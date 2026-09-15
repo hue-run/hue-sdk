@@ -901,3 +901,35 @@ test("replay reporting exposes failures and retries completion with a stable key
   expect(completions[0]).toBe(completions[1]);
   expect(p.diagnostics.deliveryOk).toBe(true);
 });
+
+test("fetch HEAD replay preserves null body and representation length without decoding absent bytes", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([
+      {
+        id: "http",
+        kind: "http",
+        contractVersion: "1",
+        http: { origin: "https://source.test", pathPrefix: "/" },
+      },
+    ]);
+  let live = 0;
+  const f = wrapFetch((async () => {
+    live++;
+    return new Response(null, {
+      headers: {
+        "content-type": "application/pdf",
+        "content-encoding": "gzip",
+        "content-length": "987",
+      },
+    });
+  }) as unknown as typeof fetch);
+  await capture.run(() => f("https://source.test/file", { method: "HEAD" }));
+  const p = await frozen(host, capture, ["http"]);
+  await p.run(async () => {
+    const response = await f("https://source.test/file", { method: "HEAD" });
+    expect(response.body).toBeNull();
+    expect(response.headers.get("content-length")).toBe("987");
+    expect(response.headers.get("content-encoding")).toBe("gzip");
+  });
+  expect(live).toBe(1);
+});

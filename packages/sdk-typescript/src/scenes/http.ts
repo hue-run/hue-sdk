@@ -156,6 +156,7 @@ export class HttpCapture {
             "application/octet-stream";
           if (
             this.eligible &&
+            bytes.length > 0 &&
             this.metadata.status >= 200 &&
             this.metadata.status < 300 &&
             (mime === "application/pdf" ||
@@ -220,7 +221,12 @@ export function responseMetadata(
 ): Omit<HttpPayload, "body"> {
   const headers = cleanHeaders(response.headers);
   delete headers["transfer-encoding"];
-  if (decoded) {
+  if (
+    decoded &&
+    response.body &&
+    headers["content-encoding"] &&
+    headers["content-encoding"] !== "identity"
+  ) {
     delete headers["content-encoding"];
     delete headers["content-length"];
   }
@@ -250,6 +256,7 @@ function decompress(bytes: Uint8Array, encoding?: string): Uint8Array {
 export function responseFromRecorded(
   value: unknown,
   decoded = false,
+  head = false,
 ): Response {
   if (
     !value ||
@@ -266,15 +273,21 @@ export function responseFromRecorded(
   if (p.status < 200 || p.status > 599)
     throw new SnapshotMissError("nonportable");
   const headers = { ...p.headers };
-  const body = decoded
+  const transformed =
+    decoded &&
+    !head &&
+    p.body.length > 0 &&
+    Boolean(headers["content-encoding"]) &&
+    headers["content-encoding"] !== "identity";
+  const body = transformed
     ? decompress(p.body, headers["content-encoding"])
     : p.body;
-  if (decoded) {
+  if (transformed) {
     delete headers["content-encoding"];
     delete headers["content-length"];
   }
   const response = new Response(
-    [204, 205, 304].includes(p.status) ? null : new Uint8Array(body),
+    head || [204, 205, 304].includes(p.status) ? null : new Uint8Array(body),
     { status: p.status, statusText: p.statusText, headers },
   );
   if (p.url) Object.defineProperty(response, "url", { value: p.url });
@@ -335,6 +348,7 @@ export function wrapFetch(
           throw new SnapshotMissError("unrecorded");
         }),
         true,
+        request.method === "HEAD",
       );
     }
     const capture = active.runtime as CaptureSession;
