@@ -190,6 +190,9 @@ def scene_server():
                 if path == "/files/document.pdf":
                     data = b"%PDF synthetic observed source"
                     headers["Content-Type"] = "application/pdf"
+                if path == "/files/utf16-json":
+                    data = '{"content":"observed"}'.encode("utf-16")
+                    headers["Content-Type"] = "application/ld+json"
                 if path == "/files/large":
                     data = b"x" * (300 * 1024)
                 headers["Set-Cookie"] = "secret=do-not-capture"

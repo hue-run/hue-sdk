@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from hashlib import sha256
 
 import httpx
 import pytest
@@ -296,3 +297,71 @@ def test_httpx_recording_replays_compressed_body_in_requests_and_links_source_fi
             assert http.get(api.source_url + "/files/gzip").content == b"observed source document"
             assert http.get(api.source_url + "/files/document.pdf").content.startswith(b"%PDF")
     assert len(api.source_hits) == hits
+
+
+def test_http_json_media_gate_strict_utf8_and_bom_keys():
+    binding = Binding("files", kind="http", http_origin="https://example.test").wire()
+    body = b'{"b":2,"a":1}'
+    canonical_digest = sha256(b'{"a":1,"b":2}').hexdigest()
+    for media_type in (
+        "application/json",
+        " APPLICATION/LD+JSON ; charset=utf-8",
+        "text/vendor+json",
+    ):
+        for content in (body, b"\xef\xbb\xbf" + body):
+            args = http_arguments(
+                binding, "POST", "https://example.test/files", {"Content-Type": media_type}, content
+            )
+            assert args["bodySha256"] == canonical_digest
+    for media_type in (
+        "text/json",
+        "application/notjson",
+        "application/json-seq",
+        "invalid type/subtype+json",
+        "application/+json",
+    ):
+        args = http_arguments(
+            binding, "POST", "https://example.test/files", {"Content-Type": media_type}, body
+        )
+        assert args["bodySha256"] == sha256(body).hexdigest()
+    for content in ('{"a":1}'.encode("utf-16"), b"\xff", b"{", b'{"value":NaN}'):
+        with pytest.raises(ValueError):
+            http_arguments(
+                binding,
+                "POST",
+                "https://example.test/files",
+                {"Content-Type": "application/json"},
+                content,
+            )
+    empty = http_arguments(
+        binding, "GET", "https://example.test/files", {"Content-Type": "application/json"}, b""
+    )
+    assert empty["bodySha256"] == sha256(b"").hexdigest()
+
+
+def test_non_utf8_json_request_and_response_stay_live_then_miss(api):
+    scenes, binding = setup(api)
+    body = '{"content":"observed"}'.encode("utf-16")
+    with httpx.Client(transport=SceneTransport(scenes)) as http:
+        with scenes.capture(bindings=[binding], external_trace_id=TRACE) as capture:
+            assert (
+                http.post(
+                    api.source_url + "/files/binary",
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                ).status_code
+                == 200
+            )
+            assert http.get(api.source_url + "/files/utf16-json").content == body
+        recording = load(scenes, capture)
+        hits = len(api.source_hits)
+        with recording.replay(binding_ids=["files"], external_trace_id=REPLAY_TRACE):
+            with pytest.raises(SnapshotMissError, match="nonportable"):
+                http.post(
+                    api.source_url + "/files/binary",
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                )
+            with pytest.raises(SnapshotMissError, match="nonportable"):
+                http.get(api.source_url + "/files/utf16-json")
+        assert len(api.source_hits) == hits

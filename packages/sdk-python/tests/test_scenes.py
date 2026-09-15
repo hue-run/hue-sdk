@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from jsonschema import Draft202012Validator
 from scenes_server import scene_server
 
 from hue_sdk import Hue
@@ -57,6 +58,34 @@ def test_cross_language_golden_and_jcs_boundaries():
             )
             == item["sha256"]
         )
+    schema = json.loads(fixture.with_name("schema.json").read_text())
+    packaged = Path(__file__).parents[1] / "src/hue_sdk/scenes/_schema.json"
+    assert json.loads(packaged.read_text()) == schema
+    for item in values["schemaCases"]:
+        validator = Draft202012Validator({**schema, "$ref": "#/$defs/" + item["definition"]})
+        assert validator.is_valid(item["value"]) is item["valid"]
+    from hue_sdk.scenes.http import http_arguments
+
+    binding = Binding("files", kind="http", http_origin="https://example.test").wire()
+    for item in values["httpBodies"]:
+        if item["sha256"] is None:
+            with pytest.raises(ValueError):
+                http_arguments(
+                    binding,
+                    "POST",
+                    "https://example.test/files",
+                    {"content-type": item["contentType"]},
+                    item["body"].encode(),
+                )
+        else:
+            args = http_arguments(
+                binding,
+                "POST",
+                "https://example.test/files",
+                {"content-type": item["contentType"]},
+                item["body"].encode(),
+            )
+            assert args["bodySha256"] == item["sha256"]
     assert canonical_json({"x": -0.0, "y": 1e-6, "z": 1e-7}) == (b'{"x":0,"y":0.000001,"z":1e-7}')
     assert canonical_json({"\ue000": 1, "\U00010000": 2}).decode() == '{"𐀀":2,"\ue000":1}'
     for value in (float("nan"), float("inf"), 2**53, 1e20, {"bad": object()}, "\ud800"):

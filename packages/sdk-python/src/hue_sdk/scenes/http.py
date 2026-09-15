@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import zlib
 from email.message import Message
 from pathlib import PurePosixPath
@@ -25,6 +26,20 @@ REPRESENTATION_HEADERS = frozenset(
         "if-range",
     }
 )
+
+
+def is_json_media_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    token = r"[!#$%&'*+\-.^_`|~0-9a-z]+"
+    return (
+        media_type == "application/json"
+        or re.fullmatch(token + "/" + token + r"\+json", media_type) is not None
+    )
+
+
+def parse_http_json(body: bytes):
+    """JSON on the wire is UTF-8, with only an optional UTF-8 BOM accepted."""
+    return json.loads(body.decode("utf-8-sig", errors="strict"))
 
 
 def safe_url(url: str) -> str:
@@ -88,8 +103,8 @@ def http_arguments(binding, method: str, url: str, headers, body: bytes | None):
     }
     if body is None or "multipart/" in normalized_headers.get("content-type", "").lower():
         raise ValueError("Streamed and multipart source request bodies are not portable.")
-    if body and "json" in normalized_headers.get("content-type", "").lower():
-        body = canonical_json(clean_json(json.loads(body)))
+    if body and is_json_media_type(normalized_headers.get("content-type", "")):
+        body = canonical_json(clean_json(parse_http_json(body)))
     return {
         "method": method.upper(),
         "url": safe_url(url),
@@ -176,7 +191,9 @@ class ResponseCapture:
         try:
             if error is not None or omission:
                 partial = None
-                if self._body and "json" not in self.metadata["headers"].get("content-type", ""):
+                if self._body and not is_json_media_type(
+                    self.metadata["headers"].get("content-type", "")
+                ):
                     partial = {**self.metadata, "body": _payload.encode(bytes(self._body))}
                 self.call.finish(
                     error=error, payload=partial, omission=omission or "body_interrupted"
@@ -188,11 +205,13 @@ class ResponseCapture:
                 if body != self._body:
                     self.call.finish(omission="redacted_body")
                     return
-                if body and "json" in self.metadata["headers"].get("content-type", "").lower():
+                if is_json_media_type(self.metadata["headers"].get("content-type", "")) and (
+                    self.request_method != "HEAD" and self.metadata["status"] not in {204, 205, 304}
+                ):
                     json_bytes = (
                         body if decoded else decoded_http_body(body, self.metadata["headers"])
                     )
-                    value = json.loads(json_bytes)
+                    value = parse_http_json(json_bytes)
                     if canonical_json(value) != canonical_json(scenes._clean("http_json", value)):
                         self.call.finish(omission="redacted_body")
                         return
