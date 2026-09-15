@@ -34,7 +34,7 @@ def main() -> None:
         environment.pop(key, None)
     environment["PYTHONNOUSERSITE"] = "1"
     spec = (
-        str(args.wheel.resolve()) if args.wheel else f"hue-sdk=={args.registry_version}"
+        str(args.wheel.resolve()) if args.wheel else f"hue-run=={args.registry_version}"
     )
     # The checkout only supplies tests and frozen test dependencies. The SDK is
     # installed separately, without an editable package or source-path fallback.
@@ -85,7 +85,7 @@ def main() -> None:
                 "-c",
                 "import hue_sdk, hue_sdk.evals, pathlib, sys; from importlib.metadata import version; "
                 "assert pathlib.Path(hue_sdk.__file__).is_relative_to(sys.prefix); "
-                "assert version('hue-sdk') == sys.argv[1]",
+                "assert version('hue-run') == sys.argv[1]",
                 version,
                 cwd=consumer,
                 env=environment,

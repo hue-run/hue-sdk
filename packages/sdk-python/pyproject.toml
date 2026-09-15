@@ -1,5 +1,5 @@
 [project]
-name = "hue-sdk"
+name = "hue-run"
 version = "0.1.0"
 description = "OpenTelemetry helpers for sending agent traces and correlated logs to Hue"
 readme = "README.md"

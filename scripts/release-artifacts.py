@@ -85,7 +85,7 @@ def inspect(path: Path, language: str, version: str) -> None:
         metadata_files = [data for name, data in files.items() if name.endswith(suffix)]
         assert len(metadata_files) == 1, "Unexpected Python metadata inventory"
         metadata = BytesParser().parsebytes(metadata_files[0])
-        assert metadata["Name"] == "hue-sdk" and metadata["Version"] == version
+        assert metadata["Name"] == "hue-run" and metadata["Version"] == version
         license_value = metadata["License-Expression"] or metadata["License"]
         assert license_value and "UNLICENSED" not in license_value
     print(f"Inspected {path.name}: {len(files)} files")
@@ -105,8 +105,8 @@ def main() -> None:
         [f"hue-run-sdk-{args.version}.tgz"]
         if args.language == "typescript"
         else [
-            f"hue_sdk-{args.version}-py3-none-any.whl",
-            f"hue_sdk-{args.version}.tar.gz",
+            f"hue_run-{args.version}-py3-none-any.whl",
+            f"hue_run-{args.version}.tar.gz",
         ]
     )
     artifacts = [args.directory / name for name in filenames]
@@ -152,7 +152,7 @@ def main() -> None:
             urls = {filenames[0]: metadata["dist"]["tarball"]}
         else:
             metadata = json.loads(
-                read_url(f"https://pypi.org/pypi/hue-sdk/{args.version}/json")
+                read_url(f"https://pypi.org/pypi/hue-run/{args.version}/json")
             )
             urls = {item["filename"]: item["url"] for item in metadata["urls"]}
         for item in manifest["artifacts"]:

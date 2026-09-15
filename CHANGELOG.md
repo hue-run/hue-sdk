@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use `hue-run` for the public Python distribution while preserving `hue_sdk` imports.
+
 - Use `@hue-run/sdk` for the public npm package and all TypeScript entry points.
 
 - License the public SDK packages under MIT.

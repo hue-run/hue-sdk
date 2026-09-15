@@ -4,14 +4,14 @@ For frozen datasets, local experiments, custom scorers, durable retries and hist
 
 Python helpers around official OpenTelemetry **1.44.0** trace and log SDKs and OTLP HTTP/protobuf exporters. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
 
-The distribution is named `hue-sdk` (`import hue_sdk`). Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
+The distribution is named `hue-run` (`import hue_sdk`). Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
 
 ## Install
 
 ```bash
-pip install hue-sdk
+pip install hue-run
 # Or, in a uv project:
-uv add hue-sdk
+uv add hue-run
 ```
 
 ## Send a trace

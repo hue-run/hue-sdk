@@ -30,7 +30,12 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
         "HUE_API_KEY": "synthetic-installed-wheel-key",
     }
     imported = subprocess.run(
-        [str(python), "-c", "import hue_sdk; print(hue_sdk.__file__)"],
+        [
+            str(python),
+            "-c",
+            "import hue_sdk; from importlib.metadata import version; "
+            "assert version('hue-run') == hue_sdk.__version__; print(hue_sdk.__file__)",
+        ],
         env=environment,
         cwd=tmp_path,
         check=True,
