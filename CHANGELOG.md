@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## Python 0.1.0 — 2026-09-15
 
-- Prepare Python `0.1.0` as the `hue-run` distribution under MIT, with verified release artifacts and unchanged `hue_sdk` imports.
+- Publish `hue-run` to PyPI under MIT, with verified release artifacts and unchanged `hue_sdk` imports.
 - Default Python clients to Hue Cloud while preserving explicit origins and existing positional calls.
 - Use package-page-safe links and consistent Python installation examples.
 
