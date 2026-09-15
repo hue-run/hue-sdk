@@ -187,3 +187,7 @@ published. The chatbot README describes running that external installation.
 # Local evaluation workflows
 
 The optional `@hue/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See [EVALUATIONS.md](./EVALUATIONS.md) for the complete journey, content policy and checkpoint recovery contract.
+
+## Source snapshots
+
+The optional [`@hue/sdk/scenes` module](./SCENES.md) records selected source tools, MCP calls, and scoped HTTP requests for exact local playback. Models and transforms remain live.

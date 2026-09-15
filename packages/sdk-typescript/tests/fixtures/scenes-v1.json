@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "1",
+  "canonical": [
+    {
+      "value": {
+        "b": 2,
+        "a": 1
+      },
+      "canonical": "{\"a\":1,\"b\":2}"
+    },
+    {
+      "value": {
+        "value": null,
+        "empty": "",
+        "list": [
+          3,
+          1,
+          2
+        ]
+      },
+      "canonical": "{\"empty\":\"\",\"list\":[3,1,2],\"value\":null}"
+    },
+    {
+      "value": {
+        "€": "Euro",
+        "😀": "face",
+        "a": "x"
+      },
+      "canonical": "{\"a\":\"x\",\"€\":\"Euro\",\"😀\":\"face\"}"
+    },
+    {
+      "value": [
+        -0.0,
+        1e-07,
+        1e-06,
+        333333333.3333333,
+        0.1
+      ],
+      "canonical": "[0,1e-7,0.000001,333333333.3333333,0.1]"
+    },
+    {
+      "value": {
+        "�": 1,
+        "😀": 2
+      },
+      "canonical": "{\"😀\":2,\"�\":1}"
+    },
+    {
+      "value": {
+        "value": "\b\t\n\f\r\"\\"
+      },
+      "canonical": "{\"value\":\"\\b\\t\\n\\f\\r\\\"\\\\\"}"
+    },
+    {
+      "value": [
+        null,
+        [],
+        {},
+        false
+      ],
+      "canonical": "[null,[],{},false]"
+    }
+  ],
+  "matching": [
+    {
+      "arguments": {
+        "bindingId": "docs",
+        "operation": "search",
+        "contractVersion": "1",
+        "arguments": {
+          "q": "renewal",
+          "limit": 3
+        }
+      },
+      "canonical": "{\"arguments\":{\"limit\":3,\"q\":\"renewal\"},\"bindingId\":\"docs\",\"contractVersion\":\"1\",\"operation\":\"search\"}",
+      "sha256": "990dee5b1e1e9f0a0a83f60be233daede20dc8d6ad7ed0554a0404e09f2da987"
+    },
+    {
+      "arguments": {
+        "bindingId": "http-files",
+        "operation": "http",
+        "contractVersion": "1",
+        "arguments": {
+          "method": "GET",
+          "url": "https://example.test/files?a=1&a=2",
+          "headers": {
+            "accept": "application/pdf"
+          },
+          "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "canonical": "{\"arguments\":{\"bodySha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"headers\":{\"accept\":\"application/pdf\"},\"method\":\"GET\",\"url\":\"https://example.test/files?a=1&a=2\"},\"bindingId\":\"http-files\",\"contractVersion\":\"1\",\"operation\":\"http\"}",
+      "sha256": "e6f99e0846634e1250b10b4ccb85a024ce923ace525003168e700e37c5400c76"
+    }
+  ],
+  "missReasons": [
+    "unrecorded",
+    "exhausted",
+    "incompatible",
+    "ambiguous",
+    "incomplete",
+    "unavailable_content",
+    "nonportable",
+    "overlapping_bindings",
+    "integrity"
+  ]
+}
