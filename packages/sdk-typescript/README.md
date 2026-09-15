@@ -66,7 +66,8 @@ wrapper, database dependency, or dependency on the Hue application workspace.
 ## Vercel AI SDK 7
 
 Compatible optional peers are `ai@^7.0.99` and `@ai-sdk/otel@^1.0.99`, alongside
-`@opentelemetry/api@1.9.1`. Configure telemetry on each agent or generation call:
+`@opentelemetry/api@1.9.1`. For an app without global AI SDK telemetry integrations,
+configure telemetry on each agent or generation call:
 
 ```ts
 import { ToolLoopAgent } from "ai";
@@ -89,9 +90,22 @@ await hue.withSpan(
 await hue.flush();
 ```
 
+`hueTelemetry(hue)` supplies per-call integrations, which AI SDK 7 uses **instead of
+globally registered integrations for that call**. Global registration remains intact,
+but those integrations do not receive that call's events. To keep an existing
+OpenTelemetry exporter, attach Hue's transport to the same provider using the
+[existing-provider recipe](#existing-opentelemetry-providers).
+
+Reuse the client across server requests. Await stream completion before flushing;
+returning a streaming `Response` does not mean its stream has finished. The
+[Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-next-js)
+shows how to keep completion and flushing within the request's background lifetime.
+For a standalone script, put the operation in `try` and call `await hue.shutdown()`
+in `finally`. Shut down a shared server client only when the application stops.
+
 The integration creates real Vercel provider, streaming and tool spans and passes
-`recordInputs` and `recordOutputs` explicitly. It doesn't register global AI SDK
-integrations. The installed-package verification tests the matching 7.0.99/1.0.99 and
+`recordInputs` and `recordOutputs` explicitly. The installed-package verification
+tests the matching 7.0.99/1.0.99 and
 7.0.100/1.0.100 pairs. Compatible-major ranges do not mean every later release
 has been verified. Other OTel
 instrumentations can use `hue.tracer` directly or explicitly attach the processors

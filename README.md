@@ -123,7 +123,7 @@ For Python, use the installation instructions above and follow the [complete Pyt
 | [Python agent](./examples/python-agent) | Public wheel imports, model/tool spans, correlated logs and optional instrumented OpenAI calls. |
 | [Python evaluation](./examples/python-evaluation) | Frozen datasets, local targets/scorers, resumable uploads and historical rescoring. |
 
-The separate [X Research Docs chatbot](https://github.com/hue-run/tester-agent-xdotcom-docs) integration is a draft pending a user-supplied project key. Account-connected acceptance has not been completed. A synthetic provider test does not establish live provider access.
+For applications that already use OpenTelemetry, such as the separate [X Research Docs chatbot](https://github.com/hue-run/tester-agent-xdotcom-docs), follow the [existing-provider guide](https://docs.hue.run/integrations/opentelemetry), including its Next.js streaming recipe.
 
 ## Build and verify from a standalone clone
 
