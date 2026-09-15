@@ -434,6 +434,10 @@
         },
         "omissionReason": {
           "type": "string"
+        },
+        "externalSpanId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16}$"
         }
       },
       "required": [
@@ -539,6 +543,24 @@
         },
         "createdAt": {
           "type": "string"
+        },
+        "capturePolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sourceContent": {
+              "const": true
+            },
+            "redactionVersion": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "sourceContent",
+            "redactionVersion"
+          ]
         }
       },
       "required": [
@@ -639,4 +661,3 @@
     }
   }
 }
-
