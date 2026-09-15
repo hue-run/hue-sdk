@@ -13,13 +13,16 @@ dependencies = [
   "jsonschema==4.26.0",
 ]
 
+[project.optional-dependencies]
+scenes = ["httpx>=0.28.1,<1"]
+
 [project.urls]
 Homepage = "https://docs.hue.run"
 Repository = "https://github.com/hue-run/hue-sdk"
 Documentation = "https://docs.hue.run"
 
 [dependency-groups]
-dev = ["pytest>=8.3,<10", "build>=1.2,<2", "ruff>=0.15,<1", "hatchling>=1.27,<2"]
+dev = ["pytest>=8.3,<10", "build>=1.2,<2", "ruff>=0.15,<1", "hatchling>=1.27,<2", "httpx>=0.28.1,<1"]
 compatibility = ["openai==3.14.0", "openinference-instrumentation-openai==0.1.60"]
 
 [build-system]
