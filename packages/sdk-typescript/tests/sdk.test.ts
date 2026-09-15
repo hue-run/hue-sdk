@@ -63,7 +63,12 @@ function receiver(
       expect(request.headers.get("authorization")).toBe(`Bearer ${apiKey}`);
       if (mode === "redirect")
         return new Response(null, { status: 307, headers: { Location: redirect! } });
-      if (mode === "unauthorized") return new Response(`reflected ${apiKey}`, { status: 401 });
+      if (mode === "unauthorized") {
+        // This fixture tests received 401 acknowledgements, so finish reading the
+        // compressed request instead of racing its upload with an early response.
+        await request.arrayBuffer();
+        return new Response(`reflected ${apiKey}`, { status: 401 });
+      }
       if (new URL(request.url).pathname === "/api/v1/projects/current")
         return Response.json(project);
       if (mode === "retry" && hits === 1) {
@@ -408,6 +413,18 @@ describe("Hue SDK contract", () => {
         expect(hue.transport.getReport()[mode === "partial" ? "rejectedLogs" : "failedLogs"]).toBe(
           1,
         );
+        if (mode === "unauthorized") {
+          for (const signal of ["traces", "logs"] as const) {
+            const recordIssues = hue.transport
+              .getIssues()
+              .filter((issue) => issue.signal === signal && issue.count > 0);
+            expect(recordIssues).toEqual([
+              expect.objectContaining({ signal, kind: "failed", count: 1, status: 401 }),
+            ]);
+          }
+        }
+        expect(hue.transport.getReport().pendingSpans).toBe(0);
+        expect(hue.transport.getReport().pendingLogs).toBe(0);
         expect(endpoint.hits()).toBe(2);
       } finally {
         await hue.shutdown();
