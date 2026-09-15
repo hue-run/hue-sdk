@@ -2,17 +2,16 @@
 
 ## Unreleased
 
-- Use `hue-run` for the public Python distribution while preserving `hue_sdk` imports.
-
-- Use `@hue-run/sdk` for the public npm package and all TypeScript entry points.
-
-- License the public SDK packages under MIT.
-- Prepare TypeScript `0.1.2` and Python `0.1.0` for public registry publication with verified release artifacts.
+- Prepare Python `0.1.0` as the `hue-run` distribution under MIT, with verified release artifacts and unchanged `hue_sdk` imports.
 - Default Python clients to Hue Cloud while preserving explicit origins and existing positional calls.
-- Document the tested runtime and integration matrix, including dependency-resolution and cross-language content/delivery boundaries.
 - Use package-page-safe links and consistent Python installation examples.
-- Clarify the first-publication steps for npm and PyPI, verified artifacts and documentation availability.
+
+## TypeScript 0.1.2 — 2026-09-15
+
+- Publish `@hue-run/sdk` to npm under MIT, including the core, AI SDK, and evaluation entry points.
 - Expose hosted-judge authentication and charge-reconciliation metadata in TypeScript declarations.
+- Document the tested runtime and integration matrix, including dependency-resolution and cross-language content/delivery boundaries.
+- Verify release archives and registry bytes, and document npm/PyPI publication and installation checks.
 
 ## Private pilot releases
 
