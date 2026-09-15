@@ -9,7 +9,7 @@ import {
   httpArguments,
   httpBinding,
   HttpCapture,
-  responseFromRecorded,
+  replayHttpResponse,
 } from "./scenes/http.js";
 import {
   ARTIFACT_BYTES,
@@ -78,11 +78,7 @@ export function installNodeHttpCapture(): { dispose(): void } {
             "nonportable",
           );
         controller.respondWith(
-          responseFromRecorded(
-            active.runtime.invoke(binding.id, "http", args, () => {
-              throw new SnapshotMissError("unrecorded");
-            }),
-          ),
+          replayHttpResponse(active.runtime as Playback, binding, args),
         );
       } catch (e) {
         controller.errorWith(

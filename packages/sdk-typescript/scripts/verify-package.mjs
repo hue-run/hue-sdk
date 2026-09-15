@@ -64,7 +64,8 @@ for (const patch of [99, 100]) {
         .replaceAll('"../src/ai-sdk.js"', '"@hue/sdk/ai-sdk"')
         .replaceAll('"../src/evals.js"', '"@hue/sdk/evals"')
         .replaceAll("'../src/scenes.js'", "'@hue/sdk/scenes'")
-        .replaceAll('"../src/scenes.js"', '"@hue/sdk/scenes"'),
+        .replaceAll('"../src/scenes.js"', '"@hue/sdk/scenes"')
+        .replaceAll('"../src/scenes-mcp.js"', '"@hue/sdk/scenes/mcp"'),
     );
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.

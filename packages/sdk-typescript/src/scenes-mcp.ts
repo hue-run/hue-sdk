@@ -48,6 +48,11 @@ export function createPlaybackMcpServer(
       throw new SnapshotMissError("unrecorded");
     });
   server.setRequestHandler("tools/call", async (request) => {
+    const operation =
+      binding.kind === "mcp"
+        ? `tools/call:${request.params.name}`
+        : request.params.name;
+    const args = request.params.arguments ?? {};
     try {
       if (!operations.some((o) => o.name === request.params.name))
         playback.reject(
@@ -56,20 +61,16 @@ export function createPlaybackMcpServer(
           request.params.arguments ?? {},
           "unrecorded",
         );
-      const result = invoke(
-        binding.kind === "mcp"
-          ? `tools/call:${request.params.name}`
-          : request.params.name,
-        request.params.arguments ?? {},
-      );
+      const result = invoke(operation, args);
       if (isAsyncIterable(result))
-        throw new SnapshotMissError(
-          "nonportable",
-          bindingId,
-          request.params.name,
-        );
+        playback.reject(bindingId, operation, args, "nonportable");
       if (binding.kind === "mcp") {
-        const value = json(result);
+        let value;
+        try {
+          value = json(result);
+        } catch {
+          return playback.reject(bindingId, operation, args, "nonportable");
+        }
         if (
           !value ||
           typeof value !== "object" ||
@@ -78,11 +79,7 @@ export function createPlaybackMcpServer(
           !Array.isArray(value.content) ||
           ("resultType" in value && value.resultType !== "accepted")
         )
-          throw new SnapshotMissError(
-            "nonportable",
-            bindingId,
-            request.params.name,
-          );
+          playback.reject(bindingId, operation, args, "nonportable");
         return value as unknown as CallToolResult;
       }
       if (result instanceof Uint8Array)

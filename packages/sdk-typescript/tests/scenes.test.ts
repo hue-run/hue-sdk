@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  InMemoryTransport,
+  type CallToolResult,
+} from "@modelcontextprotocol/server";
+import { createPlaybackMcpServer } from "../src/scenes-mcp.js";
+import {
   ScenesClient,
   CaptureSession,
   Playback,
@@ -700,8 +705,9 @@ describe("Scenes source associations and incomplete evidence", () => {
     await capture.finalize();
     const noOutcome = structuredClone(host.manifest!);
     delete noOutcome.observations[1].outcome;
-    const p = await Playback.fromManifest(capture.client, noOutcome, ["docs"]);
-    p.run(() => reason(() => tool(), "incomplete"));
+    await expect(
+      Playback.fromManifest(capture.client, noOutcome, ["docs"]),
+    ).rejects.toMatchObject({ reason: "integrity" });
     const unknown = structuredClone(host.manifest!) as unknown as {
       observations: { result?: unknown }[];
     };
@@ -955,6 +961,10 @@ test("shared schema admission fixtures reject malformed bindings and HTTP bodies
     if (fixture.definition === "binding") {
       manifest.bindings = [fixture.value as Binding];
       manifest.observations = [];
+    } else if (fixture.definition === "observation") {
+      manifest.observations = [
+        { ...fixture.value, bindingId: "docs" } as Observation,
+      ];
     } else {
       const finish = manifest.observations.find((o) => o.phase === "finish")!;
       finish.result = fixture.value as Observation["result"];
@@ -963,6 +973,127 @@ test("shared schema admission fixtures reject malformed bindings and HTTP bodies
     if (fixture.valid) expect((await pending).manifest.sceneId).toBe("scene");
     else await expect(pending).rejects.toMatchObject({ reason: "integrity" });
   }
+});
+
+test("HTTP reconstruction failures persist an explicit miss without an upstream call", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([
+      {
+        id: "http",
+        kind: "http",
+        contractVersion: "1",
+        http: { origin: "https://source.test", pathPrefix: "/" },
+      },
+    ]);
+  let live = 0;
+  const f = wrapFetch((async () => {
+    live++;
+    return new Response("original");
+  }) as unknown as typeof fetch);
+  await capture.run(async () => {
+    await (await f("https://source.test/file")).text();
+  });
+  await capture.finalize();
+  const manifest = structuredClone(host.manifest!);
+  const result = manifest.observations.find(
+    (o) => o.phase === "finish",
+  )!.result!;
+  if (result.kind !== "http") throw new Error("Expected HTTP response");
+  result.headers["content-encoding"] = "unsupported-encoding";
+  const p = await Playback.fromManifest(capture.client, manifest, ["http"]);
+  await p.run(() =>
+    expect(f("https://source.test/file")).rejects.toMatchObject({
+      reason: "nonportable",
+    }),
+  );
+  await p.complete();
+  expect(p.events.map((e) => e.status)).toEqual(["matched", "miss"]);
+  expect(p.events.at(-1)?.reason).toBe("nonportable");
+  expect(host.events).toHaveLength(2);
+  expect(live).toBe(1);
+});
+
+test("local MCP streams and malformed envelopes persist nonportable misses", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([{ ...binding, kind: "mcp" }]);
+  let live = 0;
+  const source = wrapTool(
+    "docs",
+    "tools/call:search",
+    ({ mode }: { mode: string }) => {
+      live++;
+      if (mode === "stream")
+        return (async function* () {
+          yield "item";
+        })();
+      if (mode === "absent") return undefined;
+      return { content: "invalid" };
+    },
+  );
+  const modes = ["stream", "absent", "malformed"];
+  await capture.run(async () => {
+    for (const mode of modes) {
+      const value = source({ mode });
+      if (mode === "stream")
+        for await (const _ of value as AsyncIterable<unknown>) {
+        }
+    }
+  });
+  const p = await frozen(host, capture);
+  const server = createPlaybackMcpServer(p, "docs");
+  const [transport, serverTransport] = InMemoryTransport.createLinkedPair();
+  let sequence = 0;
+  const pending = new Map<
+    number,
+    { resolve(value: CallToolResult): void; reject(error: Error): void }
+  >();
+  transport.onmessage = (message) => {
+    if (!("id" in message) || typeof message.id !== "number") return;
+    const entry = pending.get(message.id);
+    pending.delete(message.id);
+    if ("result" in message) entry?.resolve(message.result as CallToolResult);
+    else entry?.reject(new Error("Unexpected MCP protocol error"));
+  };
+  const call = (method: string, params: Record<string, unknown>) =>
+    new Promise<CallToolResult>((resolve, reject) => {
+      const id = ++sequence;
+      pending.set(id, { resolve, reject });
+      void transport.send({ jsonrpc: "2.0", id, method, params }).catch(reject);
+    });
+  await server.connect(serverTransport);
+  await transport.start();
+  try {
+    await call("initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "synthetic", version: "1" },
+    });
+    await transport.send({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    for (const mode of modes) {
+      const result = await call("tools/call", {
+        name: "search",
+        arguments: { mode },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].type).toBe("text");
+      if (result.content[0].type !== "text")
+        throw new Error("Expected diagnostic text");
+      expect(JSON.parse(result.content[0].text)).toMatchObject({
+        code: "HUE_SNAPSHOT_MISS",
+        reason: "nonportable",
+      });
+    }
+  } finally {
+    await server.close();
+    await transport.close();
+  }
+  await p.complete();
+  expect(p.events.filter((e) => e.status === "miss")).toHaveLength(3);
+  expect(host.events).toHaveLength(6);
+  expect(live).toBe(3);
 });
 
 test("MCP extraction preserves original live validation and fails closed in selected playback", async () => {

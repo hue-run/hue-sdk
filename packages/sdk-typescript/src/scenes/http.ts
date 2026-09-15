@@ -296,6 +296,27 @@ export function responseFromRecorded(
   if (p.url) Object.defineProperty(response, "url", { value: p.url });
   return response;
 }
+export function replayHttpResponse(
+  playback: Playback,
+  binding: Binding,
+  args: unknown,
+  decoded = false,
+  head = false,
+): Response {
+  const value = playback.invoke(binding.id, "http", args, () => {
+    throw new SnapshotMissError("unrecorded");
+  });
+  try {
+    return responseFromRecorded(value, decoded, head);
+  } catch (error) {
+    return playback.reject(
+      binding.id,
+      "http",
+      args,
+      error instanceof SnapshotMissError ? error.reason : "nonportable",
+    );
+  }
+}
 export function wrapFetch(
   fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
 ): typeof fetch {
@@ -346,10 +367,10 @@ export function wrapFetch(
           args,
           "nonportable",
         );
-      return responseFromRecorded(
-        active.runtime.invoke(binding.id, "http", args, () => {
-          throw new SnapshotMissError("unrecorded");
-        }),
+      return replayHttpResponse(
+        active.runtime as Playback,
+        binding,
+        args,
         true,
         request.method === "HEAD",
       );
