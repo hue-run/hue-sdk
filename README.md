@@ -22,7 +22,7 @@
          \/____/                  ~~                       \/____/          
 ```
 
-# Hue SDKs
+# Hue SDK
 
 OpenTelemetry tracing and local evaluation workflows for AI applications.
 
