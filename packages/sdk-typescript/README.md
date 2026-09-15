@@ -23,7 +23,7 @@ gh release download typescript-v0.1.1 --repo hue-run/hue-sdk --pattern 'hue-sdk-
 npm install ./.hue-sdk/typescript/hue-sdk-0.1.1.tgz @opentelemetry/api@1.9.1
 ```
 
-Run these commands in your application directory. The [release guide](../../RELEASING.md#public-release) tracks registry ownership and publication; the GitHub repository can remain private.
+Run these commands in your application directory. The [release guide](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md#public-release) tracks registry ownership and publication; the GitHub repository can remain private.
 
 ## Start
 
@@ -200,4 +200,4 @@ published. The chatbot README describes running that external installation.
 
 # Local evaluation workflows
 
-The optional `@hue/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See [EVALUATIONS.md](./EVALUATIONS.md) for the complete journey, content policy and checkpoint recovery contract.
+The optional `@hue/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.

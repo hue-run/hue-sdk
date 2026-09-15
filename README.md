@@ -26,7 +26,7 @@
 
 OpenTelemetry tracing and local evaluation workflows for AI applications.
 
-[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run) · [Examples](./examples) · [Contributing](./CONTRIBUTING.md)
+[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Contributing](./CONTRIBUTING.md)
 
 [![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml)
 
@@ -73,6 +73,8 @@ Python:
 
 ```bash
 pip install hue-sdk
+# Or, in a uv project:
+uv add hue-sdk
 ```
 
 TypeScript / JavaScript:
@@ -173,7 +175,9 @@ CI also verifies Python 3.10. [Release instructions](./RELEASING.md) describe pr
 
 ## Compatibility and limits
 
-TypeScript uses compatible-major peers for AI SDK 7 and its OTel integration. The two patch pairs above are tested; other combinations are not individually certified. Python's optional OpenInference/OpenAI pair is pinned in its lockfile and tested separately.
+TypeScript uses compatible-major peers for AI SDK 7 and its OTel integration. The two patch pairs above are tested; other combinations are not individually certified. Those optional peers also constrain an already installed AI SDK: the current package does not install alongside AI SDK 6, even when using only the core entry point. Existing OTel applications can use a standard OTLP exporter directly without this package. See [compatibility](./COMPATIBILITY.md) before changing application dependencies.
+
+Python's optional OpenInference/OpenAI pair is pinned in its lockfile and tested separately. Python helper capture controls and TypeScript export filtering have different scopes; the package guides describe them explicitly.
 
 Queues are bounded and in memory. Await flush and inspect its result; successful application execution does not prove telemetry delivery. Hosted judges, storage/rendering and production scheduler activation belong to the Hue platform and have separate readiness requirements.
 

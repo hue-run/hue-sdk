@@ -24,7 +24,7 @@ with Hue(os.environ["HUE_BASE_URL"], os.environ["HUE_API_KEY"], capture_content=
     print(report.run_id)
 ```
 
-The [standalone example](../../examples/python-evaluation/README.md) also creates the dataset/scorers and compares two complete configurations using only an installed wheel.
+The [standalone example](https://github.com/hue-run/hue-sdk/tree/main/examples/python-evaluation) also creates the dataset/scorers and compares two complete configurations using only an installed wheel.
 
 ## Client and definitions
 

@@ -1,6 +1,6 @@
 # Hue Python SDK
 
-For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](EVALUATIONS.md) and the [standalone evaluation example](../../examples/python-evaluation/README.md).
+For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](https://docs.hue.run/evaluations/first-evaluation) and the [standalone evaluation example](https://github.com/hue-run/hue-sdk/tree/main/examples/python-evaluation).
 
 Python helpers around official OpenTelemetry **1.44.0** trace and log SDKs and OTLP HTTP/protobuf exporters. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
 
@@ -14,6 +14,8 @@ The distribution is named `hue-sdk` (`import hue_sdk`). Python 3.10+ is supporte
 
 ```bash
 pip install hue-sdk
+# Or, in a uv project:
+uv add hue-sdk
 ```
 
 ### Private release (available now)
@@ -44,7 +46,7 @@ import os
 from hue_sdk import Hue
 
 with Hue(
-    os.environ["HUE_BASE_URL"],
+    os.environ.get("HUE_BASE_URL", "https://app.hue.run"),
     os.environ["HUE_API_KEY"],
     capture_content=False,  # Required: choose explicitly.
 ) as hue:
@@ -96,7 +98,7 @@ For model helpers, pass the message representation produced by your integration.
 
 Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; a borrowed tracer provider and its other processors stay usable. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
 
-An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. They can emit content even when Hue helper capture is disabled. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). The [standalone example](../../examples/python-agent/README.md) contains a separate, optional direct official OpenAI-client path.
+An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. They can emit content even when Hue helper capture is disabled. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). The [standalone example](https://github.com/hue-run/hue-sdk/tree/main/examples/python-agent) contains a separate, optional direct official OpenAI-client path.
 
 ## Export behavior and limits
 
