@@ -226,6 +226,56 @@ try {
   await capture.run(async () => {
     assert.equal((await (await f(request)).json()).body.n, 2);
   });
+  // Native Node requires duplex for stream overrides; metadata inspection must not
+  // construct a second Request that drops that option or takes body ownership.
+  await capture.run(async () => {
+    for (const path of ["/source/stream", "/unselected"]) {
+      const streamed = new Request(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      const response = await f(streamed, {
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"n":3}'));
+            controller.close();
+          },
+        }),
+        duplex: "half",
+      });
+      assert.equal(response.status, 200);
+      if (path === "/source/stream")
+        assert.equal((await response.json()).body.n, 3);
+      else assert.equal(await response.text(), "live");
+    }
+  });
+
+  let beginRead;
+  const reading = new Promise((resolve) => {
+    beginRead = resolve;
+  });
+  const cancelled = [];
+  const pendingBody = new ReadableStream(
+    {
+      pull() {
+        beginRead();
+        return new Promise(() => {});
+      },
+      cancel(reason) {
+        cancelled.push(reason);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const slowFetch = wrapFetch(async () => new Response(pendingBody));
+  const slow = await capture.run(() => slowFetch(`${baseUrl}/source/slow`));
+  const reader = slow.body.getReader();
+  const read = reader.read();
+  await reading;
+  await reader.cancel("synthetic-cancellation");
+  assert.deepEqual(await read, { done: true, value: undefined });
+  assert.deepEqual(cancelled, ["synthetic-cancellation"]);
+  assert.equal(pendingBody.locked, false);
   const toolBinding = {
     id: "docs",
     kind: "tool",

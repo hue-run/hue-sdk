@@ -1276,3 +1276,136 @@ test("a failed HTTP response stream retains the live prefix and cannot replay as
   );
   expect(live).toBe(1);
 });
+
+test("streaming Request overrides preserve live bodies inside and outside source scope", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([
+      {
+        id: "http",
+        kind: "http",
+        contractVersion: "1",
+        http: { origin: "https://source.test", pathPrefix: "/selected/" },
+      },
+    ]);
+  let live = 0;
+  const f = wrapFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
+    live++;
+    return new Response(await new Request(input, init).text());
+  }) as unknown as typeof fetch);
+  const request = (path: string) =>
+    new Request(`https://source.test/${path}`, { method: "POST" });
+  const init = () =>
+    ({
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("source-body"));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    }) as RequestInit;
+  await capture.run(async () => {
+    expect(await (await f(request("selected/file"), init())).text()).toBe(
+      "source-body",
+    );
+    expect(await (await f(request("outside/file"), init())).text()).toBe(
+      "source-body",
+    );
+  });
+  const p = await frozen(host, capture, ["http"]);
+  await p.run(() =>
+    expect(f(request("selected/file"), init())).rejects.toMatchObject({
+      reason: "nonportable",
+    }),
+  );
+  expect(live).toBe(2);
+});
+
+test("cancelling an in-flight response read preserves cancellation and releases its lock", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([
+      {
+        id: "http",
+        kind: "http",
+        contractVersion: "1",
+        http: { origin: "https://source.test", pathPrefix: "/" },
+      },
+    ]);
+  let started!: () => void;
+  const reading = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const cancelled: unknown[] = [];
+  const source = new ReadableStream<Uint8Array>(
+    {
+      pull() {
+        started();
+        return new Promise<void>(() => {});
+      },
+      cancel(reason) {
+        cancelled.push(reason);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const f = wrapFetch(
+    (async () => new Response(source)) as unknown as typeof fetch,
+  );
+  const response = await capture.run(() => f("https://source.test/file"));
+  const reader = response.body!.getReader();
+  const pending = reader.read();
+  await reading;
+  const reason = new Error("Synthetic cancellation");
+  await reader.cancel(reason);
+  expect(await pending).toEqual({ value: undefined, done: true });
+  expect(cancelled).toEqual([reason]);
+  expect(source.locked).toBe(false);
+  await capture.flush();
+  expect(host.observations.at(-1)?.outcome).toBe("cancelled");
+});
+
+test("bodyless fetch metadata preserves native implicit content types for buffered requests", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([
+      {
+        id: "http",
+        kind: "http",
+        contractVersion: "1",
+        http: { origin: "https://source.test", pathPrefix: "/" },
+      },
+    ]);
+  let live = 0;
+  const f = wrapFetch((async (input: RequestInfo | URL, init?: RequestInit) => {
+    live++;
+    const request = new Request(input, init);
+    return Response.json({
+      type: request.headers.get("content-type"),
+      body: await request.text(),
+    });
+  }) as unknown as typeof fetch);
+  const bodies = [
+    "plain",
+    new URLSearchParams({ q: "a b" }),
+    new Blob(["blob"], { type: "text/custom" }),
+    new Uint8Array([65]),
+  ];
+  const expected: unknown[] = [];
+  await capture.run(async () => {
+    for (const body of bodies)
+      expected.push(
+        await (
+          await f("https://source.test/file", { method: "POST", body })
+        ).json(),
+      );
+  });
+  const p = await frozen(host, capture, ["http"]);
+  await p.run(async () => {
+    for (const [index, body] of bodies.entries())
+      expect(
+        await (
+          await f("https://source.test/file", { method: "POST", body })
+        ).json(),
+      ).toEqual(expected[index]);
+  });
+  expect(live).toBe(bodies.length);
+});

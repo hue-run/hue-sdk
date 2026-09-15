@@ -326,18 +326,30 @@ export function wrapFetch(
   ) => {
     const active = sceneContext.getStore();
     if (!active || active.suppressed) return fetcher(input, init);
-    const request =
-      input instanceof Request
-        ? new Request(input.url, {
-            method: init?.method ?? input.method,
-            headers: init?.headers ?? input.headers,
-            signal: init?.signal ?? input.signal,
-            ...(init?.body ? { body: init.body } : {}),
-          })
-        : new Request(input, init);
-    const binding = httpBinding(active.runtime, request.url);
+    const original = input instanceof Request ? input : undefined;
+    const url = original?.url ?? String(input);
+    const binding = httpBinding(active.runtime, url);
     if (!binding || !active.runtime.selected(binding.id))
       return fetcher(input, init);
+    // Inspect metadata without constructing a second owner of the live body.
+    // In particular, a streaming override must keep its original duplex option.
+    const request = new Request(url, {
+      method: init?.method ?? original?.method,
+      headers: init?.headers ?? original?.headers,
+      signal: init?.signal ?? original?.signal,
+    });
+    if (!request.headers.has("content-type")) {
+      const body = init?.body;
+      if (typeof body === "string")
+        request.headers.set("content-type", "text/plain;charset=UTF-8");
+      else if (body instanceof URLSearchParams)
+        request.headers.set(
+          "content-type",
+          "application/x-www-form-urlencoded;charset=UTF-8",
+        );
+      else if (body instanceof Blob && body.type)
+        request.headers.set("content-type", body.type);
+    }
     let args: unknown;
     let eligible = true;
     try {
