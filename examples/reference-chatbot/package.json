@@ -1,0 +1,23 @@
+{
+  "name": "hue-reference-chatbot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "bun --no-env-file src/server.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/otel": "1.0.99",
+    "@opentelemetry/api": "1.9.1",
+    "ai": "7.0.99",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hue reference chatbot</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        max-width: 760px;
+        margin: 48px auto;
+        padding: 0 20px;
+      }
+      h1 {
+        font-size: 1.6rem;
+        margin-bottom: 8px;
+      }
+      #config,
+      #status,
+      .meta {
+        font-size: 0.85rem;
+        opacity: 0.8;
+      }
+      #messages {
+        min-height: 240px;
+        margin: 24px 0;
+      }
+      article {
+        padding: 16px;
+        border: 1px solid #8886;
+        border-radius: 8px;
+        margin: 12px 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 90px;
+        padding: 12px;
+        font: inherit;
+      }
+      button {
+        padding: 10px 16px;
+        font: inherit;
+        cursor: pointer;
+        margin: 10px 8px 0 0;
+      }
+      :focus-visible {
+        outline: 3px solid #8b5cf6;
+        outline-offset: 3px;
+      }
+      [role="alert"] {
+        color: #c44;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Hue reference chatbot</h1>
+    <p id="config">Connecting…</p>
+    <p>Ask for a word count to exercise a tool, then inspect the trace in Hue.</p>
+    <section id="messages" aria-label="Conversation" aria-live="polite"></section>
+    <form id="form">
+      <label for="prompt">Message</label>
+      <textarea id="prompt" maxlength="8000" required>
+Count the words in: observability makes agents easier to understand.</textarea>
+      <button id="send">Send</button>
+      <button id="error" type="button">Record controlled error</button>
+      <button id="new" type="button">New session</button>
+    </form>
+    <p id="status" role="status"></p>
+    <script type="module">
+      const byId = (id) => document.getElementById(id);
+      const config = await fetch("/config").then((response) => response.json());
+      byId("config").textContent =
+        `${config.mode === "synthetic" ? "Synthetic provider — no lab model or billed tokens" : "Live AI Gateway provider"} · ${config.captureContent ? "Content capture enabled" : "Content capture disabled"} · Project: ${config.project.name}`;
+      let sessionId = sessionStorage.getItem("hue-reference-session") ?? crypto.randomUUID();
+      sessionStorage.setItem("hue-reference-session", sessionId);
+      let messages = [];
+      const add = (text) => {
+        const node = document.createElement("article");
+        node.textContent = text;
+        byId("messages").append(node);
+        return node;
+      };
+      async function send(scenario) {
+        const prompt = byId("prompt").value.trim();
+        if (!prompt) return;
+        for (const button of document.querySelectorAll("button")) button.disabled = true;
+        messages.push({ role: "user", content: prompt });
+        add(`You: ${prompt}`);
+        const answer = add("");
+        let text = "";
+        try {
+          const response = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId, messages, scenario }),
+          });
+          if (!response.ok || !response.body) throw new Error("Chat request was rejected");
+          const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buffer = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += value;
+            let boundary;
+            while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+              const frame = buffer.slice(0, boundary);
+              buffer = buffer.slice(boundary + 2);
+              const name = frame.match(/^event: (.+)$/m)?.[1];
+              const data = JSON.parse(frame.match(/^data: (.+)$/m)?.[1] ?? "{}");
+              if (name === "text") {
+                text += data.text;
+                answer.textContent = text;
+              }
+              if (name === "trace") {
+                const meta = document.createElement("p");
+                meta.className = "meta";
+                meta.textContent = `Trace: ${data.traceId} · Session: ${data.sessionId}`;
+                byId("messages").append(meta);
+              }
+              if (name === "tool") byId("status").textContent = `Running tool: ${data.name}`;
+              if (name === "tool-result") {
+                const meta = document.createElement("p");
+                meta.className = "meta";
+                meta.textContent = `${data.name}: ${JSON.stringify(data.output)}`;
+                byId("messages").append(meta);
+              }
+              if (name === "error") {
+                answer.textContent = data.message;
+                answer.setAttribute("role", "alert");
+              }
+              if (name === "telemetry")
+                byId("status").textContent =
+                  data.status === "accepted"
+                    ? `Telemetry accepted · ${data.report.acceptedSpans} spans · ${data.report.acceptedLogs} logs (this process)`
+                    : "Telemetry export failed. Check the server diagnostics.";
+            }
+          }
+          if (text) messages.push({ role: "assistant", content: text });
+        } catch (error) {
+          answer.textContent = error.message;
+          answer.setAttribute("role", "alert");
+        } finally {
+          for (const button of document.querySelectorAll("button")) button.disabled = false;
+        }
+      }
+      byId("form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        send("chat");
+      });
+      byId("error").addEventListener("click", () => send("controlled-error"));
+      byId("new").addEventListener("click", () => {
+        sessionId = crypto.randomUUID();
+        sessionStorage.setItem("hue-reference-session", sessionId);
+        messages = [];
+        byId("messages").replaceChildren();
+        byId("status").textContent = "New session started.";
+      });
+    </script>
+  </body>
+</html>

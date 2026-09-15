@@ -1,0 +1,73 @@
+{
+  "name": "@hue/sdk",
+  "version": "0.1.1",
+  "private": true,
+  "license": "UNLICENSED",
+  "homepage": "https://docs.hue.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hue-run/sdk.git",
+    "directory": "packages/sdk-typescript"
+  },
+  "description": "Hue OpenTelemetry helpers for Node.js agent applications",
+  "files": [
+    "dist",
+    "README.md",
+    "EVALUATIONS.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./ai-sdk": {
+      "types": "./dist/ai-sdk.d.ts",
+      "import": "./dist/ai-sdk.js"
+    },
+    "./evals": {
+      "types": "./dist/evals.d.ts",
+      "import": "./dist/evals.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test tests"
+  },
+  "dependencies": {
+    "@opentelemetry/api-logs": "0.222.0",
+    "@opentelemetry/core": "2.11.0",
+    "@opentelemetry/otlp-exporter-base": "0.222.0",
+    "@opentelemetry/otlp-transformer": "0.222.0",
+    "@opentelemetry/resources": "2.11.0",
+    "@opentelemetry/sdk-logs": "0.222.0",
+    "@opentelemetry/sdk-trace": "2.11.0",
+    "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "@ai-sdk/otel": "1.0.99",
+    "@opentelemetry/api": "1.9.1",
+    "@types/bun": "1.4.2",
+    "@types/node": "24.10.1",
+    "ai": "7.0.99",
+    "protobufjs": "8.8.0",
+    "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "@ai-sdk/otel": "^1.0.99",
+    "@opentelemetry/api": "^1.9.1",
+    "ai": "^7.0.99"
+  },
+  "peerDependenciesMeta": {
+    "@ai-sdk/otel": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

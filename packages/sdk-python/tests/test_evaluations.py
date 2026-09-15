@@ -1,0 +1,762 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import os
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Event, Lock, Thread, current_thread
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+import pytest
+
+import hue_sdk.evals.runner as runner_module
+from hue_sdk import Hue
+from hue_sdk.evals import (
+    MISSING,
+    EvaluationClient,
+    HueApiError,
+    OutcomeSerializationError,
+    TelemetryExportError,
+    TraceEvidence,
+    UncertainExecutionError,
+    builtins,
+    define_local_scorer,
+    rescore,
+    run_experiment,
+    score_locally,
+)
+from hue_sdk.evals._checkpoint import CheckpointStore
+from hue_sdk.evals._json import json_value
+
+
+@pytest.fixture
+def evaluation_receiver():
+    state = SimpleNamespace(
+        project_id=str(uuid4()),
+        experiment_id=str(uuid4()),
+        version_id=str(uuid4()),
+        case_id=str(uuid4()),
+        run_id=str(uuid4()),
+        scorer_id=str(uuid4()),
+        execution=None,
+        completion=None,
+        subject=None,
+        scores={},
+        requests=[],
+        starts=0,
+        fail_start=0,
+        fail_complete=0,
+        fail_result=0,
+        fail_otlp=False,
+        include_expected=True,
+        output=None,
+        inputs="sensitive-input",
+        config={"answer": None},
+        deferred=[],
+        historical=None,
+        lock=Lock(),
+    )
+    state.versions = [
+        {"id": state.scorer_id, "contentDigest": "b" * 64, "definition": builtins.exact_match()}
+    ]
+
+    def dispatch(method, path, body):
+        if "/otlp/" in path:
+            return (400, {}) if state.fail_otlp else (200, b"")
+        if path.endswith("/projects/current"):
+            return 200, {
+                "id": state.project_id,
+                "organizationId": str(uuid4()),
+                "name": "Synthetic",
+                "slug": "synthetic",
+            }
+        if path.endswith(f"/experiments/{state.experiment_id}"):
+            return 200, {
+                "id": state.experiment_id,
+                "datasetVersionId": state.version_id,
+                "caseCount": 1,
+                "config": state.config,
+                "configDigest": "c" * 64,
+                "evaluation": {"id": state.run_id, "scorerVersions": state.versions},
+            }
+        if path.endswith(f"/dataset-versions/{state.version_id}"):
+            return 200, {
+                "id": state.version_id,
+                "frozenAt": "2026-09-15T00:00:00Z",
+                "contentDigest": "a" * 64,
+            }
+        if path.endswith(f"/experiments/{state.experiment_id}/items"):
+            return 200, {
+                "items": [{"id": state.case_id, "execution": state.execution}],
+                "nextCursor": None,
+            }
+        if path.endswith(f"/items/{state.case_id}"):
+            return 200, {
+                "id": state.case_id,
+                "externalKey": "case",
+                "datasetVersionId": state.version_id,
+                "inputs": state.inputs,
+                "metadata": {},
+                "hasExpected": state.include_expected,
+                **({"expected": None} if state.include_expected else {}),
+            }
+        if path.endswith("/start"):
+            if state.execution is None:
+                state.starts += 1
+                state.execution = {
+                    "id": str(uuid4()),
+                    "state": "started",
+                    "attempt": 1,
+                    "traceExternalId": body.get("traceExternalId"),
+                }
+                state.start_body = body
+            elif state.start_body != body:
+                return 409, {}
+            if state.fail_start:
+                state.fail_start -= 1
+                return 503, {}
+            return 200, state.execution
+        if path.endswith("/complete"):
+            if state.completion is None:
+                state.complete_body = body
+                state.completion = {
+                    "executionId": state.execution["id"],
+                    "subjectId": str(uuid4()),
+                    "evaluationItemId": str(uuid4()),
+                    "traceSnapshotId": str(uuid4()),
+                }
+                state.execution["state"] = body["state"]
+                state.subject = {
+                    "id": state.completion["subjectId"],
+                    "inputs": "sensitive-input",
+                    "hasOutput": "output" in body,
+                    **({"output": body["output"]} if "output" in body else {}),
+                    "hasExpected": state.include_expected,
+                    "metadata": {},
+                    "executionState": body["state"],
+                    **({"expected": None} if state.include_expected else {}),
+                }
+            elif body != state.complete_body:
+                return 409, {}
+            if state.fail_complete:
+                state.fail_complete -= 1
+                return 503, {}
+            return 200, state.completion
+        if "/experiment-executions/" in path:
+            return 200, state.execution
+        if path.endswith("/results"):
+            key = body["idempotencyKey"]
+            if key not in state.scores:
+                state.scores[key] = {"body": body, "ids": [str(uuid4())]}
+            elif state.scores[key]["body"] != body:
+                return 409, {}
+            if state.fail_result:
+                state.fail_result -= 1
+                return 503, {}
+            return 200, {"ids": state.scores[key]["ids"]}
+        if path.endswith("/finish"):
+            return 200, {"id": state.experiment_id, "finishedAt": "2026-09-15T00:00:00Z"}
+        if path.endswith("/evaluation-runs") and method == "POST":
+            state.historical = {"id": str(uuid4()), "itemId": str(uuid4())}
+            return 200, {"id": state.historical["id"]}
+        if "/evaluation-subjects/" in path:
+            return 200, state.subject
+        if state.historical and f"/evaluation-runs/{state.historical['id']}" in path:
+            if path.endswith("/items"):
+                return 200, {
+                    "items": [{"id": state.historical["itemId"], "subjectId": state.subject["id"]}],
+                    "nextCursor": None,
+                }
+            return 200, {
+                "id": state.historical["id"],
+                "itemCount": 1,
+                "scorerVersions": state.versions,
+            }
+        return 404, {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.respond("GET")
+
+        def do_POST(self):
+            self.respond("POST")
+
+        def respond(self, method):
+            path = urlsplit(self.path).path
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.loads(raw) if raw and "/otlp/" not in path else None
+            with state.lock:
+                state.requests.append((method, path, raw))
+                status, value = dispatch(method, path, body)
+                payload = value if isinstance(value, bytes) else json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header(
+                "Content-Type",
+                "application/x-protobuf" if isinstance(value, bytes) else "application/json",
+            )
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    state.url = f"http://127.0.0.1:{server.server_port}"
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
+def options(receiver, tmp_path, target, *, persist=True, evidence=None):
+    return dict(
+        client=EvaluationClient(receiver.url, "synthetic-key"),
+        hue=Hue(receiver.url, "synthetic-key", capture_content=False),
+        experiment_id=receiver.experiment_id,
+        target=target,
+        checkpoint_directory=tmp_path / "checkpoints",
+        persist_result_content=persist,
+        trace_evidence=evidence or TraceEvidence("required"),
+    )
+
+
+def test_real_http_retries_saved_completion_and_scores_without_replaying_target(
+    evaluation_receiver, tmp_path
+):
+    receiver, calls = evaluation_receiver, []
+    receiver.fail_complete = receiver.fail_result = 1
+    arguments = options(receiver, tmp_path, lambda _inputs, _context: calls.append(1))
+    try:
+        for _ in range(2):
+            with pytest.raises(HueApiError) as failure:
+                run_experiment(**arguments)
+            assert failure.value.status == 503
+        report = run_experiment(**arguments)
+        assert calls == [1] and receiver.starts == 1
+        assert len(report.subject_ids) == len(report.result_ids) == 1
+        assert receiver.complete_body["output"] is None
+        assert list(receiver.scores.values())[0]["body"]["results"][0]["metrics"] == [
+            {"name": "match", "value": True, "passed": True}
+        ]
+        assert run_experiment(**arguments) == report
+        assert calls == [1]
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_content_opt_out_covers_http_and_checkpoints_and_historical_unavailable(
+    evaluation_receiver, tmp_path
+):
+    receiver, called, scored = evaluation_receiver, [], []
+
+    def custom_score(_context):
+        scored.append(1)
+        return {
+            "state": "scored",
+            "metrics": [{"name": "quality", "value": False, "passed": False}],
+            "explanation": "sensitive-explanation",
+            "evidence": "sensitive-evidence",
+        }
+
+    local = define_local_scorer(
+        source=inspect.getsource(custom_score),
+        entrypoint="score",
+        metrics=[{"name": "quality", "type": "boolean"}],
+        score=custom_score,
+    )
+    receiver.versions = [
+        {"id": str(uuid4()), "contentDigest": "d" * 64, "definition": local.definition}
+    ]
+
+    def target(_inputs, _context):
+        called.append(1)
+        return "sensitive-output"
+
+    arguments = options(receiver, tmp_path, target, persist=False)
+    arguments["scorers"] = [local]
+    try:
+        report = run_experiment(**arguments)
+        assert "output" not in receiver.complete_body
+        score = list(receiver.scores.values())[0]["body"]["results"][0]
+        assert score["metrics"][0]["value"] is False and score["state"] == "scored"
+        assert "evidence" not in score and score["sourceDigest"] == local.definition["sourceDigest"]
+        persisted = b"".join(
+            path.read_bytes() for path in arguments["checkpoint_directory"].glob("*.json")
+        )
+        sent = b"".join(body for _, _, body in receiver.requests)
+        for content in (
+            b"sensitive-output",
+            b"sensitive-evidence",
+            b"sensitive-explanation",
+            b"sensitive-input",
+        ):
+            assert content not in persisted + sent
+        historical = arguments["client"].create_evaluation_run(
+            idempotency_key=str(uuid4()),
+            name="Rescore",
+            subject_ids=report.subject_ids,
+            scorer_version_ids=[receiver.versions[0]["id"]],
+        )
+    finally:
+        arguments["hue"].shutdown()
+    rescored = rescore(
+        client=arguments["client"],
+        run_id=historical["id"],
+        checkpoint_directory=tmp_path / "rescore",
+        persist_result_content=False,
+        scorers=[local],
+    )
+    assert len(rescored.result_ids) == 1 and called == [1] and scored == [1]
+    result = list(receiver.scores.values())[-1]["body"]["results"][0]
+    assert (
+        result["state"] == "skipped" and result["explanation"] == "Output evidence is unavailable"
+    )
+
+
+def test_start_ambiguity_and_serialization_failure_never_reinvoke(evaluation_receiver, tmp_path):
+    receiver, calls = evaluation_receiver, []
+    receiver.fail_start = 1
+    arguments = options(receiver, tmp_path, lambda *_: calls.append(1))
+    try:
+        with pytest.raises(HueApiError):
+            run_experiment(**arguments)
+        with pytest.raises(UncertainExecutionError) as uncertain:
+            run_experiment(**arguments)
+        assert uncertain.value.execution_id == receiver.execution["id"] and calls == []
+    finally:
+        arguments["hue"].shutdown()
+
+
+@pytest.mark.parametrize("output_kind", ["object", "cycle"])
+def test_non_json_target_output_is_not_target_error_or_replayed(
+    evaluation_receiver, tmp_path, output_kind
+):
+    calls = []
+
+    def target(*_args):
+        calls.append(1)
+        if output_kind == "object":
+            return object()
+        cycle = []
+        cycle.append(cycle)
+        return cycle
+
+    arguments = options(evaluation_receiver, tmp_path, target)
+    try:
+        for _ in range(2):
+            with pytest.raises(OutcomeSerializationError):
+                run_experiment(**arguments)
+        assert calls == [1] and evaluation_receiver.completion is None
+        assert evaluation_receiver.execution["state"] == "started"
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_shared_acyclic_output_completes_and_resumes_without_replaying_target(
+    evaluation_receiver, tmp_path
+):
+    calls = []
+    shared = {"message": "same value", "items": [None, False]}
+    output = {"first": shared, "second": shared, "list": [shared, shared]}
+
+    def target(*_args):
+        calls.append(1)
+        return output
+
+    arguments = options(evaluation_receiver, tmp_path, target)
+    try:
+        report = run_experiment(**arguments)
+        assert evaluation_receiver.complete_body["output"] == json.loads(json.dumps(output))
+        assert evaluation_receiver.complete_body["state"] == "succeeded"
+        assert run_experiment(**arguments) == report
+        assert calls == [1] and evaluation_receiver.starts == 1
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_json_counts_each_expansion_of_shared_references_and_rejects_real_cycles():
+    shared = [None] * 100
+    assert json_value([shared, shared]) == [shared, shared]
+    with pytest.raises(ValueError, match="depth or node limits"):
+        json_value([shared] * 200)
+    left, right = {}, {}
+    left["next"] = right
+    right["next"] = left
+    with pytest.raises(ValueError, match="cycles"):
+        json_value(left)
+
+
+def test_fresh_exporter_cannot_acknowledge_a_prior_failed_trace(evaluation_receiver, tmp_path):
+    receiver, calls = evaluation_receiver, []
+    receiver.fail_otlp = True
+    arguments = options(receiver, tmp_path, lambda *_: calls.append(1))
+    with pytest.raises(TelemetryExportError):
+        run_experiment(**arguments)
+    arguments["hue"].shutdown()
+    receiver.fail_otlp = False
+    arguments["hue"] = Hue(receiver.url, "synthetic-key", capture_content=False)
+    try:
+        with pytest.raises(TelemetryExportError):
+            run_experiment(**arguments)
+        assert calls == [1] and receiver.completion is None
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_explicit_omission_and_deferred_scorers_preserve_remote_result_slots(
+    evaluation_receiver, tmp_path
+):
+    receiver = evaluation_receiver
+    receiver.fail_otlp = True
+    receiver.versions.extend(
+        [
+            {"id": str(uuid4()), "contentDigest": "e" * 64, "definition": {"kind": kind}}
+            for kind in ("manual", "llm_judge")
+        ]
+    )
+    arguments = options(
+        receiver,
+        tmp_path,
+        lambda *_: None,
+        evidence=TraceEvidence("omit", "Trace receiver is unavailable"),
+    )
+    try:
+        report = run_experiment(**arguments)
+        assert len(report.deferred_scorer_version_ids) == 2
+        assert len(receiver.scores) == 1
+        assert receiver.complete_body["traceEvidence"] == "omit"
+        assert receiver.complete_body["omissionReason"] == "Trace receiver is unavailable"
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_exclusive_checkpoint_owner_prevents_concurrent_target_invocation(
+    evaluation_receiver, tmp_path
+):
+    entered, release, calls = Event(), Event(), []
+
+    def target(*_args):
+        calls.append(1)
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    arguments = options(evaluation_receiver, tmp_path, target)
+    try:
+        with ThreadPoolExecutor(1) as executor:
+            future = executor.submit(run_experiment, **arguments)
+            assert entered.wait(5)
+            try:
+                with pytest.raises(RuntimeError, match="locked"):
+                    run_experiment(**arguments)
+            finally:
+                release.set()
+            future.result(5)
+        assert calls == [1]
+        with pytest.raises(RuntimeError, match="identity differs"):
+            run_experiment(**{**arguments, "persist_result_content": False})
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_builtin_types_schema_process_and_local_error_boundaries():
+    context = {
+        "inputs": None,
+        "has_output": True,
+        "output": False,
+        "has_expected": True,
+        "expected": 0,
+        "metadata": {},
+        "execution_state": "succeeded",
+    }
+    version = {"definition": builtins.exact_match()}
+    assert score_locally(version, context)["metrics"][0]["value"] is False
+    assert (
+        score_locally(
+            version, {**context, "output": {"a": 1, "b": None}, "expected": {"b": None, "a": 1.0}}
+        )["metrics"][0]["value"]
+        is True
+    )
+    for schema, output, expected in [
+        ({"const": {"$async": True}}, {"$async": True}, True),
+        ({"minimum": 0}, 1, True),
+        ({"annotation": "allowed", "type": "string"}, 1, False),
+        ({"$defs": {"value": {"type": "null"}}, "$ref": "#/$defs/value"}, None, True),
+        ({"type": "object", "properties": {"child": {"$ref": "#"}}}, {"child": {}}, True),
+        ({"type": "object", "properties": {"child": {"$ref": "#"}}}, {"child": 1}, False),
+    ]:
+        result = score_locally(
+            {"definition": builtins.json_schema(schema)}, {**context, "output": output}
+        )
+        assert result["metrics"][0]["value"] is expected
+    remote = score_locally(
+        {"definition": builtins.json_schema({"$ref": "https://unreachable.test/schema"})}, context
+    )
+    assert remote == {"state": "error", "error": {"type": "InvalidSchema"}}
+    timeout = score_locally(
+        {"definition": builtins.json_schema({"type": "string", "pattern": "(a+)+$"})},
+        {**context, "output": "a" * 100 + "!"},
+        schema_timeout_millis=500,
+    )
+    assert timeout == {"state": "error", "error": {"type": "SchemaTimeout"}}
+    local = define_local_scorer(
+        source="score source",
+        entrypoint="score",
+        metrics=[{"name": "score", "type": "number"}],
+        score=lambda _: {
+            "state": "scored",
+            "metrics": [{"name": "score", "value": True}],
+            "explanation": "Invalid boolean-as-number",
+        },
+    )
+    assert (
+        score_locally({"definition": local.definition}, context, scorers=[local])["state"]
+        == "error"
+    )
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_async_target_errors_and_cancellation_stay_distinct_and_redacted(
+    evaluation_receiver, tmp_path, cancelled
+):
+    async def target(*_args):
+        await asyncio.sleep(0)
+        if cancelled:
+            raise asyncio.CancelledError("sensitive-cancellation")
+        raise RuntimeError("sensitive-target-error")
+
+    arguments = options(evaluation_receiver, tmp_path, target, persist=False)
+    try:
+        run_experiment(**arguments)
+        body = evaluation_receiver.complete_body
+        assert body["state"] == ("cancelled" if cancelled else "error")
+        assert "output" not in body
+        if not cancelled:
+            assert body["error"] == {"type": "TargetError"}
+        persisted = b"".join(
+            path.read_bytes() for path in arguments["checkpoint_directory"].glob("*.json")
+        )
+        assert b"sensitive-target-error" not in persisted
+        assert b"sensitive-cancellation" not in persisted
+        score = list(evaluation_receiver.scores.values())[0]["body"]["results"][0]
+        assert score["state"] == "skipped"
+    finally:
+        arguments["hue"].shutdown()
+
+
+@pytest.mark.parametrize("field", ["inputs", "config"])
+def test_invalid_runner_inputs_never_become_target_errors(evaluation_receiver, tmp_path, field):
+    setattr(evaluation_receiver, field, {"unrepresentable_python_integer": 2**54})
+    calls = []
+    arguments = options(evaluation_receiver, tmp_path, lambda *_: calls.append(True))
+    try:
+        for _ in range(2):
+            with pytest.raises(ValueError, match="Expected JSON"):
+                run_experiment(**arguments)
+        assert not calls
+        assert evaluation_receiver.starts == 0 and evaluation_receiver.completion is None
+        assert not list(arguments["checkpoint_directory"].glob("case-*.json"))
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_worker_waiting_to_dequeue_cannot_start_after_sibling_failure(monkeypatch):
+    waiting, failure_recorded = Event(), Event()
+    calls = []
+    roles = {}
+
+    class ScheduledLock:
+        """Pause a real worker at lock acquisition to reproduce the stop/dequeue race."""
+
+        def __init__(self):
+            self.lock = Lock()
+
+        def __enter__(self):
+            name = current_thread().name
+            if roles.get(name) == 1:
+                waiting.set()
+                assert failure_recorded.wait(5)
+            self.lock.acquire()
+
+        def __exit__(self, *_args):
+            name = current_thread().name
+            if roles.get(name) == 0:
+                failure_recorded.set()
+            self.lock.release()
+
+    monkeypatch.setattr(runner_module, "Lock", ScheduledLock)
+
+    def execute(item):
+        roles[current_thread().name] = item["id"]
+        calls.append(item["id"])
+        if item["id"] == 0:
+            assert waiting.wait(5)
+            raise RuntimeError("first case failed")
+
+    with pytest.raises(RuntimeError, match="first case failed"):
+        runner_module._pool([{"id": i} for i in range(4)], 2, execute)
+    assert sorted(calls) == [0, 1]
+
+
+def test_concurrent_flush_drains_later_spans_after_an_earlier_trace_drain(receiver):
+    receiver.delay_seconds = 0.1
+    with Hue(receiver.url, "synthetic-key", capture_content=False) as hue:
+        with hue.span("first") as first:
+            first.log_inference(output=None)
+        with ThreadPoolExecutor(2) as executor:
+            early = executor.submit(hue.force_flush)
+            deadline = time.monotonic() + 5
+            while True:
+                with receiver.lock:
+                    reached_logs = any(path.endswith("/logs") for path, _, _ in receiver.requests)
+                if reached_logs:
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+            # The first caller already drained traces and is waiting on its log request.
+            with hue.span("later") as later:
+                later.log_inference(output=None)
+            following = executor.submit(hue.force_flush)
+            assert following.result(5) is True and early.result(5) is True
+            assert {span.name for span in receiver.spans()} == {"first", "later"}
+        receiver.delay_seconds = 0
+        receiver.reply(400)
+        with hue.span("failed"):
+            pass
+        assert not hue.force_flush()
+        with hue.span("after-failure"):
+            pass
+        assert not hue.force_flush()  # An earlier caller cannot consume exporter failure evidence.
+
+
+def test_client_http_boundaries_and_hosted_controls(receiver):
+    client = EvaluationClient(receiver.url, "synthetic-private-key")
+    receiver.reply(302, b"synthetic-private-key", Location="http://127.0.0.1:1/stolen")
+    with pytest.raises(HueApiError) as redirect:
+        client.check_connection()
+    assert redirect.value.status == 302 and "synthetic-private-key" not in str(redirect.value)
+    assert len(receiver.requests) == 1 and "synthetic-private-key" not in repr(client)
+    with pytest.raises(TypeError):
+        client.start_execution(
+            str(uuid4()), str(uuid4()), idempotency_key="key", allow_uncertain_retry="false"
+        )
+    receiver.reply(200, b'{"payload":"' + b"x" * (4 * 1024 * 1024) + b'"}')
+    with pytest.raises(HueApiError):
+        client.check_connection()
+    run_id, job_id, item_id, scorer_id = [str(uuid4()) for _ in range(4)]
+    for response, invoke_client, suffix in [
+        (
+            {"ids": [job_id]},
+            lambda: client.create_judge_jobs(
+                run_id,
+                idempotency_key="stable",
+                jobs=[{"evaluationItemId": item_id, "scorerVersionId": scorer_id}],
+            ),
+            f"/evaluation-runs/{run_id}/judge-jobs",
+        ),
+        (
+            {"items": [], "nextCursor": None},
+            lambda: client.list_judge_jobs(run_id),
+            f"/evaluation-runs/{run_id}/judge-jobs?limit=100",
+        ),
+        (
+            {"id": job_id, "state": "queued"},
+            lambda: client.get_judge_job(job_id),
+            f"/judge-jobs/{job_id}",
+        ),
+        (
+            {"id": job_id, "state": "cancelled"},
+            lambda: client.cancel_judge_job(job_id, reason="Requested cancellation"),
+            f"/judge-jobs/{job_id}/cancel",
+        ),
+        (
+            {"enabled": True, "allowanceMicroUsd": 1000, "reservedMicroUsd": 0, "spentMicroUsd": 0},
+            client.get_judge_budget,
+            "/judge-budget",
+        ),
+    ]:
+        receiver.reply(200, json.dumps(response).encode(), **{"Content-Type": "application/json"})
+        assert invoke_client() == response
+        assert receiver.requests[-1][0].endswith(suffix)
+
+
+def test_json_and_checkpoint_boundaries(tmp_path):
+    for value in [float("inf"), 2**53, "\0", "\ud800", {1: "coercion"}, MISSING]:
+        with pytest.raises(ValueError):
+            json_value(value)
+    assert json_value({"__proto__": {"literal": True}}) == {"__proto__": {"literal": True}}
+    store = CheckpointStore(tmp_path / "private", {"run": "test"})
+    try:
+        store.write("case", {"value": None})
+        assert (store.directory / "case.json").stat().st_mode & 0o077 == 0
+        path = store.directory / "case.json"
+        path.write_text(path.read_text().replace('"value":null', '"value":false'))
+        with pytest.raises(RuntimeError, match="integrity"):
+            store.read("case")
+        (store.directory / "symlink.json").symlink_to(path)
+        with pytest.raises(OSError):
+            store.read("symlink")
+    finally:
+        store.release()
+
+
+def test_installed_wheel_runs_evaluations_and_schema_subprocess(evaluation_receiver, tmp_path):
+    package = Path(__file__).resolve().parents[1]
+    dist, consumer = tmp_path / "dist", tmp_path / "consumer"
+    for command in (
+        [sys.executable, "-m", "build", "--no-isolation", str(package), "--outdir", str(dist)],
+        ["uv", "venv", str(consumer), "--python", sys.executable],
+    ):
+        subprocess.run(command, check=True, capture_output=True)
+    python = consumer / "bin" / "python"
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(python), str(next(dist.glob("*.whl")))],
+        check=True,
+        capture_output=True,
+    )
+    program = """
+import os, hue_sdk
+from hue_sdk import Hue
+from hue_sdk.evals import EvaluationClient, TraceEvidence, run_experiment, builtins, score_locally
+assert os.environ['CONSUMER'] in hue_sdk.__file__
+client = EvaluationClient(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'])
+with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=False) as hue:
+    report = run_experiment(client=client, hue=hue, experiment_id=os.environ['EXPERIMENT'],
+        target=lambda inputs, context: None, checkpoint_directory='checkpoints',
+        persist_result_content=True, trace_evidence=TraceEvidence('required'))
+    assert len(report.result_ids) == 1
+result = score_locally({'definition':builtins.json_schema({'type':'null'})},
+    {'inputs':None,'has_output':True,'output':None,'has_expected':False,
+     'metadata':{},'execution_state':'succeeded'})
+assert result['metrics'][0]['value'] is True
+print('installed evaluation wheel passed')
+"""
+    completed = subprocess.run(
+        [str(python), "-I", "-c", program],
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ["PATH"],
+            "HUE_BASE_URL": evaluation_receiver.url,
+            "HUE_API_KEY": "synthetic-wheel-key",
+            "EXPERIMENT": evaluation_receiver.experiment_id,
+            "CONSUMER": str(consumer),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "installed evaluation wheel passed" in completed.stdout
+    assert "synthetic-wheel-key" not in completed.stdout + completed.stderr

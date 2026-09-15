@@ -1,0 +1,44 @@
+[project]
+name = "hue-sdk"
+version = "0.1.0.dev0"
+description = "OpenTelemetry helpers for sending agent traces and correlated logs to Hue"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "UNLICENSED" }
+dependencies = [
+  "opentelemetry-api==1.44.0",
+  "opentelemetry-sdk==1.44.0",
+  "opentelemetry-exporter-otlp-proto-http==1.44.0",
+  "requests>=2.32.5,<3",
+  "jsonschema==4.26.0",
+]
+
+[project.urls]
+Homepage = "https://docs.hue.run"
+Repository = "https://github.com/hue-run/sdk"
+Documentation = "https://docs.hue.run"
+
+[dependency-groups]
+dev = ["pytest>=8.3,<10", "build>=1.2,<2", "ruff>=0.15,<1", "hatchling>=1.27,<2"]
+compatibility = ["openai==3.14.0", "openinference-instrumentation-openai==0.1.60"]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hue_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["hue_sdk"]
