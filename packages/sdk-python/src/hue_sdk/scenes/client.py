@@ -298,6 +298,14 @@ class Capture:
         for binding in self.selected.values():
             if binding.get("http", {}).get("origin") == scenes.api.base_url:
                 raise ValueError("Hue traffic cannot be a source binding.")
+        http = [binding["http"] for binding in self.selected.values() if "http" in binding]
+        for index, left in enumerate(http):
+            for right in http[index + 1:]:
+                if left["origin"] == right["origin"] and (
+                    left["pathPrefix"].startswith(right["pathPrefix"])
+                    or right["pathPrefix"].startswith(left["pathPrefix"])
+                ):
+                    raise ValueError("HTTP source scopes must not overlap.")
         self.producer_id = str(uuid4())
         self._create: dict[str, Any] = {
             "idempotencyKey": str(uuid4()),

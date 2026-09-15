@@ -31,7 +31,7 @@ def setup(api, **kwargs):
         kind="http",
         http_origin=api.source_url,
         path_prefix="/files",
-        headers=("x-source-version", "authorization"),
+        headers=("x-source-version",),
     )
     return scenes, binding
 

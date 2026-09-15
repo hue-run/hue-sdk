@@ -65,14 +65,28 @@ class Binding:
         if self.account_scope is not None:
             result["accountScope"] = self.account_scope
         if self.kind == "http":
-            from hue_sdk.transport import normalize_base_url
+            from urllib.parse import urlsplit
 
+            from ._json import credential_key
             from .http import safe_url
 
             if self.http_origin is None or not self.path_prefix.startswith("/"):
                 raise ValueError("HTTP bindings require an origin and absolute path prefix.")
+            origin = urlsplit(self.http_origin)
+            if (
+                origin.scheme not in {"http", "https"}
+                or not origin.hostname
+                or origin.username
+                or origin.password
+                or origin.query
+                or origin.fragment
+                or origin.path.strip("/")
+            ):
+                raise ValueError("Source scope must contain only an HTTP(S) origin.")
+            if any(credential_key(name) for name in self.headers):
+                raise ValueError("Credential headers cannot participate in source arguments.")
             result["http"] = {
-                "origin": safe_url(normalize_base_url(self.http_origin)).rstrip("/"),
+                "origin": safe_url(self.http_origin).rstrip("/"),
                 "pathPrefix": self.path_prefix,
                 "headers": list(self.headers),
             }

@@ -177,7 +177,7 @@ def _ambiguous(calls: list[dict[str, Any]]) -> bool:
             ls, rs = left.get("start"), right.get("start")
             lf, rf = left.get("finish"), right.get("finish")
             if not all((ls, rs, lf, rf)):
-                continue
+                return True
             if ls["producerId"] != rs["producerId"]:
                 return True
             if ls["sequence"] < rf["sequence"] and rs["sequence"] < lf["sequence"]:
