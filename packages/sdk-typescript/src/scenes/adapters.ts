@@ -1,4 +1,4 @@
-import { wrapTool, type ToolOptions } from "./context.js";
+import { sceneContext, wrapTool, type ToolOptions } from "./context.js";
 /** Wrap only explicitly registered source tools. Model calls and transforms remain untouched. */
 export function wrapAiTools<T extends Record<string, unknown>>(
   bindingId: string,
@@ -77,12 +77,24 @@ export function wrapMcpClient<T extends object>(
       const describe = typeof key === "string" ? mcpMethods[key] : undefined;
       if (!describe) return value.bind(target);
       return (...args: unknown[]) => {
-        const call = describe(args);
+        const active = sceneContext.getStore();
+        if (!active || active.suppressed || !active.runtime.selected(bindingId))
+          return value.apply(target, args);
+        let operation = String(key);
+        let requestArguments: unknown;
+        try {
+          const call = describe(args);
+          operation = call.operation;
+          requestArguments = call.arguments;
+        } catch {
+          // Preserve the client's live validation/error while making failed extraction ineligible.
+          requestArguments = Symbol("unsupported MCP arguments");
+        }
         return wrapTool(
           bindingId,
-          call.operation,
+          operation,
           () => value.apply(target, args),
-          () => call.arguments,
+          () => requestArguments,
           { ...options, resultMode: "promise" },
         )();
       };

@@ -53,10 +53,15 @@ export async function decodePayload(
   switch (payload.kind) {
     case "absent":
       return undefined;
-    case "json":
-      return json(payload.value);
+    case "json": {
+      const value = json(payload.value);
+      if (Buffer.byteLength(canonical(value)) > INLINE_BYTES)
+        throw new SnapshotMissError("integrity");
+      return value;
+    }
     case "bytes": {
       if (
+        payload.base64.length > INLINE_BYTES ||
         !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
           payload.base64,
         )

@@ -103,5 +103,122 @@
     "nonportable",
     "overlapping_bindings",
     "integrity"
+  ],
+  "schemaCases": [
+    {
+      "definition": "binding",
+      "valid": true,
+      "value": {
+        "id": "docs",
+        "kind": "http",
+        "contractVersion": "1",
+        "http": {
+          "origin": "https://example.test",
+          "pathPrefix": "/"
+        }
+      }
+    },
+    {
+      "definition": "binding",
+      "valid": false,
+      "value": {
+        "id": "docs",
+        "kind": "http",
+        "contractVersion": "1"
+      }
+    },
+    {
+      "definition": "binding",
+      "valid": false,
+      "value": {
+        "id": "docs",
+        "kind": "http",
+        "contractVersion": "1",
+        "http": {
+          "origin": "",
+          "pathPrefix": ""
+        }
+      }
+    },
+    {
+      "definition": "payload",
+      "valid": true,
+      "value": {
+        "kind": "http",
+        "status": 200,
+        "headers": {},
+        "body": {
+          "kind": "bytes",
+          "base64": ""
+        }
+      }
+    },
+    {
+      "definition": "payload",
+      "valid": false,
+      "value": {
+        "kind": "http",
+        "status": 200,
+        "headers": {},
+        "body": {
+          "kind": "json",
+          "value": {}
+        }
+      }
+    },
+    {
+      "definition": "payload",
+      "valid": false,
+      "value": {
+        "kind": "http",
+        "status": 200,
+        "headers": {},
+        "body": {
+          "kind": "absent"
+        }
+      }
+    }
+  ],
+  "httpBodies": [
+    {
+      "contentType": "application/json",
+      "body": "{ \"b\":2, \"a\":1 }",
+      "sha256": "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+    },
+    {
+      "contentType": "Application/Problem+JSON; charset=utf-8",
+      "body": "{ \"b\":2, \"a\":1 }",
+      "sha256": "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+    },
+    {
+      "contentType": "text/plain",
+      "body": "{ \"b\":2, \"a\":1 }",
+      "sha256": "a782da44b228c14de003efcebc359fbe0a5bc35d90d5da70513e54e25fa5428a"
+    },
+    {
+      "contentType": "text/json",
+      "body": "{ \"b\":2, \"a\":1 }",
+      "sha256": "a782da44b228c14de003efcebc359fbe0a5bc35d90d5da70513e54e25fa5428a"
+    },
+    {
+      "contentType": "application/notjson",
+      "body": "{ \"b\":2, \"a\":1 }",
+      "sha256": "a782da44b228c14de003efcebc359fbe0a5bc35d90d5da70513e54e25fa5428a"
+    },
+    {
+      "contentType": "application/json",
+      "body": "{broken",
+      "sha256": null
+    },
+    {
+      "contentType": "application/json",
+      "body": "{\"password\":\"synthetic\",\"q\":\"renewal\"}",
+      "sha256": "691b7471f9bbfcccc630b0efd523b74b05146c68a65af50e5c8728a4cc5f0eca"
+    },
+    {
+      "contentType": "application/json",
+      "body": "﻿{\"a\":1}",
+      "sha256": "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862"
+    }
   ]
 }

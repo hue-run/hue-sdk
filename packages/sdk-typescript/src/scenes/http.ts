@@ -24,6 +24,13 @@ export const SEMANTIC_HEADERS = [
   "if-unmodified-since",
   "if-range",
 ];
+function isJsonContentType(value: string | null | undefined): boolean {
+  const mediaType = value?.split(";")[0].trim().toLowerCase() ?? "";
+  return (
+    mediaType === "application/json" ||
+    /^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+\+json$/.test(mediaType)
+  );
+}
 export function httpBinding(
   runtime: SceneRuntime,
   url: string,
@@ -45,12 +52,7 @@ export function httpArguments(
   bytes: Uint8Array,
 ) {
   let body = bytes;
-  if (
-    /\b(?:application\/json|[^;]+\+json)\b/i.test(
-      request.headers.get("content-type") ?? "",
-    ) &&
-    bytes.length
-  ) {
+  if (isJsonContentType(request.headers.get("content-type")) && bytes.length) {
     const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     body = Buffer.from(canonical(sanitize(JSON.parse(decoded)).value));
   }
@@ -125,9 +127,7 @@ export class HttpCapture {
       if (
         this.eligible &&
         bytes.length > 0 &&
-        /\b(?:application\/json|[^;]+\+json)\b/i.test(
-          this.metadata.headers["content-type"] ?? "",
-        )
+        isJsonContentType(this.metadata.headers["content-type"])
       ) {
         try {
           if (
@@ -212,6 +212,9 @@ export class HttpCapture {
     if (this.ended) return;
     this.ended = true;
     this.disable();
+    // The application has already received an HTTP response. A function-level error
+    // cannot reproduce its headers or partially consumed body during playback.
+    if (this.handle) this.handle.replayable = false;
     this.capture.fail(this.handle, error, cancelled);
   }
 }

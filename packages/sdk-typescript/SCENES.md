@@ -79,6 +79,8 @@ try {
 
 The pin contains `sceneId`, `revision`, and the SHA-256 digest of the canonical manifest. Loading verifies the manifest and artifact length/hash before results are available. Selected tools never invoke their live implementations, including on misses. Unselected functions remain live. Recording and playback use async scope, so parallel agents have independent contexts.
 
+Calling `complete()` closes dispatch immediately. Await the agent's work before completing; later `run`, `invoke`, or `reject` calls raise a lifecycle error. If reporting fails, retry `complete()` on the same playback object to reuse its stable completion request.
+
 Matching uses binding ID, operation, contract version, and credential-sanitized canonical JSON arguments. Use distinct binding IDs for distinct accounts; `accountScope` documents their identity. Bump `contractVersion` when a tool's meaning or schema changes. Tool wrappers expect version `1` by default; set `ToolOptions.contractVersion` to the current contract when registering another version (also available in `wrapAiTools` and `wrapMcpClient` options). A different snapshot version produces an `incompatible` miss. The wrapper uses its single argument, or an array for multiple arguments; pass an `argsOf` callback to select semantic arguments.
 
 Repeated requests consume recordings in start order. Independent request keys can reorder. Exhaustion is a miss. Overlapping identical requests with different outcomes are ambiguous and cannot replay. Selecting both an observed ancestor and descendant binding is rejected; an outer mock bypasses its children. Source writes may only be selected deliberately: mocked writes have no live side effects.
@@ -127,6 +129,8 @@ const binding = {
 ```
 
 Every request in the selected origin/path scope is owned, including changed methods and unknown paths under the prefix. Misses have no upstream fallback. Keys preserve query ordering/repeated keys, include method, body digest, and semantic headers. JSON request bodies use canonical JSON; other supported bodies use exact bytes. Standard semantic headers are `accept`, `content-type`, `range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`, and `if-range`; configured names add to them. Credential headers, credential query fields, and common credential-named JSON fields are removed before queuing. An output that requires redaction is ineligible. This filter cannot identify every secret embedded in arbitrary text or binary files; register only intended sources.
+
+JSON media types are `application/json` or a valid `type/subtype+json`, case-insensitive and ignoring parameters. Nonempty JSON bodies must decode as strict UTF-8 (an initial UTF-8 BOM is accepted) and contain portable JSON. Malformed or unsupported JSON is ineligible; empty bodies retain the empty-byte digest.
 
 The fetch adapter accepts buffered `RequestInit` bodies (strings, bytes, blobs, URL search parameters). A `Request` with an existing body, multipart bodies, and streaming request bodies are ineligible; their live requests still work. Enclose unsupported client operations in a source tool wrapper. Fetch capture follows response consumption without a clone branch or eager drain. HTTP replay returns a readable body; consumed PDF/DOCX/PPTX and attachment responses are associated as source documents, with 206 responses marked partial.
 

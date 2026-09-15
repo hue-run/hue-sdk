@@ -158,6 +158,7 @@ export class Playback implements SceneRuntime {
           finish.operation !== start.operation ||
           finish.contractVersion !== start.contractVersion ||
           finish.producerId !== start.producerId ||
+          finish.parentCallId !== start.parentCallId ||
           finish.sequence <= start.sequence)
       )
         throw new SnapshotMissError("integrity");
@@ -242,6 +243,7 @@ export class Playback implements SceneRuntime {
     return this.selectedIds.has(id);
   }
   run<T>(callback: () => T): T {
+    this.assertOpen();
     return sceneContext.run({ runtime: this }, callback);
   }
   invoke<T>(
@@ -250,6 +252,7 @@ export class Playback implements SceneRuntime {
     args: unknown,
     _execute: () => T,
   ): T {
+    this.assertOpen();
     const binding = this.bindings.find((b) => b.id === bindingId);
     if (!this.selected(bindingId)) return _execute();
     let key = sha256("unsupported");
@@ -294,6 +297,7 @@ export class Playback implements SceneRuntime {
     args: unknown,
     reason: MissReason,
   ): never {
+    this.assertOpen();
     let key = sha256("unsupported");
     const binding = this.bindings.find((b) => b.id === bindingId);
     try {
@@ -301,6 +305,10 @@ export class Playback implements SceneRuntime {
     } catch {}
     this.record(bindingId, operation, key, "miss", undefined, reason);
     throw new SnapshotMissError(reason, bindingId, operation);
+  }
+  private assertOpen() {
+    if (this.completionBody)
+      throw new Error("Replay completion has started; dispatch is closed");
   }
   private record(
     bindingId: string,

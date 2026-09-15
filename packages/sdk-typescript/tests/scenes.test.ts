@@ -895,11 +895,180 @@ test("replay reporting exposes failures and retries completion with a stable key
   capture.run(() => source());
   const p = await frozen(host, capture);
   p.run(() => source());
-  await expect(p.complete()).rejects.toThrow();
+  const completion = p.complete();
+  expect(() => p.run(() => source())).toThrow("dispatch is closed");
+  expect(() => p.invoke("docs", "search", [], () => 7)).toThrow(
+    "dispatch is closed",
+  );
+  expect(() => p.reject("docs", "search", [], "unrecorded")).toThrow(
+    "dispatch is closed",
+  );
+  await expect(completion).rejects.toThrow();
   expect(p.diagnostics.deliveryOk).toBe(false);
+  expect(() => p.run(() => source())).toThrow("dispatch is closed");
   await p.complete();
   expect(completions[0]).toBe(completions[1]);
   expect(p.diagnostics.deliveryOk).toBe(true);
+  expect(() => p.run(() => source())).toThrow("dispatch is closed");
+  expect(host.events).toHaveLength(1);
+});
+
+test("inline payload bounds and finish provenance reject malformed foreign snapshots", async () => {
+  const host = new Hosted(),
+    capture = await host.capture();
+  const source = wrapTool("docs", "search", (): unknown => "original");
+  capture.run(() => source());
+  await capture.finalize();
+  const original = host.manifest!;
+  for (const kind of ["json", "bytes"] as const) {
+    for (const oversized of [false, true]) {
+      const manifest = structuredClone(original);
+      const finish = manifest.observations.find((o) => o.phase === "finish")!;
+      finish.result =
+        kind === "json"
+          ? { kind, value: "x".repeat(262144 - 2 + Number(oversized)) }
+          : { kind, base64: "A".repeat(262144 + (oversized ? 4 : 0)) };
+      const p = await Playback.fromManifest(capture.client, manifest, ["docs"]);
+      if (oversized) p.run(() => reason(() => source(), "integrity"));
+      else
+        expect(p.run(() => source())).toEqual(
+          kind === "json" ? "x".repeat(262142) : new Uint8Array(196608),
+        );
+    }
+  }
+  const malformed = structuredClone(original);
+  malformed.observations.find((o) => o.phase === "finish")!.parentCallId =
+    "other-call";
+  await expect(
+    Playback.fromManifest(capture.client, malformed, ["docs"]),
+  ).rejects.toMatchObject({ reason: "integrity" });
+});
+
+test("shared schema admission fixtures reject malformed bindings and HTTP bodies", async () => {
+  const host = new Hosted(),
+    capture = await host.capture();
+  const source = wrapTool("docs", "search", () => "original");
+  capture.run(() => source());
+  await capture.finalize();
+  for (const fixture of fixtures.schemaCases) {
+    const manifest = structuredClone(host.manifest!);
+    if (fixture.definition === "binding") {
+      manifest.bindings = [fixture.value as Binding];
+      manifest.observations = [];
+    } else {
+      const finish = manifest.observations.find((o) => o.phase === "finish")!;
+      finish.result = fixture.value as Observation["result"];
+    }
+    const pending = Playback.fromManifest(capture.client, manifest, ["docs"]);
+    if (fixture.valid) expect((await pending).manifest.sceneId).toBe("scene");
+    else await expect(pending).rejects.toMatchObject({ reason: "integrity" });
+  }
+});
+
+test("MCP extraction preserves original live validation and fails closed in selected playback", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([{ ...binding, kind: "mcp" }]);
+  const original = new Error("Original MCP client validation");
+  let live = 0,
+    accessed = 0;
+  const mcp = wrapMcpClient("docs", {
+    async callTool(_: unknown) {
+      live++;
+      throw original;
+    },
+  });
+  const input = Object.defineProperty({}, "name", {
+    get() {
+      accessed++;
+      throw new Error("Adapter extraction failure");
+    },
+  });
+  await expect(mcp.callTool(input)).rejects.toBe(original);
+  expect(accessed).toBe(0);
+  await expect(capture.run(() => mcp.callTool(input))).rejects.toBe(original);
+  expect(accessed).toBe(1);
+  const p = await frozen(host, capture);
+  await p.run(() =>
+    expect(mcp.callTool(input)).rejects.toMatchObject({
+      reason: "nonportable",
+    }),
+  );
+  expect(live).toBe(2);
+});
+
+test("shared HTTP body fixtures and strict JSON media types preserve cross-language keys", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([
+      {
+        id: "http",
+        kind: "http",
+        contractVersion: "1",
+        http: { origin: "https://source.test", pathPrefix: "/" },
+      },
+    ]);
+  let live = 0;
+  const f = wrapFetch((async () => {
+    live++;
+    return new Response("source", {
+      headers: { "content-type": "text/plain" },
+    });
+  }) as unknown as typeof fetch);
+  const cases = [
+    ...fixtures.httpBodies,
+    ...[
+      "application/jsonp",
+      "x-application/json",
+      "application/a+json-invalid",
+      "text/plain; note=application/json",
+    ].map((contentType) => ({
+      contentType,
+      body: '{ "a":1 }',
+      sha256: hash('{ "a":1 }'),
+    })),
+    {
+      contentType: "application/json",
+      body: new Uint8Array([0x22, 0x80, 0x22]),
+      sha256: null,
+    },
+    { contentType: "application/json", body: "9007199254740992", sha256: null },
+  ];
+  await capture.run(async () => {
+    for (const [index, fixture] of cases.entries()) {
+      await (
+        await f(`https://source.test/${index}`, {
+          method: "POST",
+          body: fixture.body,
+          headers: { "content-type": fixture.contentType },
+        })
+      ).text();
+    }
+  });
+  await capture.flush();
+  const starts = host.observations.filter((o) => o.phase === "start");
+  for (const [index, fixture] of cases.entries()) {
+    const args = starts[index].arguments;
+    expect(args?.kind).toBe("json");
+    if (args?.kind !== "json") throw new Error("Missing HTTP request evidence");
+    if (fixture.sha256 === null) expect(starts[index].replayable).toBe(false);
+    else
+      expect((args.value as { bodySha256: string }).bodySha256).toBe(
+        fixture.sha256,
+      );
+  }
+  const p = await frozen(host, capture, ["http"]);
+  await p.run(async () => {
+    for (const [index, fixture] of cases.entries()) {
+      const response = f(`https://source.test/${index}`, {
+        method: "POST",
+        body: fixture.body,
+        headers: { "content-type": fixture.contentType },
+      });
+      if (fixture.sha256 === null)
+        await expect(response).rejects.toMatchObject({ reason: "nonportable" });
+      else expect(await (await response).text()).toBe("source");
+    }
+  });
+  expect(live).toBe(cases.length);
 });
 
 test("fetch HEAD replay preserves null body and representation length without decoding absent bytes", async () => {
@@ -931,5 +1100,48 @@ test("fetch HEAD replay preserves null body and representation length without de
     expect(response.headers.get("content-length")).toBe("987");
     expect(response.headers.get("content-encoding")).toBe("gzip");
   });
+  expect(live).toBe(1);
+});
+
+test("a failed HTTP response stream retains the live prefix and cannot replay as an initial error", async () => {
+  const host = new Hosted(),
+    capture = await host.capture([
+      {
+        id: "http",
+        kind: "http",
+        contractVersion: "1",
+        http: { origin: "https://source.test", pathPrefix: "/" },
+      },
+    ]);
+  const original = new Error("Synthetic response read failed");
+  let live = 0,
+    reads = 0;
+  const f = wrapFetch((async () => {
+    live++;
+    return new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (reads++ === 0) controller.enqueue(new Uint8Array([42]));
+            else controller.error(original);
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+    );
+  }) as unknown as typeof fetch);
+  await capture.run(async () => {
+    const response = await f("https://source.test/partial");
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    expect((await reader.read()).value).toEqual(new Uint8Array([42]));
+    await expect(reader.read()).rejects.toBe(original);
+  });
+  const p = await frozen(host, capture, ["http"]);
+  await p.run(() =>
+    expect(f("https://source.test/partial")).rejects.toMatchObject({
+      reason: "incomplete",
+    }),
+  );
   expect(live).toBe(1);
 });
