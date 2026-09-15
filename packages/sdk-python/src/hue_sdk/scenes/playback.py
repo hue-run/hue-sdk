@@ -491,10 +491,10 @@ class Replay:
     def complete(self, *, state: str = "completed") -> bool:
         """Retry diagnostics without rerunning calls. Caught misses remain in the event log."""
         with self._condition:
+            self._closed = True
             if not self._condition.wait_for(lambda: self._inflight == 0, timeout=30):
                 self.delivery_ok = False
                 return False
-            self._closed = True
         scenes = self.recording.scenes
         if not scenes or not self._id:
             return True

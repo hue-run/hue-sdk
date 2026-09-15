@@ -496,6 +496,8 @@ def test_completion_waits_for_inflight_blob_and_exports_its_event(scene_api):
         completion = Thread(target=lambda: (replay.complete(state="interrupted"), completed.set()))
         completion.start()
         assert not completed.wait(0.05)
+        with pytest.raises(ValueError, match="completed"):
+            replay.dispatch("docs", "new-call-during-completion", {})
         release.set()
         worker.join(2)
         completion.join(2)
