@@ -1,0 +1,663 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs.hue.run/schemas/scenes/v1",
+  "title": "Hue Scenes v1",
+  "$ref": "#/$defs/manifest",
+  "$defs": {
+    "json": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/json"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/json"
+          }
+        }
+      ]
+    },
+    "blob": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "byteSize": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "encoding": {
+          "enum": [
+            "bytes",
+            "json",
+            "utf8"
+          ]
+        }
+      },
+      "required": [
+        "artifactId",
+        "sha256",
+        "byteSize",
+        "mimeType",
+        "encoding"
+      ]
+    },
+    "payload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "absent"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "json"
+            },
+            "value": {
+              "$ref": "#/$defs/json"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "bytes"
+            },
+            "base64": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "base64"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "blob"
+            },
+            "ref": {
+              "$ref": "#/$defs/blob"
+            }
+          },
+          "required": [
+            "kind",
+            "ref"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "stream"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/payload"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "http"
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            },
+            "statusText": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "url": {
+              "type": "string"
+            },
+            "body": {
+              "$ref": "#/$defs/payload"
+            }
+          },
+          "required": [
+            "kind",
+            "status",
+            "headers",
+            "body"
+          ]
+        }
+      ]
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": {
+          "type": "object"
+        },
+        "kind": {
+          "enum": [
+            "tool",
+            "resource"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "inputSchema"
+      ]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "kind": {
+          "enum": [
+            "tool",
+            "mcp",
+            "http"
+          ]
+        },
+        "contractVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/operation"
+          }
+        },
+        "http": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "type": "string"
+            },
+            "pathPrefix": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "origin",
+            "pathPrefix"
+          ]
+        },
+        "accountScope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "contractVersion"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "content": {
+          "enum": [
+            "complete",
+            "partial",
+            "reference_only",
+            "unavailable"
+          ]
+        },
+        "relation": {
+          "enum": [
+            "query_attachment",
+            "tool_source"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "byteSize": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sourceVersion": {
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/json"
+        }
+      },
+      "required": [
+        "id",
+        "content",
+        "relation"
+      ]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "producerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "phase": {
+          "enum": [
+            "start",
+            "finish"
+          ]
+        },
+        "bindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operation": {
+          "type": "string"
+        },
+        "contractVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "requestKey": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "arguments": {
+          "$ref": "#/$defs/payload"
+        },
+        "parentCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "at": {
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "success",
+            "error",
+            "cancelled",
+            "incomplete"
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/payload"
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "code": {
+              "$ref": "#/$defs/json"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "replayable": {
+          "type": "boolean"
+        },
+        "omissionReason": {
+          "type": "string"
+        },
+        "externalSpanId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16}$"
+        }
+      },
+      "required": [
+        "id",
+        "callId",
+        "producerId",
+        "sequence",
+        "phase",
+        "bindingId",
+        "operation",
+        "contractVersion",
+        "requestKey",
+        "at",
+        "replayable"
+      ]
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "producerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "lastSequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "producerId",
+        "lastSequence",
+        "pending",
+        "dropped"
+      ]
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1"
+        },
+        "sceneId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "externalTraceId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "observedUserId": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/$defs/payload"
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/binding"
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/observation"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "producers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/producer"
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "capturePolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sourceContent": {
+              "const": true
+            },
+            "redactionVersion": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "sourceContent",
+            "redactionVersion"
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "sceneId",
+        "projectId",
+        "revision",
+        "externalTraceId",
+        "bindings",
+        "observations",
+        "sources",
+        "producers",
+        "createdAt"
+      ]
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sceneId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "sceneId",
+        "revision",
+        "digest"
+      ]
+    },
+    "replayEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "bindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operation": {
+          "type": "string"
+        },
+        "requestKey": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "status": {
+          "enum": [
+            "matched",
+            "miss",
+            "error"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recordedCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sequence",
+        "bindingId",
+        "operation",
+        "requestKey",
+        "status",
+        "at"
+      ]
+    }
+  }
+}
