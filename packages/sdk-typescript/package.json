@@ -6,7 +6,7 @@
   "homepage": "https://docs.hue.run",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hue-run/sdk.git",
+    "url": "git+https://github.com/hue-run/hue-sdk.git",
     "directory": "packages/sdk-typescript"
   },
   "description": "Hue OpenTelemetry helpers for Node.js agent applications",

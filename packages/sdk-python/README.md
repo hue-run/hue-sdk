@@ -1,20 +1,41 @@
-# Hue Python SDK (unpublished pilot)
+# Hue Python SDK
 
 For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](EVALUATIONS.md) and the [standalone evaluation example](../../examples/python-evaluation/README.md).
 
 Python helpers around official OpenTelemetry **1.44.0** trace and log SDKs and OTLP HTTP/protobuf exporters. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
 
-`hue-sdk` is a provisional distribution name (`import hue_sdk`). The [PyPI project endpoint](https://pypi.org/pypi/hue-sdk/json) returned 404 on September 14, 2026; that is an availability observation, not a reservation. This package has not been published. Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
+The distribution is named `hue-sdk` (`import hue_sdk`). Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
 
-## Install a built wheel
+## Install
 
-From this repository:
+> PyPI installs are coming soon. During the private pilot, use the release archive below.
+
+### Registry install (coming soon)
+
+```bash
+pip install hue-sdk
+```
+
+### Private release (available now)
+
+Use the GitHub CLI authenticated to an account with access to `hue-run/hue-sdk`. In your application directory, activate a Python 3.10+ environment, then run:
+
+```bash
+gh release download python-v0.1.0.dev0 --repo hue-run/hue-sdk --pattern 'hue_sdk-0.1.0.dev0-py3-none-any.whl' --dir .hue-sdk/python
+pip install ./.hue-sdk/python/hue_sdk-0.1.0.dev0-py3-none-any.whl
+```
+
+### Build from a checkout
+
+From the repository root:
 
 ```sh
 uv build packages/sdk-python --out-dir .local/python-sdk-dist
-uv venv .local/python-sdk-consumer --python 3.13
+uv venv .local/python-sdk-consumer --python 3.14
 uv pip install --python .local/python-sdk-consumer/bin/python .local/python-sdk-dist/hue_sdk-0.1.0.dev0-py3-none-any.whl
 ```
+
+## Send a trace
 
 In the consuming application, use only public imports:
 

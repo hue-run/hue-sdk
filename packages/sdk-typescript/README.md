@@ -2,8 +2,28 @@
 
 A Node 24 / Bun 1.3.9 client for Hue's standard OTLP HTTP endpoints. It uses the
 OpenTelemetry JavaScript SDK and official OTLP protobuf exporter components for
-traces and correlated logs. `@hue/sdk` is a provisional, unpublished package name;
-this package is currently private. Install its locally packed tarball to try it.
+traces and correlated logs. The package is named `@hue/sdk`.
+
+## Install
+
+> npm installs are coming soon. During the private pilot, use the release archive below.
+
+### Registry install (coming soon)
+
+```bash
+npm install @hue/sdk
+```
+
+### Private release (available now)
+
+Use the GitHub CLI authenticated to an account with access to `hue-run/hue-sdk`:
+
+```bash
+gh release download typescript-v0.1.1 --repo hue-run/hue-sdk --pattern 'hue-sdk-0.1.1.tgz' --dir .hue-sdk/typescript
+npm install ./.hue-sdk/typescript/hue-sdk-0.1.1.tgz @opentelemetry/api@1.9.1
+```
+
+Run these commands in your application directory. The [release guide](../../RELEASING.md#public-release) tracks registry ownership and publication; the GitHub repository can remain private.
 
 ## Start
 

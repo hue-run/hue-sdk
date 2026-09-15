@@ -15,7 +15,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://docs.hue.run"
-Repository = "https://github.com/hue-run/sdk"
+Repository = "https://github.com/hue-run/hue-sdk"
 Documentation = "https://docs.hue.run"
 
 [dependency-groups]
