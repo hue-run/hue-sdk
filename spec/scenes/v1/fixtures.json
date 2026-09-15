@@ -177,6 +177,279 @@
           "kind": "absent"
         }
       }
+    },
+    {
+      "definition": "observation",
+      "valid": true,
+      "value": {
+        "id": "start-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 0,
+        "phase": "start",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "arguments": {
+          "kind": "json",
+          "value": {
+            "q": "renewal"
+          }
+        }
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "start-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 0,
+        "phase": "start",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "start-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 0,
+        "phase": "start",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "arguments": {
+          "kind": "json",
+          "value": {
+            "q": "renewal"
+          }
+        },
+        "outcome": "success"
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "start-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 0,
+        "phase": "start",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "arguments": {
+          "kind": "json",
+          "value": {
+            "q": "renewal"
+          }
+        },
+        "result": {
+          "kind": "absent"
+        }
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "start-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 0,
+        "phase": "start",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "arguments": {
+          "kind": "json",
+          "value": {
+            "q": "renewal"
+          }
+        },
+        "error": {
+          "type": "Error"
+        }
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "start-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 0,
+        "phase": "start",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "arguments": {
+          "kind": "json",
+          "value": {
+            "q": "renewal"
+          }
+        },
+        "sources": []
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "finish-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 1,
+        "phase": "finish",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": true,
+      "value": {
+        "id": "finish-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 1,
+        "phase": "finish",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "outcome": "success",
+        "result": {
+          "kind": "json",
+          "value": null
+        }
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "finish-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 1,
+        "phase": "finish",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "outcome": "success"
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": true,
+      "value": {
+        "id": "finish-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 1,
+        "phase": "finish",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "outcome": "error",
+        "error": {
+          "type": "Error"
+        }
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": false,
+      "value": {
+        "id": "finish-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 1,
+        "phase": "finish",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": true,
+        "outcome": "error"
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": true,
+      "value": {
+        "id": "finish-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 1,
+        "phase": "finish",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": false,
+        "outcome": "cancelled"
+      }
+    },
+    {
+      "definition": "observation",
+      "valid": true,
+      "value": {
+        "id": "finish-1",
+        "callId": "call-1",
+        "producerId": "producer-1",
+        "sequence": 1,
+        "phase": "finish",
+        "bindingId": "source-1",
+        "operation": "search",
+        "contractVersion": "1",
+        "requestKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "at": "2026-09-15T00:00:00Z",
+        "replayable": false,
+        "outcome": "incomplete",
+        "omissionReason": "serialization"
+      }
     }
   ],
   "httpBodies": [
