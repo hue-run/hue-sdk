@@ -77,7 +77,7 @@ jobs:
           uv run --frozen --all-groups pytest
           uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
           uv run --frozen --all-groups python -m build --no-isolation --outdir ../../.artifacts
-          uvx --from twine==6.2.0 twine check --strict ../../.artifacts/*
+          uvx --from twine==7.0.0 twine check --strict ../../.artifacts/*
       - name: Inspect package inventory and record checksums
         env:
           RELEASE_LANGUAGE: ${{ inputs.language }}
@@ -85,7 +85,14 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ inputs.language }}-${{ github.sha }}
-          path: .artifacts/
+          # The staging directory is hidden; upload only its inspected outputs.
+          path: |
+            .artifacts/*.tgz
+            .artifacts/*.whl
+            .artifacts/*.tar.gz
+            .artifacts/release-manifest.json
+            .artifacts/SHA256SUMS
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
 
@@ -159,7 +166,7 @@ jobs:
           (cd .artifacts && sha256sum --check SHA256SUMS)
           mkdir dist
           cp ".artifacts/hue_sdk-${RELEASE_VERSION}-py3-none-any.whl" ".artifacts/hue_sdk-${RELEASE_VERSION}.tar.gz" dist/
-      - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
           attestations: true
