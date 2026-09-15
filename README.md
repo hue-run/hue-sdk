@@ -39,6 +39,32 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 | TypeScript / JavaScript | `@hue/sdk`, `@hue/sdk/ai-sdk`, `@hue/sdk/evals` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
 | Python | `hue-sdk`; `hue_sdk`, `hue_sdk.evals` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 
+## For coding agents
+
+The portable [Hue skill](./skills/hue/SKILL.md) helps Codex, Claude Code, Cursor, and other compatible agents inspect your app, integrate tracing, and verify delivery. It preserves your existing model provider and OpenTelemetry setup. It uses the [Agent Skills format](https://agentskills.io/specification), with its version recorded in the skill metadata.
+
+Install it in your application directory with the [skills CLI](https://github.com/vercel-labs/skills):
+
+```sh
+npx skills add hue-run/hue-sdk --skill hue
+```
+
+The repository is private, so your Git or GitHub CLI authentication must have access. The CLI lets you choose your agent and installs into the current project; no Hue API key is needed to install the skill. The repository command uses the default branch. To try an unmerged skill change, install from that branch's local checkout instead:
+
+```sh
+npx skills add /path/to/hue-sdk --skill hue
+```
+
+Then ask your coding agent:
+
+```text
+Use the Hue skill to add tracing to this application. Preserve its behavior and
+existing telemetry, start with metadata-only capture, and verify delivery.
+Tell me what you changed, tested, and still need me to configure.
+```
+
+You configure your project service key through your application's secret workflow; do not paste it into the agent chat. The skill can prepare and locally test the integration before the key is available. See [For agents](https://docs.hue.run/guides/agent-setup) for the documentation handoff.
+
 ## Install
 
 ### Registry installs (coming soon)
