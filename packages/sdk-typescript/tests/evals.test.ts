@@ -595,6 +595,85 @@ describe("installed evaluation API and runner contract", () => {
       server.stop(true);
     }
   });
+  test("hosted reads distinguish resolved credentials and reconciled charges from execution success", async () => {
+    const jobId = randomUUID();
+    const runId = randomUUID();
+    let settled = false;
+    let exposeAuthentication = true;
+    const job = () => ({
+      id: jobId,
+      state: "uncertain",
+      chargeState: settled ? "settled" : "uncertain",
+      originalChargeState: "uncertain",
+      actualMicroUsd: settled ? 2500 : null,
+      receipt: { actualMicroUsd: null },
+      reconciliation: settled
+        ? {
+            jobId,
+            actualMicroUsd: 2500,
+            evidenceReference: "synthetic-provider-statement-42",
+            reason: "Verified final charge after interrupted execution",
+            createdAt: "2026-09-15T10:00:00.000Z",
+          }
+        : null,
+    });
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
+        expect(request.method).toBe("GET");
+        const path = new URL(request.url).pathname;
+        if (path.endsWith("/judge-budget"))
+          return Response.json({
+            configured: true,
+            enabled: false,
+            ...(exposeAuthentication
+              ? {
+                  authentication: {
+                    status: "available",
+                    method: "oidc",
+                    verification: "credential_resolution",
+                  },
+                }
+              : {}),
+          });
+        if (path === `/api/v1/evaluation-runs/${runId}/judge-jobs`)
+          return Response.json({ items: [job()], nextCursor: null });
+        if (path === `/api/v1/judge-jobs/${jobId}`) return Response.json(job());
+        return new Response(null, { status: 404 });
+      },
+    });
+    const client = createEvaluationClient({ apiKey: key, baseUrl: server.url.origin });
+    try {
+      const budget = await client.getJudgeBudget();
+      expect(budget.authentication?.status).toBe("available");
+      expect(budget.authentication?.method).toBe("oidc");
+      expect(budget.authentication?.verification).toBe("credential_resolution");
+      expect(budget.enabled).toBe(false);
+      const original = await client.getJudgeJob(jobId);
+      expect(original.reconciliation).toBeNull();
+      expect(original.actualMicroUsd).toBeNull();
+
+      settled = true;
+      const updated = (await client.listJudgeJobs(runId)).items[0];
+      expect(updated.chargeState).toBe("settled");
+      expect(updated.originalChargeState).toBe(original.chargeState);
+      expect(updated.state).toBe(original.state);
+      expect(updated.receipt).toEqual(original.receipt);
+      if (!updated.reconciliation) throw new Error("Settled fixture is missing its reconciliation");
+      expect(updated.actualMicroUsd).toBe(updated.reconciliation.actualMicroUsd);
+      expect(updated.reconciliation.evidenceReference).toBe("synthetic-provider-statement-42");
+      expect(updated.reconciliation.reason).toBe("Verified final charge after interrupted execution");
+      expect(updated.reconciliation.createdAt).toBe("2026-09-15T10:00:00.000Z");
+      expect(updated.reconciliation.jobId).toBe(jobId);
+
+      exposeAuthentication = false;
+      expect((await client.getJudgeBudget()).authentication).toBeUndefined();
+    } finally {
+      server.stop(true);
+    }
+  });
   test("evaluation requests refuse credential-bearing redirects and sanitize failures", async () => {
     let redirectedHits = 0;
     const target = Bun.serve({

@@ -45,6 +45,7 @@ for (const patch of [99, 100]) {
     ),
   );
   await cp(join(source, "tests"), join(consumer, "tests"), { recursive: true });
+  await cp(join(source, "tsconfig.json"), join(consumer, "tsconfig.json"));
   for (const name of ["sdk.test.ts", "evals.test.ts"]) {
     const testPath = join(consumer, "tests", name);
     await writeFile(
@@ -57,6 +58,8 @@ for (const patch of [99, 100]) {
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
   run("npm", ["install", "--no-audit", "--no-fund"], consumer);
+  // Check consumers against the packed declarations, not only source types.
+  run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
   run("bun", ["--no-env-file", "test", "./tests/sdk.test.ts", "./tests/evals.test.ts"], consumer);
   const exampleSource = resolve(source, "../../examples/reference-chatbot");
   await cp(exampleSource, chatbot, {

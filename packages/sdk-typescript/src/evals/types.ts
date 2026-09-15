@@ -91,8 +91,17 @@ export interface JudgeJob {
   scorerVersionId: string;
   state: "queued" | "running" | "completed" | "cancelled" | "uncertain";
   chargeState: "unreserved" | "reserved" | "settled" | "uncertain";
+  /** Preserved charge state before any separately verified reconciliation. */
+  originalChargeState: JudgeJob["chargeState"];
   reservationMicroUsd: number;
   actualMicroUsd: number | null;
+  reconciliation: {
+    jobId: string;
+    actualMicroUsd: number;
+    evidenceReference: string;
+    reason: string;
+    createdAt: string;
+  } | null;
   priceQuote: JsonValue;
   receipt: JsonValue;
   workflowId: string | null;
@@ -105,6 +114,12 @@ export interface JudgeJob {
 export interface JudgeBudget {
   projectId: string;
   configured: boolean;
+  /** Credential resolution does not establish provider acceptance or available funds. */
+  authentication?: {
+    status: "available" | "unavailable";
+    method: "api-key" | "oidc" | null;
+    verification: "credential_resolution";
+  };
   enabled: boolean;
   allowanceMicroUsd: number;
   reservedMicroUsd: number;

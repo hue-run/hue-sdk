@@ -108,6 +108,18 @@ All declared metrics must appear exactly once and satisfy pinned types, bounds a
 
 The local runner leaves `llm_judge` and `manual` pins pending and reports their IDs in `deferredScorerVersionIds`. It does not upload a synthetic skipped result that would occupy their immutable result slot. Manual results require a human session. Hosted dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
 
+When present, the budget's `authentication` reports credential resolution only. An
+`available` status or `configured: true` does not prove that a provider accepted the
+credential, has funds, or permits the selected model. The project's `enabled`,
+allocation and `blocked` fields are separate admission controls. Treat absent
+authentication details as unknown.
+
+Job reads preserve `originalChargeState` and the original provider `receipt`.
+`chargeState` and `actualMicroUsd` reflect a separately verified reconciliation
+when one exists; `reconciliation` is otherwise `null`. Its evidence reference,
+reason and timestamp explain that settlement. A settled charge does not change
+an interrupted job's execution state or rerun the model.
+
 ## Checkpoints and failures
 
 Use one dedicated mode-0700 directory per experiment/rescore run. Files are mode 0600, written through fsync and atomic rename, and protected against accidental corruption by a digest. This is local storage, not encryption. Do not check it into Git. The manifest binds project, origin, frozen versions/configuration, scorer pins and content choices. Keep the directory until you no longer need upload recovery.
