@@ -1,6 +1,6 @@
 # SDK releases
 
-The repository stays private. Public package distribution is a separate decision: PyPI serves both `pip install hue-sdk` and `uv add hue-sdk`; npm serves `npm install @hue-run/sdk` and other npm-compatible installers.
+The repository stays private. Public package distribution is a separate decision: PyPI serves both `pip install hue-run` and `uv add hue-run`; npm serves `npm install @hue-run/sdk` and other npm-compatible installers.
 
 The SDK packages use the MIT license. Registry account setup and a successful publishing run are still required for public availability. A workflow file or a passing build does not mean a version is publicly available.
 
@@ -17,7 +17,7 @@ Publication is not rolled back automatically if acceptance fails. Investigate th
 
 ## Registry setup
 
-Confirm control of npm's `@hue-run` scope and PyPI's `hue-sdk` project name. An absent listing does not prove that a name is available. Keep registry credentials out of source, logs and archives.
+Confirm control of npm's `@hue-run` scope and PyPI's `hue-run` project name. An absent listing does not prove that a name is available. Keep registry credentials out of source, logs and archives.
 
 Configure GitHub environments `npm` and `pypi` to allow `main` only. Use those exact names when registering trusted publishers. The workflow has no registry token secrets or token fallback.
 
@@ -25,7 +25,7 @@ Configure GitHub environments `npm` and `pypi` to allow `main` only. Use those e
 
 Create a [pending trusted publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/) for:
 
-- Project: `hue-sdk`
+- Project: `hue-run`
 - Owner: `hue-run`
 - Repository: `hue-sdk`
 - Workflow: `release.yml`
@@ -77,8 +77,8 @@ uv sync --project packages/sdk-python --frozen --all-groups --python 3.14
 uv run --project packages/sdk-python --frozen --all-groups --python 3.14 python -m build packages/sdk-python --no-isolation --outdir .artifacts/python
 uvx --from twine==7.0.0 twine check --strict .artifacts/python/*
 python3 scripts/release-artifacts.py inspect python 0.1.0 .artifacts/python
-python3 scripts/verify-python-release.py --wheel .artifacts/python/hue_sdk-0.1.0-py3-none-any.whl --python 3.10
-python3 scripts/verify-python-release.py --wheel .artifacts/python/hue_sdk-0.1.0-py3-none-any.whl --python 3.14
+python3 scripts/verify-python-release.py --wheel .artifacts/python/hue_run-0.1.0-py3-none-any.whl --python 3.10
+python3 scripts/verify-python-release.py --wheel .artifacts/python/hue_run-0.1.0-py3-none-any.whl --python 3.14
 
 # Only after public publication:
 python3 scripts/release-artifacts.py registry python 0.1.0 .artifacts/python

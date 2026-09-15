@@ -197,8 +197,8 @@ class Hue:
         )
         self.tracer_provider.add_span_processor(self._span_processor)
         self.logger_provider.add_log_record_processor(self._log_processor)
-        self.tracer = self.tracer_provider.get_tracer("hue-sdk", "0.1.0")
-        self._logger = self.logger_provider.get_logger("hue-sdk", "0.1.0")
+        self.tracer = self.tracer_provider.get_tracer("hue-run", "0.1.0")
+        self._logger = self.logger_provider.get_logger("hue-run", "0.1.0")
 
     def __repr__(self) -> str:
         return f"Hue(capture_content={self.capture_content!r}, closed={self._closed!r})"

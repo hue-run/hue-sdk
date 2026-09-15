@@ -35,7 +35,7 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
 | TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
-| Python | `hue-sdk`; `hue_sdk`, `hue_sdk.evals` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
+| Python | `hue-run`; `hue_sdk`, `hue_sdk.evals` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 
 ## For coding agents
 
@@ -68,9 +68,9 @@ You configure your project service key through your application's secret workflo
 Python:
 
 ```bash
-pip install hue-sdk
+pip install hue-run
 # Or, in a uv project:
-uv add hue-sdk
+uv add hue-run
 ```
 
 TypeScript / JavaScript:

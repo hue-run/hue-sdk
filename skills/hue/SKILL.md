@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.2"
+  version: "0.1.3"
 ---
 
 # Hue tracing
@@ -35,10 +35,10 @@ npm install @hue-run/sdk
 
 ```sh
 # Python: use the application's existing Python environment.
-python -m pip install hue-sdk
+python -m pip install hue-run
 ```
 
-Adapt the install command to the app's package manager, for example `uv add hue-sdk` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or credentials are missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
+Adapt the install command to the app's package manager, for example `uv add hue-run` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or credentials are missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
 
 The user creates their project service key in Hue under **Settings → Integrations & API keys** and configures `HUE_API_KEY` on the server. Read that setting from the application; never request the key in chat or put it in browser code, fixtures, committed files, or logs.
 

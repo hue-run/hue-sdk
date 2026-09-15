@@ -44,18 +44,18 @@ def test_cloud_defaults_route_validation_traces_logs_and_evaluations(receiver, m
         "/api/v1/otlp/v1/logs",
     }
     assert len(receiver.spans()) == len(receiver.logs()) == 1
-    assert __version__ == version("hue-sdk")
+    assert __version__ == version("hue-run")
     for path, headers, body in receiver.requests:
         assert headers["Authorization"] == f"Bearer {KEY}"
         assert b"content-must-stay-private" not in body
         if path.endswith("/traces"):
             message = ExportTraceServiceRequest.FromString(body)
             scope = message.resource_spans[0].scope_spans[0].scope
-            assert scope.name == "hue-sdk" and scope.version == __version__
+            assert scope.name == "hue-run" and scope.version == __version__
         elif path.endswith("/logs"):
             message = ExportLogsServiceRequest.FromString(body)
             scope = message.resource_logs[0].scope_logs[0].scope
-            assert scope.name == "hue-sdk" and scope.version == __version__
+            assert scope.name == "hue-run" and scope.version == __version__
 
 
 @pytest.mark.parametrize("positional", [True, False])
