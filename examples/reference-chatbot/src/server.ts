@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
-import { createHue, HueExportError } from "@hue/sdk";
+import { createHue, HueExportError } from "@hue-run/sdk";
 import { createChatAgent } from "./agent.js";
 
 const mode = process.env.HUE_CHAT_MODE;

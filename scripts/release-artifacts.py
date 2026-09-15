@@ -60,7 +60,7 @@ def inspect(path: Path, language: str, version: str) -> None:
     )
     if language == "typescript":
         metadata = json.loads(files["package/package.json"])
-        assert metadata["name"] == "@hue/sdk" and metadata["version"] == version
+        assert metadata["name"] == "@hue-run/sdk" and metadata["version"] == version
         assert metadata.get("private") is not True
         assert metadata.get("license") not in (None, "UNLICENSED")
         assert metadata.get("publishConfig", {}).get("access") == "public"
@@ -102,7 +102,7 @@ def main() -> None:
         "Public release must use a stable version"
     )
     filenames = (
-        [f"hue-sdk-{args.version}.tgz"]
+        [f"hue-run-sdk-{args.version}.tgz"]
         if args.language == "typescript"
         else [
             f"hue_sdk-{args.version}-py3-none-any.whl",
@@ -147,7 +147,7 @@ def main() -> None:
         )
         if args.language == "typescript":
             metadata = json.loads(
-                read_url(f"https://registry.npmjs.org/@hue%2fsdk/{args.version}")
+                read_url(f"https://registry.npmjs.org/@hue-run%2fsdk/{args.version}")
             )
             urls = {filenames[0]: metadata["dist"]["tarball"]}
         else:

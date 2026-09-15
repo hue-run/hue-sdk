@@ -19,7 +19,7 @@ spec.loader.exec_module(release)
 class ArchiveGateTests(unittest.TestCase):
     def archive(self, folder, changes=None, metadata_changes=None):
         metadata = {
-            "name": "@hue/sdk",
+            "name": "@hue-run/sdk",
             "version": "1.2.3",
             "license": "MIT",
             "publishConfig": {"access": "public"},
@@ -49,11 +49,12 @@ class ArchiveGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             release.inspect(self.archive(folder), "typescript", "1.2.3")
 
-    def test_rejects_private_metadata_hooks_and_wrong_version(self):
+    def test_rejects_private_metadata_hooks_and_wrong_identity(self):
         with tempfile.TemporaryDirectory() as folder:
             for change in (
                 {"private": True},
                 {"version": "9.9.9"},
+                {"name": "@another-org/sdk"},
                 {"license": "UNLICENSED"},
                 {"scripts": {"postinstall": "some-command"}},
             ):
@@ -83,7 +84,7 @@ class ArchiveGateTests(unittest.TestCase):
 
     def test_rejects_extra_files_in_release_directory(self):
         with tempfile.TemporaryDirectory() as folder:
-            self.archive(folder).rename(Path(folder) / "hue-sdk-1.2.3.tgz")
+            self.archive(folder).rename(Path(folder) / "hue-run-sdk-1.2.3.tgz")
             (Path(folder) / "extra.whl").write_bytes(b"unexpected")
             with patch(
                 "sys.argv",
@@ -99,7 +100,7 @@ class ArchiveGateTests(unittest.TestCase):
             manifest = {
                 "language": "typescript",
                 "version": "1.2.3",
-                "artifacts": [{"filename": "hue-sdk-1.2.3.tgz", "sha256": "0" * 64}],
+                "artifacts": [{"filename": "hue-run-sdk-1.2.3.tgz", "sha256": "0" * 64}],
             }
             (Path(folder) / "release-manifest.json").write_text(json.dumps(manifest))
             metadata = json.dumps(

@@ -27,7 +27,7 @@ function run(command, args, cwd) {
 const pkg = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
 if (values["registry-version"] && values["registry-version"] !== pkg.version)
   throw new Error("Registry version must match this checkout's package version");
-const tarball = values.archive ? resolve(values.archive) : join(destination, `hue-sdk-${pkg.version}.tgz`);
+const tarball = values.archive ? resolve(values.archive) : join(destination, `hue-run-sdk-${pkg.version}.tgz`);
 if (!values.archive && !values["registry-version"]) {
   await cp(source, staging, {
     recursive: true,
@@ -46,12 +46,12 @@ const minimal = join(destination, "minimal-consumer");
 await mkdir(minimal);
 await writeFile(
   join(minimal, "package.json"),
-  JSON.stringify({ private: true, type: "module", dependencies: { "@hue/sdk": packageSpec } }),
+  JSON.stringify({ private: true, type: "module", dependencies: { "@hue-run/sdk": packageSpec } }),
 );
 run("npm", ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"], minimal);
 run(
   process.execPath,
-  ["--input-type=module", "-e", 'await import("@hue/sdk"); await import("@hue/sdk/evals");'],
+  ["--input-type=module", "-e", 'await import("@hue-run/sdk"); await import("@hue-run/sdk/evals");'],
   minimal,
 );
 for (const patch of [99, 100]) {
@@ -68,7 +68,7 @@ for (const patch of [99, 100]) {
           ...pkg.devDependencies,
           ai: `7.0.${patch}`,
           "@ai-sdk/otel": `1.0.${patch}`,
-          "@hue/sdk": packageSpec,
+          "@hue-run/sdk": packageSpec,
         },
       },
       null,
@@ -82,14 +82,14 @@ for (const patch of [99, 100]) {
     await writeFile(
       testPath,
       (await readFile(testPath, "utf8"))
-        .replaceAll('"../src/index.js"', '"@hue/sdk"')
-        .replaceAll('"../src/ai-sdk.js"', '"@hue/sdk/ai-sdk"')
-        .replaceAll('"../src/evals.js"', '"@hue/sdk/evals"'),
+        .replaceAll('"../src/index.js"', '"@hue-run/sdk"')
+        .replaceAll('"../src/ai-sdk.js"', '"@hue-run/sdk/ai-sdk"')
+        .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"'),
     );
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
   run("npm", ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"], consumer);
-  const installed = JSON.parse(await readFile(join(consumer, "node_modules/@hue/sdk/package.json"), "utf8"));
+  const installed = JSON.parse(await readFile(join(consumer, "node_modules/@hue-run/sdk/package.json"), "utf8"));
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
   // Check consumers against the packed declarations, not only source types.
@@ -102,7 +102,7 @@ for (const patch of [99, 100]) {
       !/(?:^|\/)(?:node_modules|dist)(?:\/|$)/u.test(path) && !/(?:^|\/)\.env(?:\.|$)/u.test(path),
   });
   const example = JSON.parse(await readFile(join(chatbot, "package.json"), "utf8"));
-  example.dependencies["@hue/sdk"] = packageSpec;
+  example.dependencies["@hue-run/sdk"] = packageSpec;
   example.dependencies.ai = `7.0.${patch}`;
   example.dependencies["@ai-sdk/otel"] = `1.0.${patch}`;
   await writeFile(join(chatbot, "package.json"), JSON.stringify(example, null, 2));

@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # Hue tracing
@@ -30,7 +30,7 @@ Use the current [installation guide](https://docs.hue.run/installation) and veri
 
 ```sh
 # TypeScript: run in the application directory.
-npm install @hue/sdk
+npm install @hue-run/sdk
 ```
 
 ```sh
@@ -54,7 +54,7 @@ Use metadata-only capture (`false` / `False`) unless the user has chosen content
 
 Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()` and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument one real request path with model/tool children, preserve propagated parent context, and reuse the application's session identifier when available. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent.
 
-For AI SDK 7, `hueTelemetry()` from `@hue/sdk/ai-sdk` provides per-call integrations. Those replace the global integrations for that call. If existing telemetry must keep receiving the call, follow the existing-provider guide and attach Hue's transport to that provider instead. Direct OTLP users keep their framework instrumentation without adding Hue wrappers.
+For AI SDK 7, `hueTelemetry()` from `@hue-run/sdk/ai-sdk` provides per-call integrations. Those replace the global integrations for that call. If existing telemetry must keep receiving the call, follow the existing-provider guide and attach Hue's transport to that provider instead. Direct OTLP users keep their framework instrumentation without adding Hue wrappers.
 
 Keep spans open until streamed work completes or aborts. A returned streaming `Response` is not generation completion. Use the framework's completion/background-lifetime hooks; see the [Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-nextjs). Preserve application errors and cancellations while recording their span status. Add short comments where initialization, capture, or delivery behavior needs explanation.
 

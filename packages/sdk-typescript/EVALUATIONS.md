@@ -1,11 +1,11 @@
 # Local evaluations
 
-This provisional, private package executes targets and scorers on your machine. Hue stores pinned definitions, experiment progress and results. It does not execute uploaded source code. Install from the reviewed package tarball until a public release is explicitly approved.
+The SDK executes targets and scorers on your machine. Hue stores pinned definitions, experiment progress and results. It does not execute uploaded source code. Follow the [installation guide](https://docs.hue.run/installation) to add `@hue-run/sdk` to your application.
 
 ```ts
 import { randomUUID } from "node:crypto";
-import { createHue } from "@hue/sdk";
-import { builtins, createEvaluationClient, runExperiment, rescore } from "@hue/sdk/evals";
+import { createHue } from "@hue-run/sdk";
+import { builtins, createEvaluationClient, runExperiment, rescore } from "@hue-run/sdk/evals";
 
 const connection = { apiKey: process.env.HUE_API_KEY! };
 const client = createEvaluationClient(connection);
@@ -82,7 +82,7 @@ JSON Schema compilation and validation run in an isolated worker with a default 
 
 ```ts
 import { readFile } from "node:fs/promises";
-import { defineLocalScorer } from "@hue/sdk/evals";
+import { defineLocalScorer } from "@hue-run/sdk/evals";
 import { score } from "./my-scorer.js";
 
 const local = defineLocalScorer({

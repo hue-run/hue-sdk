@@ -13,7 +13,7 @@ This matrix describes TypeScript `0.1.2` and Python `0.1.0`. Tested combinations
 
 ## Existing dependencies
 
-The current `@hue/sdk` package cannot be installed alongside `ai@6`: npm enforces the optional `ai@^7.0.99` peer even if the application only imports the core client. Do not bypass the resolver with `--force` or `--legacy-peer-deps`, or upgrade an application's framework solely to add tracing. An existing OTel application can send records with its standard exporter using the [OTLP integration guide](https://docs.hue.run/integrations/opentelemetry).
+The current `@hue-run/sdk` package cannot be installed alongside `ai@6`: npm enforces the optional `ai@^7.0.99` peer even if the application only imports the core client. Do not bypass the resolver with `--force` or `--legacy-peer-deps`, or upgrade an application's framework solely to add tracing. An existing OTel application can send records with its standard exporter using the [OTLP integration guide](https://docs.hue.run/integrations/opentelemetry).
 
 Python's exact OTel pins can conflict with applications that require a different version. Resolve the dependency set before changing the application. A lockfile records what was tested; it does not certify every compatible-looking version.
 

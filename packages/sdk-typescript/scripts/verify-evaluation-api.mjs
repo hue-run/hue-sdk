@@ -11,7 +11,7 @@ if (!process.env.HUE_API_KEY || !process.env.HUE_BASE_URL || !process.argv[2])
 const loader = join(resolve(process.argv[2]), "evaluation-imports.mjs");
 await writeFile(
   loader,
-  'export * as telemetry from "@hue/sdk"; export * as evaluation from "@hue/sdk/evals";',
+  'export * as telemetry from "@hue-run/sdk"; export * as evaluation from "@hue-run/sdk/evals";',
 );
 const { telemetry, evaluation } = await import(pathToFileURL(loader));
 const { createHue } = telemetry;

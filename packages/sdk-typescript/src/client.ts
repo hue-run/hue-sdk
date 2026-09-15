@@ -157,10 +157,10 @@ export class HueClient {
     }
     this.captureContent = this.transport.options.captureContent;
     this.tracer = new ContextualTracer(
-      this.tracerProvider.getTracer("@hue/sdk", "0.1.2"),
+      this.tracerProvider.getTracer("@hue-run/sdk", "0.1.2"),
       this.storage,
     );
-    this.logger = this.loggerProvider.getLogger("@hue/sdk", "0.1.2");
+    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", "0.1.2");
   }
 
   getContext(): Context {
