@@ -166,3 +166,7 @@ Queues are bounded and in memory. Await flush and inspect its result; successful
 The initial SDK snapshot is recorded in [.source.json](./.source.json). This repository contains only SDKs and standalone examples, with no application source or inherited Fern Git history. Keep SDK changes reviewed here; updating any retained Fern copy is an explicit synchronization step.
 
 Source repository access and public package distribution are managed separately.
+
+## License
+
+The SDK packages are distributed under the [MIT license](./LICENSE).

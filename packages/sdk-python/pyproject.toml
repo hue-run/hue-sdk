@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "OpenTelemetry helpers for sending agent traces and correlated logs to Hue"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "UNLICENSED" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   "opentelemetry-api==1.44.0",
   "opentelemetry-sdk==1.44.0",

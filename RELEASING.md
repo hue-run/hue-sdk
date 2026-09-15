@@ -2,7 +2,7 @@
 
 The repository stays private. Public package distribution is a separate decision: PyPI serves both `pip install hue-sdk` and `uv add hue-sdk`; npm serves `npm install @hue/sdk` and other npm-compatible installers.
 
-The release workflow is prepared, but publication still requires approved license metadata and registry account setup. A workflow file or a passing build does not mean a version is publicly available.
+The SDK packages use the MIT license. Registry account setup and a successful publishing run are still required for public availability. A workflow file or a passing build does not mean a version is publicly available.
 
 ## Release contract
 
