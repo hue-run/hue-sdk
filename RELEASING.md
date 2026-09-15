@@ -75,7 +75,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --registry-version 0.1.2
 ```bash
 uv sync --project packages/sdk-python --frozen --all-groups --python 3.14
 uv run --project packages/sdk-python --frozen --all-groups --python 3.14 python -m build packages/sdk-python --no-isolation --outdir .artifacts/python
-uvx --from twine==6.2.0 twine check --strict .artifacts/python/*
+uvx --from twine==7.0.0 twine check --strict .artifacts/python/*
 python3 scripts/release-artifacts.py inspect python 0.1.0 .artifacts/python
 python3 scripts/verify-python-release.py --wheel .artifacts/python/hue_sdk-0.1.0-py3-none-any.whl --python 3.10
 python3 scripts/verify-python-release.py --wheel .artifacts/python/hue_sdk-0.1.0-py3-none-any.whl --python 3.14
