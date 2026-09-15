@@ -1,5 +1,7 @@
 # Hue Python SDK
 
+For explicit source-document snapshots, scoped HTTP/MCP capture and pinned playback, see [Scenes](SCENES.md).
+
 For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](EVALUATIONS.md) and the [standalone evaluation example](../../examples/python-evaluation/README.md).
 
 Python helpers around official OpenTelemetry **1.44.0** trace and log SDKs and OTLP HTTP/protobuf exporters. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
