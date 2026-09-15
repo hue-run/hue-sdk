@@ -13,7 +13,8 @@
   "files": [
     "dist",
     "README.md",
-    "EVALUATIONS.md"
+    "EVALUATIONS.md",
+    "SCENES.md"
   ],
   "type": "module",
   "exports": {
@@ -32,6 +33,14 @@
     "./scenes": {
       "types": "./dist/scenes.d.ts",
       "import": "./dist/scenes.js"
+    },
+    "./scenes/node": {
+      "types": "./dist/scenes-node.d.ts",
+      "import": "./dist/scenes-node.js"
+    },
+    "./scenes/mcp": {
+      "types": "./dist/scenes-mcp.d.ts",
+      "import": "./dist/scenes-mcp.js"
     }
   },
   "scripts": {
@@ -40,6 +49,8 @@
     "test": "bun test tests"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "@mswjs/interceptors": "0.42.6",
     "@opentelemetry/api-logs": "0.222.0",
     "@opentelemetry/core": "2.11.0",
     "@opentelemetry/otlp-exporter-base": "0.222.0",
@@ -55,6 +66,7 @@
     "@types/bun": "1.4.2",
     "@types/node": "24.10.1",
     "ai": "7.0.99",
+    "axios": "1.20.0",
     "protobufjs": "8.8.0",
     "typescript": "7.0.2"
   },
@@ -73,5 +85,8 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "bin": {
+    "hue-scenes-mcp": "./dist/scenes-cli.js"
   }
 }

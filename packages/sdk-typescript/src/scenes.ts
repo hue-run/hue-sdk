@@ -10,3 +10,6 @@ export {
   ScenesApiError,
 } from "./scenes/portable.js";
 export type * from "./scenes/types.js";
+export { wrapAiTools, wrapMcpClient } from "./scenes/adapters.js";
+export { wrapFetch } from "./scenes/http.js";
+export type { ToolOptions } from "./scenes/context.js";
