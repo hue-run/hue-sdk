@@ -174,7 +174,28 @@
               "type": "string"
             },
             "body": {
-              "$ref": "#/$defs/payload"
+              "allOf": [
+                {
+                  "$ref": "#/$defs/payload"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "bytes",
+                        "blob"
+                      ]
+                    },
+                    "ref": {
+                      "properties": {
+                        "encoding": {
+                          "const": "bytes"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
             }
           },
           "required": [
@@ -245,10 +266,14 @@
           "additionalProperties": false,
           "properties": {
             "origin": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^https?://[^/?#@]+$"
             },
             "pathPrefix": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^/"
             },
             "headers": {
               "type": "array",
@@ -272,6 +297,22 @@
         "id",
         "kind",
         "contractVersion"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "http"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "http"
+            ]
+          }
+        }
       ]
     },
     "source": {
@@ -437,7 +478,7 @@
         },
         "externalSpanId": {
           "type": "string",
-          "pattern": "^[a-f0-9]{16}$"
+          "pattern": "^(?!0{16}$)[a-f0-9]{16}$"
         }
       },
       "required": [
@@ -506,7 +547,7 @@
         },
         "externalTraceId": {
           "type": "string",
-          "pattern": "^[a-f0-9]{32}$"
+          "pattern": "^(?!0{32}$)[a-f0-9]{32}$"
         },
         "sessionId": {
           "type": "string"
