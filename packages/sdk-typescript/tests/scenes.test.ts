@@ -734,3 +734,45 @@ test("capture mapping and result accessors cannot replace the live return", asyn
   await capture.flush();
   expect(host.observations.at(-1)?.replayable).toBe(false);
 });
+
+test("native generator next/return/throw methods remain available and bidirectional capture is ineligible", async () => {
+  const host = new Hosted(),
+    capture = await host.capture();
+  const tool = wrapTool(
+    "docs",
+    "search",
+    async function* (q: string): AsyncGenerator<number, void, number> {
+      try {
+        const sent = yield 1;
+        if (sent) yield sent;
+      } catch {
+        yield 9;
+      }
+    },
+  );
+  await capture.run(async () => {
+    const complete = tool("full");
+    expect(await complete.next()).toEqual({ value: 1, done: false });
+    expect((await complete.next()).done).toBe(true);
+    expect((await complete.next()).done).toBe(true);
+    const sent = tool("sent");
+    await sent.next();
+    expect((await sent.next(2)).value).toBe(2);
+    await sent.next();
+    const thrown = tool("thrown");
+    await thrown.next();
+    expect((await thrown.throw(new Error("local"))).value).toBe(9);
+    await thrown.next();
+  });
+  const p = await frozen(host, capture);
+  await p.run(async () => {
+    const stream = tool("full");
+    expect((await stream.next()).value).toBe(1);
+    expect((await stream.next()).done).toBe(true);
+    reason(() => tool("sent"), "incomplete");
+    reason(() => tool("thrown"), "incomplete");
+  });
+  await capture.flush();
+  expect(capture.client.reserve(64 * 1024 * 1024)).toBe(true);
+  capture.client.release(64 * 1024 * 1024);
+});

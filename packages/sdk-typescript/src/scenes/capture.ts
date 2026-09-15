@@ -340,7 +340,7 @@ export class CaptureSession implements SceneRuntime {
   ): AsyncIterable<unknown> {
     const self = this;
     let used = false;
-    return {
+    const tracked = {
       [Symbol.asyncIterator]() {
         if (used) throw new TypeError("Captured stream is single-use");
         used = true;
@@ -439,7 +439,28 @@ export class CaptureSession implements SceneRuntime {
         };
       },
     };
+    let iterator: AsyncIterator<unknown> | undefined;
+    const get = () => (iterator ??= tracked[Symbol.asyncIterator]());
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next(...args: [] | [unknown]) {
+        return get().next(...args);
+      },
+      return(value?: unknown) {
+        const current = get();
+        return current.return
+          ? current.return(value)
+          : Promise.resolve({ done: true as const, value });
+      },
+      throw(error?: unknown) {
+        const current = get();
+        return current.throw ? current.throw(error) : Promise.reject(error);
+      },
+    } as AsyncIterableIterator<unknown>;
   }
+
   private mcpSources(h: Handle, value: PortableValue) {
     if (
       !value ||
