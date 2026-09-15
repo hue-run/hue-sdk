@@ -66,16 +66,20 @@ Creating a scene and finalizing it are explicit API operations and may fail. Onc
 ```typescript
 import { loadPlayback, SnapshotMissError } from "@hue/sdk/scenes";
 
-const playback = await loadPlayback(scenes, pin, ["documents"]);
-try {
-  await playback.run(() => runAgent({ search }));
-  await playback.complete();
-} catch (error) {
-  await playback.complete("failed");
-  if (error instanceof SnapshotMissError) console.error(error.reason);
-  throw error;
-}
+await hue.withSpan("research.playback", async (run) => {
+  const playback = await loadPlayback(scenes, pin, ["documents"], run.traceId);
+  try {
+    await playback.run(() => runAgent({ search }));
+    await playback.complete();
+  } catch (error) {
+    await playback.complete("failed");
+    if (error instanceof SnapshotMissError) console.error(error.reason);
+    throw error;
+  }
+});
 ```
+
+Start this span outside the earlier capture context so playback has a fresh trace root. Passing `run.traceId` links replay diagnostics to the same trace as the live agent spans. Reuse the existing Hue client and its provider; flush or shut it down at the application's established lifecycle boundary.
 
 The pin contains `sceneId`, `revision`, and the SHA-256 digest of the canonical manifest. Loading verifies the manifest and artifact length/hash before results are available. Selected tools never invoke their live implementations, including on misses. Unselected functions remain live. Recording and playback use async scope, so parallel agents have independent contexts.
 
