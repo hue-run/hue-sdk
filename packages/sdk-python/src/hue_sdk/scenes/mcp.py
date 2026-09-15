@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import Callable
 from pathlib import PurePosixPath
@@ -71,6 +72,28 @@ class SceneMCPClient:
         self.result_decoder = result_decoder
         self.contract_version = contract_version
 
+    def _decode_result(self, operation, result):
+        key = (
+            "content"
+            if operation.startswith("tools/call:")
+            else {
+                "resources/read": "contents",
+                "tools/list": "tools",
+                "resources/list": "resources",
+                "resources/templates/list": "resourceTemplates",
+            }[operation]
+        )
+        try:
+            if not isinstance(result, dict) or not isinstance(result.get(key), list):
+                raise ValueError()
+            if not all(isinstance(item, dict) for item in result[key]):
+                raise ValueError()
+            if self.result_decoder:
+                return self.result_decoder(operation, result)
+            return result
+        except Exception:
+            raise SnapshotMissError("nonportable") from None
+
     async def _call(self, operation, arguments, live):
         active = self.scenes._active.get()
         replaying = (
@@ -79,6 +102,16 @@ class SceneMCPClient:
             and self.binding_id in active.selected
         )
         try:
+            if replaying:
+                return await asyncio.to_thread(
+                    active.dispatch,
+                    self.binding_id,
+                    operation,
+                    arguments,
+                    contract_version=self.contract_version,
+                    result_decoder=lambda result: self._decode_result(operation, result),
+                    error_decoder=lambda _error: self._decode_error(operation),
+                )
             result = await self.scenes.acall(
                 self.binding_id,
                 operation,
@@ -96,8 +129,20 @@ class SceneMCPClient:
                 "content": [{"type": "text", "text": "HUE_RECORDED_TOOL_ERROR"}],
             }
         if replaying and self.result_decoder:
-            return self.result_decoder(operation, result)
+            try:
+                return self.result_decoder(operation, result)
+            except Exception:
+                # The underlying miss is already durable, even if a caller's result class
+                # cannot represent the MCP error envelope.
+                raise SnapshotMissError("nonportable") from None
         return result
+
+    def _decode_error(self, operation):
+        result = {"isError": True, "content": [{"type": "text", "text": "HUE_RECORDED_TOOL_ERROR"}]}
+        try:
+            return self.result_decoder(operation, result) if self.result_decoder else result
+        except Exception:
+            raise SnapshotMissError("nonportable") from None
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None, **kwargs):
         return await self._call(

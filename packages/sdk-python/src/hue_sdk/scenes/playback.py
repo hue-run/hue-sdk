@@ -356,6 +356,7 @@ class Replay:
         *,
         contract_version: str | None = None,
         result_decoder: Callable[[Any], Any] | None = None,
+        error_decoder: Callable[[RecordedToolError], Any] | None = None,
     ) -> Any:
         with self._condition:
             if self._closed:
@@ -368,6 +369,7 @@ class Replay:
                 arguments,
                 contract_version=contract_version,
                 result_decoder=result_decoder,
+                error_decoder=error_decoder,
             )
         finally:
             with self._condition:
@@ -382,6 +384,7 @@ class Replay:
         *,
         contract_version: str | None = None,
         result_decoder: Callable[[Any], Any] | None = None,
+        error_decoder: Callable[[RecordedToolError], Any] | None = None,
     ) -> Any:
         if not self._entered:
             raise ValueError("Enter the replay context before dispatching calls.")
@@ -451,16 +454,33 @@ class Replay:
                 self._event_locked(binding_id, operation, key, "miss", reason=reason)
             raise SnapshotMissError(reason, binding_id, operation) from None
         if finish["outcome"] == "error":
+            metadata = finish["error"]
+            error = RecordedToolError(metadata["type"], code=metadata.get("code"))
+            if error_decoder:
+                try:
+                    result = error_decoder(error)
+                except Exception as failure:
+                    reason = (
+                        failure.reason if isinstance(failure, SnapshotMissError) else "nonportable"
+                    )
+                    with self._lock:
+                        self._event_locked(binding_id, operation, key, "miss", reason=reason)
+                    raise SnapshotMissError(reason, binding_id, operation) from None
             with self._lock:
                 self._event_locked(binding_id, operation, key, "error", call_id=finish["callId"])
-            error = finish.get("error", {"type": "Error"})
-            raise RecordedToolError(error["type"], code=error.get("code"))
+            if error_decoder:
+                return result
+            raise error
         try:
             result = _payload.decode(finish["result"], self.recording._blob)
             if result_decoder:
                 result = result_decoder(result)
-        except (SnapshotMissError, KeyError) as error:
-            reason = error.reason if isinstance(error, SnapshotMissError) else "incomplete"
+        except Exception as error:
+            reason = (
+                error.reason
+                if isinstance(error, SnapshotMissError)
+                else ("incomplete" if isinstance(error, KeyError) else "nonportable")
+            )
             with self._lock:
                 self._event_locked(binding_id, operation, key, "miss", reason=reason)
             raise SnapshotMissError(reason, binding_id, operation) from None

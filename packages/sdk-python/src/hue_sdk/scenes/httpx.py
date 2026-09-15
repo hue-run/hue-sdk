@@ -7,7 +7,7 @@ import asyncio
 import httpx
 
 from .client import Capture, Scenes
-from .http import ResponseCapture, http_arguments, owned_binding
+from .http import ResponseCapture, decoded_http_body, http_arguments, owned_binding
 from .types import SnapshotMissError
 
 
@@ -19,11 +19,18 @@ def _body(request: httpx.Request):
 
 
 def _response(result, request):
-    if not isinstance(result, dict) or result.get("kind") != "http":
-        raise SnapshotMissError("nonportable")
-    return httpx.Response(
-        result["status"], headers=result["headers"], content=result["body"], request=request
-    )
+    try:
+        if not isinstance(result, dict) or result.get("kind") != "http":
+            raise ValueError()
+        if result["body"]:
+            # Validate codecs and their bounded expansion before HTTPX can decode while
+            # constructing the response. Keep raw headers/body for HTTPX's normal semantics.
+            decoded_http_body(result["body"], result["headers"])
+        return httpx.Response(
+            result["status"], headers=result["headers"], content=result["body"], request=request
+        )
+    except Exception:
+        raise SnapshotMissError("nonportable") from None
 
 
 class _SyncTee(httpx.SyncByteStream):
@@ -91,7 +98,12 @@ class SceneTransport(httpx.BaseTransport):
             )
 
         if not isinstance(active, Capture):
-            return _response(active.dispatch(binding["id"], "http", arguments), request)
+            return active.dispatch(
+                binding["id"],
+                "http",
+                arguments,
+                result_decoder=lambda result: _response(result, request),
+            )
         call = active.start(binding["id"], "http", arguments)
         try:
             response = self.transport.handle_request(request)
@@ -128,8 +140,13 @@ class AsyncSceneTransport(httpx.AsyncBaseTransport):
             )
 
         if not isinstance(active, Capture):
-            result = await asyncio.to_thread(active.dispatch, binding["id"], "http", arguments)
-            return _response(result, request)
+            return await asyncio.to_thread(
+                active.dispatch,
+                binding["id"],
+                "http",
+                arguments,
+                result_decoder=lambda result: _response(result, request),
+            )
         call = active.start(binding["id"], "http", arguments)
         try:
             response = await self.transport.handle_async_request(request)

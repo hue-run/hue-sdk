@@ -9,7 +9,7 @@ import pytest
 import requests
 from scenes_server import scene_server
 
-from hue_sdk.scenes import Binding, Scenes, SnapshotMissError
+from hue_sdk.scenes import Binding, Recording, Scenes, SnapshotMissError, canonical_json
 from hue_sdk.scenes.http import http_arguments, safe_url
 from hue_sdk.scenes.httpx import AsyncSceneTransport, SceneTransport
 from hue_sdk.scenes.mcp import SceneMCPClient
@@ -41,6 +41,106 @@ def load(scenes, capture):
     result = capture.finalize()
     assert result.ok, result
     return scenes.load(result.snapshot)
+
+
+@pytest.mark.parametrize("adapter", ["httpx", "async-httpx", "requests"])
+def test_http_reconstruction_failure_is_a_durable_miss(api, adapter):
+    scenes, binding = setup(api)
+    url = api.source_url + "/files/gzip"
+    with httpx.Client(transport=SceneTransport(scenes)) as http:
+        with scenes.capture(bindings=[binding], external_trace_id=TRACE) as capture:
+            assert http.get(url).content == b"observed source document"
+    manifest = load(scenes, capture).manifest
+    finish = next(item for item in manifest["observations"] if item["phase"] == "finish")
+    # An admissible foreign recording can contain an invalid compressed representation.
+    # Its manifest hash is valid; reconstruction, rather than blob integrity, must reject it.
+    finish["result"]["body"] = {"kind": "bytes", "base64": "YmFkIGd6aXA="}
+    recording = Recording(manifest, sha256(canonical_json(manifest)).hexdigest(), scenes=scenes)
+    hits = len(api.source_hits)
+
+    async def asynchronous():
+        async with httpx.AsyncClient(transport=AsyncSceneTransport(scenes)) as http:
+            async with recording.replay(
+                binding_ids=["files"], external_trace_id=REPLAY_TRACE
+            ) as replay:
+                with pytest.raises(SnapshotMissError, match="nonportable"):
+                    await http.get(url)
+            return replay
+
+    if adapter == "async-httpx":
+        replay = asyncio.run(asynchronous())
+    else:
+        http = (
+            httpx.Client(transport=SceneTransport(scenes))
+            if adapter == "httpx"
+            else requests.Session()
+        )
+        with http:
+            if adapter == "requests":
+                http.mount("http://", SceneAdapter(scenes))
+            with recording.replay(binding_ids=["files"], external_trace_id=REPLAY_TRACE) as replay:
+                with pytest.raises(SnapshotMissError, match="nonportable"):
+                    http.get(url)
+    assert replay.delivery_ok and replay.miss_count == 1
+    events = next(iter(api.replays.values()))["events"]
+    assert [(event["status"], event.get("reason")) for event in events] == [("miss", "nonportable")]
+    assert len(api.source_hits) == hits
+
+
+@pytest.mark.parametrize("failure", ["envelope", "decoder", "stream", "error-decoder"])
+def test_mcp_reconstruction_failure_is_a_durable_protocol_miss(api, failure):
+    scenes, _ = setup(api)
+    calls = []
+    observed = {"content": [{"type": "text", "text": "observed"}]}
+
+    class Session:
+        async def call_tool(self, name, arguments=None):
+            calls.append(name)
+            if failure == "error-decoder":
+                raise RuntimeError("Original live source exception.")
+            if failure == "stream":
+
+                async def items():
+                    yield observed
+
+                return items()
+            return {"content": "malformed"} if failure == "envelope" else observed
+
+    def decoder(_operation, value):
+        if value.get("isError") and "HUE_SNAPSHOT_MISS" in json.dumps(value):
+            return value
+        raise ValueError("The framework cannot reconstruct this result.")
+
+    async def exercise():
+        mcp = SceneMCPClient(
+            scenes,
+            "mcp",
+            Session(),
+            result_decoder=decoder if failure in {"decoder", "error-decoder"} else None,
+        )
+        async with scenes.capture(
+            bindings=[Binding("mcp", kind="mcp")], external_trace_id=TRACE
+        ) as capture:
+            if failure == "error-decoder":
+                with pytest.raises(RuntimeError, match="Original live source exception"):
+                    await mcp.call_tool("read")
+            elif failure == "stream":
+                result = await mcp.call_tool("read")
+                assert [item async for item in result] == [observed]
+            else:
+                result = await mcp.call_tool("read")
+                assert result == ({"content": "malformed"} if failure == "envelope" else observed)
+        finalized = await capture.afinalize()
+        recording = await scenes.aload(finalized.snapshot)
+        async with recording.replay(binding_ids=["mcp"], external_trace_id=REPLAY_TRACE) as replay:
+            result = await mcp.call_tool("read")
+            assert result["isError"] and "HUE_SNAPSHOT_MISS" in json.dumps(result)
+        assert replay.delivery_ok and replay.miss_count == 1
+
+    asyncio.run(exercise())
+    events = next(iter(api.replays.values()))["events"]
+    assert [(event["status"], event.get("reason")) for event in events] == [("miss", "nonportable")]
+    assert calls == ["read"]
 
 
 def test_http_identity_ordering_credentials_representation_and_json():

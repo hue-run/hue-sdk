@@ -58,11 +58,19 @@ class _Call:
         payload: dict[str, Any] | None = None,
         omission: str | None = None,
         sources: Any = None,
+        reserved_bytes: int = 0,
     ) -> None:
         try:
             self.capture._finish(
-                self, result, error=error, payload=payload, omission=omission, sources=sources
+                self,
+                result,
+                error=error,
+                payload=payload,
+                omission=omission,
+                sources=sources,
+                reserved_bytes=reserved_bytes,
             )
+            reserved_bytes = 0
         except BaseException:
             # Export bookkeeping must not replace the user's exception/cancellation.
             with self.capture._lock:
@@ -70,6 +78,8 @@ class _Call:
                     self.done = True
                     self.capture._pending -= 1
                 self.capture._dropped += 1
+        finally:
+            self.capture.scenes._release(reserved_bytes)
 
 
 class Scenes:
@@ -115,6 +125,18 @@ class Scenes:
         with self._budget_lock:
             self._bytes -= byte_size
             self._records -= records
+
+    def _transfer(self, reserved_bytes: int, byte_size: int, records: int = 0) -> bool:
+        """Replace a live stream reservation with its queued record under the same lock."""
+        with self._budget_lock:
+            self._bytes -= reserved_bytes
+            if self._bytes + byte_size > self._max_bytes or (
+                self._records + records > self._max_records
+            ):
+                return False
+            self._bytes += byte_size
+            self._records += records
+            return True
 
     def _clean(self, field: str, value: Any) -> Any:
         # Built-in filtering runs both before and after the customer sanitizer.
@@ -300,7 +322,7 @@ class Capture:
                 raise ValueError("Hue traffic cannot be a source binding.")
         http = [binding["http"] for binding in self.selected.values() if "http" in binding]
         for index, left in enumerate(http):
-            for right in http[index + 1:]:
+            for right in http[index + 1 :]:
                 if left["origin"] == right["origin"] and (
                     left["pathPrefix"].startswith(right["pathPrefix"])
                     or right["pathPrefix"].startswith(left["pathPrefix"])
@@ -363,10 +385,13 @@ class Capture:
     async def __aexit__(self, *exc: Any) -> None:
         self.__exit__(*exc)
 
-    def _enqueue_locked(self, route: str, record: dict[str, Any]) -> None:
+    def _enqueue_locked(
+        self, route: str, record: dict[str, Any], *, reserved_bytes: int = 0
+    ) -> None:
         if _payload.wire_size(record) > 1000 * 1024:
             if route != "observations":
                 self._dropped += 1
+                self.scenes._release(reserved_bytes)
                 return
             record = {**record, "replayable": False, "omissionReason": "metadata_limit"}
             record.pop("sources", None)
@@ -376,7 +401,7 @@ class Capture:
                 record.pop("result", None)
                 record["outcome"] = "incomplete"
         byte_size = _payload.size(record)
-        if self.scenes._reserve(byte_size, 1):
+        if self.scenes._transfer(reserved_bytes, byte_size, 1):
             self._queue.append((route, record, byte_size))
         else:
             self._dropped += 1
@@ -441,6 +466,7 @@ class Capture:
         payload: dict[str, Any] | None,
         omission: str | None,
         sources: Any,
+        reserved_bytes: int,
     ) -> None:
         record: dict[str, Any] = {
             **call.fields,
@@ -486,15 +512,17 @@ class Capture:
             record["omissionReason"] = omission
         with self._lock:
             if call.done:
+                self.scenes._release(reserved_bytes)
                 return
             call.done = True
             self._pending -= 1
             self._sequence += 1
             record["sequence"] = self._sequence
             if call.retained:
-                self._enqueue_locked("observations", record)
+                self._enqueue_locked("observations", record, reserved_bytes=reserved_bytes)
             else:
                 self._dropped += 1
+                self.scenes._release(reserved_bytes)
 
     def _source(self, source: SourceFile, call_id: str | None = None) -> dict[str, Any]:
         if source.relation not in {"query_attachment", "tool_source"}:
@@ -529,8 +557,11 @@ class Capture:
         return result
 
     def add_source(self, source: SourceFile) -> bool:
+        return self._add_source(source)
+
+    def _add_source(self, source: SourceFile, call_id: str | None = None) -> bool:
         try:
-            record = self._source(source)
+            record = self._source(source, call_id)
             with self._lock:
                 previous = self._dropped
                 self._enqueue_locked("sources", record)
@@ -663,10 +694,10 @@ class _CaptureStream:
         return self
 
     def _finish(self, **kwargs):
-        self._call.capture.scenes._release(self._bytes)
+        reserved_bytes = self._bytes
         self._bytes = 0
         try:
-            self._call.finish(**kwargs)
+            self._call.finish(**kwargs, reserved_bytes=reserved_bytes)
         finally:
             self._items = []
 
@@ -679,9 +710,6 @@ class _CaptureStream:
             item = await self._iterator.__anext__()
         except StopAsyncIteration:
             payload = {"kind": "stream", "items": self._items}
-            # Transfer the reservation to the queued immutable finish record.
-            scenes._release(self._bytes)
-            self._bytes = 0
             self._finish(payload=payload, omission=self._omission)
             raise
         except BaseException as error:
@@ -693,6 +721,13 @@ class _CaptureStream:
             raise
         finally:
             scenes._parents.reset(token)
+        if self._sources is not None:
+            try:
+                for source in self._sources(item):
+                    if not self._call.capture._add_source(source, self._call.fields["callId"]):
+                        self._omission = "source_limit"
+            except BaseException:
+                self._omission = "extractor_failed"
         if self._omission is None:
             try:
                 value = self._serializer(item) if self._serializer else item
@@ -705,7 +740,11 @@ class _CaptureStream:
                 )
                 if changed:
                     self._omission = "redacted_stream"
-                byte_size = _payload.size(encoded)
+                # Include list separators and leave room for the finish envelope. Otherwise
+                # retained items alone can exhaust the budget required to describe completion.
+                byte_size = _payload.size(encoded) + 1
+                if not self._items:
+                    byte_size += 1024 + _payload.size(self._call.fields)
                 if len(self._items) >= 2000 or not scenes._reserve(byte_size):
                     self._omission = "stream_limit"
                 else:

@@ -24,6 +24,25 @@ def _decoded_payload(result):
     return {**result, "headers": headers, "body": content}
 
 
+def _response(result, request):
+    try:
+        result = _decoded_payload(result)
+        response = requests.Response()
+        response.status_code = result["status"]
+        response.headers = CaseInsensitiveDict(result["headers"])
+        content = result["body"]
+        response._content = content
+        response._content_consumed = True
+        response.raw = BytesIO(content)
+        response.request = request
+        response.url = result.get("url", request.url)
+        response.reason = result.get("statusText", "")
+        response.encoding = requests.utils.get_encoding_from_headers(response.headers)
+        return response
+    except Exception:
+        raise SnapshotMissError("nonportable") from None
+
+
 class _RawTee:
     def __init__(self, raw, capture):
         self.raw, self.capture = raw, capture
@@ -84,23 +103,12 @@ class SceneAdapter(HTTPAdapter):
             return http_arguments(binding, request.method, request.url, request.headers, body)
 
         if not isinstance(active, Capture):
-            result = active.dispatch(
-                binding["id"], "http", arguments, result_decoder=_decoded_payload
+            return active.dispatch(
+                binding["id"],
+                "http",
+                arguments,
+                result_decoder=lambda result: _response(result, request),
             )
-            if not isinstance(result, dict) or result.get("kind") != "http":
-                raise SnapshotMissError("nonportable")
-            response = requests.Response()
-            response.status_code = result["status"]
-            response.headers = CaseInsensitiveDict(result["headers"])
-            content = result["body"]
-            response._content = content
-            response._content_consumed = True
-            response.raw = BytesIO(content)
-            response.request = request
-            response.url = result.get("url", request.url)
-            response.reason = result.get("statusText", "")
-            response.encoding = requests.utils.get_encoding_from_headers(response.headers)
-            return response
         call = active.start(binding["id"], "http", arguments)
         try:
             response = super().send(request, **kwargs)

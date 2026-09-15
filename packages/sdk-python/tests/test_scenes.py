@@ -5,7 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -308,6 +308,75 @@ def test_async_stream_is_pull_only_and_partial_revision_stays_immutable(scene_ap
 
 async def anext_310(iterator):
     return await iterator.__anext__()
+
+
+def test_stream_extracts_only_consumed_sources_and_keeps_partial_call_links(scene_api):
+    scenes = client(scene_api)
+    extracted = []
+
+    def sources(item):
+        extracted.append(item)
+        return [SourceFile(item.decode() + ".txt", item, "text/plain", "tool_source")]
+
+    @scenes.tool("docs", sources=sources)
+    async def documents():
+        yield b"observed"
+        yield b"unseen"
+
+    async def exercise():
+        async with scenes.capture(bindings=[Binding("docs")], external_trace_id=TRACE) as capture:
+            stream = documents()
+            assert extracted == []
+            assert await anext_310(stream) == b"observed"
+            await stream.aclose()
+        result = await capture.afinalize()
+        assert result.ok and result.dropped == 0
+        recording = await scenes.aload(result.snapshot)
+        manifest = recording.manifest
+        assert len(manifest["sources"]) == 1
+        source = manifest["sources"][0]
+        assert source["callId"] == manifest["observations"][0]["callId"]
+        assert await recording.adownload_source(source["id"]) == b"observed"
+        assert manifest["observations"][-1]["replayable"] is False
+
+    asyncio.run(exercise())
+    assert extracted == [b"observed"]
+
+
+def test_concurrent_stream_finish_preserves_bounded_reservations(scene_api):
+    scenes = client(scene_api, max_buffer_bytes=48 * 1024)
+    barrier = Barrier(4)
+    body = "observed" * 1024
+
+    @scenes.tool("docs")
+    async def documents():
+        yield body
+        await asyncio.to_thread(barrier.wait, 5)
+
+    def worker(index):
+        async def exercise():
+            async with scenes.capture(
+                bindings=[Binding("docs")], external_trace_id=f"{index + 1:032x}"
+            ) as capture:
+                assert [item async for item in documents()] == [body]
+            return capture
+
+        return asyncio.run(exercise())
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        captures = list(pool.map(worker, range(4)))
+    for index, capture in enumerate(captures):
+        result = capture.finalize()
+        assert result.ok and result.pending == result.dropped == 0
+        recording = scenes.load(result.snapshot)
+
+        async def playback(frozen, number):
+            async with frozen.replay(
+                binding_ids=["docs"], external_trace_id=f"{number + 10:032x}"
+            ):
+                assert [item async for item in documents()] == [body]
+
+        asyncio.run(playback(recording, index))
 
 
 def test_large_payload_sources_hashes_and_load_integrity(scene_api, tmp_path):

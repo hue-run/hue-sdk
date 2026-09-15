@@ -185,8 +185,11 @@ class ResponseCapture:
             return
         self._done = True
         scenes = self.call.capture.scenes
-        scenes._release(self._reserved)
-        self._reserved = 0
+
+        def finish(**kwargs):
+            reserved_bytes, self._reserved = self._reserved, 0
+            self.call.finish(**kwargs, reserved_bytes=reserved_bytes)
+
         omission = self._omission or ("body_not_consumed" if incomplete else None)
         try:
             if error is not None or omission:
@@ -195,15 +198,13 @@ class ResponseCapture:
                     self.metadata["headers"].get("content-type", "")
                 ):
                     partial = {**self.metadata, "body": _payload.encode(bytes(self._body))}
-                self.call.finish(
-                    error=error, payload=partial, omission=omission or "body_interrupted"
-                )
+                finish(error=error, payload=partial, omission=omission or "body_interrupted")
             else:
                 body = scenes._clean("http_body", bytes(self._body))
                 if not isinstance(body, bytes):
                     raise ValueError()
                 if body != self._body:
-                    self.call.finish(omission="redacted_body")
+                    finish(omission="redacted_body")
                     return
                 if is_json_media_type(self.metadata["headers"].get("content-type", "")) and (
                     self.request_method != "HEAD" and self.metadata["status"] not in {204, 205, 304}
@@ -213,7 +214,7 @@ class ResponseCapture:
                     )
                     value = parse_http_json(json_bytes)
                     if canonical_json(value) != canonical_json(scenes._clean("http_json", value)):
-                        self.call.finish(omission="redacted_body")
+                        finish(omission="redacted_body")
                         return
                 headers = self.metadata["headers"]
                 if decoded and body and headers.get("content-encoding"):
@@ -257,8 +258,8 @@ class ResponseCapture:
                                 body, "bytes", sources[0].mime_type, name, "source"
                             ),
                         }
-                self.call.finish(payload={**self.metadata, "body": payload}, sources=sources)
+                finish(payload={**self.metadata, "body": payload}, sources=sources)
         except BaseException:
-            self.call.finish(omission="nonportable_body")
+            finish(omission="nonportable_body")
         finally:
             self._body.clear()
