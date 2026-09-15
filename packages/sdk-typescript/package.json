@@ -1,8 +1,13 @@
 {
   "name": "@hue/sdk",
-  "version": "0.1.1",
-  "private": true,
-  "license": "UNLICENSED",
+  "version": "0.1.2",
+  "private": false,
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "provenance": false
+  },
   "homepage": "https://docs.hue.run",
   "repository": {
     "type": "git",
@@ -13,7 +18,8 @@
   "files": [
     "dist",
     "README.md",
-    "EVALUATIONS.md"
+    "EVALUATIONS.md",
+    "LICENSE"
   ],
   "type": "module",
   "exports": {

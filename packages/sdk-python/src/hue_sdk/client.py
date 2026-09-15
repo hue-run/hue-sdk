@@ -24,6 +24,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from opentelemetry.util.types import AttributeValue
 
 from .transport import (
+    DEFAULT_BASE_URL,
     MAX_CONTENT_BYTES,
     BoundedLogExporter,
     BoundedSpanExporter,
@@ -134,14 +135,16 @@ class HueSpan:
 class Hue:
     """Explicit, instance-owned OTel setup; never changes global providers.
 
+    Use ``Hue(api_key=..., capture_content=...)`` for Hue Cloud. ``base_url``
+    overrides the default origin; existing ``Hue(base_url, api_key, ...)`` calls work.
     ``capture_content`` is required. It governs Hue's content helpers only. Arbitrary
     attributes, names, external instrumentors and other exporters remain caller-owned.
     """
 
     def __init__(
         self,
-        base_url: str,
-        api_key: str,
+        base_url: str = DEFAULT_BASE_URL,
+        api_key: str | None = None,
         *,
         capture_content: bool,
         service_name: str = "hue-python-agent",
@@ -194,8 +197,8 @@ class Hue:
         )
         self.tracer_provider.add_span_processor(self._span_processor)
         self.logger_provider.add_log_record_processor(self._log_processor)
-        self.tracer = self.tracer_provider.get_tracer("hue-sdk", "0.1.0.dev0")
-        self._logger = self.logger_provider.get_logger("hue-sdk", "0.1.0.dev0")
+        self.tracer = self.tracer_provider.get_tracer("hue-sdk", "0.1.0")
+        self._logger = self.logger_provider.get_logger("hue-sdk", "0.1.0")
 
     def __repr__(self) -> str:
         return f"Hue(capture_content={self.capture_content!r}, closed={self._closed!r})"

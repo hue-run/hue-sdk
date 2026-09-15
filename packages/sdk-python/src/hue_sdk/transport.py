@@ -26,6 +26,7 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 MAX_REQUEST_BYTES = 1_048_576
 MAX_CONTENT_BYTES = 262_144
+DEFAULT_BASE_URL = "https://app.hue.run"
 
 
 def normalize_base_url(value: str) -> str:

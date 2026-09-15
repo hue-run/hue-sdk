@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Hue tracing
@@ -20,32 +20,30 @@ Read the application's repository instructions and inspect its runtime, dependen
 | Python 3.10+ | [Python SDK](https://docs.hue.run/sdks/python) |
 | Existing OTel provider or framework instrumentation | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); retain the provider and other exporters |
 
-Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. This skill targets TypeScript `0.1.1` and Python `0.1.0.dev0`; check release notes when using a newer package. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
+Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. This skill targets TypeScript `0.1.2` and Python `0.1.0`; check release notes when using a newer package. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
 
 **Existing AI SDK 6:** the current Hue TypeScript package's optional AI SDK 7 peers conflict even with core-only imports. Preserve AI SDK 6 and use its standard OTLP exporter path; do not force dependency resolution or upgrade the app merely to install Hue. Direct OTLP does not need the Hue package or Hue helper methods.
 
 ## Install and configure
 
-Use the current [installation guide](https://docs.hue.run/installation). npm and PyPI publication is pending for the versions above. Accounts with access to the private `hue-run/hue-sdk` repository can download these released assets with the authenticated GitHub CLI:
+Use the current [installation guide](https://docs.hue.run/installation) and verify that the intended package version is published before installing it:
 
 ```sh
 # TypeScript: run in the application directory.
-gh release download typescript-v0.1.1 --repo hue-run/hue-sdk --pattern 'hue-sdk-0.1.1.tgz' --dir .hue-sdk/typescript
-npm install ./.hue-sdk/typescript/hue-sdk-0.1.1.tgz @opentelemetry/api@1.9.1
+npm install @hue/sdk
 ```
 
 ```sh
 # Python: use the application's existing Python environment.
-gh release download python-v0.1.0.dev0 --repo hue-run/hue-sdk --pattern 'hue_sdk-0.1.0.dev0-py3-none-any.whl' --dir .hue-sdk/python
-python -m pip install ./.hue-sdk/python/hue_sdk-0.1.0.dev0-py3-none-any.whl
+python -m pip install hue-sdk
 ```
 
-Adapt the install command to the app's package manager. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If repository access or credentials are missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
+Adapt the install command to the app's package manager, for example `uv add hue-sdk` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or credentials are missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
 
 The user creates their project service key in Hue under **Settings → Integrations & API keys** and configures `HUE_API_KEY` on the server. Read that setting from the application; never request the key in chat or put it in browser code, fixtures, committed files, or logs.
 
 - **TypeScript:** pass `apiKey`, a stable `serviceName`, and explicit `captureContent` to `createHue`. Hue Cloud is the default; omit `baseUrl` for ordinary cloud use. `checkConnection()` verifies the key's project.
-- **Python:** the current `Hue` constructor requires `base_url`, `api_key`, and explicit `capture_content`. Use `base_url="https://app.hue.run"` for Hue Cloud and set a stable `service_name`. `validate_project()` verifies the key's project.
+- **Python:** pass `api_key`, a stable `service_name`, and explicit `capture_content` to `Hue`. Hue Cloud is the default; omit `base_url` for ordinary cloud use. `validate_project()` verifies the key's project. Older Python `0.1.0.dev0` installations still require an explicit origin.
 - **Direct OTLP:** configure `https://app.hue.run/api/v1/otlp/v1/traces` and, when needed, `/api/v1/otlp/v1/logs` with `Authorization: Bearer <project-service-key>`. These are full signal URLs for an OTLP HTTP exporter. `GET /api/v1/projects/current` with the same header optionally verifies the project without sending telemetry. Configure `service.name` on the existing provider resource.
 
 SDK constructors do not automatically read environment variables. For another Hue deployment, use its configured origin. A custom SDK origin excludes API paths; the standard OTLP exporter needs its full signal endpoint. Never change the model provider's API base URL to Hue.

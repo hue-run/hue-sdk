@@ -30,8 +30,6 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 [![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml)
 
-> npm and PyPI installs are coming soon. During the private pilot, use the release archives below.
-
 ## Choose your SDK
 
 | Language | Package / imports | Runtime | Guide |
@@ -67,8 +65,6 @@ You configure your project service key through your application's secret workflo
 
 ## Install
 
-### Registry installs (coming soon)
-
 Python:
 
 ```bash
@@ -81,27 +77,11 @@ TypeScript / JavaScript:
 
 ```bash
 npm install @hue/sdk
+# Or, with Bun:
+bun add @hue/sdk
 ```
 
-### From a private GitHub release — available now
-
-Use the GitHub CLI authenticated to an account with access to `hue-run/hue-sdk`. Run the matching commands in your application directory; Python users should activate their Python 3.10+ environment first.
-
-Python:
-
-```bash
-gh release download python-v0.1.0.dev0 --repo hue-run/hue-sdk --pattern 'hue_sdk-0.1.0.dev0-py3-none-any.whl' --dir .hue-sdk/python
-pip install ./.hue-sdk/python/hue_sdk-0.1.0.dev0-py3-none-any.whl
-```
-
-TypeScript / JavaScript:
-
-```bash
-gh release download typescript-v0.1.1 --repo hue-run/hue-sdk --pattern 'hue-sdk-0.1.1.tgz' --dir .hue-sdk/typescript
-npm install ./.hue-sdk/typescript/hue-sdk-0.1.1.tgz @opentelemetry/api@1.9.1
-```
-
-These install the existing [Python](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.0.dev0) and [TypeScript](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.1) pilot assets without cloning the repository. You can also [build from a checkout](#build-and-verify-from-a-standalone-clone).
+See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Package installation does not require access to the source repository. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
 
 ## What you can do
 
@@ -171,7 +151,7 @@ uv run --frozen --all-groups --python 3.14 ruff check src tests ../../examples/p
 uv run --frozen --all-groups --python 3.14 python -m build --no-isolation
 ```
 
-CI also verifies Python 3.10. [Release instructions](./RELEASING.md) describe private archives and the separate public publication step.
+CI also verifies Python 3.10. [Release instructions](./RELEASING.md) describe verified archives, registry publishing and release checks.
 
 ## Compatibility and limits
 
@@ -185,4 +165,8 @@ Queues are bounded and in memory. Await flush and inspect its result; successful
 
 The initial SDK snapshot is recorded in [.source.json](./.source.json). This repository contains only SDKs and standalone examples, with no application source or inherited Fern Git history. Keep SDK changes reviewed here; updating any retained Fern copy is an explicit synchronization step.
 
-Public registry publication, repository visibility and an open-source license are separate release decisions. The current packages remain private/unlicensed.
+Source repository access and public package distribution are managed separately.
+
+## License
+
+The SDK packages are distributed under the [MIT license](./LICENSE).

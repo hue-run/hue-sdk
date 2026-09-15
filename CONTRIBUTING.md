@@ -1,6 +1,6 @@
 # Contributing
 
-This repository is a private pilot. Work on a short branch from current `main` and open a pull request with the behavior change and relevant verification.
+Work on a short branch from current `main` and open a pull request with the behavior change and relevant verification. Repository access is currently limited to invited contributors.
 
 ## Development
 
@@ -17,4 +17,3 @@ Add behavioral regression coverage for changed delivery, privacy, concurrency or
 Never include real credentials, customer prompts or files in fixtures, logs or screenshots. Share security concerns through the private repository's existing maintainers instead of posting secrets.
 
 Public package publication and a future open-source license are separate decisions; do not add a permissive license or remove package privacy flags without authorization.
-

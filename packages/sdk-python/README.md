@@ -1,6 +1,6 @@
 # Hue Python SDK
 
-For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](https://docs.hue.run/evaluations/first-evaluation) and the [standalone evaluation example](https://github.com/hue-run/hue-sdk/tree/main/examples/python-evaluation).
+For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](https://docs.hue.run/evaluations/first-evaluation).
 
 Python helpers around official OpenTelemetry **1.44.0** trace and log SDKs and OTLP HTTP/protobuf exporters. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
 
@@ -8,33 +8,10 @@ The distribution is named `hue-sdk` (`import hue_sdk`). Python 3.10+ is supporte
 
 ## Install
 
-> PyPI installs are coming soon. During the private pilot, use the release archive below.
-
-### Registry install (coming soon)
-
 ```bash
 pip install hue-sdk
 # Or, in a uv project:
 uv add hue-sdk
-```
-
-### Private release (available now)
-
-Use the GitHub CLI authenticated to an account with access to `hue-run/hue-sdk`. In your application directory, activate a Python 3.10+ environment, then run:
-
-```bash
-gh release download python-v0.1.0.dev0 --repo hue-run/hue-sdk --pattern 'hue_sdk-0.1.0.dev0-py3-none-any.whl' --dir .hue-sdk/python
-pip install ./.hue-sdk/python/hue_sdk-0.1.0.dev0-py3-none-any.whl
-```
-
-### Build from a checkout
-
-From the repository root:
-
-```sh
-uv build packages/sdk-python --out-dir .local/python-sdk-dist
-uv venv .local/python-sdk-consumer --python 3.14
-uv pip install --python .local/python-sdk-consumer/bin/python .local/python-sdk-dist/hue_sdk-0.1.0.dev0-py3-none-any.whl
 ```
 
 ## Send a trace
@@ -46,8 +23,7 @@ import os
 from hue_sdk import Hue
 
 with Hue(
-    os.environ.get("HUE_BASE_URL", "https://app.hue.run"),
-    os.environ["HUE_API_KEY"],
+    api_key=os.environ["HUE_API_KEY"],
     capture_content=False,  # Required: choose explicitly.
 ) as hue:
     project = hue.validate_project()
@@ -62,13 +38,13 @@ with Hue(
         raise RuntimeError("Telemetry export failed; inspect Hue export_status.")
 ```
 
-`base_url` is the Hue origin, such as `https://app.hue.run`, without an API suffix. The project service key determines the project. The SDK validates the project at `GET /api/v1/projects/current` when explicitly requested; construction itself does not perform a request. HTTP is permitted only for `localhost` and loopback IPs. Userinfo, query strings, fragments, paths and redirects are rejected. The key is sent only as `Authorization: Bearer …`; `repr(hue)`, SDK errors and status counters omit it.
+The SDK uses `https://app.hue.run` by default. Set `base_url` only for a different Hue deployment or a local receiver, using an origin without an API suffix. Existing `Hue(base_url, api_key, ...)` calls remain supported. The project service key determines the project. The SDK validates the project at `GET /api/v1/projects/current` when explicitly requested; construction itself does not perform a request. HTTP is permitted only for `localhost` and loopback IPs. Userinfo, query strings, fragments, paths and redirects are rejected. The key is sent only as `Authorization: Bearer …`; `repr(hue)`, SDK errors and status counters omit it.
 
 ## Content and semantic fields
 
 `capture_content` has no default. `False` makes `set_input`, `set_output` and inference-log bodies omit content before it reaches an OTel queue. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
-This setting is **not a blanket PII filter**. Custom attributes, span names, session/user identifiers, resource attributes, third-party instrumentors and other exporters remain under your control. The server stores received content; there is no automatic telemetry expiry in the pilot. Delete scoped data explicitly when required by your retention policy.
+This setting is **not a blanket PII filter**. Custom attributes, span names, session/user identifiers, resource attributes, third-party instrumentors and other exporters remain under your control. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
 
 Use `redactor=lambda field, value: ...` to transform content in supported helpers. It runs synchronously before serialization and export. Return a redacted JSON value; failures raise a generic `ValueError` and the field is not recorded. It does not inspect arbitrary OTel attributes or logs:
 
@@ -98,7 +74,7 @@ For model helpers, pass the message representation produced by your integration.
 
 Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; a borrowed tracer provider and its other processors stay usable. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
 
-An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. They can emit content even when Hue helper capture is disabled. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). The [standalone example](https://github.com/hue-run/hue-sdk/tree/main/examples/python-agent) contains a separate, optional direct official OpenAI-client path.
+An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. They can emit content even when Hue helper capture is disabled. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). See the [Python integration guide](https://docs.hue.run/sdks/python) for application setup.
 
 ## Export behavior and limits
 
@@ -109,16 +85,8 @@ An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`
 - `force_flush(timeout_millis=30000)` drains both processors and returns `False` for a timeout or any recorded failed export batch since this client was created. Because OTel 1.44 ignores its processor timeout, Hue serializes flushes in one background worker and bounds the caller's wait. Pending exports continue after timeout. `export_status` exposes cumulative failure counters. `shutdown()` stops new helpers, drains and closes owned exporters within the caller's wait budget; repeated calls wait for the same shutdown. After a timeout, keep the process alive and call shutdown again to confirm completion. Context-manager exit calls shutdown; check flush explicitly when an exit code must reflect delivery failure.
 - Standard OTel batch queues hold 2,048 records per signal and are in-memory. Queue overflow, process termination and sampling can lose telemetry. Flush success reports observed exporter outcomes, not durable local delivery or proof that every application operation was instrumented. The exporter timeout controls individual export/retry operations. A caller timeout does not cancel an HTTP request already in flight; background workers continue until the operation completes.
 
-## Validate locally
+## Supported runtimes and verification
 
-```sh
-cd packages/sdk-python
-uv sync --frozen --all-groups --python 3.14
-uv run --frozen --all-groups pytest
-uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
-uv run --frozen --all-groups python -m build --no-isolation
-```
+Python 3.10+ is supported. CI tests Python 3.10 and 3.14, source imports and an independently installed wheel. Tests use synthetic loopback HTTP receivers and decode official OTLP protobuf messages to verify trace/log correlation, metadata-only capture, redaction, propagation, existing-provider ownership, authentication failures, redirects, partial rejection, retries and encoded request limits. Compatibility tests also exercise local evaluations and the optional OpenInference adapter. No live model provider is required for these checks.
 
-Tests decode requests received over real local HTTP into the official OTLP protobuf types. They cover correlation, capture disabled, null/empty content, redaction failure, propagation, borrowed providers, endpoint/auth failures, redirects, partial rejection, retry and encoded request limits. The wheel acceptance test runs the standalone app under a separate interpreter with no source-path imports. No real Hue or model-provider account is needed.
-
-Standalone extraction verification: **59 tests passed on both Python 3.10.21 and Python 3.14.5**, including optional adapter cases, local evaluation recovery, and installed-wheel application runs. These tests use synthetic loopback HTTP endpoints; they do not create project keys, access a Hue account, or call live model providers.
+See the [documentation](https://docs.hue.run/sdks/python) for integration guidance and [troubleshooting](https://docs.hue.run/guides/troubleshooting) for export failures.
