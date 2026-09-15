@@ -34,7 +34,7 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue/sdk`, `@hue/sdk/ai-sdk`, `@hue/sdk/evals` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
 | Python | `hue-sdk`; `hue_sdk`, `hue_sdk.evals` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 
 ## For coding agents
@@ -76,9 +76,9 @@ uv add hue-sdk
 TypeScript / JavaScript:
 
 ```bash
-npm install @hue/sdk
+npm install @hue-run/sdk
 # Or, with Bun:
-bun add @hue/sdk
+bun add @hue-run/sdk
 ```
 
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Package installation does not require access to the source repository. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
@@ -98,7 +98,7 @@ Your application runs the model or agent. Instrumentation must emit telemetry; t
 After installing the TypeScript SDK above, set `HUE_API_KEY` to a project service key in your server environment. Choose content capture explicitly:
 
 ```typescript
-import { createHue } from "@hue/sdk";
+import { createHue } from "@hue-run/sdk";
 
 const hue = createHue({
   apiKey: process.env.HUE_API_KEY!,

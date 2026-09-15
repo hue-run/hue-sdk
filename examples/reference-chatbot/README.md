@@ -16,11 +16,11 @@ node packages/sdk-typescript/scripts/verify-package.mjs
 
 It prints `tarball`, `consumer` and `chatbot` absolute paths. The chatbot directory
 is a complete, installed external application. Its generated package manifest
-contains the actual local `@hue/sdk` tarball dependency; the source manifest omits
+contains the actual local `@hue-run/sdk` tarball dependency; the source manifest omits
 that unpublished dependency so it cannot accidentally resolve an unrelated
 registry package. The verifier never publishes anything.
 
-For a separate checkout, run `bun add /absolute/path/to/hue-sdk-0.1.2.tgz` in this
+For a separate checkout, run `bun add /absolute/path/to/hue-run-sdk-0.1.2.tgz` in this
 example directory, then `bun install` and `bun run build`.
 
 ## Run with a synthetic provider

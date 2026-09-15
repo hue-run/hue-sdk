@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use `@hue-run/sdk` for the public npm package and all TypeScript entry points.
+
 - License the public SDK packages under MIT.
 - Prepare TypeScript `0.1.2` and Python `0.1.0` for public registry publication with verified release artifacts.
 - Default Python clients to Hue Cloud while preserving explicit origins and existing positional calls.

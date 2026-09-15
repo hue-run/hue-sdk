@@ -145,7 +145,7 @@ jobs:
       - run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org
       # OIDC is configured on the existing npm package. Private source repositories
       # cannot emit npm provenance; package publication still uses short-lived OIDC.
-      - run: npm publish ".artifacts/hue-sdk-${RELEASE_VERSION}.tgz" --access public --ignore-scripts --provenance=false --registry=https://registry.npmjs.org
+      - run: npm publish ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz" --access public --ignore-scripts --provenance=false --registry=https://registry.npmjs.org
 
   publish-pypi:
     if: inputs.publish && inputs.language == 'python'

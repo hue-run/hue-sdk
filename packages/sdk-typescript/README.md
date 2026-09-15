@@ -2,18 +2,18 @@
 
 A Node 24 / Bun 1.3.9 client for Hue's standard OTLP HTTP endpoints. It uses the
 OpenTelemetry JavaScript SDK and official OTLP protobuf exporter components for
-traces and correlated logs. The package is named `@hue/sdk`.
+traces and correlated logs. The package is named `@hue-run/sdk`.
 
 ## Install
 
 ```bash
-npm install @hue/sdk
+npm install @hue-run/sdk
 ```
 
 Or with Bun:
 
 ```bash
-bun add @hue/sdk
+bun add @hue-run/sdk
 ```
 
 Run the command in your application's server package. See the [compatibility guide](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies.
@@ -21,7 +21,7 @@ Run the command in your application's server package. See the [compatibility gui
 ## Start
 
 ```ts
-import { createHue, HueExportError } from "@hue/sdk";
+import { createHue, HueExportError } from "@hue-run/sdk";
 
 const hue = createHue({
   apiKey: process.env.HUE_API_KEY!, // a project service key, on the server only
@@ -64,7 +64,7 @@ configure telemetry on each agent or generation call:
 
 ```ts
 import { ToolLoopAgent } from "ai";
-import { hueTelemetry } from "@hue/sdk/ai-sdk";
+import { hueTelemetry } from "@hue-run/sdk/ai-sdk";
 
 const agent = new ToolLoopAgent({
   model: process.env.AI_MODEL!, // actual configured AI Gateway provider/model
@@ -135,7 +135,7 @@ context manager.
 ```ts
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
-import { createHue, createHueTransport } from "@hue/sdk";
+import { createHue, createHueTransport } from "@hue-run/sdk";
 
 const transport = createHueTransport({
   apiKey: process.env.HUE_API_KEY!,
@@ -193,4 +193,4 @@ published. The chatbot README describes running that external installation.
 
 # Local evaluation workflows
 
-The optional `@hue/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.
+The optional `@hue-run/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.

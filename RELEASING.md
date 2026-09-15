@@ -1,6 +1,6 @@
 # SDK releases
 
-The repository stays private. Public package distribution is a separate decision: PyPI serves both `pip install hue-sdk` and `uv add hue-sdk`; npm serves `npm install @hue/sdk` and other npm-compatible installers.
+The repository stays private. Public package distribution is a separate decision: PyPI serves both `pip install hue-sdk` and `uv add hue-sdk`; npm serves `npm install @hue-run/sdk` and other npm-compatible installers.
 
 The SDK packages use the MIT license. Registry account setup and a successful publishing run are still required for public availability. A workflow file or a passing build does not mean a version is publicly available.
 
@@ -17,7 +17,7 @@ Publication is not rolled back automatically if acceptance fails. Investigate th
 
 ## Registry setup
 
-Confirm control of npm's `@hue` scope and PyPI's `hue-sdk` project name. An absent listing does not prove that a name is available. Keep registry credentials out of source, logs and archives.
+Confirm control of npm's `@hue-run` scope and PyPI's `hue-sdk` project name. An absent listing does not prove that a name is available. Keep registry credentials out of source, logs and archives.
 
 Configure GitHub environments `npm` and `pypi` to allow `main` only. Use those exact names when registering trusted publishers. The workflow has no registry token secrets or token fallback.
 
@@ -42,7 +42,7 @@ Download the prepared TypeScript workflow artifact, verify its checksums, and pu
 ```bash
 # Run inside the downloaded artifact directory, using the authorized npm account.
 sha256sum --check SHA256SUMS
-npm publish ./hue-sdk-0.1.2.tgz --access public --ignore-scripts --provenance=false --registry=https://registry.npmjs.org
+npm publish ./hue-run-sdk-0.1.2.tgz --access public --ignore-scripts --provenance=false --registry=https://registry.npmjs.org
 ```
 
 On macOS, use `shasum -a 256 -c SHA256SUMS`. The account may require an interactive login or 2FA; do not put registry tokens into these commands or commit authentication files.
@@ -63,7 +63,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 python3 scripts/release-artifacts.py inspect typescript 0.1.2 .artifacts/typescript
 
 # Recheck a previously built artifact without rebuilding it.
-node packages/sdk-typescript/scripts/verify-package.mjs --archive .artifacts/typescript/hue-sdk-0.1.2.tgz
+node packages/sdk-typescript/scripts/verify-package.mjs --archive .artifacts/typescript/hue-run-sdk-0.1.2.tgz
 
 # Only after public publication, using that release commit and artifact manifest:
 python3 scripts/release-artifacts.py registry typescript 0.1.2 .artifacts/typescript

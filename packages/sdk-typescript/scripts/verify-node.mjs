@@ -12,7 +12,7 @@ const [consumer, chatbot] = process.argv.slice(2);
 if (!consumer || !chatbot) throw new Error("Provide consumer and chatbot paths");
 const require = createRequire(join(consumer, "package.json"));
 const installedPackage = JSON.parse(
-  await readFile(join(consumer, "node_modules/@hue/sdk/package.json"), "utf8"),
+  await readFile(join(consumer, "node_modules/@hue-run/sdk/package.json"), "utf8"),
 );
 const protobuf = require("protobufjs/light.js");
 const schema = JSON.parse(
@@ -20,6 +20,7 @@ const schema = JSON.parse(
 );
 const root = protobuf.Root.fromJSON(schema);
 const requests = [];
+const sdkSignals = new Set();
 const server = createServer(async (request, response) => {
   try {
     assert.equal(request.headers.authorization, "Bearer synthetic-node24-key");
@@ -51,8 +52,10 @@ const server = createServer(async (request, response) => {
       ? data.resourceSpans.flatMap((group) => group.scopeSpans)
       : data.resourceLogs.flatMap((group) => group.scopeLogs);
     for (const group of scopes) {
-      if (group.scope?.name === "@hue/sdk")
+      if (group.scope?.name === installedPackage.name) {
         assert.equal(group.scope.version, installedPackage.version);
+        sdkSignals.add(signal);
+      }
     }
     const records =
       signal === "traces"
@@ -98,6 +101,7 @@ try {
     },
   );
   assert.equal(stderr, "");
+  assert.deepEqual(sdkSignals, new Set(["traces", "logs"]), "Both signals identify the installed SDK package");
   const evidence = JSON.parse(stdout);
   for (const run of evidence.evidence) {
     const all = requests

@@ -1,8 +1,8 @@
 import { ToolLoopAgent, isStepCount, tool, type LanguageModel, type ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
-import { hueTelemetry } from "@hue/sdk/ai-sdk";
-import type { HueClient } from "@hue/sdk";
+import { hueTelemetry } from "@hue-run/sdk/ai-sdk";
+import type { HueClient } from "@hue-run/sdk";
 
 export function textStatistics(text: string) {
   return {
