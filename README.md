@@ -28,9 +28,9 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 [Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run) · [Examples](./examples) · [Contributing](./CONTRIBUTING.md)
 
-[![SDK checks](https://github.com/hue-run/sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/sdk/actions/workflows/ci.yml)
+[![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml)
 
-> **Private pilot.** This repository and its release assets require access. The npm and PyPI packages are not publicly published. Install a supplied archive or build from this checkout.
+> npm and PyPI installs are coming soon. During the private pilot, use the release archives below.
 
 ## Choose your SDK
 
@@ -38,6 +38,42 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 | --- | --- | --- | --- |
 | TypeScript / JavaScript | `@hue/sdk`, `@hue/sdk/ai-sdk`, `@hue/sdk/evals` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
 | Python | `hue-sdk`; `hue_sdk`, `hue_sdk.evals` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
+
+## Install
+
+### Registry installs (coming soon)
+
+Python:
+
+```bash
+pip install hue-sdk
+```
+
+TypeScript / JavaScript:
+
+```bash
+npm install @hue/sdk
+```
+
+### From a private GitHub release — available now
+
+Use the GitHub CLI authenticated to an account with access to `hue-run/hue-sdk`. Run the matching commands in your application directory; Python users should activate their Python 3.10+ environment first.
+
+Python:
+
+```bash
+gh release download python-v0.1.0.dev0 --repo hue-run/hue-sdk --pattern 'hue_sdk-0.1.0.dev0-py3-none-any.whl' --dir .hue-sdk/python
+pip install ./.hue-sdk/python/hue_sdk-0.1.0.dev0-py3-none-any.whl
+```
+
+TypeScript / JavaScript:
+
+```bash
+gh release download typescript-v0.1.1 --repo hue-run/hue-sdk --pattern 'hue-sdk-0.1.1.tgz' --dir .hue-sdk/typescript
+npm install ./.hue-sdk/typescript/hue-sdk-0.1.1.tgz @opentelemetry/api@1.9.1
+```
+
+These install the existing [Python](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.0.dev0) and [TypeScript](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.1) pilot assets without cloning the repository. You can also [build from a checkout](#build-and-verify-from-a-standalone-clone).
 
 ## What you can do
 
@@ -51,13 +87,7 @@ Your application runs the model or agent. Instrumentation must emit telemetry; t
 
 ## Send a trace
 
-Install the TypeScript archive supplied for your pilot in your application:
-
-```bash
-npm install ./hue-sdk-0.1.1.tgz @opentelemetry/api@1.9.1
-```
-
-Set `HUE_API_KEY` to a project service key in your server environment. Choose content capture explicitly:
+After installing the TypeScript SDK above, set `HUE_API_KEY` to a project service key in your server environment. Choose content capture explicitly:
 
 ```typescript
 import { createHue } from "@hue/sdk";
@@ -83,7 +113,7 @@ try {
 
 The default destination is `https://app.hue.run`. Metadata-only mode omits the input/output text above. The tracing guide covers capture, redaction, borrowed providers, streaming and shutdown.
 
-For Python, install the built wheel and follow the [complete Python example](./packages/sdk-python/README.md).
+For Python, use the installation instructions above and follow the [complete Python example](./packages/sdk-python/README.md).
 
 ## Try the examples
 
