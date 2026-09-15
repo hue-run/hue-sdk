@@ -1,6 +1,6 @@
 # Compatibility
 
-This matrix describes the private pilot releases: TypeScript `0.1.1` and Python `0.1.0.dev0`. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This matrix describes TypeScript `0.1.2` and Python `0.1.0`. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -33,6 +33,6 @@ Neither SDK estimates unavailable token usage or cost. Queues are bounded and in
 
 Both SDKs support dataset/scorer creation, frozen versions, local experiments, built-in/custom scorers, resumable result uploads and historical rescoring. Hosted judge job/budget methods are available, but credential resolution is not proof of a successful provider call. Activation belongs to the platform environment.
 
-The clients do not yet expose every platform REST operation. Dataset editing/archival, case replacement/deletion, promotion from a trace, copying published scorers, experiment/run listing and frozen-trace snapshot reads are not convenience methods in the pilot clients. There is no general service-key trace-search client. Open pull requests are not released functionality.
+The clients do not yet expose every platform REST operation. Dataset editing/archival, case replacement/deletion, promotion from a trace, copying published scorers, experiment/run listing and frozen-trace snapshot reads are not convenience methods in these clients. There is no general service-key trace-search client. Open pull requests are not released functionality.
 
 API responses are limited to 4 MiB by the clients. Full dataset pages can exceed this limit when cases contain large values. Use smaller explicit page limits when listing full cases; the local experiment runner separately reads summaries and individual cases. A response-size failure does not establish that the server rejected the request.

@@ -7,14 +7,14 @@ import os
 from hue_sdk import Hue
 from hue_sdk.evals import EvaluationClient, TraceEvidence, run_experiment
 
-client = EvaluationClient(os.environ["HUE_BASE_URL"], os.environ["HUE_API_KEY"])
+client = EvaluationClient(api_key=os.environ["HUE_API_KEY"])
 
 def target(inputs, context):
     # Call your application here. context.config is the frozen experiment config;
     # context.item contains the frozen case and context.span is an ordinary Hue span helper.
     return inputs["question"].upper()
 
-with Hue(os.environ["HUE_BASE_URL"], os.environ["HUE_API_KEY"], capture_content=False) as hue:
+with Hue(api_key=os.environ["HUE_API_KEY"], capture_content=False) as hue:
     report = run_experiment(
         client=client, hue=hue, experiment_id=os.environ["HUE_EXPERIMENT_ID"],
         target=target, checkpoint_directory=".local/my-evaluation",
@@ -24,11 +24,11 @@ with Hue(os.environ["HUE_BASE_URL"], os.environ["HUE_API_KEY"], capture_content=
     print(report.run_id)
 ```
 
-The [standalone example](https://github.com/hue-run/hue-sdk/tree/main/examples/python-evaluation) also creates the dataset/scorers and compares two complete configurations using only an installed wheel.
+The [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) covers creating datasets and scorers before running an experiment.
 
 ## Client and definitions
 
-`EvaluationClient(base_url, api_key, timeout_seconds=10)` uses the same project service key as telemetry. Its methods cover dataset creation/versioning/cases/freezing, scorer creation/publication, experiment creation/start/completion/finish, evaluation runs/subjects/results, and hosted judge job submission/list/get/cancel/budget reads. Python method arguments use snake_case; response dictionaries and `complete_execution` payloads retain the documented HTTP camelCase fields. Reads are paged with `after`/`limit`. Mutations never retry implicitly: retain their `idempotency_key` when retrying an experiment or result write. HTTP failures expose only status, with no server body, key or content in the error.
+`EvaluationClient(api_key=..., timeout_seconds=10)` uses the same project service key as telemetry and defaults to `https://app.hue.run`. Set `base_url` to override the origin for another Hue deployment; `EvaluationClient(base_url, api_key)` remains supported. Its methods cover dataset creation/versioning/cases/freezing, scorer creation/publication, experiment creation/start/completion/finish, evaluation runs/subjects/results, and hosted judge job submission/list/get/cancel/budget reads. Python method arguments use snake_case; response dictionaries and `complete_execution` payloads retain the documented HTTP camelCase fields. Reads are paged with `after`/`limit`. Mutations never retry implicitly: retain their `idempotency_key` when retrying an experiment or result write. HTTP failures expose only status, with no server body, key or content in the error.
 
 `builtins.exact_match()`, `builtins.includes(case_sensitive=True)` and `builtins.json_schema(schema)` return publishable declarations. Exact match preserves JSON types (`False` differs from `0`), object key order is irrelevant, and equivalent JSON numbers compare equally. Missing output/reference produces a skipped score, never zero. `None` is present JSON null; the exported `MISSING` sentinel represents intentional absence.
 

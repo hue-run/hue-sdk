@@ -6,24 +6,17 @@ traces and correlated logs. The package is named `@hue/sdk`.
 
 ## Install
 
-> npm installs are coming soon. During the private pilot, use the release archive below.
-
-### Registry install (coming soon)
-
 ```bash
 npm install @hue/sdk
 ```
 
-### Private release (available now)
-
-Use the GitHub CLI authenticated to an account with access to `hue-run/hue-sdk`:
+Or with Bun:
 
 ```bash
-gh release download typescript-v0.1.1 --repo hue-run/hue-sdk --pattern 'hue-sdk-0.1.1.tgz' --dir .hue-sdk/typescript
-npm install ./.hue-sdk/typescript/hue-sdk-0.1.1.tgz @opentelemetry/api@1.9.1
+bun add @hue/sdk
 ```
 
-Run these commands in your application directory. The [release guide](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md#public-release) tracks registry ownership and publication; the GitHub repository can remain private.
+Run the command in your application's server package. See the [compatibility guide](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies.
 
 ## Start
 
@@ -34,7 +27,6 @@ const hue = createHue({
   apiKey: process.env.HUE_API_KEY!, // a project service key, on the server only
   serviceName: "my-agent",
   captureContent: false, // required: explicitly choose true or false
-  // baseUrl: "http://localhost:3000", // default: https://app.hue.run
   onExportIssue: (issue) => console.error(issue), // sanitized counts, never server bodies
 });
 
@@ -57,8 +49,9 @@ try {
 await hue.shutdown(); // flushes and releases providers owned by this client
 ```
 
-Data goes to `/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` with a Bearer project
-key. `baseUrl` must be an origin without an API path; a trailing slash is accepted.
+The default destination is `https://app.hue.run`. Data goes to
+`/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` with a Bearer project key.
+Set `baseUrl` only for another Hue deployment. It must be an origin without an API path; a trailing slash is accepted.
 HTTPS is required except for loopback HTTP. Redirects are refused for both
 project checks and exports. There is no proprietary tracing protocol, lab API
 wrapper, database dependency, or dependency on the Hue application workspace.
