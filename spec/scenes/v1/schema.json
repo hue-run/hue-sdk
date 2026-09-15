@@ -493,6 +493,90 @@
         "requestKey",
         "at",
         "replayable"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "start"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "arguments"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "outcome"
+                  ]
+                },
+                {
+                  "required": [
+                    "result"
+                  ]
+                },
+                {
+                  "required": [
+                    "error"
+                  ]
+                },
+                {
+                  "required": [
+                    "sources"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "finish"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "outcome"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "outcome": {
+                      "const": "success"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "result"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "outcome": {
+                      "const": "error"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            ]
+          }
+        }
       ]
     },
     "producer": {
