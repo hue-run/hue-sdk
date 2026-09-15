@@ -776,3 +776,128 @@ test("native generator next/return/throw methods remain available and bidirectio
   expect(capture.client.reserve(64 * 1024 * 1024)).toBe(true);
   capture.client.release(64 * 1024 * 1024);
 });
+
+test("tool, AI and MCP contract mismatches miss without selected live execution", async () => {
+  const host = new Hosted(),
+    capture = await host.capture();
+  let live = 0;
+  const source = wrapTool("docs", "search", (x: unknown) => {
+    live++;
+    return x;
+  });
+  capture.run(() => source({ q: "known" }));
+  const p = await frozen(host, capture);
+  const changed = wrapTool(
+    "docs",
+    "search",
+    (x: unknown) => {
+      live++;
+      return x;
+    },
+    undefined,
+    { contractVersion: "2" },
+  );
+  const tools = wrapAiTools(
+    "docs",
+    {
+      search: {
+        execute: async (_: unknown) => {
+          live++;
+          return 7;
+        },
+      },
+    },
+    { contractVersion: "2" },
+  );
+  const mcp = wrapMcpClient(
+    "docs",
+    {
+      async callTool(_: unknown) {
+        live++;
+        return { content: [] };
+      },
+    },
+    { contractVersion: "2" },
+  );
+  await p.run(async () => {
+    reason(() => changed({ q: "known" }), "incompatible");
+    await expect(tools.search.execute({ q: "known" })).rejects.toMatchObject({
+      reason: "incompatible",
+    });
+    await expect(
+      mcp.callTool({ name: "search", arguments: { q: "known" } }),
+    ).rejects.toMatchObject({ reason: "incompatible" });
+  });
+  expect(live).toBe(1);
+  expect(p.events.every((e) => e.reason === "incompatible")).toBe(true);
+});
+
+test("removing URL credentials preserves query spelling and duplicate ordering", async () => {
+  const host = new Hosted(),
+    capture = await host.capture();
+  const source = wrapTool("docs", "search", (_: unknown) => "source");
+  capture.run(() =>
+    source({
+      url: "https://source.test/files?q=a%20b&q=~&token=secret&last=%2f",
+    }),
+  );
+  await capture.flush();
+  const args = host.observations[0].arguments;
+  expect(args).toEqual({
+    kind: "json",
+    value: { url: "https://source.test/files?q=a%20b&q=~&last=%2f" },
+  });
+  const p = await frozen(host, capture);
+  expect(
+    p.run(() =>
+      source({
+        url: "https://source.test/files?q=a%20b&q=~&token=new&last=%2f",
+      }),
+    ),
+  ).toBe("source");
+});
+
+test("stream item metadata is bounded even for absent zero-byte values", async () => {
+  const host = new Hosted(),
+    capture = await host.capture();
+  const source = wrapTool("docs", "search", async function* () {
+    for (let n = 0; n < 2001; n++) yield undefined;
+  });
+  await capture.run(async () => {
+    for await (const _ of source()) {
+    }
+  });
+  const p = await frozen(host, capture);
+  p.run(() => reason(() => source(), "incomplete"));
+  expect(capture.client.reserve(64 * 1024 * 1024)).toBe(true);
+  capture.client.release(64 * 1024 * 1024);
+});
+
+test("replay reporting exposes failures and retries completion with a stable key", async () => {
+  const host = new Hosted();
+  let reject = true;
+  const completions: string[] = [];
+  const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith("/scene-replays/replay/complete")) {
+      completions.push(String(init?.body));
+      if (reject) {
+        reject = false;
+        return new Response(null, { status: 503 });
+      }
+    }
+    return host.fetch(input, init);
+  }) as unknown as typeof fetch;
+  const capture = await CaptureSession.create(host.client({ fetch: fetcher }), {
+    bindings: [binding],
+    externalTraceId: "1".repeat(32),
+  });
+  const source = wrapTool("docs", "search", () => 1);
+  capture.run(() => source());
+  const p = await frozen(host, capture);
+  p.run(() => source());
+  await expect(p.complete()).rejects.toThrow();
+  expect(p.diagnostics.deliveryOk).toBe(false);
+  await p.complete();
+  expect(completions[0]).toBe(completions[1]);
+  expect(p.diagnostics.deliveryOk).toBe(true);
+});

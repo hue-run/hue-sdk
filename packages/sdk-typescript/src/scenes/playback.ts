@@ -37,6 +37,19 @@ export class Playback implements SceneRuntime {
   private ambiguous = new Set<string>();
   private selectedIds: Set<string>;
   private eventSequence = 0;
+  private droppedEvents = 0;
+  private reportingFailed = false;
+  private completionBody?: {
+    idempotencyKey: string;
+    state: string;
+    endedAt: string;
+  };
+  get diagnostics() {
+    return {
+      droppedEvents: this.droppedEvents,
+      deliveryOk: this.droppedEvents === 0 && !this.reportingFailed,
+    };
+  }
   private reported = 0;
   private completion?: Promise<unknown>;
   private flushing?: Promise<void>;
@@ -74,6 +87,8 @@ export class Playback implements SceneRuntime {
   ): Promise<Playback> {
     manifest = verifyManifest(manifest, sha256(canonical(manifest)));
     if (
+      !selected.length ||
+      externalTraceId === manifest.externalTraceId ||
       new Set(selected).size !== selected.length ||
       selected.some((id) => !manifest.bindings.some((b) => b.id === id))
     )
@@ -98,6 +113,21 @@ export class Playback implements SceneRuntime {
       map.set(o.callId, o);
     }
     const selections = new Set(selected);
+    const http = manifest.bindings.filter(
+      (b) => selections.has(b.id) && b.http,
+    );
+    for (let i = 0; i < http.length; i++)
+      for (let j = i + 1; j < http.length; j++) {
+        const a = http[i].http!,
+          b = http[j].http!;
+        if (
+          a.origin === b.origin &&
+          (a.pathPrefix.startsWith(b.pathPrefix) ||
+            b.pathPrefix.startsWith(a.pathPrefix))
+        )
+          throw new SnapshotMissError("overlapping_bindings");
+      }
+
     for (const s of starts.values()) {
       if (!selections.has(s.bindingId)) continue;
       let p = s.parentCallId;
@@ -281,6 +311,7 @@ export class Playback implements SceneRuntime {
     reason?: string,
   ) {
     if (this.events.length >= 4000) {
+      this.droppedEvents++;
       this.client.issue("replay_event_limit");
       return;
     }
@@ -298,9 +329,19 @@ export class Playback implements SceneRuntime {
   }
   flush(): Promise<void> {
     if (this.flushing) return this.flushing;
-    this.flushing = this.flushEvents().finally(() => {
-      this.flushing = undefined;
-    });
+    this.flushing = this.flushEvents()
+      .then(
+        () => {
+          this.reportingFailed = false;
+        },
+        (error) => {
+          this.reportingFailed = true;
+          throw error;
+        },
+      )
+      .finally(() => {
+        this.flushing = undefined;
+      });
     return this.flushing;
   }
   private async flushEvents() {
@@ -318,18 +359,25 @@ export class Playback implements SceneRuntime {
     state: "completed" | "failed" | "interrupted" = "completed",
   ): Promise<unknown> {
     if (this.completion) return this.completion;
+    this.completionBody ??= {
+      idempotencyKey: randomUUID(),
+      state,
+      endedAt: new Date().toISOString(),
+    };
     this.completion = (async () => {
       await this.flush();
-      return this.client.request(
+      const result = await this.client.request(
         "POST",
         `/scene-replays/${encodeURIComponent(this.replayId)}/complete`,
-        {
-          idempotencyKey: randomUUID(),
-          state,
-          endedAt: new Date().toISOString(),
-        },
+        this.completionBody,
       );
-    })();
+      this.reportingFailed = false;
+      return result;
+    })().catch((error) => {
+      this.reportingFailed = true;
+      this.completion = undefined;
+      throw error;
+    });
     return this.completion;
   }
 }

@@ -185,11 +185,22 @@ export function sanitize(value: unknown): {
 }
 export function cleanUrl(value: string): string {
   const u = new URL(value);
-  if (u.username || u.password)
-    throw new TypeError("URL credentials unsupported");
+  u.username = "";
+  u.password = "";
   u.hash = "";
-  for (const k of [...u.searchParams.keys()])
-    if (isSecret(k)) u.searchParams.delete(k);
+  // Do not use URLSearchParams.delete: it re-encodes every remaining pair (%20 becomes +).
+  const pairs = u.search
+    .slice(1)
+    .split("&")
+    .filter((pair) => {
+      const rawName = pair.split("=", 1)[0];
+      let name = rawName;
+      try {
+        name = decodeURIComponent(rawName.replace(/\+/g, " "));
+      } catch {}
+      return !isSecret(name);
+    });
+  u.search = pairs.join("&");
   return u.href;
 }
 export function cleanHeaders(
@@ -243,6 +254,18 @@ export function validateBindings(bindings: Binding[]): Binding[] {
   }
   if (new Set(result.map((b) => b.id)).size !== result.length)
     throw new TypeError("Duplicate binding");
+  const http = result.filter((b) => b.http);
+  for (let i = 0; i < http.length; i++)
+    for (let j = i + 1; j < http.length; j++) {
+      const a = http[i].http!,
+        b = http[j].http!;
+      if (
+        a.origin === b.origin &&
+        (a.pathPrefix.startsWith(b.pathPrefix) ||
+          b.pathPrefix.startsWith(a.pathPrefix))
+      )
+        throw new TypeError("HTTP source scopes overlap");
+    }
   return result;
 }
 

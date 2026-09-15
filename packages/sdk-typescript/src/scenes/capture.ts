@@ -390,6 +390,7 @@ export class CaptureSession implements SceneRuntime {
                   }
                   const added = valueSize(item);
                   if (
+                    items.length >= 2000 ||
                     size + added > ARTIFACT_BYTES ||
                     !self.client.reserve(added)
                   )

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Binding } from "./types.js";
+import { SnapshotMissError } from "./portable.js";
+import type { Binding, MissReason } from "./types.js";
 export interface SceneRuntime {
   readonly mode: "capture" | "playback";
   readonly bindings: Binding[];
@@ -10,6 +11,12 @@ export interface SceneRuntime {
     execute: () => T,
   ): T;
   selected(bindingId: string): boolean;
+  reject?(
+    bindingId: string,
+    operation: string,
+    args: unknown,
+    reason: MissReason,
+  ): never;
 }
 export const sceneContext = new AsyncLocalStorage<{
   runtime: SceneRuntime;
@@ -17,6 +24,7 @@ export const sceneContext = new AsyncLocalStorage<{
   suppressed?: boolean;
 }>();
 export interface ToolOptions {
+  contractVersion?: string;
   resultMode?: "sync" | "promise" | "asyncIterable";
 }
 export function wrapTool<A extends unknown[], R>(
@@ -43,6 +51,20 @@ export function wrapTool<A extends unknown[], R>(
             : args;
       } catch {
         requestArguments = Symbol("unsupported arguments");
+      }
+      const binding = active.runtime.bindings.find((b) => b.id === bindingId);
+      if (binding?.contractVersion !== (options.contractVersion ?? "1")) {
+        if (active.runtime.mode === "playback") {
+          if (active.runtime.reject)
+            active.runtime.reject(
+              bindingId,
+              operation,
+              requestArguments,
+              "incompatible",
+            );
+          throw new SnapshotMissError("incompatible", bindingId, operation);
+        }
+        requestArguments = Symbol("incompatible contract");
       }
       return active.runtime.invoke(bindingId, operation, requestArguments, () =>
         execute.apply(this, args),

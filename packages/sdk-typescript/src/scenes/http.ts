@@ -31,6 +31,7 @@ export function httpBinding(
   const u = new URL(url);
   const bindings = runtime.bindings.filter(
     (b) =>
+      runtime.selected(b.id) &&
       b.kind === "http" &&
       b.http?.origin === u.origin &&
       u.pathname.startsWith(b.http.pathPrefix),
@@ -123,6 +124,7 @@ export class HttpCapture {
       const bytes = new Uint8Array(Buffer.concat(this.chunks));
       if (
         this.eligible &&
+        bytes.length > 0 &&
         /\b(?:application\/json|[^;]+\+json)\b/i.test(
           this.metadata.headers["content-type"] ?? "",
         )

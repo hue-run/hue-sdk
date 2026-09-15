@@ -1,8 +1,9 @@
-import { wrapTool } from "./context.js";
+import { wrapTool, type ToolOptions } from "./context.js";
 /** Wrap only explicitly registered source tools. Model calls and transforms remain untouched. */
 export function wrapAiTools<T extends Record<string, unknown>>(
   bindingId: string,
   tools: T,
+  options: Pick<ToolOptions, "contractVersion"> = {},
 ): T {
   return Object.fromEntries(
     Object.entries(tools).map(([name, tool]) => {
@@ -22,6 +23,7 @@ export function wrapAiTools<T extends Record<string, unknown>>(
             name,
             tool.execute as (...args: unknown[]) => unknown,
             (input) => input,
+            options,
           ),
         },
       ];
@@ -66,6 +68,7 @@ const mcpMethods: Record<
 export function wrapMcpClient<T extends object>(
   bindingId: string,
   client: T,
+  options: Pick<ToolOptions, "contractVersion"> = {},
 ): T {
   return new Proxy(client, {
     get(target, key) {
@@ -80,7 +83,7 @@ export function wrapMcpClient<T extends object>(
           call.operation,
           () => value.apply(target, args),
           () => call.arguments,
-          { resultMode: "promise" },
+          { ...options, resultMode: "promise" },
         )();
       };
     },
