@@ -57,8 +57,10 @@ Then ask your coding agent:
 
 ```text
 Use the Hue skill to add tracing to this application. Preserve its behavior and
-existing telemetry, start with metadata-only capture, and verify delivery.
-Tell me what you changed, tested, and still need me to configure.
+existing telemetry. Enable full-fidelity capture of supported prompts, responses,
+tool inputs/outputs, and available model, token usage, timing, error, and session data.
+Preserve redaction and explicit capture restrictions. Run checks and verify the
+captured trace in Hue. Tell me what you changed and still need me to configure.
 ```
 
 You configure your project service key through your application's secret workflow; do not paste it into the agent chat. The skill can prepare and locally test the integration before the key is available. See [For agents](https://docs.hue.run/guides/agent-setup) for the documentation handoff.
