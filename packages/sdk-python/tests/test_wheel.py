@@ -140,3 +140,38 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
         capture_output=True,
         text=True,
     )
+
+
+def test_installed_wheel_managed_target_boundaries(tmp_path):
+    package = Path(__file__).resolve().parents[1]
+    dist = tmp_path / "dist"
+    consumer = tmp_path / "consumer"
+    for command in (
+        [sys.executable, "-m", "build", "--no-isolation", str(package), "--outdir", str(dist)],
+        ["uv", "venv", str(consumer), "--python", sys.executable],
+    ):
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    python = consumer / "bin" / "python"
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            str(next(dist.glob("*.whl"))),
+            "pytest>=8.3,<10",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    shutil.copyfile(package / "tests/test_managed.py", tmp_path / "test_managed.py")
+    subprocess.run(
+        [str(python), "-m", "pytest", "-q", "test_managed.py"],
+        env={"PATH": os.environ["PATH"], "PYTHONNOUSERSITE": "1"},
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

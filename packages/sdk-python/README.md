@@ -129,3 +129,36 @@ that implements `/api/v1/traces/{traceId}/receipt`.
 Python 3.10+ is supported. CI tests Python 3.10 and 3.14, source imports and an independently installed wheel. Tests use synthetic loopback HTTP receivers and decode official OTLP protobuf messages to verify trace/log correlation, metadata-only capture, redaction, propagation, existing-provider ownership, authentication failures, redirects, partial rejection, retries and encoded request limits. Compatibility tests also exercise local evaluations and the optional OpenInference adapter. No live model provider is required for these checks.
 
 See the [documentation](https://docs.hue.run/sdks/python) for integration guidance and [troubleshooting](https://docs.hue.run/guides/troubleshooting) for export failures.
+
+## Managed targets
+
+Start a frozen dataset run in Hue while your existing agent stays in your application:
+
+```python
+import os
+from hue_sdk.managed import ManagedTargetHandler, ManagedTargetResult
+
+def target(invocation):
+    # Your function consumes unchanged inputs and verified attachment bytes.
+    result = run_agent_for_evaluation(invocation)
+    return ManagedTargetResult(output=result)
+
+handler = ManagedTargetHandler(
+    machine_credential=os.environ["HUE_MANAGED_TARGET_SECRET"],
+    target=target,
+    flush_telemetry=hue.force_flush,  # Existing client; False keeps telemetry pending.
+)
+```
+
+Your POST route calls `handler.handle(raw_body_bytes, request_headers)` and returns
+its JSON body, status code and headers. Limit request bodies to 1 MiB; use
+`asyncio.to_thread` from an async route. The target must honor `cancelled` and
+`deadline_monotonic`. Use a 120-second host limit for the default 90-second callback
+and 30-second finalization budget.
+
+For generated files, return `ManagedOutputFile` entries containing actual bytes,
+filename, content type and an optional primary flag. The helper claims the
+invocation, verifies files and saves the outcome without automatically rerunning
+the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs)
+and [full adapter contract](MANAGED_TARGETS.md) for registration, existing-provider
+flush callbacks and recovery. Local/CI runners remain available.

@@ -227,3 +227,31 @@ published. The chatbot README describes running that external installation.
 # Local evaluation workflows
 
 The optional `@hue-run/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.
+
+## Managed targets
+
+Start a frozen dataset run in Hue while your agent stays in your application. Expose a
+protected POST route around your existing function:
+
+```ts
+import { createManagedTargetHandler } from "@hue-run/sdk/managed";
+
+export const POST = createManagedTargetHandler({
+  machineCredential: process.env.HUE_MANAGED_TARGET_SECRET!,
+  // Application-owned functions: keep your current provider, tools and tracing.
+  target: async ({ input, config, inputFiles, signal }) =>
+    runAgentForEvaluation({ input, config, inputFiles, signal }),
+  flushTelemetry: () => hue.flush(), // Existing Hue client; flush traces and logs.
+});
+```
+
+`runAgentForEvaluation` adapts your application result to `{ output, files? }`.
+Files contain `filename`, `contentType`, actual `Uint8Array` data and an optional
+`primary` flag. The helper verifies input bytes, claims the invocation, saves the
+outcome and correlates its span with Hue. It never retries the agent automatically.
+Use a 120-second host request limit for the default 90-second execution and
+30-second finalization budget; your target must honor `signal`.
+
+See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs) and the
+[full adapter contract](MANAGED_TARGETS.md) for registration, file handling,
+existing-provider flush callbacks and recovery. Local/CI runners remain available.
