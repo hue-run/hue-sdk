@@ -281,13 +281,13 @@ class ManagedTargetHandler:
                             file.data,
                             _MIB,
                             final_end,
-                            retry=True,
+                            retry=False,
                             upload=True,
                             upload_headers=upload_headers,
                         )
                     except Exception:
-                        # Lost successful PUTs can replay as 409. Completion verifies
-                        # the stored length/hash and resolves upload uncertainty.
+                        # Never replay a signed write. Completion verifies the
+                        # stored length/hash and resolves upload uncertainty.
                         pass
                     api.json(f"/files/{artifact_id}/complete", {}, final_end, retry=True)
                 artifact_ids.append(artifact_id)

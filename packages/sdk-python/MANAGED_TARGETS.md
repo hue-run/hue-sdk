@@ -75,7 +75,10 @@ and logs and checkpoints a telemetry acknowledgement. HTTP 200 returns
 A failed flush or lost acknowledgement preserves the saved outcome as telemetry
 pending. Hue independently verifies evidence before completing the experiment.
 
-Identical idempotent uploads/checkpoints retry at most once within the deadline.
+Signed file PUTs make one attempt and never follow redirects. If their acknowledgement
+is lost, Hue's completion callback verifies the stored bytes before accepting the file.
+Identical idempotent reservation/completion/checkpoint/telemetry callbacks retry at most
+once within the deadline.
 The agent never retries automatically. HTTP 503 `uncertain` means inspect Hue's
 saved execution before explicitly authorizing another attempt. The helper does
 not promise exactly-once execution across crashes or resume a lost callback.

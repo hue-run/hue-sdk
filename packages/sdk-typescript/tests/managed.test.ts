@@ -44,7 +44,9 @@ async function fixture() {
   let claimCalls = 0;
   let hook: ((path: string) => number | "disconnect" | "hang" | undefined) | undefined;
   let ready = false;
-  let uploadHeaders: Record<string, string> = { "x-vercel-blob-access": "private" };
+  let uploadHeaders: Record<string, string> | null = { "x-vercel-blob-access": "private" };
+  let uploadUrl: string | undefined;
+  let uploaded: Buffer | undefined;
   let baseUrl = "";
   const server = createServer(async (req, res) => {
     const chunks = [];
@@ -52,6 +54,7 @@ async function fixture() {
     const body = Buffer.concat(chunks);
     const path = req.url!;
     requests.push({ path, authorization: req.headers.authorization, body });
+    if (path === "/upload" || path.startsWith("/upload?")) uploaded = body;
     const injected = hook?.(path);
     if (injected === "disconnect") {
       req.socket.destroy();
@@ -79,10 +82,17 @@ async function fixture() {
         JSON.stringify(
           ready
             ? { artifactId: fileId, state: "ready" }
-            : { artifactId: fileId, uploadUrl: `${baseUrl}/upload`, headers: uploadHeaders },
+            : {
+                artifactId: fileId,
+                uploadUrl: uploadUrl ?? `${baseUrl}/upload`,
+                headers: uploadHeaders,
+              },
         ),
       );
-    else if (path.endsWith("/outcome")) {
+    else if (path.endsWith("/complete") && (!uploaded || !uploaded.equals(bytes))) {
+      res.writeHead(409);
+      res.end("{}");
+    } else if (path.endsWith("/outcome")) {
       outcomeCalls++;
       outcomes.push(JSON.parse(body.toString()));
       res.end("{}");
@@ -135,6 +145,9 @@ async function fixture() {
     },
     setUploadHeaders: (value: typeof uploadHeaders) => {
       uploadHeaders = value;
+    },
+    setUploadUrl: (value: string) => {
+      uploadUrl = value;
     },
     calls: () => ({ targetCalls, claimCalls, outcomeCalls }),
   };
@@ -409,5 +422,64 @@ describe("managed target protocol", () => {
     expect((await createManagedTargetHandler(f.options)(f.request())).status).toBe(200);
     expect(f.requests.some((r) => r.path.endsWith("/complete"))).toBe(true);
     expect(f.outcomes[0]).toMatchObject({ state: "succeeded", primaryArtifactId: fileId });
+  });
+  test.each(["disconnect", 500, 421] as const)(
+    "lost upload acknowledgement %s never replays a PUT",
+    async (failure) => {
+      const f = await fixture();
+      f.setHook((path) => (path === "/upload" ? failure : undefined));
+      expect((await createManagedTargetHandler(f.options)(f.request())).status).toBe(200);
+      expect(f.requests.filter((r) => r.path === "/upload")).toHaveLength(1);
+      expect(f.outcomes[0]).toMatchObject({ state: "succeeded", artifactIds: [fileId] });
+      expect(f.calls().targetCalls).toBe(1);
+    },
+  );
+  test("failed authoritative verification records upload failure without replaying the target or PUT", async () => {
+    const f = await fixture();
+    f.setHook((path) =>
+      path === "/upload" ? "disconnect" : path.endsWith("/complete") ? 409 : undefined,
+    );
+    expect((await createManagedTargetHandler(f.options)(f.request())).status).toBe(200);
+    expect(f.requests.filter((r) => r.path === "/upload")).toHaveLength(1);
+    expect(f.outcomes[0]).toMatchObject({
+      state: "error",
+      artifactIds: [],
+      error: { type: "artifact_upload_failed" },
+    });
+    expect(f.calls().targetCalls).toBe(1);
+  });
+  test("null upload headers use content type only", async () => {
+    const f = await fixture();
+    f.setUploadHeaders(null);
+    expect((await createManagedTargetHandler(f.options)(f.request())).status).toBe(200);
+    expect(f.requests.find((r) => r.path === "/upload")).toMatchObject({
+      authorization: undefined,
+      body: bytes,
+    });
+    expect(f.outcomes[0].state).toBe("succeeded");
+  });
+  test("the finalization deadline bounds a hanging upload response without replay", async () => {
+    const f = await fixture();
+    f.options.maxExecutionMillis = 100;
+    f.options.finalizationMillis = 30;
+    f.setHook((path) => (path === "/upload" ? "hang" : undefined));
+    const started = Date.now();
+    const response = await createManagedTargetHandler(f.options)(f.request());
+    expect(response.status).toBe(503);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(f.requests.filter((r) => r.path === "/upload")).toHaveLength(1);
+    expect(f.outcomes).toHaveLength(0);
+  });
+  test("preserves signed query bytes on the actual PUT request", async () => {
+    const f = await fixture();
+    const path = "/upload?signature=A%2fb+%2B&empty=&duplicate=x&duplicate=y";
+    const signed = `${f.options.baseUrl}${path}`;
+    f.setUploadUrl(signed);
+    expect((await createManagedTargetHandler(f.options)(f.request())).status).toBe(200);
+    expect(f.outcomes[0].state).toBe("succeeded");
+    expect(f.requests.find((r) => r.path === path)).toMatchObject({
+      authorization: undefined,
+      body: bytes,
+    });
   });
 });

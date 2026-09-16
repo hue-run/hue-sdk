@@ -70,8 +70,10 @@ At most one file can be primary. Files are limited to 16, 25 MiB each and 64 MiB
 total; input/output JSON and HTTP envelopes also have bounded sizes. Error text
 is caller-owned public content: never return raw provider exceptions or secrets.
 
-Only identical idempotent upload/checkpoint/telemetry requests retry, at most once
-within the finalization deadline. The helper never retries the agent, automatically
+Signed file PUTs make one attempt and never follow redirects. If their acknowledgement
+is lost, Hue's completion callback verifies the stored bytes before accepting the file.
+Only identical idempotent reservation/completion/checkpoint/telemetry callbacks retry,
+at most once within the finalization deadline. The helper never retries the agent, automatically
 resumes a lost callback, or claims exactly-once execution across crashes. After
 transport loss or a callback deadline, inspect the saved execution in Hue. An
 explicitly authorized new attempt is a separate execution decision.

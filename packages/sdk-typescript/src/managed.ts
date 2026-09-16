@@ -1,4 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { context, ROOT_CONTEXT, SpanStatusCode, trace, type Tracer } from "@opentelemetry/api";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { validateOptions } from "./config.js";
@@ -228,8 +230,8 @@ export function createManagedTargetHandler(
         if (reserved.state !== "ready") {
           const uploadUrl = safeUploadUrl(reserved.uploadUrl);
           const headers = uploadHeaders(reserved.headers, file.contentType);
-          // A lost successful PUT may replay as 409 in immutable storage. Completion
-          // independently verifies the stored hash, so it resolves that uncertainty.
+          // Never replay a signed write. Completion independently verifies the
+          // stored hash, so it can settle a lost successful acknowledgement.
           try {
             await api.upload(uploadUrl, file.data, headers, finalEnd);
           } catch {
@@ -353,13 +355,58 @@ class InvocationApi {
     );
   }
   async upload(url: string, data: Uint8Array, headers: Record<string, string>, deadline: number) {
-    await this.request(
-      url,
-      { method: "PUT", headers, body: Buffer.from(data) },
-      MIB,
-      deadline,
-      true,
-    );
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("deadline");
+    const signal = AbortSignal.timeout(remaining);
+    await new Promise<void>((resolve, reject) => {
+      let activeResponse: import("node:http").IncomingMessage | undefined;
+      const finish = (error?: Error) => {
+        signal.removeEventListener("abort", abort);
+        if (error) reject(error);
+        else resolve();
+      };
+      const abort = () => {
+        activeResponse?.destroy();
+        request.destroy();
+        finish(new Error("Hue managed upload failed"));
+      };
+      // Signed writes must not be replayed by fetch, redirect handling or a
+      // reused-socket retry. A lost response is settled by Hue's verified read.
+      const request = (new URL(url).protocol === "https:" ? httpsRequest : httpRequest)(
+        url,
+        {
+          method: "PUT",
+          agent: false,
+          signal,
+          maxHeaderSize: 16 * 1024,
+          headers: { ...headers, "content-length": String(data.byteLength) },
+        },
+        (response) => {
+          activeResponse = response;
+          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+            response.destroy();
+            finish(new Error("Hue managed upload failed"));
+            return;
+          }
+          void (async () => {
+            let length = 0;
+            for await (const chunk of response) {
+              signal.throwIfAborted();
+              length += Buffer.byteLength(chunk);
+              if (length > MIB) throw new Error("Upload response too large");
+            }
+            signal.throwIfAborted();
+            finish();
+          })().catch(() => {
+            response.destroy();
+            finish(new Error("Hue managed upload failed"));
+          });
+        },
+      );
+      request.once("error", () => finish(new Error("Hue managed upload failed")));
+      signal.addEventListener("abort", abort, { once: true });
+      request.end(Buffer.from(data));
+    });
   }
   private async request(
     url: string,
@@ -538,7 +585,8 @@ function validateResult(result: ManagedTargetResult) {
   if (total > MAX_TOTAL || primary > 1) throw new TypeError("Invalid output files");
 }
 function safeUploadUrl(value: unknown): string {
-  if (typeof value !== "string" || value.length > 8192) throw new TypeError("Invalid upload URL");
+  if (typeof value !== "string" || value.length > 8192 || /[\x00-\x20\x7f]/u.test(value))
+    throw new TypeError("Invalid upload URL");
   const url = new URL(value);
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (
@@ -548,11 +596,12 @@ function safeUploadUrl(value: unknown): string {
     url.hash
   )
     throw new TypeError("Invalid upload URL");
-  return url.href;
+  // Validate without rewriting the provider's signed capability.
+  return value;
 }
 function uploadHeaders(value: unknown, contentType: string): Record<string, string> {
   const headers: Record<string, string> = { "content-type": contentType };
-  if (value === undefined) return headers;
+  if (value === undefined || value === null) return headers;
   for (const [name, raw] of Object.entries(object(value))) {
     const lower = name.toLowerCase();
     const value = shortString(raw);

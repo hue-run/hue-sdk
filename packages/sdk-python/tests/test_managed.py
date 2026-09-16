@@ -63,6 +63,7 @@ def managed():
             self.claimed = False
             self.target_calls = 0
             self.ready = False
+            self.uploaded = None
             self.upload_headers = {"x-vercel-blob-access": "private"}
             self.hook = lambda _path: None
             self.exporter = InMemorySpanExporter()
@@ -117,6 +118,8 @@ def managed():
         def answer(self):
             data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             fixture.requests.append((self.path, self.headers.get("Authorization"), data))
+            if self.path == "/upload":
+                fixture.uploaded = data
             injected = fixture.hook(self.path)
             if injected == "disconnect":
                 self.close_connection = True
@@ -143,6 +146,10 @@ def managed():
                         "headers": fixture.upload_headers,
                     }
                 ).encode()
+            elif self.path.endswith("/complete") and fixture.uploaded != DATA:
+                self.send_response(409)
+                self.end_headers()
+                return
             elif self.path.endswith("/outcome"):
                 fixture.outcomes.append(json.loads(data))
             self.send_response(200)
@@ -313,6 +320,37 @@ def test_completion_resolves_lost_upload_acknowledgement(managed):
     assert any(r[0].endswith("/complete") for r in managed.requests)
     assert managed.outcomes[0]["state"] == "succeeded"
     assert managed.outcomes[0]["primaryArtifactId"] == FILE
+
+
+@pytest.mark.parametrize("failure", ["disconnect", 500, 421])
+def test_lost_upload_ack_never_replays_put(managed, failure):
+    managed.hook = lambda path: failure if path == "/upload" else None
+    assert managed.handler().handle(invocation(), HEADERS).status_code == 200
+    assert len([r for r in managed.requests if r[0] == "/upload"]) == 1
+    assert managed.outcomes[0]["state"] == "succeeded"
+    assert managed.outcomes[0]["artifactIds"] == [FILE]
+    assert managed.target_calls == 1
+
+
+def test_failed_verification_does_not_claim_success_or_replay(managed):
+    def hook(path):
+        if path == "/upload":
+            return "disconnect"
+        return 409 if path.endswith("/complete") else None
+
+    managed.hook = hook
+    assert managed.handler().handle(invocation(), HEADERS).status_code == 200
+    assert len([r for r in managed.requests if r[0] == "/upload"]) == 1
+    assert managed.outcomes[0]["state"] == "error"
+    assert managed.outcomes[0]["error"]["type"] == "artifact_upload_failed"
+    assert managed.outcomes[0]["artifactIds"] == []
+    assert managed.target_calls == 1
+
+
+def test_null_upload_headers_default_to_content_type(managed):
+    managed.upload_headers = None
+    assert managed.handler().handle(invocation(), HEADERS).status_code == 200
+    assert managed.outcomes[0]["state"] == "succeeded"
 
 
 def test_raw_target_exception_is_not_recorded_or_returned(managed):
