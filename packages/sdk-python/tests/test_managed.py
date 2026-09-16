@@ -273,6 +273,13 @@ def test_flush_failure_preserves_outcome(managed):
     assert not any(r[0].endswith("/telemetry") for r in managed.requests)
 
 
+def test_false_flush_preserves_checkpoint_without_delivery_ack(managed):
+    response = managed.handler(flush_telemetry=lambda: False).handle(invocation(), HEADERS)
+    assert response.status_code == 200 and response.body["telemetry"] == "pending"
+    assert managed.outcomes[0]["state"] == "succeeded"
+    assert not any(r[0].endswith("/telemetry") for r in managed.requests)
+
+
 def test_target_deadline_is_uncertain_without_false_terminal_outcome(managed):
     def target(context):
         context.cancelled.wait(timeout=1)

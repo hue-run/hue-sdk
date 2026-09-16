@@ -3,8 +3,9 @@
 ## TypeScript 0.1.4 / Python 0.1.2 — unreleased
 
 - Add TypeScript and Python managed-target adapters with scoped execution claims, verified file bytes, existing-provider trace context, idempotent outcomes and telemetry acknowledgements.
+- Preserve saved outcomes when flush callbacks report failure or pending records, and reject expired callback budgets and malformed trace/file identities before starting agent work.
 
-## TypeScript 0.1.3 / Python 0.1.1 — unreleased
+## TypeScript 0.1.3 / Python 0.1.1 — 2026-09-16
 
 - Verify persisted application traces by OpenTelemetry trace ID, expected span IDs, and required field presence using bounded, authenticated receipt requests.
 - Keep export acknowledgement, stored evidence, and content inspection distinct; report incomplete receipts and safe authentication/transport failures.

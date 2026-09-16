@@ -172,6 +172,10 @@ export function createManagedTargetHandler(
           throw new Error("input_integrity");
         inputFiles.push({ ...file, data });
       }
+      // Synchronous input hashing or a busy event loop can exhaust the budget
+      // before the abort timer runs. Do not start a paid callback in that gap.
+      if (Date.now() >= executionEnd) throw new Error("deadline");
+      signal.throwIfAborted();
       result = await within(
         context.with(trace.setSpan(parent, span), () =>
           options.target({
@@ -277,7 +281,21 @@ export function createManagedTargetHandler(
     try {
       const remaining = finalEnd - Date.now();
       if (remaining <= 0) throw new Error();
-      await within(Promise.resolve().then(options.flushTelemetry), AbortSignal.timeout(remaining));
+      const flushed = await within(
+        Promise.resolve().then(options.flushTelemetry),
+        AbortSignal.timeout(remaining),
+      );
+      if (flushed === false) throw new Error("flush_failed");
+      if (
+        flushed &&
+        typeof flushed === "object" &&
+        ("pendingSpans" in flushed || "pendingLogs" in flushed)
+      ) {
+        // Hue's failure counters are cumulative; its flush throws for new failures.
+        // Pending counters describe the current drain and must both be zero.
+        const report = flushed as Record<string, unknown>;
+        if (report.pendingSpans !== 0 || report.pendingLogs !== 0) throw new Error("flush_pending");
+      }
       await api.json(
         "POST",
         "/telemetry",
@@ -448,12 +466,14 @@ function validateInvocation(value: unknown): ManagedInvocation {
   bounded(v.attempt, 1, Number.MAX_SAFE_INTEGER);
   if (
     typeof v.deadline !== "string" ||
+    v.deadline.trim() !== v.deadline ||
     !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(v.deadline) ||
     !Number.isFinite(Date.parse(v.deadline))
   )
     throw new TypeError("Invalid deadline");
   if (
     typeof v.traceparent !== "string" ||
+    v.traceparent.length !== 55 ||
     !/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(v.traceparent) ||
     /^00-0{32}-/.test(v.traceparent) ||
     /-0{16}-01$/.test(v.traceparent)
@@ -479,7 +499,11 @@ function validateInvocation(value: unknown): ManagedInvocation {
     shortString(file.contentType);
     shortString(file.role, 64);
     total += bounded(file.byteSize, 0, MAX_FILE);
-    if (typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256))
+    if (
+      typeof file.sha256 !== "string" ||
+      file.sha256.length !== 64 ||
+      !/^[0-9a-f]{64}$/.test(file.sha256)
+    )
       throw new TypeError("Invalid hash");
   }
   if (total > MAX_TOTAL) throw new TypeError("Input files too large");
@@ -491,6 +515,7 @@ function validateResult(result: ManagedTargetResult) {
     throw new TypeError("Invalid outcome");
   if (Object.hasOwn(result, "output")) json(result.output);
   if (result.error) {
+    shortString(result.error.type, 64);
     if (!/^[a-z][a-z0-9_]{0,63}$/.test(result.error.type))
       throw new TypeError("Invalid error type");
     if (result.error.message !== undefined) shortString(result.error.message, 1000);

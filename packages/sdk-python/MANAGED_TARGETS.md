@@ -35,8 +35,9 @@ response = handler.handle(request_body_bytes, request_headers)
 ```
 
 The example uses application-owned agent, provider and flush functions. Flush
-must raise if either trace or log delivery failed; check boolean `force_flush`
-results when using OpenTelemetry providers directly. Hue exporters provide their
+must raise if either trace or log delivery failed, or return `False`. The handler
+recognizes an explicit `False` from a provider's `force_flush`; when combining
+multiple providers, check every boolean result and raise if any failed. Hue exporters provide their
 own acknowledgement-aware flush API. Never shut down a shared provider per request.
 
 Use a host request limit of at least 120 seconds for the defaults: 90 seconds for

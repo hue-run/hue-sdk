@@ -52,6 +52,7 @@ export function sourceDigest(source: string | Uint8Array): string {
 export function uuid(value: string): string {
   if (
     typeof value !== "string" ||
+    value.length !== 36 ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
   )
     throw new TypeError("Expected a UUID");

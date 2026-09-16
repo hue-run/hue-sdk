@@ -329,7 +329,8 @@ class ManagedTargetHandler:
             "state": "checkpointed",
         }
         try:
-            _within(self._flush, final_end)
+            if _within(self._flush, final_end) is False:
+                raise RuntimeError("Telemetry flush did not complete.")
             api.json(
                 "/telemetry",
                 {"expectedSpanIds": outcome["expectedSpanIds"], "flushed": True},

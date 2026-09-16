@@ -260,6 +260,75 @@ describe("managed target protocol", () => {
     expect(await response.json()).toMatchObject({ state: "checkpointed", telemetry: "pending" });
     expect(f.outcomes[0].state).toBe("succeeded");
   });
+  test.each([false, { pendingSpans: 1, pendingLogs: 0 }, { pendingSpans: 0, pendingLogs: 1 }])(
+    "flush result %p does not acknowledge delivery",
+    async (flushResult) => {
+      const f = await fixture();
+      f.options.flushTelemetry = async () => flushResult;
+      const response = await createManagedTargetHandler(f.options)(f.request());
+      expect(await response.json()).toMatchObject({ state: "checkpointed", telemetry: "pending" });
+      expect(f.outcomes[0].state).toBe("succeeded");
+      expect(f.requests.some((r) => r.path.endsWith("/telemetry"))).toBe(false);
+    },
+  );
+  test("historical report failures do not poison a completed current drain", async () => {
+    const f = await fixture();
+    f.options.flushTelemetry = async () => ({
+      failedSpans: 1,
+      rejectedLogs: 2,
+      pendingSpans: 0,
+      pendingLogs: 0,
+    });
+    const response = await createManagedTargetHandler(f.options)(f.request());
+    expect(await response.json()).toMatchObject({ telemetry: "flushed" });
+  });
+  test("a budget exhausted during synchronous setup never starts the target", async () => {
+    const f = await fixture();
+    const tracer = f.options.tracer!;
+    f.options.maxExecutionMillis = 30;
+    f.options.tracer = Object.assign(Object.create(tracer), {
+      startSpan: (...args: Parameters<typeof tracer.startSpan>) => {
+        const span = tracer.startSpan(...args);
+        const finish = Date.now() + 40;
+        while (Date.now() < finish) {
+          /* Simulate synchronous hashing/event-loop work. */
+        }
+        return span;
+      },
+    });
+    const response = await createManagedTargetHandler(f.options)(f.request());
+    expect(response.status).toBe(503);
+    expect(f.calls().targetCalls).toBe(0);
+    expect(f.outcomes).toHaveLength(0);
+  });
+  test.each(["traceparent", "deadline", "executionId"] as const)(
+    "rejects trailing newline in %s before claiming",
+    async (field) => {
+      const f = await fixture();
+      const body = invocation();
+      body[field] += "\n";
+      expect((await createManagedTargetHandler(f.options)(f.request(body))).status).toBe(400);
+      expect(f.requests).toHaveLength(0);
+    },
+  );
+  test("rejects a trailing newline in the declared file hash before claiming", async () => {
+    const f = await fixture();
+    const body = {
+      ...invocation(),
+      inputFiles: [
+        {
+          artifactId: fileId,
+          filename: "source.docx",
+          contentType: "application/octet-stream",
+          byteSize: bytes.length,
+          sha256: sha256 + "\n",
+          role: "source",
+        },
+      ],
+    };
+    expect((await createManagedTargetHandler(f.options)(f.request(body))).status).toBe(400);
+    expect(f.requests).toHaveLength(0);
+  });
   test("unresolved target at deadline stays uncertain without false terminal checkpoint", async () => {
     const f = await fixture();
     f.options.maxExecutionMillis = 30;

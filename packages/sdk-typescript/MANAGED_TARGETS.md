@@ -31,7 +31,10 @@ export const POST = createManagedTargetHandler({
 ```
 
 The example's `existingAgent` and `flushExistingTracesAndLogs` are application
-functions. An optional `tracer` uses an already configured provider. The default
+functions. A flush callback must throw on delivery failure; an explicit `false`
+result or a Hue report with pending records also leaves telemetry pending. Hue's
+flush API throws for new export failures; its historical failure counters do not
+invalidate later successful drains. An optional `tracer` uses an already configured provider. The default
 uses the global provider, which must record the supplied sampled trace context.
 Configure a host request limit of at least 120 seconds for the defaults: 90 seconds
 for the target and 30 seconds reserved for uploads, checkpointing and telemetry.
