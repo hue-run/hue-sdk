@@ -20,7 +20,7 @@ contains the actual local `@hue-run/sdk` tarball dependency; the source manifest
 that unpublished dependency so it cannot accidentally resolve an unrelated
 registry package. The verifier never publishes anything.
 
-For a separate checkout, run `bun add /absolute/path/to/hue-run-sdk-0.1.2.tgz` in this
+For a separate checkout, run `bun add /absolute/path/to/hue-run-sdk-0.1.3.tgz` in this
 example directory, then `bun install` and `bun run build`.
 
 ## Run with a synthetic provider

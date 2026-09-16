@@ -69,3 +69,25 @@ export interface ProjectConnection {
   organizationId: string;
   slug: string;
 }
+
+export type TraceReceiptField = "input" | "output" | "model" | "usage" | "session";
+export interface TraceReceipt {
+  traceId: string;
+  spanCount: number;
+  revision: number;
+  /** Presence of stored normalized fields; not a judgment of content correctness. */
+  fields: Record<TraceReceiptField, boolean>;
+  matchedSpanIds: string[];
+  missingSpanIds: string[];
+  traceUrl: string;
+}
+export interface VerifyTraceOptions {
+  expectedSpanIds?: string[];
+  requiredFields?: TraceReceiptField[];
+  /** Total request/retry budget, including response bodies. Default 10000; maximum 60000. */
+  timeoutMillis?: number;
+}
+export interface TraceVerification {
+  verified: boolean;
+  receipt: TraceReceipt | null;
+}

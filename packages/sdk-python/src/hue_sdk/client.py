@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Iterator, Mapping, MutableMapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -23,6 +23,7 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
+from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
 from .transport import (
     DEFAULT_BASE_URL,
     MAX_CONTENT_BYTES,
@@ -171,6 +172,7 @@ class Hue:
         self._timeout = export_timeout_seconds
         self._closed = False
         self._flush_lock = Lock()
+        self._receipt_lock = Lock()
         self._shutdown_lock = Lock()
         self._shutdown_done = Event()
         self._shutdown_result = False
@@ -197,8 +199,8 @@ class Hue:
         )
         self.tracer_provider.add_span_processor(self._span_processor)
         self.logger_provider.add_log_record_processor(self._log_processor)
-        self.tracer = self.tracer_provider.get_tracer("hue-run", "0.1.0")
-        self._logger = self.logger_provider.get_logger("hue-run", "0.1.0")
+        self.tracer = self.tracer_provider.get_tracer("hue-run", "0.1.1")
+        self._logger = self.logger_provider.get_logger("hue-run", "0.1.1")
 
     def __repr__(self) -> str:
         return f"Hue(capture_content={self.capture_content!r}, closed={self._closed!r})"
@@ -334,6 +336,34 @@ class Hue:
     @property
     def export_status(self) -> ExportStatus:
         return ExportStatus(self._span_exporter.failures, self._log_exporter.failures)
+
+    def verify_trace(
+        self,
+        trace_id: str,
+        *,
+        expected_span_ids: Sequence[str] | None = None,
+        required_fields: Sequence[TraceReceiptField] | None = None,
+        timeout_millis: float = 10_000,
+    ) -> TraceVerificationResult:
+        """Poll Hue for received spans/fields from an actual application request.
+
+        This does not flush exporters, generate spans, or call a model. Finish
+        the application request and flush its provider before checking receipt.
+        A timeout returns ``verified=False`` with the latest receipt, if any.
+        The caller's deadline includes response bodies; an already-running
+        network read may finish in the background after timeout.
+        """
+        self._ensure_open()
+        return verify_trace(
+            self.base_url,
+            self._headers,
+            trace_id,
+            expected_span_ids=expected_span_ids,
+            required_fields=required_fields,
+            timeout_millis=timeout_millis,
+            request_timeout=self._timeout,
+            poll_lock=self._receipt_lock,
+        )
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         """Drain pending telemetry. False means a timeout or a recorded export failure.

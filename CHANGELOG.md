@@ -1,5 +1,11 @@
 # Changelog
 
+## TypeScript 0.1.3 / Python 0.1.1 — unreleased
+
+- Verify persisted application traces by OpenTelemetry trace ID, expected span IDs, and required field presence using bounded, authenticated receipt requests.
+- Keep export acknowledgement, stored evidence, and content inspection distinct; report incomplete receipts and safe authentication/transport failures.
+- Update the maintained coding-agent skill to verify real application requests after flushing their owning providers.
+
 ## Python 0.1.0 — 2026-09-15
 
 - Publish `hue-run` to PyPI under MIT, with verified release artifacts and unchanged `hue_sdk` imports.

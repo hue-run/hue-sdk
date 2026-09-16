@@ -85,6 +85,45 @@ An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`
 - `force_flush(timeout_millis=30000)` drains both processors and returns `False` for a timeout or any recorded failed export batch since this client was created. Because OTel 1.44 ignores its processor timeout, Hue serializes flushes in one background worker and bounds the caller's wait. Pending exports continue after timeout. `export_status` exposes cumulative failure counters. `shutdown()` stops new helpers, drains and closes owned exporters within the caller's wait budget; repeated calls wait for the same shutdown. After a timeout, keep the process alive and call shutdown again to confirm completion. Context-manager exit calls shutdown; check flush explicitly when an exit code must reflect delivery failure.
 - Standard OTel batch queues hold 2,048 records per signal and are in-memory. Queue overflow, process termination and sampling can lose telemetry. Flush success reports observed exporter outcomes, not durable local delivery or proof that every application operation was instrumented. The exporter timeout controls individual export/retry operations. A caller timeout does not cancel an HTTP request already in flight; background workers continue until the operation completes.
 
+## Confirm a trace reached Hue
+
+`Hue.verify_trace()` checks a server receipt for a known trace from a real application request.
+It does not send a synthetic trace, invoke a model, or flush an exporter. Finish the request,
+then flush the provider that produced it. If you borrow a provider, call its `force_flush()`
+first, then check Hue's `force_flush()` result before verifying:
+
+```python
+# Retain these IDs while your application's instrumented request runs.
+# After the request finishes and the relevant providers have flushed:
+confirmation = hue.verify_trace(
+    request_trace_id,
+    expected_span_ids=[request_span_id, model_span_id],
+    required_fields=["input", "output", "model", "usage", "session"],
+    timeout_millis=10_000,
+)
+if confirmation.verified:
+    print(confirmation.receipt.trace_url)
+else:
+    # The latest partial receipt, or None if this trace has not appeared yet.
+    print(confirmation.receipt)
+```
+
+Only require fields your instrumentation emits and your capture policy permits. For metadata-only
+capture, omit `input` and `output`. The receipt contains presence booleans and counts, not captured
+content. `verified=True` confirms the requested trace, every supplied expected span, and every
+required field; it does not prove that unlisted application operations were instrumented. Missing
+spans or fields continue polling until the deadline, then return `verified=False` with the latest
+receipt. Trace IDs must be nonzero and contain 32 lowercase hexadecimal characters; expected span
+IDs must be nonzero, contain 16, be unique, and number at most 100. The timeout must be positive
+and at most 60,000 ms.
+
+Only trace-not-found responses, HTTP 429 and HTTP 503 are retried. Authentication, unsupported
+receipt endpoints, malformed responses and connection failures raise `TraceVerificationError`
+with a safe `code` and optional `status_code`; response bodies and keys are omitted. Redirects
+are rejected. The deadline covers connection, polling and response-body reads. An in-flight network
+read may finish in the background after the caller times out. This helper requires a Hue deployment
+that implements `/api/v1/traces/{traceId}/receipt`.
+
 ## Supported runtimes and verification
 
 Python 3.10+ is supported. CI tests Python 3.10 and 3.14, source imports and an independently installed wheel. Tests use synthetic loopback HTTP receivers and decode official OTLP protobuf messages to verify trace/log correlation, metadata-only capture, redaction, propagation, existing-provider ownership, authentication failures, redirects, partial rejection, retries and encoded request limits. Compatibility tests also exercise local evaluations and the optional OpenInference adapter. No live model provider is required for these checks.

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 
@@ -72,3 +75,68 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
         len([event for span in spans for event in span.events if event.name == "stream.chunk"]) == 6
     )
     assert all(span.trace_id for span in spans)
+
+    trace_id = spans[0].trace_id.hex()
+    span_id = spans[0].span_id.hex()
+    receiver.reply(404, json.dumps({"code": "TRACE_NOT_FOUND"}).encode())
+    receiver.reply(
+        200,
+        json.dumps(
+            {
+                "traceId": trace_id,
+                "spanCount": 1,
+                "revision": 1,
+                "fields": dict.fromkeys(("input", "output", "model", "usage", "session"), False),
+                "matchedSpanIds": [span_id],
+                "missingSpanIds": [],
+                "traceUrl": f"{receiver.url}/projects/synthetic/traces/{trace_id}",
+            }
+        ).encode(),
+    )
+    confirmation = subprocess.run(
+        [
+            str(python),
+            "-c",
+            """
+import os
+import sys
+from hue_sdk import Hue, TraceReceipt, TraceVerificationResult, TraceVerificationError
+with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=False) as hue:
+    result = hue.verify_trace(sys.argv[1], expected_span_ids=[sys.argv[2]], timeout_millis=2000)
+    assert isinstance(result, TraceVerificationResult) and result.verified
+    assert isinstance(result.receipt, TraceReceipt)
+    assert result.receipt.matched_span_ids == (sys.argv[2],)
+    print('receipt-verified=true')
+""",
+            trace_id,
+            span_id,
+        ],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "receipt-verified=true" in confirmation.stdout
+    assert environment["HUE_API_KEY"] not in confirmation.stdout + confirmation.stderr
+
+    # Exercise failure boundaries against this wheel too: the copied tests run
+    # outside the checkout, with no editable package or source-path fallback.
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(python), f"pytest=={version('pytest')}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    receipt_tests = tmp_path / "receipt-tests"
+    receipt_tests.mkdir()
+    for name in ("conftest.py", "test_receipts.py"):
+        shutil.copyfile(package / "tests" / name, receipt_tests / name)
+    subprocess.run(
+        [str(python), "-m", "pytest", "-q", str(receipt_tests)],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

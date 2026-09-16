@@ -177,6 +177,39 @@ drain, including records emitted before its call. Stop request production
 before shutdown so late spans cannot race it. A client does not own instrumented
 operations still running in the application.
 
+## Verify a stored application trace
+
+After exercising a real application request and finishing its stream, flush the
+providers that own its spans, then verify their OpenTelemetry IDs:
+
+```ts
+// traceId and requestSpanId come from the application request you just exercised.
+await hue.flush(); // borrowed providers must also finish their own work
+const result = await hue.verifyTrace(traceId, {
+  expectedSpanIds: [requestSpanId], // include known model/tool span IDs when available
+  requiredFields: ["input", "output", "model"], // choose fields this request should emit
+});
+if (!result.verified) throw new Error("Trace verification timed out; inspect missing spans and fields.");
+console.log(result.receipt?.traceUrl);
+```
+
+Available in TypeScript `0.1.3`. `verifyTrace` makes a read-only, project-key-authenticated
+receipt request. It does not flush, run your application, create a test span, or
+read captured values. `fields` reports the presence of stored normalized input,
+output, model, usage, and session data across the trace; it does not establish
+content correctness or that every possible span has arrived. Leave unknown usage
+and intentionally disabled content out of `requiredFields`.
+
+The default budget is 10 seconds; set `timeoutMillis` up to 60,000. Only a recognized
+missing trace, HTTP 429, or HTTP 503 is retried, respecting `Retry-After` and the
+overall deadline. Incomplete evidence is also checked again within that deadline.
+A timeout returns `{ verified: false, receipt }`, retaining the latest observed
+receipt or `null`. Authentication, unsupported endpoint, transport, and invalid
+response failures throw `HueTraceVerificationError` with a safe `code` and optional
+HTTP `status`. Missing expected spans and required fields remain explicit; a 200
+response alone is not success. A successful result verifies those requested
+conditions only. Use Hue's UI to inspect captured values and redaction.
+
 ## Package verification
 
 From the repository root with Node 24 and Bun 1.3.9 on PATH:

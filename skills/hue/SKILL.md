@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.4"
+  version: "0.1.5"
 ---
 
 # Hue tracing
@@ -20,7 +20,7 @@ Read the application's repository instructions and inspect its runtime, dependen
 | Python 3.10+ | [Python SDK](https://docs.hue.run/sdks/python) |
 | Existing OTel provider or framework instrumentation | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); retain the provider and other exporters |
 
-Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. This skill targets TypeScript `0.1.2` and Python `0.1.0`; check release notes when using a newer package. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
+Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. Receipt helpers require TypeScript `0.1.3` or Python `0.1.1`; check package availability and release notes before using them. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
 
 **Existing AI SDK 6:** the current Hue TypeScript package's optional AI SDK 7 peers conflict even with core-only imports. Preserve AI SDK 6 and use its standard OTLP exporter path; do not force dependency resolution or upgrade the app merely to install Hue. Direct OTLP does not need the Hue package or Hue helper methods.
 
@@ -70,6 +70,8 @@ Run the application's relevant checks and exercise the changed request path, inc
 
 Keep ownership of borrowed providers with the application. A TypeScript borrowed-provider client flushes but does not shut down those providers; at application shutdown, stop the providers and then its Hue transport. Do not repeatedly attach new Hue processors to a long-lived provider.
 
-Record the trace ID. Verify the request and child spans, captured prompts/responses and tool inputs/outputs, available model/usage/timing/session fields, and error status under **Traces** in the project returned by the connection check. Confirm that redaction and any explicit capture restrictions are respected. An exporter acknowledgement is not proof that the UI has the complete trace. The service key does not provide general trace browsing; if authorized UI access is unavailable, give the user the trace ID and specific checks to complete.
+Record the actual application's OpenTelemetry trace ID and known request/model/tool span IDs. After their owning providers flush, use `hue.verifyTrace(traceId, { expectedSpanIds, requiredFields })` or Python `hue.verify_trace(trace_id, expected_span_ids=..., required_fields=...)` when available. Require only fields this request should emit; do not require usage the provider omits or content an explicit policy disables. The helper polls for stored evidence within 10 seconds by default (maximum 60 seconds), without implicitly flushing or generating substitute telemetry. A false result is incomplete verification; report missing spans/fields. Authentication, unavailable endpoint, and transport errors require fixing their cause, not claiming arrival. Existing direct-OTLP apps can use the same project-authenticated `GET /api/v1/traces/{otelTraceId}/receipt` with repeated `expectedSpanId` query parameters; do not install conflicting SDK dependencies for this check.
 
-Summarize the installed version, changed files, configuration names, capture policy, checks run, and delivery evidence. Separate locally tested behavior, collector acknowledgement, and a trace inspected in Hue. State remaining access or verification steps without claiming success.
+A receipt confirms stored field presence and the requested span IDs, not payload correctness or universal trace completeness. Inspect captured prompts/responses, tool inputs/outputs, redaction, timing and errors under **Traces** using the receipt's `traceUrl` when authorized. The service key does not provide general trace browsing; if UI access is unavailable, report the receipt evidence and leave content inspection to the user. Older SDKs or deployments require explicit UI verification; do not invent unsupported helper methods or call a connection check proof of ingestion.
+
+Summarize the installed version, changed files, configuration names, capture policy, checks run, and delivery evidence. Separate locally tested behavior, collector acknowledgement, stored receipt evidence, and content inspected in Hue. State remaining access or verification steps without claiming success.
