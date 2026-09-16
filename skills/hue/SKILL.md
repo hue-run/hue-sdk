@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.3"
+  version: "0.1.4"
 ---
 
 # Hue tracing
@@ -50,7 +50,9 @@ SDK constructors do not automatically read environment variables. For another Hu
 
 ## Capture and instrumentation
 
-Use metadata-only capture (`false` / `False`) unless the user has chosen content capture. Explain what will be recorded. Python's setting covers Hue helpers, not third-party instrumentation; configure that instrumentor's own input/output capture controls. Direct OTLP also requires explicit instrumentor capture settings. Custom attributes, span names, and session/user identifiers can contain sensitive data even when helper content capture is disabled.
+Default to full-fidelity capture of the supported, available telemetry: explicitly set `captureContent: true` in TypeScript or `capture_content=True` in Python. Capture prompts/messages, responses, and tool arguments/results, plus available model/provider identifiers, provider-reported token usage, timing, errors, and existing session/user correlation. Honor a user's metadata-only choice and explicit application capture restrictions. Preserve configured redaction and credential filtering, and explain what content will be sent.
+
+Python's setting covers Hue helpers, not third-party instrumentation; enable the chosen instrumentor's own input/output capture controls as well. Direct OTLP also requires explicit instrumentor capture settings. Python helpers record exception type and status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
 
 Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()` and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument one real request path with model/tool children, preserve propagated parent context, and reuse the application's session identifier when available. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent.
 
@@ -68,6 +70,6 @@ Run the application's relevant checks and exercise the changed request path, inc
 
 Keep ownership of borrowed providers with the application. A TypeScript borrowed-provider client flushes but does not shut down those providers; at application shutdown, stop the providers and then its Hue transport. Do not repeatedly attach new Hue processors to a long-lived provider.
 
-Record the trace ID. Verify the request and child spans, error status, and capture policy under **Traces** in the project returned by the connection check. An exporter acknowledgement is not proof that the UI has the complete trace. The service key does not provide general trace browsing; if authorized UI access is unavailable, give the user the trace ID and specific checks to complete.
+Record the trace ID. Verify the request and child spans, captured prompts/responses and tool inputs/outputs, available model/usage/timing/session fields, and error status under **Traces** in the project returned by the connection check. Confirm that redaction and any explicit capture restrictions are respected. An exporter acknowledgement is not proof that the UI has the complete trace. The service key does not provide general trace browsing; if authorized UI access is unavailable, give the user the trace ID and specific checks to complete.
 
 Summarize the installed version, changed files, configuration names, capture policy, checks run, and delivery evidence. Separate locally tested behavior, collector acknowledgement, and a trace inspected in Hue. State remaining access or verification steps without claiming success.
