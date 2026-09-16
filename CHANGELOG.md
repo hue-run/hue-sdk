@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## TypeScript 0.1.4 / Python 0.1.2 — unreleased
 
 - Add TypeScript and Python managed-target adapters with scoped execution claims, verified file bytes, existing-provider trace context, idempotent outcomes and telemetry acknowledgements.
 
