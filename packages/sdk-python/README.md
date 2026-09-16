@@ -129,3 +129,8 @@ that implements `/api/v1/traces/{traceId}/receipt`.
 Python 3.10+ is supported. CI tests Python 3.10 and 3.14, source imports and an independently installed wheel. Tests use synthetic loopback HTTP receivers and decode official OTLP protobuf messages to verify trace/log correlation, metadata-only capture, redaction, propagation, existing-provider ownership, authentication failures, redirects, partial rejection, retries and encoded request limits. Compatibility tests also exercise local evaluations and the optional OpenInference adapter. No live model provider is required for these checks.
 
 See the [documentation](https://docs.hue.run/sdks/python) for integration guidance and [troubleshooting](https://docs.hue.run/guides/troubleshooting) for export failures.
+
+## Managed targets
+
+Run your existing agent from Hue with authenticated execution claims, verified files,
+real trace context and saved outcomes. See [Managed targets](MANAGED_TARGETS.md).

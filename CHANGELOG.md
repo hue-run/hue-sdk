@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add TypeScript and Python managed-target adapters with scoped execution claims, verified file bytes, existing-provider trace context, idempotent outcomes and telemetry acknowledgements.
+
 ## TypeScript 0.1.3 / Python 0.1.1 — unreleased
 
 - Verify persisted application traces by OpenTelemetry trace ID, expected span IDs, and required field presence using bounded, authenticated receipt requests.

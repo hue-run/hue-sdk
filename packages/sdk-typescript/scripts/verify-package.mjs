@@ -37,7 +37,7 @@ if (!values.archive && !values["registry-version"]) {
   run("bun", ["--no-env-file", "install", "--frozen-lockfile"], staging);
   run("bun", ["--no-env-file", "run", "typecheck"], staging);
   run("bun", ["--no-env-file", "run", "build"], staging);
-  run("bun", ["--no-env-file", "pm", "pack", "--destination", destination], staging);
+  run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
 }
 const packageSpec = values["registry-version"] ?? `file:${tarball}`;
 // Check the advertised install before adding any test or optional AI dependencies.
@@ -51,7 +51,7 @@ await writeFile(
 run("npm", ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"], minimal);
 run(
   process.execPath,
-  ["--input-type=module", "-e", 'await import("@hue-run/sdk"); await import("@hue-run/sdk/evals");'],
+  ["--input-type=module", "-e", 'await import("@hue-run/sdk"); await import("@hue-run/sdk/evals"); await import("@hue-run/sdk/managed");'],
   minimal,
 );
 for (const patch of [99, 100]) {
@@ -77,14 +77,15 @@ for (const patch of [99, 100]) {
   );
   await cp(join(source, "tests"), join(consumer, "tests"), { recursive: true });
   await cp(join(source, "tsconfig.json"), join(consumer, "tsconfig.json"));
-  for (const name of ["sdk.test.ts", "evals.test.ts", "receipt.test.ts"]) {
+  for (const name of ["sdk.test.ts", "evals.test.ts", "receipt.test.ts", "managed.test.ts"]) {
     const testPath = join(consumer, "tests", name);
     await writeFile(
       testPath,
       (await readFile(testPath, "utf8"))
         .replaceAll('"../src/index.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/ai-sdk.js"', '"@hue-run/sdk/ai-sdk"')
-        .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"'),
+        .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"')
+        .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"'),
     );
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
@@ -94,7 +95,7 @@ for (const patch of [99, 100]) {
     throw new Error("Installed package does not match this checkout");
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
-  run("bun", ["--no-env-file", "test", "./tests/sdk.test.ts", "./tests/evals.test.ts", "./tests/receipt.test.ts"], consumer);
+  run("bun", ["--no-env-file", "test", "./tests/sdk.test.ts", "./tests/evals.test.ts", "./tests/receipt.test.ts", "./tests/managed.test.ts"], consumer);
   const exampleSource = resolve(source, "../../examples/reference-chatbot");
   await cp(exampleSource, chatbot, {
     recursive: true,

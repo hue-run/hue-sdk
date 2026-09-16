@@ -227,3 +227,8 @@ published. The chatbot README describes running that external installation.
 # Local evaluation workflows
 
 The optional `@hue-run/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.
+
+## Managed targets
+
+Run your existing agent from Hue with authenticated execution claims, verified files,
+real trace context and saved outcomes. See [Managed targets](MANAGED_TARGETS.md).
