@@ -15,6 +15,7 @@ import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { MAX_CONTENT_BYTES } from "./config.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
+import { verifyTrace } from "./receipt.js";
 import type {
   ExportReport,
   FlushableLoggerProvider,
@@ -24,6 +25,8 @@ import type {
   JsonValue,
   ProjectConnection,
   SpanOptions,
+  VerifyTraceOptions,
+  TraceVerification,
 } from "./types.js";
 
 interface LocalContext {
@@ -157,10 +160,14 @@ export class HueClient {
     }
     this.captureContent = this.transport.options.captureContent;
     this.tracer = new ContextualTracer(
-      this.tracerProvider.getTracer("@hue-run/sdk", "0.1.2"),
+      this.tracerProvider.getTracer("@hue-run/sdk", "0.1.3"),
       this.storage,
     );
-    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", "0.1.2");
+    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", "0.1.3");
+  }
+
+  verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
+    return verifyTrace(this.transport.options, traceId, options);
   }
 
   getContext(): Context {

@@ -90,6 +90,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Record requests, model calls, tools, errors and sessions using standard OTLP.
 - Choose content capture or metadata only, and inspect export failures.
 - Preserve an existing OpenTelemetry provider and its other exporters.
+- Confirm stored traces, known child spans, and required field presence after export.
 - Run local evaluation targets and scorers against frozen datasets.
 - Resume result uploads and rescore stored outputs without rerunning the target.
 
@@ -162,6 +163,8 @@ TypeScript uses compatible-major peers for AI SDK 7 and its OTel integration. Th
 Python's optional OpenInference/OpenAI pair is pinned in its lockfile and tested separately. Python helper capture controls and TypeScript export filtering have different scopes; the package guides describe them explicitly.
 
 Queues are bounded and in memory. Await flush and inspect its result; successful application execution does not prove telemetry delivery. Hosted judges, storage/rendering and production scheduler activation belong to the Hue platform and have separate readiness requirements.
+
+After a real request and its exporter flush, `verifyTrace()` / `verify_trace()` can confirm stored evidence using that request's OpenTelemetry IDs. Require the fields and spans that request should emit; verification does not generate a replacement test trace or inspect content correctness. See the [TypeScript receipt guide](./packages/sdk-typescript/README.md#verify-a-stored-application-trace) or [Python guide](./packages/sdk-python/README.md).
 
 ## Repository history
 
