@@ -269,3 +269,25 @@ def test_inherited_client_is_noop_and_does_not_wait_on_parent_locks(receiver):
         hue._flush_lock.release()
         hue.shutdown()
     assert receiver.requests == []
+
+
+
+def test_shutdown_worker_failure_does_not_reactivate_closed_processors(receiver, monkeypatch):
+    import hue_sdk.client as client_module
+
+    class UnavailableThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("synthetic worker exhaustion")
+
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    monkeypatch.setattr(client_module, "Thread", UnavailableThread)
+    assert not hue.shutdown_safe()
+    assert not hue.export_status.ok
+    assert hue.export_status.instrumentation_failures == 1
+    with hue.span("after-shutdown"):
+        pass
+    assert hue.export_status.queued_trace_records == 0
+    assert not hue.shutdown_safe()

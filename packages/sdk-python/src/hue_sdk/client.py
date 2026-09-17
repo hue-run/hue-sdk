@@ -618,7 +618,10 @@ class Hue:
                 try:
                     Thread(target=close, name="hue-shutdown", daemon=True).start()
                 except RuntimeError:
-                    self._closed = False
+                    # The queue inputs are already closed; never reactivate a
+                    # client whose shutdown worker could not be scheduled.
+                    self._record_issue()
+                    self._shutdown_done.set()
                     return False
         return self._shutdown_done.wait(timeout_millis / 1000) and self._shutdown_result
 
