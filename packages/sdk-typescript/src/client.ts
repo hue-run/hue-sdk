@@ -191,12 +191,12 @@ export class HueClient {
     this.captureContent = this.transport.options.captureContent;
     this.enabled = this.transport.options.enabled !== false;
     this.tracer = new ContextualTracer(
-      this.tracerProvider.getTracer("@hue-run/sdk", "0.1.4"),
+      this.tracerProvider.getTracer("@hue-run/sdk", "0.1.5"),
       this.storage,
       () => this.enabled && !this.closed,
       () => this.transport.instrumentationFailure(),
     );
-    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", "0.1.4");
+    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", "0.1.5");
   }
 
   verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
