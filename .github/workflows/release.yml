@@ -30,7 +30,7 @@ env:
 jobs:
   prepare:
     if: github.repository == 'hue-run/hue-sdk' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -99,7 +99,7 @@ jobs:
   verify-python:
     if: inputs.language == 'python'
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -126,6 +126,8 @@ jobs:
   publish-npm:
     if: inputs.publish && inputs.language == 'typescript'
     needs: prepare
+    # npm Trusted Publishing requires GitHub-hosted runners.
+    # https://docs.npmjs.com/trusted-publishers/
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: npm
@@ -150,7 +152,7 @@ jobs:
   publish-pypi:
     if: inputs.publish && inputs.language == 'python'
     needs: [prepare, verify-python]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     environment: pypi
     permissions:
@@ -173,7 +175,7 @@ jobs:
 
   accept-npm:
     needs: [prepare, publish-npm]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -196,7 +198,7 @@ jobs:
 
   accept-pypi:
     needs: [prepare, publish-pypi]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
       fail-fast: false
