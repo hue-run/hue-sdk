@@ -1,6 +1,10 @@
 # Contributing
 
-Work on a short branch from current `main` and open a pull request with the behavior change and relevant verification. Repository access is currently limited to invited contributors.
+Fork the repository (or branch directly if you have write access), work on a short branch from current `main`, and open a pull request with the behavior change and its verification. Search existing issues before filing a new one.
+
+## License of contributions
+
+This repository is licensed under the [MIT License](LICENSE). By submitting a pull request you agree that your contribution is licensed under the same MIT License (inbound = outbound). No contributor license agreement is required. If your employer owns your work, confirm that you may contribute it under MIT.
 
 ## Development
 
@@ -8,12 +12,13 @@ Use Node 24, Bun 1.3.9 and uv 0.12.5. Each package owns its dependencies and loc
 
 - TypeScript: run `node packages/sdk-typescript/scripts/verify-package.mjs` from the root. It validates public imports from installed packages with both tested AI SDK patch pairs.
 - Python: use the commands in [README.md](README.md), then repeat pytest on Python 3.10 for compatibility changes.
+- Release tooling: run `python3 -m unittest discover -s scripts -p 'test_*.py'`.
 - Examples: keep them independent of Hue application source. Synthetic mode must be explicit; provider errors must not silently fall back to synthetic success.
 
 ## Review expectations
 
 Add behavioral regression coverage for changed delivery, privacy, concurrency or retry behavior. Documentation-only changes need accurate, runnable snippets and working links, not a repeated application test suite. Explain any remaining live integration limit.
 
-Never include real credentials, customer prompts or files in fixtures, logs or screenshots. Share security concerns through the private repository's existing maintainers instead of posting secrets.
+Never include real credentials, customer prompts or files in fixtures, logs or screenshots. Pull request descriptions and commit messages are public; do not link internal systems or paste unreleased platform details. Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md) rather than in a public issue.
 
-Public package publication and a future open-source license are separate decisions; do not add a permissive license or remove package privacy flags without authorization.
+Do not change the license, package visibility, registry publishing configuration or release workflows without explicit maintainer authorization. See [VERSIONING.md](VERSIONING.md) for what a patch or minor release may change.

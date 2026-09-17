@@ -33,6 +33,6 @@
 - Document the tested runtime and integration matrix, including dependency-resolution and cross-language content/delivery boundaries.
 - Verify release archives and registry bytes, and document npm/PyPI publication and installation checks.
 
-## Private pilot releases
+## Pre-publication pilot builds
 
-The available archives are [TypeScript 0.1.1](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.1) and [Python 0.1.0.dev0](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.0.dev0). They provide OpenTelemetry tracing and local evaluations with frozen datasets, resumable uploads and historical rescoring. Access requires repository permission; these are not npm or PyPI releases.
+Before registry publication, pilot builds were attached to the GitHub pre-releases [TypeScript 0.1.1](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.1) and [Python 0.1.0.dev0](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.0.dev0). They used the provisional package names `@hue/sdk` and `hue-sdk`, carried `UNLICENSED` metadata, and were never published to npm or PyPI. Use the registry packages above instead.

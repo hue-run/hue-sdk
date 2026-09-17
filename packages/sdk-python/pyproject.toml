@@ -6,6 +6,22 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["opentelemetry", "otlp", "tracing", "observability", "llm", "ai-agents", "evaluation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Monitoring",
+  "Typing :: Typed",
+]
 dependencies = [
   "opentelemetry-api==1.44.0",
   "opentelemetry-sdk==1.44.0",
@@ -17,6 +33,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://docs.hue.run"
 Documentation = "https://docs.hue.run"
+Repository = "https://github.com/hue-run/hue-sdk"
+Changelog = "https://github.com/hue-run/hue-sdk/blob/main/CHANGELOG.md"
+Issues = "https://github.com/hue-run/hue-sdk/issues"
 
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "build>=1.2,<2", "ruff>=0.15,<1", "hatchling>=1.27,<2"]

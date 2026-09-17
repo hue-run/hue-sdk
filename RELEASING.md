@@ -1,6 +1,6 @@
 # SDK releases
 
-The repository stays private. Public package distribution is a separate decision: PyPI serves both `pip install hue-run` and `uv add hue-run`; npm serves `npm install @hue-run/sdk` and other npm-compatible installers.
+The repository is public. Package distribution: PyPI serves both `pip install hue-run` and `uv add hue-run`; npm serves `npm install @hue-run/sdk` and other npm-compatible installers.
 
 The SDK packages use the MIT license. Registry account setup and a successful publishing run are still required for public availability. A workflow file or a passing build does not mean a version is publicly available.
 
@@ -10,7 +10,7 @@ The SDK packages use the MIT license. Registry account setup and a successful pu
 2. Run **Release SDK** (`.github/workflows/release.yml`) from `main`, selecting the language and exact committed stable version. Leave **publish** unchecked to prepare downloadable artifacts without publishing. The workflow always checks out its immutable triggering commit; it cannot publish a feature branch.
 3. Preparation builds once, tests installed packages, inspects the distribution inventory, and records `release-manifest.json` plus `SHA256SUMS`. TypeScript runs both supported AI SDK/OTel patch pairs and the Node reference chatbot. Python installs the same wheel using both pip and uv on Python 3.10 and 3.14, exercising tracing, logs, evaluation, privacy, acknowledgements and cloud configuration against synthetic loopback services.
 4. After registry setup, select **publish** to prepare, verify and publish. Only the isolated publishing jobs receive `id-token: write`. They download the verified artifacts, check hashes and publish unchanged bytes; they do not check out source or rebuild packages. The npm job disables lifecycle scripts.
-5. Public registry acceptance fetches the published archives and verifies their SHA-256 against the tested artifacts. Fresh consumers then install by package name and exact version, without GitHub credentials or local archive overrides, and rerun behavioral checks.
+5. Public registry acceptance fetches the published archives and verifies their SHA-256 against the tested artifacts. For npm it also requires provenance attestations on the published version. Fresh consumers then install by package name and exact version, without GitHub credentials or local archive overrides, and rerun behavioral checks.
 6. Record the workflow run, source commit, versions and checksums in language-specific GitHub releases (for example `typescript-v0.1.2` and `python-v0.1.0`). Update public availability statements only after registry acceptance succeeds.
 
 Publication is not rolled back automatically if acceptance fails. Investigate the published version, correct the issue in a reviewed patch release, and use registry deprecation/yank controls deliberately if needed. Do not retry publication with different bytes under the same version.
@@ -42,12 +42,12 @@ Download the prepared TypeScript workflow artifact, verify its checksums, and pu
 ```bash
 # Run inside the downloaded artifact directory, using the authorized npm account.
 sha256sum --check SHA256SUMS
-npm publish ./hue-run-sdk-0.1.2.tgz --access public --ignore-scripts --provenance=false --registry=https://registry.npmjs.org
+npm publish ./hue-run-sdk-0.1.2.tgz --access public --ignore-scripts --registry=https://registry.npmjs.org
 ```
 
 On macOS, use `shasum -a 256 -c SHA256SUMS`. The account may require an interactive login or 2FA; do not put registry tokens into these commands or commit authentication files.
 
-After bootstrap, register the [npm trusted publisher](https://docs.npmjs.com/trusted-publishers/) with owner `hue-run`, repository `hue-sdk`, workflow `release.yml`, environment `npm`, and permission to publish directly. Subsequent releases use the isolated OIDC publishing job. It installs the pinned npm 11.15.0 CLI under Node 24. npm provenance is unavailable for private source repositories; keeping this repository private does not prevent public package distribution or OIDC authentication.
+After bootstrap, register the [npm trusted publisher](https://docs.npmjs.com/trusted-publishers/) with owner `hue-run`, repository `hue-sdk`, workflow `release.yml`, environment `npm`, and permission to publish directly. Subsequent releases use the isolated OIDC publishing job. It installs the pinned npm 11.15.0 CLI under Node 24. Because the source repository is public, npm generates provenance attestations automatically for trusted-publisher releases, and the acceptance job verifies that the published version carries them. A manual bootstrap publish from a workstation carries no provenance.
 
 Do not rerun the publishing workflow for the version already published manually. Run its acceptance commands below against the downloaded manifest and archive instead.
 
@@ -88,4 +88,4 @@ python3 scripts/verify-python-release.py --registry-version 0.1.0 --python 3.14
 
 Use a new artifact directory for each preparation. The inspection command accepts only the expected package files, then writes the manifest and checksums. Preserve those files as release evidence. Python's standard build creates the wheel from the source distribution; installed checks use that same wheel. The copied behavioral suite excludes its two nested wheel-building cases so it cannot accidentally test a newly rebuilt package.
 
-All integration checks use synthetic services. No paid model API, production Hue key, application database, or Fern checkout is required. Review compatibility and the changelog separately; a passed release test certifies the tested combinations, not every framework or dependency version.
+All integration checks use synthetic services. No paid model API, production Hue key, application database, or Hue application checkout is required. Review compatibility and the changelog separately; a passed release test certifies the tested combinations, not every framework or dependency version.
