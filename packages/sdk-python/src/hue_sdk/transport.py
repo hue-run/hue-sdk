@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from google.protobuf.message import DecodeError, Message
+from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY, attach, detach, set_value
 from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.exporter.otlp.proto.http import Compression
@@ -113,6 +114,9 @@ class SafeSession(requests.Session):
         timeout = kwargs.get("timeout", 10)
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise requests.RequestException("Hue telemetry request timed out.")
+        # ContextVars do not automatically follow work onto a new thread.
+        # Preserve OTel suppression in the actual HTTP call, not only its caller.
+        export_context = set_value(_SUPPRESS_INSTRUMENTATION_KEY, True)
         if not self._request_lock.acquire(blocking=False):
             raise requests.RequestException("Hue telemetry transport is still busy.")
         completed = Event()
@@ -122,7 +126,9 @@ class SafeSession(requests.Session):
 
         def send() -> None:
             nonlocal result, failure
+            token = None
             try:
+                token = attach(export_context)
                 for attempt in range(6):
                     remaining = deadline - monotonic()
                     if remaining <= 0:
@@ -145,6 +151,11 @@ class SafeSession(requests.Session):
             except Exception as error:
                 failure = error
             finally:
+                if token is not None:
+                    try:
+                        detach(token)
+                    except Exception as error:
+                        failure = error
                 self._request_lock.release()
                 completed.set()
 

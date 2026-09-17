@@ -70,6 +70,8 @@ Before redaction, helpers copy supported content into detached built-in containe
 | `span.record_error(error)`                     | Exception type event and ERROR status; context managers also record escaping errors/cancellation                                               |
 | `Hue.inject(headers)` / `Hue.extract(headers)` | W3C trace context propagation; pass extracted context to `span(parent_context=...)`                                                            |
 
+Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
+
 For model helpers, pass the message representation produced by your integration. Prefer current [GenAI message conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) when authoring your own messages. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. Structured log fields contain JSON strings so null remains distinguishable from protobuf's absent value.
 
 ## Existing instrumentation
@@ -81,6 +83,7 @@ An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`
 ## Export behavior and limits
 
 - Traces go to `/api/v1/otlp/v1/traces`; correlated logs go to `/api/v1/otlp/v1/logs`. Both use the official OTLP HTTP/protobuf exporter, uncompressed. The official exporter handles retryable network/service failures; Hue additionally honors 429 and Retry-After within its transport budget. There is no proprietary provider transport.
+- Exporter work and its HTTP worker run with OpenTelemetry instrumentation suppressed. Hue ignores records emitted within that suppressed scope, preventing HTTP instrumentation and exporter diagnostics from feeding back into its own queues. Application instrumentation resumes outside that scope.
 - Batches initially contain at most 64 records and are split by encoded protobuf size to fit **1 MiB**, both on wire and after decoding. A single oversized record fails visibly through export status. Helper content exceeding **256 KiB** UTF-8 JSON is omitted before enqueue and increments instrumentation failures; it is never silently truncated by Hue. Third-party record validation remains the receiver's responsibility. OTel's own attribute/count/environment limits can still affect externally configured providers.
 - Hue accepts at most **2,000 distinct spans per trace**. This is enforced by the receiver across distributed producers; the client cannot guarantee a global count.
 - HTTP errors, malformed/non-200 success responses and OTLP `partial_success` rejected counts cause a failed export status. Partial rejection is not retried wholesale. Receiver error text is not echoed. A warning-only partial-success response with zero rejected records remains successful.

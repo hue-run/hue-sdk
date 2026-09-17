@@ -722,6 +722,54 @@ describe("Vercel AI SDK integration", () => {
 });
 
 describe("Application failure isolation", () => {
+  test("content proxies cannot invoke traps or mutate application inputs and results", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "proxy-content",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    let traps = 0;
+    let executions = 0;
+    const live = { value: "unchanged" };
+    const forbidden = () => {
+      traps++;
+      live.value = "modified by capture";
+      throw new Error("application proxy trap");
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const proxies = [
+      new Proxy(live, { ownKeys: forbidden }),
+      new Proxy([], { get: forbidden }),
+      revoked.proxy,
+    ];
+    try {
+      for (const proxy of proxies) {
+        const input = { nested: proxy };
+        const output = { nested: proxy };
+        expect(
+          await hue.tool("proxy-content", input, () => {
+            executions++;
+            expect(live.value).toBe("unchanged");
+            return output;
+          }),
+        ).toBe(output);
+      }
+      expect(traps).toBe(0);
+      expect(executions).toBe(proxies.length);
+      expect(live.value).toBe("unchanged");
+      expect(hue.transport.getReport().instrumentationFailures).toBe(proxies.length * 2);
+      await hue.shutdownSafe();
+      expect(endpoint.requests.flatMap((request) => request.records)).toHaveLength(proxies.length);
+      expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain("nested");
+    } finally {
+      await hue.shutdownSafe();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("invalid capture never prevents a callback or changes a completed side effect", async () => {
     const endpoint = receiver();
     const hue = createHue({
@@ -1042,6 +1090,80 @@ test("redaction expansion is bounded and loses telemetry rather than an applicat
 });
 
 describe("Queued telemetry snapshots", () => {
+  test("byte array accessors cannot bypass the aggregate queue limit", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "byte-budget",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 8192,
+    });
+    const provider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    let getters = 0;
+    const body = new Uint8Array(1_000_000);
+    Object.defineProperty(body, "byteLength", {
+      get() {
+        getters++;
+        return 1;
+      },
+    });
+    try {
+      provider.getLogger("byte-budget").emit({ body });
+      expect(getters).toBe(0);
+      expect(transport.getReport()).toMatchObject({
+        droppedLogs: 1,
+        pendingLogs: 0,
+        pendingBytes: 0,
+      });
+      provider.getLogger("byte-budget").emit({ body: Buffer.from([1, 2, 3]) });
+      await provider.forceFlush();
+      await expect(transport.flush()).rejects.toBeInstanceOf(HueExportError);
+      expect(transport.getReport()).toMatchObject({ acceptedLogs: 1, pendingBytes: 0 });
+      expect(endpoint.requests).toHaveLength(1);
+      expect(endpoint.requests[0]!.raw).toContain("AQID");
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown().catch(() => {});
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("borrowed log proxies are dropped without executing application traps", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "proxy-log",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const provider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    let traps = 0;
+    const forbidden = () => {
+      traps++;
+      throw new Error("application proxy trap");
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    try {
+      for (const body of [new Proxy({}, { getPrototypeOf: forbidden }), revoked.proxy])
+        provider.getLogger("proxy-log").emit({ body });
+      expect(traps).toBe(0);
+      expect(transport.getReport()).toMatchObject({
+        droppedLogs: 2,
+        pendingLogs: 0,
+        pendingBytes: 0,
+      });
+      await provider.forceFlush();
+      await expect(transport.flush()).rejects.toBeInstanceOf(HueExportError);
+      expect(endpoint.hits()).toBe(0);
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown().catch(() => {});
+      endpoint.server.stop(true);
+    }
+  });
+
   test("mutating borrowed log data after emit cannot change queued bytes or exported values", async () => {
     const endpoint = receiver();
     const transport = createHueTransport({

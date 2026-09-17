@@ -1,4 +1,5 @@
 import { INVALID_SPAN_CONTEXT, trace, type Span } from "@opentelemetry/api";
+import { types as utilTypes } from "node:util";
 import { MAX_CONTENT_BYTES } from "./config.js";
 import type { JsonValue } from "./types.js";
 
@@ -113,6 +114,9 @@ export function encodeContent(value: JsonValue): string {
     }
     if (!item || typeof item !== "object" || ancestors.has(item))
       throw new TypeError("Invalid JSON");
+    // Even descriptor/prototype reads can execute application code on a Proxy.
+    // The native check also handles revoked proxies without invoking their traps.
+    if (utilTypes.isProxy(item)) throw new TypeError("JSON proxies are unsupported");
     const array = Array.isArray(item);
     if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(item)))
       throw new TypeError("Expected JSON data");

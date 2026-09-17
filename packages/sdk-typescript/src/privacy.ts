@@ -63,7 +63,12 @@ function redactValue(
     // JavaScript can supply an async redactor despite the synchronous contract.
     // Observe its rejection before dropping the invalid record.
     if (result && typeof result === "object") void Promise.resolve(result).catch(() => {});
-    if (typeof result !== "string" || !result.isWellFormed() || result.includes("\u0000"))
+    if (
+      typeof result !== "string" ||
+      result.length > MAX_CONTENT_BYTES ||
+      !result.isWellFormed() ||
+      result.includes("\u0000")
+    )
       throw new Error("Redaction produced unsupported text");
     if (Buffer.byteLength(result) > MAX_CONTENT_BYTES)
       throw new Error("Telemetry text exceeds 256 KiB");

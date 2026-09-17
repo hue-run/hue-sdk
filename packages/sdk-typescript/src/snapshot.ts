@@ -1,7 +1,13 @@
 import { createTraceState, type SpanContext } from "@opentelemetry/api";
+import { types as utilTypes } from "node:util";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord, ReadWriteLogRecord } from "@opentelemetry/sdk-logs";
+
+const typedArrayByteLength = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  "byteLength",
+)!.get!;
 
 /** Copies only exported data, with the same finite budget used for admission. */
 class Snapshot {
@@ -34,10 +40,13 @@ class Snapshot {
     )
       return value;
     if (typeof value !== "object") throw new TypeError("Unsupported telemetry value");
+    if (utilTypes.isProxy(value)) throw new TypeError("Telemetry proxies are unsupported");
     if (this.ancestors.has(value)) throw new TypeError("Cyclic telemetry value");
     if (this.copied.has(value)) return this.copied.get(value) as T;
-    if (value instanceof Uint8Array) {
-      this.charge(value.byteLength);
+    if (utilTypes.isUint8Array(value)) {
+      // Own accessors/subclasses cannot disguise the retained byte count. The
+      // typed-array constructor copies internal data without an iterator hook.
+      this.charge(typedArrayByteLength.call(value));
       const copy = new Uint8Array(value);
       this.copied.set(value, copy);
       return copy as T;

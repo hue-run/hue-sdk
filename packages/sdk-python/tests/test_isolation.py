@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 import subprocess
@@ -21,6 +22,60 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from hue_sdk import Hue, create_hue_safe
 
 KEY = "synthetic-isolation-key"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("business_error", [None, RuntimeError("original")])
+def test_tool_and_model_metadata_never_calls_application_conversion_hooks(
+    receiver, enabled, business_error
+):
+    hooks = []
+
+    class BadName(str):
+        def __str__(self):
+            hooks.append("str")
+            raise RuntimeError("synthetic conversion failure")
+
+        def __format__(self, spec):
+            hooks.append("format")
+            raise RuntimeError("synthetic formatting failure")
+
+        def __bool__(self):
+            hooks.append("bool")
+            raise RuntimeError("synthetic truth-value failure")
+
+    value = BadName("original")
+    hue = Hue(receiver.url, KEY, capture_content=False, enabled=enabled)
+    calls = []
+    result = object()
+
+    def business(scope):
+        with scope:
+            calls.append("once")
+            if business_error is not None:
+                raise business_error
+            return result
+
+    try:
+        scopes = (
+            hue.tool(value, call_id=value),
+            hue.model(value, provider=value, operation=value, name=value),
+        )
+        for scope in scopes:
+            if business_error is None:
+                assert business(scope) is result
+            else:
+                with pytest.raises(type(business_error)) as caught:
+                    business(scope)
+                assert caught.value is business_error
+        assert calls == ["once", "once"] and not hooks
+        assert hue.export_status.instrumentation_failures == (6 if enabled else 0)
+        assert hue.force_flush() is not enabled
+        assert [span.name for span in receiver.spans()] == (
+            ["execute_tool unknown", "chat unknown"] if enabled else []
+        )
+    finally:
+        hue.shutdown_safe()
 
 
 @pytest.mark.parametrize("redactor_raises", [False, True])
@@ -465,6 +520,76 @@ def _emit_isolation_record(hue, signal, name, *, large=False):
             trace.get_current_span().set_attributes(attributes)
     else:
         hue.logger_provider.get_logger("external").emit(body=name, attributes=attributes)
+
+
+@pytest.mark.parametrize("signal", ["traces", "logs"])
+@pytest.mark.parametrize("initial_failure", [False, True])
+def test_export_suppression_prevents_http_and_diagnostic_feedback(
+    receiver, monkeypatch, signal, initial_failure
+):
+    import requests
+    from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY, get_value
+    from opentelemetry.sdk._logs import LoggingHandler
+
+    hue = Hue(receiver.url, KEY, capture_content=False, export_timeout_seconds=0.1)
+    processor = hue._span_processor if signal == "traces" else hue._log_processor
+    original_request = requests.Session.request
+    original_export = processor._exporter._delegate.export
+    original_ready = type(processor._exporter).ready
+    http_contexts, exporter_contexts, ready_contexts = [], [], []
+    diagnostic = logging.Logger("synthetic-exporter-diagnostic")
+    handler = LoggingHandler(logger_provider=hue.logger_provider)
+    diagnostic.addHandler(handler)
+
+    def instrumented_request(session, method, url, **kwargs):
+        suppressed = bool(get_value(_SUPPRESS_INSTRUMENTATION_KEY))
+        http_contexts.append(suppressed)
+        # Follow the supported OTel HTTP-instrumentor suppression contract.
+        # Bound a broken implementation's recursion so this test itself is safe.
+        if not suppressed and len(http_contexts) <= 3:
+            with hue.tracer.start_as_current_span("instrumented-http-export"):
+                pass
+        return original_request(session, method, url, **kwargs)
+
+    def export_with_diagnostic(batch):
+        exporter_contexts.append(bool(get_value(_SUPPRESS_INSTRUMENTATION_KEY)))
+        diagnostic.error("synthetic exporter diagnostic")
+        return original_export(batch)
+
+    def ready(exporter):
+        if exporter is processor._exporter:
+            ready_contexts.append(bool(get_value(_SUPPRESS_INSTRUMENTATION_KEY)))
+        return original_ready.fget(exporter)
+
+    monkeypatch.setattr(requests.Session, "request", instrumented_request)
+    monkeypatch.setattr(processor._exporter._delegate, "export", export_with_diagnostic)
+    monkeypatch.setattr(type(processor._exporter), "ready", property(ready))
+    if initial_failure:
+        receiver.reply(503, **{"Retry-After": "20"})
+    try:
+        for index in range(2):
+            assert not get_value(_SUPPRESS_INSTRUMENTATION_KEY)
+            _emit_isolation_record(hue, signal, f"business-{index}")
+            assert hue.force_flush(timeout_millis=1000) is not initial_failure
+            assert not get_value(_SUPPRESS_INSTRUMENTATION_KEY)
+        assert exporter_contexts == http_contexts == [True, True]
+        assert ready_contexts == [False, False]  # Restore the persistent exporter thread too.
+        assert len(receiver.requests) == 2
+        assert all(path.endswith(f"/{signal}") for path, _, _ in receiver.requests)
+        assert processor._exporter.failures == int(initial_failure)
+        status = hue.export_status
+        assert status.dropped_trace_records == status.dropped_log_records == 0
+        assert status.queued_trace_records == status.queued_log_records == 0
+        assert status.instrumentation_failures == 0
+        records = receiver.spans() if signal == "traces" else receiver.logs()
+        names = [
+            record.name if signal == "traces" else record.body.string_value for record in records
+        ]
+        assert names == ["business-0", "business-1"]
+    finally:
+        hue.shutdown_safe()
+        diagnostic.removeHandler(handler)
+        handler.close()
 
 
 @pytest.mark.parametrize("signal", ["traces", "logs"])

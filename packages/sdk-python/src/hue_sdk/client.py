@@ -414,6 +414,10 @@ class Hue:
         operation: str = "chat",
         name: str | None = None,
     ) -> Iterator[HueSpan]:
+        model = self._metadata_string(model, "unknown")
+        operation = self._metadata_string(operation, "chat")
+        provider = self._metadata_string(provider, "unknown")
+        name = self._metadata_string(name, "") if name is not None else ""
         with self.span(
             name or f"{operation} {model}",
             kind=SpanKind.CLIENT,
@@ -428,14 +432,23 @@ class Hue:
 
     @contextmanager
     def tool(self, name: str, *, call_id: str | None = None) -> Iterator[HueSpan]:
+        name = self._metadata_string(name, "unknown")
         attributes: dict[str, AttributeValue] = {
             "gen_ai.operation.name": "execute_tool",
             "gen_ai.tool.name": name,
         }
         if call_id is not None:
-            attributes["gen_ai.tool.call.id"] = call_id
+            attributes["gen_ai.tool.call.id"] = self._metadata_string(call_id, "unknown")
         with self.span(f"execute_tool {name}", attributes=attributes, _category="tool") as span:
             yield span
+
+    def _metadata_string(self, value: Any, fallback: str) -> str:
+        if not self._active:
+            return fallback
+        if type(value) is str:
+            return value
+        self._record_issue()
+        return fallback
 
     @staticmethod
     def inject(headers: MutableMapping[str, str]) -> None:

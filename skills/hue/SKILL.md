@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.6"
+  version: "0.1.7"
 ---
 
 # Hue tracing
@@ -42,8 +42,8 @@ Adapt the install command to the app's package manager, for example `uv add hue-
 
 The user creates their project service key in Hue under **Settings → Integrations & API keys** and configures `HUE_API_KEY` on the server. Read that setting from the application; never request the key in chat or put it in browser code, fixtures, committed files, or logs.
 
-- **TypeScript:** pass `apiKey`, a stable `serviceName`, and explicit `captureContent` to `createHue`. Hue Cloud is the default; omit `baseUrl` for ordinary cloud use. `checkConnection()` verifies the key's project.
-- **Python:** pass `api_key`, a stable `service_name`, and explicit `capture_content` to `Hue`. Hue Cloud is the default; omit `base_url` for ordinary cloud use. `validate_project()` verifies the key's project. Older Python `0.1.0.dev0` installations still require an explicit origin.
+- **TypeScript:** for serving applications, pass `apiKey`, a stable `serviceName`, and explicit `captureContent` to `createHueSafe` (requires 0.1.5). Hue Cloud is the default; omit `baseUrl` for ordinary cloud use. Use strict `createHue` and `checkConnection()` only in a separate setup diagnostic to verify the key's project.
+- **Python:** for serving applications, pass `api_key`, a stable `service_name`, and explicit `capture_content` to `create_hue_safe` (requires 0.1.3). Hue Cloud is the default; omit `base_url` for ordinary cloud use. Use strict `Hue` and `validate_project()` in a separate setup diagnostic. Older Python `0.1.0.dev0` installations still require an explicit origin.
 - **Direct OTLP:** configure `https://app.hue.run/api/v1/otlp/v1/traces` and, when needed, `/api/v1/otlp/v1/logs` with `Authorization: Bearer <project-service-key>`. These are full signal URLs for an OTLP HTTP exporter. `GET /api/v1/projects/current` with the same header optionally verifies the project without sending telemetry. Configure `service.name` on the existing provider resource.
 
 SDK constructors do not automatically read environment variables. For another Hue deployment, use its configured origin. A custom SDK origin excludes API paths; the standard OTLP exporter needs its full signal endpoint. Never change the model provider's API base URL to Hue.

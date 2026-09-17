@@ -13,6 +13,13 @@ from threading import Condition, Thread
 from time import monotonic
 from typing import Any
 
+from opentelemetry.context import (
+    _SUPPRESS_INSTRUMENTATION_KEY,
+    attach,
+    detach,
+    get_value,
+    set_value,
+)
 from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
@@ -48,6 +55,8 @@ class _BoundedProcessor:
             return
         admitted = False
         try:
+            if get_value(_SUPPRESS_INSTRUMENTATION_KEY):
+                return
             # Reject oversized/invalid records before retaining them. The budget
             # includes in-flight records, so a stalled receiver cannot grow it.
             with self._condition:
@@ -151,11 +160,20 @@ class _BoundedProcessor:
                     batch_bytes += size
                 # Per-record encodings include resource/scope overhead, so this
                 # conservative sum keeps each export within one HTTP request.
+            token = None
             try:
+                # Match the pinned OTel SDK's exporter suppression contract.
+                # Exporter diagnostics must not feed back into this pipeline.
+                token = attach(set_value(_SUPPRESS_INSTRUMENTATION_KEY, True))
                 self._exporter.export(tuple(item for item, _ in batch))
             except Exception:
                 self._exporter.record_failure()
             finally:
+                if token is not None:
+                    try:
+                        detach(token)
+                    except Exception:
+                        self._exporter.record_failure()
                 with self._condition:
                     self._pending_records -= len(batch)
                     self._pending_bytes -= sum(size for _, size in batch)

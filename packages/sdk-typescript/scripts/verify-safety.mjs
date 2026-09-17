@@ -3,11 +3,49 @@ import { once } from "node:events";
 import { strict as assert } from "node:assert";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const [consumer] = process.argv.slice(2);
 const { createHue, createHueSafe, HueExportError } = await import(
   pathToFileURL(join(consumer, "node_modules/@hue-run/sdk/dist/index.js")).href
 );
+// A large lazy string costs little until scanning flattens it. Reject it by
+// length before Unicode/NUL/UTF-8 checks allocate its complete backing storage.
+// Isolate peak-memory measurement from the rest of this verification process.
+const redactionProbe = spawnSync(
+  process.execPath,
+  [
+    "--max-old-space-size=64",
+    "--unhandled-rejections=strict",
+    "--input-type=module",
+    "-e",
+    `
+      import { strict as assert } from "node:assert";
+      const { createHue } = await import(process.argv[1]);
+      const hue = createHue({
+        apiKey: "synthetic",
+        serviceName: "oversized-redactor",
+        captureContent: true,
+        baseUrl: "http://127.0.0.1:1",
+        timeoutMillis: 100,
+        redact: () => "x".repeat(128 * 1024 * 1024),
+      });
+      assert.equal(await hue.withSpan("probe", () => 42, { input: "small" }), 42);
+      const before = process.resourceUsage().maxRSS;
+      const delivery = await hue.flushSafe();
+      const addedPeakKiB = process.resourceUsage().maxRSS - before;
+      assert.equal(delivery.ok, false);
+      assert.equal(delivery.report.failedSpans, 1);
+      assert.ok(addedPeakKiB < 64 * 1024, "Oversized redactor output was materialized before rejection");
+      await hue.shutdownSafe();
+      console.log(JSON.stringify({ oversizedRedaction: "passed", addedPeakKiB }));
+    `,
+    pathToFileURL(join(consumer, "node_modules/@hue-run/sdk/dist/index.js")).href,
+  ],
+  { encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 },
+);
+assert.equal(redactionProbe.status, 0, redactionProbe.stderr || redactionProbe.error?.message);
+console.log(redactionProbe.stdout.trim());
 let mode = "unauthorized";
 let closedResponses = 0;
 let requests = 0;

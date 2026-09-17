@@ -66,6 +66,8 @@ You configure your project service key through your application's secret workflo
 
 For production request handlers, follow [production safety](https://docs.hue.run/guides/production-safety). The strict setup examples below intentionally expose delivery failures.
 
+The [tracing reliability contract](./RELIABILITY.md) maps failure isolation and resource limits to regression tests and application acceptance checks.
+
 ## Install
 
 Python:
