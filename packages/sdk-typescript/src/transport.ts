@@ -449,6 +449,7 @@ class ReportingExporter<T extends RecordValue> {
     const options = this.transport.options;
     let rejected = 0;
     let validResponse = true;
+    let receivedResponse = false;
     let expired = false;
     const agents = new Set<Agent>();
     const deadline = Date.now() + options.timeoutMillis;
@@ -457,6 +458,7 @@ class ReportingExporter<T extends RecordValue> {
       serializeRequest: (data) => this.serializer.serializeRequest(data),
       deserializeResponse: (bytes) => {
         if (expired) return {};
+        receivedResponse = true;
         try {
           const response = this.serializer.deserializeResponse(bytes);
           const partial = response.partialSuccess;
@@ -530,6 +532,15 @@ class ReportingExporter<T extends RecordValue> {
         exporter.export(records, resolve);
       });
       if (result.code === ExportResultCode.SUCCESS) {
+        if (!receivedResponse) {
+          this.transport.issue(
+            this.signal,
+            "failed",
+            records.length,
+            "Hue response ended without a complete OTLP acknowledgement; acceptance is uncertain",
+          );
+          return false;
+        }
         if (validResponse) this.transport.acceptedRecords(this.signal, records.length - rejected);
         return validResponse;
       } else {

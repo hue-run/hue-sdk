@@ -23,6 +23,13 @@ const server = createServer(async (request, response) => {
     response.writeHead(401).end("synthetic-private-body");
     return;
   }
+  if (mode === "incomplete") {
+    response.writeHead(200, { "Content-Type": "application/x-protobuf", "Content-Length": "4" });
+    response.flushHeaders();
+    response.write(Buffer.from([0]));
+    setTimeout(() => response.destroy(), 10);
+    return;
+  }
   if (mode === "trickle") {
     response.writeHead(200, { "Content-Type": "application/x-protobuf" });
     response.flushHeaders();
@@ -92,6 +99,13 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(closedResponses, requests, "Deadline closes the active HTTP response");
 
+  mode = "incomplete";
+  const incomplete = createHue(options);
+  await incomplete.withSpan("incomplete", () => 42);
+  await assert.rejects(incomplete.flush(), HueExportError);
+  assert.equal(incomplete.transport.getReport().acceptedSpans, 0);
+  assert.equal(incomplete.transport.getReport().failedSpans, 1);
+  await incomplete.shutdownSafe();
   mode = "success";
   const badRedactor = createHue({
     ...options,

@@ -6,31 +6,88 @@ export function noopSpan(): Span {
   return trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
 }
 
-/** Wrap only telemetry calls. Never wrap/retry the application callback. */
-export function safeSpan(source: Span, failed: () => void): Span {
-  const fallback = noopSpan();
-  let wrapped: Span;
-  wrapped = new Proxy(source, {
-    get(_target, key) {
-      return (...args: unknown[]) => {
-        try {
-          const result = Reflect.apply(Reflect.get(source, key), source, args);
-          const ids = result as { traceId?: unknown; spanId?: unknown } | undefined;
-          if (
-            key === "spanContext" &&
-            (!ids || typeof ids.traceId !== "string" || typeof ids.spanId !== "string")
-          )
-            throw new TypeError("Invalid span context");
-          return result === source ? wrapped : result;
-        } catch {
-          failed();
-          const result = Reflect.apply(Reflect.get(fallback, key), fallback, args);
-          return result === fallback ? wrapped : result;
-        }
+/** Isolate the public Span interface without changing its fluent method contract. */
+class SafeSpan implements Span {
+  constructor(
+    private source: Span,
+    private failed: () => void,
+  ) {}
+
+  private write(work: () => unknown): void {
+    try {
+      const result = work();
+      // Broken/custom providers can return rejected promises from synchronous
+      // OTel methods. Observe them without awaiting on application code paths.
+      if (result && typeof (result as PromiseLike<unknown>).then === "function")
+        void Promise.resolve(result).catch(this.failed);
+    } catch {
+      this.failed();
+    }
+  }
+
+  spanContext(): ReturnType<Span["spanContext"]> {
+    try {
+      const ids = this.source.spanContext();
+      if (!ids || typeof ids.traceId !== "string" || typeof ids.spanId !== "string")
+        throw new TypeError("Invalid span context");
+      return {
+        traceId: ids.traceId,
+        spanId: ids.spanId,
+        traceFlags: ids.traceFlags,
+        isRemote: ids.isRemote,
+        traceState: ids.traceState,
       };
-    },
-  });
-  return wrapped;
+    } catch {
+      this.failed();
+      return INVALID_SPAN_CONTEXT;
+    }
+  }
+  isRecording(): boolean {
+    try {
+      return this.source.isRecording() === true;
+    } catch {
+      this.failed();
+      return false;
+    }
+  }
+  setAttribute(...args: Parameters<Span["setAttribute"]>): this {
+    this.write(() => this.source.setAttribute(...args));
+    return this;
+  }
+  setAttributes(...args: Parameters<Span["setAttributes"]>): this {
+    this.write(() => this.source.setAttributes(...args));
+    return this;
+  }
+  addEvent(...args: Parameters<Span["addEvent"]>): this {
+    this.write(() => this.source.addEvent(...args));
+    return this;
+  }
+  addLink(...args: Parameters<Span["addLink"]>): this {
+    this.write(() => this.source.addLink(...args));
+    return this;
+  }
+  addLinks(...args: Parameters<Span["addLinks"]>): this {
+    this.write(() => this.source.addLinks(...args));
+    return this;
+  }
+  setStatus(...args: Parameters<Span["setStatus"]>): this {
+    this.write(() => this.source.setStatus(...args));
+    return this;
+  }
+  updateName(...args: Parameters<Span["updateName"]>): this {
+    this.write(() => this.source.updateName(...args));
+    return this;
+  }
+  end(...args: Parameters<Span["end"]>): void {
+    this.write(() => this.source.end(...args));
+  }
+  recordException(...args: Parameters<Span["recordException"]>): void {
+    this.write(() => this.source.recordException(...args));
+  }
+}
+
+export function safeSpan(source: Span, failed: () => void): Span {
+  return new SafeSpan(source, failed);
 }
 
 /** Validate a bounded data tree without invoking toJSON or property getters. */
