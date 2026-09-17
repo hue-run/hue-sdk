@@ -50,6 +50,7 @@ dev = [
   "referencing>=0.28",
   "mypy>=2.3,<3",
   "types-requests>=2.32,<3",
+  "pdoc>=15,<16",
 ]
 compatibility = ["openai==3.14.0", "openinference-instrumentation-openai==0.1.60"]
 

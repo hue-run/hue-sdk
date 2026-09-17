@@ -1,0 +1,16 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "@hue-run/sdk",
+  "entryPoints": [
+    "packages/sdk-typescript/src/index.ts",
+    "packages/sdk-typescript/src/ai-sdk.ts",
+    "packages/sdk-typescript/src/evals.ts",
+    "packages/sdk-typescript/src/managed.ts"
+  ],
+  "tsconfig": "packages/sdk-typescript/tsconfig.build.json",
+  "out": "docs/reference/typescript",
+  "readme": "none",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "treatWarningsAsErrors": true
+}

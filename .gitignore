@@ -15,4 +15,5 @@ htmlcov/
 !.env.example
 !.env.schema
 .DS_Store
-
+# Generated API reference (typedoc, pdoc)
+docs/reference/

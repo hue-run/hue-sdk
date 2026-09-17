@@ -39,7 +39,7 @@ type Response = {
     errorMessage?: string;
   };
 };
-type RecordValue = ReadableSpan | ReadableLogRecord;
+export type RecordValue = ReadableSpan | ReadableLogRecord;
 
 function recordData(record: RecordValue, signal: Signal): unknown {
   if (signal === "traces") {

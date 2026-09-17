@@ -68,7 +68,6 @@ run(
   const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
   // ajv is an optional peer: a tracing-only install must load evals and report the missing
   // validator as a scorer error instead of failing at import or crashing a worker.
-  assert.equal(require.resolve.paths ? true : true, true);
   const score = await scoreLocally(
     { definition: builtins.jsonSchema({ type: "string" }) },
     { inputs: {}, output: "text", hasOutput: true, hasExpected: false },
