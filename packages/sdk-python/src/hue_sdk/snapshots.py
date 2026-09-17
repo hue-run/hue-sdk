@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import copy
+from math import isfinite
 from typing import Any
 
 from opentelemetry.attributes import BoundedAttributes
@@ -20,6 +21,79 @@ from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, Status
 
 from .transport import MAX_REQUEST_BYTES
+
+MAX_CONTENT_SNAPSHOT_BYTES = 1_048_576
+MAX_CONTENT_SNAPSHOT_DEPTH = 64
+MAX_CONTENT_SNAPSHOT_NODES = 65_536
+MAX_CONTENT_INTEGER_BITS = 14_000
+
+
+class _ContentBudget:
+    """Copy only built-in JSON values; never invoke application copy/iteration hooks."""
+
+    def __init__(self) -> None:
+        self.remaining_bytes = MAX_CONTENT_SNAPSHOT_BYTES
+        self.remaining_nodes = MAX_CONTENT_SNAPSHOT_NODES
+        self.active: set[int] = set()
+
+    def consume(self, size: int) -> None:
+        self.remaining_bytes -= size
+        if self.remaining_bytes < 0:
+            raise ValueError("Content snapshot exceeds its value budget.")
+
+    def value(self, value: Any, depth: int = 0) -> Any:
+        self.remaining_nodes -= 1
+        self.consume(8)
+        if self.remaining_nodes < 0 or depth > MAX_CONTENT_SNAPSHOT_DEPTH:
+            raise ValueError("Content snapshot exceeds its traversal limit.")
+        kind = type(value)
+        if value is None or kind is bool:
+            return value
+        if kind is str:
+            if len(value) > self.remaining_bytes:
+                raise ValueError("Content snapshot exceeds its value budget.")
+            self.consume(len(value.encode("utf-8")))
+            return value
+        if kind is int:
+            # Decimal conversion can be superlinear even when it fits the byte
+            # budget. Do not depend on the interpreter's configurable digit cap.
+            if value.bit_length() > MAX_CONTENT_INTEGER_BITS:
+                raise ValueError("Content integer exceeds its conversion limit.")
+            self.consume((value.bit_length() * 30103) // 100000 + 2)
+            return value
+        if kind is float and isfinite(value):
+            self.consume(24)
+            return value
+        if kind is not dict and kind is not list and kind is not tuple:
+            raise ValueError("Content must contain only built-in JSON values.")
+        identity = id(value)
+        if identity in self.active:
+            raise ValueError("Content snapshot cannot contain cycles.")
+        self.active.add(identity)
+        try:
+            if kind is dict:
+                result = {}
+                for key, item in value.items():
+                    key_kind = type(key)
+                    if (
+                        key is not None
+                        and key_kind is not str
+                        and key_kind is not bool
+                        and key_kind is not int
+                        and key_kind is not float
+                    ):
+                        raise ValueError("Content contains an unsupported object key.")
+                    result[self.value(key, depth + 1)] = self.value(item, depth + 1)
+                return result
+            items = [self.value(item, depth + 1) for item in value]
+            return tuple(items) if kind is tuple else items
+        finally:
+            self.active.remove(identity)
+
+
+def snapshot_content(value: Any) -> Any:
+    """Detach nested mutable content before exposing it to a user redactor."""
+    return _ContentBudget().value(value)
 
 
 class _ValueBudget:

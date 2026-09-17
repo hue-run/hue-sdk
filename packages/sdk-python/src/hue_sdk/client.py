@@ -26,6 +26,7 @@ from opentelemetry.util.types import AttributeValue
 
 from .processors import BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
+from .snapshots import snapshot_content
 from .transport import (
     DEFAULT_BASE_URL,
     MAX_CONTENT_BYTES,
@@ -298,8 +299,13 @@ class Hue:
     def _content(self, key: str, value: Any) -> str:
         # Redact before serialization, before queues and before any exporter receives content.
         try:
+            # A redactor may mutate its argument before returning or raising.
+            # It must never receive the application's live mutable values.
+            value = snapshot_content(value)
             if self._redactor is not None:
-                value = self._redactor(key, value)
+                # Bound the returned tree too, before JSONEncoder can allocate
+                # an arbitrarily large nested string or invoke custom hooks.
+                value = snapshot_content(self._redactor(key, value))
             # Stop accumulation once the field exceeds its budget. Large direct
             # strings can be rejected before JSON creates an escaped copy.
             if isinstance(value, str) and len(value) > MAX_CONTENT_BYTES:

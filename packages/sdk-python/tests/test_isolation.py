@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import subprocess
+import sys
 import time
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +21,221 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from hue_sdk import Hue, create_hue_safe
 
 KEY = "synthetic-isolation-key"
+
+
+@pytest.mark.parametrize("redactor_raises", [False, True])
+@pytest.mark.parametrize(
+    "business_error", [None, RuntimeError("original"), asyncio.CancelledError()]
+)
+def test_redactor_mutations_preserve_application_values_and_error_identity(
+    receiver, redactor_raises, business_error
+):
+    calls = []
+
+    def content(secret):
+        return {"nested": [{"secret": secret}], "tuple": ({"secret": secret},)}
+
+    inputs, output = content("secret-input"), content("secret-output")
+
+    def redact(field, value):
+        calls.append(field)
+        assert type(value) is dict and type(value["nested"]) is list
+        assert type(value["tuple"]) is tuple
+        value["nested"][0]["secret"] = "redacted"
+        value["tuple"][0]["secret"] = "redacted"
+        value["redactor-only"] = True
+        if redactor_raises:
+            raise ValueError("synthetic redactor failure after mutation")
+        return value
+
+    hue = Hue(receiver.url, KEY, capture_content=True, redactor=redact)
+    executed = []
+
+    def business():
+        with hue.span("business") as span:
+            span.set_input(inputs)
+            executed.append("once")
+            span.set_output(output)
+            span.log_inference(input=inputs)
+            span.log_inference(output=output)
+            if business_error is not None:
+                raise business_error
+            return output
+
+    try:
+        if business_error is None:
+            assert business() is output
+        else:
+            with pytest.raises(type(business_error)) as caught:
+                business()
+            assert caught.value is business_error
+        assert executed == ["once"] and len(calls) == 4
+        assert inputs == content("secret-input")
+        assert output == content("secret-output")
+        assert hue.force_flush() is not redactor_raises
+        assert hue.export_status.instrumentation_failures == (4 if redactor_raises else 0)
+        payload = b"".join(body for _, _, body in receiver.requests)
+        assert b"secret-input" not in payload and b"secret-output" not in payload
+        assert (b"redactor-only" in payload) is not redactor_raises
+    finally:
+        hue.shutdown_safe()
+
+
+@pytest.mark.parametrize("invalid", ["bytes", "nodes", "depth", "cycle", "custom", "nonfinite"])
+@pytest.mark.parametrize("with_redactor", [False, True])
+def test_content_snapshot_rejects_unsafe_input_before_redactor(receiver, invalid, with_redactor):
+    from hue_sdk.snapshots import (
+        MAX_CONTENT_SNAPSHOT_BYTES,
+        MAX_CONTENT_SNAPSHOT_DEPTH,
+        MAX_CONTENT_SNAPSHOT_NODES,
+    )
+
+    hooks = []
+
+    class CustomDict(dict):
+        def items(self):
+            hooks.append("items")
+            raise AssertionError("custom iterator called")
+
+        def __copy__(self):
+            hooks.append("copy")
+            raise AssertionError("custom copy called")
+
+        def __deepcopy__(self, memo):
+            hooks.append("deepcopy")
+            raise AssertionError("custom deepcopy called")
+
+    if invalid == "bytes":
+        value = {"data": "x" * MAX_CONTENT_SNAPSHOT_BYTES}
+    elif invalid == "nodes":
+        value = [None] * MAX_CONTENT_SNAPSHOT_NODES
+    elif invalid == "depth":
+        value = None
+        for _ in range(MAX_CONTENT_SNAPSHOT_DEPTH + 1):
+            value = [value]
+    elif invalid == "cycle":
+        value = []
+        value.append(value)
+    elif invalid == "custom":
+        value = CustomDict(data="unchanged")
+    else:
+        value = float("inf")
+    calls = []
+    hue = Hue(
+        receiver.url,
+        KEY,
+        capture_content=True,
+        redactor=(lambda *args: calls.append(args)) if with_redactor else None,
+    )
+    try:
+        with hue.span("invalid") as span:
+            span.set_input(value)
+        assert not calls and not hooks
+        assert hue.export_status.instrumentation_failures == 1
+        assert not hue.force_flush()
+        assert all(attribute.key != "input.value" for attribute in receiver.spans()[0].attributes)
+        if invalid == "cycle":
+            assert len(value) == 1 and value[0] is value
+        elif invalid == "custom":
+            assert dict.__getitem__(value, "data") == "unchanged"
+        elif invalid == "bytes":
+            assert value["data"] == "x" * MAX_CONTENT_SNAPSHOT_BYTES
+        elif invalid == "nodes":
+            assert len(value) == MAX_CONTENT_SNAPSHOT_NODES and all(item is None for item in value)
+    finally:
+        hue.shutdown_safe()
+
+
+def test_redactor_can_reduce_content_within_snapshot_budget(receiver):
+    calls = []
+
+    def redact(field, value):
+        calls.append(len(value))
+        return "redacted"
+
+    hue = Hue(receiver.url, KEY, capture_content=True, redactor=redact)
+    with hue.span("reduce") as span:
+        span.set_input("x" * 300_000)
+    assert hue.force_flush()
+    assert calls == [300_000]
+    assert hue.shutdown()
+
+
+@pytest.mark.parametrize("invalid", ["nested-oversize", "custom-container", "final-json-limit"])
+def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
+    from hue_sdk.snapshots import MAX_CONTENT_SNAPSHOT_BYTES
+
+    hooks, calls = [], []
+
+    class CustomList(list):
+        def __iter__(self):
+            hooks.append("iter")
+            raise AssertionError("custom serialization hook called")
+
+    def redact(_field, value):
+        calls.append(1)
+        value["nested"][0] = "changed"
+        if invalid == "nested-oversize":
+            return {"nested": ["x" * MAX_CONTENT_SNAPSHOT_BYTES]}
+        if invalid == "custom-container":
+            return {"nested": CustomList(["unchanged"])}
+        return {"nested": "x" * 262_144}
+
+    output = {"nested": ["original"]}
+    hue = Hue(receiver.url, KEY, capture_content=True, redactor=redact)
+    try:
+        with hue.span("invalid-output") as span:
+            span.set_output(output)
+        assert calls == [1] and not hooks
+        assert output == {"nested": ["original"]}
+        assert hue.export_status.instrumentation_failures == 1
+        assert not hue.force_flush()
+        assert all(attribute.key != "output.value" for attribute in receiver.spans()[0].attributes)
+    finally:
+        hue.shutdown_safe()
+
+
+def test_integer_conversion_limit_is_independent_of_interpreter_settings():
+    # Isolate the mutable interpreter limit and avoid converting the giant int
+    # even in assertion messages. Exercise values, object keys and redactor output.
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from opentelemetry import trace
+from hue_sdk import Hue, HueSpan
+from hue_sdk.snapshots import MAX_CONTENT_INTEGER_BITS
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(0)
+giant = 1 << 1_000_000
+calls = []
+def redact(field, value):
+    calls.append(field)
+    return {"nested": giant}
+hue = Hue("http://127.0.0.1:1", "synthetic-key", capture_content=True, redactor=redact)
+span = HueSpan(hue, trace.INVALID_SPAN, "span")
+span.set_input({"nested": giant})
+span.set_input({giant: "value"})
+assert not calls
+span.set_output({"ordinary": 1})
+assert len(calls) == 1
+assert hue.export_status.instrumentation_failures == 3
+assert not hue.shutdown_safe()
+ordinary = Hue("http://127.0.0.1:1", "synthetic-key", capture_content=True)
+assert ordinary._content("input", {1: 2}) == '{"1":2}'
+assert ordinary._content("input", 1 << (MAX_CONTENT_INTEGER_BITS - 1))
+assert ordinary.shutdown_safe()
+print("integer-conversion-boundary-passed")
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    assert "integer-conversion-boundary-passed" in completed.stdout
 
 
 def test_invalid_content_and_redactor_preserve_result_and_run_once(receiver):
