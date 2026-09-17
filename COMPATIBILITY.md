@@ -1,6 +1,6 @@
 # Compatibility
 
-This matrix describes the pending TypeScript `0.1.5` and Python `0.1.3` releases. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This matrix describes the current releases: TypeScript `0.1.5` and Python `0.1.3`. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
