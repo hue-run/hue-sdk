@@ -57,6 +57,7 @@ class ArchiveGateTests(unittest.TestCase):
                 {"name": "@another-org/sdk"},
                 {"license": "UNLICENSED"},
                 {"scripts": {"postinstall": "some-command"}},
+                {"dependencies": {"ajv": "8.20.0"}},
             ):
                 with self.subTest(change=change), self.assertRaises(AssertionError):
                     release.inspect(

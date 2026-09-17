@@ -33,8 +33,11 @@ def main() -> None:
     for key in ("PYTHONPATH", "HUE_API_KEY", "HUE_BASE_URL", "OPENAI_API_KEY"):
         environment.pop(key, None)
     environment["PYTHONNOUSERSITE"] = "1"
+    # The evals extra provides JSON Schema scoring, which the copied behavioral suite exercises.
     spec = (
-        str(args.wheel.resolve()) if args.wheel else f"hue-run=={args.registry_version}"
+        f"{args.wheel.resolve()}[evals]"
+        if args.wheel
+        else f"hue-run[evals]=={args.registry_version}"
     )
     # The checkout only supplies tests and frozen test dependencies. The SDK is
     # installed separately, without an editable package or source-path fallback.

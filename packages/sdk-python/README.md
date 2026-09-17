@@ -92,6 +92,19 @@ An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`
 - A timed-out HTTP worker can retain one encoded request of up to 1 MiB per signal outside the queue counters. Later records remain queued within the configured limits until that worker finishes; shutdown counts any queued records it must discard. Queue bytes are not total process memory.
 - A flush timeout releases drain coordination so later flushes can make progress. Both signals share the caller's remaining wait budget, including time spent waiting for another flush. Shutdown's exporter cleanup can continue after the caller returns without holding that coordination lock. Repeated shutdown calls report current failures and drops as well as cleanup completion.
 
+## Dependencies
+
+The tracing core depends on the official OpenTelemetry packages and `requests` only. JSON Schema
+scoring (`builtins.json_schema`) runs `jsonschema` in an isolated process and needs the optional extra;
+without it `builtins.json_schema` raises `ImportError` and stored schema scorers report
+`SchemaValidatorUnavailable`:
+
+```bash
+pip install 'hue-run[evals]'
+```
+
+See [THIRD_PARTY_NOTICES.md](https://github.com/hue-run/hue-sdk/blob/main/THIRD_PARTY_NOTICES.md) for licenses.
+
 ## Confirm a trace reached Hue
 
 `Hue.verify_trace()` checks a server receipt for a known trace from a real application request.

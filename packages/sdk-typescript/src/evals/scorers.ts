@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
 import { digest, json, sourceDigest } from "./json.js";
 import type {
@@ -47,7 +48,25 @@ export function defineLocalScorer(options: {
   };
 }
 
+/** ajv is an optional peer dependency: only JSON Schema scoring loads it, inside a worker. */
+function schemaValidatorAvailable(): boolean {
+  try {
+    createRequire(import.meta.url).resolve("ajv/dist/2020.js");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function schemaScore(schema: JsonValue, output: JsonValue, timeoutMillis: number): Promise<Score> {
+  if (!schemaValidatorAvailable())
+    return Promise.resolve({
+      state: "error",
+      error: {
+        type: "SchemaValidatorUnavailable",
+        message: "JSON Schema scoring requires the optional ajv peer dependency: npm install ajv",
+      },
+    });
   return new Promise((resolve) => {
     const compiled = new URL("./schema-worker.js", import.meta.url);
     const file = existsSync(compiled) ? compiled : new URL("./schema-worker.ts", import.meta.url);

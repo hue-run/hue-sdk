@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import importlib.util
 import inspect
 import json
 import subprocess
@@ -31,6 +32,8 @@ class Builtins:
 
     @staticmethod
     def json_schema(schema: Any) -> dict[str, Any]:
+        if not _schema_validator_available():
+            raise ImportError(_SCHEMA_VALIDATOR_HINT)
         return {
             "kind": "builtin",
             "entry": "hue.json_schema.v1",
@@ -68,7 +71,7 @@ def invoke(callback: Callable[..., Any], *args: Any) -> Any:
     value = callback(*args)
     if inspect.isawaitable(value):
 
-        async def await_value():
+        async def await_value() -> Any:
             return await value
 
         return asyncio.run(await_value())
@@ -98,7 +101,22 @@ def _skip(reason: str) -> Score:
     return {"state": "skipped", "explanation": reason}
 
 
+_SCHEMA_VALIDATOR_HINT = (
+    "JSON Schema scoring requires the optional evals extra: pip install 'hue-run[evals]'"
+)
+
+
+def _schema_validator_available() -> bool:
+    """jsonschema is optional: only JSON Schema scoring uses it, in an isolated process."""
+    return importlib.util.find_spec("jsonschema") is not None
+
+
 def _schema_score(schema: Any, output: Any, timeout_millis: int) -> Score:
+    if not _schema_validator_available():
+        return {
+            "state": "error",
+            "error": {"type": "SchemaValidatorUnavailable", "message": _SCHEMA_VALIDATOR_HINT},
+        }
     # Async execution is not part of JSON Schema and cannot be opted into by stored config.
     pending = [schema]
     while pending:

@@ -5,7 +5,7 @@ Install a built `hue-run` wheel into a separate environment, then run this synth
 ```sh
 uv build packages/sdk-python --out-dir .local/python-eval-dist
 uv venv .local/python-eval-consumer --python 3.14
-uv pip install --python .local/python-eval-consumer/bin/python .local/python-eval-dist/hue_run-0.1.1-py3-none-any.whl
+uv pip install --python .local/python-eval-consumer/bin/python ".local/python-eval-dist/hue_run-<version>-py3-none-any.whl[evals]"
 
 # Set HUE_BASE_URL and HUE_API_KEY through your ignored environment or secret manager.
 .local/python-eval-consumer/bin/python examples/python-evaluation/main.py \

@@ -209,6 +209,19 @@ HTTP `status`. Missing expected spans and required fields remain explicit; a 200
 response alone is not success. A successful result verifies those requested
 conditions only. Use Hue's UI to inspect captured values and redaction.
 
+## Dependencies
+
+The tracing core depends only on official `@opentelemetry/*` packages. JSON Schema scoring in
+`@hue-run/sdk/evals` uses `ajv`, an optional peer dependency that is loaded inside a worker only when
+`builtins.jsonSchema` scores a case; without it that scorer reports `SchemaValidatorUnavailable`.
+Install it when you use that scorer:
+
+```bash
+npm install ajv
+```
+
+See [THIRD_PARTY_NOTICES.md](https://github.com/hue-run/hue-sdk/blob/main/THIRD_PARTY_NOTICES.md) for licenses.
+
 ## Package verification
 
 From the repository root with Node 24 and Bun 1.3.9 on PATH:

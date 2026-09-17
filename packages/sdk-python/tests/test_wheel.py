@@ -21,7 +21,7 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
         subprocess.run(command, check=True, capture_output=True, text=True)
     python = consumer / "bin" / "python"
     subprocess.run(
-        ["uv", "pip", "install", "--python", str(python), str(next(dist.glob("*.whl")))],
+        ["uv", "pip", "install", "--python", str(python), f"{next(dist.glob('*.whl'))}[evals]"],
         check=True,
         capture_output=True,
         text=True,
@@ -159,7 +159,7 @@ def test_installed_wheel_managed_target_boundaries(tmp_path):
             "install",
             "--python",
             str(python),
-            str(next(dist.glob("*.whl"))),
+            f"{next(dist.glob('*.whl'))}[evals]",
             "pytest>=8.3,<10",
         ],
         check=True,

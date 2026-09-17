@@ -64,6 +64,10 @@ def inspect(path: Path, language: str, version: str) -> None:
         assert metadata.get("private") is not True
         assert metadata.get("license") not in (None, "UNLICENSED")
         assert metadata.get("publishConfig", {}).get("access") == "public"
+        core = sorted(metadata.get("dependencies", {}))
+        assert all(name.startswith("@opentelemetry/") for name in core), (
+            f"Core tracing dependencies must be OpenTelemetry packages: {core}"
+        )
         assert not any(
             name in metadata.get("scripts", {})
             for name in (
@@ -88,6 +92,12 @@ def inspect(path: Path, language: str, version: str) -> None:
         assert metadata["Name"] == "hue-run" and metadata["Version"] == version
         license_value = metadata["License-Expression"] or metadata["License"]
         assert license_value and "UNLICENSED" not in license_value
+        core = sorted(
+            item for item in metadata.get_all("Requires-Dist") or [] if "extra ==" not in item
+        )
+        assert all(re.match(r"(?:opentelemetry-|requests\b)", item) for item in core), (
+            f"Core tracing dependencies must be OpenTelemetry packages or requests: {core}"
+        )
     print(f"Inspected {path.name}: {len(files)} files")
 
 
