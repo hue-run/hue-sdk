@@ -31,6 +31,7 @@ class _BoundedProcessor:
         self._queue: deque[tuple[Any, int]] = deque()
         self._pending_records = 0
         self._pending_bytes = 0
+        self._admissions = 0
         self._dropped = 0
         self._closed = False
         self._flush_requested = False
@@ -40,24 +41,35 @@ class _BoundedProcessor:
     @property
     def status(self) -> tuple[int, int, int]:
         with self._condition:
-            return self._dropped, self._pending_records, self._pending_bytes
+            return self._dropped, self._pending_records + self._admissions, self._pending_bytes
 
     def _enqueue(self, item: Any) -> None:
         if self._pid != os.getpid():
             return
+        admitted = False
         try:
             # Reject oversized/invalid records before retaining them. The budget
             # includes in-flight records, so a stalled receiver cannot grow it.
             with self._condition:
                 if self._closed:
                     return
-                if self._pending_records >= self._max_records:
+                if self._pending_records + self._admissions >= self._max_records:
                     self._dropped += 1
                     return
+                # Reserve a record slot before snapshotting outside the lock.
+                # Flush must also wait for this admission to finish or be dropped.
+                self._admissions += 1
+                admitted = True
             item = self._snapshot(item)
             size = self._encode((item,)).ByteSize()
             with self._condition:
+                # Transfer the reservation into the queue (or drop accounting)
+                # atomically, without briefly counting one record twice.
+                self._admissions -= 1
+                admitted = False
+                self._condition.notify_all()
                 if self._closed:
+                    self._dropped += 1
                     return
                 if size > MAX_REQUEST_BYTES:
                     self._dropped += 1
@@ -76,6 +88,11 @@ class _BoundedProcessor:
             with self._condition:
                 self._dropped += 1
             self._exporter.record_failure()
+        finally:
+            if admitted:
+                with self._condition:
+                    self._admissions -= 1
+                    self._condition.notify_all()
 
     def _run(self) -> None:
         try:
@@ -111,7 +128,29 @@ class _BoundedProcessor:
                     and monotonic() < next_export
                 ):
                     self._condition.wait(max(0, next_export - monotonic()))
-                batch = [self._queue.popleft() for _ in range(min(64, len(self._queue)))]
+                if not self._exporter.ready:
+                    # A timed-out request can still own the single HTTP worker.
+                    # Keep later records queued until it finishes; never replay
+                    # the ambiguous batch or create additional network workers.
+                    if self._closed:
+                        self._dropped += len(self._queue)
+                        self._pending_records -= len(self._queue)
+                        self._pending_bytes -= sum(size for _, size in self._queue)
+                        self._queue.clear()
+                        self._condition.notify_all()
+                        return
+                    self._condition.wait(timeout=0.1)
+                    continue
+                batch = []
+                batch_bytes = 0
+                while self._queue and len(batch) < 64:
+                    size = self._queue[0][1]
+                    if batch_bytes + size > MAX_REQUEST_BYTES:
+                        break
+                    batch.append(self._queue.popleft())
+                    batch_bytes += size
+                # Per-record encodings include resource/scope overhead, so this
+                # conservative sum keeps each export within one HTTP request.
             try:
                 self._exporter.export(tuple(item for item, _ in batch))
             except Exception:
@@ -120,7 +159,7 @@ class _BoundedProcessor:
                 with self._condition:
                     self._pending_records -= len(batch)
                     self._pending_bytes -= sum(size for _, size in batch)
-                    if not self._pending_records:
+                    if not self._pending_records and not self._admissions:
                         self._flush_requested = False
                     self._condition.notify_all()
             next_export = monotonic() + 1
@@ -132,7 +171,7 @@ class _BoundedProcessor:
         with self._condition:
             self._flush_requested = True
             self._condition.notify_all()
-            while self._pending_records:
+            while self._pending_records or self._admissions:
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     return False

@@ -241,6 +241,130 @@ def test_trickling_http_does_not_extend_deadline_or_spawn_unbounded_requests():
         worker.join(timeout=5)
 
 
+def _emit_isolation_record(hue, signal, name, *, large=False):
+    attributes = {"content": "x" * 600_000} if large else {}
+    if signal == "traces":
+        with hue.span(name):
+            trace.get_current_span().set_attributes(attributes)
+    else:
+        hue.logger_provider.get_logger("external").emit(body=name, attributes=attributes)
+
+
+@pytest.mark.parametrize("signal", ["traces", "logs"])
+@pytest.mark.parametrize("shutdown", [False, True])
+def test_busy_http_worker_retains_queue_until_recovery_or_accounted_shutdown(
+    receiver, monkeypatch, signal, shutdown
+):
+    from hue_sdk.transport import MAX_REQUEST_BYTES, SafeSession
+
+    started, release, completed = Event(), Event(), Event()
+    calls = []
+    original_request = SafeSession._request
+
+    def blocked_request(session, method, url, **kwargs):
+        if session.signal != signal:
+            return original_request(session, method, url, **kwargs)
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            try:
+                assert release.wait(10), "test did not release the blocked HTTP worker"
+                return original_request(session, method, url, **kwargs)
+            finally:
+                completed.set()
+        return original_request(session, method, url, **kwargs)
+
+    monkeypatch.setattr(SafeSession, "_request", blocked_request)
+    hue = Hue(
+        receiver.url, KEY, capture_content=False, export_timeout_seconds=0.3, max_queue_size=3
+    )
+    processor = hue._span_processor if signal == "traces" else hue._log_processor
+    try:
+        _emit_isolation_record(hue, signal, "ambiguous")
+        assert not hue.force_flush(timeout_millis=1500)
+        assert started.is_set() and not completed.is_set()
+        assert processor._exporter.failures == 1
+        for index in range(3):
+            # Each record fits one request, but a batch of all three would not.
+            _emit_isolation_record(hue, signal, f"retained-{index}", large=True)
+        _emit_isolation_record(hue, signal, "overflow")
+        assert not hue.force_flush(timeout_millis=30)
+        drops, pending, size = processor.status
+        assert (drops, pending) == (1, 3)
+        assert MAX_REQUEST_BYTES < size <= 8 * 1024 * 1024
+        assert processor._exporter.failures == 1
+        assert len(calls) == 1
+
+        if shutdown:
+            start = time.monotonic()
+            assert not hue.shutdown_safe(timeout_millis=500)
+            assert time.monotonic() - start < 1
+            assert processor.status == (4, 0, 0)
+            assert len(calls) == 1
+            release.set()
+            assert completed.wait(2)
+        else:
+            release.set()
+            assert not hue.force_flush(timeout_millis=3000)  # The earlier failure remains visible.
+            assert processor.status == (1, 0, 0)
+            assert processor._exporter.failures == 1
+            assert len(calls) == 4
+
+        records = receiver.spans() if signal == "traces" else receiver.logs()
+        names = [
+            record.name if signal == "traces" else record.body.string_value for record in records
+        ]
+        expected = (
+            ["ambiguous"] if shutdown else ["ambiguous", *(f"retained-{i}" for i in range(3))]
+        )
+        assert names == expected  # The timed-out batch is never replayed.
+        assert all(len(body) <= MAX_REQUEST_BYTES for _, _, body in receiver.requests)
+    finally:
+        release.set()
+        hue.shutdown_safe()
+
+
+@pytest.mark.parametrize("signal", ["traces", "logs"])
+def test_flush_waits_for_snapshot_admission_racing_shutdown(receiver, monkeypatch, signal):
+    hue = Hue(receiver.url, KEY, capture_content=False, max_queue_size=1)
+    processor = hue._span_processor if signal == "traces" else hue._log_processor
+    original_snapshot = processor._snapshot
+    started, release = Event(), Event()
+    errors = []
+
+    def paused_snapshot(item):
+        started.set()
+        assert release.wait(5), "test did not release snapshot admission"
+        return original_snapshot(item)
+
+    def emit():
+        try:
+            _emit_isolation_record(hue, signal, "racing-shutdown")
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(processor, "_snapshot", paused_snapshot)
+    emitter = Thread(target=emit, daemon=True)
+    emitter.start()
+    try:
+        assert started.wait(1)
+        assert processor.status == (0, 1, 0)
+        processor.stop_accepting()
+        assert not processor.force_flush(timeout_millis=10)
+        assert not hue.force_flush(timeout_millis=10)
+        release.set()
+        emitter.join(timeout=2)
+        assert not emitter.is_alive() and not errors
+        assert processor.status == (1, 0, 0)
+        assert not hue.force_flush(timeout_millis=1000)
+        assert not hue.shutdown_safe()
+        assert receiver.requests == []
+    finally:
+        release.set()
+        emitter.join(timeout=2)
+        hue.shutdown_safe()
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork regression")
 def test_inherited_client_is_noop_and_does_not_wait_on_parent_locks(receiver):
     hue = Hue(receiver.url, KEY, capture_content=False)

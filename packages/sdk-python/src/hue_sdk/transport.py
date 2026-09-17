@@ -98,6 +98,11 @@ class SafeSession(requests.Session):
         self.signal = signal
         self._request_lock = Lock()
 
+    @property
+    def ready(self) -> bool:
+        """Whether the owned HTTP worker has released the transport."""
+        return not self._request_lock.locked()
+
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         kwargs["allow_redirects"] = False
         if not self.signal:
@@ -235,15 +240,20 @@ def _split_batches(
 
 class BoundedSpanExporter(SpanExporter):
     def __init__(self, endpoint: str, headers: dict[str, str], timeout: float) -> None:
+        self._session = SafeSession("traces")
         self._delegate = OTLPSpanExporter(
             endpoint=endpoint,
             headers=headers,
             timeout=timeout,
             compression=Compression.NoCompression,
-            session=SafeSession("traces"),
+            session=self._session,
         )
         self._failures = 0
         self._lock = Lock()
+
+    @property
+    def ready(self) -> bool:
+        return self._session.ready
 
     def record_failure(self) -> None:
         with self._lock:
@@ -280,15 +290,20 @@ class BoundedSpanExporter(SpanExporter):
 
 class BoundedLogExporter(LogRecordExporter):
     def __init__(self, endpoint: str, headers: dict[str, str], timeout: float) -> None:
+        self._session = SafeSession("logs")
         self._delegate = OTLPLogExporter(
             endpoint=endpoint,
             headers=headers,
             timeout=timeout,
             compression=Compression.NoCompression,
-            session=SafeSession("logs"),
+            session=self._session,
         )
         self._failures = 0
         self._lock = Lock()
+
+    @property
+    def ready(self) -> bool:
+        return self._session.ready
 
     def record_failure(self) -> None:
         with self._lock:
