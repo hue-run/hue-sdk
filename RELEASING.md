@@ -89,3 +89,22 @@ python3 scripts/verify-python-release.py --registry-version 0.1.0 --python 3.14
 Use a new artifact directory for each preparation. The inspection command accepts only the expected package files, then writes the manifest and checksums. Preserve those files as release evidence. Python's standard build creates the wheel from the source distribution; installed checks use that same wheel. The copied behavioral suite excludes its two nested wheel-building cases so it cannot accidentally test a newly rebuilt package.
 
 All integration checks use synthetic services. No paid model API, production Hue key, application database, or Hue application checkout is required. Review compatibility and the changelog separately; a passed release test certifies the tested combinations, not every framework or dependency version.
+
+## Registry aliases
+
+`packages/aliases/npm-hue-run` and `packages/aliases/pypi-hue-sdk` are thin alias packages: `hue-run` on
+npm re-exports `@hue-run/sdk`, and `hue-sdk` on PyPI depends on `hue-run`. They exist so the sibling
+name on each registry resolves to the real SDK instead of an unrelated or squatted package (the
+Python import module is `hue_sdk`). They are not part of the verified release workflow above.
+
+When a package releases, bump the alias to the same version and its pinned dependency, then publish it
+by hand with the authorized account (npm requires a manual first publication before a trusted
+publisher can be registered):
+
+```bash
+(cd packages/aliases/npm-hue-run && npm publish --access public --ignore-scripts)
+(cd packages/aliases/pypi-hue-sdk && uvx --from build pyproject-build . && uvx --from twine==7.0.0 twine upload dist/*)
+```
+
+Register trusted publishers for both aliases once they exist so later bumps can move into
+`release.yml`.

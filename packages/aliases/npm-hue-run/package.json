@@ -1,0 +1,23 @@
+{
+  "name": "hue-run",
+  "version": "0.1.5",
+  "description": "Alias of @hue-run/sdk. Install @hue-run/sdk directly; this package only re-exports it.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://docs.hue.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hue-run/hue-sdk.git",
+    "directory": "packages/aliases/npm-hue-run"
+  },
+  "bugs": { "url": "https://github.com/hue-run/hue-sdk/issues" },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+  "files": ["index.js", "ai-sdk.js", "evals.js", "managed.js", "README.md", "LICENSE"],
+  "exports": {
+    ".": "./index.js",
+    "./ai-sdk": "./ai-sdk.js",
+    "./evals": "./evals.js",
+    "./managed": "./managed.js"
+  },
+  "dependencies": { "@hue-run/sdk": "0.1.5" }
+}

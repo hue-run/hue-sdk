@@ -57,7 +57,7 @@ def redact(field, value):
 
 The callback should cover your actual nested input format; this small example is only a top-level dictionary transformation.
 
-Before redaction, helpers copy supported content into detached built-in containers; in-place changes by a redactor cannot change application inputs or results. The input and the redactor's returned value each have a **1 MiB conservative value budget**, **64 maximum nesting depth** and **65,536 visited values/keys**. Integers and integer keys are limited to **14,000 bits** before decimal conversion. Final serialized content still has the **256 KiB** UTF-8 JSON limit. Cyclic, nonfinite, unsupported or over-budget content is omitted and counted as an instrumentation failure. See [the Python safety boundary](SAFETY.md) for supported types and callback limits.
+Before redaction, helpers copy supported content into detached built-in containers; in-place changes by a redactor cannot change application inputs or results. The input and the redactor's returned value each have a **1 MiB conservative value budget**, **64 maximum nesting depth** and **65,536 visited values/keys**. Integers and integer keys are limited to **14,000 bits** before decimal conversion. Final serialized content still has the **256 KiB** UTF-8 JSON limit. Cyclic, nonfinite, unsupported or over-budget content is omitted and counted as an instrumentation failure. See [the Python safety boundary](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/SAFETY.md) for supported types and callback limits.
 
 | Helper                                         | Attributes / behavior                                                                                                                          |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -180,7 +180,7 @@ For generated files, return `ManagedOutputFile` entries containing actual bytes,
 filename, content type and an optional primary flag. The helper claims the
 invocation, verifies files and saves the outcome without automatically rerunning
 the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs)
-and [full adapter contract](MANAGED_TARGETS.md) for registration, existing-provider
+and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider
 flush callbacks and recovery. Local/CI runners remain available.
 
 ## Serving safely

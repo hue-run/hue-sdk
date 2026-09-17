@@ -265,7 +265,7 @@ Use a 120-second host request limit for the default 90-second execution and
 30-second finalization budget; your target must honor `signal`.
 
 See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs) and the
-[full adapter contract](MANAGED_TARGETS.md) for registration, file handling,
+[full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-typescript/MANAGED_TARGETS.md) for registration, file handling,
 existing-provider flush callbacks and recovery. Local/CI runners remain available.
 
 ## Serving safely
