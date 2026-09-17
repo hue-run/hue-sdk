@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
-import { context, trace } from "@opentelemetry/api";
+import { context, trace, type TraceState } from "@opentelemetry/api";
+import { detectResources, resourceFromAttributes } from "@opentelemetry/resources";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import {
@@ -1004,4 +1005,174 @@ test("redaction expansion is bounded and loses telemetry rather than an applicat
   });
   await hue.shutdownSafe();
   endpoint.server.stop(true);
+});
+
+describe("Queued telemetry snapshots", () => {
+  test("mutating borrowed log data after emit cannot change queued bytes or exported values", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "snapshot",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 8192,
+    });
+    const resourceValues = ["resource-before"];
+    const scopeValues = ["scope-before"];
+    const attributes = { nested: ["attribute-before"] };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const body = { value: "body-before", bytes };
+    const provider = new LoggerProvider({
+      resource: resourceFromAttributes({ example: resourceValues }),
+      processors: [transport.logRecordProcessor],
+    });
+    try {
+      provider
+        .getLogger("snapshot", "1", { attributes: { example: scopeValues } })
+        .emit({ body, attributes });
+      const queued = transport.getReport();
+      expect(queued.pendingLogs).toBe(1);
+      expect(queued.pendingBytes).toBeLessThanOrEqual(8192);
+      body.value = "mutated-secret".repeat(100000);
+      bytes.fill(255);
+      attributes.nested[0] = "attribute-mutated";
+      resourceValues[0] = "resource-mutated";
+      scopeValues[0] = "scope-mutated";
+      expect(transport.getReport().pendingBytes).toBe(queued.pendingBytes);
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedLogs).toBe(1);
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      for (const original of [
+        "body-before",
+        "attribute-before",
+        "resource-before",
+        "scope-before",
+        "AQID",
+      ])
+        expect(raw).toContain(original);
+      for (const changed of [
+        "mutated-secret",
+        "attribute-mutated",
+        "resource-mutated",
+        "scope-mutated",
+        "////",
+      ])
+        expect(raw).not.toContain(changed);
+      expect(transport.getReport().pendingBytes).toBe(0);
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("span snapshots detach events, links, trace state and resource attributes before admission", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "snapshot",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 16384,
+    });
+    let traceState = "vendor=before";
+    const state = { serialize: () => traceState } as TraceState;
+    const resourceValues = ["resource-before"];
+    const provider = new TracerProvider({
+      resource: resourceFromAttributes({ example: resourceValues }),
+      spanProcessors: [
+        transport.spanProcessor,
+        {
+          onStart() {},
+          async forceFlush() {},
+          async shutdown() {},
+          onEnd(record) {
+            // A later borrowed processor can mutate the source object it receives.
+            record.attributes["custom"] = "attribute-mutated";
+            record.events[0]!.attributes!["custom"] = "event-mutated";
+            record.links[0]!.attributes!["custom"] = "link-mutated";
+          },
+        },
+      ],
+    });
+    try {
+      const source = provider.getTracer("snapshot", "1").startSpan("snapshot", {
+        attributes: { custom: "attribute-before" },
+        links: [
+          {
+            context: {
+              traceId: "f".repeat(32),
+              spanId: "f".repeat(16),
+              traceFlags: 1,
+              traceState: state,
+            },
+            attributes: { custom: "link-before" },
+          },
+        ],
+      });
+      source.addEvent("event", { custom: "event-before" });
+      source.end();
+      const before = transport.getReport().pendingBytes;
+      resourceValues[0] = "resource-mutated".repeat(100000);
+      traceState = "vendor=after";
+      expect(transport.getReport().pendingBytes).toBe(before);
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedSpans).toBe(1);
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      for (const original of [
+        "resource-before",
+        "attribute-before",
+        "event-before",
+        "link-before",
+        "vendor=before",
+      ])
+        expect(raw).toContain(original);
+      expect(raw).not.toContain("mutated");
+      expect(raw).not.toContain("vendor=after");
+      expect(transport.getReport().pendingBytes).toBe(0);
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("unresolved resource attributes are omitted with a warning and appear on later records", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "snapshot",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    let resolve!: (value: string) => void;
+    const pending = new Promise<string>((done) => {
+      resolve = done;
+    });
+    const resource = detectResources({
+      detectors: [{ detect: () => ({ attributes: { sync: "available", async: pending } }) }],
+    });
+    const provider = new LoggerProvider({ resource, processors: [transport.logRecordProcessor] });
+    try {
+      provider.getLogger("snapshot").emit({ body: "before-detection" });
+      expect(transport.getIssues()).toEqual([
+        expect.objectContaining({ kind: "warning", count: 0 }),
+      ]);
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedLogs).toBe(1);
+      expect(endpoint.requests[0]!.raw).toContain("available");
+      expect(endpoint.requests[0]!.raw).not.toContain("detected");
+      resolve("detected");
+      await resource.waitForAsyncAttributes?.();
+      provider.getLogger("snapshot").emit({ body: "after-detection" });
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedLogs).toBe(2);
+      expect(endpoint.requests[1]!.raw).toContain("detected");
+    } finally {
+      resolve("detected");
+      await provider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
 });

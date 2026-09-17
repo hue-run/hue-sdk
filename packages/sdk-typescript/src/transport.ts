@@ -28,6 +28,7 @@ import {
 } from "@opentelemetry/sdk-logs";
 import { MAX_BODY_BYTES, validateOptions } from "./config.js";
 import { estimateRecordBytes } from "./safety.js";
+import { snapshotLog, snapshotSpan } from "./snapshot.js";
 import { redactLog, redactSpan, type ResourceCache } from "./privacy.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
@@ -138,12 +139,15 @@ export class HueTransport {
         }
       },
       onEnd: (span) => {
+        let admitted: ReadableSpan | undefined;
         try {
           if (!(span.spanContext().traceFlags & 1)) return;
-          if (!this.enqueue("traces", span)) return;
-          spans.onEnd(span);
+          const queued = this.enqueue("traces", span);
+          if (!queued) return;
+          admitted = queued as ReadableSpan;
+          spans.onEnd(admitted);
         } catch {
-          this.finish("traces", [span]);
+          if (admitted) this.finish("traces", [admitted]);
           this.issue("traces", "invalid", 1, "Telemetry processor could not accept a record");
         }
       },
@@ -152,11 +156,14 @@ export class HueTransport {
     };
     this.logRecordProcessor = {
       onEmit: (log) => {
+        let admitted: ReadableLogRecord | undefined;
         try {
-          if (!this.enqueue("logs", log)) return;
-          logs.onEmit(log);
+          const queued = this.enqueue("logs", log);
+          if (!queued) return;
+          admitted = queued as ReadableLogRecord;
+          logs.onEmit(queued as Parameters<LogRecordProcessor["onEmit"]>[0]);
         } catch {
-          this.finish("logs", [log]);
+          if (admitted) this.finish("logs", [admitted]);
           this.issue("logs", "invalid", 1, "Telemetry processor could not accept a record");
         }
       },
@@ -165,7 +172,7 @@ export class HueTransport {
     };
   }
 
-  private enqueue(signal: Signal, record: RecordValue): boolean {
+  private enqueue(signal: Signal, record: RecordValue): RecordValue | undefined {
     const pending = signal === "traces" ? this.spans : this.logs;
     if (this.closed || pending.size >= 2048) {
       this.issue(
@@ -176,27 +183,34 @@ export class HueTransport {
           ? "Telemetry emitted after transport shutdown"
           : "Telemetry queue reached 2048 records",
       );
-      return false;
+      return undefined;
     }
-    let bytes: number;
     try {
-      // Charge record data, not the provider/exporter graph behind an OTel span.
-      bytes =
-        512 +
-        estimateRecordBytes(
-          recordData(record, signal),
-          this.options.maxQueueBytes - this.pendingBytes,
+      const remaining = this.options.maxQueueBytes - this.pendingBytes;
+      const snapshot =
+        signal === "traces"
+          ? snapshotSpan(record as ReadableSpan, remaining)
+          : snapshotLog(record as ReadableLogRecord, remaining);
+      this.pendingBytes += snapshot.bytes;
+      if (signal === "traces") this.spans.set(snapshot.record as ReadableSpan, snapshot.bytes);
+      else this.logs.set(snapshot.record as ReadableLogRecord, snapshot.bytes);
+      if (snapshot.unresolvedResource)
+        this.issue(
+          signal,
+          "warning",
+          0,
+          "Unresolved resource attributes omitted from the telemetry snapshot",
         );
-      if (this.pendingBytes + bytes > this.options.maxQueueBytes)
-        throw new RangeError("Queue full");
+      return snapshot.record;
     } catch {
-      this.issue(signal, "dropped", 1, "Telemetry queue byte or record complexity budget exceeded");
-      return false;
+      this.issue(
+        signal,
+        "dropped",
+        1,
+        "Telemetry snapshot exceeded its byte or complexity budget or contained unsupported data",
+      );
+      return undefined;
     }
-    this.pendingBytes += bytes;
-    if (signal === "traces") this.spans.set(record as ReadableSpan, bytes);
-    else this.logs.set(record as ReadableLogRecord, bytes);
-    return true;
   }
 
   finish(signal: Signal, records: RecordValue[]): void {
