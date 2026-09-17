@@ -51,6 +51,10 @@ jobs:
               metadata = tomllib.loads(pathlib.Path('packages/sdk-python/pyproject.toml').read_text())['project']
           assert metadata['version'] == version, 'Version must match the committed package'
           PY
+      - name: Require a changelog entry for the requested version
+        env:
+          RELEASE_LANGUAGE: ${{ inputs.language }}
+        run: python3 scripts/changelog.py section "$RELEASE_LANGUAGE" "$RELEASE_VERSION"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: inputs.language == 'typescript'
         with:
@@ -226,3 +230,37 @@ jobs:
       - env:
           PYTHON_VERSION: ${{ matrix.python }}
         run: python3 scripts/verify-python-release.py --registry-version "$RELEASE_VERSION" --python "$PYTHON_VERSION"
+
+  github-release:
+    # Runs after whichever registry acceptance job applies to the selected language.
+    if: ${{ !cancelled() && inputs.publish && (needs.accept-npm.result == 'success' || needs.accept-pypi.result == 'success') }}
+    needs: [prepare, accept-npm, accept-pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ inputs.language }}-${{ github.sha }}
+          path: .artifacts
+      - run: cd .artifacts && sha256sum --check SHA256SUMS
+      - name: Create or update the GitHub release from CHANGELOG.md and the tested artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_LANGUAGE: ${{ inputs.language }}
+        run: |
+          tag="${RELEASE_LANGUAGE}-v${RELEASE_VERSION}"
+          if [ "$RELEASE_LANGUAGE" = typescript ]; then title="TypeScript SDK ${RELEASE_VERSION}"; else title="Python SDK ${RELEASE_VERSION}"; fi
+          python3 scripts/changelog.py notes "$RELEASE_LANGUAGE" "$RELEASE_VERSION" "$GITHUB_SHA" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" .artifacts/SHA256SUMS > release-notes.md
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file release-notes.md
+            gh release upload "$tag" .artifacts/* --clobber
+          else
+            gh release create "$tag" .artifacts/* --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md
+          fi
