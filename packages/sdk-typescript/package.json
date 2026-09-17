@@ -1,6 +1,6 @@
 {
   "name": "@hue-run/sdk",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": false,
   "license": "MIT",
   "publishConfig": {
@@ -68,7 +68,7 @@
   "peerDependencies": {
     "@ai-sdk/otel": "^1.0.99",
     "@opentelemetry/api": "^1.9.1",
-    "ai": "^7.0.99"
+    "ai": "^6.0.0 || ^7.0.99"
   },
   "peerDependenciesMeta": {
     "@ai-sdk/otel": {

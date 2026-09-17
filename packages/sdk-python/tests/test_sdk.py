@@ -89,11 +89,10 @@ def test_redaction_before_export_and_failure_does_not_leak(receiver):
     with Hue(receiver.url, KEY, capture_content=True, redactor=redact) as hue:
         with hue.span("redacted") as span:
             span.set_input({"email": "person@example.test"})
-            with pytest.raises(ValueError, match="content was omitted") as error:
-                span.set_output("fail")
-            assert "sensitive" not in str(error.value)
+            span.set_output("fail")
+            assert hue.export_status.instrumentation_failures == 1
             span.log_inference(output={"email": "person@example.test"})
-        assert hue.force_flush()
+        assert not hue.force_flush()
     combined = b"".join(body for _, _, body in receiver.requests)
     assert b"person@example.test" not in combined
     assert b"sensitive-redactor" not in combined
@@ -144,9 +143,10 @@ def test_borrowed_provider_and_existing_processors_survive_shutdown(receiver):
         pass
     assert len(memory.get_finished_spans()) == 3
     assert len(receiver.spans()) == 2
-    assert hue.shutdown()
-    with pytest.raises(RuntimeError, match="shut down"), hue.span("too-late"):
-        pass
+    assert hue.export_status.dropped_trace_records == 1
+    assert not hue.shutdown()
+    with hue.span("too-late") as span:
+        span.set_output("safe-noop")
     provider.shutdown()
 
 
@@ -222,15 +222,12 @@ def test_capture_choice_and_valid_json_are_required(receiver):
         Hue(receiver.url, KEY, capture_content="yes")
     with Hue(receiver.url, KEY, capture_content=True) as hue:
         with hue.span("invalid") as span:
-            with pytest.raises(ValueError):
-                span.set_input(float("nan"))
-            with pytest.raises(ValueError):
-                span.set_output("x" * 262_144)
-            with pytest.raises(ValueError):
-                span.set_usage(input_tokens=-1)
-            with pytest.raises(ValueError):
-                span.set_usage(output_tokens=True)
-        assert hue.force_flush()
+            span.set_input(float("nan"))
+            span.set_output("x" * 262_144)
+            span.set_usage(input_tokens=-1)
+            span.set_usage(output_tokens=True)
+        assert not hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 4
     assert not attrs(receiver.spans()[0])
 
 

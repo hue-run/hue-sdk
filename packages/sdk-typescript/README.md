@@ -93,7 +93,7 @@ Reuse the client across server requests. Await stream completion before flushing
 returning a streaming `Response` does not mean its stream has finished. The
 [Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-next-js)
 shows how to keep completion and flushing within the request's background lifetime.
-For a standalone script, put the operation in `try` and call `await hue.shutdown()`
+For a standalone script, put the operation in `try` and call `await hue.shutdownSafe()`
 in `finally`. Shut down a shared server client only when the application stops.
 
 The integration creates real Vercel provider, streaming and tool spans and passes
@@ -117,8 +117,7 @@ names cannot be classified automatically; use them deliberately.
 there is no SDK retention timer or automatic content expiry. To redact strings
 before export, supply `redact(value, path)`; it applies to supported strings in
 attributes, resources, event/link attributes and log bodies. Return a string.
-A throwing callback or invalid/oversized content fails closed: that record is
-counted as failed and the flush reports it. Shared resources are redacted once per
+Invalid/oversized helper content is omitted with an instrumentation failure; the span can still be delivered. Export-time redactor failures reject the affected record and are reported by flush. Shared resources are redacted once per
 export batch. Do not put user content or secrets in span names or scope names.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
@@ -165,7 +164,7 @@ flush. This is an in-memory queue, not durable storage.
 
 `flush()` waits for the current trace and log export work. A partial rejection,
 invalid acknowledgement, queue drop or failure throws `HueExportError`; its
-`report` contains cumulative accepted/rejected/failed/pending counts. Accepted
+`report` contains cumulative accepted/rejected/failed counts and current pending gauges. Accepted
 means the collector acknowledged receipt, not that a complete trace has arrived.
 A malformed response reports uncertain acceptance as failure. Partial successes
 are not retried. Warning-only acknowledgements with zero rejected records remain
@@ -255,3 +254,11 @@ Use a 120-second host request limit for the default 90-second execution and
 See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs) and the
 [full adapter contract](MANAGED_TARGETS.md) for registration, file handling,
 existing-provider flush callbacks and recovery. Local/CI runners remain available.
+
+## Serving safely
+
+Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client with an instrumentation failure recorded. Pass `enabled: false` to disable Hue without a key; disabled helpers still execute the application callback. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
+
+Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production safety](https://docs.hue.run/guides/production-safety).
+
+Queued records snapshot supported telemetry values when a span ends or a log is emitted; later caller mutations cannot change queued data. Resource attributes still awaiting detection are omitted with a sanitized warning. Later records include them after detection finishes; await resource detection before instrumentation when those attributes are required.

@@ -12,7 +12,8 @@ const { values } = parseArgs({
     "artifacts-dir": { type: "string" },
   },
 });
-if (values.archive && values["registry-version"]) throw new Error("Choose an archive or registry version");
+if (values.archive && values["registry-version"])
+  throw new Error("Choose an archive or registry version");
 if (values["registry-version"] && values["artifacts-dir"])
   throw new Error("Registry verification does not produce a release archive");
 
@@ -27,7 +28,9 @@ function run(command, args, cwd) {
 const pkg = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
 if (values["registry-version"] && values["registry-version"] !== pkg.version)
   throw new Error("Registry version must match this checkout's package version");
-const tarball = values.archive ? resolve(values.archive) : join(destination, `hue-run-sdk-${pkg.version}.tgz`);
+const tarball = values.archive
+  ? resolve(values.archive)
+  : join(destination, `hue-run-sdk-${pkg.version}.tgz`);
 if (!values.archive && !values["registry-version"]) {
   await cp(source, staging, {
     recursive: true,
@@ -48,11 +51,79 @@ await writeFile(
   join(minimal, "package.json"),
   JSON.stringify({ private: true, type: "module", dependencies: { "@hue-run/sdk": packageSpec } }),
 );
-run("npm", ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"], minimal);
+run(
+  "npm",
+  ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"],
+  minimal,
+);
 run(
   process.execPath,
-  ["--input-type=module", "-e", 'await import("@hue-run/sdk"); await import("@hue-run/sdk/evals"); await import("@hue-run/sdk/managed");'],
+  [
+    "--input-type=module",
+    "-e",
+    'await import("@hue-run/sdk"); await import("@hue-run/sdk/evals"); await import("@hue-run/sdk/managed");',
+  ],
   minimal,
+);
+// Core imports must coexist with an existing AI SDK 6 application without
+// forcing an upgrade. Its AI SDK telemetry adapter remains explicitly v7-only.
+const ai6 = join(destination, "ai6-core-consumer");
+await mkdir(ai6);
+await writeFile(
+  join(ai6, "package.json"),
+  JSON.stringify({
+    private: true,
+    type: "module",
+    dependencies: { ai: "6.0.116", "@hue-run/sdk": packageSpec },
+  }),
+);
+run("npm", ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"], ai6);
+run(
+  process.execPath,
+  [
+    "--input-type=module",
+    "-e",
+    `
+  import { strict as assert } from "node:assert";
+  import { createRequire } from "node:module";
+  import { createHue } from "@hue-run/sdk";
+  const require = createRequire(import.meta.url);
+  assert.equal(require("ai/package.json").version, "6.0.116");
+  const hue = createHue({ enabled: false, captureContent: false });
+  assert.equal(await hue.withSpan("core", () => 42), 42);
+  await hue.shutdownSafe();
+`,
+  ],
+  ai6,
+);
+// With the optional adapter installed, reject unsupported AI SDK configuration
+// explicitly instead of silently providing v7 options to an AI SDK 6 caller.
+run(
+  "npm",
+  [
+    "install",
+    "@ai-sdk/otel@1.0.99",
+    "--registry=https://registry.npmjs.org",
+    "--no-audit",
+    "--no-fund",
+  ],
+  ai6,
+);
+run(
+  process.execPath,
+  [
+    "--input-type=module",
+    "-e",
+    `
+  import { strict as assert } from "node:assert";
+  import { createHue } from "@hue-run/sdk";
+  import { hueTelemetry } from "@hue-run/sdk/ai-sdk";
+  const hue = createHue({ apiKey: "synthetic-key", serviceName: "compatibility", captureContent: false });
+  assert.throws(() => hueTelemetry(hue), /requires ai@/);
+  await hue.shutdownSafe();
+`,
+  ],
+  ai6,
 );
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -89,13 +160,30 @@ for (const patch of [99, 100]) {
     );
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
-  run("npm", ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"], consumer);
-  const installed = JSON.parse(await readFile(join(consumer, "node_modules/@hue-run/sdk/package.json"), "utf8"));
+  run(
+    "npm",
+    ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"],
+    consumer,
+  );
+  const installed = JSON.parse(
+    await readFile(join(consumer, "node_modules/@hue-run/sdk/package.json"), "utf8"),
+  );
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
-  run("bun", ["--no-env-file", "test", "./tests/sdk.test.ts", "./tests/evals.test.ts", "./tests/receipt.test.ts", "./tests/managed.test.ts"], consumer);
+  run(
+    "bun",
+    [
+      "--no-env-file",
+      "test",
+      "./tests/sdk.test.ts",
+      "./tests/evals.test.ts",
+      "./tests/receipt.test.ts",
+      "./tests/managed.test.ts",
+    ],
+    consumer,
+  );
   const exampleSource = resolve(source, "../../examples/reference-chatbot");
   await cp(exampleSource, chatbot, {
     recursive: true,
@@ -110,12 +198,19 @@ for (const patch of [99, 100]) {
   run("bun", ["--no-env-file", "install"], chatbot);
   run("bun", ["--no-env-file", "run", "build"], chatbot);
   run(process.execPath, [join(source, "scripts/verify-node.mjs"), consumer, chatbot], destination);
-  console.log(JSON.stringify({
-    tarball: values["registry-version"] ? undefined : tarball,
-    registryVersion: values["registry-version"],
-    consumer,
-    chatbot,
-  }));
+  run(
+    process.execPath,
+    ["--unhandled-rejections=strict", join(source, "scripts/verify-safety.mjs"), consumer],
+    destination,
+  );
+  console.log(
+    JSON.stringify({
+      tarball: values["registry-version"] ? undefined : tarball,
+      registryVersion: values["registry-version"],
+      consumer,
+      chatbot,
+    }),
+  );
 }
 // Copy only after all installed-package and Node chatbot checks pass. Publishers
 // consume these exact bytes; they must never rebuild a package after verification.

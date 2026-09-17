@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
-import { context, trace } from "@opentelemetry/api";
+import { context, trace, type TraceState } from "@opentelemetry/api";
+import { detectResources, resourceFromAttributes } from "@opentelemetry/resources";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
-import { createHue, createHueTransport, HueConnectionError, HueExportError } from "../src/index.js";
+import {
+  createHue,
+  createHueSafe,
+  createHueTransport,
+  HueConnectionError,
+  HueExportError,
+} from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { generateText, streamText } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
@@ -268,6 +275,10 @@ describe("Hue SDK contract", () => {
         failedLogs: 0,
         pendingSpans: 0,
         pendingLogs: 0,
+        droppedSpans: 0,
+        droppedLogs: 0,
+        pendingBytes: 0,
+        instrumentationFailures: 0,
       });
       const spans = endpoint.requests
         .filter((request) => request.signal === "traces")
@@ -706,6 +717,618 @@ describe("Vercel AI SDK integration", () => {
     } finally {
       await hue.shutdown();
       await endpoint.server.stop(true);
+    }
+  });
+});
+
+describe("Application failure isolation", () => {
+  test("content proxies cannot invoke traps or mutate application inputs and results", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "proxy-content",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    let traps = 0;
+    let executions = 0;
+    const live = { value: "unchanged" };
+    const forbidden = () => {
+      traps++;
+      live.value = "modified by capture";
+      throw new Error("application proxy trap");
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const proxies = [
+      new Proxy(live, { ownKeys: forbidden }),
+      new Proxy([], { get: forbidden }),
+      revoked.proxy,
+    ];
+    try {
+      for (const proxy of proxies) {
+        const input = { nested: proxy };
+        const output = { nested: proxy };
+        expect(
+          await hue.tool("proxy-content", input, () => {
+            executions++;
+            expect(live.value).toBe("unchanged");
+            return output;
+          }),
+        ).toBe(output);
+      }
+      expect(traps).toBe(0);
+      expect(executions).toBe(proxies.length);
+      expect(live.value).toBe("unchanged");
+      expect(hue.transport.getReport().instrumentationFailures).toBe(proxies.length * 2);
+      await hue.shutdownSafe();
+      expect(endpoint.requests.flatMap((request) => request.records)).toHaveLength(proxies.length);
+      expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain("nested");
+    } finally {
+      await hue.shutdownSafe();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("invalid capture never prevents a callback or changes a completed side effect", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "safe",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    let getterCalls = 0;
+    const accessor = {
+      get private() {
+        getterCalls++;
+        throw new Error(apiKey);
+      },
+    };
+    const invalid = ["x".repeat(262144), cyclic, accessor, { n: NaN }, 1n];
+    try {
+      let executions = 0;
+      for (const value of invalid) {
+        const result = await hue.withSpan(
+          "safe",
+          async (span) => {
+            span.setOutput(value as never);
+            hue.recordMessages({ output: value as never });
+            return hue.tool("effect", value as never, () => {
+              executions++;
+              return value as never;
+            });
+          },
+          { input: value as never },
+        );
+        expect(result as unknown).toBe(value);
+      }
+      expect(executions).toBe(invalid.length);
+      expect(getterCalls).toBe(0);
+      expect(hue.transport.getReport().instrumentationFailures).toBe(25);
+      await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+      expect(hue.transport.getReport().acceptedSpans).toBe(10);
+      expect(JSON.stringify(hue.transport.getIssues())).not.toContain(apiKey);
+    } finally {
+      await hue.shutdownSafe();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("invalid identifiers and telemetry setup still execute exactly once", async () => {
+    const hue = createHue({ apiKey, serviceName: "safe", captureContent: true });
+    let executions = 0;
+    for (const options of [
+      { sessionId: "" },
+      { userId: "\u0000" },
+      { parentContext: {} as never },
+    ]) {
+      expect(
+        await hue.withSpan(
+          "invalid",
+          () => {
+            executions++;
+            return 42;
+          },
+          options,
+        ),
+      ).toBe(42);
+    }
+    expect(executions).toBe(3);
+    expect(hue.transport.getReport().instrumentationFailures).toBeGreaterThan(0);
+    await hue.shutdownSafe();
+  });
+
+  test("borrowed provider failures in start, recording, logging and end cannot replace business errors", async () => {
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "broken-provider",
+      captureContent: true,
+    });
+    const fail = () => {
+      throw new Error(apiKey);
+    };
+    const source = new Proxy({}, { get: () => fail });
+    const hue = createHue({
+      transport,
+      tracerProvider: {
+        getTracer: () => ({ startSpan: () => source, startActiveSpan: fail }),
+        async forceFlush() {},
+      } as never,
+      loggerProvider: { getLogger: () => ({ emit: fail }), async forceFlush() {} } as never,
+    });
+    const original = new Error("business failure");
+    Object.defineProperty(original, "stack", { get: fail });
+    let executions = 0;
+    try {
+      expect(
+        await hue.withSpan("success", ({ span }) => {
+          executions++;
+          span.setAttribute("example", "value").addEvent("test");
+          hue.recordMessages({ output: null });
+          return original;
+        }),
+      ).toBe(original);
+      await expect(
+        hue.withSpan("failure", () => {
+          executions++;
+          throw original;
+        }),
+      ).rejects.toBe(original);
+      expect(executions).toBe(2);
+      expect(hue.transport.getReport().instrumentationFailures).toBeGreaterThan(0);
+    } finally {
+      await hue.shutdownSafe();
+      await transport.shutdown().catch(() => {});
+    }
+  });
+
+  test("safe initialization and the kill switch require no credentials and perform no HTTP", async () => {
+    const endpoint = receiver();
+    const clients = [
+      createHue({ enabled: false, captureContent: true, baseUrl: endpoint.url }),
+      createHueSafe({
+        apiKey: "",
+        serviceName: "invalid",
+        captureContent: true,
+        baseUrl: endpoint.url,
+      }),
+    ];
+    for (const hue of clients) {
+      expect(hue.enabled).toBe(false);
+      expect(hueTelemetry(hue).isEnabled).toBe(false);
+      expect(await hue.tool("disabled", null, () => "success")).toBe("success");
+      await hue.shutdownSafe();
+      expect(await hue.withSpan("late", () => "late-success")).toBe("late-success");
+      await expect(hue.checkConnection()).rejects.toBeInstanceOf(HueConnectionError);
+      await expect(hue.verifyTrace("f".repeat(32))).rejects.toBeInstanceOf(HueConnectionError);
+    }
+    expect(clients[1].transport.getReport().instrumentationFailures).toBe(1);
+    expect(endpoint.hits()).toBe(0);
+    endpoint.server.stop(true);
+  });
+
+  test("non-boolean enabled values fail strict initialization and safely disable telemetry", async () => {
+    const endpoint = receiver();
+    try {
+      for (const enabled of ["false", "true", 0, 1, null, {}]) {
+        const options = {
+          apiKey,
+          serviceName: "invalid-enabled",
+          captureContent: false,
+          enabled,
+          baseUrl: endpoint.url,
+        } as never;
+        expect(() => createHue(options)).toThrow(new TypeError("enabled must be a boolean"));
+        expect(() => createHueTransport(options)).toThrow(
+          new TypeError("enabled must be a boolean"),
+        );
+        const hue = createHueSafe(options);
+        expect(hue.enabled).toBe(false);
+        let executions = 0;
+        expect(
+          await hue.withSpan("disabled", () => {
+            executions++;
+            return 42;
+          }),
+        ).toBe(42);
+        expect(executions).toBe(1);
+        await hue.shutdownSafe();
+        expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+      }
+      expect(endpoint.hits()).toBe(0);
+    } finally {
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("safe shutdown preserves an application exception during a collector outage", async () => {
+    const endpoint = receiver("unauthorized");
+    const hue = createHue({
+      apiKey,
+      serviceName: "unavailable",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const original = new Error("business failure");
+    const result = (async () => {
+      try {
+        return await hue.withSpan("failure", () => {
+          throw original;
+        });
+      } finally {
+        expect((await hue.shutdownSafe()).ok).toBe(false);
+      }
+    })();
+    await expect(result).rejects.toBe(original);
+    expect(hue.transport.getReport().failedSpans).toBe(1);
+    endpoint.server.stop(true);
+  });
+
+  test("safe lifecycle returns within budget for a hung borrowed provider without queuing new drains", async () => {
+    const transport = createHueTransport({ apiKey, serviceName: "hung", captureContent: false });
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const tracer = new TracerProvider({});
+    const logger = new LoggerProvider({});
+    const hue = createHue({
+      transport,
+      tracerProvider: {
+        getTracer: tracer.getTracer.bind(tracer),
+        forceFlush: () => {
+          calls++;
+          return wait;
+        },
+      },
+      loggerProvider: logger,
+    });
+    const start = Date.now();
+    const first = hue.flushSafe({ timeoutMillis: 25 });
+    expect(await first).toMatchObject({ ok: false, timedOut: true });
+    expect(Date.now() - start).toBeLessThan(500);
+    for (let i = 0; i < 100; i++) expect(hue.flushSafe()).toBe(first);
+    expect(calls).toBe(1);
+    release();
+    await hue.shutdownSafe();
+    await tracer.shutdown();
+    await logger.shutdown();
+    await transport.shutdown();
+  });
+
+  test("queue byte budget applies to both signals and includes work in flight", async () => {
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const endpoint = receiver("success", undefined, async () => {
+      enter();
+      await blocked;
+    });
+    const maxQueueBytes = 64 * 1024;
+    const hue = createHue({
+      apiKey,
+      serviceName: "bytes",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes,
+    });
+    await hue.withSpan("first", ({ setOutput }) => setOutput("x".repeat(20000)));
+    const drain = hue.flush().catch((error) => error);
+    await entered;
+    for (let i = 0; i < 20; i++)
+      await hue.withSpan("burst", () => hue.recordMessages({ output: "y".repeat(20000) }), {
+        input: "z".repeat(20000),
+      });
+    const pending = hue.transport.getReport();
+    expect(pending.pendingBytes).toBeGreaterThan(40000);
+    expect(pending.pendingBytes).toBeLessThanOrEqual(maxQueueBytes);
+    expect(pending.droppedSpans).toBe(20);
+    expect(pending.droppedLogs).toBe(20);
+    release();
+    expect(await drain).toBeInstanceOf(HueExportError);
+    expect(hue.transport.getReport()).toMatchObject({
+      acceptedSpans: 1,
+      failedSpans: 20,
+      failedLogs: 20,
+      pendingBytes: 0,
+    });
+    await hue.shutdownSafe();
+    endpoint.server.stop(true);
+  });
+
+  test("async diagnostic rejections cannot reject business requests", async () => {
+    const endpoint = receiver("unauthorized");
+    let calls = 0;
+    const hue = createHue({
+      apiKey,
+      serviceName: "diagnostics",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      onExportIssue: async () => {
+        calls++;
+        throw new Error(apiKey);
+      },
+    });
+    expect(await hue.withSpan("request", () => "ok", { input: "x".repeat(300000) })).toBe("ok");
+    await hue.flushSafe();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(calls).toBe(1);
+    expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+    await hue.shutdownSafe();
+    endpoint.server.stop(true);
+  });
+});
+
+test("redaction expansion is bounded and loses telemetry rather than an application result", async () => {
+  const endpoint = receiver();
+  const hue = createHue({
+    apiKey,
+    serviceName: "expansion",
+    captureContent: true,
+    baseUrl: endpoint.url,
+    maxQueueBytes: 65536,
+    redact: (value) => (value === "expand" ? "x".repeat(20000) : value),
+  });
+  for (let i = 0; i < 10; i++)
+    expect(await hue.withSpan("record", () => 42, { attributes: { custom: "expand" } })).toBe(42);
+  await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+  expect(hue.transport.getReport()).toMatchObject({
+    acceptedSpans: 1,
+    failedSpans: 9,
+    pendingBytes: 0,
+  });
+  await hue.shutdownSafe();
+  endpoint.server.stop(true);
+});
+
+describe("Queued telemetry snapshots", () => {
+  test("byte array accessors cannot bypass the aggregate queue limit", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "byte-budget",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 8192,
+    });
+    const provider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    let getters = 0;
+    const body = new Uint8Array(1_000_000);
+    Object.defineProperty(body, "byteLength", {
+      get() {
+        getters++;
+        return 1;
+      },
+    });
+    try {
+      provider.getLogger("byte-budget").emit({ body });
+      expect(getters).toBe(0);
+      expect(transport.getReport()).toMatchObject({
+        droppedLogs: 1,
+        pendingLogs: 0,
+        pendingBytes: 0,
+      });
+      provider.getLogger("byte-budget").emit({ body: Buffer.from([1, 2, 3]) });
+      await provider.forceFlush();
+      await expect(transport.flush()).rejects.toBeInstanceOf(HueExportError);
+      expect(transport.getReport()).toMatchObject({ acceptedLogs: 1, pendingBytes: 0 });
+      expect(endpoint.requests).toHaveLength(1);
+      expect(endpoint.requests[0]!.raw).toContain("AQID");
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown().catch(() => {});
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("borrowed log proxies are dropped without executing application traps", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "proxy-log",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const provider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    let traps = 0;
+    const forbidden = () => {
+      traps++;
+      throw new Error("application proxy trap");
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    try {
+      for (const body of [new Proxy({}, { getPrototypeOf: forbidden }), revoked.proxy])
+        provider.getLogger("proxy-log").emit({ body });
+      expect(traps).toBe(0);
+      expect(transport.getReport()).toMatchObject({
+        droppedLogs: 2,
+        pendingLogs: 0,
+        pendingBytes: 0,
+      });
+      await provider.forceFlush();
+      await expect(transport.flush()).rejects.toBeInstanceOf(HueExportError);
+      expect(endpoint.hits()).toBe(0);
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown().catch(() => {});
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("mutating borrowed log data after emit cannot change queued bytes or exported values", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "snapshot",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 8192,
+    });
+    const resourceValues = ["resource-before"];
+    const scopeValues = ["scope-before"];
+    const attributes = { nested: ["attribute-before"] };
+    const bytes = new Uint8Array([1, 2, 3]);
+    const body = { value: "body-before", bytes };
+    const provider = new LoggerProvider({
+      resource: resourceFromAttributes({ example: resourceValues }),
+      processors: [transport.logRecordProcessor],
+    });
+    try {
+      provider
+        .getLogger("snapshot", "1", { attributes: { example: scopeValues } })
+        .emit({ body, attributes });
+      const queued = transport.getReport();
+      expect(queued.pendingLogs).toBe(1);
+      expect(queued.pendingBytes).toBeLessThanOrEqual(8192);
+      body.value = "mutated-secret".repeat(100000);
+      bytes.fill(255);
+      attributes.nested[0] = "attribute-mutated";
+      resourceValues[0] = "resource-mutated";
+      scopeValues[0] = "scope-mutated";
+      expect(transport.getReport().pendingBytes).toBe(queued.pendingBytes);
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedLogs).toBe(1);
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      for (const original of [
+        "body-before",
+        "attribute-before",
+        "resource-before",
+        "scope-before",
+        "AQID",
+      ])
+        expect(raw).toContain(original);
+      for (const changed of [
+        "mutated-secret",
+        "attribute-mutated",
+        "resource-mutated",
+        "scope-mutated",
+        "////",
+      ])
+        expect(raw).not.toContain(changed);
+      expect(transport.getReport().pendingBytes).toBe(0);
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("span snapshots detach events, links, trace state and resource attributes before admission", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "snapshot",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 16384,
+    });
+    let traceState = "vendor=before";
+    const state = { serialize: () => traceState } as TraceState;
+    const resourceValues = ["resource-before"];
+    const provider = new TracerProvider({
+      resource: resourceFromAttributes({ example: resourceValues }),
+      spanProcessors: [
+        transport.spanProcessor,
+        {
+          onStart() {},
+          async forceFlush() {},
+          async shutdown() {},
+          onEnd(record) {
+            // A later borrowed processor can mutate the source object it receives.
+            record.attributes["custom"] = "attribute-mutated";
+            record.events[0]!.attributes!["custom"] = "event-mutated";
+            record.links[0]!.attributes!["custom"] = "link-mutated";
+          },
+        },
+      ],
+    });
+    try {
+      const source = provider.getTracer("snapshot", "1").startSpan("snapshot", {
+        attributes: { custom: "attribute-before" },
+        links: [
+          {
+            context: {
+              traceId: "f".repeat(32),
+              spanId: "f".repeat(16),
+              traceFlags: 1,
+              traceState: state,
+            },
+            attributes: { custom: "link-before" },
+          },
+        ],
+      });
+      source.addEvent("event", { custom: "event-before" });
+      source.end();
+      const before = transport.getReport().pendingBytes;
+      resourceValues[0] = "resource-mutated".repeat(100000);
+      traceState = "vendor=after";
+      expect(transport.getReport().pendingBytes).toBe(before);
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedSpans).toBe(1);
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      for (const original of [
+        "resource-before",
+        "attribute-before",
+        "event-before",
+        "link-before",
+        "vendor=before",
+      ])
+        expect(raw).toContain(original);
+      expect(raw).not.toContain("mutated");
+      expect(raw).not.toContain("vendor=after");
+      expect(transport.getReport().pendingBytes).toBe(0);
+    } finally {
+      await provider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("unresolved resource attributes are omitted with a warning and appear on later records", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "snapshot",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    let resolve!: (value: string) => void;
+    const pending = new Promise<string>((done) => {
+      resolve = done;
+    });
+    const resource = detectResources({
+      detectors: [{ detect: () => ({ attributes: { sync: "available", async: pending } }) }],
+    });
+    const provider = new LoggerProvider({ resource, processors: [transport.logRecordProcessor] });
+    try {
+      provider.getLogger("snapshot").emit({ body: "before-detection" });
+      expect(transport.getIssues()).toEqual([
+        expect.objectContaining({ kind: "warning", count: 0 }),
+      ]);
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedLogs).toBe(1);
+      expect(endpoint.requests[0]!.raw).toContain("available");
+      expect(endpoint.requests[0]!.raw).not.toContain("detected");
+      resolve("detected");
+      await resource.waitForAsyncAttributes?.();
+      provider.getLogger("snapshot").emit({ body: "after-detection" });
+      await provider.forceFlush();
+      expect((await transport.flush()).acceptedLogs).toBe(2);
+      expect(endpoint.requests[1]!.raw).toContain("detected");
+    } finally {
+      resolve("detected");
+      await provider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
     }
   });
 });

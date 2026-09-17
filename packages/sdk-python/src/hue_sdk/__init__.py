@@ -1,6 +1,6 @@
 """Hue's public Python telemetry API. Provider requests stay in your application."""
 
-from .client import Hue, HueSpan, Project, ProjectValidationError, Redactor
+from .client import Hue, HueSpan, Project, ProjectValidationError, Redactor, create_hue_safe
 from .receipts import (
     TraceReceipt,
     TraceReceiptField,
@@ -11,6 +11,7 @@ from .receipts import (
 from .transport import ExportStatus
 
 __all__ = [
+    "create_hue_safe",
     "ExportStatus",
     "Hue",
     "HueSpan",
@@ -23,4 +24,4 @@ __all__ = [
     "TraceVerificationError",
     "TraceVerificationResult",
 ]
-__version__ = "0.1.2"
+__version__ = "0.1.3"

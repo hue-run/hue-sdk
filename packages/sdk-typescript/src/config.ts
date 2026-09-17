@@ -6,11 +6,26 @@ export const MAX_CONTENT_BYTES = 256 * 1024;
 export function validateOptions(
   options: HueOptions,
 ): Required<
-  Pick<HueOptions, "apiKey" | "serviceName" | "baseUrl" | "captureContent" | "timeoutMillis">
+  Pick<
+    HueOptions,
+    "apiKey" | "serviceName" | "baseUrl" | "captureContent" | "timeoutMillis" | "maxQueueBytes"
+  >
 > &
   HueOptions {
   if (typeof options.captureContent !== "boolean")
     throw new TypeError("Choose captureContent explicitly: true or false");
+  if (options.enabled !== undefined && typeof options.enabled !== "boolean")
+    throw new TypeError("enabled must be a boolean");
+  if (options.enabled === false)
+    return {
+      captureContent: options.captureContent,
+      enabled: false,
+      apiKey: "",
+      serviceName: "hue-disabled",
+      baseUrl: "https://app.hue.run",
+      timeoutMillis: 10000,
+      maxQueueBytes: 8 * 1024 * 1024,
+    };
   if (
     typeof options.apiKey !== "string" ||
     !options.apiKey ||
@@ -42,5 +57,12 @@ export function validateOptions(
   const timeoutMillis = options.timeoutMillis ?? 10000;
   if (!Number.isInteger(timeoutMillis) || timeoutMillis < 100 || timeoutMillis > 60000)
     throw new TypeError("timeoutMillis must be 100–60000");
-  return { ...options, baseUrl: url.origin, timeoutMillis };
+  const maxQueueBytes = options.maxQueueBytes ?? 8 * 1024 * 1024;
+  if (
+    !Number.isSafeInteger(maxQueueBytes) ||
+    maxQueueBytes < 1024 ||
+    maxQueueBytes > 64 * 1024 * 1024
+  )
+    throw new TypeError("maxQueueBytes must be 1024–67108864");
+  return { ...options, baseUrl: url.origin, timeoutMillis, maxQueueBytes };
 }

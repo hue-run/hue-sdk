@@ -2,7 +2,7 @@ import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord } from "@opentelemetry/sdk-logs";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import type { HueOptions } from "./types.js";
-import { MAX_CONTENT_BYTES } from "./config.js";
+import { MAX_BODY_BYTES, MAX_CONTENT_BYTES } from "./config.js";
 
 const contentPrefixes = [
   "gen_ai.input.messages",
@@ -44,27 +44,57 @@ function isContentKey(key: string): boolean {
   return contentPrefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}.`));
 }
 
-function redactValue(value: unknown, path: string, options: HueOptions, depth = 0): unknown {
-  if (depth > 32) throw new Error("Telemetry value exceeds the supported nesting limit");
+interface RedactionBudget {
+  bytes: number;
+  nodes: number;
+}
+
+function redactValue(
+  value: unknown,
+  path: string,
+  options: HueOptions,
+  budget: RedactionBudget,
+  depth = 0,
+): unknown {
+  if (++budget.nodes > 16384 || depth > 32)
+    throw new Error("Telemetry value exceeds the supported nesting limit");
   if (typeof value === "string") {
     const result = options.redact ? options.redact(value, path) : value;
-    if (typeof result !== "string" || !result.isWellFormed() || result.includes("\u0000"))
+    // JavaScript can supply an async redactor despite the synchronous contract.
+    // Observe its rejection before dropping the invalid record.
+    if (result && typeof result === "object") void Promise.resolve(result).catch(() => {});
+    if (
+      typeof result !== "string" ||
+      result.length > MAX_CONTENT_BYTES ||
+      !result.isWellFormed() ||
+      result.includes("\u0000")
+    )
       throw new Error("Redaction produced unsupported text");
     if (Buffer.byteLength(result) > MAX_CONTENT_BYTES)
       throw new Error("Telemetry text exceeds 256 KiB");
+    budget.bytes += Buffer.byteLength(result);
+    if (budget.bytes > MAX_BODY_BYTES)
+      throw new Error("Redacted record exceeds the content budget");
     return result;
   }
-  if (Array.isArray(value))
-    return value.map((item, index) => redactValue(item, `${path}.${index}`, options, depth + 1));
+  if (Array.isArray(value)) {
+    if (value.length > 16384) throw new Error("Telemetry array exceeds the complexity limit");
+    return value.map((item, index) =>
+      redactValue(item, `${path}.${index}`, options, budget, depth + 1),
+    );
+  }
   if (value instanceof Uint8Array) {
     if (value.byteLength > MAX_CONTENT_BYTES) throw new Error("Telemetry bytes exceed 256 KiB");
+    budget.bytes += value.byteLength;
+    if (budget.bytes > MAX_BODY_BYTES)
+      throw new Error("Redacted record exceeds the content budget");
     return value;
   }
   if (value !== null && typeof value === "object")
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        redactValue(item, `${path}.${key}`, options, depth + 1),
+        redactValue(item, `${path}.${key}`, options, budget, depth + 1),
       ]),
     );
   return value;
@@ -74,23 +104,29 @@ function attributes<T extends Record<string, unknown>>(
   source: T,
   options: HueOptions,
   path: string,
+  budget: RedactionBudget,
 ): T {
   return Object.fromEntries(
     Object.entries(source).flatMap(([key, value]) =>
       !options.captureContent && isContentKey(key)
         ? []
-        : [[key, redactValue(value, `${path}.${key}`, options)]],
+        : [[key, redactValue(value, `${path}.${key}`, options, budget)]],
     ),
   ) as T;
 }
 
 export type ResourceCache = WeakMap<Resource, Resource>;
 
-function redactResource(resource: Resource, options: HueOptions, cache: ResourceCache): Resource {
+function redactResource(
+  resource: Resource,
+  options: HueOptions,
+  cache: ResourceCache,
+  budget: RedactionBudget,
+): Resource {
   let result = cache.get(resource);
   if (!result) {
     result = resourceFromAttributes(
-      attributes(resource.attributes, options, "resource.attributes"),
+      attributes(resource.attributes, options, "resource.attributes", budget),
       { schemaUrl: resource.schemaUrl },
     );
     cache.set(resource, result);
@@ -103,6 +139,7 @@ export function redactSpan(
   options: HueOptions,
   cache: ResourceCache,
 ): ReadableSpan {
+  const budget = { bytes: 0, nodes: 0 };
   return {
     name: span.name,
     kind: span.kind,
@@ -115,10 +152,10 @@ export function redactSpan(
     status: {
       code: span.status.code,
       ...(options.captureContent && span.status.message !== undefined
-        ? { message: String(redactValue(span.status.message, "status.message", options)) }
+        ? { message: String(redactValue(span.status.message, "status.message", options, budget)) }
         : {}),
     },
-    attributes: attributes(span.attributes, options, "attributes"),
+    attributes: attributes(span.attributes, options, "attributes", budget),
     events: span.events
       .filter(
         (event) =>
@@ -127,13 +164,13 @@ export function redactSpan(
       )
       .map((event) => ({
         ...event,
-        attributes: attributes(event.attributes ?? {}, options, `events.${event.name}`),
+        attributes: attributes(event.attributes ?? {}, options, `events.${event.name}`, budget),
       })),
     links: span.links.map((link) => ({
       ...link,
-      attributes: attributes(link.attributes ?? {}, options, "links.attributes"),
+      attributes: attributes(link.attributes ?? {}, options, "links.attributes", budget),
     })),
-    resource: redactResource(span.resource, options, cache),
+    resource: redactResource(span.resource, options, cache, budget),
     instrumentationScope: span.instrumentationScope,
     droppedAttributesCount: span.droppedAttributesCount,
     droppedEventsCount: span.droppedEventsCount,
@@ -146,7 +183,8 @@ export function redactLog(
   options: HueOptions,
   cache: ResourceCache,
 ): ReadableLogRecord {
-  const body = options.captureContent ? redactValue(log.body, "body", options) : undefined;
+  const budget = { bytes: 0, nodes: 0 };
+  const body = options.captureContent ? redactValue(log.body, "body", options, budget) : undefined;
   if (body !== undefined && Buffer.byteLength(JSON.stringify(body)) > MAX_CONTENT_BYTES)
     throw new Error("Telemetry log body exceeds 256 KiB");
   return {
@@ -157,8 +195,8 @@ export function redactLog(
     severityNumber: log.severityNumber,
     eventName: log.eventName,
     body: body as ReadableLogRecord["body"],
-    attributes: attributes(log.attributes, options, "attributes"),
-    resource: redactResource(log.resource, options, cache),
+    attributes: attributes(log.attributes, options, "attributes", budget),
+    resource: redactResource(log.resource, options, cache, budget),
     instrumentationScope: {
       ...log.instrumentationScope,
       ...(log.instrumentationScope.attributes
@@ -167,6 +205,7 @@ export function redactLog(
               log.instrumentationScope.attributes,
               options,
               "scope.attributes",
+              budget,
             ),
           }
         : {}),

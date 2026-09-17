@@ -1,6 +1,15 @@
 # Changelog
 
-## TypeScript 0.1.4 / Python 0.1.2 — unreleased
+## TypeScript 0.1.5 / Python 0.1.3 — unreleased
+
+- Isolate helper capture, redaction and provider failures from application results/errors; never rerun business callbacks.
+- Add disabled clients, safe initialization and nonthrowing lifecycle calls with a default one-second caller deadline, retaining strict diagnostic APIs.
+- Bound pending telemetry by bytes and records, including in-flight exports, and report omissions/drops through cumulative health counters.
+- Bound transport work and acknowledgements; isolate rejected TypeScript diagnostics, handle Python 429/Retry-After, and make inherited Python clients safe after fork.
+- Allow TypeScript core installation alongside AI SDK 6 while retaining the AI SDK 7 adapter requirement.
+- Add installed-package regressions for outages, oversized data, redactor failures, queue saturation, cancellation, stuck providers and trickling responses.
+
+## TypeScript 0.1.4 / Python 0.1.2 — 2026-09-16
 
 - Add TypeScript and Python managed-target adapters with scoped execution claims, verified file bytes, existing-provider trace context, idempotent outcomes and telemetry acknowledgements.
 - Preserve saved outcomes when flush callbacks report failure or pending records, and reject expired callback budgets and malformed trace/file identities before starting agent work.

@@ -57,13 +57,16 @@ Then ask your coding agent:
 
 ```text
 Use the Hue skill to add tracing to this application. Preserve its behavior and
-existing telemetry. Enable full-fidelity capture of supported prompts, responses,
-tool inputs/outputs, and available model, token usage, timing, error, and session data.
-Preserve redaction and explicit capture restrictions. Run checks and verify the
-captured trace in Hue. Tell me what you changed and still need me to configure.
+existing telemetry. Start with metadata-only capture unless our team has approved
+content capture. Preserve redaction and use safe initialization, bounded lifecycle
+methods and a kill switch. Test collector outages and verify a real trace in Hue. Tell me what you changed and still need me to configure.
 ```
 
 You configure your project service key through your application's secret workflow; do not paste it into the agent chat. The skill can prepare and locally test the integration before the key is available. See [For agents](https://docs.hue.run/guides/agent-setup) for the documentation handoff.
+
+For production request handlers, follow [production safety](https://docs.hue.run/guides/production-safety). The strict setup examples below intentionally expose delivery failures.
+
+The [tracing reliability contract](./RELIABILITY.md) maps failure isolation and resource limits to regression tests and application acceptance checks.
 
 ## Install
 
@@ -118,7 +121,7 @@ try {
   }, { sessionId: "demo-session", input: "hello" });
   await hue.flush();
 } finally {
-  await hue.shutdown();
+  await hue.shutdownSafe();
 }
 ```
 
@@ -158,7 +161,7 @@ CI also verifies Python 3.10. [Release instructions](./RELEASING.md) describe ve
 
 ## Compatibility and limits
 
-TypeScript uses compatible-major peers for AI SDK 7 and its OTel integration. The two patch pairs above are tested; other combinations are not individually certified. Those optional peers also constrain an already installed AI SDK: the current package does not install alongside AI SDK 6, even when using only the core entry point. Existing OTel applications can use a standard OTLP exporter directly without this package. See [compatibility](./COMPATIBILITY.md) before changing application dependencies.
+TypeScript uses compatible-major peers for AI SDK 7 and its OTel integration. The two patch pairs above are tested; other combinations are not individually certified. Core-only installation can coexist with AI SDK 6; the `hueTelemetry` adapter remains AI SDK 7 only. Existing OTel applications can use a standard OTLP exporter directly without this package. See [compatibility](./COMPATIBILITY.md) before changing application dependencies.
 
 Python's optional OpenInference/OpenAI pair is pinned in its lockfile and tested separately. Python helper capture controls and TypeScript export filtering have different scopes; the package guides describe them explicitly.
 
