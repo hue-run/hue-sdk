@@ -12,7 +12,7 @@ concurrency:
 jobs:
   release-tools:
     name: Release artifact boundaries
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -21,7 +21,7 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
   typescript:
     name: TypeScript installed package
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -37,7 +37,7 @@ jobs:
       - run: node packages/sdk-typescript/scripts/verify-package.mjs
   python:
     name: Python ${{ matrix.python }} source and installed wheel
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
