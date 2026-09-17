@@ -566,10 +566,10 @@ class Hue:
         def drain() -> None:
             nonlocal result
             try:
-                result = self._drain()
+                result = self._drain(deadline)
             finally:
-                completed.set()
                 self._flush_lock.release()
+                completed.set()
 
         try:
             Thread(target=drain, name="hue-flush", daemon=True).start()
@@ -587,14 +587,20 @@ class Hue:
         ):
             raise ValueError("timeout_millis must be a positive integer.")
 
-    def _drain(self) -> bool:
+    def _drain(self, deadline: float) -> bool:
         traces, logs = False, False
         try:
-            traces = self._span_processor.force_flush()
+            traces = self._span_processor.force_flush(
+                timeout_millis=max(0, int((deadline - monotonic()) * 1000))
+            )
         except Exception:
             pass
         try:
-            logs = self._log_processor.force_flush()
+            # Even with no wait remaining, request the other signal's export.
+            # The processor's own worker continues without holding this drain.
+            logs = self._log_processor.force_flush(
+                timeout_millis=max(0, int((deadline - monotonic()) * 1000))
+            )
         except Exception:
             pass
         return traces and logs and self.export_status.ok
@@ -611,6 +617,7 @@ class Hue:
         if not self.enabled:
             self._closed = True
             return self.export_status.ok
+        deadline = monotonic() + timeout_millis / 1000
         with self._shutdown_lock:
             if not self._closed:
                 self._closed = True
@@ -619,16 +626,24 @@ class Hue:
 
                 def close() -> None:
                     try:
-                        with self._flush_lock:
-                            flushed = self._drain()
+                        acquired = self._flush_lock.acquire(timeout=max(0, deadline - monotonic()))
+                        if acquired:
                             try:
-                                if self._owns_provider:
-                                    self.tracer_provider.shutdown()
-                                else:
-                                    self._span_processor.shutdown()
+                                self._drain(deadline)
                             finally:
-                                self.logger_provider.shutdown()
-                            self._shutdown_result = flushed and self.export_status.ok
+                                self._flush_lock.release()
+                        # Cleanup can outlive this caller. Do not hold the drain
+                        # coordinator while waiting for exporter workers to stop.
+                        try:
+                            if self._owns_provider:
+                                self.tracer_provider.shutdown()
+                            else:
+                                self._span_processor.shutdown()
+                        finally:
+                            self.logger_provider.shutdown()
+                        # An expired caller budget is not an export failure.
+                        # Recheck completed cleanup without starting another wait.
+                        self._shutdown_result = self._drain(monotonic())
                     except Exception:
                         self._shutdown_result = False
                     finally:
@@ -642,7 +657,11 @@ class Hue:
                     self._record_issue()
                     self._shutdown_done.set()
                     return False
-        return self._shutdown_done.wait(timeout_millis / 1000) and self._shutdown_result
+        return (
+            self._shutdown_done.wait(max(0, deadline - monotonic()))
+            and self._shutdown_result
+            and self.export_status.ok
+        )
 
     def force_flush_safe(self, timeout_millis: int = 1000) -> bool:
         """Best-effort production cleanup; strict delivery checks belong outside requests."""

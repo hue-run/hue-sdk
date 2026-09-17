@@ -8,6 +8,7 @@ const typedArrayByteLength = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype),
   "byteLength",
 )!.get!;
+const typedArraySet = Uint8Array.prototype.set;
 
 /** Copies only exported data, with the same finite budget used for admission. */
 class Snapshot {
@@ -44,10 +45,14 @@ class Snapshot {
     if (this.ancestors.has(value)) throw new TypeError("Cyclic telemetry value");
     if (this.copied.has(value)) return this.copied.get(value) as T;
     if (utilTypes.isUint8Array(value)) {
-      // Own accessors/subclasses cannot disguise the retained byte count. The
-      // typed-array constructor copies internal data without an iterator hook.
-      this.charge(typedArrayByteLength.call(value));
-      const copy = new Uint8Array(value);
+      // Own accessors/subclasses cannot disguise the retained byte count.
+      // A length-tracking SharedArrayBuffer view can grow on another thread
+      // after charging: keep the destination fixed and reject growth during
+      // the intrinsic copy instead of retaining an uncharged larger array.
+      const length = typedArrayByteLength.call(value);
+      this.charge(length);
+      const copy = new Uint8Array(length);
+      typedArraySet.call(copy, value);
       this.copied.set(value, copy);
       return copy as T;
     }

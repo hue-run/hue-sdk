@@ -758,6 +758,116 @@ def test_shutdown_worker_failure_does_not_reactivate_closed_processors(receiver,
     assert not hue.shutdown_safe()
 
 
+@pytest.mark.parametrize("operation", ["force_flush_safe", "shutdown_safe"])
+def test_lifecycle_releases_coordinator_at_shared_deadline(receiver, monkeypatch, operation):
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    release = Event()
+    started = {"traces": Event(), "logs": Event()}
+    budgets = {"traces": [], "logs": []}
+
+    def intercept(processor, signal):
+        original_export = processor._exporter.export
+        original_flush = processor.force_flush
+
+        def blocked_export(items):
+            started[signal].set()
+            assert release.wait(5), "test did not release exporter"
+            return original_export(items)
+
+        def record_budget(timeout_millis=30000):
+            budgets[signal].append(timeout_millis)
+            return original_flush(timeout_millis)
+
+        monkeypatch.setattr(processor._exporter, "export", blocked_export)
+        monkeypatch.setattr(processor, "force_flush", record_budget)
+
+    intercept(hue._span_processor, "traces")
+    intercept(hue._log_processor, "logs")
+    try:
+        _emit_isolation_record(hue, "traces", "deadline-span")
+        _emit_isolation_record(hue, "logs", "deadline-log")
+        start = time.monotonic()
+        assert not getattr(hue, operation)(timeout_millis=40)
+        assert time.monotonic() - start < 0.5
+        assert started["traces"].wait(1)
+        assert started["logs"].wait(1), "the first signal consumed the second signal's deadline"
+        acquired = hue._flush_lock.acquire(timeout=0.5)
+        if acquired:
+            hue._flush_lock.release()
+        assert acquired, "expired drain retained the coordinator while exports were still blocked"
+        assert 0 <= budgets["logs"][0] <= budgets["traces"][0] <= 40
+
+        release.set()
+        # A short wait does not abandon queued records or make shutdown's
+        # eventual successful completion permanently report that first timeout.
+        if operation == "shutdown_safe":
+            assert hue.shutdown(timeout_millis=2000)
+        else:
+            assert hue.force_flush(timeout_millis=2000)
+            assert hue.shutdown(timeout_millis=2000)
+        assert len(receiver.spans()) == len(receiver.logs()) == 1
+        assert hue.export_status.ok
+    finally:
+        release.set()
+        hue.shutdown_safe(timeout_millis=2000)
+
+
+def test_shutdown_does_not_wait_past_budget_for_another_flush(receiver):
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    hue._flush_lock.acquire()
+    try:
+        start = time.monotonic()
+        hue.shutdown_safe(timeout_millis=20)
+        assert time.monotonic() - start < 0.5
+        assert hue._shutdown_done.wait(0.5), "shutdown remained behind an unrelated drain"
+        assert hue.shutdown_safe(timeout_millis=20)
+        assert not hue._span_processor._worker.is_alive()
+        assert not hue._log_processor._worker.is_alive()
+    finally:
+        hue._flush_lock.release()
+        hue.shutdown_safe(timeout_millis=2000)
+
+
+@pytest.mark.parametrize("signal", ["traces", "logs"])
+def test_records_emitted_after_processor_shutdown_are_counted(receiver, signal):
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    span = hue.tracer.start_span("started-before-shutdown")
+    logger = hue.logger_provider.get_logger("external")
+    try:
+        assert hue.shutdown_safe()
+        if signal == "traces":
+            span.end()
+        else:
+            logger.emit(body="emitted-after-shutdown")
+        status = hue.export_status
+        assert (status.dropped_trace_records, status.dropped_log_records) == (
+            (1, 0) if signal == "traces" else (0, 1)
+        )
+        assert status.queued_trace_records == status.queued_log_records == 0
+        assert not status.ok
+        assert not hue.shutdown_safe(), "repeat shutdown returned stale pre-drop success"
+        with hue.span("new-helper-is-an-intentional-noop"):
+            pass
+        assert hue.export_status == status
+        assert receiver.requests == []
+    finally:
+        hue.shutdown_safe()
+
+
+def test_helper_ending_after_shutdown_keeps_original_error_and_counts_drop(receiver):
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    original = RuntimeError("original application failure")
+    with pytest.raises(RuntimeError) as caught:
+        with hue.span("still-running"):
+            assert hue.shutdown_safe()
+            raise original
+    assert caught.value is original
+    assert hue.export_status.dropped_trace_records == 1
+    assert not hue.export_status.ok
+    assert not hue.shutdown_safe()
+    assert receiver.requests == []
+
+
 def test_queued_log_owns_nested_body_and_attributes_after_emit(receiver):
     from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
     from opentelemetry.sdk._logs import LogRecordProcessor

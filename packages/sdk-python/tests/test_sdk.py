@@ -143,7 +143,8 @@ def test_borrowed_provider_and_existing_processors_survive_shutdown(receiver):
         pass
     assert len(memory.get_finished_spans()) == 3
     assert len(receiver.spans()) == 2
-    assert hue.shutdown()
+    assert hue.export_status.dropped_trace_records == 1
+    assert not hue.shutdown()
     with hue.span("too-late") as span:
         span.set_output("safe-noop")
     provider.shutdown()

@@ -61,6 +61,7 @@ class _BoundedProcessor:
             # includes in-flight records, so a stalled receiver cannot grow it.
             with self._condition:
                 if self._closed:
+                    self._dropped += 1
                     return
                 if self._pending_records + self._admissions >= self._max_records:
                     self._dropped += 1

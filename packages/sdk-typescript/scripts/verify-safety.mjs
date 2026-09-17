@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { Worker } from "node:worker_threads";
 
 const [consumer] = process.argv.slice(2);
 const { createHue, createHueSafe, HueExportError } = await import(
@@ -46,6 +47,79 @@ const redactionProbe = spawnSync(
 );
 assert.equal(redactionProbe.status, 0, redactionProbe.stderr || redactionProbe.error?.message);
 console.log(redactionProbe.stdout.trim());
+// Exercise the installed snapshot with a genuinely concurrent growing view.
+// No hooks or mocked constructors create the race; vary the worker's delay to
+// cover growth before, during and after admission while bounding total work.
+const { snapshotLog } = await import(
+  pathToFileURL(join(consumer, "node_modules/@hue-run/sdk/dist/snapshot.js")).href
+);
+const control = new Int32Array(new SharedArrayBuffer(4));
+const growthWorker = new Worker(
+  `const { parentPort, workerData } = require("node:worker_threads");
+   const control = new Int32Array(workerData);
+   parentPort.on("message", ({ buffer, delay }) => {
+     Atomics.store(control, 0, 1);
+     Atomics.notify(control, 0);
+     while (Atomics.load(control, 0) !== 2) {}
+     for (let index = 0; index < delay; index++) Atomics.load(control, 0);
+     buffer.grow(65_536);
+     Atomics.store(control, 0, 3);
+     Atomics.notify(control, 0);
+   });`,
+  { eval: true, workerData: control.buffer },
+);
+function awaitGrowthState(expected) {
+  const deadline = performance.now() + 2000;
+  for (let state = Atomics.load(control, 0); state !== expected; state = Atomics.load(control, 0)) {
+    assert.ok(performance.now() < deadline, "Shared-buffer test worker timed out");
+    Atomics.wait(control, 0, state, 100);
+  }
+}
+let sharedSnapshots = 0;
+let sharedDrops = 0;
+try {
+  const deadline = performance.now() + 10_000;
+  for (let attempt = 0; attempt < 5000; attempt++) {
+    assert.ok(performance.now() < deadline, "Shared-buffer snapshot probe exceeded its budget");
+    const buffer = new SharedArrayBuffer(1, { maxByteLength: 65_536 });
+    const body = new Uint8Array(buffer);
+    Atomics.store(control, 0, 0);
+    growthWorker.postMessage({ buffer, delay: attempt % 512 });
+    awaitGrowthState(1);
+    let snapshot;
+    try {
+      snapshot = snapshotLog(
+        {
+          get body() {
+            Atomics.store(control, 0, 2);
+            return body;
+          },
+          attributes: {},
+          instrumentationScope: { name: "shared-memory-budget" },
+          resource: { asyncAttributesPending: false, getRawAttributes: () => [] },
+        },
+        8192,
+      );
+      sharedSnapshots++;
+    } catch (error) {
+      assert.ok(error instanceof RangeError, "Concurrent growth may only reject admission");
+      sharedDrops++;
+    }
+    awaitGrowthState(3);
+    if (snapshot) {
+      assert.ok(
+        snapshot.record.body.byteLength <= snapshot.bytes,
+        "Concurrent growth retained more bytes than the admitted snapshot budget",
+      );
+      assert.ok(snapshot.bytes <= 8192);
+      assert.notEqual(snapshot.record.body.buffer, buffer);
+    }
+  }
+  assert.equal(sharedSnapshots + sharedDrops, 5000);
+} finally {
+  await growthWorker.terminate();
+}
+console.log(JSON.stringify({ sharedMemoryBudget: "passed", sharedSnapshots, sharedDrops }));
 let mode = "unauthorized";
 let closedResponses = 0;
 let requests = 0;
