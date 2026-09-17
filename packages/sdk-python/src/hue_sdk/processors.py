@@ -9,15 +9,14 @@ from __future__ import annotations
 import os
 from collections import deque
 from collections.abc import Callable
-from copy import copy
 from threading import Condition, Thread
 from time import monotonic
 from typing import Any
 
-from opentelemetry.context import Context
-from opentelemetry.sdk._logs import LogRecordProcessor, ReadableLogRecord, ReadWriteLogRecord
+from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
+from .snapshots import snapshot_log, snapshot_span
 from .transport import MAX_REQUEST_BYTES
 
 
@@ -55,6 +54,7 @@ class _BoundedProcessor:
                 if self._pending_records >= self._max_records:
                     self._dropped += 1
                     return
+            item = self._snapshot(item)
             size = self._encode((item,)).ByteSize()
             with self._condition:
                 if self._closed:
@@ -154,6 +154,8 @@ class _BoundedProcessor:
 
 
 class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
+    _snapshot = staticmethod(snapshot_span)
+
     def on_start(self, span: Any, parent_context: Any = None) -> None:
         pass
 
@@ -163,23 +165,7 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
 
 
 class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
+    _snapshot = staticmethod(snapshot_log)
+
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
-        if self._pid != os.getpid():
-            return
-        try:
-            # Match OTel's public readable-record boundary without retaining the
-            # caller's potentially large context or copying locks in attributes.
-            record = copy(log_record.log_record)
-            record.context = Context()
-            self._enqueue(
-                ReadableLogRecord(
-                    log_record=record,
-                    resource=log_record.resource,
-                    instrumentation_scope=log_record.instrumentation_scope,
-                    limits=log_record.limits,
-                )
-            )
-        except Exception:
-            with self._condition:
-                self._dropped += 1
-            self._exporter.record_failure()
+        self._enqueue(log_record)

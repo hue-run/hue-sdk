@@ -271,7 +271,6 @@ def test_inherited_client_is_noop_and_does_not_wait_on_parent_locks(receiver):
     assert receiver.requests == []
 
 
-
 def test_shutdown_worker_failure_does_not_reactivate_closed_processors(receiver, monkeypatch):
     import hue_sdk.client as client_module
 
@@ -291,3 +290,89 @@ def test_shutdown_worker_failure_does_not_reactivate_closed_processors(receiver,
         pass
     assert hue.export_status.queued_trace_records == 0
     assert not hue.shutdown_safe()
+
+
+def test_queued_log_owns_nested_body_and_attributes_after_emit(receiver):
+    from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
+    from opentelemetry.sdk._logs import LogRecordProcessor
+
+    class RetainRecord(LogRecordProcessor):
+        def on_emit(self, log_record):
+            self.record = log_record.log_record
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30000):
+            return True
+
+    hue = Hue(receiver.url, KEY, capture_content=False, max_queue_bytes=2048)
+    retain = RetainRecord()
+    hue.logger_provider.add_log_record_processor(retain)
+    body = {"nested": ["before"]}
+    hue.logger_provider.get_logger("external").emit(
+        body=body, attributes={"nested": {"values": ["before"]}}
+    )
+    admitted_bytes = hue.export_status.queued_log_bytes
+    assert 0 < admitted_bytes <= 2048
+    body["nested"][0] = "x" * 100_000
+    retain.record.attributes["nested"] = {"values": ["y" * 100_000]}
+    queued = hue._log_processor._queue[0][0]
+    assert encode_logs((queued,)).ByteSize() == admitted_bytes
+    assert hue.export_status.queued_log_bytes == admitted_bytes
+    assert hue.force_flush()
+    assert hue.shutdown()
+    log = receiver.logs()[0]
+    assert log.body.kvlist_value.values[0].value.array_value.values[0].string_value == "before"
+    nested = next(attribute.value for attribute in log.attributes if attribute.key == "nested")
+    assert nested.kvlist_value.values[0].value.array_value.values[0].string_value == "before"
+    assert all(len(payload) <= 2048 for _, _, payload in receiver.requests)
+
+
+def test_queued_span_owns_attributes_events_links_and_preserves_drop_counts(receiver):
+    from opentelemetry.attributes import BoundedAttributes
+    from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
+    from opentelemetry.sdk.trace import Event, ReadableSpan
+    from opentelemetry.trace import Link, SpanContext, TraceFlags
+
+    context = SpanContext(1, 2, False, TraceFlags(1))
+    values = ["before"]
+    attributes = {"values": values}
+    event_attributes = BoundedAttributes(attributes={"event": "before"})
+    event_attributes.dropped = 3
+    span = ReadableSpan(
+        name="external",
+        context=context,
+        attributes=attributes,
+        events=(Event("event", event_attributes, 1),),
+        links=(Link(context, attributes),),
+        start_time=1,
+        end_time=2,
+    )
+    hue = Hue(receiver.url, KEY, capture_content=False, max_queue_bytes=2048)
+    hue._span_processor.on_end(span)
+    admitted_bytes = hue.export_status.queued_trace_bytes
+    values[0] = "x" * 100_000
+    attributes["new-field"] = "after"
+    queued = hue._span_processor._queue[0][0]
+    assert encode_spans((queued,)).ByteSize() == admitted_bytes
+    assert queued.resource is not span.resource
+    assert hue.force_flush()
+    assert hue.shutdown()
+    stored = receiver.spans()[0]
+    assert stored.attributes[0].value.array_value.values[0].string_value == "before"
+    assert len(stored.attributes) == 1
+    assert stored.events[0].dropped_attributes_count == 3
+    assert stored.links[0].attributes[0].value.array_value.values[0].string_value == "before"
+
+
+def test_recursive_log_body_is_dropped_without_traversing_application_graph(receiver):
+    body = []
+    body.append(body)
+    hue = Hue(receiver.url, KEY, capture_content=False)
+    hue.logger_provider.get_logger("external").emit(body=body)
+    assert hue.export_status.dropped_log_records == 1
+    assert hue.export_status.queued_log_bytes == 0
+    assert not hue.force_flush()
+    assert not hue.shutdown()
+    assert receiver.requests == []
