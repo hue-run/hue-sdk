@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   context,
+  ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
   trace,
@@ -13,7 +14,7 @@ import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { resourceFromAttributes } from "@opentelemetry/resources";
-import { MAX_CONTENT_BYTES } from "./config.js";
+import { encodeContent, noopSpan, safeSpan } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import type {
@@ -27,6 +28,8 @@ import type {
   SpanOptions,
   VerifyTraceOptions,
   TraceVerification,
+  SafeLifecycleOptions,
+  SafeLifecycleResult,
 } from "./types.js";
 
 interface LocalContext {
@@ -68,21 +71,32 @@ class ContextualTracer implements Tracer {
   constructor(
     private source: Tracer,
     private storage: AsyncLocalStorage<LocalContext>,
+    private enabled: () => boolean,
+    private failed: () => void,
   ) {}
   startSpan(name: string, options: OtelSpanOptions = {}, parent?: Context): Span {
-    const active = this.storage.getStore();
-    return this.source.startSpan(
-      name,
-      {
-        ...options,
-        attributes: {
-          ...options.attributes,
-          ...(active?.sessionId ? { "gen_ai.conversation.id": active.sessionId } : {}),
-          ...(active?.userId ? { "user.id": active.userId } : {}),
-        },
-      },
-      parent ?? active?.context ?? context.active(),
-    );
+    if (!this.enabled()) return noopSpan();
+    try {
+      const active = this.storage.getStore();
+      return safeSpan(
+        this.source.startSpan(
+          name,
+          {
+            ...options,
+            attributes: {
+              ...options.attributes,
+              ...(active?.sessionId ? { "gen_ai.conversation.id": active.sessionId } : {}),
+              ...(active?.userId ? { "user.id": active.userId } : {}),
+            },
+          },
+          parent ?? active?.context ?? context.active(),
+        ),
+        this.failed,
+      );
+    } catch {
+      this.failed();
+      return noopSpan();
+    }
   }
   startActiveSpan<F extends (span: Span) => unknown>(name: string, fn: F): ReturnType<F>;
   startActiveSpan<F extends (span: Span) => unknown>(
@@ -110,14 +124,25 @@ class ContextualTracer implements Tracer {
           ? contextOrFn
           : fn;
     if (!callback) throw new TypeError("A span callback is required");
-    const parent =
-      typeof contextOrFn === "object"
-        ? contextOrFn
-        : (this.storage.getStore()?.context ?? context.active());
+    let parent = ROOT_CONTEXT;
+    try {
+      parent =
+        typeof contextOrFn === "object"
+          ? contextOrFn
+          : (this.storage.getStore()?.context ?? context.active());
+    } catch {
+      this.failed();
+    }
     const span = this.startSpan(name, options, parent);
-    return this.storage.run(
-      { ...this.storage.getStore(), context: trace.setSpan(parent, span) },
-      () => callback(span),
+    let active = ROOT_CONTEXT;
+    try {
+      active = trace.setSpan(parent, span);
+    } catch {
+      this.failed();
+      active = trace.setSpan(ROOT_CONTEXT, span);
+    }
+    return this.storage.run({ ...this.storage.getStore(), context: active }, () =>
+      callback(span),
     ) as ReturnType<F>;
   }
 }
@@ -126,6 +151,7 @@ export class HueClient {
   readonly transport: HueTransport;
   readonly tracer: Tracer;
   readonly captureContent: boolean;
+  readonly enabled: boolean;
   private logger: Logger;
   private storage = new AsyncLocalStorage<LocalContext>();
   private tracerProvider: FlushableTracerProvider;
@@ -134,6 +160,8 @@ export class HueClient {
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
   private flushPromise?: Promise<ExportReport>;
+  private safeFlushPromise?: Promise<SafeLifecycleResult>;
+  private safeShutdownPromise?: Promise<SafeLifecycleResult>;
 
   constructor(options: HueOptions | ExistingHueProviders) {
     if ("transport" in options) {
@@ -148,30 +176,41 @@ export class HueClient {
       });
       const tracer = new TracerProvider({
         resource,
-        spanProcessors: [this.transport.spanProcessor],
+        spanProcessors:
+          this.transport.options.enabled === false ? [] : [this.transport.spanProcessor],
       });
       const logger = new LoggerProvider({
         resource,
-        processors: [this.transport.logRecordProcessor],
+        processors:
+          this.transport.options.enabled === false ? [] : [this.transport.logRecordProcessor],
       });
       this.ownedProviders = { tracer, logger };
       this.tracerProvider = tracer;
       this.loggerProvider = logger;
     }
     this.captureContent = this.transport.options.captureContent;
+    this.enabled = this.transport.options.enabled !== false;
     this.tracer = new ContextualTracer(
       this.tracerProvider.getTracer("@hue-run/sdk", "0.1.4"),
       this.storage,
+      () => this.enabled && !this.closed,
+      () => this.transport.instrumentationFailure(),
     );
     this.logger = this.loggerProvider.getLogger("@hue-run/sdk", "0.1.4");
   }
 
   verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
+    if (!this.enabled) return Promise.reject(new HueConnectionError("Hue telemetry is disabled"));
     return verifyTrace(this.transport.options, traceId, options);
   }
 
   getContext(): Context {
-    return this.storage.getStore()?.context ?? context.active();
+    try {
+      return this.storage.getStore()?.context ?? context.active();
+    } catch {
+      this.transport.instrumentationFailure();
+      return ROOT_CONTEXT;
+    }
   }
 
   async withSpan<T>(
@@ -179,38 +218,58 @@ export class HueClient {
     callback: (span: HueSpan) => Promise<T> | T,
     options: SpanOptions = {},
   ): Promise<T> {
-    if (this.closed) throw new Error("Hue client is shut down");
-    const inherited = this.storage.getStore();
-    const sessionId = identifier(options.sessionId ?? inherited?.sessionId);
-    const userId = identifier(options.userId ?? inherited?.userId);
-    const parent = options.parentContext ?? inherited?.context ?? context.active();
-    const active: LocalContext = { context: parent, sessionId, userId };
-    return this.storage.run(active, async () => {
-      const span = this.tracer.startSpan(
-        name,
-        { kind: options.kind ?? SpanKind.INTERNAL, attributes: options.attributes },
-        parent,
-      );
-      const spanContext = trace.setSpan(parent, span);
-      const handle: HueSpan = {
-        span,
-        context: spanContext,
-        traceId: span.spanContext().traceId,
-        spanId: span.spanContext().spanId,
-        setInput: (value) => this.setContent(span, "input.value", value),
-        setOutput: (value) => this.setContent(span, "output.value", value),
-      };
-      return this.storage.run({ ...active, context: spanContext }, async () => {
-        try {
-          if (options.input !== undefined) handle.setInput(options.input);
-          return await callback(handle);
-        } catch (error) {
-          this.recordError(span, error);
-          throw error;
-        } finally {
-          span.end();
-        }
-      });
+    let span = noopSpan();
+    let active: LocalContext = { context: this.getContext() };
+    if (this.enabled && !this.closed) {
+      try {
+        const inherited = this.storage.getStore();
+        active = {
+          context: options.parentContext ?? inherited?.context ?? context.active(),
+          sessionId: identifier(options.sessionId ?? inherited?.sessionId),
+          userId: identifier(options.userId ?? inherited?.userId),
+        };
+        span = this.storage.run(active, () =>
+          this.tracer.startSpan(
+            name,
+            { kind: options.kind ?? SpanKind.INTERNAL, attributes: options.attributes },
+            active.context,
+          ),
+        );
+      } catch {
+        this.transport.instrumentationFailure();
+      }
+    }
+    let spanContext: Context;
+    try {
+      spanContext = trace.setSpan(active.context, span);
+    } catch {
+      this.transport.instrumentationFailure();
+      spanContext = trace.setSpan(ROOT_CONTEXT, span);
+    }
+    const handle: HueSpan = {
+      span,
+      context: spanContext,
+      traceId: span.spanContext().traceId,
+      spanId: span.spanContext().spanId,
+      setInput: (value) => this.setContent(span, "input.value", value),
+      setOutput: (value) => this.setContent(span, "output.value", value),
+    };
+    return this.storage.run({ ...active, context: spanContext }, async () => {
+      // Setup, capture and cleanup have separate failure boundaries from customer code.
+      try {
+        if (this.enabled && !this.closed && options.input !== undefined)
+          handle.setInput(options.input);
+      } catch {
+        this.transport.instrumentationFailure();
+      }
+      try {
+        return await callback(handle);
+      } catch (error) {
+        this.recordError(span, error);
+        throw error;
+      } finally {
+        span.end();
+      }
     });
   }
 
@@ -232,57 +291,63 @@ export class HueClient {
   }
 
   recordError(span: Span, error: unknown): void {
-    const type = error instanceof Error ? error.name : "Error";
-    span.setStatus({
-      code: SpanStatusCode.ERROR,
-      ...(this.captureContent
-        ? { message: error instanceof Error ? error.message : "Operation failed" }
-        : {}),
-    });
-    span.addEvent("exception", {
-      "exception.type": type,
-      ...(this.captureContent && error instanceof Error
-        ? {
-            "exception.message": error.message,
-            ...(error.stack ? { "exception.stacktrace": error.stack } : {}),
-          }
-        : {}),
-    });
+    if (!this.enabled || this.closed) return;
+    try {
+      const type = error instanceof Error ? error.name : "Error";
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        ...(this.captureContent
+          ? { message: error instanceof Error ? error.message : "Operation failed" }
+          : {}),
+      });
+      span.addEvent("exception", {
+        "exception.type": type,
+        ...(this.captureContent && error instanceof Error
+          ? {
+              "exception.message": error.message,
+              ...(error.stack ? { "exception.stacktrace": error.stack } : {}),
+            }
+          : {}),
+      });
+    } catch {
+      this.transport.instrumentationFailure();
+    }
   }
 
   recordMessages(
     messages: { input?: JsonValue; output?: JsonValue },
     explicitContext?: Context,
   ): void {
-    if (this.closed) throw new Error("Hue client is shut down");
-    if (!this.captureContent) return;
-    const active = explicitContext ?? this.getContext();
-    if (!trace.getSpanContext(active))
-      throw new Error("Message records require an active span or explicit span context");
-    const body: Record<string, JsonValue> = {};
-    if (messages.input !== undefined) body["gen_ai.input.messages"] = messages.input;
-    if (messages.output !== undefined) body["gen_ai.output.messages"] = messages.output;
-    this.logger.emit({
-      context: active,
-      severityNumber: SeverityNumber.INFO,
-      eventName: "gen_ai.client.inference.operation.details",
-      body,
-    });
+    if (!this.enabled || this.closed || !this.captureContent) return;
+    try {
+      const active = explicitContext ?? this.getContext();
+      if (!trace.getSpanContext(active))
+        throw new Error("Message records require an active span or explicit span context");
+      const body: Record<string, JsonValue> = {};
+      if (messages.input !== undefined) body["gen_ai.input.messages"] = messages.input;
+      if (messages.output !== undefined) body["gen_ai.output.messages"] = messages.output;
+      this.logger.emit({
+        context: active,
+        severityNumber: SeverityNumber.INFO,
+        eventName: "gen_ai.client.inference.operation.details",
+        body: JSON.parse(encodeContent(body)),
+      });
+    } catch {
+      this.transport.instrumentationFailure("logs");
+    }
   }
 
   private setContent(span: Span, key: string, value: JsonValue): void {
-    if (!this.captureContent) return;
-    const encoded = JSON.stringify(value, (_key, item: unknown) => {
-      if (typeof item === "number" && !Number.isFinite(item))
-        throw new TypeError("Captured JSON numbers must be finite");
-      return item;
-    });
-    if (encoded === undefined || Buffer.byteLength(encoded) > MAX_CONTENT_BYTES)
-      throw new RangeError("Captured content must be JSON and no more than 256 KiB");
-    span.setAttribute(key, encoded);
+    if (!this.enabled || this.closed || !this.captureContent) return;
+    try {
+      span.setAttribute(key, encodeContent(value));
+    } catch {
+      this.transport.instrumentationFailure();
+    }
   }
 
   async checkConnection(): Promise<ProjectConnection> {
+    if (!this.enabled) throw new HueConnectionError("Hue telemetry is disabled");
     const options = this.transport.options;
     let response: globalThis.Response;
     try {
@@ -332,6 +397,65 @@ export class HueClient {
     }
   }
 
+  /** Production lifecycle path: never rejects; timeouts do not cancel borrowed provider work. */
+  flushSafe(options: SafeLifecycleOptions = {}): Promise<SafeLifecycleResult> {
+    if (this.safeFlushPromise) return this.safeFlushPromise;
+    const work = this.flushPromise ?? this.flush();
+    const result = this.safeLifecycle(() => work, options);
+    this.safeFlushPromise = result;
+    const clear = () => {
+      this.safeFlushPromise = undefined;
+    };
+    // Retain the timed-out result until its underlying drain settles. Repeated
+    // timeouts must not accumulate promises against a hung borrowed provider.
+    void work.then(clear, clear);
+    return result;
+  }
+
+  /** Safe for finally blocks; preserves the application's result or original exception. */
+  shutdownSafe(options: SafeLifecycleOptions = {}): Promise<SafeLifecycleResult> {
+    if (this.safeShutdownPromise) return this.safeShutdownPromise;
+    const work = this.shutdown();
+    const result = this.safeLifecycle(() => work, options);
+    this.safeShutdownPromise = result;
+    const clear = () => {
+      this.safeShutdownPromise = undefined;
+    };
+    void work.then(clear, clear);
+    return result;
+  }
+
+  private async safeLifecycle(
+    work: () => Promise<ExportReport>,
+    options: SafeLifecycleOptions,
+  ): Promise<SafeLifecycleResult> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = options.timeoutMillis ?? 1000;
+      if (!Number.isInteger(timeout) || timeout < 1 || timeout > 60000)
+        throw new TypeError("Invalid lifecycle budget");
+      const outcome = await Promise.race([
+        work().then(() => "complete" as const),
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), timeout);
+        }),
+      ]);
+      const report = this.transport.getReport();
+      return {
+        ok:
+          outcome === "complete" &&
+          this.transport.getFailureSequence() === 0 &&
+          report.pendingSpans + report.pendingLogs === 0,
+        timedOut: outcome === "timeout",
+        report,
+      };
+    } catch {
+      return { ok: false, timedOut: false, report: this.transport.getReport() };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   flush(): Promise<ExportReport> {
     // Each caller needs a drain after its own preceding span/log emissions.
     // Joining an earlier drain can acknowledge records that were not in its batch.
@@ -358,8 +482,8 @@ export class HueClient {
 
   private async flushOnce(): Promise<ExportReport> {
     const results = await Promise.allSettled([
-      this.tracerProvider.forceFlush(),
-      this.loggerProvider.forceFlush(),
+      Promise.resolve().then(() => this.tracerProvider.forceFlush()),
+      Promise.resolve().then(() => this.loggerProvider.forceFlush()),
     ]);
     for (const [index, result] of results.entries())
       if (result.status === "rejected")
@@ -393,4 +517,15 @@ export class HueClient {
 
 export function createHue(options: HueOptions | ExistingHueProviders): HueClient {
   return new HueClient(options);
+}
+
+/** Fail-open initialization for production; strict createHue remains available for setup/CI. */
+export function createHueSafe(options: HueOptions | ExistingHueProviders): HueClient {
+  try {
+    return new HueClient(options);
+  } catch {
+    const disabled = new HueClient({ enabled: false, captureContent: false });
+    disabled.transport.instrumentationFailure();
+    return disabled;
+  }
 }

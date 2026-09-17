@@ -10,17 +10,23 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 export type Signal = "traces" | "logs";
 
-export interface HueOptions {
-  apiKey: string;
-  serviceName: string;
+interface SharedHueOptions {
   captureContent: boolean;
   baseUrl?: string;
   serviceVersion?: string;
   /** Runs on string values before Hue export, including custom attribute values. */
   redact?: (value: string, path: string) => string;
-  onExportIssue?: (issue: ExportIssue) => void;
+  onExportIssue?: (issue: ExportIssue) => void | Promise<void>;
   timeoutMillis?: number;
+  /** Aggregate estimated retained telemetry bytes across both signals, including in-flight work. Default 8 MiB. */
+  maxQueueBytes?: number;
 }
+
+export type HueOptions = SharedHueOptions &
+  (
+    | { enabled?: true; apiKey: string; serviceName: string }
+    | { enabled: false; apiKey?: string; serviceName?: string }
+  );
 
 export interface ExportIssue {
   sequence: number;
@@ -40,6 +46,21 @@ export interface ExportReport {
   failedLogs: number;
   pendingSpans: number;
   pendingLogs: number;
+  droppedSpans: number;
+  droppedLogs: number;
+  pendingBytes: number;
+  instrumentationFailures: number;
+}
+
+export interface SafeLifecycleOptions {
+  /** Caller wait budget, 1–60000 ms. Default 1000. Does not cancel borrowed providers. */
+  timeoutMillis?: number;
+}
+
+export interface SafeLifecycleResult {
+  ok: boolean;
+  timedOut: boolean;
+  report: ExportReport;
 }
 
 export interface SpanOptions {

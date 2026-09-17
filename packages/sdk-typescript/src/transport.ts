@@ -27,6 +27,7 @@ import {
   type ReadableLogRecord,
 } from "@opentelemetry/sdk-logs";
 import { MAX_BODY_BYTES, validateOptions } from "./config.js";
+import { estimateRecordBytes } from "./safety.js";
 import { redactLog, redactSpan, type ResourceCache } from "./privacy.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
@@ -38,6 +39,30 @@ type Response = {
   };
 };
 type RecordValue = ReadableSpan | ReadableLogRecord;
+
+function recordData(record: RecordValue, signal: Signal): unknown {
+  if (signal === "traces") {
+    const span = record as ReadableSpan;
+    return {
+      name: span.name,
+      attributes: span.attributes,
+      events: span.events,
+      links: span.links,
+      status: span.status,
+      resource: span.resource.attributes,
+      scope: span.instrumentationScope,
+    };
+  }
+  const log = record as ReadableLogRecord;
+  return {
+    body: log.body,
+    attributes: log.attributes,
+    eventName: log.eventName,
+    severityText: log.severityText,
+    resource: log.resource.attributes,
+    scope: log.instrumentationScope,
+  };
+}
 
 export class HueExportError extends Error {
   constructor(
@@ -61,8 +86,13 @@ export class HueTransport {
   private accepted = { traces: 0, logs: 0 };
   private rejected = { traces: 0, logs: 0 };
   private failed = { traces: 0, logs: 0 };
-  private spans = new Set<ReadableSpan>();
-  private logs = new Set<ReadableLogRecord>();
+  private spans = new Map<ReadableSpan, number>();
+  private logs = new Map<ReadableLogRecord, number>();
+  private pendingBytes = 0;
+  private dropped = { traces: 0, logs: 0 };
+  private instrumentationFailures = 0;
+  private diagnosticPending = false;
+  private lastDiagnosticAt = -Infinity;
   private traceExporter: ReportingExporter<ReadableSpan>;
   private logExporter: ReportingExporter<ReadableLogRecord>;
   private closed = false;
@@ -86,6 +116,11 @@ export class HueTransport {
       LogsExporterMetricsHelper,
       (log, cache) => redactLog(log, this.options, cache),
     );
+    if (this.options.enabled === false) {
+      this.spanProcessor = { onStart() {}, onEnd() {}, async forceFlush() {}, async shutdown() {} };
+      this.logRecordProcessor = { onEmit() {}, async forceFlush() {}, async shutdown() {} };
+      return;
+    }
     const batching = {
       maxQueueSize: 2048,
       maxExportBatchSize: 128,
@@ -95,19 +130,35 @@ export class HueTransport {
     const spans = new BatchSpanProcessor({ exporter: this.traceExporter, ...batching });
     const logs = new BatchLogRecordProcessor({ exporter: this.logExporter, ...batching });
     this.spanProcessor = {
-      onStart: (span, parent) => spans.onStart(span, parent),
+      onStart: (span, parent) => {
+        try {
+          spans.onStart(span, parent);
+        } catch {
+          this.instrumentationFailure();
+        }
+      },
       onEnd: (span) => {
-        if (!(span.spanContext().traceFlags & 1)) return;
-        if (!this.enqueue("traces", span)) return;
-        spans.onEnd(span);
+        try {
+          if (!(span.spanContext().traceFlags & 1)) return;
+          if (!this.enqueue("traces", span)) return;
+          spans.onEnd(span);
+        } catch {
+          this.finish("traces", [span]);
+          this.issue("traces", "invalid", 1, "Telemetry processor could not accept a record");
+        }
       },
       forceFlush: () => spans.forceFlush(),
       shutdown: () => spans.shutdown(),
     };
     this.logRecordProcessor = {
       onEmit: (log) => {
-        if (!this.enqueue("logs", log)) return;
-        logs.onEmit(log);
+        try {
+          if (!this.enqueue("logs", log)) return;
+          logs.onEmit(log);
+        } catch {
+          this.finish("logs", [log]);
+          this.issue("logs", "invalid", 1, "Telemetry processor could not accept a record");
+        }
       },
       forceFlush: () => logs.forceFlush(),
       shutdown: () => logs.shutdown(),
@@ -127,15 +178,32 @@ export class HueTransport {
       );
       return false;
     }
-    if (signal === "traces") this.spans.add(record as ReadableSpan);
-    else this.logs.add(record as ReadableLogRecord);
+    let bytes: number;
+    try {
+      // Charge record data, not the provider/exporter graph behind an OTel span.
+      bytes =
+        512 +
+        estimateRecordBytes(
+          recordData(record, signal),
+          this.options.maxQueueBytes - this.pendingBytes,
+        );
+      if (this.pendingBytes + bytes > this.options.maxQueueBytes)
+        throw new RangeError("Queue full");
+    } catch {
+      this.issue(signal, "dropped", 1, "Telemetry queue byte or record complexity budget exceeded");
+      return false;
+    }
+    this.pendingBytes += bytes;
+    if (signal === "traces") this.spans.set(record as ReadableSpan, bytes);
+    else this.logs.set(record as ReadableLogRecord, bytes);
     return true;
   }
 
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
-      if (signal === "traces") this.spans.delete(record as ReadableSpan);
-      else this.logs.delete(record as ReadableLogRecord);
+      const pending = signal === "traces" ? this.spans : this.logs;
+      this.pendingBytes -= pending.get(record as ReadableSpan & ReadableLogRecord) ?? 0;
+      pending.delete(record as ReadableSpan & ReadableLogRecord);
     }
   }
 
@@ -150,6 +218,7 @@ export class HueTransport {
     message: string,
     status?: number,
   ): void {
+    if (kind === "dropped") this.dropped[signal] += count;
     if (kind === "rejected") this.rejected[signal] += count;
     else if (kind !== "warning") this.failed[signal] += count;
     const issue: ExportIssue = {
@@ -163,11 +232,36 @@ export class HueTransport {
     if (kind !== "warning") this.failureSequence = issue.sequence;
     this.issues.push(issue);
     if (this.issues.length > 128) this.issues.shift();
-    try {
-      this.options.onExportIssue?.({ ...issue });
-    } catch {
-      /* Diagnostics callbacks cannot interrupt the customer's application. */
+    // One diagnostic task at a time, at most once a second. No unbounded promise
+    // queue if a user callback never settles; all issues remain in counts/history.
+    if (
+      this.options.onExportIssue &&
+      !this.diagnosticPending &&
+      Date.now() - this.lastDiagnosticAt >= 1000
+    ) {
+      this.diagnosticPending = true;
+      this.lastDiagnosticAt = Date.now();
+      void Promise.resolve()
+        .then(() => this.options.onExportIssue?.({ ...issue }))
+        .then(
+          () => {
+            this.diagnosticPending = false;
+          },
+          () => {
+            this.diagnosticPending = false;
+          },
+        );
     }
+  }
+
+  instrumentationFailure(signal: Signal = "traces"): void {
+    this.instrumentationFailures++;
+    this.issue(
+      signal,
+      "invalid",
+      0,
+      "Telemetry capture or instrumentation failed; application execution was preserved",
+    );
   }
 
   getReport(): ExportReport {
@@ -180,6 +274,10 @@ export class HueTransport {
       failedLogs: this.failed.logs,
       pendingSpans: this.spans.size,
       pendingLogs: this.logs.size,
+      droppedSpans: this.dropped.traces,
+      droppedLogs: this.dropped.logs,
+      pendingBytes: this.pendingBytes,
+      instrumentationFailures: this.instrumentationFailures,
     };
   }
 
@@ -264,7 +362,8 @@ class ReportingExporter<T extends RecordValue> {
       .finally(() => {
         this.transport.finish(this.signal, records);
         this.pending.delete(work);
-      });
+      })
+      .catch(() => {});
     this.pending.add(work);
   }
 
@@ -272,10 +371,38 @@ class ReportingExporter<T extends RecordValue> {
     const accepted: T[] = [];
     const cache: ResourceCache = new WeakMap();
     let failed = false;
+    let redactedBytes = 0;
+    const resourceDeadline = Date.now() + this.transport.options.timeoutMillis;
     for (const record of records) {
       try {
-        await record.resource.waitForAsyncAttributes?.();
-        accepted.push(this.redact(record, cache));
+        const ready = record.resource.waitForAsyncAttributes?.();
+        if (ready) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              ready,
+              new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error("Resource deadline exceeded")),
+                  Math.max(1, resourceDeadline - Date.now()),
+                );
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+        const redacted = this.redact(record, cache);
+        const bytes =
+          512 +
+          estimateRecordBytes(
+            recordData(redacted, this.signal),
+            this.transport.options.maxQueueBytes - redactedBytes,
+          );
+        if (redactedBytes + bytes > this.transport.options.maxQueueBytes)
+          throw new RangeError("Redacted batch exceeds byte budget");
+        redactedBytes += bytes;
+        accepted.push(redacted);
       } catch {
         failed = true;
         this.transport.issue(
@@ -288,6 +415,14 @@ class ReportingExporter<T extends RecordValue> {
     }
     let batch: T[] = [];
     for (const record of accepted) {
+      let recordBytes: number;
+      try {
+        recordBytes = this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
+      } catch {
+        failed = true;
+        this.transport.issue(this.signal, "invalid", 1, "Telemetry record could not be serialized");
+        continue;
+      }
       const candidate = [...batch, record];
       // Leave room for gzip headers/blocks when otherwise incompressible data is near the wire cap.
       if ((this.serializer.serializeRequest(candidate)?.byteLength ?? 0) <= MAX_BODY_BYTES - 1024) {
@@ -296,7 +431,7 @@ class ReportingExporter<T extends RecordValue> {
       }
       if (batch.length && !(await this.send(batch))) failed = true;
       batch = [];
-      if ((this.serializer.serializeRequest([record])?.byteLength ?? 0) > MAX_BODY_BYTES - 1024) {
+      if (recordBytes > MAX_BODY_BYTES - 1024) {
         failed = true;
         this.transport.issue(
           this.signal,
@@ -314,9 +449,14 @@ class ReportingExporter<T extends RecordValue> {
     const options = this.transport.options;
     let rejected = 0;
     let validResponse = true;
+    let expired = false;
+    const agents = new Set<Agent>();
+    const deadline = Date.now() + options.timeoutMillis;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const serializer: ISerializer<T[], Response> = {
       serializeRequest: (data) => this.serializer.serializeRequest(data),
       deserializeResponse: (bytes) => {
+        if (expired) return {};
         try {
           const response = this.serializer.deserializeResponse(bytes);
           const partial = response.partialSuccess;
@@ -358,6 +498,14 @@ class ReportingExporter<T extends RecordValue> {
           timeoutMillis: options.timeoutMillis,
           concurrencyLimit: 1,
           compression: CompressionAlgorithm.GZIP,
+          httpAgentOptions: async (protocol: string) => {
+            if (expired || Date.now() >= deadline) throw new Error("Hue export deadline exceeded");
+            const { Agent } = await import(protocol === "https:" ? "node:https" : "node:http");
+            const agent = new Agent({ keepAlive: false });
+            agents.add(agent);
+            if (expired) agent.destroy();
+            return agent;
+          },
         },
         this.signal === "traces" ? "TRACES" : "LOGS",
         `v1/${this.signal}`,
@@ -370,9 +518,17 @@ class ReportingExporter<T extends RecordValue> {
     );
     const exporter = new OTLPExporterBase(delegate);
     try {
-      const result = await new Promise<ExportResult>((resolve) =>
-        exporter.export(records, resolve),
-      );
+      const result = await new Promise<ExportResult>((resolve) => {
+        timer = setTimeout(
+          () => {
+            expired = true;
+            for (const agent of agents) agent.destroy();
+            resolve({ code: ExportResultCode.FAILED });
+          },
+          Math.max(1, deadline - Date.now()),
+        );
+        exporter.export(records, resolve);
+      });
       if (result.code === ExportResultCode.SUCCESS) {
         if (validResponse) this.transport.acceptedRecords(this.signal, records.length - rejected);
         return validResponse;
@@ -394,7 +550,11 @@ class ReportingExporter<T extends RecordValue> {
       this.transport.issue(this.signal, "failed", records.length, "Hue telemetry request failed");
       return false;
     } finally {
-      await exporter.shutdown();
+      clearTimeout(timer);
+      for (const agent of agents) agent.destroy();
+      // Delegate cleanup cannot extend the hard request wait. Sockets are closed
+      // and the cleanup promise is always observed, even after a caller timeout.
+      void exporter.shutdown().catch(() => {});
     }
   }
 
@@ -409,3 +569,4 @@ class ReportingExporter<T extends RecordValue> {
 export function createHueTransport(options: HueOptions): HueTransport {
   return new HueTransport(options);
 }
+import type { Agent } from "node:http";

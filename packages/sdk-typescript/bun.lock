@@ -26,7 +26,7 @@
       "peerDependencies": {
         "@ai-sdk/otel": "^1.0.99",
         "@opentelemetry/api": "^1.9.1",
-        "ai": "^7.0.99",
+        "ai": "^6.0.0 || ^7.0.99",
       },
       "optionalPeers": [
         "@ai-sdk/otel",
