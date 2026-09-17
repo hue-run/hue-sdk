@@ -14,6 +14,8 @@ export function validateOptions(
   HueOptions {
   if (typeof options.captureContent !== "boolean")
     throw new TypeError("Choose captureContent explicitly: true or false");
+  if (options.enabled !== undefined && typeof options.enabled !== "boolean")
+    throw new TypeError("enabled must be a boolean");
   if (options.enabled === false)
     return {
       captureContent: options.captureContent,

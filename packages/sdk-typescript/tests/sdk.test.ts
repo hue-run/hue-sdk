@@ -862,6 +862,40 @@ describe("Application failure isolation", () => {
     endpoint.server.stop(true);
   });
 
+  test("non-boolean enabled values fail strict initialization and safely disable telemetry", async () => {
+    const endpoint = receiver();
+    try {
+      for (const enabled of ["false", "true", 0, 1, null, {}]) {
+        const options = {
+          apiKey,
+          serviceName: "invalid-enabled",
+          captureContent: false,
+          enabled,
+          baseUrl: endpoint.url,
+        } as never;
+        expect(() => createHue(options)).toThrow(new TypeError("enabled must be a boolean"));
+        expect(() => createHueTransport(options)).toThrow(
+          new TypeError("enabled must be a boolean"),
+        );
+        const hue = createHueSafe(options);
+        expect(hue.enabled).toBe(false);
+        let executions = 0;
+        expect(
+          await hue.withSpan("disabled", () => {
+            executions++;
+            return 42;
+          }),
+        ).toBe(42);
+        expect(executions).toBe(1);
+        await hue.shutdownSafe();
+        expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+      }
+      expect(endpoint.hits()).toBe(0);
+    } finally {
+      endpoint.server.stop(true);
+    }
+  });
+
   test("safe shutdown preserves an application exception during a collector outage", async () => {
     const endpoint = receiver("unauthorized");
     const hue = createHue({
