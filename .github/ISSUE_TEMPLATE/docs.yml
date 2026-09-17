@@ -1,0 +1,22 @@
+name: Documentation issue
+description: Something wrong or missing in a README, guide, reference page or the skill.
+labels: ["docs"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Page or file
+      description: A docs.hue.run URL or a repository path such as packages/sdk-python/README.md.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested text
+      description: Optional. docs.hue.run is maintained separately from this repository; maintainers port accepted fixes.

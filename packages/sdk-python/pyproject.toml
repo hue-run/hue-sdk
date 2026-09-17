@@ -37,6 +37,10 @@ Repository = "https://github.com/hue-run/hue-sdk"
 Changelog = "https://github.com/hue-run/hue-sdk/blob/main/CHANGELOG.md"
 Issues = "https://github.com/hue-run/hue-sdk/issues"
 
+[tool.uv]
+# Supply-chain cooldown for re-resolution; frozen installs are unaffected.
+exclude-newer = "7 days"
+
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "build>=1.2,<2", "ruff>=0.15,<1", "hatchling>=1.27,<2"]
 compatibility = ["openai==3.14.0", "openinference-instrumentation-openai==0.1.60"]

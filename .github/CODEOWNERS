@@ -1,0 +1,9 @@
+# Review ownership. Release, workflow and policy files need a maintainer review.
+*                                   @joshle298
+/.github/                           @joshle298
+/scripts/                           @joshle298
+/RELEASING.md                       @joshle298
+/VERSIONING.md                      @joshle298
+/SECURITY.md                        @joshle298
+/packages/sdk-typescript/package.json   @joshle298
+/packages/sdk-python/pyproject.toml     @joshle298

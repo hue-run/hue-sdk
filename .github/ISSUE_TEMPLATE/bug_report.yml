@@ -1,0 +1,80 @@
+name: Bug report
+description: Tracing, evaluation or packaging behavior that does not match the documentation.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste API keys, prompts, model output or customer data. Export reports and receipts contain only counts and identifiers; redact anything else.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - "@hue-run/sdk (TypeScript)"
+        - "hue-run (Python)"
+        - Skill (skills/hue)
+        - Examples
+        - Release tooling / CI
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: "0.1.5"
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime and version
+      description: Node.js, Bun or Python version, plus the operating system.
+      placeholder: "Node.js 24.14.1 on Ubuntu 24.04"
+    validations:
+      required: true
+  - type: dropdown
+    id: capture
+    attributes:
+      label: Content capture setting
+      options:
+        - "captureContent / capture_content = false (metadata only)"
+        - "captureContent / capture_content = true"
+        - Not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: OpenTelemetry provider ownership
+      options:
+        - Hue-owned provider (createHue / Hue())
+        - Attached to an existing application provider
+        - Direct OTLP without the Hue package
+        - Not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the flush result, `HueExportError` issues, `ExportReport` / `export_status` counters or the receipt with identifiers redacted.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: A short script against a loopback receiver is ideal. Do not include a real project key.
+      render: text
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Relevant dependency versions
+      description: AI SDK, @opentelemetry/*, instrumentors or frameworks involved.
