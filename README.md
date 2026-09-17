@@ -156,7 +156,17 @@ cd packages/sdk-python
 uv sync --frozen --all-groups --python 3.14
 uv run --frozen --all-groups --python 3.14 pytest
 uv run --frozen --all-groups --python 3.14 ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
+uv run --frozen --all-groups --python 3.14 ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
+uv run --frozen --all-groups --python 3.14 mypy
 uv run --frozen --all-groups --python 3.14 python -m build --no-isolation
+```
+
+Lint and formatting for the TypeScript sources run from the repository root with the pinned tooling in `package.json`:
+
+```bash
+bun install --frozen-lockfile
+bun run lint
+bun run format:check
 ```
 
 CI also verifies Python 3.10. [Release instructions](./RELEASING.md) describe verified archives, registry publishing and release checks.

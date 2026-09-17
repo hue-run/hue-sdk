@@ -104,7 +104,7 @@ class SafeSession(requests.Session):
         """Whether the owned HTTP worker has released the transport."""
         return not self._request_lock.locked()
 
-    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         kwargs["allow_redirects"] = False
         if not self.signal:
             return self._request(method, url, **kwargs)
@@ -188,7 +188,7 @@ class SafeSession(requests.Session):
                         if len(content) > 65_536:
                             raise requests.RequestException("Hue OTLP response exceeds its limit.")
                     response._content = bytes(content)
-                    response._content_consumed = True
+                    response._content_consumed = True  # type: ignore[attr-defined]
                 finally:
                     response.close()
         except requests.ConnectionError:

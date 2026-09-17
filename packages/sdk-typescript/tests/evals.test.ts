@@ -664,7 +664,9 @@ describe("installed evaluation API and runner contract", () => {
       if (!updated.reconciliation) throw new Error("Settled fixture is missing its reconciliation");
       expect(updated.actualMicroUsd).toBe(updated.reconciliation.actualMicroUsd);
       expect(updated.reconciliation.evidenceReference).toBe("synthetic-provider-statement-42");
-      expect(updated.reconciliation.reason).toBe("Verified final charge after interrupted execution");
+      expect(updated.reconciliation.reason).toBe(
+        "Verified final charge after interrupted execution",
+      );
       expect(updated.reconciliation.createdAt).toBe("2026-09-15T10:00:00.000Z");
       expect(updated.reconciliation.jobId).toBe(jobId);
 

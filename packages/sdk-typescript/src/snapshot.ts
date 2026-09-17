@@ -4,10 +4,14 @@ import { resourceFromAttributes, type Resource } from "@opentelemetry/resources"
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord, ReadWriteLogRecord } from "@opentelemetry/sdk-logs";
 
+// Intrinsic accessors are captured once and invoked with an explicit receiver so a
+// hostile object cannot override them; the unbound reference is the point.
+// eslint-disable-next-line @typescript-eslint/unbound-method
 const typedArrayByteLength = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype),
   "byteLength",
 )!.get!;
+// eslint-disable-next-line @typescript-eslint/unbound-method
 const typedArraySet = Uint8Array.prototype.set;
 
 /** Copies only exported data, with the same finite budget used for admission. */

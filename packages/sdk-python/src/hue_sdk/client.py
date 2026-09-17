@@ -13,6 +13,7 @@ from typing import Any
 
 import requests
 from opentelemetry import trace
+from opentelemetry._logs import LoggerProvider as ApiLoggerProvider
 from opentelemetry._logs import NoOpLoggerProvider, SeverityNumber
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
@@ -217,9 +218,9 @@ class Hue:
         )
         if not enabled:
             self._owns_provider = False
-            self.tracer_provider = trace.NoOpTracerProvider()
+            self.tracer_provider: trace.TracerProvider = trace.NoOpTracerProvider()
             self.tracer = self.tracer_provider.get_tracer("hue-run")
-            self.logger_provider = NoOpLoggerProvider()
+            self.logger_provider: ApiLoggerProvider = NoOpLoggerProvider()
             self._logger = self.logger_provider.get_logger("hue-run")
             return
         try:
@@ -245,10 +246,12 @@ class Hue:
     ) -> None:
         resource = Resource.create({"service.name": service_name})
         self._owns_provider = tracer_provider is None
-        self.tracer_provider = tracer_provider or TracerProvider(
+        sdk_tracer_provider = tracer_provider or TracerProvider(
             resource=resource, shutdown_on_exit=False
         )
-        self.logger_provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
+        sdk_logger_provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
+        self.tracer_provider = sdk_tracer_provider
+        self.logger_provider = sdk_logger_provider
         self._span_exporter = BoundedSpanExporter(
             f"{self.base_url}/api/v1/otlp/v1/traces", self._headers, self._timeout
         )
@@ -261,8 +264,8 @@ class Hue:
         self._log_processor = BoundedLogProcessor(
             self._log_exporter, encode_logs, max_queue_size, max_queue_bytes
         )
-        self.tracer_provider.add_span_processor(self._span_processor)
-        self.logger_provider.add_log_record_processor(self._log_processor)
+        sdk_tracer_provider.add_span_processor(self._span_processor)
+        sdk_logger_provider.add_log_record_processor(self._log_processor)
         self.tracer = self.tracer_provider.get_tracer("hue-run", "0.1.3")
         self._logger = self.logger_provider.get_logger("hue-run", "0.1.3")
 
@@ -365,7 +368,7 @@ class Hue:
         parent_context: Context | None = None,
         _category: str = "span",
     ) -> Iterator[HueSpan]:
-        otel_span = trace.INVALID_SPAN
+        otel_span: trace.Span = trace.INVALID_SPAN
         scope = None
         if self._active:
             try:
@@ -635,12 +638,15 @@ class Hue:
                         # Cleanup can outlive this caller. Do not hold the drain
                         # coordinator while waiting for exporter workers to stop.
                         try:
-                            if self._owns_provider:
+                            if self._owns_provider and isinstance(
+                                self.tracer_provider, TracerProvider
+                            ):
                                 self.tracer_provider.shutdown()
                             else:
                                 self._span_processor.shutdown()
                         finally:
-                            self.logger_provider.shutdown()
+                            if isinstance(self.logger_provider, LoggerProvider):
+                                self.logger_provider.shutdown()
                         # An expired caller budget is not an export failure.
                         # Recheck completed cleanup without starting another wait.
                         self._shutdown_result = self._drain(monotonic())

@@ -1,0 +1,19 @@
+{
+  "name": "hue-sdk-repo-tooling",
+  "private": true,
+  "type": "module",
+  "description": "Lint and formatting tooling for the repository; not published.",
+  "scripts": {
+    "lint": "eslint .",
+    "format:check": "prettier --check \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\"",
+    "format": "prettier --write \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\""
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "eslint": "9.39.5",
+    "globals": "17.12.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.0"
+  }
+}

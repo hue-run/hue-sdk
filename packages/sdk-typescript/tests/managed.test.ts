@@ -29,7 +29,10 @@ const invocation = (): ManagedInvocation => ({
 });
 const servers: Server[] = [];
 afterEach(() => {
-  for (const server of servers.splice(0)) (server.closeAllConnections(), server.close());
+  for (const server of servers.splice(0)) {
+    server.closeAllConnections();
+    server.close();
+  }
 });
 
 async function fixture() {

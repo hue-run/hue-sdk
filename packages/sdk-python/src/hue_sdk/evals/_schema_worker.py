@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import NoReturn
 
 from jsonschema import Draft202012Validator
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
 
-def refuse_resource(uri: str):
-    raise NoSuchResource(ref=uri)
+def refuse_resource(uri: str) -> NoReturn:
+    raise NoSuchResource(ref=uri)  # type: ignore[call-arg]
 
 
 def main() -> None:
@@ -25,7 +26,10 @@ def main() -> None:
         values = json.loads(sys.stdin.buffer.read(1024 * 1024 + 1))
         schema = values["schema"]
         Draft202012Validator.check_schema(schema)
-        validator = Draft202012Validator(schema, registry=Registry(retrieve=refuse_resource))
+        validator = Draft202012Validator(
+            schema,
+            registry=Registry(retrieve=refuse_resource),  # type: ignore[call-arg]
+        )
         print(json.dumps({"match": validator.is_valid(values["output"])}))
     except Exception:
         print('{"error":true}')

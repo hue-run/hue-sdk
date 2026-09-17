@@ -6,7 +6,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Lock
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from opentelemetry.context import Context
@@ -16,7 +16,7 @@ from ._checkpoint import CheckpointStore
 from ._json import MISSING, json_value, uuid
 from .client import EvaluationClient
 from .scorers import invoke, persisted_score, score_locally, validate_bindings
-from .types import LocalScorer, RunnerReport, TargetContext, TraceEvidence
+from .types import LocalScorer, RunnerReport, ScoreContext, TargetContext, TraceEvidence
 
 
 class UncertainExecutionError(RuntimeError):
@@ -135,7 +135,10 @@ def _scores(
         if definition["kind"] in ("manual", "llm_judge"):
             continue
         score = persisted_score(
-            score_locally(version, context, scorers=scorers, schema_timeout_millis=timeout), persist
+            score_locally(
+                version, cast(ScoreContext, context), scorers=scorers, schema_timeout_millis=timeout
+            ),
+            persist,
         )
         results.append(
             {

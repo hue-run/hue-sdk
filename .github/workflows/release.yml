@@ -76,6 +76,8 @@ jobs:
           uv sync --frozen --all-groups
           uv run --frozen --all-groups pytest
           uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
+          uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
+          uv run --frozen --all-groups mypy
           uv run --frozen --all-groups python -m build --no-isolation --outdir ../../.artifacts
           uvx --from twine==7.0.0 twine check --strict ../../.artifacts/*
       - name: Inspect package inventory and record checksums

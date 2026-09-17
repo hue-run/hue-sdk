@@ -13,6 +13,7 @@ Use Node 24, Bun 1.3.9 and uv 0.12.5. Each package owns its dependencies and loc
 - TypeScript: run `node packages/sdk-typescript/scripts/verify-package.mjs` from the root. It validates public imports from installed packages with both tested AI SDK patch pairs.
 - Python: use the commands in [README.md](README.md), then repeat pytest on Python 3.10 for compatibility changes.
 - Release tooling: run `python3 -m unittest discover -s scripts -p 'test_*.py'`.
+- Lint and format: `bun install --frozen-lockfile` once at the repository root, then `bun run lint` (type-checked eslint over the TypeScript SDK) and `bun run format:check` (prettier). Python runs `ruff check`, `ruff format --check` and `mypy` inside `packages/sdk-python`. `pre-commit install` wires the same checks into Git hooks.
 - Examples: keep them independent of Hue application source. Synthetic mode must be explicit; provider errors must not silently fall back to synthetic success.
 
 ## Review expectations
