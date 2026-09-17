@@ -1,6 +1,6 @@
 # Changelog
 
-## TypeScript 0.1.5 / Python 0.1.3 — unreleased
+## TypeScript 0.1.5 / Python 0.1.3 — 2026-09-17
 
 - Isolate helper capture, redaction and provider failures from application results/errors; never rerun business callbacks.
 - Add disabled clients, safe initialization and nonthrowing lifecycle calls with a default one-second caller deadline, retaining strict diagnostic APIs.
