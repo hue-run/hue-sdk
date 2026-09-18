@@ -1,6 +1,6 @@
 {
   "name": "hue-run",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Alias of @hue-run/sdk. Install @hue-run/sdk directly; this package only re-exports it.",
   "license": "MIT",
   "type": "module",
@@ -34,6 +34,6 @@
     "./environment": "./environment.js"
   },
   "dependencies": {
-    "@hue-run/sdk": "0.2.1"
+    "@hue-run/sdk": "0.2.2"
   }
 }

@@ -157,10 +157,14 @@ export function estimateRecordBytes(value: unknown, limit: number): number {
     else if (item instanceof Uint8Array) bytes += item.byteLength;
     else if (item && typeof item === "object" && !seen.has(item)) {
       seen.add(item);
-      for (const [key, child] of Object.entries(item)) {
-        bytes += key.length * 2 + 16;
-        visit(child, depth + 1);
-      }
+      // Match admission (`Snapshot.copy`): array elements are nodes without retained index
+      // keys. Charging indexes here would refuse array-heavy records the queue admitted.
+      if (Array.isArray(item)) for (const child of item) visit(child, depth + 1);
+      else
+        for (const [key, child] of Object.entries(item)) {
+          bytes += key.length * 2 + 16;
+          visit(child, depth + 1);
+        }
     }
     if (bytes > limit) throw new RangeError("Telemetry byte limit exceeded");
   };

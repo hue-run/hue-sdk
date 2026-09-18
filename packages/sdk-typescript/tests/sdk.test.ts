@@ -1581,6 +1581,31 @@ describe("Application failure isolation", () => {
   });
 });
 
+test("array-heavy records admitted within the byte budget are exported, not failed as invalid", async () => {
+  const endpoint = receiver();
+  const maxQueueBytes = 65536;
+  const hue = createHue({
+    apiKey,
+    serviceName: "arrays",
+    captureContent: true,
+    baseUrl: endpoint.url,
+    maxQueueBytes,
+  });
+  // An embedding-sized numeric array: admission charges its elements as nodes only, so
+  // export accounting must not add per-index key costs and refuse the admitted record.
+  const embedding = Array.from({ length: 3072 }, (_, index) => index / 3072);
+  expect(await hue.withSpan("embed", () => "ok", { attributes: { embedding } })).toBe("ok");
+  const admitted = hue.transport.getReport();
+  expect(admitted.droppedSpans).toBe(0);
+  expect(admitted.pendingBytes).toBeGreaterThan(3072 * 16);
+  expect(admitted.pendingBytes).toBeLessThanOrEqual(maxQueueBytes);
+  expect(await hue.flush()).toMatchObject({ acceptedSpans: 1, failedSpans: 0, pendingBytes: 0 });
+  expect(hue.transport.getIssues()).toEqual([]);
+  expect(endpoint.requests.filter((request) => request.signal === "traces")).toHaveLength(1);
+  await hue.shutdownSafe();
+  endpoint.server.stop(true);
+});
+
 test("redaction expansion is bounded and loses telemetry rather than an application result", async () => {
   const endpoint = receiver();
   const hue = createHue({
