@@ -1,8 +1,14 @@
 # Hue TypeScript SDK
 
+[![npm](https://img.shields.io/npm/v/%40hue-run%2Fsdk?label=%40hue-run%2Fsdk)](https://www.npmjs.com/package/@hue-run/sdk) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+
 A client for Hue's standard OTLP HTTP endpoints on Node.js 22 or 24 and Bun 1.4.2. It uses the
 OpenTelemetry JavaScript SDK and official OTLP protobuf exporter components for
 traces and correlated logs. The package is named `@hue-run/sdk`.
+
+[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run)
+
+_Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
 
 ## Install
 

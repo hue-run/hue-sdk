@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hue README wordmark generator</title>
+<!--
+  Source of truth for the README header wordmark in this directory.
+
+  The art below is byte-identical to the <details> fold at the foot of ../../README.md
+  (21 lines, meaningful trailing whitespace). Do not reflow or re-indent it.
+
+  Regenerate the PNGs with (run from the repository root):
+
+    .github/assets/render.sh
+
+  which is a thin wrapper over, for each variant:
+
+    google-chrome --headless --disable-gpu --hide-scrollbars \
+      --default-background-color=00000000 --force-device-scale-factor=3 \
+      --window-size=$W,$H --screenshot=<out>.png \
+      '.github/assets/hue-ascii.html?w=720&ink=<hex>'
+
+  Query parameters: w = target CSS display width in px (font-size is solved to hit it
+  exactly), ink = hex colour without '#', font = font-family override.
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #art {
+    display: block;
+    width: max-content;
+    margin: 0;
+    padding: 0;
+    white-space: pre;
+    font-family: "Source Code Pro", monospace;
+    font-variant-ligatures: none;
+    font-kerning: none;
+    color: #7d7d78;
+    line-height: 1.15;
+    font-size: 100px;
+  }
+</style>
+<pre id="art">          _____                    _____                    _____          
+         /\    \                  /\    \                  /\    \         
+        /::\____\                /::\____\                /::\    \        
+       /:::/    /               /:::/    /               /::::\    \       
+      /:::/    /               /:::/    /               /::::::\    \      
+     /:::/    /               /:::/    /               /:::/\:::\    \     
+    /:::/____/               /:::/    /               /:::/__\:::\    \    
+   /::::\    \              /:::/    /               /::::\   \:::\    \   
+  /::::::\    \   _____    /:::/    /      _____    /::::::\   \:::\    \  
+ /:::/\:::\    \ /\    \  /:::/____/      /\    \  /:::/\:::\   \:::\    \ 
+/:::/  \:::\    /::\____\|:::|    /      /::\____\/:::/__\:::\   \:::\____\
+\::/    \:::\  /:::/    /|:::|____\     /:::/    /\:::\   \:::\   \::/    /
+ \/____/ \:::\/:::/    /  \:::\    \   /:::/    /  \:::\   \:::\   \/____/ 
+          \::::::/    /    \:::\    \ /:::/    /    \:::\   \:::\    \     
+           \::::/    /      \:::\    /:::/    /      \:::\   \:::\____\    
+           /:::/    /        \:::\__/:::/    /        \:::\   \::/    /    
+          /:::/    /          \::::::::/    /          \:::\   \/____/     
+         /:::/    /            \::::::/    /            \:::\    \         
+        /:::/    /              \::::/    /              \:::\____\        
+        \::/    /                \::/____/                \::/    /        
+         \/____/                  ~~                       \/____/          </pre>
+<script>
+  const q = new URLSearchParams(location.search);
+  const el = document.getElementById("art");
+
+  if (q.get("font")) el.style.fontFamily = '"' + q.get("font") + '", monospace';
+  if (q.get("ink")) el.style.color = "#" + q.get("ink");
+  if (q.get("lh")) el.style.lineHeight = q.get("lh");
+
+  // Solve font-size for an exact target width instead of assuming a 0.6em advance.
+  const target = Number(q.get("w") || 720);
+  el.style.fontSize = "100px";
+  const probe = el.getBoundingClientRect().width;
+  el.style.fontSize = (100 * target / probe) + "px";
+
+  const r = el.getBoundingClientRect();
+  const w = Math.ceil(r.width), h = Math.ceil(r.height);
+  const tag = document.createElement("div");
+  tag.id = "measured";
+  tag.setAttribute("data-w", w);
+  tag.setAttribute("data-h", h);
+  tag.setAttribute("data-font-size", el.style.fontSize);
+  tag.style.display = "none";
+  tag.textContent = "MEASURED " + w + " " + h;
+  document.body.appendChild(tag);
+  document.title = w + "x" + h;
+</script>
