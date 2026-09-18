@@ -12,8 +12,6 @@ traces and correlated logs. The package is named `@hue-run/sdk`.
 
 [Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run)
 
-_Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
-
 ## Install
 
 ```bash
