@@ -26,7 +26,8 @@ Or with Bun:
 bun add @hue-run/sdk
 ```
 
-Run the command in your application's server package. See the [compatibility guide](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies.
+Run the command in your application's server package. The package is ESM; CommonJS applications on
+Node.js 22.12 or later load it with `require("@hue-run/sdk")`. See the [compatibility guide](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies.
 
 ## Start
 
@@ -71,22 +72,29 @@ wrapper, database dependency, or dependency on the Hue application workspace.
 When you call a provider SDK directly, `hue.model()` creates the GenAI client span for the call:
 
 ```ts
-await hue.model("gpt-5-mini", { provider: "openai" }, async (span) => {
-  span.setInput(messages); // gen_ai.input.messages when captureContent is true
-  const response = await openai.chat.completions.create({ model: "gpt-5-mini", messages });
-  span.setOutput(response.choices.map((choice) => choice.message));
-  span.setUsage({
-    inputTokens: response.usage?.prompt_tokens,
-    outputTokens: response.usage?.completion_tokens,
-  });
-  return response;
-});
+await hue.model(
+  "gpt-5-mini",
+  async (span) => {
+    span.setInput(messages); // gen_ai.input.messages when captureContent is true
+    const response = await openai.chat.completions.create({ model: "gpt-5-mini", messages });
+    span.setOutput(response.choices.map((choice) => choice.message));
+    span.setUsage({
+      inputTokens: response.usage?.prompt_tokens,
+      outputTokens: response.usage?.completion_tokens,
+    });
+    return response;
+  },
+  { provider: "openai" },
+);
 ```
 
 The span is named `{operation} {model}` (`operation` defaults to `chat`) with
-`gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. `setUsage` records
+`gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. Like `withSpan`, the
+options come after the callback and also accept `name`, `sessionId`, `userId`, `input` (recorded as
+`gen_ai.input.messages`) and `parentContext`. `setUsage` records
 nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
-counted as instrumentation failures. Unknown usage stays absent.
+counted as instrumentation failures. Unknown usage stays absent. `hue.tool(name, input, execute)`
+creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result.
 
 ## Vercel AI SDK 6
 
@@ -173,15 +181,19 @@ Invalid/oversized helper content is omitted with an instrumentation failure; the
 export batch. Do not put user content or secrets in span names or scope names.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
-outputs and usage remain absent. This SDK does not estimate tokens or cost. Error
-helpers mark span status and record an exception; thrown application errors remain
-errors and are rethrown unchanged. `withSpan` ends its span in `finally`.
+outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
+application error marks the span with `error.type` (the error's `name`), an ERROR status and an
+`exception` event carrying only the type; exception messages and stack traces are never recorded by
+the helpers, whatever `captureContent` is, and the error is rethrown unchanged. `withSpan` ends its
+span in `finally`.
 
 ## Existing OpenTelemetry providers
 
 Attach processors while constructing your providers. Hue uses local async context
 for its own helpers and never registers/replaces the global tracer, logger, or
-context manager.
+context manager. When your application has registered a context manager, Hue helpers also make
+their span the active OpenTelemetry span for the duration of the callback, so spans from other
+instrumentations (HTTP clients, provider SDKs) that use the global API parent under it.
 
 ```ts
 import { TracerProvider } from "@opentelemetry/sdk-trace";
@@ -358,7 +370,7 @@ existing-provider flush callbacks and recovery. Local/CI runners remain availabl
 
 ## Serving safely
 
-Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client with an instrumentation failure recorded. Pass `enabled: false` to disable Hue without a key; disabled helpers still execute the application callback. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
+Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client that keeps your `onExportIssue` hook and records the reason as an instrumentation failure. Pass `enabled: false` to disable Hue without a key or a `captureContent` choice; disabled helpers still execute the application callback, and `inject()` keeps propagating the application's own trace context. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
 
 Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production safety](https://docs.hue.run/guides/production-safety).
 

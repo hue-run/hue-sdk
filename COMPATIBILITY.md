@@ -4,7 +4,7 @@ This matrix describes the next releases, TypeScript `0.2.0` and Python `0.2.0` (
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
-| TypeScript core and evaluations | Node.js 22 and 24 (CI also runs 26); Bun 1.4.2 runs the installed-package suite and the reference chatbot; compiled ESM and type declarations | `engines.node >= 22.12`. No CommonJS export. Resource-bound checks (heap flags, worker memory limits, export-deadline socket close) are verified on Node; Bun does not enforce worker `resourceLimits`. |
+| TypeScript core and evaluations | Node.js 22 and 24 (CI also runs 26); Bun 1.4.2 runs the installed-package suite and the reference chatbot; compiled ESM and type declarations | `engines.node >= 22.12`. ESM build only; CommonJS applications load it through Node's `require(esm)`. Resource-bound checks (heap flags, worker memory limits, export-deadline socket close) are verified on Node; Bun does not enforce worker `resourceLimits`. |
 | Vercel AI SDK adapter | AI SDK / OTel pairs `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100` | Install both adapter peers; preserve an existing global integration. |
 | Existing JavaScript OTel provider | Hue transport attached to an application's provider; other exporters remain usable | Core-only installation supports AI SDK 6; the Hue AI SDK adapter requires version 7. |
 | Python tracing and evaluations | Python 3.10 and 3.14; OpenTelemetry 1.44.0 | OTel versions are pinned. Local evaluation checkpoints require POSIX filesystem behavior. |
