@@ -16,7 +16,6 @@ from opentelemetry import trace
 from opentelemetry._logs import LoggerProvider as ApiLoggerProvider
 from opentelemetry._logs import NoOpLoggerProvider, SeverityNumber
 from opentelemetry.context import Context
-from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk.resources import Resource
@@ -26,6 +25,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from opentelemetry.util.types import AttributeValue
 
 from ._version import __version__
+from ._otel_compat import encode_logs
 from .processors import BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
 from .snapshots import snapshot_content
