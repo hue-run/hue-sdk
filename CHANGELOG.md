@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.2.2](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.2.2) - 2026-09-18
+
+#### Fixed
+
+- Export-time byte accounting walks arrays by element, matching admission, so array-heavy records such as embeddings that fit `maxQueueBytes` are exported instead of failed as `invalid`.
+
 ### [0.2.1](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.2.1) - 2026-09-18
 
 #### Changed
@@ -111,6 +117,8 @@ refuses to publish a version without a matching entry below.
 ## hue-run (Python)
 
 ### Unreleased
+
+### [0.2.2](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.2.2) - 2026-09-18
 
 #### Changed
 
