@@ -88,6 +88,8 @@ jobs:
         continue-on-error: true
       - run: bun install --frozen-lockfile
         working-directory: packages/sdk-typescript
+      - run: node scripts/write-version.mjs --check
+        working-directory: packages/sdk-typescript
       - run: bun run lint
       - run: bun run format:check
   docs:

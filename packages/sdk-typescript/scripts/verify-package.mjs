@@ -38,6 +38,8 @@ if (!values.archive && !values["registry-version"]) {
       !/(?:^|\/)(?:node_modules|dist)(?:\/|$)/u.test(path) && !/(?:^|\/)\.env(?:\.|$)/u.test(path),
   });
   run("bun", ["--no-env-file", "install", "--frozen-lockfile"], staging);
+  // The committed version literal must already match package.json; the build regenerates it.
+  run("node", ["scripts/write-version.mjs", "--check"], staging);
   run("bun", ["--no-env-file", "run", "typecheck"], staging);
   run("bun", ["--no-env-file", "run", "build"], staging);
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
