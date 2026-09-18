@@ -1,6 +1,7 @@
-# Dependency and action updates with a supply-chain cooldown. Runtime dependencies
-# are exact-pinned on purpose (see COMPATIBILITY.md); Dependabot surfaces the
-# updates and installed-package verification in CI decides whether to take them.
+# Dependency and action updates with a supply-chain cooldown. TypeScript runtime
+# dependencies are exact-pinned and Python's OpenTelemetry range is certified through
+# uv.lock (see COMPATIBILITY.md); Dependabot surfaces the updates and installed-package
+# verification in CI decides whether to take them.
 version: 2
 updates:
   - package-ecosystem: bun

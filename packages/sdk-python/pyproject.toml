@@ -23,9 +23,11 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "opentelemetry-api==1.44.0",
-  "opentelemetry-sdk==1.44.0",
-  "opentelemetry-exporter-otlp-proto-http==1.44.0",
+  # Tested floor 1.40.0 (CI resolves every direct dependency at its declared floor); uv.lock
+  # records the certified combination. Keep in sync with hue_sdk/_otel_compat.py.
+  "opentelemetry-api>=1.40,<2",
+  "opentelemetry-sdk>=1.40,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.40,<2",
   "requests>=2.32.5,<3",
 ]
 

@@ -8,7 +8,7 @@
 
 For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](https://docs.hue.run/evaluations/first-evaluation).
 
-Python helpers around official OpenTelemetry **1.44.0** trace and log SDKs and OTLP HTTP/protobuf exporters. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
+Python helpers around the official OpenTelemetry trace and log SDKs and OTLP HTTP/protobuf exporters. `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as **`>=1.40,<2`**; **1.44.0** is the certified lockfile combination and **1.40.0** is tested as the floor in CI. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
 
 The distribution is named `hue-run` (`import hue_sdk`). Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
 
@@ -97,7 +97,7 @@ Hue speaks standard OTLP, so any local collector works. Point `base_url` at a lo
 ## Export behavior and limits
 
 - Traces go to `/api/v1/otlp/v1/traces`; correlated logs go to `/api/v1/otlp/v1/logs`. Both use the official OTLP HTTP/protobuf exporter with gzip-compressed request bodies and a `hue-sdk-python/<version>` User-Agent ahead of the exporter's own token. The official exporter handles retryable network/service failures; Hue additionally honors 429 and Retry-After within its transport budget. There is no proprietary provider transport.
-- Exporter work and its HTTP worker run with OpenTelemetry instrumentation suppressed. Hue ignores records emitted within that suppressed scope, preventing HTTP instrumentation and exporter diagnostics from feeding back into its own queues. Application instrumentation resumes outside that scope.
+- Exporter work and its HTTP worker run with OpenTelemetry instrumentation suppressed. Hue ignores records emitted within that suppressed scope, preventing HTTP instrumentation and exporter diagnostics from feeding back into its own queues. Application instrumentation resumes outside that scope. If an OpenTelemetry release ever stops exposing its suppression key, Hue warns once at import and keeps exporting: its own queues still ignore its export work, but OTel HTTP instrumentors could then record Hue's export requests on other exporters.
 - Batches initially contain at most 64 records and are split by encoded protobuf size to fit **1 MiB**, both on wire and after decoding. A single oversized record fails visibly through export status. Helper content exceeding **256 KiB** UTF-8 JSON is omitted before enqueue and increments instrumentation failures; it is never silently truncated by Hue. Third-party record validation remains the receiver's responsibility. OTel's own attribute/count/environment limits can still affect externally configured providers.
 - Hue accepts at most **2,000 distinct spans per trace**. This is enforced by the receiver across distributed producers; the client cannot guarantee a global count.
 - HTTP errors, malformed/non-200 success responses and OTLP `partial_success` rejected counts cause a failed export status. Partial rejection is not retried wholesale. Receiver error text is not echoed. A warning-only partial-success response with zero rejected records remains successful.

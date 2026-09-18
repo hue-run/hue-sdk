@@ -20,8 +20,27 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
     ):
         subprocess.run(command, check=True, capture_output=True, text=True)
     python = consumer / "bin" / "python"
+    # Install the wheel against the OpenTelemetry release under test so the installed-package
+    # check certifies the same combination as the in-process suite (including the CI job that
+    # resolves every direct dependency at its declared floor).
+    opentelemetry = [
+        f"{name}=={version(name)}"
+        for name in (
+            "opentelemetry-api",
+            "opentelemetry-sdk",
+            "opentelemetry-exporter-otlp-proto-http",
+        )
+    ]
     subprocess.run(
-        ["uv", "pip", "install", "--python", str(python), f"{next(dist.glob('*.whl'))}[evals]"],
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            f"{next(dist.glob('*.whl'))}[evals]",
+            *opentelemetry,
+        ],
         check=True,
         capture_output=True,
         text=True,
