@@ -25,16 +25,16 @@ _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not aff
 ## Why Hue
 
 - **Standard OpenTelemetry, nothing proprietary.** Traces and correlated logs travel as OTLP/HTTP to documented endpoints. Any OpenTelemetry-emitting language or instrumentor works without a Hue package, and Hue never replaces your global providers.
-- **Explicit content policy.** `captureContent` / `capture_content` is a required choice. Metadata-only mode strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content fields at export time (in TypeScript today, in Python from 0.2.0), and a redaction hook runs over the rest.
+- **Explicit content policy.** `captureContent` / `capture_content` is a required choice. Metadata-only mode strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content fields at export time in both SDKs, and a redaction hook runs over the rest.
 - **Fail-open by contract.** Safe constructors, byte- and record-bounded queues, cumulative loss counters and bounded lifecycle deadlines are written down in [RELIABILITY.md](./RELIABILITY.md) and tested against the installed packages.
 - **Provable delivery.** `verifyTrace()` / `verify_trace()` confirm that a real request's spans and fields were stored, without exposing content.
-- **Small, auditable footprint.** From 0.2.0 the tracing core depends only on official OpenTelemetry packages (plus `requests` in Python) and the JSON Schema validator used by the evaluation scorers becomes an opt-in extra; the current 0.1.x releases still install it by default. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
+- **Small, auditable footprint.** The tracing core depends only on official OpenTelemetry packages (plus `requests` in Python), and the JSON Schema validator used by the evaluation scorers is an opt-in extra. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
 
 ## Choose your SDK
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed` | Node.js 22 or 24 (26 in CI; the published 0.1.5 requires 24); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated environments](./packages/sdk-typescript/ENVIRONMENTS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed` | Node.js 22 or 24 (26 in CI); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated environments](./packages/sdk-typescript/ENVIRONMENTS.md) |
 | Python | `hue-run`; `hue_sdk`, `hue_sdk.evals`, `hue_sdk.managed` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 | Any other language | The official OpenTelemetry SDK with an OTLP/HTTP exporter | Go, Java, .NET, Rust, Ruby and others | [Existing OpenTelemetry](https://docs.hue.run/integrations/opentelemetry) |
 

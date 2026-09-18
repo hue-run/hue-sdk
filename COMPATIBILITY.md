@@ -1,6 +1,6 @@
 # Compatibility
 
-This matrix describes the next releases, TypeScript `0.2.0` and Python `0.2.0` (unreleased; see the Unreleased sections of [CHANGELOG.md](./CHANGELOG.md)). The published TypeScript `0.1.5` and Python `0.1.3` packages declare `engines.node >=24` and strip external content only in TypeScript. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This matrix describes the current releases, TypeScript `0.2.0` and Python `0.2.0`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |

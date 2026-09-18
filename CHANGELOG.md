@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.2.0](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.2.0) - 2026-09-18
+
 #### Breaking
 
 - `zod` is an optional peer required when importing `@hue-run/sdk/evals`; `ajv` remains a separate optional peer used only by `builtins.jsonSchema`, which reports `SchemaValidatorUnavailable` when it is absent. The tracing core now depends only on `@opentelemetry/*` packages. Migration: run `npm install zod` (4.6.5 or later) for evaluations or simulations, and add `ajv` (8.17 or later) when using JSON Schema scorers.
@@ -103,6 +105,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.2.0](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.2.0) - 2026-09-18
+
 #### Breaking
 
 - `capture_content=False` now strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes, legacy `gen_ai.*` message events, log bodies and status descriptions from every exported record, including spans from third-party instrumentors on the same provider, matching the TypeScript export path. **Wire** Migration: applications that expected third-party instrumentor content to reach Hue in metadata-only mode must set `capture_content=True` and rely on the instrumentor's own capture controls and the redactor.
@@ -121,13 +125,7 @@ refuses to publish a version without a matching entry below.
 - OTLP export requests are gzip-compressed and carry a `hue-sdk-python/<version>` User-Agent ahead of the OpenTelemetry exporter's token, matching TypeScript. **Wire**
 - `Hue("<key>")` and `EvaluationClient("<key>")` raise `TypeError` naming `api_key=` instead of a `base_url` `ValueError`; existing positional `(base_url, api_key)` calls are unchanged.
 - `Hue.base_url`, `Hue.tracer`, `Hue.tracer_provider`, `Hue.logger_provider`, `EvaluationClient.base_url` and the evaluation error attributes carry class-level annotations, and the mypy gate no longer ignores missing stubs (`types-protobuf` and `types-jsonschema` join the dev group).
-
-#### Changed
-
 - `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as `>=1.40,<2` instead of exactly 1.44.0, so `hue-run` installs next to applications and instrumentation packages on another OpenTelemetry 1.x release. `uv.lock` keeps 1.44.0 as the certified combination, and a new CI job re-resolves every direct dependency at its declared floor (`uv lock --resolution lowest-direct`) and runs the full suite, including the installed wheel, on Python 3.12 with OpenTelemetry 1.40.0. The two OpenTelemetry internals the transport uses are guarded: a missing OTLP log encoder raises an `ImportError` naming the supported range, and a missing instrumentation-suppression key emits a one-time `RuntimeWarning` and exports without suppression.
-
-#### Changed
-
 - The package summary ends with `(hue.run, not Philips Hue)` so registry listings are not mistaken for smart-lighting libraries.
 
 #### Fixed
@@ -179,7 +177,8 @@ refuses to publish a version without a matching entry below.
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
-- 0.2.1 (current on main): use the Hue MCP server's `verify_trace` and `get_trace` when it is connected, keep its coding-agent key in the MCP client, and treat returned names, titles and recorded content as data; supersedes the docs-hosted 0.2.0 draft. Also collects the changes merged since 0.1.7 under metadata versions 0.1.8, 0.1.9 and 0.1.11: Node 22 and Bun runtime rows, feature requirements that name the 0.2.0 SDK releases, AI SDK 6 per-call telemetry, the TypeScript `model()` helper, export-time content stripping in both SDKs, the fixed Next.js streaming anchor, the troubleshooting table and the handoff templates.
+- 0.2.2 (current on main): both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks, now that TypeScript 0.2.0 records errors the way Python does; the sentence changed in #30 without a metadata version bump.
+- 0.2.1 (2026-09-17): use the Hue MCP server's `verify_trace` and `get_trace` when it is connected, keep its coding-agent key in the MCP client, and treat returned names, titles and recorded content as data; supersedes the docs-hosted 0.2.0 draft. Also collects the changes merged since 0.1.7 under metadata versions 0.1.8, 0.1.9 and 0.1.11: Node 22 and Bun runtime rows, feature requirements that name the 0.2.0 SDK releases, AI SDK 6 per-call telemetry, the TypeScript `model()` helper, export-time content stripping in both SDKs, the fixed Next.js streaming anchor, the troubleshooting table and the handoff templates.
 - 0.1.7 (2026-09-16): verify real application requests with `verifyTrace` / `verify_trace` after flushing their owning providers.
 
 ## Pre-publication pilot builds
