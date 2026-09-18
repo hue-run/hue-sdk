@@ -1778,7 +1778,13 @@ describe("warning issues", () => {
     });
     // The warning's callback settles over two microtasks; wait for a macrotask before the failure.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    hue.transport.issue("traces", "failed", 1, "synthetic failure");
+    // `issue` is @internal (stripped from the published declarations); reach it through a cast so
+    // the installed-package typecheck of this file still passes.
+    (
+      hue.transport as unknown as {
+        issue(signal: "traces", kind: "failed", count: number, message: string): void;
+      }
+    ).issue("traces", "failed", 1, "synthetic failure");
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(seen).toEqual(["warning", "failed"]);
     await hue.shutdownSafe({ timeoutMillis: 200 });
