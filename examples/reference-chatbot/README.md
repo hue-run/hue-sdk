@@ -4,7 +4,6 @@ A Node.js 22+ (or Bun 1.4) HTTP server with a small streaming chat page, Vercel 
 `ToolLoopAgent`, a real text-statistics tool and a controlled-error action. The
 browser receives streamed model text and a trace ID; the server exports standard
 OTLP traces and correlated message logs. It imports only the packed public SDK.
-It has no Hue application or database imports.
 
 ## Install and build
 
