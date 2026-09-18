@@ -160,9 +160,13 @@ jobs:
           uv run --frozen --all-groups mypy
           uv run --frozen --all-groups python -m build --no-isolation
   python-lowest-bounds:
-    name: Python 3.12 at the lowest OpenTelemetry bound
+    name: Python ${{ matrix.python }} at the lowest OpenTelemetry bound
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,7 +180,7 @@ jobs:
       - name: Resolve direct dependencies at their floors and run the suite
         working-directory: packages/sdk-python
         env:
-          UV_PYTHON: "3.12"
+          UV_PYTHON: ${{ matrix.python }}
         run: |
           uv lock --resolution lowest-direct
           uv sync --frozen --all-groups

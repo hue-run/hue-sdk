@@ -106,3 +106,19 @@ def test_missing_suppression_key_warns_once_and_still_exports(receiver):
     assert "fallback-export=ok" in completed.stdout
     assert "synthetic-compat-key" not in completed.stdout + completed.stderr
     assert [span.name for span in receiver.spans()] == ["fallback-export"]
+
+
+def test_supported_range_matches_pyproject() -> None:
+    """The ImportError text and pyproject.toml must name the same OpenTelemetry range."""
+    from pathlib import Path
+
+    import tomllib
+
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    specifiers = {
+        dep[len("opentelemetry-") :].split(">=")[0]: dep[dep.index(">=") :]
+        for dep in pyproject["project"]["dependencies"]
+        if dep.startswith("opentelemetry-")
+    }
+    assert specifiers, "expected opentelemetry dependencies in pyproject.toml"
+    assert set(specifiers.values()) == {_otel_compat.SUPPORTED_OPENTELEMETRY}
