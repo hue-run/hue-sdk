@@ -14,7 +14,7 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 [Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Versioning](./VERSIONING.md) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
-Hue Cloud is currently invite-only; to request access, email [team@hue.run](mailto:team@hue.run). Everything in this repository works without an account against any OTLP receiver: see "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
+Hue Cloud is currently invite-only; to request access, email [team@hue.run](mailto:team@hue.run). Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
 
 <!-- TODO(maintainer): add one screenshot of a stored trace in Hue here before launch. -->
 

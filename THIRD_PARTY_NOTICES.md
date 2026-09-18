@@ -16,7 +16,7 @@ software, which keeps its own license. Transitive dependencies are recorded in
 
 | Package | License | Used by |
 | --- | --- | --- |
-| `ajv` (with `fast-uri` under BSD-3-Clause, `fast-deep-equal`, `json-schema-traverse`, `require-from-string`) | MIT | `@hue-run/sdk/evals`, optional peer dependency |
+| `ajv` (with `fast-uri` under BSD-3-Clause, `fast-deep-equal`, `json-schema-traverse`, `require-from-string`) | MIT | `@hue-run/sdk/evals`; regular dependency in 0.1.x, optional peer dependency from 0.2.0 |
 | `jsonschema`, `referencing`, `jsonschema-specifications`, `rpds-py`, `attrs` | MIT | `hue-run[evals]` |
 
 ## Test material
