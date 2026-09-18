@@ -1,36 +1,22 @@
-```text
-          _____                    _____                    _____          
-         /\    \                  /\    \                  /\    \         
-        /::\____\                /::\____\                /::\    \        
-       /:::/    /               /:::/    /               /::::\    \       
-      /:::/    /               /:::/    /               /::::::\    \      
-     /:::/    /               /:::/    /               /:::/\:::\    \     
-    /:::/____/               /:::/    /               /:::/__\:::\    \    
-   /::::\    \              /:::/    /               /::::\   \:::\    \   
-  /::::::\    \   _____    /:::/    /      _____    /::::::\   \:::\    \  
- /:::/\:::\    \ /\    \  /:::/____/      /\    \  /:::/\:::\   \:::\    \ 
-/:::/  \:::\    /::\____\|:::|    /      /::\____\/:::/__\:::\   \:::\____\
-\::/    \:::\  /:::/    /|:::|____\     /:::/    /\:::\   \:::\   \::/    /
- \/____/ \:::\/:::/    /  \:::\    \   /:::/    /  \:::\   \:::\   \/____/ 
-          \::::::/    /    \:::\    \ /:::/    /    \:::\   \:::\    \     
-           \::::/    /      \:::\    /:::/    /      \:::\   \:::\____\    
-           /:::/    /        \:::\__/:::/    /        \:::\   \::/    /    
-          /:::/    /          \::::::::/    /          \:::\   \/____/     
-         /:::/    /            \::::::/    /            \:::\    \         
-        /:::/    /              \::::/    /              \:::\____\        
-        \::/    /                \::/____/                \::/    /        
-         \/____/                  ~~                       \/____/          
-```
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/hue-ascii-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/hue-ascii-light.png">
+  <img alt="Hue" src=".github/assets/hue-ascii-neutral.png" width="720">
+</picture>
 
 # Hue SDK
 
 OpenTelemetry tracing and local evaluation workflows for AI applications.
 
-_Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
+[![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40hue-run%2Fsdk?label=%40hue-run%2Fsdk)](https://www.npmjs.com/package/@hue-run/sdk) [![PyPI](https://img.shields.io/pypi/v/hue-run?label=hue-run)](https://pypi.org/project/hue-run/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 [Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Versioning](./VERSIONING.md) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
-[![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40hue-run%2Fsdk?label=%40hue-run%2Fsdk)](https://www.npmjs.com/package/@hue-run/sdk) [![PyPI](https://img.shields.io/pypi/v/hue-run?label=hue-run)](https://pypi.org/project/hue-run/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+</div>
+
+_Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
 
 ## Why Hue
 
@@ -210,3 +196,32 @@ The SDKs were extracted from Hue's application monorepo at TypeScript 0.1.1 / Py
 ## License
 
 This repository and the SDK packages are distributed under the [MIT license](./LICENSE). Contributions are accepted under the same license; see [Contributing](./CONTRIBUTING.md).
+
+<details>
+<summary>Hue ASCII wordmark (plain text)</summary>
+
+```text
+          _____                    _____                    _____          
+         /\    \                  /\    \                  /\    \         
+        /::\____\                /::\____\                /::\    \        
+       /:::/    /               /:::/    /               /::::\    \       
+      /:::/    /               /:::/    /               /::::::\    \      
+     /:::/    /               /:::/    /               /:::/\:::\    \     
+    /:::/____/               /:::/    /               /:::/__\:::\    \    
+   /::::\    \              /:::/    /               /::::\   \:::\    \   
+  /::::::\    \   _____    /:::/    /      _____    /::::::\   \:::\    \  
+ /:::/\:::\    \ /\    \  /:::/____/      /\    \  /:::/\:::\   \:::\    \ 
+/:::/  \:::\    /::\____\|:::|    /      /::\____\/:::/__\:::\   \:::\____\
+\::/    \:::\  /:::/    /|:::|____\     /:::/    /\:::\   \:::\   \::/    /
+ \/____/ \:::\/:::/    /  \:::\    \   /:::/    /  \:::\   \:::\   \/____/ 
+          \::::::/    /    \:::\    \ /:::/    /    \:::\   \:::\    \     
+           \::::/    /      \:::\    /:::/    /      \:::\   \:::\____\    
+           /:::/    /        \:::\__/:::/    /        \:::\   \::/    /    
+          /:::/    /          \::::::::/    /          \:::\   \/____/     
+         /:::/    /            \::::::/    /            \:::\    \         
+        /:::/    /              \::::/    /              \:::\____\        
+        \::/    /                \::/____/                \::/    /        
+         \/____/                  ~~                       \/____/          
+```
+
+</details>
