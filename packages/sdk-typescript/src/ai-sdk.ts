@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { OpenTelemetry } from "@ai-sdk/otel";
 import type { TelemetryOptions } from "ai";
 import type { HueClient } from "./client.js";
@@ -21,4 +22,3 @@ export function hueTelemetry(hue: HueClient): TelemetryOptions {
     integrations: [new OpenTelemetry({ tracer: hue.tracer, usage: true })],
   };
 }
-import { createRequire } from "node:module";
