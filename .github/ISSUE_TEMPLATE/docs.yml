@@ -19,4 +19,4 @@ body:
     id: suggestion
     attributes:
       label: Suggested text
-      description: Optional. docs.hue.run is maintained separately from this repository; maintainers port accepted fixes.
+      description: Optional. The docs.hue.run source is public at https://github.com/hue-run/docs; you can also open a pull request there directly.

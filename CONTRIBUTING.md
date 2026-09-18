@@ -18,7 +18,7 @@ Use Node 24, Bun 1.4.2 and uv 0.12.5 (`.tool-versions` and `.bun-version` record
 
 ## Review expectations
 
-Add behavioral regression coverage for changed delivery, privacy, concurrency or retry behavior. Documentation-only changes need accurate, runnable snippets and working links, not a repeated application test suite. Explain any remaining live integration limit.
+Add behavioral regression coverage for changed delivery, privacy, concurrency or retry behavior. Documentation-only changes need accurate, runnable snippets and working links, not a repeated application test suite. The docs.hue.run site has its own public repository, [hue-run/docs](https://github.com/hue-run/docs); the compatibility matrix and the coding-agent skill are mirrored there from this repository. Explain any remaining live integration limit.
 
 Never include real credentials, customer prompts or files in fixtures, logs or screenshots. Pull request descriptions and commit messages are public; do not link internal systems or paste unreleased platform details. Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md) rather than in a public issue.
 
