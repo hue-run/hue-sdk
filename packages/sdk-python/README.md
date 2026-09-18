@@ -6,6 +6,8 @@
 
 [![PyPI](https://img.shields.io/pypi/v/hue-run?label=hue-run)](https://pypi.org/project/hue-run/) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
+> This README follows `main`, which is ahead of the registries: npm serves [@hue-run/sdk 0.1.5](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.5) (Node 24 or newer) and PyPI serves [hue-run 0.1.3](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.3). Paragraphs marked "from 0.2.0" describe what ships in 0.2.0; the [changelog](https://github.com/hue-run/hue-sdk/blob/main/CHANGELOG.md) lists every pending change.
+
 For frozen datasets, local experiments, custom scorers, durable retries and historical rescoring, see [Local evaluations](https://docs.hue.run/evaluations/first-evaluation).
 
 Python helpers around the official OpenTelemetry trace and log SDKs and OTLP HTTP/protobuf exporters. `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as **`>=1.40,<2`**; **1.44.0** is the certified lockfile combination and **1.40.0** is tested as the floor in CI. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
@@ -54,7 +56,7 @@ The SDK uses `https://app.hue.run` by default. Set `base_url` only for a differe
 
 `capture_content` has no default. `False` makes `set_input`, `set_output` and inference-log bodies omit content before it reaches an OTel queue. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
-When capture is disabled, Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes (including OpenInference retrieval documents, embeddings, reranker documents, prompt-template variables and images), legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. [COMPATIBILITY.md](https://github.com/hue-run/hue-sdk/blob/main/COMPATIBILITY.md) lists the exact keys. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
+From 0.2.0, when capture is disabled Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes (including OpenInference retrieval documents, embeddings, reranker documents, prompt-template variables and images), legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. [COMPATIBILITY.md](https://github.com/hue-run/hue-sdk/blob/main/COMPATIBILITY.md) lists the exact keys. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
 
 Use `redactor=lambda field, value: ...` to transform content in supported helpers. It runs synchronously before serialization and export. Return a redacted JSON value; failures omit the field and increment `export_status.instrumentation_failures` without changing application behavior. It does not inspect arbitrary OTel attributes or logs:
 
@@ -108,9 +110,9 @@ Hue speaks standard OTLP, so any local collector works. Point `base_url` at a lo
 
 ## Dependencies
 
-The tracing core depends on the official OpenTelemetry packages and `requests` only. JSON Schema
+From 0.2.0 the tracing core depends on the official OpenTelemetry packages and `requests` only. JSON Schema
 scoring (`builtin_scorers.json_schema`) runs `jsonschema` in an isolated process and needs the optional
-extra; without it `builtin_scorers.json_schema` raises `ImportError` and stored schema scorers report
+extra (0.1.3 installs `jsonschema` by default and has no extra); without it `builtin_scorers.json_schema` raises `ImportError` and stored schema scorers report
 `SchemaValidatorUnavailable`:
 
 ```bash
