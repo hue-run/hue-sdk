@@ -285,6 +285,7 @@ export class HueClient {
     name: string,
     input: JsonValue,
     execute: () => Promise<T> | T,
+    options: Pick<SpanOptions, "parentContext"> = {},
   ): Promise<T> {
     return this.withSpan(
       name,
@@ -294,7 +295,10 @@ export class HueClient {
         if (result !== undefined) this.setContent(span, "gen_ai.tool.call.result", result);
         return result;
       },
-      { attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name } },
+      {
+        attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name },
+        ...(options.parentContext ? { parentContext: options.parentContext } : {}),
+      },
     );
   }
 

@@ -1,6 +1,6 @@
 import { validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
-import { json, uuid } from "./json.js";
+import { json, uuid, valueBounds } from "./json.js";
 import type {
   CaseWrite,
   CompleteExecution,
@@ -10,6 +10,7 @@ import type {
   DatasetVersion,
   EvaluationItem,
   EvaluationRun,
+  EnvironmentEvidenceSnapshot,
   Execution,
   Experiment,
   ExperimentCase,
@@ -25,6 +26,7 @@ import type {
   Scorer,
   ScorerDefinition,
   ScorerVersion,
+  SimulationMcpCapability,
   StartExecution,
   Subject,
   StoredResult,
@@ -68,7 +70,7 @@ export class EvaluationClient {
               Object.fromEntries(
                 Object.entries(body as object).filter(([, value]) => value !== undefined),
               ),
-              1024 * 1024,
+              { ...valueBounds, bytes: 1024 * 1024 },
             ),
           );
     let response: Response;
@@ -203,6 +205,28 @@ export class EvaluationClient {
   getExecution(id: string) {
     return this.request<Execution>("GET", `/experiment-executions/${uuid(id)}`);
   }
+  getEnvironmentEvidence(executionId: string) {
+    return this.request<EnvironmentEvidenceSnapshot>(
+      "GET",
+      `/experiment-executions/${uuid(executionId)}/environment`,
+    );
+  }
+  getEnvironmentSteps(executionId: string, page: { after?: number; limit?: number } = {}) {
+    if (page.after !== undefined && (!Number.isInteger(page.after) || page.after < -1))
+      throw new RangeError("Step cursor must be an integer at least -1");
+    if (
+      page.limit !== undefined &&
+      (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > 100)
+    )
+      throw new RangeError("Step page size must be 1–100");
+    const query = new URLSearchParams();
+    if (page.after !== undefined) query.set("after", String(page.after));
+    if (page.limit !== undefined) query.set("limit", String(page.limit));
+    return this.request<import("../environment/types.js").StepPage>(
+      "GET",
+      `/experiment-executions/${uuid(executionId)}/environment/steps${query.size ? `?${query}` : ""}`,
+    );
+  }
   completeExecution(id: string, input: CompleteExecution) {
     return this.request<Completion>("POST", `/experiment-executions/${uuid(id)}/complete`, input);
   }
@@ -276,6 +300,13 @@ export class EvaluationClient {
   }
   getJudgeBudget() {
     return this.request<JudgeBudget>("GET", "/judge-budget");
+  }
+  createSimulationMcpCapability(input: { runId: string; executionId: string }) {
+    return this.request<SimulationMcpCapability>(
+      "POST",
+      "/local-agent-worker/mcp-capability",
+      input,
+    );
   }
 }
 export function createEvaluationClient(options: EvaluationClientOptions): EvaluationClient {

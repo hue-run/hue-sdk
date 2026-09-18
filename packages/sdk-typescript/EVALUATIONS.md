@@ -63,6 +63,11 @@ try {
 
 Create another experiment with the same frozen version and different `config` to compare configurations. The runner reads the exact experiment case/version and scorer definitions; it never resolves a mutable latest version. `rescore` accepts an existing evaluation-run ID and has no target callback. Subject IDs refer to immutable saved outputs and trace evidence.
 
+For the shorter agent-against-a-hosted-world workflow, use `runSimulation`. It owns immutable
+resolution, a fresh linked world per case, local and hosted MCP tools, finalization, sealed
+evidence and scoring while retaining this runner's checkpoint guarantees. See
+[Simulated environments](ENVIRONMENTS.md#run-a-scenario-like-a-test).
+
 ## Content and result states
 
 Both choices are required and independent:

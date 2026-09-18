@@ -95,6 +95,7 @@ run(
   import { strict as assert } from "node:assert";
   await import("@hue-run/sdk");
   await import("@hue-run/sdk/managed");
+  await import("@hue-run/sdk/environment");
   const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
   // ajv is an optional peer: a tracing-only install must load evals and report the missing
   // validator as a scorer error instead of failing at import or crashing a worker.
@@ -235,7 +236,14 @@ for (const patch of [99, 100]) {
   const consumerTsconfig = JSON.parse(await readFile(join(source, "tsconfig.json"), "utf8"));
   consumerTsconfig.compilerOptions.lib = ["esnext"];
   await writeFile(join(consumer, "tsconfig.json"), JSON.stringify(consumerTsconfig, null, 2));
-  for (const name of ["sdk.test.ts", "evals.test.ts", "receipt.test.ts", "managed.test.ts"]) {
+  for (const name of [
+    "sdk.test.ts",
+    "evals.test.ts",
+    "environment.test.ts",
+    "simulation.test.ts",
+    "receipt.test.ts",
+    "managed.test.ts",
+  ]) {
     const testPath = join(consumer, "tests", name);
     await writeFile(
       testPath,
@@ -243,6 +251,8 @@ for (const patch of [99, 100]) {
         .replaceAll('"../src/index.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/ai-sdk.js"', '"@hue-run/sdk/ai-sdk"')
         .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"')
+        .replaceAll('"../src/environment.js"', '"@hue-run/sdk/environment"')
+        .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"'),
     );
   }
@@ -275,6 +285,8 @@ for (const patch of [99, 100]) {
       ...junit,
       "./tests/sdk.test.ts",
       "./tests/evals.test.ts",
+      "./tests/environment.test.ts",
+      "./tests/simulation.test.ts",
       "./tests/receipt.test.ts",
       "./tests/managed.test.ts",
     ],

@@ -31,6 +31,7 @@
     "dist",
     "README.md",
     "EVALUATIONS.md",
+    "ENVIRONMENTS.md",
     "MANAGED_TARGETS.md",
     "LICENSE"
   ],
@@ -50,6 +51,10 @@
     "./evals": {
       "types": "./dist/evals.d.ts",
       "import": "./dist/evals.js"
+    },
+    "./environment": {
+      "types": "./dist/environment.d.ts",
+      "import": "./dist/environment.js"
     },
     "./managed": {
       "types": "./dist/managed.d.ts",

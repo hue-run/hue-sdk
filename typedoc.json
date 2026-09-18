@@ -4,6 +4,7 @@
   "entryPoints": [
     "packages/sdk-typescript/src/index.ts",
     "packages/sdk-typescript/src/ai-sdk.ts",
+    "packages/sdk-typescript/src/environment.ts",
     "packages/sdk-typescript/src/evals.ts",
     "packages/sdk-typescript/src/managed.ts"
   ],

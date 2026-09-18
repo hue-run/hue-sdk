@@ -33,6 +33,7 @@ export interface DatasetCase {
   expected?: JsonValue;
   metadata: Record<string, JsonValue>;
   datasetVersionId: string;
+  environmentVersionId?: string | null;
 }
 export interface ExperimentCase extends DatasetCase {
   hasExpected: boolean;
@@ -43,6 +44,7 @@ export interface CaseWrite {
   inputs: JsonValue;
   expected?: JsonValue;
   metadata?: Record<string, JsonValue>;
+  environmentVersionId?: string | null;
 }
 export type MetricDefinition =
   | { name: string; type: "boolean" | "text" }
@@ -208,6 +210,7 @@ export interface EvaluationItem {
 }
 export interface Subject {
   id: string;
+  executionId: string;
   inputs: JsonValue;
   hasOutput: boolean;
   output?: JsonValue;
@@ -249,9 +252,30 @@ export interface ScoreContext {
   hasExpected: boolean;
   metadata: Record<string, JsonValue>;
   executionState: TerminalState;
+  environment?: EnvironmentEvidence;
+}
+export interface EnvironmentEvidenceSnapshot {
+  runId: string;
+  executionId: string;
+  environmentVersionId: string;
+  definitionDigest: string;
+  seed: string;
+  status: "completed" | "abandoned" | "expired";
+  stepCount: number;
+  stateDigest: string;
+  initialState: JsonValue;
+  finalState: JsonValue;
+}
+export interface EnvironmentEvidence extends EnvironmentEvidenceSnapshot {
+  steps: import("../environment/types.js").Step[];
 }
 export interface LocalScorer {
   definition: Extract<ScorerDefinition, { kind: "local_code" }>;
   /** Trusted local code. There is no callback timeout or side-effect cancellation. */
   score(context: ScoreContext): Score | Promise<Score>;
+}
+export interface SimulationMcpCapability {
+  url: string;
+  token: string;
+  expiresAt: string;
 }

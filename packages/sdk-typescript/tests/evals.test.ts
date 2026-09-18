@@ -267,6 +267,7 @@ function fixture() {
         const subject = {
           ...item,
           id: subjectId,
+          executionId: execution.id,
           caseId: item.id,
           caseExternalKey: item.externalKey,
           hasOutput,

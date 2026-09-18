@@ -44,7 +44,7 @@ _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not aff
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` | Node.js 22 or 24 (26 in CI; the published 0.1.5 requires 24); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed` | Node.js 22 or 24 (26 in CI; the published 0.1.5 requires 24); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated environments](./packages/sdk-typescript/ENVIRONMENTS.md) |
 | Python | `hue-run`; `hue_sdk`, `hue_sdk.evals`, `hue_sdk.managed` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 | Any other language | The official OpenTelemetry SDK with an OTLP/HTTP exporter | Go, Java, .NET, Rust, Ruby and others | [Existing OpenTelemetry](https://docs.hue.run/integrations/opentelemetry) |
 
@@ -107,6 +107,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Confirm stored traces, known child spans, and required field presence after export.
 - Run local evaluation targets and scorers against frozen datasets.
 - Resume result uploads and rescore stored outputs without rerunning the target.
+- Run an existing local agent callback against a fresh hosted simulated world.
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 
@@ -189,7 +190,7 @@ Hue's SDKs are deliberately small. The following are design choices, not missing
 - No proprietary event protocol, live token streaming, attachments or feature-flag API. Spans are exported when they complete; use standard attributes and span events.
 - No browser, edge or CommonJS builds: the project service key is a server-side credential.
 - No environment-variable reading in constructors, no token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
-- The service key is write-only plus receipts. General trace browsing, feedback or score ingestion for stored traces, and a one-call evaluation entrypoint are platform decisions tracked separately.
+- The service key is write-only plus receipts. General trace browsing, feedback, and score ingestion for stored traces remain platform concerns. TypeScript's explicit `runSimulation()` helper orchestrates versioned simulation resources; it does not grant general read access or hide provider execution.
 
 See [VERSIONING.md](./VERSIONING.md) for what may change between releases.
 
