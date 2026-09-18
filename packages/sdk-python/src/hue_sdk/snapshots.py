@@ -96,9 +96,64 @@ def snapshot_content(value: Any) -> Any:
     return _ContentBudget().value(value)
 
 
+# Attribute keys (and their dotted children) removed in metadata-only mode. Mirrors the
+# TypeScript SDK so both export paths strip the same GenAI, OpenInference, OpenLLMetry
+# and Vercel AI SDK content fields regardless of which instrumentor produced them.
+CONTENT_PREFIXES: tuple[str, ...] = (
+    "gen_ai.input.messages",
+    "gen_ai.output.messages",
+    "gen_ai.system_instructions",
+    "gen_ai.prompt",
+    "gen_ai.completion",
+    "gen_ai.tool.call.arguments",
+    "gen_ai.tool.call.result",
+    "gen_ai.tool.definitions",
+    "gen_ai.event.content",
+    "llm.input_messages",
+    "llm.output_messages",
+    "llm.prompts",
+    "llm.completions",
+    "llm.invocation_parameters",
+    "input.value",
+    "output.value",
+    "ai.prompt",
+    "ai.response.text",
+    "ai.response.object",
+    "ai.response.toolCalls",
+    "ai.response.body",
+    "ai.toolCall.args",
+    "ai.toolCall.result",
+    "ai.value",
+    "ai.values",
+    "ai.embedding",
+    "ai.embeddings",
+    "traceloop.entity.input",
+    "traceloop.entity.output",
+    "tool.parameters",
+    "exception.message",
+    "exception.stacktrace",
+)
+_LEGACY_CONTENT_EVENTS = (
+    "gen_ai.system",
+    "gen_ai.user",
+    "gen_ai.assistant",
+    "gen_ai.tool",
+    "gen_ai.choice",
+)
+
+
+def is_content_key(key: str) -> bool:
+    return any(key == prefix or key.startswith(prefix + ".") for prefix in CONTENT_PREFIXES)
+
+
+def _is_legacy_content_event(name: str) -> bool:
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in _LEGACY_CONTENT_EVENTS)
+
+
 class _ValueBudget:
-    def __init__(self) -> None:
+    def __init__(self, capture_content: bool = True) -> None:
         self.remaining = MAX_REQUEST_BYTES
+        self.capture_content = capture_content
 
     def consume(self, size: int) -> None:
         self.remaining -= size
@@ -139,8 +194,15 @@ class _ValueBudget:
         raise ValueError("Unsupported telemetry snapshot value.")
 
     def attributes(self, values: Any, dropped: int = 0) -> BoundedAttributes:
+        source = values or {}
+        if not self.capture_content and isinstance(source, Mapping):
+            source = {
+                key: item
+                for key, item in source.items()
+                if not (isinstance(key, str) and is_content_key(key))
+            }
         result = BoundedAttributes(
-            attributes=self.value(values or {}), immutable=True, extended_attributes=True
+            attributes=self.value(source), immutable=True, extended_attributes=True
         )
         result.dropped += dropped
         return result
@@ -162,8 +224,8 @@ class _ValueBudget:
 
 
 class _SpanSnapshot(ReadableSpan):
-    def __init__(self, span: ReadableSpan) -> None:
-        budget = _ValueBudget()
+    def __init__(self, span: ReadableSpan, capture_content: bool = True) -> None:
+        budget = _ValueBudget(capture_content)
         super().__init__(
             name=budget.value(span.name),
             context=span.context,
@@ -177,13 +239,17 @@ class _SpanSnapshot(ReadableSpan):
                     event.timestamp,
                 )
                 for event in span.events
+                if capture_content or not _is_legacy_content_event(event.name)
             ),
             links=tuple(
                 Link(link.context, budget.attributes(link.attributes, link.dropped_attributes))
                 for link in span.links
             ),
             kind=span.kind,
-            status=Status(span.status.status_code, budget.value(span.status.description)),
+            status=Status(
+                span.status.status_code,
+                budget.value(span.status.description) if capture_content else None,
+            ),
             start_time=span.start_time,
             end_time=span.end_time,
             instrumentation_scope=budget.scope(span.instrumentation_scope),
@@ -200,15 +266,15 @@ class _SpanSnapshot(ReadableSpan):
         return self._snapshot_dropped_links
 
 
-def snapshot_span(span: ReadableSpan) -> ReadableSpan:
-    return _SpanSnapshot(span)
+def snapshot_span(span: ReadableSpan, capture_content: bool = True) -> ReadableSpan:
+    return _SpanSnapshot(span, capture_content)
 
 
-def snapshot_log(log_record: ReadWriteLogRecord) -> ReadableLogRecord:
-    budget = _ValueBudget()
+def snapshot_log(log_record: ReadWriteLogRecord, capture_content: bool = True) -> ReadableLogRecord:
+    budget = _ValueBudget(capture_content)
     record = copy(log_record.log_record)
     record.context = Context()
-    record.body = budget.value(record.body)
+    record.body = budget.value(record.body) if capture_content else None
     record.attributes = budget.attributes(record.attributes, log_record.dropped_attributes)
     record.event_name = budget.value(record.event_name)
     record.severity_text = budget.value(record.severity_text)

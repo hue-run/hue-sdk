@@ -9,8 +9,13 @@ import pytest
 from hue_sdk import Hue
 
 
-@pytest.mark.parametrize("capture_content", [True, False])
-def test_openinference_official_openai_stream_exports_to_hue(receiver, capture_content):
+@pytest.mark.parametrize(
+    ("capture_content", "instrumentor_hides"),
+    [(True, True), (False, True), (False, False)],
+)
+def test_openinference_official_openai_stream_exports_to_hue(
+    receiver, capture_content, instrumentor_hides
+):
     openai = pytest.importorskip("openai")
     instrumentation = pytest.importorskip("openinference.instrumentation")
     adapter = pytest.importorskip("openinference.instrumentation.openai")
@@ -48,14 +53,16 @@ def test_openinference_official_openai_stream_exports_to_hue(receiver, capture_c
     receiver.reply(200, body.encode(), **{"Content-Type": "text/event-stream"})
     instrumentor = adapter.OpenAIInstrumentor()
     with Hue(receiver.url, "synthetic-hue-key", capture_content=capture_content) as hue:
-        # External instrumentation owns its privacy settings independently of Hue helpers.
+        # External instrumentation owns its privacy settings; when it does not hide content,
+        # Hue's export path still strips the recognized content attributes in metadata-only mode.
+        hide = instrumentor_hides and not capture_content
         instrumentor.instrument(
             tracer_provider=hue.tracer_provider,
             config=instrumentation.TraceConfig(
-                hide_inputs=not capture_content,
-                hide_outputs=not capture_content,
-                hide_input_messages=not capture_content,
-                hide_output_messages=not capture_content,
+                hide_inputs=hide,
+                hide_outputs=hide,
+                hide_input_messages=hide,
+                hide_output_messages=hide,
                 enable_genai_semconv=True,
             ),
         )

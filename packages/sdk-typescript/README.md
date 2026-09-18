@@ -56,6 +56,47 @@ HTTPS is required except for loopback HTTP. Redirects are refused for both
 project checks and exports. There is no proprietary tracing protocol, lab API
 wrapper, database dependency, or dependency on the Hue application workspace.
 
+## Model spans without a framework adapter
+
+When you call a provider SDK directly, `hue.model()` creates the GenAI client span for the call:
+
+```ts
+await hue.model("gpt-5-mini", { provider: "openai" }, async (span) => {
+  span.setInput(messages); // gen_ai.input.messages when captureContent is true
+  const response = await openai.chat.completions.create({ model: "gpt-5-mini", messages });
+  span.setOutput(response.choices.map((choice) => choice.message));
+  span.setUsage({
+    inputTokens: response.usage?.prompt_tokens,
+    outputTokens: response.usage?.completion_tokens,
+  });
+  return response;
+});
+```
+
+The span is named `{operation} {model}` (`operation` defaults to `chat`) with
+`gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. `setUsage` records
+nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
+counted as instrumentation failures. Unknown usage stays absent.
+
+## Vercel AI SDK 6
+
+AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
+`hueExperimentalTelemetry(hue)` from the core entry point; the generated spans parent under
+`withSpan`, inherit session/user identifiers, and record prompts and responses only when
+`captureContent` is true:
+
+```ts
+import { hueExperimentalTelemetry } from "@hue-run/sdk";
+
+const result = await generateText({
+  model,
+  prompt,
+  experimental_telemetry: hueExperimentalTelemetry(hue),
+});
+```
+
+This requires no `@ai-sdk/otel` peer. `hueTelemetry` remains AI SDK 7 only.
+
 ## Vercel AI SDK 7
 
 Compatible optional peers are `ai@^7.0.99` and `@ai-sdk/otel@^1.0.99`, alongside
@@ -110,7 +151,8 @@ normal OTel setup; Hue does not silently replace it.
 `captureContent: false` disables manual input/output/messages/tool content and
 removes recognized GenAI, Vercel, OpenInference and OpenLLMetry content attributes,
 legacy GenAI content events, log bodies, status messages and exception text before
-export. Model/provider/token metadata remains available. Generic custom attribute
+export. The exported `contentPrefixes` array lists the attribute keys (and their dotted
+children) that are removed. Model/provider/token metadata remains available. Generic custom attribute
 names cannot be classified automatically; use them deliberately.
 
 `captureContent: true` captures supplied content. Accepted content is stored by Hue;
@@ -149,10 +191,40 @@ await hue.shutdown(); // flushes; does not shut down these externally owned prov
 // During application shutdown, shut down your providers, then await transport.shutdown().
 ```
 
-For external parent context pass `parentContext` to `withSpan`, or use standard
-OTel context propagation in your application. `getContext()` exposes the helper's
-current context for APIs taking an explicit context. Session/user identifiers are
-inherited within a client callback. Separate requests require separate callbacks.
+For external parent context pass `parentContext` to `withSpan`. Across processes, use
+`hue.inject(carrier)` inside the producing span and `hue.extract(carrier)` in the worker; both
+speak W3C `traceparent` only and never include the API key or baggage. Hue registers no global
+propagator, so `propagation.inject()` from `@opentelemetry/api` is a no-op unless your
+application configured one. `getContext()` exposes the helper's current context for APIs taking
+an explicit context. Session/user identifiers are inherited within a client callback and are
+stamped only on spans created through Hue's tracer (helpers and the AI SDK adapters); spans from
+other instrumentations on a shared provider carry them only if that instrumentation sets them.
+Separate requests require separate callbacks.
+
+In attach mode Hue's span processor exports every span that ends on that provider, the same
+default as other OpenTelemetry exporters. To send only part of a provider's spans, wrap the
+processor:
+
+```ts
+const aiSpansOnly = {
+  onStart: () => {},
+  onEnd: (span) => {
+    if ("gen_ai.operation.name" in span.attributes || span.name.startsWith("ai."))
+      transport.spanProcessor.onEnd(span);
+  },
+  forceFlush: () => transport.spanProcessor.forceFlush(),
+  shutdown: () => transport.spanProcessor.shutdown(),
+};
+```
+
+## Local development without a Hue account
+
+Hue speaks standard OTLP, so any local collector works. Point `baseUrl` at a loopback receiver
+that accepts `/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` (for example an OpenTelemetry
+Collector `otlp` receiver with `http.traces_url_path` and `logs_url_path` set to those paths,
+forwarding to Jaeger or the debug exporter) and pass any placeholder `apiKey`; HTTP is allowed
+for loopback origins. `checkConnection()` and `verifyTrace()` are Hue-only diagnostics and are
+not available against a generic collector.
 
 ## Delivery behavior
 
@@ -253,9 +325,15 @@ export const POST = createManagedTargetHandler({
   // Application-owned functions: keep your current provider, tools and tracing.
   target: async ({ input, config, inputFiles, signal }) =>
     runAgentForEvaluation({ input, config, inputFiles, signal }),
+  tracer: hue.tracer, // Required with a Hue-owned client: Hue never registers a global tracer.
   flushTelemetry: () => hue.flush(), // Existing Hue client; flush traces and logs.
 });
 ```
+
+Without `tracer`, the handler falls back to the global OpenTelemetry tracer, its span is not
+recorded, and every invocation returns `uncertain`. An application that only uses `createHue()`
+also needs an OpenTelemetry context manager installed for the handler's span to propagate; see
+the [managed-run guide](https://docs.hue.run/evaluations/managed-runs).
 
 `runAgentForEvaluation` adapts your application result to `{ output, files? }`.
 Files contain `filename`, `contentType`, actual `Uint8Array` data and an optional

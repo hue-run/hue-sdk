@@ -15,19 +15,19 @@ This matrix describes the current releases: TypeScript `0.1.5` and Python `0.1.3
 
 `@hue-run/sdk` core can coexist with AI SDK 6 (installed-package validation covers 6.0.116). The `hueTelemetry` adapter still requires AI SDK 7 and a compatible `@ai-sdk/otel` peer; it explicitly rejects AI SDK 6. Keep AI SDK 6 instrumentation on its existing provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade a framework solely to add tracing.
 
-Python's exact OTel pins can conflict with applications that require a different version. Resolve the dependency set before changing the application. A lockfile records what was tested; it does not certify every compatible-looking version.
+Python's exact OTel pins can conflict with applications that require a different version. The pins are deliberate: the Python transport relies on OpenTelemetry internals for instrumentation suppression and log encoding, so each OpenTelemetry release is adopted through a Hue patch release rather than a resolver range. Resolve the dependency set before changing the application. A lockfile records what was tested; it does not certify every compatible-looking version.
 
 ## Content and delivery
 
 | Contract | TypeScript | Python |
 | --- | --- | --- |
 | Explicit content choice | Required `captureContent` | Required `capture_content` |
-| Metadata-only scope | Hue helpers plus recognized external content fields on Hue's export path | Hue helpers; external instrumentation needs separate configuration |
+| Metadata-only scope | Hue helpers plus recognized external content fields on Hue's export path | Hue helpers plus recognized external content fields on Hue's export path |
 | Arbitrary custom metadata | Application-controlled | Application-controlled |
 | Failed delivery | `flush()` throws for new export failures; warning-only acknowledgements succeed and counters remain cumulative | `force_flush()` remains false after an export failure, dropped record or instrumentation failure during the client's lifetime |
 | Borrowed provider | Not shut down by the client | Not shut down by the client |
 
-Neither SDK estimates unavailable token usage or cost. Queues are bounded and in memory; a successful model response does not establish telemetry delivery.
+Neither SDK estimates unavailable token usage or cost. Queues are bounded and in memory; a successful model response does not establish telemetry delivery. Message content recorded through `recordMessages` / `log_inference` travels in the body of the `gen_ai.client.inference.operation.details` log record (structured in TypeScript, JSON strings in Python so null stays distinct) rather than as the Development-status event attributes; Hue's receiver reads the body.
 
 ## Evaluation coverage
 

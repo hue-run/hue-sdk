@@ -317,3 +317,33 @@ def test_encoded_batches_are_split_and_single_oversize_is_visible(receiver):
         assert not hue.force_flush()
         assert hue.export_status.failed_trace_batches == 1
     assert len(receiver.spans()) == 8
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver, capture_content):
+    from hue_sdk.snapshots import CONTENT_PREFIXES
+
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=capture_content, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("external")
+        for prefix in CONTENT_PREFIXES:
+            span.set_attribute(prefix, "private-value")
+            span.set_attribute(f"{prefix}.0.content", "private-value")
+        span.set_attribute("gen_ai.request.model", "synthetic-model")
+        span.add_event("gen_ai.user.message", {"content": "private-value"})
+        span.set_status(trace.Status(trace.StatusCode.ERROR, "private description"))
+        span.end()
+        assert hue.force_flush()
+    (exported,) = receiver.spans()
+    keys = {attribute.key for attribute in exported.attributes}
+    content = {
+        key
+        for key in keys
+        if any(key == prefix or key.startswith(prefix + ".") for prefix in CONTENT_PREFIXES)
+    }
+    assert "gen_ai.request.model" in keys
+    assert len(content) == (2 * len(CONTENT_PREFIXES) if capture_content else 0)
+    assert any(event.name == "gen_ai.user.message" for event in exported.events) is capture_content
+    assert (exported.status.message == "private description") is capture_content
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert (b"private" in telemetry) is capture_content

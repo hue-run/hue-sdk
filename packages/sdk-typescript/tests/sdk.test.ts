@@ -11,6 +11,7 @@ import {
   createHueTransport,
   HueConnectionError,
   HueExportError,
+  contentPrefixes,
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { generateText, streamText } from "ai";
@@ -60,6 +61,7 @@ function receiver(
     records: WireRecord[];
     raw: string;
     bytes: number;
+    headers: Record<string, string>;
   }[] = [];
   let hits = 0;
   const server = Bun.serve({
@@ -96,7 +98,13 @@ function receiver(
           : data.resourceLogs.flatMap((group: { scopeLogs: { logRecords: WireRecord[] }[] }) =>
               group.scopeLogs.flatMap((scope) => scope.logRecords),
             );
-      requests.push({ signal, records, raw: JSON.stringify(data), bytes: bytes.byteLength });
+      requests.push({
+        signal,
+        records,
+        raw: JSON.stringify(data),
+        bytes: bytes.byteLength,
+        headers: Object.fromEntries(request.headers),
+      });
       await beforeReply?.(signal);
       if (mode === "malformed")
         return new Response(new Uint8Array([0x0a, 0xff]), {
@@ -127,6 +135,160 @@ function attr(record: WireRecord, key: string): Value | undefined {
 }
 
 describe("Hue SDK contract", () => {
+  test("export requests ignore OTEL_EXPORTER_OTLP_* environment configuration", async () => {
+    const endpoint = receiver();
+    const previous = {
+      OTEL_EXPORTER_OTLP_HEADERS: process.env.OTEL_EXPORTER_OTLP_HEADERS,
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+      OTEL_EXPORTER_OTLP_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    };
+    process.env.OTEL_EXPORTER_OTLP_HEADERS = "x-foreign-vendor=leaked";
+    process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS = "x-foreign-traces=leaked";
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:9/elsewhere";
+    const hue = createHue({
+      apiKey,
+      serviceName: "env-isolation",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan("request", () => undefined);
+      await hue.flush();
+      expect(endpoint.requests.length).toBeGreaterThan(0);
+      for (const request of endpoint.requests) {
+        expect(request.headers["x-foreign-vendor"]).toBeUndefined();
+        expect(request.headers["x-foreign-traces"]).toBeUndefined();
+        expect(request.headers["user-agent"]).toMatch(/^hue-sdk-typescript\/\d/);
+      }
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("model helper records GenAI request attributes, message content and validated usage", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "model-helper",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan("request", async () => {
+        await hue.model("synthetic-model", { provider: "synthetic" }, async (span) => {
+          span.setInput([{ role: "user", content: "hi" }]);
+          span.setOutput([{ role: "assistant", content: "hello" }]);
+          span.setUsage({ inputTokens: 3, outputTokens: 2 });
+          // Invalid counts are omitted and counted, never thrown into application code.
+          span.setUsage({ inputTokens: -1 });
+        });
+      });
+      // The counted omission fails a strict flush by contract; the safe path reports it.
+      const result = await hue.flushSafe();
+      expect(result.ok).toBe(false);
+      expect(result.report.instrumentationFailures).toBe(1);
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const root = spans.find((span) => span.name === "request")!;
+      const model = spans.find((span) => span.name === "chat synthetic-model")!;
+      expect(model.parentSpanId).toBe(root.spanId);
+      expect(attr(model, "gen_ai.operation.name")?.stringValue).toBe("chat");
+      expect(attr(model, "gen_ai.request.model")?.stringValue).toBe("synthetic-model");
+      expect(attr(model, "gen_ai.provider.name")?.stringValue).toBe("synthetic");
+      expect(JSON.parse(attr(model, "gen_ai.input.messages")!.stringValue!)).toEqual([
+        { role: "user", content: "hi" },
+      ]);
+      expect(JSON.parse(attr(model, "gen_ai.output.messages")!.stringValue!)).toEqual([
+        { role: "assistant", content: "hello" },
+      ]);
+      expect(attr(model, "gen_ai.usage.input_tokens")?.intValue).toBe("3");
+      expect(attr(model, "gen_ai.usage.output_tokens")?.intValue).toBe("2");
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("inject and extract carry W3C trace context without baggage or credentials", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "propagation",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      const carrier: Record<string, string> = {};
+      let producerSpanId = "";
+      await hue.withSpan("producer", (span) => {
+        producerSpanId = span.spanId;
+        hue.inject(carrier);
+      });
+      expect(Object.keys(carrier)).toEqual(["traceparent"]);
+      expect(carrier.traceparent).toContain(producerSpanId);
+      expect(JSON.stringify(carrier)).not.toContain(apiKey);
+      const parentContext = hue.extract(carrier);
+      await hue.withSpan("consumer", () => undefined, { parentContext });
+      await hue.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const producer = spans.find((span) => span.name === "producer")!;
+      const consumer = spans.find((span) => span.name === "consumer")!;
+      // Wire identifiers are base64; the helper exposes hex, which the carrier must contain.
+      expect(Buffer.from(producer.spanId, "base64").toString("hex")).toBe(producerSpanId);
+      expect(consumer.parentSpanId).toBe(producer.spanId);
+      expect(consumer.traceId).toBe(producer.traceId);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test.each([true, false])(
+    "export strips every recognized content prefix from borrowed-provider spans (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const transport = createHueTransport({
+        apiKey,
+        serviceName: "content-prefixes",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+      const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+      const hue = createHue({ transport, tracerProvider, loggerProvider });
+      try {
+        const span = tracerProvider.getTracer("third-party").startSpan("external");
+        for (const prefix of contentPrefixes) {
+          span.setAttribute(prefix, "private-value");
+          span.setAttribute(`${prefix}.0.content`, "private-value");
+        }
+        span.setAttribute("gen_ai.request.model", "synthetic-model");
+        span.addEvent("gen_ai.user.message", { content: "private-value" });
+        span.end();
+        await hue.flush();
+        const [record] = endpoint.requests.flatMap((request) => request.records);
+        const keys = (record.attributes ?? []).map((attribute) => attribute.key);
+        const content = keys.filter((key) =>
+          contentPrefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}.`)),
+        );
+        expect(content).toHaveLength(captureContent ? contentPrefixes.length * 2 : 0);
+        expect(keys).toContain("gen_ai.request.model");
+        expect((record.events ?? []).some((event) => event.name === "gen_ai.user.message")).toBe(
+          captureContent,
+        );
+        expect(endpoint.requests.some((request) => request.raw.includes("private-value"))).toBe(
+          captureContent,
+        );
+      } finally {
+        await hue.shutdown();
+        await tracerProvider.shutdown();
+        await loggerProvider.shutdown();
+        await transport.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
   test.each([
     ["client", "traces"],
     ["transport", "traces"],
@@ -1330,5 +1492,32 @@ describe("Queued telemetry snapshots", () => {
       await transport.shutdown();
       endpoint.server.stop(true);
     }
+  });
+});
+
+describe("model() metadata validation", () => {
+  test("a disabled client runs the callback and records no instrumentation failure", async () => {
+    const hue = createHue({ enabled: false, captureContent: false });
+    const result = await hue.model("", { provider: "", operation: " " }, async (span) => {
+      span.setInput({ messages: [] });
+      span.setUsage({ inputTokens: -1 });
+      return "ok";
+    });
+    expect(result).toBe("ok");
+    expect(hue.transport.getReport().instrumentationFailures).toBe(0);
+    expect((await hue.flushSafe()).ok).toBe(true);
+    await hue.shutdownSafe();
+  });
+
+  test("an active client still counts invalid metadata", async () => {
+    const hue = createHue({
+      apiKey: "hue_test_key",
+      serviceName: "model-metadata",
+      captureContent: false,
+      baseUrl: "http://127.0.0.1:9",
+    });
+    await hue.model("", { provider: "synthetic" }, async () => "ok");
+    expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+    await hue.shutdownSafe({ timeoutMillis: 200 });
   });
 });

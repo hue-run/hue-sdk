@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.8"
+  version: "0.1.9"
 ---
 
 # Hue tracing
@@ -22,7 +22,7 @@ Read the application's repository instructions and inspect its runtime, dependen
 
 Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. Receipt helpers require TypeScript `0.1.3` or Python `0.1.1`; check package availability and release notes before using them. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
 
-**Existing AI SDK 6:** Hue 0.1.5 core can coexist with AI SDK 6, but the `hueTelemetry` adapter remains AI SDK 7 only. Keep the existing instrumentation/provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade the app merely to add tracing.
+**Existing AI SDK 6:** Hue core coexists with AI SDK 6. Pass `hueExperimentalTelemetry(hue)` from `@hue-run/sdk` as `experimental_telemetry` (requires TypeScript 0.1.6); `hueTelemetry` remains AI SDK 7 only. Alternatively keep the existing instrumentation/provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade the app merely to add tracing.
 
 ## Install and configure
 
@@ -52,9 +52,9 @@ SDK constructors do not automatically read environment variables. For another Hu
 
 Use metadata-only capture unless the user or an existing approved application policy authorizes content capture. Explicitly choose `captureContent` / `capture_content`, preserve redaction and credential filtering, and explain what is sent. When approved, capture supported prompts/messages, responses and tool inputs/outputs alongside available model/provider identifiers, usage, timing, errors and existing correlation. Do not invent missing fields.
 
-Python's setting covers Hue helpers, not third-party instrumentation; configure the chosen instrumentor's own input/output capture controls to match the approved policy. Direct OTLP also requires explicit instrumentor capture settings. Python helpers record exception type and status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
+Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry and Vercel content attributes at export when capture is disabled (Python requires 0.1.4); still configure the chosen instrumentor's own input/output capture controls to match the approved policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Python helpers record exception type and status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
 
-Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()` and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument one real request path with model/tool children, preserve propagated parent context, and reuse the application's session identifier when available. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent.
+Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()`, `model()` (requires 0.1.6) and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument one real request path with model/tool children, preserve propagated parent context, and reuse the application's session identifier when available. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent.
 
 For AI SDK 7, `hueTelemetry()` from `@hue-run/sdk/ai-sdk` provides per-call integrations. Those replace the global integrations for that call. If existing telemetry must keep receiving the call, follow the existing-provider guide and attach Hue's transport to that provider instead. Direct OTLP users keep their framework instrumentation without adding Hue wrappers.
 
@@ -89,7 +89,7 @@ Summarize the installed version, changed files, configuration names, capture pol
 | `flush()` throws `HueExportError` with `rejected` issues or HTTP 401/403 | Not a project service key, or a `baseUrl` that includes a path | Use a service key from **Settings → Integrations & API keys**; `baseUrl` is an origin only |
 | Receipt reports missing expected spans | The owning provider was not flushed, or the stream had not finished | Await stream completion, flush the borrowed provider, then verify |
 | Receipt `fields.input` / `fields.output` are false | `captureContent` / `capture_content` is `false` | Expected in metadata-only mode; do not require those fields |
-| `hueTelemetry` throws "requires ai@" | AI SDK 6 in the application | Keep the app's telemetry provider and attach Hue's transport, or use a standard OTLP exporter |
+| `hueTelemetry` throws "requires ai@" | AI SDK 6 in the application | Pass `hueExperimentalTelemetry(hue)` as `experimental_telemetry` (0.1.6+), or attach Hue's transport to the app's provider |
 | `droppedSpans` / dropped-record counters grow | Queue budget reached during a collector outage | Expected loss under the bounded-queue contract; check reachability and the queue budget |
 
 See [troubleshooting](https://docs.hue.run/guides/troubleshooting) for delivery diagnostics.

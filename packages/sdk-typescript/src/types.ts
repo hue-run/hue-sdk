@@ -1,4 +1,11 @@
-import type { Attributes, Context, Span, SpanKind, TracerProvider } from "@opentelemetry/api";
+import type {
+  Attributes,
+  Context,
+  Span,
+  SpanKind,
+  Tracer,
+  TracerProvider,
+} from "@opentelemetry/api";
 import type { LoggerProvider } from "@opentelemetry/api-logs";
 
 export type JsonValue =
@@ -72,6 +79,30 @@ export interface SpanOptions {
   parentContext?: Context;
 }
 
+export interface TokenUsage {
+  /** Provider-reported prompt tokens (`gen_ai.usage.input_tokens`). */
+  inputTokens?: number;
+  /** Provider-reported completion tokens (`gen_ai.usage.output_tokens`). */
+  outputTokens?: number;
+}
+
+export interface ModelOptions {
+  /** Provider identifier recorded as `gen_ai.provider.name`, for example "openai". */
+  provider: string;
+  /** Recorded as `gen_ai.operation.name`; defaults to "chat". */
+  operation?: string;
+  /** Span name; defaults to "{operation} {model}". */
+  name?: string;
+}
+
+/** Value for AI SDK 6's `experimental_telemetry` option; AI SDK 7 uses `hueTelemetry` instead. */
+export interface ExperimentalTelemetrySettings {
+  isEnabled: boolean;
+  recordInputs: boolean;
+  recordOutputs: boolean;
+  tracer: Tracer;
+}
+
 export interface HueSpan {
   span: Span;
   context: Context;
@@ -79,6 +110,8 @@ export interface HueSpan {
   spanId: string;
   setInput(value: JsonValue): void;
   setOutput(value: JsonValue): void;
+  /** Records nonnegative integer token counts; invalid values are omitted and counted as instrumentation failures. */
+  setUsage(usage: TokenUsage): void;
 }
 
 export type FlushableTracerProvider = TracerProvider & { forceFlush(): Promise<void> };

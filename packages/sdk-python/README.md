@@ -44,7 +44,7 @@ The SDK uses `https://app.hue.run` by default. Set `base_url` only for a differe
 
 `capture_content` has no default. `False` makes `set_input`, `set_output` and inference-log bodies omit content before it reaches an OTel queue. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
-This setting is **not a blanket PII filter**. Custom attributes, span names, session/user identifiers, resource attributes, third-party instrumentors and other exporters remain under your control. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
+When capture is disabled, Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes, legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
 
 Use `redactor=lambda field, value: ...` to transform content in supported helpers. It runs synchronously before serialization and export. Return a redacted JSON value; failures omit the field and increment `export_status.instrumentation_failures` without changing application behavior. It does not inspect arbitrary OTel attributes or logs:
 
@@ -76,9 +76,13 @@ For model helpers, pass the message representation produced by your integration.
 
 ## Existing instrumentation
 
-Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; a borrowed tracer provider and its other processors stay usable. Finish traced work before shutting Hue down: spans ending or external records emitted afterward increment Hue's dropped-record counters, including emissions through a borrowed provider. New Hue helpers after shutdown are no-ops. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
+Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter. Hue's processor then exports every span that ends on that provider, the same default as other OpenTelemetry exporters; wrap the processor if only part of the provider's spans should reach Hue. Session/user identifiers from `hue.context()` are stamped on Hue helper spans only. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; a borrowed tracer provider and its other processors stay usable. Finish traced work before shutting Hue down: spans ending or external records emitted afterward increment Hue's dropped-record counters, including emissions through a borrowed provider. New Hue helpers after shutdown are no-ops. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
 
-An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. They can emit content even when Hue helper capture is disabled. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). See the [Python integration guide](https://docs.hue.run/sdks/python) for application setup.
+An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. Hue's export path strips their recognized content attributes when `capture_content` is `False`, but configure their own capture controls as well: unrecognized custom keys pass through, and the instrumentor may still send content to other exporters. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). See the [Python integration guide](https://docs.hue.run/sdks/python) for application setup.
+
+## Local development without a Hue account
+
+Hue speaks standard OTLP, so any local collector works. Point `base_url` at a loopback receiver that accepts `/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` (for example an OpenTelemetry Collector `otlp` receiver with `http.traces_url_path` and `logs_url_path` set to those paths, forwarding to Jaeger or the debug exporter) and pass any placeholder `api_key`; HTTP is allowed for loopback origins. `validate_project()` and `verify_trace()` are Hue-only diagnostics and are not available against a generic collector.
 
 ## Export behavior and limits
 
@@ -166,9 +170,13 @@ def target(invocation):
 handler = ManagedTargetHandler(
     machine_credential=os.environ["HUE_MANAGED_TARGET_SECRET"],
     target=target,
+    tracer=hue.tracer,  # Required with a Hue-owned client: Hue never sets a global tracer.
     flush_telemetry=hue.force_flush,  # Existing client; False keeps telemetry pending.
 )
 ```
+
+Without `tracer`, the handler falls back to the global OpenTelemetry tracer, its span is not
+recorded and every invocation returns `uncertain`.
 
 Your POST route calls `handler.handle(raw_body_bytes, request_headers)` and returns
 its JSON body, status code and headers. Limit request bodies to 1 MiB; use

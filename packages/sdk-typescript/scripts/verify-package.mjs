@@ -99,12 +99,52 @@ run(
     `
   import { strict as assert } from "node:assert";
   import { createRequire } from "node:module";
-  import { createHue } from "@hue-run/sdk";
+  import { createHue, createHueTransport, hueExperimentalTelemetry } from "@hue-run/sdk";
+  import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
+  import { LoggerProvider } from "@opentelemetry/sdk-logs";
+  import { generateText } from "ai";
+  import { MockLanguageModelV3 } from "ai/test";
   const require = createRequire(import.meta.url);
   assert.equal(require("ai/package.json").version, "6.0.116");
   const hue = createHue({ enabled: false, captureContent: false });
   assert.equal(await hue.withSpan("core", () => 42), 42);
   await hue.shutdownSafe();
+  // AI SDK 6 per-call telemetry: spans come from Hue's tracer, parent under withSpan, and
+  // metadata-only capture keeps the prompt out of the recorded attributes.
+  const exporter = new InMemorySpanExporter();
+  const transport = createHueTransport({
+    apiKey: "synthetic-key", serviceName: "ai6", captureContent: false, baseUrl: "http://127.0.0.1:9",
+  });
+  const tracerProvider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+  const traced = createHue({ transport, tracerProvider, loggerProvider: new LoggerProvider({ processors: [] }) });
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [{ type: "text", text: "Hello" }],
+      finishReason: { unified: "stop", raw: "stop" },
+      usage: {
+        inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 1, text: 1, reasoning: 0 },
+      },
+      warnings: [],
+    }),
+  });
+  let rootSpanId = "";
+  await traced.withSpan("request", async (span) => {
+    rootSpanId = span.spanId;
+    const result = await generateText({
+      model, prompt: "private prompt", experimental_telemetry: hueExperimentalTelemetry(traced),
+    });
+    assert.equal(result.text, "Hello");
+  });
+  await tracerProvider.forceFlush();
+  const aiSpans = exporter.getFinishedSpans().filter((span) => span.name.startsWith("ai."));
+  assert.ok(aiSpans.length >= 2, "AI SDK 6 created spans through Hue's tracer");
+  const outer = aiSpans.find((span) => span.name === "ai.generateText");
+  assert.equal(outer.parentSpanContext?.spanId, rootSpanId, "AI SDK spans parent under withSpan");
+  assert.equal(outer.attributes["ai.prompt"], undefined, "metadata-only capture omits prompts");
+  await traced.shutdownSafe();
+  await tracerProvider.shutdown();
+  await transport.shutdown();
 `,
   ],
   ai6,
