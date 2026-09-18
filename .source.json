@@ -1,7 +1,0 @@
-{
-  "repository": "hue-run/fern",
-  "commit": "94306443784db784df126c70a161229741b97306",
-  "typescriptVersion": "0.1.1",
-  "pythonVersion": "0.1.0.dev0",
-  "note": "Initial source snapshot; subsequent SDK changes are reviewed in this repository."
-}

@@ -26,7 +26,9 @@
 
 OpenTelemetry tracing and local evaluation workflows for AI applications.
 
-[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Contributing](./CONTRIBUTING.md)
+_Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
+
+[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Versioning](./VERSIONING.md) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
 [![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml)
 
@@ -47,7 +49,7 @@ Install it in your application directory with the [skills CLI](https://github.co
 npx skills add hue-run/hue-sdk --skill hue
 ```
 
-The repository is private, so your Git or GitHub CLI authentication must have access. The CLI lets you choose your agent and installs into the current project; no Hue API key is needed to install the skill. The repository command uses the default branch. To try an unmerged skill change, install from that branch's local checkout instead:
+The CLI lets you choose your agent and installs into the current project; no Hue API key is needed to install the skill. The repository command uses the default branch. To try an unmerged skill change, install from that branch's local checkout instead:
 
 ```sh
 npx skills add /path/to/hue-sdk --skill hue
@@ -137,11 +139,11 @@ For Python, use the installation instructions above and follow the [complete Pyt
 | [Python agent](./examples/python-agent) | Public wheel imports, model/tool spans, correlated logs and optional instrumented OpenAI calls. |
 | [Python evaluation](./examples/python-evaluation) | Frozen datasets, local targets/scorers, resumable uploads and historical rescoring. |
 
-For applications that already use OpenTelemetry, such as the separate [X Research Docs chatbot](https://github.com/hue-run/tester-agent-xdotcom-docs), follow the [existing-provider guide](https://docs.hue.run/integrations/opentelemetry), including its Next.js streaming recipe.
+For applications that already use OpenTelemetry, follow the [existing-provider guide](https://docs.hue.run/integrations/opentelemetry), including its Next.js streaming recipe.
 
 ## Build and verify from a standalone clone
 
-Use Node 24, Bun 1.3.9 and uv 0.12.5. No Fern checkout, app database or management credentials are needed.
+Use Node 24, Bun 1.3.9 and uv 0.12.5. No Hue application checkout, database or management credentials are needed.
 
 ```bash
 node packages/sdk-typescript/scripts/verify-package.mjs
@@ -171,10 +173,8 @@ After a real request and its exporter flush, `verifyTrace()` / `verify_trace()` 
 
 ## Repository history
 
-The initial SDK snapshot is recorded in [.source.json](./.source.json). This repository contains only SDKs and standalone examples, with no application source or inherited Fern Git history. Keep SDK changes reviewed here; updating any retained Fern copy is an explicit synchronization step.
-
-Source repository access and public package distribution are managed separately.
+The SDKs were extracted from Hue's application monorepo at TypeScript 0.1.1 / Python 0.1.0.dev0, the pre-publication pilot builds. This repository contains only the SDKs, standalone examples and the coding-agent skill, with no application source. All SDK changes are reviewed here.
 
 ## License
 
-The SDK packages are distributed under the [MIT license](./LICENSE).
+This repository and the SDK packages are distributed under the [MIT license](./LICENSE). Contributions are accepted under the same license; see [Contributing](./CONTRIBUTING.md).

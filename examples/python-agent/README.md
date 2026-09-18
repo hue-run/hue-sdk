@@ -1,6 +1,6 @@
 # Python reference agent
 
-This small application imports only the installed `hue_sdk` public package. It produces an explicitly synthetic streamed model response, a tool execution and a handled tool failure. It uses both OTLP traces and correlated inference logs. It does not import Fern internals or access a database.
+This small application imports only the installed `hue_sdk` public package. It produces an explicitly synthetic streamed model response, a tool execution and a handled tool failure. It uses both OTLP traces and correlated inference logs. It does not import Hue application internals or access a database.
 
 Build/install the wheel using [SDK instructions](../../packages/sdk-python/README.md), then set `HUE_BASE_URL` and `HUE_API_KEY` in your environment without committing their values:
 
