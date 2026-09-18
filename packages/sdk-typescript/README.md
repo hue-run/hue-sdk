@@ -6,13 +6,11 @@
 
 [![npm](https://img.shields.io/npm/v/%40hue-run%2Fsdk?label=%40hue-run%2Fsdk)](https://www.npmjs.com/package/@hue-run/sdk) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
-> This README follows `main`, which is ahead of the registries: npm serves [@hue-run/sdk 0.1.5](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.5) (Node 24 or newer) and PyPI serves [hue-run 0.1.3](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.3). Paragraphs marked "from 0.2.0" describe what ships in 0.2.0; the [changelog](https://github.com/hue-run/hue-sdk/blob/main/CHANGELOG.md) lists every pending change.
-
 A client for Hue's standard OTLP HTTP endpoints on Node.js 22 or 24 and Bun 1.4.2. It uses the
 OpenTelemetry JavaScript SDK and official OTLP protobuf exporter components for
 traces and correlated logs. The package is named `@hue-run/sdk`.
 
-[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run)
+[Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run)
 
 _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
 
@@ -78,7 +76,7 @@ and `serviceVersion` taking precedence over same-named keys.
 
 ## Model spans without a framework adapter
 
-Available from 0.2.0. When you call a provider SDK directly, `hue.model()` creates the GenAI client span for the call.
+When you call a provider SDK directly, `hue.model()` creates the GenAI client span for the call.
 Inside it, `setInput` and `setOutput` record `gen_ai.input.messages` / `gen_ai.output.messages`
 when `captureContent` is true. Those attributes carry the OpenTelemetry GenAI message shape
 (`{ role, parts: [{ type: "text", content }] }`, with `finish_reason` on output messages) defined
@@ -123,7 +121,8 @@ options come after the callback and also accept `name`, `sessionId`, `userId`, `
 `gen_ai.input.messages`) and `parentContext`. `setUsage` records
 nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
 counted as instrumentation failures. Unknown usage stays absent. `hue.tool(name, input, execute)`
-creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result. Content
+creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result; an optional
+fourth argument `{ callId }` records the provider's tool call id as `gen_ai.tool.call.id`. Content
 helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`,
 `SpanOptions.input`) accept any value and encode plain JSON data (`JsonValue`) at runtime; a value
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
@@ -131,7 +130,7 @@ while the callback result is returned unchanged.
 
 ## Vercel AI SDK 6
 
-Available from 0.2.0. AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
+AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
 `hueExperimentalTelemetry(hue)` from the core entry point; the generated spans parent under
 `withSpan`, inherit session/user identifiers, and record prompts and responses only when
 `captureContent` is true:
@@ -203,7 +202,7 @@ normal OTel setup; Hue does not silently replace it.
 `captureContent: false` disables manual input/output/messages/tool content and
 removes recognized GenAI, Vercel, OpenInference and OpenLLMetry content attributes,
 legacy GenAI content events, log bodies, status messages and exception text before
-export. From 0.2.0 the exported `contentPrefixes` array lists the attribute keys (and their dotted
+export. The exported `contentPrefixes` array lists the attribute keys (and their dotted
 children) that are removed. Model/provider/token metadata remains available. Generic custom attribute
 names cannot be classified automatically; use them deliberately.
 
@@ -258,7 +257,7 @@ The application's providers own the resource in this mode, so `resourceAttribute
 transport options is ignored and reported as a `warning` issue; set `deployment.environment.name`
 and similar attributes on your own providers.
 
-For external parent context pass `parentContext` to `withSpan`. Across processes, from 0.2.0 use
+For external parent context pass `parentContext` to `withSpan`. Across processes, use
 `hue.inject(carrier)` inside the producing span and `hue.extract(carrier)` in the worker; both
 speak W3C `traceparent` only and never include the API key or baggage. Hue registers no global
 propagator, so `propagation.inject()` from `@opentelemetry/api` is a no-op unless your
@@ -366,11 +365,11 @@ conditions only. Use Hue's UI to inspect captured values and redaction.
 
 ## Dependencies
 
-From 0.2.0 the tracing core depends only on official `@opentelemetry/*` packages (0.1.5 installs `ajv`
-as a regular dependency). The optional `@hue-run/sdk/evals` entry point uses `zod` for its bounded
-runtime contracts. Install that peer when you use evaluations or simulations. JSON Schema scoring
-also uses `ajv`, loaded inside a worker only when `builtins.jsonSchema` scores a case; without it that
-scorer reports `SchemaValidatorUnavailable`.
+The tracing core depends only on official `@opentelemetry/*` packages. The optional
+`@hue-run/sdk/evals` entry point uses `zod` for its bounded runtime contracts; install that peer
+when you use evaluations or simulations. JSON Schema scoring also uses `ajv`, an optional peer
+loaded inside a worker only when `builtins.jsonSchema` scores a case; without it that scorer
+reports `SchemaValidatorUnavailable`. Install it when you use that scorer:
 
 ```bash
 npm install zod
@@ -394,7 +393,7 @@ HTTP exporter suite against that installed package, and installs/builds the
 standalone reference chatbot. It prints the artifact paths. No package is
 published. The chatbot README describes running that external installation.
 
-# Local evaluation workflows
+## Local evaluation workflows
 
 The optional `@hue-run/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.
 

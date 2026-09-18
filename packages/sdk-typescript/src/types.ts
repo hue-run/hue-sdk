@@ -37,8 +37,9 @@ export interface SharedHueOptions {
   /**
    * Additional resource attributes for an owned client, for example `deployment.environment.name`
    * or `service.namespace`. `service.name` and `service.version` from `serviceName` and
-   * `serviceVersion` take precedence over same-named keys, as in the OpenTelemetry NodeSDK. Ignored with a warning issue in attach mode, where the application
-   * owns the providers and their resource.
+   * `serviceVersion` take precedence over same-named keys, as in the OpenTelemetry NodeSDK.
+   * Ignored with a warning issue in attach mode, where the application owns the providers and
+   * their resource.
    */
   resourceAttributes?: Attributes;
   /**

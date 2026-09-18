@@ -264,6 +264,38 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("tool records an optional call id and counts a blank one as an instrumentation failure", async () => {
+    const endpoint = receiver();
+    // The id is metadata, so it must survive metadata-only mode.
+    const hue = createHue({
+      apiKey,
+      serviceName: "tool-call-ids",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      expect(await hue.tool("lookup", { q: 1 }, () => "found", { callId: "call_1" })).toBe("found");
+      expect(await hue.tool("plain", null, () => "ok")).toBe("ok");
+      expect(await hue.tool("blank", null, () => "ran", { callId: "" })).toBe("ran");
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(1);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const lookup = spans.find((span) => span.name === "execute_tool lookup")!;
+      expect(attr(lookup, "gen_ai.operation.name")?.stringValue).toBe("execute_tool");
+      expect(attr(lookup, "gen_ai.tool.name")?.stringValue).toBe("lookup");
+      expect(attr(lookup, "gen_ai.tool.call.id")?.stringValue).toBe("call_1");
+      expect(attr(lookup, "gen_ai.tool.call.arguments")).toBeUndefined();
+      for (const name of ["execute_tool plain", "execute_tool blank"]) {
+        const span = spans.find((record) => record.name === name)!;
+        expect(attr(span, "gen_ai.tool.call.id")).toBeUndefined();
+      }
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({
