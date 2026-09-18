@@ -33,7 +33,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -51,19 +51,23 @@ jobs:
               metadata = tomllib.loads(pathlib.Path('packages/sdk-python/pyproject.toml').read_text())['project']
           assert metadata['version'] == version, 'Version must match the committed package'
           PY
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - name: Require a changelog entry for the requested version
+        env:
+          RELEASE_LANGUAGE: ${{ inputs.language }}
+        run: python3 scripts/changelog.py section "$RELEASE_LANGUAGE" "$RELEASE_VERSION"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: inputs.language == 'typescript'
         with:
           node-version: "24"
           package-manager-cache: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: inputs.language == 'typescript'
         with:
-          bun-version: 1.3.9
+          bun-version-file: .bun-version
       - name: Build and test the exact TypeScript archive
         if: inputs.language == 'typescript'
         run: node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifacts
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         if: inputs.language == 'python'
         with:
           version: "0.12.5"
@@ -76,13 +80,15 @@ jobs:
           uv sync --frozen --all-groups
           uv run --frozen --all-groups pytest
           uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
+          uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
+          uv run --frozen --all-groups mypy
           uv run --frozen --all-groups python -m build --no-isolation --outdir ../../.artifacts
           uvx --from twine==7.0.0 twine check --strict ../../.artifacts/*
       - name: Inspect package inventory and record checksums
         env:
           RELEASE_LANGUAGE: ${{ inputs.language }}
         run: python3 scripts/release-artifacts.py inspect "$RELEASE_LANGUAGE" "$RELEASE_VERSION" .artifacts
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ inputs.language }}-${{ github.sha }}
           # The staging directory is hidden; upload only its inspected outputs.
@@ -106,14 +112,14 @@ jobs:
       matrix:
         python: ["3.10", "3.14"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "0.12.5"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-python-${{ github.sha }}
           path: .artifacts
@@ -135,16 +141,17 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           package-manager-cache: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-typescript-${{ github.sha }}
           path: .artifacts
       - run: cd .artifacts && sha256sum --check SHA256SUMS
-      - run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; the version is exact-pinned and scripts are disabled.
+      - run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org # zizmor: ignore[adhoc-packages]
       # OIDC trusted publishing is configured on the npm package. npm generates
       # provenance attestations automatically because the source repository is public.
       - run: npm publish ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz" --access public --ignore-scripts --registry=https://registry.npmjs.org
@@ -159,7 +166,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-python-${{ github.sha }}
           path: .artifacts
@@ -178,18 +185,18 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           package-manager-cache: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.3.9
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+          bun-version-file: .bun-version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-typescript-${{ github.sha }}
           path: .artifacts
@@ -209,14 +216,14 @@ jobs:
       matrix:
         python: ["3.10", "3.14"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "0.12.5"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-python-${{ github.sha }}
           path: .artifacts
@@ -224,3 +231,37 @@ jobs:
       - env:
           PYTHON_VERSION: ${{ matrix.python }}
         run: python3 scripts/verify-python-release.py --registry-version "$RELEASE_VERSION" --python "$PYTHON_VERSION"
+
+  github-release:
+    # Runs after whichever registry acceptance job applies to the selected language.
+    if: ${{ !cancelled() && inputs.publish && (needs.accept-npm.result == 'success' || needs.accept-pypi.result == 'success') }}
+    needs: [prepare, accept-npm, accept-pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ inputs.language }}-${{ github.sha }}
+          path: .artifacts
+      - run: cd .artifacts && sha256sum --check SHA256SUMS
+      - name: Create or update the GitHub release from CHANGELOG.md and the tested artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_LANGUAGE: ${{ inputs.language }}
+        run: |
+          tag="${RELEASE_LANGUAGE}-v${RELEASE_VERSION}"
+          if [ "$RELEASE_LANGUAGE" = typescript ]; then title="TypeScript SDK ${RELEASE_VERSION}"; else title="Python SDK ${RELEASE_VERSION}"; fi
+          python3 scripts/changelog.py notes "$RELEASE_LANGUAGE" "$RELEASE_VERSION" "$GITHUB_SHA" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" .artifacts/SHA256SUMS > release-notes.md
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file release-notes.md
+            gh release upload "$tag" .artifacts/* --clobber
+          else
+            gh release create "$tag" .artifacts/* --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md
+          fi

@@ -10,7 +10,7 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 export type Signal = "traces" | "logs";
 
-interface SharedHueOptions {
+export interface SharedHueOptions {
   captureContent: boolean;
   baseUrl?: string;
   serviceVersion?: string;

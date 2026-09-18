@@ -90,10 +90,11 @@ def _parse_receipt(
     if not isinstance(fields, dict) or any(type(fields.get(key)) is not bool for key in _FIELDS):
         raise _invalid_response()
     matched, missing = data.get("matchedSpanIds"), data.get("missingSpanIds")
+    if not isinstance(matched, list) or not isinstance(missing, list):
+        raise _invalid_response()
     for ids in (matched, missing):
         if (
-            not isinstance(ids, list)
-            or len(ids) > 100
+            len(ids) > 100
             or any(not _valid_id(value, 16) for value in ids)
             or len(set(ids)) != len(ids)
         ):

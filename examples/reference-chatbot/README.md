@@ -6,22 +6,19 @@ browser receives streamed model text and a trace ID; the server exports standard
 OTLP traces and correlated message logs. It imports only the packed public SDK.
 It has no Hue application or database imports.
 
-## Build and install outside the repository
+## Install and build
 
-Run the SDK package verifier from the Hue repository with Node 24 and Bun 1.3.9:
+From this directory, install the published SDK and build:
 
 ```sh
-node packages/sdk-typescript/scripts/verify-package.mjs
+bun install
+bun run build
 ```
 
-It prints `tarball`, `consumer` and `chatbot` absolute paths. The chatbot directory
-is a complete, installed external application. Its generated package manifest
-contains the actual local `@hue-run/sdk` tarball dependency; the source manifest omits
-that unpublished dependency so it cannot accidentally resolve an unrelated
-registry package. The verifier never publishes anything.
-
-For a separate checkout, run `bun add /absolute/path/to/hue-run-sdk-0.1.3.tgz` in this
-example directory, then `bun install` and `bun run build`.
+`bun install` resolves `@hue-run/sdk` from npm. To test an unpublished archive instead, run
+`node packages/sdk-typescript/scripts/verify-package.mjs` from the repository root: it copies this
+example, points it at the freshly packed tarball, builds it and runs the acceptance script, then
+prints the `chatbot` directory it created. It never publishes anything.
 
 ## Run with a synthetic provider
 
@@ -30,14 +27,13 @@ using an ignored `.env` file or your secret manager:
 
 ```sh
 HUE_API_KEY=<project service key>
-HUE_BASE_URL=http://localhost:3000
 HUE_CAPTURE_CONTENT=false
 HUE_CHAT_MODE=synthetic
 PORT=3401
 ```
 
-`HUE_CAPTURE_CONTENT` and `HUE_CHAT_MODE` are required explicit decisions. Use the
-actual Hue application's address for `HUE_BASE_URL`; omitting it uses
+`HUE_CAPTURE_CONTENT` and `HUE_CHAT_MODE` are required explicit decisions. Set
+`HUE_BASE_URL` only for a different Hue deployment; omitting it uses
 `https://app.hue.run`. Start with `node --env-file=.env dist/server.js` or provide the
 variables in your process environment and run `node dist/server.js`. Open the
 printed loopback URL. The app verifies the service key's project at startup.

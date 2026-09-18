@@ -12,42 +12,120 @@ concurrency:
 jobs:
   release-tools:
     name: Release artifact boundaries
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
   typescript:
     name: TypeScript installed package
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           package-manager-cache: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.3.9
+          bun-version-file: .bun-version
       - run: node packages/sdk-typescript/scripts/verify-package.mjs
+  typescript-node-matrix:
+    name: TypeScript installed package (Node ${{ matrix.node }})
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "26"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - run: node packages/sdk-typescript/scripts/verify-package.mjs
+  typescript-lint:
+    name: TypeScript lint and format
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      # Root tooling (eslint, prettier) plus the SDK's own dependencies for type-checked lint.
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
+        working-directory: packages/sdk-typescript
+      - run: bun run lint
+      - run: bun run format:check
+  docs:
+    name: Documentation checks
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.12.5"
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
+        working-directory: packages/sdk-typescript
+      - name: TypeScript API reference builds without warnings
+        run: bun run docs:typescript
+      - name: Python API reference builds
+        working-directory: packages/sdk-python
+        env:
+          UV_PYTHON: "3.14"
+        run: |
+          uv sync --frozen --all-groups
+          uv run --frozen --all-groups pdoc hue_sdk -o ../../docs/reference/python
+      - name: Tracked Markdown names only current package versions
+        run: python3 scripts/check-doc-versions.py
+      - name: Markdown links resolve (advisory)
+        continue-on-error: true
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --no-progress --include-fragments --exclude-path node_modules --exclude-path docs/reference "./**/*.md"
+          fail: true
+      # The hosted docs mirror COMPATIBILITY.md, the skill and the public API surface. These
+      # checks compare against the live site and stay advisory until the site is aligned.
+      - name: Docs site mirrors the repository (advisory)
+        continue-on-error: true
+        run: |
+          python3 scripts/check-docs-drift.py
+          python3 scripts/check-reference-coverage.py
   python:
     name: Python ${{ matrix.python }} source and installed wheel
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         python: ["3.10", "3.14"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "0.12.5"
       - name: Frozen install, behavioral checks and package build
@@ -58,4 +136,19 @@ jobs:
           uv sync --frozen --all-groups
           uv run --frozen --all-groups pytest
           uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
+          uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
+          uv run --frozen --all-groups mypy
           uv run --frozen --all-groups python -m build --no-isolation
+  checks-passed:
+    name: All checks passed
+    if: always()
+    needs: [release-tools, typescript, typescript-node-matrix, typescript-lint, python, docs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail if any required job did not succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          python3 -c 'import json, os, sys; r = json.loads(os.environ["RESULTS"]); bad = [k for k, v in r.items() if v["result"] != "success"]; sys.exit(f"failed: {bad}" if bad else 0)'

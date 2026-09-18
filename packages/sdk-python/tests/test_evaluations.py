@@ -723,7 +723,7 @@ def test_installed_wheel_runs_evaluations_and_schema_subprocess(evaluation_recei
         subprocess.run(command, check=True, capture_output=True)
     python = consumer / "bin" / "python"
     subprocess.run(
-        ["uv", "pip", "install", "--python", str(python), str(next(dist.glob("*.whl")))],
+        ["uv", "pip", "install", "--python", str(python), f"{next(dist.glob('*.whl'))}[evals]"],
         check=True,
         capture_output=True,
     )

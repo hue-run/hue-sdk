@@ -76,7 +76,13 @@ def test_explicit_origin_overrides_cloud_and_preserves_positional_calls(receiver
 @pytest.mark.parametrize("client_class", [Hue, EvaluationClient])
 @pytest.mark.parametrize(
     "base_url",
-    [None, "", "http://example.test", "https://example.test/api/v1", "https://example.test?key=secret"],
+    [
+        None,
+        "",
+        "http://example.test",
+        "https://example.test/api/v1",
+        "https://example.test?key=secret",
+    ],
 )
 def test_invalid_explicit_origin_does_not_fall_back_to_cloud(client_class, base_url):
     options = {"capture_content": False} if client_class is Hue else {}

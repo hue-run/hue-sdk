@@ -30,14 +30,23 @@ _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not aff
 
 [Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Versioning](./VERSIONING.md) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
-[![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml)
+[![SDK checks](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/hue-run/hue-sdk/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40hue-run%2Fsdk?label=%40hue-run%2Fsdk)](https://www.npmjs.com/package/@hue-run/sdk) [![PyPI](https://img.shields.io/pypi/v/hue-run?label=hue-run)](https://pypi.org/project/hue-run/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
+## Why Hue
+
+- **Standard OpenTelemetry, nothing proprietary.** Traces and correlated logs travel as OTLP/HTTP to documented endpoints. Any OpenTelemetry-emitting language or instrumentor works without a Hue package, and Hue never replaces your global providers.
+- **Explicit content policy.** `captureContent` / `capture_content` is a required choice. Metadata-only mode strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content fields at export time, and a redaction hook runs over the rest.
+- **Fail-open by contract.** Safe constructors, byte- and record-bounded queues, cumulative loss counters and bounded lifecycle deadlines are written down in [RELIABILITY.md](./RELIABILITY.md) and tested against the installed packages.
+- **Provable delivery.** `verifyTrace()` / `verify_trace()` confirm that a real request's spans and fields were stored, without exposing content.
+- **Small, auditable footprint.** The tracing core depends only on official OpenTelemetry packages (plus `requests` in Python); evaluation extras are opt-in. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
 
 ## Choose your SDK
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
-| Python | `hue-run`; `hue_sdk`, `hue_sdk.evals` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
+| Python | `hue-run`; `hue_sdk`, `hue_sdk.evals`, `hue_sdk.managed` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
+| Any other language | The official OpenTelemetry SDK with an OTLP/HTTP exporter | Go, Java, .NET, Rust, Ruby and others | [Existing OpenTelemetry](https://docs.hue.run/integrations/opentelemetry) |
 
 ## For coding agents
 
@@ -156,10 +165,33 @@ cd packages/sdk-python
 uv sync --frozen --all-groups --python 3.14
 uv run --frozen --all-groups --python 3.14 pytest
 uv run --frozen --all-groups --python 3.14 ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
+uv run --frozen --all-groups --python 3.14 ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
+uv run --frozen --all-groups --python 3.14 mypy
 uv run --frozen --all-groups --python 3.14 python -m build --no-isolation
 ```
 
+Lint and formatting for the TypeScript sources run from the repository root with the pinned tooling in `package.json`:
+
+```bash
+bun install --frozen-lockfile
+bun run lint
+bun run format:check
+```
+
 CI also verifies Python 3.10. [Release instructions](./RELEASING.md) describe verified archives, registry publishing and release checks.
+
+## Scope and non-goals
+
+Hue's SDKs are deliberately small. The following are design choices, not missing features:
+
+- No bundled provider auto-instrumentation and no per-framework adapters beyond the AI SDK 7 helper. Use the provider's or framework's own OpenTelemetry export (OpenInference, OpenLLMetry, native OTel) and configure its content controls; Hue recognizes those conventions.
+- No native SDKs beyond TypeScript and Python. Other languages use the official OpenTelemetry SDK pointed at Hue's OTLP endpoints.
+- No proprietary event protocol, live token streaming, attachments or feature-flag API. Spans are exported when they complete; use standard attributes and span events.
+- No browser, edge or CommonJS builds: the project service key is a server-side credential.
+- No environment-variable reading in constructors, no token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
+- The service key is write-only plus receipts. General trace browsing, feedback or score ingestion for stored traces, and a one-call evaluation entrypoint are platform decisions tracked separately.
+
+See [VERSIONING.md](./VERSIONING.md) for what may change between releases.
 
 ## Compatibility and limits
 

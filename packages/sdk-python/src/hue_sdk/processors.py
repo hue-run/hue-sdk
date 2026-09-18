@@ -28,7 +28,11 @@ from .transport import MAX_REQUEST_BYTES
 
 
 class _BoundedProcessor:
-    def __init__(self, exporter: Any, encode: Callable, max_records: int, max_bytes: int):
+    _snapshot: Callable[[Any], Any]
+
+    def __init__(
+        self, exporter: Any, encode: Callable[[Any], Any], max_records: int, max_bytes: int
+    ) -> None:
         self._pid = os.getpid()
         self._exporter = exporter
         self._encode = encode
@@ -151,7 +155,7 @@ class _BoundedProcessor:
                         return
                     self._condition.wait(timeout=0.1)
                     continue
-                batch = []
+                batch: list[Any] = []
                 batch_bytes = 0
                 while self._queue and len(batch) < 64:
                     size = self._queue[0][1]

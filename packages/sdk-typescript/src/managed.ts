@@ -448,6 +448,7 @@ function sha256(data: Uint8Array) {
   return createHash("sha256").update(data).digest("hex");
 }
 function token(value: unknown): string {
+  // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
   if (typeof value !== "string" || !value || value.length > 8192 || /[\s\u0000]/u.test(value))
     throw new TypeError("Invalid credential");
   return value;
@@ -472,6 +473,7 @@ function filename(value: unknown): string {
     typeof value !== "string" ||
     !value.trim() ||
     value.length > 255 ||
+    // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
     /[\x00-\x1f\x7f/\\]/u.test(value) ||
     value === "." ||
     value === ".."
@@ -484,6 +486,7 @@ function shortString(value: unknown, maximum = 255): string {
     typeof value !== "string" ||
     !value ||
     value.length > maximum ||
+    // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
     /[\x00-\x1f\x7f]/u.test(value)
   )
     throw new TypeError("Invalid string");
@@ -585,6 +588,7 @@ function validateResult(result: ManagedTargetResult) {
   if (total > MAX_TOTAL || primary > 1) throw new TypeError("Invalid output files");
 }
 function safeUploadUrl(value: unknown): string {
+  // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
   if (typeof value !== "string" || value.length > 8192 || /[\x00-\x20\x7f]/u.test(value))
     throw new TypeError("Invalid upload URL");
   const url = new URL(value);

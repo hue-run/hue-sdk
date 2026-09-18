@@ -57,7 +57,7 @@ def redact(field, value):
 
 The callback should cover your actual nested input format; this small example is only a top-level dictionary transformation.
 
-Before redaction, helpers copy supported content into detached built-in containers; in-place changes by a redactor cannot change application inputs or results. The input and the redactor's returned value each have a **1 MiB conservative value budget**, **64 maximum nesting depth** and **65,536 visited values/keys**. Integers and integer keys are limited to **14,000 bits** before decimal conversion. Final serialized content still has the **256 KiB** UTF-8 JSON limit. Cyclic, nonfinite, unsupported or over-budget content is omitted and counted as an instrumentation failure. See [the Python safety boundary](SAFETY.md) for supported types and callback limits.
+Before redaction, helpers copy supported content into detached built-in containers; in-place changes by a redactor cannot change application inputs or results. The input and the redactor's returned value each have a **1 MiB conservative value budget**, **64 maximum nesting depth** and **65,536 visited values/keys**. Integers and integer keys are limited to **14,000 bits** before decimal conversion. Final serialized content still has the **256 KiB** UTF-8 JSON limit. Cyclic, nonfinite, unsupported or over-budget content is omitted and counted as an instrumentation failure. See [the Python safety boundary](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/SAFETY.md) for supported types and callback limits.
 
 | Helper                                         | Attributes / behavior                                                                                                                          |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -91,6 +91,19 @@ An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`
 - Hue processors use the public OTel interfaces and bound each signal to 2,048 records and 8 MiB of encoded telemetry by default, including in-flight records (`max_queue_size`, `max_queue_bytes`). Dropped records and instrumentation omissions make cumulative `export_status.ok` false. Queue overflow, process termination and sampling can lose telemetry. Flush success reports observed exporter outcomes, not durable local delivery or proof that every application operation was instrumented. The exporter timeout controls individual export/retry operations. A caller timeout does not cancel an HTTP request already in flight; background workers continue until the operation completes.
 - A timed-out HTTP worker can retain one encoded request of up to 1 MiB per signal outside the queue counters. Later records remain queued within the configured limits until that worker finishes; shutdown counts any queued records it must discard. Queue bytes are not total process memory.
 - A flush timeout releases drain coordination so later flushes can make progress. Both signals share the caller's remaining wait budget, including time spent waiting for another flush. Shutdown's exporter cleanup can continue after the caller returns without holding that coordination lock. Repeated shutdown calls report current failures and drops as well as cleanup completion.
+
+## Dependencies
+
+The tracing core depends on the official OpenTelemetry packages and `requests` only. JSON Schema
+scoring (`builtins.json_schema`) runs `jsonschema` in an isolated process and needs the optional extra;
+without it `builtins.json_schema` raises `ImportError` and stored schema scorers report
+`SchemaValidatorUnavailable`:
+
+```bash
+pip install 'hue-run[evals]'
+```
+
+See [THIRD_PARTY_NOTICES.md](https://github.com/hue-run/hue-sdk/blob/main/THIRD_PARTY_NOTICES.md) for licenses.
 
 ## Confirm a trace reached Hue
 
@@ -167,7 +180,7 @@ For generated files, return `ManagedOutputFile` entries containing actual bytes,
 filename, content type and an optional primary flag. The helper claims the
 invocation, verifies files and saves the outcome without automatically rerunning
 the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs)
-and [full adapter contract](MANAGED_TARGETS.md) for registration, existing-provider
+and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider
 flush callbacks and recovery. Local/CI runners remain available.
 
 ## Serving safely

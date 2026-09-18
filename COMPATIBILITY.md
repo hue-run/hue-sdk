@@ -37,6 +37,10 @@ The clients do not yet expose every platform REST operation. Dataset editing/arc
 
 API responses are limited to 4 MiB by the clients. Full dataset pages can exceed this limit when cases contain large values. Use smaller explicit page limits when listing full cases; the local experiment runner separately reads summaries and individual cases. A response-size failure does not establish that the server rejected the request.
 
+## Hue-managed runs
+
+The TypeScript and Python managed target adapters use the same versioned HTTP contract. Hue starts runs against a registered public HTTPS endpoint; the existing agent remains in its own environment. This release supports synchronous targets, verified file transfer, stored outcome recovery and deterministic platform scoring. Hosted AI judges, arbitrary hosted code, manual evaluators and asynchronous targets are outside this managed-run release. See [managed runs](https://docs.hue.run/evaluations/managed-runs).
+
 ## Failure isolation
 
 Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: false` / `enabled=False` for a local kill switch, and bounded safe lifecycle methods. See [production safety](https://docs.hue.run/guides/production-safety). Helper capture failures omit telemetry, preserve business results/errors and increment diagnostic counters. TypeScript defaults to an 8 MiB combined trace/log queue budget; Python defaults to 8 MiB per signal, including in-flight records. These are telemetry budgets, not process RSS ceilings. A process kill, arbitrary slow user hook, third-party instrumentation or out-of-memory condition remains outside an in-process SDK guarantee.

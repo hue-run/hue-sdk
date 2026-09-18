@@ -61,7 +61,20 @@ run(
   [
     "--input-type=module",
     "-e",
-    'await import("@hue-run/sdk"); await import("@hue-run/sdk/evals"); await import("@hue-run/sdk/managed");',
+    `
+  import { strict as assert } from "node:assert";
+  await import("@hue-run/sdk");
+  await import("@hue-run/sdk/managed");
+  const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
+  // ajv is an optional peer: a tracing-only install must load evals and report the missing
+  // validator as a scorer error instead of failing at import or crashing a worker.
+  const score = await scoreLocally(
+    { definition: builtins.jsonSchema({ type: "string" }) },
+    { inputs: {}, output: "text", hasOutput: true, hasExpected: false },
+  );
+  assert.equal(score.state, "error");
+  assert.equal(score.error.type, "SchemaValidatorUnavailable");
+`,
   ],
   minimal,
 );
@@ -147,7 +160,11 @@ for (const patch of [99, 100]) {
     ),
   );
   await cp(join(source, "tests"), join(consumer, "tests"), { recursive: true });
-  await cp(join(source, "tsconfig.json"), join(consumer, "tsconfig.json"));
+  // Consumers compile against the packed declarations without the DOM lib so a
+  // browser-only type leaking into dist/*.d.ts fails here instead of at an adopter.
+  const consumerTsconfig = JSON.parse(await readFile(join(source, "tsconfig.json"), "utf8"));
+  consumerTsconfig.compilerOptions.lib = ["esnext"];
+  await writeFile(join(consumer, "tsconfig.json"), JSON.stringify(consumerTsconfig, null, 2));
   for (const name of ["sdk.test.ts", "evals.test.ts", "receipt.test.ts", "managed.test.ts"]) {
     const testPath = join(consumer, "tests", name);
     await writeFile(

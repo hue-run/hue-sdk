@@ -1,14 +1,13 @@
 # Python evaluation example
 
-Install a built `hue-run` wheel into a separate environment, then run this synthetic chatbot comparison against your Hue project. It creates a frozen three-case dataset, four versioned scorers, two experiments, and a historical scoring run through the public API. The two targets differ in capitalization; one case returns explicit JSON null and one raises a target error. Repeating each completed runner verifies that its target is not executed again.
+Install `hue-run` with its `evals` extra into a separate environment, then run this synthetic chatbot comparison against your Hue project. It creates a frozen three-case dataset, four versioned scorers, two experiments, and a historical scoring run through the public API. The two targets differ in capitalization; one case returns explicit JSON null and one raises a target error. Repeating each completed runner verifies that its target is not executed again.
 
 ```sh
-uv build packages/sdk-python --out-dir .local/python-eval-dist
-uv venv .local/python-eval-consumer --python 3.14
-uv pip install --python .local/python-eval-consumer/bin/python .local/python-eval-dist/hue_run-0.1.1-py3-none-any.whl
+python -m venv .venv && . .venv/bin/activate
+pip install -r examples/python-evaluation/requirements.txt  # hue-run[evals]
 
-# Set HUE_BASE_URL and HUE_API_KEY through your ignored environment or secret manager.
-.local/python-eval-consumer/bin/python examples/python-evaluation/main.py \
+# Set HUE_API_KEY (and HUE_BASE_URL for a deployment other than Hue Cloud) through your ignored environment or secret manager.
+python examples/python-evaluation/main.py \
   --capture-content no --persist-result-content yes \
   --checkpoint-directory .local/python-evaluation-checkpoints
 ```

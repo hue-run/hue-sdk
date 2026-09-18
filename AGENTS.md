@@ -13,12 +13,13 @@ This repository is public and MIT-licensed. Read README.md and the relevant pack
 
 ## Verification (definition of done)
 
-Run from the repository root before opening a pull request. All three must succeed:
+Run from the repository root before opening a pull request. All four must succeed:
 
 ```sh
 node packages/sdk-typescript/scripts/verify-package.mjs
+bun install --frozen-lockfile && bun run lint && bun run format:check
 python3 -m unittest discover -s scripts -p 'test_*.py'
-(cd packages/sdk-python && uv sync --frozen --all-groups && uv run --frozen --all-groups pytest && uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation)
+(cd packages/sdk-python && uv sync --frozen --all-groups && uv run --frozen --all-groups pytest && uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation && uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation && uv run --frozen --all-groups mypy)
 ```
 
 CI runs the same checks on Node 24 and on Python 3.10 and 3.14. Documentation-only changes need accurate, runnable snippets and working links. See CONTRIBUTING.md for review expectations, RELEASING.md for releases, VERSIONING.md for the compatibility policy and SECURITY.md for vulnerability reports.

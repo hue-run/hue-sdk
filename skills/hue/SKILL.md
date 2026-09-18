@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.7"
+  version: "0.1.8"
 ---
 
 # Hue tracing
@@ -58,7 +58,7 @@ Initialize one client or exporter per server lifecycle. For TypeScript helpers u
 
 For AI SDK 7, `hueTelemetry()` from `@hue-run/sdk/ai-sdk` provides per-call integrations. Those replace the global integrations for that call. If existing telemetry must keep receiving the call, follow the existing-provider guide and attach Hue's transport to that provider instead. Direct OTLP users keep their framework instrumentation without adding Hue wrappers.
 
-Keep spans open until streamed work completes or aborts. A returned streaming `Response` is not generation completion. Use the framework's completion/background-lifetime hooks; see the [Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-nextjs). Preserve application errors and cancellations while recording their span status. Add short comments where initialization, capture, or delivery behavior needs explanation.
+Keep spans open until streamed work completes or aborts. A returned streaming `Response` is not generation completion. Use the framework's completion/background-lifetime hooks; see the [Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-next-js). Preserve application errors and cancellations while recording their span status. Add short comments where initialization, capture, or delivery behavior needs explanation.
 
 ## Isolate serving requests from Hue failures
 
@@ -81,3 +81,23 @@ Record the actual application's OpenTelemetry trace ID and known request/model/t
 A receipt confirms stored field presence and the requested span IDs, not payload correctness or universal trace completeness. Inspect captured prompts/responses, tool inputs/outputs, redaction, timing and errors under **Traces** using the receipt's `traceUrl` when authorized. The service key does not provide general trace browsing; if UI access is unavailable, report the receipt evidence and leave content inspection to the user. Older SDKs or deployments require explicit UI verification; do not invent unsupported helper methods or call a connection check proof of ingestion.
 
 Summarize the installed version, changed files, configuration names, capture policy, checks run, and delivery evidence. Separate locally tested behavior, collector acknowledgement, stored receipt evidence, and content inspected in Hue. State remaining access or verification steps without claiming success.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `flush()` throws `HueExportError` with `rejected` issues or HTTP 401/403 | Not a project service key, or a `baseUrl` that includes a path | Use a service key from **Settings → Integrations & API keys**; `baseUrl` is an origin only |
+| Receipt reports missing expected spans | The owning provider was not flushed, or the stream had not finished | Await stream completion, flush the borrowed provider, then verify |
+| Receipt `fields.input` / `fields.output` are false | `captureContent` / `capture_content` is `false` | Expected in metadata-only mode; do not require those fields |
+| `hueTelemetry` throws "requires ai@" | AI SDK 6 in the application | Keep the app's telemetry provider and attach Hue's transport, or use a standard OTLP exporter |
+| `droppedSpans` / dropped-record counters grow | Queue budget reached during a collector outage | Expected loss under the bounded-queue contract; check reachability and the queue budget |
+
+See [troubleshooting](https://docs.hue.run/guides/troubleshooting) for delivery diagnostics.
+
+## Handoff
+
+End with one of these, filled in with the actual values:
+
+- Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`). I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
+- Needs a key or a run: "Code changes are complete and tested against a loopback receiver. Configure `HUE_API_KEY` through `<secret workflow>` and run `<command>`; then I can verify the stored trace."
+- Blocked: "I stopped before guessing: `<specific ambiguity or failure>`. Next step: `<concrete decision or documentation link>`."
