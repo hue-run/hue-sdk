@@ -305,9 +305,12 @@ export class HueClient {
     callback: (span: HueSpan) => Promise<T> | T,
     spanOptions: Omit<SpanOptions, "kind" | "attributes"> = {},
   ): Promise<T> {
+    // A disabled or closed client creates no span, so invalid metadata is not an instrumentation
+    // failure either; only an active client records it (matching the other helpers).
+    const active = this.enabled && !this.closed;
     const label = (value: unknown, fallback: string): string => {
       if (typeof value === "string" && value.trim() && value.length <= 256) return value;
-      this.transport.instrumentationFailure();
+      if (active) this.transport.instrumentationFailure();
       return fallback;
     };
     const requestModel = label(model, "unknown");
