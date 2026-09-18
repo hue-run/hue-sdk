@@ -760,3 +760,17 @@ print('installed evaluation wheel passed')
     )
     assert "installed evaluation wheel passed" in completed.stdout
     assert "synthetic-wheel-key" not in completed.stdout + completed.stderr
+
+
+def test_builtin_scorers_is_the_documented_name_and_builtins_stays_an_alias():
+    import builtins as stdlib_builtins
+
+    import hue_sdk.evals as evals
+    from hue_sdk.evals import builtin_scorers
+    from hue_sdk.evals.scorers import Builtins
+
+    assert isinstance(builtin_scorers, Builtins)
+    assert evals.builtins is builtin_scorers
+    assert evals.builtins is not stdlib_builtins
+    assert {"builtin_scorers", "builtins"} <= set(evals.__all__)
+    assert builtin_scorers.exact_match() == builtins.exact_match()

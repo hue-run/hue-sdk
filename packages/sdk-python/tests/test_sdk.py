@@ -2,12 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+from pathlib import Path
 
 import pytest
 from opentelemetry import trace
-from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceResponse
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceResponse
+from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
+    ExportLogsServiceRequest,
+    ExportLogsServiceResponse,
+)
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+    ExportTraceServiceResponse,
+)
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import (
+    LogRecordExporter,
+    LogRecordExportResult,
+    SimpleLogRecordProcessor,
+)
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -148,6 +163,82 @@ def test_borrowed_provider_and_existing_processors_survive_shutdown(receiver):
     with hue.span("too-late") as span:
         span.set_output("safe-noop")
     provider.shutdown()
+
+
+def wire_resources(receiver):
+    """service.name of the resource each OTLP request carried, per signal."""
+    resources = {}
+    for path, _, body in receiver.requests:
+        if path.endswith("/traces"):
+            resources["traces"] = ExportTraceServiceRequest.FromString(body).resource_spans[0]
+        elif path.endswith("/logs"):
+            resources["logs"] = ExportLogsServiceRequest.FromString(body).resource_logs[0]
+    return {signal: group.resource for signal, group in resources.items()}
+
+
+def test_attach_mode_logs_share_the_borrowed_tracer_provider_resource(receiver):
+    provider = TracerProvider(
+        resource=Resource.create({"service.name": "my-app"}), shutdown_on_exit=False
+    )
+    with Hue(
+        receiver.url, KEY, capture_content=True, tracer_provider=provider, service_name="ignored"
+    ) as hue:
+        assert isinstance(hue.logger_provider, LoggerProvider)
+        assert hue.logger_provider.resource == provider.resource
+        with hue.span("attached") as span:
+            span.log_inference(output="correlated")
+        assert hue.force_flush()
+    resources = wire_resources(receiver)
+    assert {
+        signal: attrs(resource)["service.name"].string_value
+        for signal, resource in resources.items()
+    } == {
+        "traces": "my-app",
+        "logs": "my-app",
+    }
+    assert resources["traces"] == resources["logs"]
+    provider.shutdown()
+
+
+class MemoryLogExporter(LogRecordExporter):
+    def __init__(self):
+        self.records = []
+
+    def export(self, batch):
+        self.records.extend(batch)
+        return LogRecordExportResult.SUCCESS
+
+    def shutdown(self):
+        pass
+
+    def force_flush(self, timeout_millis=30_000):
+        return True
+
+
+def test_borrowed_logger_provider_shares_resource_and_survives_shutdown(receiver):
+    with pytest.raises(TypeError, match="SDK LoggerProvider"):
+        Hue(receiver.url, KEY, capture_content=False, logger_provider=object())
+    memory = MemoryLogExporter()
+    logger_provider = LoggerProvider(
+        resource=Resource.create({"service.name": "logs-app"}), shutdown_on_exit=False
+    )
+    logger_provider.add_log_record_processor(SimpleLogRecordProcessor(memory))
+    hue = Hue(receiver.url, KEY, capture_content=True, logger_provider=logger_provider)
+    assert hue.logger_provider is logger_provider
+    assert isinstance(hue.tracer_provider, TracerProvider)
+    assert hue.tracer_provider.resource == logger_provider.resource
+    with hue.span("borrowed-logs") as span:
+        span.log_inference(output="correlated")
+    assert hue.shutdown()
+    resources = wire_resources(receiver)
+    assert attrs(resources["traces"])["service.name"].string_value == "logs-app"
+    assert resources["traces"] == resources["logs"]
+    # The borrowed provider and its other processors stay usable; Hue counts the late record.
+    logger_provider.get_logger("still-usable").emit(body="after-hue-shutdown")
+    assert len(memory.records) == 2
+    assert len(receiver.logs()) == 1
+    assert hue.export_status.dropped_log_records == 1
+    logger_provider.shutdown()
 
 
 def test_context_exit_flushes_buffered_correlated_logs_without_explicit_flush(receiver):
@@ -319,6 +410,67 @@ def test_encoded_batches_are_split_and_single_oversize_is_visible(receiver):
     assert len(receiver.spans()) == 8
 
 
+def test_content_prefixes_list_every_recognized_key_identically_to_typescript():
+    from hue_sdk.snapshots import CONTENT_PREFIXES
+
+    assert CONTENT_PREFIXES == (
+        "gen_ai.input.messages",
+        "gen_ai.output.messages",
+        "gen_ai.system_instructions",
+        "gen_ai.prompt",
+        "gen_ai.completion",
+        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.call.result",
+        "gen_ai.tool.definitions",
+        "gen_ai.event.content",
+        "llm.input_messages",
+        "llm.output_messages",
+        "llm.prompts",
+        "llm.completions",
+        "llm.invocation_parameters",
+        "llm.prompt_template.template",
+        "llm.prompt_template.variables",
+        "llm.tools",
+        "llm.function_call",
+        "llm.choices",
+        "input.value",
+        "output.value",
+        "input.images",
+        "output.images",
+        "retrieval.documents",
+        "embedding.embeddings",
+        "reranker.query",
+        "reranker.input_documents",
+        "reranker.output_documents",
+        "ai.prompt",
+        "ai.response.text",
+        "ai.response.object",
+        "ai.response.reasoning",
+        "ai.response.files",
+        "ai.response.toolCalls",
+        "ai.response.body",
+        "ai.toolCall.args",
+        "ai.toolCall.result",
+        "ai.value",
+        "ai.values",
+        "ai.embedding",
+        "ai.embeddings",
+        "traceloop.entity.input",
+        "traceloop.entity.output",
+        "tool.parameters",
+        "exception.message",
+        "exception.stacktrace",
+    )
+    typescript = (
+        Path(__file__).resolve().parents[3] / "packages" / "sdk-typescript" / "src" / "privacy.ts"
+    )
+    if not typescript.is_file():
+        pytest.skip("TypeScript source is not part of this checkout")
+    block = re.search(r"export const contentPrefixes = \[(.*?)\];", typescript.read_text(), re.S)
+    assert block is not None
+    assert tuple(re.findall(r'"([^"]+)"', block.group(1))) == CONTENT_PREFIXES
+
+
 @pytest.mark.parametrize("capture_content", [True, False])
 def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver, capture_content):
     from hue_sdk.snapshots import CONTENT_PREFIXES
@@ -333,8 +485,22 @@ def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver,
         span.add_event("gen_ai.user.message", {"content": "private-value"})
         span.set_status(trace.Status(trace.StatusCode.ERROR, "private description"))
         span.end()
+        # An OpenInference retriever span: document text is content, the score is metadata.
+        retriever = provider.get_tracer("third-party").start_span("retrieve")
+        retriever.set_attribute("openinference.span.kind", "RETRIEVER")
+        retriever.set_attribute("retrieval.documents.0.document.content", "private-value")
+        retriever.set_attribute("retrieval.documents.0.document.score", 0.42)
+        retriever.set_attribute("ai.response.reasoning", "private-value")
+        retriever.set_attribute("ai.response.finishReason", "stop")
+        retriever.end()
         assert hue.force_flush()
-    (exported,) = receiver.spans()
+    spans = {span.name: span for span in receiver.spans()}
+    exported, retrieved = spans["external"], spans["retrieve"]
+    retrieved_keys = {attribute.key for attribute in retrieved.attributes}
+    assert {"openinference.span.kind", "ai.response.finishReason"} <= retrieved_keys
+    assert ("retrieval.documents.0.document.content" in retrieved_keys) is capture_content
+    assert ("retrieval.documents.0.document.score" in retrieved_keys) is capture_content
+    assert ("ai.response.reasoning" in retrieved_keys) is capture_content
     keys = {attribute.key for attribute in exported.attributes}
     content = {
         key

@@ -41,7 +41,11 @@ class Builtins:
         }
 
 
-builtins = Builtins()
+# ``builtin_scorers`` is the documented name; ``builtins`` stays as an alias for parity with
+# the TypeScript export, but shadows the standard-library module of the same name when
+# imported into application code.
+builtin_scorers: Builtins = Builtins()
+builtins: Builtins = builtin_scorers
 
 
 def define_local_scorer(

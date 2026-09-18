@@ -21,6 +21,7 @@ from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.exporter.otlp.proto.http import Compression
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.version import __version__ as OTLP_EXPORTER_VERSION
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceResponse
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceResponse
 from opentelemetry.sdk._logs import ReadableLogRecord
@@ -28,9 +29,23 @@ from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportRes
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
+from ._version import __version__
+
 MAX_REQUEST_BYTES = 1_048_576
 MAX_CONTENT_BYTES = 262_144
 DEFAULT_BASE_URL = "https://app.hue.run"
+# The OTLP exporter lets caller headers override its own User-Agent; keep its token after
+# Hue's, as the TypeScript transport does.
+USER_AGENT = f"hue-sdk-python/{__version__} OTel-OTLP-Exporter-Python/{OTLP_EXPORTER_VERSION}"
+
+
+def reject_positional_api_key(base_url: object) -> None:
+    """Explain a key passed where the origin goes, without echoing the value."""
+    if isinstance(base_url, str) and base_url and "://" not in base_url:
+        raise TypeError(
+            "base_url is the first positional argument and must be an origin such as "
+            "https://app.hue.run; pass the project service key as api_key=... instead."
+        )
 
 
 def normalize_base_url(value: str) -> str:
@@ -205,22 +220,22 @@ class SafeSession(requests.Session):
         if self.signal and response.ok:
             if response.status_code != 200:
                 raise requests.RequestException("Hue OTLP response must use HTTP 200.")
-            acknowledgement = (
-                ExportTraceServiceResponse()
-                if self.signal == "traces"
-                else ExportLogsServiceResponse()
-            )
-            try:
-                acknowledgement.ParseFromString(response.content)
-            except DecodeError:
-                raise requests.RequestException("Hue returned an invalid OTLP response.") from None
-            partial = acknowledgement.partial_success
-            rejected = (
-                partial.rejected_spans if self.signal == "traces" else partial.rejected_log_records
-            )
-            if rejected:
+            if _rejected_records(self.signal, response.content):
                 raise requests.RequestException("Hue OTLP receiver rejected records.")
         return response
+
+
+def _rejected_records(signal: str, content: bytes) -> int:
+    try:
+        if signal == "traces":
+            traces = ExportTraceServiceResponse()
+            traces.ParseFromString(content)
+            return traces.partial_success.rejected_spans
+        logs = ExportLogsServiceResponse()
+        logs.ParseFromString(content)
+        return logs.partial_success.rejected_log_records
+    except DecodeError:
+        raise requests.RequestException("Hue returned an invalid OTLP response.") from None
 
 
 def _retry_delay(value: str | None, attempt: int) -> float:
@@ -254,9 +269,9 @@ class BoundedSpanExporter(SpanExporter):
         self._session = SafeSession("traces")
         self._delegate = OTLPSpanExporter(
             endpoint=endpoint,
-            headers=headers,
+            headers={**headers, "User-Agent": USER_AGENT},
             timeout=timeout,
-            compression=Compression.NoCompression,
+            compression=Compression.Gzip,
             session=self._session,
         )
         self._failures = 0
@@ -304,9 +319,9 @@ class BoundedLogExporter(LogRecordExporter):
         self._session = SafeSession("logs")
         self._delegate = OTLPLogExporter(
             endpoint=endpoint,
-            headers=headers,
+            headers={**headers, "User-Agent": USER_AGENT},
             timeout=timeout,
-            compression=Compression.NoCompression,
+            compression=Compression.Gzip,
             session=self._session,
         )
         self._failures = 0

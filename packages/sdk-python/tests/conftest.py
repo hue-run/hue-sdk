@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import time
 from collections import deque
@@ -64,6 +65,9 @@ def receiver():
 
         def respond(self):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            # Store decoded bytes so content assertions inspect what the wire carried.
+            if self.headers.get("Content-Encoding") == "gzip":
+                body = gzip.decompress(body)
             with state.lock:
                 state.requests.append((self.path, dict(self.headers), body))
                 if state.replies:

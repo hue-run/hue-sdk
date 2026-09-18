@@ -9,7 +9,7 @@ from .runner import (
     rescore,
     run_experiment,
 )
-from .scorers import builtins, define_local_scorer, score_locally
+from .scorers import builtin_scorers, builtins, define_local_scorer, score_locally
 from .types import LocalScorer, RunnerReport, Score, ScoreContext, TargetContext, TraceEvidence
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "TelemetryExportError",
     "TraceEvidence",
     "UncertainExecutionError",
+    "builtin_scorers",
     "builtins",
     "define_local_scorer",
     "rescore",
