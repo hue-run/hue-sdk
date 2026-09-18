@@ -12,5 +12,19 @@
   "readme": "none",
   "excludePrivate": true,
   "excludeInternal": true,
-  "treatWarningsAsErrors": true
+  "treatWarningsAsErrors": true,
+  "requiredToBeDocumented": [
+    "Class",
+    "Interface",
+    "Method",
+    "Property",
+    "Function",
+    "TypeAlias"
+  ],
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "rewrittenLink": true,
+    "notDocumented": true
+  }
 }
