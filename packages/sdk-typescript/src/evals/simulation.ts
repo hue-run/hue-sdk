@@ -97,6 +97,45 @@ type Attempt = {
 
 const scorerDefinition = (entry: RepositorySimulationScorer) =>
   "definition" in entry.scorer ? entry.scorer.definition : entry.scorer;
+
+function normalizedEnvironmentDefinition(definition: EnvironmentDefinition): JsonValue {
+  return json({
+    ...definition,
+    determinism: {
+      clock: {
+        startNs: definition.determinism?.clock?.startNs ?? "0",
+        stepAdvanceNs: definition.determinism?.clock?.stepAdvanceNs ?? "1000000",
+      },
+    },
+    actions: definition.actions.map((action) => ({
+      ...action,
+      params: (action.params ?? []).map((parameter) => ({
+        ...parameter,
+        required: parameter.required ?? true,
+      })),
+      semantics: {
+        ...action.semantics,
+        config: {
+          ...action.semantics.config,
+          guards: action.semantics.config.guards ?? [],
+          notFoundError: action.semantics.config.notFoundError ?? "not_found",
+        },
+      },
+      observation: action.observation ?? { projection: "identity" },
+    })),
+    provenance: definition.provenance ?? { kind: "handwritten" },
+    metadata: definition.metadata ?? {},
+  });
+}
+
+function normalizedScorerDefinition(definition: ScorerDefinition): JsonValue {
+  if (definition.kind === "builtin" && definition.entry === "hue.includes.v1")
+    return json({
+      ...definition,
+      config: { caseSensitive: definition.config.caseSensitive ?? true },
+    });
+  return json(definition);
+}
 function scenarioIdentity(scenario: SimulationScenario): JsonValue {
   if (scenario.kind === "experiment") return scenario;
   return json({
@@ -104,11 +143,14 @@ function scenarioIdentity(scenario: SimulationScenario): JsonValue {
     name: scenario.name,
     slug: scenario.slug,
     description: scenario.description ?? "",
-    environment: scenario.environment,
+    environment: {
+      ...scenario.environment,
+      definition: normalizedEnvironmentDefinition(scenario.environment.definition),
+    },
     cases: scenario.cases,
     scorers: scenario.scorers.map(({ scorer, ...identity }) => ({
       ...identity,
-      definition: "definition" in scorer ? scorer.definition : scorer,
+      definition: normalizedScorerDefinition("definition" in scorer ? scorer.definition : scorer),
     })),
     config: scenario.config ?? {},
   });
@@ -150,7 +192,7 @@ async function resolveEnvironment(
     }
   }
   if (identity.archivedAt) throw new Error("Repository scenario environment is archived");
-  const definitionDigest = digest(source.definition);
+  const definitionDigest = digest(normalizedEnvironmentDefinition(source.definition));
   const existing = (await client.getEnvironment(identity.id)).versions.find(
     (version) => version.contentDigest === definitionDigest,
   );
@@ -193,7 +235,7 @@ async function resolveScorers(
         if (!identity) throw new Error("Scorer creation outcome is unavailable");
       }
     }
-    const definitionDigest = digest(definition);
+    const definitionDigest = digest(normalizedScorerDefinition(definition));
     let version = (await client.getScorer(identity.id)).versions?.find(
       (item) => item.contentDigest === definitionDigest,
     );
