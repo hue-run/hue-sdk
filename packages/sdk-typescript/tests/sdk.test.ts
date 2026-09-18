@@ -1776,9 +1776,10 @@ describe("warning issues", () => {
         seen.push(issue.kind);
       },
     });
-    await Promise.resolve();
+    // The warning's callback settles over two microtasks; wait for a macrotask before the failure.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     hue.transport.issue("traces", "failed", 1, "synthetic failure");
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(seen).toEqual(["warning", "failed"]);
     await hue.shutdownSafe({ timeoutMillis: 200 });
   });
