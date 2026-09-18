@@ -10,7 +10,8 @@
     ],
     "lib": [
       "esnext"
-    ]
+    ],
+    "stripInternal": true
   },
   "include": [
     "src/**/*.ts"

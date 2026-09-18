@@ -14,6 +14,7 @@ refuses to publish a version without a matching entry below.
 
 - `ajv` is an optional peer dependency used only by `builtins.jsonSchema`; without it that scorer reports `SchemaValidatorUnavailable` instead of validating. The tracing core now depends only on `@opentelemetry/*` packages. Migration: run `npm install ajv` (8.17 or later) in projects that use `builtins.jsonSchema` or stored schema scorers.
 - Export requests use explicit configuration only: `OTEL_EXPORTER_OTLP_*` environment variables no longer reach Hue's endpoint, and requests carry a `hue-sdk-typescript/<version>` User-Agent. **Wire** Migration: none for documented configuration; headers or endpoints that reached Hue through those variables were unintended and have no replacement.
+- `HueTransport`'s exporter plumbing (`finish`, `acceptedRecords`, `issue`, `instrumentationFailure`) is `@internal` and no longer appears in the published declarations. Migration: none for documented usage; read `getReport()`, `getIssues()` and `getFailureSequence()` instead of calling these members.
 
 #### Added
 
@@ -23,12 +24,20 @@ refuses to publish a version without a matching entry below.
 - `hueExperimentalTelemetry(hue)` from the core entry point for AI SDK 6 `experimental_telemetry`; `hueTelemetry` remains AI SDK 7 only.
 - `contentPrefixes` exports the attribute keys removed in metadata-only mode.
 - Bun 1.4.2 runs the installed-package behavioral suite and the reference chatbot in package verification, and `bun pm pack` must agree with `npm pack` on package contents.
+- `resourceAttributes` on owned-client options adds resource attributes such as `deployment.environment.name` after `service.name` and `service.version`; attach mode ignores it with a warning issue.
+- `allowInsecureHttp: true` permits `http://` to hosts other than loopback, such as a docker-compose or in-cluster collector, and records a one-time warning issue.
+- `HueConnectionError.cause` carries the underlying network, timeout or parsing error from `checkConnection()`.
+- `recordMessages` accepts `operation`, `provider` and `model` for the request attributes of the details record.
 
 #### Changed
 
 - The instrumentation scope version and export User-Agent come from a literal generated from `package.json` at build time; nothing reads `package.json` at import time, so bundled deployments are unaffected.
 - `engines.node` is `>=22.12`; Node 22 and 24 are tested and Node 26 runs in CI.
 - npm releases carry provenance attestations; the release workflow refuses to publish from a private source repository.
+- `hue.tool`, `setInput`, `setOutput`, `recordMessages` and `SpanOptions.input` accept `unknown`, so interface-typed values compile without casts; `JsonValue` remains the documented wire shape and values that are not JSON are still omitted at runtime with an instrumentation failure.
+- `recordMessages` sets `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` (from the enclosing `model()` span or the caller) and `gen_ai.conversation.id` (from the active session) as attributes on the `gen_ai.client.inference.operation.details` log record, alongside the existing body. **Wire** The Python `log_inference` record does not carry these attributes yet.
+- `hueTelemetry` reads the installed `ai` major version once per process and rejects only versions below 7; the peer range enforces the `7.0.99` floor.
+- Every exported type, option and member of the four entry points carries API documentation, and the TypeScript reference build fails on undocumented public API.
 
 #### Fixed
 

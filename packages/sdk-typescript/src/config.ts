@@ -3,6 +3,17 @@ import type { HueOptions } from "./types.js";
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const MAX_CONTENT_BYTES = 256 * 1024;
 
+/** Loopback hostnames that may use plain HTTP without opting in. */
+export function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+/** True when a validated origin exports over plain HTTP to a host other than loopback. */
+export function isInsecureOrigin(baseUrl: string): boolean {
+  const url = new URL(baseUrl);
+  return url.protocol === "http:" && !isLoopbackHost(url.hostname);
+}
+
 export function validateOptions(
   options: HueOptions,
 ): Required<
@@ -40,16 +51,31 @@ export function validateOptions(
     options.serviceName.length > 256
   )
     throw new TypeError("A serviceName of 1–256 characters is required");
+  if (options.allowInsecureHttp !== undefined && typeof options.allowInsecureHttp !== "boolean")
+    throw new TypeError("allowInsecureHttp must be a boolean");
+  if (
+    options.resourceAttributes !== undefined &&
+    (options.resourceAttributes === null ||
+      typeof options.resourceAttributes !== "object" ||
+      Array.isArray(options.resourceAttributes))
+  )
+    throw new TypeError("resourceAttributes must be an object of attribute values");
   let url: URL;
   try {
     url = new URL(options.baseUrl ?? "https://app.hue.run");
   } catch {
     throw new TypeError("Invalid Hue baseUrl");
   }
-  const loopback =
-    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
-    throw new TypeError("Hue requires HTTPS except for a loopback development server");
+  if (url.protocol !== "https:" && url.protocol !== "http:")
+    throw new TypeError("Hue baseUrl must use https, or http for a loopback development server");
+  if (
+    url.protocol === "http:" &&
+    !isLoopbackHost(url.hostname) &&
+    options.allowInsecureHttp !== true
+  )
+    throw new TypeError(
+      "Hue requires HTTPS except for a loopback development server; set allowInsecureHttp: true to export over plain HTTP to another host",
+    );
   if (url.username || url.password || url.pathname !== "/" || url.search || url.hash)
     throw new TypeError(
       "Hue baseUrl must be an origin without credentials, a path, query parameters or fragments",

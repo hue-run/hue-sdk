@@ -23,7 +23,7 @@ import {
   type LogRecordProcessor,
   type ReadableLogRecord,
 } from "@opentelemetry/sdk-logs";
-import { MAX_BODY_BYTES, validateOptions } from "./config.js";
+import { isInsecureOrigin, MAX_BODY_BYTES, validateOptions } from "./config.js";
 import { estimateRecordBytes } from "./safety.js";
 import { snapshotLog, snapshotSpan } from "./snapshot.js";
 import { redactLog, redactSpan, type ResourceCache } from "./privacy.js";
@@ -37,7 +37,22 @@ type Response = {
     errorMessage?: string;
   };
 };
+/** A finished span or emitted log record as the OpenTelemetry SDK hands it to a processor. */
 export type RecordValue = ReadableSpan | ReadableLogRecord;
+
+/** The transport surface the exporters report through; kept narrow so nothing else depends on it. */
+interface ExportSink {
+  readonly options: ReturnType<typeof validateOptions>;
+  finish(signal: Signal, records: RecordValue[]): void;
+  acceptedRecords(signal: Signal, count: number): void;
+  issue(
+    signal: Signal,
+    kind: ExportIssue["kind"],
+    count: number,
+    message: string,
+    status?: number,
+  ): void;
+}
 
 function recordData(record: RecordValue, signal: Signal): unknown {
   if (signal === "traces") {
@@ -63,9 +78,15 @@ function recordData(record: RecordValue, signal: Signal): unknown {
   };
 }
 
+/**
+ * Rejection of {@link HueClient.flush} and {@link HueClient.shutdown}: telemetry was not fully
+ * accepted. Carries sanitized counts only, never server response text or content.
+ */
 export class HueExportError extends Error {
   constructor(
+    /** Non-warning issues observed since the failing drain began. */
     readonly issues: ExportIssue[],
+    /** Cumulative counters and current gauges at the time of the failure. */
     readonly report: ExportReport,
   ) {
     super("Hue could not accept all telemetry. Inspect issues and report for sanitized counts.");
@@ -73,10 +94,17 @@ export class HueExportError extends Error {
   }
 }
 
-/** Owned transport components; attach processors during provider construction. */
+/**
+ * Hue's export pipeline: OTLP/HTTP exporters behind bounded batch processors, with cumulative
+ * counters and a sanitized issue history. A client owns one; in attach mode the application attaches
+ * `spanProcessor` and `logRecordProcessor` to its own providers while constructing them.
+ */
 export class HueTransport {
+  /** Validated options with defaults applied; `baseUrl` is the origin. Not enumerable, so it does not leak the key when logged. */
   readonly options: ReturnType<typeof validateOptions>;
+  /** Span processor to attach to a tracer provider; a no-op when disabled. */
   readonly spanProcessor: SpanProcessor;
+  /** Log record processor to attach to a logger provider; a no-op when disabled. */
   readonly logRecordProcessor: LogRecordProcessor;
   private sequence = 0;
   private observedSequence = 0;
@@ -120,6 +148,13 @@ export class HueTransport {
       this.logRecordProcessor = { onEmit() {}, async forceFlush() {}, async shutdown() {} };
       return;
     }
+    if (isInsecureOrigin(this.options.baseUrl))
+      this.issue(
+        "traces",
+        "warning",
+        0,
+        "allowInsecureHttp is set: telemetry and the project key are sent over plain HTTP to a host that is not loopback",
+      );
     const batching = {
       maxQueueSize: 2048,
       maxExportBatchSize: 128,
@@ -211,6 +246,7 @@ export class HueTransport {
     }
   }
 
+  /** @internal Exporter callback: releases queued records after an export attempt settles. */
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
       const pending = signal === "traces" ? this.spans : this.logs;
@@ -219,10 +255,12 @@ export class HueTransport {
     }
   }
 
+  /** @internal Exporter callback: counts records the collector acknowledged. */
   acceptedRecords(signal: Signal, count: number): void {
     this.accepted[signal] += count;
   }
 
+  /** @internal Records a sanitized issue, updates counters and rate-limits the diagnostic callback. */
   issue(
     signal: Signal,
     kind: ExportIssue["kind"],
@@ -266,6 +304,7 @@ export class HueTransport {
     }
   }
 
+  /** @internal Counts a helper capture or instrumentation failure that preserved application execution. */
   instrumentationFailure(signal: Signal = "traces"): void {
     this.instrumentationFailures++;
     this.issue(
@@ -276,6 +315,7 @@ export class HueTransport {
     );
   }
 
+  /** Cumulative counters and current queue gauges. */
   getReport(): ExportReport {
     return {
       acceptedSpans: this.accepted.traces,
@@ -293,6 +333,7 @@ export class HueTransport {
     };
   }
 
+  /** Copies of the latest 128 sanitized issues, oldest first. */
   getIssues(): ExportIssue[] {
     return this.issues.map((issue) => ({ ...issue }));
   }
@@ -302,6 +343,11 @@ export class HueTransport {
     return this.failureSequence;
   }
 
+  /**
+   * Waits for the processors' and exporters' in-flight work; drain the providers first.
+   *
+   * @throws HueExportError when a new non-warning issue was recorded since the previous observation.
+   */
   flush(): Promise<ExportReport> {
     const from = this.observedSequence;
     const next = (this.flushPromise ?? Promise.resolve()).then(
@@ -335,6 +381,12 @@ export class HueTransport {
     return report;
   }
 
+  /**
+   * Flushes and stops the processors; records emitted afterwards are dropped and counted. In attach
+   * mode call it after shutting down the application's providers.
+   *
+   * @throws HueExportError when the final flush observed new failures.
+   */
   shutdown(): Promise<ExportReport> {
     this.shutdownPromise ??= (async () => {
       this.closed = true;
@@ -354,7 +406,7 @@ export class HueTransport {
 class ReportingExporter<T extends RecordValue> {
   private pending = new Set<Promise<void>>();
   constructor(
-    private transport: HueTransport,
+    private transport: ExportSink,
     private signal: Signal,
     private serializer: ISerializer<T[], Response>,
     private metrics: IExporterMetricsHelper<T[]>,
@@ -591,6 +643,12 @@ class ReportingExporter<T extends RecordValue> {
   }
 }
 
+/**
+ * Creates the export pipeline for attach mode; pass it with the application's providers to
+ * {@link createHue}. Validates options like an owned client.
+ *
+ * @throws TypeError for invalid options; see {@link createHue}.
+ */
 export function createHueTransport(options: HueOptions): HueTransport {
   return new HueTransport(options);
 }
