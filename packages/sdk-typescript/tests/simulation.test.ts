@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ROOT_CONTEXT } from "@opentelemetry/api";
 import type { HueClient } from "../src/client.js";
-import type { EnvironmentClient } from "../src/environment.js";
+import {
+  createEnvironmentClient,
+  type EnvironmentClient,
+  type EnvironmentDefinition,
+} from "../src/environment.js";
 import {
   actualAgentManifestV2,
   agentManifestDigestV2,
@@ -197,6 +201,67 @@ const scenario = {
   cases: [{ externalKey: "one", inputs: { task: "save" }, expected: "saved" }],
   scorers: [{ name: "Exact", slug: "exact", scorer: builtins.exactMatch() }],
 };
+
+function nodeHeavyEnvironmentDefinition(): EnvironmentDefinition {
+  let deepest: JsonValue = "leaf";
+  for (let depth = 0; depth < 32; depth++) deepest = { next: deepest };
+  const records: Record<string, Record<string, JsonValue>> = {};
+  for (let index = 0; index < 2000; index++) {
+    const id = `r${String(index).padStart(4, "0")}`;
+    records[id] =
+      index === 0
+        ? (deepest as Record<string, JsonValue>)
+        : {
+            id,
+            flags: { rank: index, on: true, off: false },
+            p: [0, 1, 2, 3, 4],
+            s: [0, 1, 2],
+          };
+  }
+  return {
+    schemaVersion: 1,
+    determinism: { clock: { startNs: "0", stepAdvanceNs: "1000000" } },
+    state: { collections: { records } },
+    actions: [
+      {
+        name: "list_records",
+        params: [],
+        semantics: {
+          entry: "hue.collection.list@1",
+          config: { collection: "records", guards: [], notFoundError: "not_found" },
+        },
+        observation: { projection: "identity" },
+      },
+    ],
+    provenance: { kind: "handwritten" },
+    metadata: {},
+  };
+}
+
+function jsonNodeCount(value: unknown): number {
+  const pending = [value];
+  let count = 0;
+  while (pending.length) {
+    const item = pending.pop();
+    count++;
+    if (item !== null && typeof item === "object") pending.push(...Object.values(item));
+  }
+  return count;
+}
+
+function jsonDepth(value: unknown): number {
+  const pending = [{ value, depth: 0 }];
+  let maximum = 0;
+  while (pending.length) {
+    const item = pending.pop()!;
+    maximum = Math.max(maximum, item.depth);
+    if (item.value !== null && typeof item.value === "object")
+      pending.push(
+        ...Object.values(item.value).map((child) => ({ value: child, depth: item.depth + 1 })),
+      );
+  }
+  return maximum;
+}
 
 function harness(
   options: {
@@ -562,35 +627,128 @@ function harness(
 }
 
 describe("one-shot simulation workflow", () => {
-  test("resolves a repository world larger than the default JSON value cap", async () => {
+  test("publishes a server-valid aggregate world and preserves definition identity", async () => {
     const fixture = harness({
       evidenceFailures: 0,
       loseCompletionAcknowledgement: false,
       loseSealAcknowledgement: false,
     });
+    const definition = nodeHeavyEnvironmentDefinition();
+    const definitionBytes = Buffer.byteLength(JSON.stringify(definition));
+    const stateBytes = Buffer.byteLength(JSON.stringify(definition.state));
+    const entities = Object.values(definition.state.collections.records!);
+    expect(jsonNodeCount(definition)).toBeGreaterThan(20_000);
+    expect(jsonDepth({ definition })).toBe(37);
+    expect(entities).toHaveLength(2000);
+    expect(
+      Math.max(...entities.map((entity) => Buffer.byteLength(JSON.stringify(entity)))),
+    ).toBeLessThanOrEqual(200_000);
+    expect(Math.max(...entities.map(jsonNodeCount))).toBeLessThanOrEqual(20_000);
+    expect(Math.max(...entities.map(jsonDepth))).toBe(32);
+    expect(stateBytes).toBeGreaterThan(180_000);
+    expect(stateBytes).toBeLessThanOrEqual(200_000);
+    expect(definitionBytes).toBeGreaterThan(180_000);
+    expect(definitionBytes).toBeLessThanOrEqual(240_000);
+
+    const publications: Array<{
+      path: string;
+      definition: EnvironmentDefinition;
+      contentDigest: string;
+    }> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        expect(request.headers.get("authorization")).toBe("Bearer synthetic-environment-key");
+        const path = new URL(request.url).pathname;
+        expect(request.method).toBe("POST");
+        expect(path).toMatch(/^\/api\/v1\/environments\/[0-9a-f-]+\/versions$/);
+        const body = (await request.json()) as { definition: EnvironmentDefinition };
+        const contentDigest = canonicalDigest(body.definition).slice("sha256:".length);
+        publications.push({ path, definition: body.definition, contentDigest });
+        return Response.json(
+          {
+            id: randomUUID(),
+            version: publications.length,
+            contentDigest,
+            createdAt: "2026-09-18T00:00:00.000Z",
+          },
+          { status: 201 },
+        );
+      },
+    });
+    const publishedClient = createEnvironmentClient({
+      apiKey: "synthetic-environment-key",
+      baseUrl: server.url.origin,
+      maxAttempts: 1,
+    });
+    const originalEnvironmentClient = fixture.environmentClient;
+    let identity: Awaited<ReturnType<EnvironmentClient["createEnvironment"]>> | undefined;
+    const environmentClient = {
+      ...originalEnvironmentClient,
+      baseUrl: server.url.origin,
+      listEnvironments: async () => ({
+        items: identity ? [identity] : [],
+        nextCursor: null,
+      }),
+      createEnvironment: async (input: Parameters<EnvironmentClient["createEnvironment"]>[0]) => {
+        identity = await originalEnvironmentClient.createEnvironment(input);
+        return identity;
+      },
+      publishVersion: async (environmentId: string, submitted: EnvironmentDefinition) => {
+        const version = await publishedClient.publishVersion(environmentId, submitted);
+        (await originalEnvironmentClient.getEnvironment(environmentId)).versions.push(version);
+        return version;
+      },
+    } as EnvironmentClient;
+    const client = { ...fixture.client, baseUrl: server.url.origin } as EvaluationClient;
+    const hue = {
+      ...fixture.hue,
+      transport: {
+        ...fixture.hue.transport,
+        options: { ...fixture.hue.transport.options, baseUrl: server.url.origin },
+      },
+    } as HueClient;
     const directory = await mkdtemp(join(tmpdir(), "hue-simulation-large-world-"));
     try {
-      const report = await runSimulation({
+      const options = {
         ...fixture,
+        client,
+        environmentClient,
+        hue,
         checkpointDirectory: directory,
         scenario: {
           ...scenario,
           environment: {
             ...scenario.environment,
-            definition: {
-              ...scenario.environment.definition,
-              state: {
-                collections: { records: { seed: { blob: "x".repeat(210_000) } } },
-              },
-            },
+            definition,
           },
         },
         persistResultContent: false,
-        traceEvidence: { mode: "required" },
+        traceEvidence: { mode: "required" as const },
+      };
+      expect((await runSimulation(options)).experimentId).toBeTruthy();
+      expect(publications).toHaveLength(1);
+      expect(jsonNodeCount(publications[0]!.definition)).toBeGreaterThan(20_000);
+      expect(jsonDepth({ definition: publications[0]!.definition })).toBe(37);
+
+      await runSimulation(options);
+      expect(publications).toHaveLength(1);
+
+      const changed = structuredClone(definition);
+      changed.metadata = { revision: "changed" };
+      await runSimulation({
+        ...options,
+        scenario: {
+          ...options.scenario,
+          environment: { ...options.scenario.environment, definition: changed },
+        },
       });
-      expect(report.experimentId).toBeTruthy();
-      expect(fixture.worlds.size).toBe(1);
+      expect(publications).toHaveLength(2);
+      expect(publications[1]!.contentDigest).not.toBe(publications[0]!.contentDigest);
+      expect(fixture.targetCalls()).toBe(3);
     } finally {
+      server.stop(true);
       await rm(directory, { recursive: true, force: true });
     }
   });
