@@ -150,7 +150,8 @@ jobs:
           name: release-typescript-${{ github.sha }}
           path: .artifacts
       - run: cd .artifacts && sha256sum --check SHA256SUMS
-      - run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; the version is exact-pinned and scripts are disabled.
+      - run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org # zizmor: ignore[adhoc-packages]
       # OIDC trusted publishing is configured on the npm package. npm generates
       # provenance attestations automatically because the source repository is public.
       - run: npm publish ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz" --access public --ignore-scripts --registry=https://registry.npmjs.org
