@@ -1,4 +1,5 @@
 import type { JsonValue } from "../types.js";
+import type { EnvironmentCoverage } from "../environment/types.js";
 
 export type { JsonValue } from "../types.js";
 /** One page of a paginated list. */
@@ -15,6 +16,11 @@ export interface PageOptions {
   /** Page size, 1–100. */
   limit?: number;
 }
+/** Cursor pagination for registry methods that can include archived identities. */
+export interface RegistryPageOptions extends PageOptions {
+  /** Include archived identities so callers can diagnose slug conflicts explicitly. */
+  includeArchived?: boolean;
+}
 /** Human-readable identity of a dataset or scorer. */
 export interface Identity {
   /** Display name. */
@@ -28,6 +34,8 @@ export interface Identity {
 export interface Dataset extends Identity {
   /** Dataset ID. */
   id: string;
+  /** Archive timestamp on current servers; absent on older compatible responses. */
+  archivedAt?: string | null;
   /** Versions of this dataset. */
   versions: DatasetVersion[];
 }
@@ -60,6 +68,14 @@ export interface DatasetCase {
   metadata: Record<string, JsonValue>;
   /** Dataset version the case belongs to. */
   datasetVersionId: string;
+  /** Exact immutable simulated world selected for this case, when present. */
+  environmentVersionId?: string | null;
+  /** Immutable trace provenance retained when the case was promoted from a trace. */
+  sourceTraceId?: string | null;
+  /** Immutable source trace revision paired with `sourceTraceId`. */
+  sourceTraceRevision?: number | null;
+  /** Immutable input-file manifest identity, when files are attached. */
+  artifactManifestId?: string | null;
 }
 /** A frozen case as an experiment sees it. */
 export interface ExperimentCase extends DatasetCase {
@@ -78,6 +94,8 @@ export interface CaseWrite {
   expected?: JsonValue;
   /** Caller-owned metadata. */
   metadata?: Record<string, JsonValue>;
+  /** Immutable simulated-world version selected for this case. */
+  environmentVersionId?: string | null;
 }
 /** A typed metric a scorer declares and must report exactly once per scored result. */
 export type MetricDefinition =
@@ -295,6 +313,8 @@ export interface JudgeBudget {
 export interface Scorer extends Identity {
   /** Scorer ID. */
   id: string;
+  /** Archive timestamp on current servers; absent on older compatible responses. */
+  archivedAt?: string | null;
   /** Published versions, when included in the response. */
   versions?: ScorerVersion[];
 }
@@ -450,6 +470,8 @@ export interface EvaluationItem {
 export interface Subject {
   /** Subject ID. */
   id: string;
+  /** Execution that produced this subject. */
+  executionId: string;
   /** Case inputs. */
   inputs: JsonValue;
   /** Whether an output is stored; JSON `null` counts as present. */
@@ -545,6 +567,36 @@ export interface ScoreContext {
   metadata: Record<string, JsonValue>;
   /** Final state of the target execution. */
   executionState: TerminalState;
+  /** Authoritative sealed world and complete journal, when required by the runner. */
+  environment?: EnvironmentEvidence;
+}
+/** Sealed environment evidence resolved through one target execution. */
+export interface EnvironmentEvidenceSnapshot extends EnvironmentCoverage {
+  /** Environment-run identity. */
+  runId: string;
+  /** Linked target execution identity. */
+  executionId: string;
+  /** Immutable environment version used by the world. */
+  environmentVersionId: string;
+  /** Digest of the stored environment definition. */
+  definitionDigest: string;
+  /** Deterministic world seed. */
+  seed: string;
+  /** Terminal world status. */
+  status: "completed" | "abandoned" | "expired";
+  /** Number of recorded journal steps. */
+  stepCount: number;
+  /** Digest of final state. */
+  stateDigest: string;
+  /** State before the first action. */
+  initialState: JsonValue;
+  /** State at sealing. */
+  finalState: JsonValue;
+}
+/** Sealed environment evidence with its full ordered journal. */
+export interface EnvironmentEvidence extends EnvironmentEvidenceSnapshot {
+  /** Complete steps ordered by ordinal. */
+  steps: import("../environment/types.js").Step[];
 }
 /** A local scorer: its pinned definition and the callback bound to it. */
 export interface LocalScorer {
@@ -552,4 +604,13 @@ export interface LocalScorer {
   definition: Extract<ScorerDefinition, { kind: "local_code" }>;
   /** Trusted local code. There is no callback timeout or side-effect cancellation. */
   score(context: ScoreContext): Score | Promise<Score>;
+}
+/** Short-lived execution-scoped MCP connection for one simulated world. */
+export interface SimulationMcpCapability {
+  /** HTTPS MCP endpoint. */
+  url: string;
+  /** Attempt-scoped bearer; never persist or expose it. */
+  token: string;
+  /** Credential expiry timestamp. */
+  expiresAt: string;
 }

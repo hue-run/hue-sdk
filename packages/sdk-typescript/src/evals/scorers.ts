@@ -1,7 +1,11 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
-import { digest, json, sourceDigest } from "./json.js";
+import { aggregateBounds, digest, json, sourceDigest } from "./json.js";
+import {
+  environmentIncompleteReason,
+  validateEnvironmentEvidence,
+} from "./environment-evidence.js";
 import type {
   JsonValue,
   LocalScorer,
@@ -148,11 +152,23 @@ export async function scoreLocally(
   const timeout = options.schemaTimeoutMillis ?? 2000;
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 60_000)
     throw new RangeError("schemaTimeoutMillis must be 100–60000");
-  if (!context.hasOutput) return skip("Output evidence is unavailable");
-  if (context.output === undefined) throw new TypeError("hasOutput requires a present JSON output");
+  if (context.environment?.validity === "environment_incomplete") {
+    try {
+      validateEnvironmentEvidence(context.environment);
+      return skip(environmentIncompleteReason);
+    } catch {
+      return { state: "error", error: { type: "LocalScorerError" } };
+    }
+  }
+  if (!context.hasOutput && !(definition.kind === "local_code" && context.environment))
+    return skip("Output evidence is unavailable");
+  if (context.hasOutput && context.output === undefined)
+    throw new TypeError("hasOutput requires a present JSON output");
   try {
     // Clone and validate inputs so a scorer cannot mutate another scorer's evidence.
-    json(context, 1024 * 1024);
+    const { environment, ...ordinaryEvidence } = context;
+    json(ordinaryEvidence, aggregateBounds(1024 * 1024));
+    if (environment !== undefined) validateEnvironmentEvidence(environment);
     const owned = structuredClone(context);
     if (definition.kind === "manual") return skip("Manual scoring requires a human session");
     if (definition.kind === "local_code") {
@@ -274,9 +290,19 @@ export function persistedScore(score: Score, persistResultContent: boolean): Sco
       metrics: score.metrics,
       explanation: "Local scoring completed; result content storage disabled",
     };
-  if (score.state === "error") return { state: "error", error: { type: "LocalScorerError" } };
+  if (score.state === "error")
+    return {
+      state: "error",
+      error: {
+        type:
+          score.error.type === "EnvironmentEvidenceUnavailable"
+            ? "EnvironmentEvidenceUnavailable"
+            : "LocalScorerError",
+      },
+    };
   // Preserve fixed unavailable reasons, never arbitrary caller explanations.
   const safeReasons = [
+    environmentIncompleteReason,
     "Output evidence is unavailable",
     "Reference evidence is unavailable",
     "Includes requires string output and reference",

@@ -1,6 +1,16 @@
 import { validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
-import { json, uuid } from "./json.js";
+import { json, uuid, valueBounds } from "./json.js";
+import {
+  attemptBindingRead,
+  parsePrepareAttemptResultV2,
+  parseRefreshedAttemptResultV2,
+  parseRevocationResult,
+  prepareAttemptInputV2,
+  validateAttemptConnectionBundleV2,
+  type AttemptConnectionBundleV2,
+  type PrepareAttemptRequestV2,
+} from "./attempt.js";
 import type {
   CaseWrite,
   CompleteExecution,
@@ -10,6 +20,7 @@ import type {
   DatasetVersion,
   EvaluationItem,
   EvaluationRun,
+  EnvironmentEvidenceSnapshot,
   Execution,
   Experiment,
   ExperimentCase,
@@ -20,11 +31,13 @@ import type {
   JudgeJob,
   Page,
   PageOptions,
+  RegistryPageOptions,
   Result,
   ResultSummary,
   Scorer,
   ScorerDefinition,
   ScorerVersion,
+  SimulationMcpCapability,
   StartExecution,
   Subject,
   StoredResult,
@@ -71,7 +84,12 @@ export class EvaluationClient {
     this.apiKey = validated.apiKey;
     this.timeoutMillis = validated.timeoutMillis;
   }
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    bounds = { ...valueBounds, bytes: 1024 * 1024 },
+  ): Promise<T> {
     // Optional top-level fields are omitted intentionally; nested undefined remains invalid.
     const payload =
       body === undefined
@@ -81,7 +99,7 @@ export class EvaluationClient {
               Object.fromEntries(
                 Object.entries(body as object).filter(([, value]) => value !== undefined),
               ),
-              1024 * 1024,
+              bounds,
             ),
           );
     let response: Response;
@@ -134,6 +152,12 @@ export class EvaluationClient {
     }
     return query.size ? `?${query}` : "";
   }
+  private registryPage(options: RegistryPageOptions = {}): string {
+    const query = new URLSearchParams(this.page(options).slice(1));
+    if (options.includeArchived !== undefined)
+      query.set("includeArchived", String(options.includeArchived));
+    return query.size ? `?${query}` : "";
+  }
   /** Reads the current project to confirm the key and origin. */
   checkConnection() {
     return this.request<ProjectConnection>("GET", "/projects/current");
@@ -147,8 +171,11 @@ export class EvaluationClient {
     return this.request<Dataset>("GET", `/datasets/${uuid(id)}`);
   }
   /** Lists datasets without their versions. */
-  listDatasets(page?: PageOptions) {
-    return this.request<Page<Omit<Dataset, "versions">>>("GET", `/datasets${this.page(page)}`);
+  listDatasets(page?: RegistryPageOptions) {
+    return this.request<Page<Omit<Dataset, "versions">>>(
+      "GET",
+      `/datasets${this.registryPage(page)}`,
+    );
   }
   /** Creates a new draft version, optionally copying cases from an existing version. */
   createDatasetVersion(id: string, input: { fromVersionId?: string } = {}) {
@@ -189,8 +216,8 @@ export class EvaluationClient {
     return this.request<Scorer>("GET", `/scorers/${uuid(id)}`);
   }
   /** Lists scorers. */
-  listScorers(page?: PageOptions) {
-    return this.request<Page<Scorer>>("GET", `/scorers${this.page(page)}`);
+  listScorers(page?: RegistryPageOptions) {
+    return this.request<Page<Scorer>>("GET", `/scorers${this.registryPage(page)}`);
   }
   /** Publishes an immutable scorer version; the server validates the pinned definition. */
   publishScorerVersion(id: string, definition: ScorerDefinition) {
@@ -241,6 +268,97 @@ export class EvaluationClient {
   /** Reads an execution. */
   getExecution(id: string) {
     return this.request<Execution>("GET", `/experiment-executions/${uuid(id)}`);
+  }
+  /** Reads the sealed environment evidence linked to an execution. */
+  getEnvironmentEvidence(executionId: string) {
+    return this.request<EnvironmentEvidenceSnapshot>(
+      "GET",
+      `/experiment-executions/${uuid(executionId)}/environment`,
+    );
+  }
+  /** Pages the sealed environment journal linked to an execution. */
+  getEnvironmentSteps(executionId: string, page: { after?: number; limit?: number } = {}) {
+    if (page.after !== undefined && (!Number.isInteger(page.after) || page.after < -1))
+      throw new RangeError("Step cursor must be an integer at least -1");
+    if (
+      page.limit !== undefined &&
+      (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > 100)
+    )
+      throw new RangeError("Step page size must be 1–100");
+    const query = new URLSearchParams();
+    if (page.after !== undefined) query.set("after", String(page.after));
+    if (page.limit !== undefined) query.set("limit", String(page.limit));
+    return this.request<import("../environment/types.js").StepPage>(
+      "GET",
+      `/experiment-executions/${uuid(executionId)}/environment/steps${query.size ? `?${query}` : ""}`,
+    );
+  }
+  /**
+   * Prepares the immutable provider-profile binding for one execution. The route identity is
+   * removed from the JSON body, and credential-bearing responses are validated against the
+   * request before being returned.
+   */
+  async prepareAttempt(input: PrepareAttemptRequestV2) {
+    const request = prepareAttemptInputV2.parse(input);
+    const { executionId, ...body } = request;
+    const response = await this.request<unknown>(
+      "POST",
+      `/experiment-executions/${executionId}/prepare-attempt`,
+      body,
+      { ...valueBounds, bytes: 128_000 },
+    );
+    try {
+      return parsePrepareAttemptResultV2(response, request);
+    } catch {
+      // A malformed success response may follow a committed decision. Never expose
+      // credential-bearing response details or imply that replay is automatically safe.
+      throw new HueApiError();
+    }
+  }
+  /** Reads coupled, secret-free V1 or V2 binding evidence; it never reacquires credentials. */
+  async getAttemptBinding(bindingId: string) {
+    const response = await this.request<unknown>("GET", `/attempt-bindings/${uuid(bindingId)}`);
+    try {
+      return attemptBindingRead.parse(response);
+    } catch {
+      throw new HueApiError();
+    }
+  }
+  /** Rotates an unexpired V2 connection while preserving its immutable binding evidence. */
+  async refreshAttemptConnection(
+    previous: AttemptConnectionBundleV2,
+    input: { idempotencyKey: string },
+  ) {
+    const source = validateAttemptConnectionBundleV2(previous);
+    const response = await this.request<unknown>(
+      "POST",
+      `/attempt-bindings/${source.bindingId}/refresh`,
+      {
+        idempotencyKey: uuid(input.idempotencyKey),
+        expectedGeneration: source.credentialGeneration,
+      },
+      { ...valueBounds, bytes: 128_000 },
+    );
+    try {
+      return parseRefreshedAttemptResultV2(response, source);
+    } catch {
+      throw new HueApiError();
+    }
+  }
+  /** Revokes an attempt binding. A revoked connection must not be reused or refreshed. */
+  async revokeAttemptConnection(input: { bindingId: string }) {
+    const bindingId = uuid(input.bindingId);
+    const response = await this.request<unknown>(
+      "POST",
+      `/attempt-bindings/${bindingId}/revoke`,
+      {},
+      { ...valueBounds, bytes: 128_000 },
+    );
+    try {
+      return parseRevocationResult(response, bindingId);
+    } catch {
+      throw new HueApiError();
+    }
   }
   /** Saves an execution's outcome and creates its immutable subject. */
   completeExecution(id: string, input: CompleteExecution) {
@@ -338,6 +456,14 @@ export class EvaluationClient {
   /** Reads the project's hosted judge budget and admission controls. */
   getJudgeBudget() {
     return this.request<JudgeBudget>("GET", "/judge-budget");
+  }
+  /** Creates the legacy execution-scoped generic MCP capability for one world. */
+  createSimulationMcpCapability(input: { runId: string; executionId: string }) {
+    return this.request<SimulationMcpCapability>(
+      "POST",
+      "/local-agent-worker/mcp-capability",
+      input,
+    );
   }
 }
 /**

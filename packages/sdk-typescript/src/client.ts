@@ -389,7 +389,12 @@ export class HueClient {
    * are recorded as `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` when `captureContent`
    * is true; values that are not JSON-encodable are omitted with an instrumentation failure.
    */
-  async tool<T>(name: string, input: unknown, execute: () => Promise<T> | T): Promise<T> {
+  async tool<T>(
+    name: string,
+    input: unknown,
+    execute: () => Promise<T> | T,
+    options: Pick<SpanOptions, "parentContext"> = {},
+  ): Promise<T> {
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {
@@ -398,7 +403,10 @@ export class HueClient {
         if (result !== undefined) this.setContent(span, "gen_ai.tool.call.result", result);
         return result;
       },
-      { attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name } },
+      {
+        attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name },
+        ...(options.parentContext ? { parentContext: options.parentContext } : {}),
+      },
     );
   }
 

@@ -5,8 +5,62 @@ export {
   rescore,
   UncertainExecutionError,
   OutcomeSerializationError,
+  TargetCancelledError,
+  TargetOutcomeUncertainError,
 } from "./evals/runner.js";
 export type { RunExperimentOptions, RescoreOptions, RunnerReport } from "./evals/runner.js";
+export { runSimulation } from "./evals/simulation.js";
+export type {
+  RepositorySimulationCase,
+  RepositorySimulationScorer,
+  RunSimulationOptions,
+  SimulationProgress,
+  SimulationReport,
+  SimulationScenario,
+  SimulationTargetContext,
+} from "./evals/simulation.js";
+export {
+  actualAgentManifestV2,
+  agentManifestDigestV2,
+  attemptBaselineV2,
+  attemptBindingRead,
+  attemptConnectionBundleV2,
+  attemptIdentityV2,
+  dependencyManifestV2,
+  dependencyProviderV2,
+  expectedAgentManifestV2,
+  executionManifestDigestV2,
+  parityEvidenceV2,
+  preflightFindingV2,
+  preflightReportV2,
+  prepareAttemptInputV2,
+  projectMcpConnectionV2,
+  secretFreeBindingV2,
+  surfaceBindingV2,
+} from "./evals/attempt.js";
+export type {
+  ActualAgentManifestInputV2,
+  ActualAgentManifestV2,
+  AttemptBaselineV2,
+  AttemptBindingRead,
+  AttemptConnectionBundleV2,
+  AttemptIdentityV2,
+  DependencyManifestV2,
+  DependencyProviderV2,
+  ExpectedAgentManifestV2,
+  ParityEvidenceV2,
+  PreflightFindingV2,
+  PreflightReportV2,
+  PrepareAttemptIncompleteV2,
+  PrepareAttemptInputV2,
+  PrepareAttemptReadyV2,
+  PrepareAttemptRequestV2,
+  PrepareAttemptResultV2,
+  RefreshAttemptResultV2,
+  RequestedAttemptProviderV2,
+  RevokeAttemptResult,
+  SurfaceBindingV2,
+} from "./evals/attempt.js";
 export { builtins, defineLocalScorer, scoreLocally } from "./evals/scorers.js";
 export { sourceDigest } from "./evals/json.js";
 export type * from "./evals/types.js";
