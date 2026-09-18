@@ -10,6 +10,10 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- The package description no longer ends with `(hue.run, not Philips Hue)`.
+
 ### [0.2.0](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.2.0) - 2026-09-18
 
 #### Breaking
@@ -105,6 +109,10 @@ refuses to publish a version without a matching entry below.
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Changed
+
+- The package summary no longer ends with `(hue.run, not Philips Hue)`.
 
 ### [0.2.0](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.2.0) - 2026-09-18
 

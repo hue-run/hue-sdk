@@ -18,8 +18,6 @@ Hue Cloud is currently invite-only; to request access, email [team@hue.run](mail
 
 </div>
 
-_Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
-
 ## Why Hue
 
 - **Standard OpenTelemetry, nothing proprietary.** Traces and correlated logs travel as OTLP/HTTP to documented endpoints. Any OpenTelemetry-emitting language or instrumentor works without a Hue package, and Hue never replaces your global providers.
