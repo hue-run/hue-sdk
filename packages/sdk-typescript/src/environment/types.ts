@@ -142,7 +142,30 @@ export interface ActionResult {
   replayed: boolean;
   stepsRemaining: number;
 }
-export interface RunState {
+export interface CoverageGapInput {
+  idempotencyKey: string;
+  provider: string;
+  operation: string;
+  code: string;
+  /** First-fault arguments are bounded to 16,000 JSON bytes. */
+  args: Record<string, JsonValue>;
+  description: string;
+}
+export interface CoverageGap extends Omit<CoverageGapInput, "idempotencyKey"> {
+  reportedAt: string;
+  reportedBy: { kind: "project_key" | "user"; id: string };
+}
+/** Missing fields from older servers mean not_assessed, never verified parity. */
+export interface EnvironmentCoverage {
+  validity?: "not_assessed" | "environment_incomplete";
+  coverageGap?: CoverageGap | null;
+}
+export interface CoverageGapResult {
+  runId: string;
+  validity: "environment_incomplete";
+  coverageGap: CoverageGap;
+}
+export interface RunState extends EnvironmentCoverage {
   id: string;
   environmentVersionId: string;
   executionId: string | null;

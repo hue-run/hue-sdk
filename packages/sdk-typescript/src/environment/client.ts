@@ -3,6 +3,8 @@ import { json, uuid, valueBounds } from "../evals/json.js";
 import type {
   ActionInput,
   ActionResult,
+  CoverageGapInput,
+  CoverageGapResult,
   CreateRunInput,
   Environment,
   EnvironmentDefinition,
@@ -181,8 +183,21 @@ export class EnvironmentClient {
       ...(input.executionId === undefined ? {} : { executionId: uuid(input.executionId) }),
     });
   }
-  getRun(runId: string) {
-    return this.request<RunState>("GET", `/environment-runs/${uuid(runId)}`);
+  async getRun(runId: string) {
+    const run = await this.request<RunState>("GET", `/environment-runs/${uuid(runId)}`);
+    return { validity: "not_assessed" as const, coverageGap: null, ...run };
+  }
+  /** Record a known coverage gap with durable identity; retries reuse the exact request. */
+  recordCoverageGap(runId: string, input: CoverageGapInput) {
+    uuid(input.idempotencyKey);
+    if (!input.args || typeof input.args !== "object" || Array.isArray(input.args))
+      throw new TypeError("Coverage gap arguments must be a JSON object");
+    json(input.args, { ...valueBounds, bytes: 16_000 });
+    return this.request<CoverageGapResult>(
+      "POST",
+      `/environment-runs/${uuid(runId)}/coverage-gap`,
+      input,
+    );
   }
   act(runId: string, input: ActionInput) {
     return this.request<ActionResult>("POST", `/environment-runs/${uuid(runId)}/actions`, {

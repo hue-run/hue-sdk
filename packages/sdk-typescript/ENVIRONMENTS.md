@@ -49,7 +49,10 @@ uncertain and a resume refuses to re-invoke the agent.
 `tools` contains framework-neutral local callables. `mcp` is a short-lived bearer for the same
 run's closed catalog when a model provider executes MCP remotely. It is scoped to one execution
 and world and is not the Hue project key. Configuration alone does not redirect real provider
-calls; give one of these connections to the agent's actual tool boundary.
+calls; give one of these connections to the agent's actual tool boundary. `environmentRunId`
+identifies the same world for adapter control operations such as
+`environmentClient.recordCoverageGap`; it is not a credential. The MCP token is delivered only
+to the callback and is never written to checkpoints.
 
 ## Repository-authored scenarios
 
@@ -118,6 +121,26 @@ await client.finishRun(run.id, { idempotencyKey: randomUUID(), status: "complete
 An observation with `status: "error"` is a recorded world answer, not a transport exception.
 Run mutations retry with stable invocation/idempotency identities. Registry writes do not retry
 automatically because identity creation and publication have no request key.
+
+## Coverage gaps
+
+A provider adapter can record a known valid provider request that the environment cannot
+implement with `client.recordCoverageGap(run.id, { idempotencyKey, provider, operation, code,
+args, description })`. Use a durable UUID idempotency key and repeat the identical request to
+recover a lost acknowledgement. This is a runner/adapter control operation, not an agent tool.
+Arguments must be a JSON object of at most 16,000 encoded bytes.
+
+Hue preserves the first report, marks `validity: "environment_incomplete"`, and refuses new
+actions while still replaying already-recorded invocation receipts. `coverageGap` retains the
+request and reporting provenance. An absent gap means `not_assessed`; it does not establish
+provider parity.
+
+Local scoring and historical rescoring skip incomplete evidence before calling a scorer, even
+when the target returned no output or failed. Unsupported caller syntax and real provider errors
+are not automatically coverage gaps; the adapter must identify a known missing provider
+behavior. `runSimulation` checks the authoritative world when its callback throws: a durably
+recorded gap finishes as environment-incomplete rather than `TargetError`, while a gap or seal
+that cannot be confirmed stays uncertain and never causes the agent to be replayed.
 
 The hosted MCP connection exposes Hue's bounded native actions; it is not general Gmail or
 Slack HTTP parity and does not proxy arbitrary provider traffic. Forking, in-place reset and

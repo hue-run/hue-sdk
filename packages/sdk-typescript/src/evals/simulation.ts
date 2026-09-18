@@ -7,7 +7,7 @@ import type { EnvironmentDefinition, EnvironmentIdentity } from "../environment/
 import type { EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";
-import { digest, json } from "./json.js";
+import { aggregateBounds, digest, json, valueBounds } from "./json.js";
 import {
   runExperiment,
   TargetCancelledError,
@@ -59,6 +59,8 @@ export interface SimulationTargetContext {
   config: JsonValue;
   item: ExperimentCase;
   executionId: string;
+  /** Stable world identity for adapter control operations such as coverage reporting. */
+  environmentRunId: string;
   tools: Record<string, EnvironmentTool>;
   mcp: SimulationMcpCapability;
   signal?: AbortSignal;
@@ -100,33 +102,36 @@ const scorerDefinition = (entry: RepositorySimulationScorer) =>
   "definition" in entry.scorer ? entry.scorer.definition : entry.scorer;
 
 function normalizedEnvironmentDefinition(definition: EnvironmentDefinition): JsonValue {
-  return json({
-    ...definition,
-    determinism: {
-      clock: {
-        startNs: definition.determinism?.clock?.startNs ?? "0",
-        stepAdvanceNs: definition.determinism?.clock?.stepAdvanceNs ?? "1000000",
-      },
-    },
-    actions: definition.actions.map((action) => ({
-      ...action,
-      params: (action.params ?? []).map((parameter) => ({
-        ...parameter,
-        required: parameter.required ?? true,
-      })),
-      semantics: {
-        ...action.semantics,
-        config: {
-          ...action.semantics.config,
-          guards: action.semantics.config.guards ?? [],
-          notFoundError: action.semantics.config.notFoundError ?? "not_found",
+  return json(
+    {
+      ...definition,
+      determinism: {
+        clock: {
+          startNs: definition.determinism?.clock?.startNs ?? "0",
+          stepAdvanceNs: definition.determinism?.clock?.stepAdvanceNs ?? "1000000",
         },
       },
-      observation: action.observation ?? { projection: "identity" },
-    })),
-    provenance: definition.provenance ?? { kind: "handwritten" },
-    metadata: definition.metadata ?? {},
-  });
+      actions: definition.actions.map((action) => ({
+        ...action,
+        params: (action.params ?? []).map((parameter) => ({
+          ...parameter,
+          required: parameter.required ?? true,
+        })),
+        semantics: {
+          ...action.semantics,
+          config: {
+            ...action.semantics.config,
+            guards: action.semantics.config.guards ?? [],
+            notFoundError: action.semantics.config.notFoundError ?? "not_found",
+          },
+        },
+        observation: action.observation ?? { projection: "identity" },
+      })),
+      provenance: definition.provenance ?? { kind: "handwritten" },
+      metadata: definition.metadata ?? {},
+    },
+    { ...valueBounds, bytes: 1024 * 1024 },
+  );
 }
 
 function normalizedScorerDefinition(definition: ScorerDefinition): JsonValue {
@@ -139,22 +144,25 @@ function normalizedScorerDefinition(definition: ScorerDefinition): JsonValue {
 }
 function scenarioIdentity(scenario: SimulationScenario): JsonValue {
   if (scenario.kind === "experiment") return scenario;
-  return json({
-    kind: scenario.kind,
-    name: scenario.name,
-    slug: scenario.slug,
-    description: scenario.description ?? "",
-    environment: {
-      ...scenario.environment,
-      definition: normalizedEnvironmentDefinition(scenario.environment.definition),
+  return json(
+    {
+      kind: scenario.kind,
+      name: scenario.name,
+      slug: scenario.slug,
+      description: scenario.description ?? "",
+      environment: {
+        ...scenario.environment,
+        definition: normalizedEnvironmentDefinition(scenario.environment.definition),
+      },
+      cases: scenario.cases,
+      scorers: scenario.scorers.map(({ scorer, ...identity }) => ({
+        ...identity,
+        definition: normalizedScorerDefinition("definition" in scorer ? scorer.definition : scorer),
+      })),
+      config: scenario.config ?? {},
     },
-    cases: scenario.cases,
-    scorers: scenario.scorers.map(({ scorer, ...identity }) => ({
-      ...identity,
-      definition: normalizedScorerDefinition("definition" in scorer ? scorer.definition : scorer),
-    })),
-    config: scenario.config ?? {},
-  });
+    aggregateBounds(8 * 1024 * 1024),
+  );
 }
 async function findBySlug<T extends { id: string; slug: string }>(
   page: (after?: string) => Promise<{ items: T[]; nextCursor: string | null }>,
@@ -513,6 +521,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
             config: context.config,
             item: context.item,
             executionId: context.executionId,
+            environmentRunId: run.id,
             tools,
             mcp,
             signal: options.signal,
@@ -527,6 +536,31 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
           return output;
         } catch (error) {
           if (error instanceof TargetOutcomeUncertainError || finalized) throw error;
+          let environmentIncomplete: boolean;
+          try {
+            environmentIncomplete =
+              (await options.environmentClient.getRun(run.id)).validity ===
+              "environment_incomplete";
+          } catch (inspectionError) {
+            // A target error can be the adapter surfacing a coverage gap. If the
+            // authoritative run cannot be read, do not guess that it was an agent
+            // failure or replay the target on resume.
+            throw new TargetOutcomeUncertainError(context.executionId, {
+              cause: new AggregateError([error, inspectionError]),
+            });
+          }
+          if (environmentIncomplete) {
+            try {
+              await seal(options.environmentClient, run.id, context.executionId, "completed");
+            } catch (finalizationError) {
+              throw new TargetOutcomeUncertainError(context.executionId, {
+                cause: new AggregateError([error, finalizationError]),
+              });
+            }
+            finalized = true;
+            await Promise.resolve(progress("world_sealed")).catch(() => undefined);
+            return undefined;
+          }
           try {
             await seal(options.environmentClient, run.id, context.executionId, "abandoned");
           } catch (finalizationError) {

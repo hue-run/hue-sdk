@@ -2,7 +2,10 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
 import { aggregateBounds, digest, json, sourceDigest } from "./json.js";
-import { validateEnvironmentEvidence } from "./environment-evidence.js";
+import {
+  environmentIncompleteReason,
+  validateEnvironmentEvidence,
+} from "./environment-evidence.js";
 import type {
   JsonValue,
   LocalScorer,
@@ -138,6 +141,14 @@ export async function scoreLocally(
   const timeout = options.schemaTimeoutMillis ?? 2000;
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 60_000)
     throw new RangeError("schemaTimeoutMillis must be 100–60000");
+  if (context.environment?.validity === "environment_incomplete") {
+    try {
+      validateEnvironmentEvidence(context.environment);
+      return skip(environmentIncompleteReason);
+    } catch {
+      return { state: "error", error: { type: "LocalScorerError" } };
+    }
+  }
   if (!context.hasOutput && !(definition.kind === "local_code" && context.environment))
     return skip("Output evidence is unavailable");
   if (context.hasOutput && context.output === undefined)
@@ -280,6 +291,7 @@ export function persistedScore(score: Score, persistResultContent: boolean): Sco
     };
   // Preserve fixed unavailable reasons, never arbitrary caller explanations.
   const safeReasons = [
+    environmentIncompleteReason,
     "Output evidence is unavailable",
     "Reference evidence is unavailable",
     "Includes requires string output and reference",

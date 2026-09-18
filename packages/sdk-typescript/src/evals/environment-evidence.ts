@@ -1,7 +1,7 @@
 import { setTimeout as wait } from "node:timers/promises";
 import { HueApiError } from "./client.js";
 import type { EvaluationClient } from "./client.js";
-import { json, uuid } from "./json.js";
+import { json, uuid, valueBounds } from "./json.js";
 import {
   environmentJson,
   validateEvidenceArguments,
@@ -30,7 +30,46 @@ async function readEvidence<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
+export const environmentIncompleteReason =
+  "Environment incomplete: provider behavior is not implemented.";
+
+function validateCoverage(evidence: EnvironmentEvidence): void {
+  const validity = evidence.validity === undefined ? "not_assessed" : evidence.validity;
+  const gap = evidence.coverageGap ?? null;
+  if (validity === "not_assessed" && gap === null) return;
+  if (validity !== "environment_incomplete" || !gap || typeof gap !== "object")
+    throw new TypeError("Invalid environment coverage evidence");
+  const { args, ...metadata } = gap;
+  json(metadata);
+  json(args, { ...valueBounds, bytes: 16_000 });
+  if (
+    !args ||
+    typeof args !== "object" ||
+    Array.isArray(args) ||
+    Object.keys(gap).sort().join(",") !==
+      "args,code,description,operation,provider,reportedAt,reportedBy" ||
+    [
+      [gap.provider, 128],
+      [gap.operation, 256],
+      [gap.code, 128],
+      [gap.description, 2000],
+    ].some(
+      ([value, maximum]) =>
+        typeof value !== "string" || !value.length || value.length > Number(maximum),
+    ) ||
+    typeof gap.reportedAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(gap.reportedAt) ||
+    !Number.isFinite(Date.parse(gap.reportedAt)) ||
+    !gap.reportedBy ||
+    !["project_key", "user"].includes(gap.reportedBy.kind) ||
+    Object.keys(gap.reportedBy).sort().join(",") !== "id,kind"
+  )
+    throw new TypeError("Invalid environment coverage gap");
+  uuid(gap.reportedBy.id);
+}
+
 export function validateEnvironmentEvidence(evidence: EnvironmentEvidence): void {
+  validateCoverage(evidence);
   uuid(evidence.runId);
   uuid(evidence.executionId);
   uuid(evidence.environmentVersionId);
@@ -75,7 +114,12 @@ export async function loadEnvironmentEvidence(
     snapshot.stepCount > MAX_ENVIRONMENT_STEPS
   )
     throw new TypeError("Invalid environment step count");
-  const evidence: EnvironmentEvidence = { ...snapshot, steps: [] };
+  const evidence: EnvironmentEvidence = {
+    validity: "not_assessed",
+    coverageGap: null,
+    ...snapshot,
+    steps: [],
+  };
   let size = Buffer.byteLength(JSON.stringify(evidence));
   let after: number | undefined;
   for (;;) {

@@ -8,6 +8,7 @@ import type { HueClient } from "../src/client.js";
 import type { EnvironmentClient } from "../src/environment.js";
 import {
   builtins,
+  defineLocalScorer,
   HueApiError,
   runSimulation,
   TargetOutcomeUncertainError,
@@ -54,6 +55,7 @@ function harness(
   options: {
     uncertainSeal?: boolean;
     evidenceFailures?: number;
+    runInspectionFailures?: number;
     loseCompletionAcknowledgement?: boolean;
     loseSealAcknowledgement?: boolean;
   } = {},
@@ -65,10 +67,12 @@ function harness(
   const executions = new Map<string, any>();
   const worlds = new Map<string, any>();
   const completions = new Map<string, any>();
+  const results: any[] = [];
   let targetCalls = 0;
   let loseCompletion = options.loseCompletionAcknowledgement ?? true;
   let loseSealAcknowledgement = options.loseSealAcknowledgement ?? true;
   let evidenceFailures = options.evidenceFailures ?? 1;
+  let runInspectionFailures = options.runInspectionFailures ?? 0;
   const client = {
     baseUrl,
     checkConnection: async () => project,
@@ -214,6 +218,8 @@ function harness(
         definitionDigest: checksum,
         seed: "b".repeat(32),
         status: world.status,
+        validity: world.validity,
+        coverageGap: world.coverageGap,
         stepCount: world.steps.length,
         stateDigest: checksum,
         initialState: { collections: { records: {} } },
@@ -242,7 +248,10 @@ function harness(
       }
       return result;
     },
-    submitResults: async () => ({ ids: [randomUUID()] }),
+    submitResults: async (_runId: string, input: { results: any[] }) => {
+      results.push(...input.results);
+      return { ids: input.results.map(() => randomUUID()) };
+    },
     finishExperiment: async (id: string) => {
       experiments.get(id).finishedAt = new Date().toISOString();
       return { id, finishedAt: experiments.get(id).finishedAt };
@@ -284,6 +293,8 @@ function harness(
         environmentVersionId: input.environmentVersionId,
         executionId: input.executionId,
         status: "open",
+        validity: "not_assessed",
+        coverageGap: null,
         steps: [],
         actions: [
           {
@@ -332,6 +343,17 @@ function harness(
         stepsRemaining: 499,
       };
     },
+    recordCoverageGap: async (runId: string, input: any) => {
+      const world = worlds.get(runId);
+      const { idempotencyKey: _idempotencyKey, ...details } = input;
+      world.validity = "environment_incomplete";
+      world.coverageGap = {
+        ...details,
+        reportedAt: "2026-09-18T05:49:02.000Z",
+        reportedBy: { kind: "project_key", id: randomUUID() },
+      };
+      return { runId, validity: world.validity, coverageGap: world.coverageGap };
+    },
     finishRun: async (runId: string, input: any) => {
       if (options.uncertainSeal) throw new Error("world finalization unavailable");
       worlds.get(runId).status = input.status;
@@ -348,7 +370,10 @@ function harness(
       }
       return sealed;
     },
-    getRun: async (runId: string) => worlds.get(runId),
+    getRun: async (runId: string) => {
+      if (runInspectionFailures-- > 0) throw new Error("world inspection unavailable");
+      return worlds.get(runId);
+    },
   } as unknown as EnvironmentClient;
   const hue = {
     captureContent: false,
@@ -377,6 +402,7 @@ function harness(
     hue,
     worlds,
     experiments,
+    results,
     targetCalls: () => targetCalls,
     target: async (_inputs: JsonValue, context: any) => {
       targetCalls++;
@@ -388,6 +414,39 @@ function harness(
 }
 
 describe("one-shot simulation workflow", () => {
+  test("resolves a repository world larger than the default JSON value cap", async () => {
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-large-world-"));
+    try {
+      const report = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario: {
+          ...scenario,
+          environment: {
+            ...scenario.environment,
+            definition: {
+              ...scenario.environment.definition,
+              state: {
+                collections: { records: { seed: { blob: "x".repeat(210_000) } } },
+              },
+            },
+          },
+        },
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+      });
+      expect(report.experimentId).toBeTruthy();
+      expect(fixture.worlds.size).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("rejects invalid world limits before consuming a scenario case", async () => {
     const fixture = harness();
     const options = {
@@ -504,6 +563,114 @@ describe("one-shot simulation workflow", () => {
       expect([...fixture.worlds.values()][0]?.status).toBe("abandoned");
       const [item] = (await fixture.client.listExperimentItems(report.experimentId)).items;
       expect(item?.execution?.state).toBe("cancelled");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a durably reported provider gap is inconclusive, not a target or scorer verdict", async () => {
+    let scorerCalls = 0;
+    let callbackCalls = 0;
+    const scorer = defineLocalScorer({
+      source: "must-not-score-an-incomplete-world",
+      entrypoint: "score",
+      metrics: [{ name: "quality", type: "boolean" }],
+      score() {
+        scorerCalls++;
+        throw new Error("must not run");
+      },
+    });
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-incomplete-"));
+    try {
+      const report = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario: {
+          ...scenario,
+          scorers: [{ name: "Quality", slug: "quality", scorer }],
+        },
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+        target: async (_inputs, context) => {
+          callbackCalls++;
+          await fixture.environmentClient.recordCoverageGap(context.environmentRunId, {
+            idempotencyKey: randomUUID(),
+            provider: "google.gmail.mcp",
+            operation: "create_draft",
+            code: "standalone_draft_unsupported",
+            args: { to: ["synthetic-recipient@example.test"] },
+            description: "Standalone new-message drafts are not implemented.",
+          });
+          const error = new Error("The simulated provider does not support this operation");
+          error.name = "EnvironmentIncompleteError";
+          throw error;
+        },
+      });
+      expect(callbackCalls).toBe(1);
+      expect(scorerCalls).toBe(0);
+      expect(fixture.results).toEqual([
+        expect.objectContaining({
+          state: "skipped",
+          metrics: [],
+          explanation: "Environment incomplete: provider behavior is not implemented.",
+        }),
+      ]);
+      const [item] = (await fixture.client.listExperimentItems(report.experimentId)).items;
+      expect(item?.execution?.state).toBe("succeeded");
+      expect([...fixture.worlds.values()][0]).toMatchObject({
+        status: "completed",
+        validity: "environment_incomplete",
+        coverageGap: {
+          provider: "google.gmail.mcp",
+          operation: "create_draft",
+          code: "standalone_draft_unsupported",
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("an unconfirmed provider gap stays uncertain and never replays the callback", async () => {
+    const fixture = harness({
+      evidenceFailures: 0,
+      runInspectionFailures: 1,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-gap-uncertain-"));
+    let callbackCalls = 0;
+    const options = {
+      ...fixture,
+      checkpointDirectory: directory,
+      scenario,
+      persistResultContent: false,
+      traceEvidence: { mode: "required" as const },
+      target: async (_inputs: JsonValue, context: any) => {
+        callbackCalls++;
+        await fixture.environmentClient.recordCoverageGap(context.environmentRunId, {
+          idempotencyKey: randomUUID(),
+          provider: "google.gmail.mcp",
+          operation: "create_draft",
+          code: "standalone_draft_unsupported",
+          args: {},
+          description: "Standalone new-message drafts are not implemented.",
+        });
+        throw new Error("Environment incomplete");
+      },
+    };
+    try {
+      await expect(runSimulation(options)).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+      expect(callbackCalls).toBe(1);
+      await expect(runSimulation(options)).rejects.toBeInstanceOf(UncertainExecutionError);
+      expect(callbackCalls).toBe(1);
+      expect([...fixture.worlds.values()][0]?.status).toBe("open");
+      expect(fixture.results).toEqual([]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

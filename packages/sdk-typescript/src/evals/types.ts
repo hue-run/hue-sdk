@@ -1,4 +1,5 @@
 import type { JsonValue } from "../types.js";
+import type { EnvironmentCoverage } from "../environment/types.js";
 
 export type { JsonValue } from "../types.js";
 export interface Page<T> {
@@ -254,7 +255,7 @@ export interface ScoreContext {
   executionState: TerminalState;
   environment?: EnvironmentEvidence;
 }
-export interface EnvironmentEvidenceSnapshot {
+export interface EnvironmentEvidenceSnapshot extends EnvironmentCoverage {
   runId: string;
   executionId: string;
   environmentVersionId: string;
