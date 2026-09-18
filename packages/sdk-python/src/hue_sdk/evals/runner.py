@@ -180,7 +180,7 @@ def _upload(
 
 
 def _error_message(error: Exception) -> str:
-    # The caller opted into storing result content; PostgreSQL still rejects invalid text.
+    # The caller opted into storing result content; the API still rejects NUL and lone surrogates.
     return "".join(
         char for char in str(error)[:4000] if char != "\0" and not 0xD800 <= ord(char) <= 0xDFFF
     )
