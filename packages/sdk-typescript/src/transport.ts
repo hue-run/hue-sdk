@@ -1,3 +1,4 @@
+import type { Agent } from "node:http";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import {
   CompressionAlgorithm,
@@ -23,7 +24,7 @@ import {
   type LogRecordProcessor,
   type ReadableLogRecord,
 } from "@opentelemetry/sdk-logs";
-import { MAX_BODY_BYTES, validateOptions } from "./config.js";
+import { isInsecureOrigin, MAX_BODY_BYTES, validateOptions } from "./config.js";
 import { estimateRecordBytes } from "./safety.js";
 import { snapshotLog, snapshotSpan } from "./snapshot.js";
 import { redactLog, redactSpan, type ResourceCache } from "./privacy.js";
@@ -37,7 +38,25 @@ type Response = {
     errorMessage?: string;
   };
 };
+/** A finished span or emitted log record as the OpenTelemetry SDK hands it to a processor. */
 export type RecordValue = ReadableSpan | ReadableLogRecord;
+
+/** The transport surface the exporters report through; kept narrow so nothing else depends on it. */
+interface ExportSink {
+  readonly options: ReturnType<typeof validateOptions>;
+  finish(signal: Signal, records: RecordValue[]): void;
+  acceptedRecords(signal: Signal, count: number): void;
+  issue(
+    signal: Signal,
+    kind: ExportIssue["kind"],
+    count: number,
+    message: string,
+    status?: number,
+  ): void;
+}
+
+/** Per-record allowance for protobuf length prefixes that grow when records are grouped. */
+const RECORD_FRAMING_BYTES = 64;
 
 function recordData(record: RecordValue, signal: Signal): unknown {
   if (signal === "traces") {
@@ -63,9 +82,15 @@ function recordData(record: RecordValue, signal: Signal): unknown {
   };
 }
 
+/**
+ * Rejection of {@link HueClient.flush} and {@link HueClient.shutdown}: telemetry was not fully
+ * accepted. Carries sanitized counts only, never server response text or content.
+ */
 export class HueExportError extends Error {
   constructor(
+    /** Non-warning issues observed since the failing drain began. */
     readonly issues: ExportIssue[],
+    /** Cumulative counters and current gauges at the time of the failure. */
     readonly report: ExportReport,
   ) {
     super("Hue could not accept all telemetry. Inspect issues and report for sanitized counts.");
@@ -73,10 +98,17 @@ export class HueExportError extends Error {
   }
 }
 
-/** Owned transport components; attach processors during provider construction. */
+/**
+ * Hue's export pipeline: OTLP/HTTP exporters behind bounded batch processors, with cumulative
+ * counters and a sanitized issue history. A client owns one; in attach mode the application attaches
+ * `spanProcessor` and `logRecordProcessor` to its own providers while constructing them.
+ */
 export class HueTransport {
+  /** Validated options with defaults applied; `baseUrl` is the origin. Not enumerable, so it does not leak the key when logged. */
   readonly options: ReturnType<typeof validateOptions>;
+  /** Span processor to attach to a tracer provider; a no-op when disabled. */
   readonly spanProcessor: SpanProcessor;
+  /** Log record processor to attach to a logger provider; a no-op when disabled. */
   readonly logRecordProcessor: LogRecordProcessor;
   private sequence = 0;
   private observedSequence = 0;
@@ -120,6 +152,13 @@ export class HueTransport {
       this.logRecordProcessor = { onEmit() {}, async forceFlush() {}, async shutdown() {} };
       return;
     }
+    if (isInsecureOrigin(this.options.baseUrl))
+      this.issue(
+        "traces",
+        "warning",
+        0,
+        "allowInsecureHttp is set: telemetry and the project key are sent over plain HTTP to a host that is not loopback",
+      );
     const batching = {
       maxQueueSize: 2048,
       maxExportBatchSize: 128,
@@ -211,6 +250,7 @@ export class HueTransport {
     }
   }
 
+  /** @internal Exporter callback: releases queued records after an export attempt settles. */
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
       const pending = signal === "traces" ? this.spans : this.logs;
@@ -219,10 +259,12 @@ export class HueTransport {
     }
   }
 
+  /** @internal Exporter callback: counts records the collector acknowledged. */
   acceptedRecords(signal: Signal, count: number): void {
     this.accepted[signal] += count;
   }
 
+  /** @internal Records a sanitized issue, updates counters and rate-limits the diagnostic callback. */
   issue(
     signal: Signal,
     kind: ExportIssue["kind"],
@@ -252,7 +294,9 @@ export class HueTransport {
       Date.now() - this.lastDiagnosticAt >= 1000
     ) {
       this.diagnosticPending = true;
-      this.lastDiagnosticAt = Date.now();
+      // Warnings (for example the allowInsecureHttp notice) do not consume the slot, so the first
+      // real failure still reaches the callback promptly.
+      if (kind !== "warning") this.lastDiagnosticAt = Date.now();
       void Promise.resolve()
         .then(() => this.options.onExportIssue?.({ ...issue }))
         .then(
@@ -266,16 +310,16 @@ export class HueTransport {
     }
   }
 
-  instrumentationFailure(signal: Signal = "traces"): void {
+  /** @internal Counts a helper capture or instrumentation failure that preserved application execution. */
+  instrumentationFailure(
+    signal: Signal = "traces",
+    message = "Telemetry capture or instrumentation failed; application execution was preserved",
+  ): void {
     this.instrumentationFailures++;
-    this.issue(
-      signal,
-      "invalid",
-      0,
-      "Telemetry capture or instrumentation failed; application execution was preserved",
-    );
+    this.issue(signal, "invalid", 0, message);
   }
 
+  /** Cumulative counters and current queue gauges. */
   getReport(): ExportReport {
     return {
       acceptedSpans: this.accepted.traces,
@@ -293,6 +337,7 @@ export class HueTransport {
     };
   }
 
+  /** Copies of the latest 128 sanitized issues, oldest first. */
   getIssues(): ExportIssue[] {
     return this.issues.map((issue) => ({ ...issue }));
   }
@@ -302,6 +347,11 @@ export class HueTransport {
     return this.failureSequence;
   }
 
+  /**
+   * Waits for the processors' and exporters' in-flight work; drain the providers first.
+   *
+   * @throws HueExportError when a new non-warning issue was recorded since the previous observation.
+   */
   flush(): Promise<ExportReport> {
     const from = this.observedSequence;
     const next = (this.flushPromise ?? Promise.resolve()).then(
@@ -335,6 +385,12 @@ export class HueTransport {
     return report;
   }
 
+  /**
+   * Flushes and stops the processors; records emitted afterwards are dropped and counted. In attach
+   * mode call it after shutting down the application's providers.
+   *
+   * @throws HueExportError when the final flush observed new failures.
+   */
   shutdown(): Promise<ExportReport> {
     this.shutdownPromise ??= (async () => {
       this.closed = true;
@@ -354,7 +410,7 @@ export class HueTransport {
 class ReportingExporter<T extends RecordValue> {
   private pending = new Set<Promise<void>>();
   constructor(
-    private transport: HueTransport,
+    private transport: ExportSink,
     private signal: Signal,
     private serializer: ISerializer<T[], Response>,
     private metrics: IExporterMetricsHelper<T[]>,
@@ -425,7 +481,13 @@ class ReportingExporter<T extends RecordValue> {
         );
       }
     }
+    // Each record is encoded once to measure it; a request is encoded once more when it is sent.
+    // Records sharing a resource and scope are grouped on the wire, so the sum of the individual
+    // encodings plus a fixed framing margin bounds the request size. Room is left for gzip
+    // headers/blocks when otherwise incompressible data is near the wire cap.
+    const limit = MAX_BODY_BYTES - 1024;
     let batch: T[] = [];
+    let batchBytes = 0;
     for (const record of accepted) {
       let recordBytes: number;
       try {
@@ -435,15 +497,13 @@ class ReportingExporter<T extends RecordValue> {
         this.transport.issue(this.signal, "invalid", 1, "Telemetry record could not be serialized");
         continue;
       }
-      const candidate = [...batch, record];
-      // Leave room for gzip headers/blocks when otherwise incompressible data is near the wire cap.
-      if ((this.serializer.serializeRequest(candidate)?.byteLength ?? 0) <= MAX_BODY_BYTES - 1024) {
-        batch = candidate;
-        continue;
+      const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
+      if (batch.length && batchBytes + framedBytes > limit) {
+        if (!(await this.send(batch))) failed = true;
+        batch = [];
+        batchBytes = 0;
       }
-      if (batch.length && !(await this.send(batch))) failed = true;
-      batch = [];
-      if (recordBytes > MAX_BODY_BYTES - 1024) {
+      if (recordBytes > limit) {
         failed = true;
         this.transport.issue(
           this.signal,
@@ -451,7 +511,10 @@ class ReportingExporter<T extends RecordValue> {
           1,
           "Telemetry record exceeds the 1 MiB request limit",
         );
-      } else batch = [record];
+        continue;
+      }
+      batch.push(record);
+      batchBytes += framedBytes;
     }
     if (batch.length && !(await this.send(batch))) failed = true;
     if (failed) throw new Error("Hue telemetry export failed");
@@ -591,7 +654,12 @@ class ReportingExporter<T extends RecordValue> {
   }
 }
 
+/**
+ * Creates the export pipeline for attach mode; pass it with the application's providers to
+ * {@link createHue}. Validates options like an owned client.
+ *
+ * @throws TypeError for invalid options; see {@link createHue}.
+ */
 export function createHueTransport(options: HueOptions): HueTransport {
   return new HueTransport(options);
 }
-import type { Agent } from "node:http";

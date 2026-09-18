@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -42,6 +43,12 @@ if (!values.archive && !values["registry-version"]) {
   run("node", ["scripts/write-version.mjs", "--check"], staging);
   run("bun", ["--no-env-file", "run", "typecheck"], staging);
   run("bun", ["--no-env-file", "run", "build"], staging);
+  // stripInternal must keep the transport's @internal mutators out of the published declarations.
+  const transportTypes = readFileSync(join(staging, "dist", "transport.d.ts"), "utf8");
+  for (const member of ["finish", "acceptedRecords", "issue", "instrumentationFailure"]) {
+    if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
+      throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);
+  }
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
   // Bun's packer must agree with npm's file inventory; the release artifact stays npm pack.
   const bunPack = spawnSync("bun", ["--no-env-file", "pm", "pack", "--dry-run"], {
@@ -105,6 +112,39 @@ run(
   );
   assert.equal(score.state, "error");
   assert.equal(score.error.type, "SchemaValidatorUnavailable");
+`,
+  ],
+  minimal,
+);
+// CommonJS applications on the Node floor (22.12+) load the ESM build through require(esm):
+// every entry point resolves through its "default" condition, and the build must stay free of
+// top-level await, which require() rejects with ERR_REQUIRE_ASYNC_MODULE.
+run(
+  process.execPath,
+  [
+    "--input-type=commonjs",
+    "-e",
+    `
+  const assert = require("node:assert/strict");
+  const sdk = require("@hue-run/sdk");
+  const evals = require("@hue-run/sdk/evals");
+  const managed = require("@hue-run/sdk/managed");
+  assert.equal(typeof sdk.createHue, "function");
+  assert.equal(typeof sdk.createHueSafe, "function");
+  assert.equal(typeof evals.scoreLocally, "function");
+  assert.equal(typeof managed.createManagedTargetHandler, "function");
+  const hue = sdk.createHue({ enabled: false });
+  hue
+    .withSpan("require", () => 42)
+    .then(async (value) => {
+      assert.equal(value, 42);
+      await hue.shutdownSafe();
+      console.log("require(esm) consumer ok");
+    })
+    .catch((error) => {
+      console.error(error);
+      process.exit(1);
+    });
 `,
   ],
   minimal,
@@ -200,10 +240,13 @@ run(
     "-e",
     `
   import { strict as assert } from "node:assert";
+  import { createRequire } from "node:module";
   import { createHue } from "@hue-run/sdk";
   import { hueTelemetry } from "@hue-run/sdk/ai-sdk";
   const hue = createHue({ apiKey: "synthetic-key", serviceName: "compatibility", captureContent: false });
   assert.throws(() => hueTelemetry(hue), /requires ai@/);
+  // The adapter entry point is also reachable from CommonJS once its peer is installed.
+  assert.equal(createRequire(import.meta.url)("@hue-run/sdk/ai-sdk").hueTelemetry, hueTelemetry);
   await hue.shutdownSafe();
 `,
   ],

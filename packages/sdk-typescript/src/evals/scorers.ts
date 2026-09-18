@@ -16,17 +16,21 @@ import type {
   ScorerVersion,
 } from "./types.js";
 
+/** Definitions for Hue's built-in scorers, ready to publish with `publishScorerVersion`. */
 export const builtins = {
+  /** Exact typed JSON equality with the reference output; key order is ignored. */
   exactMatch: (): ScorerDefinition => ({
     kind: "builtin",
     entry: "hue.exact_match.v1",
     config: {},
   }),
+  /** The string reference output is contained in the string output. */
   includes: (caseSensitive = true): ScorerDefinition => ({
     kind: "builtin",
     entry: "hue.includes.v1",
     config: { caseSensitive },
   }),
+  /** The output satisfies a JSON Schema (draft 2020-12), validated with the optional `ajv` peer in a worker. */
   jsonSchema: (schema: JsonValue): ScorerDefinition => ({
     kind: "builtin",
     entry: "hue.json_schema.v1",
@@ -128,6 +132,13 @@ export function validateScorerBindings(
       );
   }
 }
+/**
+ * Scores one subject with a pinned scorer version on this machine: built-ins run here, `local_code`
+ * pins run the matching callback from `options.scorers`, `manual` pins are skipped. Failures are
+ * returned as sanitized error scores.
+ *
+ * @throws TypeError for an `llm_judge` pin, which must be dispatched through `createJudgeJobs`.
+ */
 export async function scoreLocally(
   version: ScorerVersion,
   context: ScoreContext,

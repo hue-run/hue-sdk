@@ -13,18 +13,13 @@ from threading import Condition, Thread
 from time import monotonic
 from typing import Any
 
-from opentelemetry.context import (
-    _SUPPRESS_INSTRUMENTATION_KEY,
-    attach,
-    detach,
-    get_value,
-    set_value,
-)
+from opentelemetry.context import attach, detach
 from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
+from ._otel_compat import export_context, instrumentation_suppressed
 from .snapshots import snapshot_log, snapshot_span
-from .transport import MAX_REQUEST_BYTES
+from .transport import MAX_BATCH_BYTES
 
 
 class _BoundedProcessor:
@@ -65,7 +60,7 @@ class _BoundedProcessor:
             return
         admitted = False
         try:
-            if get_value(_SUPPRESS_INSTRUMENTATION_KEY):
+            if instrumentation_suppressed():
                 return
             # Reject oversized/invalid records before retaining them. The budget
             # includes in-flight records, so a stalled receiver cannot grow it.
@@ -91,7 +86,7 @@ class _BoundedProcessor:
                 if self._closed:
                     self._dropped += 1
                     return
-                if size > MAX_REQUEST_BYTES:
+                if size > MAX_BATCH_BYTES:
                     self._dropped += 1
                     self._exporter.record_failure()
                 elif (
@@ -165,7 +160,7 @@ class _BoundedProcessor:
                 batch_bytes = 0
                 while self._queue and len(batch) < 64:
                     size = self._queue[0][1]
-                    if batch_bytes + size > MAX_REQUEST_BYTES:
+                    if batch_bytes + size > MAX_BATCH_BYTES:
                         break
                     batch.append(self._queue.popleft())
                     batch_bytes += size
@@ -173,9 +168,9 @@ class _BoundedProcessor:
                 # conservative sum keeps each export within one HTTP request.
             token = None
             try:
-                # Match the pinned OTel SDK's exporter suppression contract.
-                # Exporter diagnostics must not feed back into this pipeline.
-                token = attach(set_value(_SUPPRESS_INSTRUMENTATION_KEY, True))
+                # Match the OTel SDK exporters' suppression contract. Exporter
+                # diagnostics must not feed back into this pipeline.
+                token = attach(export_context())
                 self._exporter.export(tuple(item for item, _ in batch))
             except Exception:
                 self._exporter.record_failure()

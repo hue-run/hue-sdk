@@ -24,53 +24,107 @@ const STATES = new Set([
 ]);
 const propagator = new W3CTraceContextPropagator();
 
+/** A declared input file the handler downloads and verifies before calling the target. */
 export interface ManagedInputFile {
+  /** Hue artifact ID. */
   artifactId: string;
+  /** File name without path separators. */
   filename: string;
+  /** MIME type. */
   contentType: string;
+  /** Exact size in bytes; verified after download. */
   byteSize: number;
+  /** Lowercase hex SHA-256 of the bytes; verified after download. */
   sha256: string;
+  /** Caller-defined role of the file in the case, up to 64 characters. */
   role: string;
 }
+/** The request body Hue POSTs to a managed target (protocol version 1). */
 export interface ManagedInvocation {
+  /** Always 1. */
   protocolVersion: 1;
+  /** Execution to claim and complete. */
   executionId: string;
+  /** Attempt number, starting at 1. */
   attempt: number;
+  /** Frozen case inputs. */
   input: JsonValue;
+  /** Experiment configuration. */
   config: JsonValue;
+  /** Up to 16 declared input files. */
   inputFiles: ManagedInputFile[];
+  /** RFC 3339 UTC deadline for the whole invocation. */
   deadline: string;
+  /** Sampled W3C `traceparent` the target span must continue. */
   traceparent: string;
 }
+/** What the target callback receives after the claim and file verification succeed. */
 export interface ManagedTargetContext {
+  /** Execution being run. */
   executionId: string;
+  /** Attempt number, starting at 1. */
   attempt: number;
+  /** Frozen case inputs. */
   input: JsonValue;
+  /** Experiment configuration. */
   config: JsonValue;
-  inputFiles: Array<ManagedInputFile & { data: Uint8Array }>;
+  /** Verified input files with their bytes. */
+  inputFiles: Array<
+    ManagedInputFile & {
+      /** Verified file contents. */
+      data: Uint8Array;
+    }
+  >;
+  /** Aborts at the execution deadline; the target must honor it. */
   signal: AbortSignal;
+  /** Trace ID of the `ai.managed_target` span the target runs under. */
   traceId: string;
 }
+/** A file the target returns for upload. */
 export interface ManagedOutputFile {
+  /** File name without path separators. */
   filename: string;
+  /** MIME type. */
   contentType: string;
+  /** Exact bytes to store, at most 25 MiB. */
   data: Uint8Array;
+  /** Marks the single primary artifact of the outcome. */
   primary?: boolean;
 }
+/** The target callback's return value. */
 export interface ManagedTargetResult {
+  /** Outcome state; `succeeded` by default. */
   state?: "succeeded" | "error" | "cancelled";
+  /** Output JSON; omitted means unavailable, `null` is a present output. */
   output?: JsonValue;
   /** Public, safe error summary. Never include provider errors, credentials or stacks. */
-  error?: { type: string; message?: string };
+  error?: {
+    /** Stable lowercase type such as `target_error`. */
+    type: string;
+    /** Bounded public message. */
+    message?: string;
+  };
+  /** Up to 16 files, 64 MiB in total. */
   files?: ManagedOutputFile[];
-  usage?: { inputTokens?: number; outputTokens?: number };
+  /** Provider-reported token usage, when known. */
+  usage?: {
+    /** Prompt tokens. */
+    inputTokens?: number;
+    /** Completion tokens. */
+    outputTokens?: number;
+  };
 }
+/** Options for {@link createManagedTargetHandler}. */
 export interface ManagedTargetOptions {
+  /** Dedicated shared secret Hue presents as a Bearer token; validated before any network access. */
   machineCredential: string;
+  /** Hue origin for invocation callbacks, `https://app.hue.run` by default; never taken from a request. */
   baseUrl?: string;
+  /** The application's existing agent function; called at most once per invocation. */
   target: (invocation: ManagedTargetContext) => Promise<ManagedTargetResult>;
   /** Flush the application's existing trace AND log pipelines; do not shut them down. */
   flushTelemetry: () => Promise<unknown>;
+  /** Tracer that records under the incoming trace context; defaults to the global tracer, which must be configured. */
   tracer?: Tracer;
   /** Reserve finalization time inside the host's request limit. Default 90 seconds. */
   maxExecutionMillis?: number;
@@ -78,7 +132,13 @@ export interface ManagedTargetOptions {
   finalizationMillis?: number;
 }
 
-/** A machine-authenticated, framework-neutral POST handler. Never retries the target. */
+/**
+ * Creates a machine-authenticated, framework-neutral POST handler that claims the invocation,
+ * verifies input files, runs `target` under the incoming trace context, uploads output files,
+ * saves the outcome and acknowledges telemetry. It never retries the target.
+ *
+ * @throws TypeError for an invalid credential, origin, budget or missing callbacks at construction.
+ */
 export function createManagedTargetHandler(
   options: ManagedTargetOptions,
 ): (request: Request) => Promise<Response> {

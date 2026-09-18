@@ -7,11 +7,13 @@ from urllib.parse import urlencode
 
 import requests
 
-from ..transport import DEFAULT_BASE_URL, normalize_base_url
+from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
 from ._json import MISSING, encode, json_value, uuid
 
 
 class HueApiError(RuntimeError):
+    status: int | None
+
     def __init__(self, status: int | None = None) -> None:
         self.status = status
         super().__init__(
@@ -25,10 +27,13 @@ class EvaluationClient:
     """Project-key v1 client. Mutations never retry implicitly; retain their idempotency keys.
 
     ``EvaluationClient(api_key=...)`` uses Hue Cloud. ``base_url`` overrides the origin;
-    existing ``EvaluationClient(base_url, api_key)`` calls remain supported.
+    existing ``EvaluationClient(base_url, api_key)`` calls remain supported, and a bare key
+    in the first position raises ``TypeError`` naming ``api_key=`` instead.
     Returned dictionaries use the public HTTP contract's camelCase field names.
     Connection/read timeout is bounded; redirects and oversized responses are rejected.
     """
+
+    base_url: str
 
     def __init__(
         self,
@@ -37,6 +42,7 @@ class EvaluationClient:
         *,
         timeout_seconds: float = 10,
     ) -> None:
+        reject_positional_api_key(base_url)
         self.base_url = normalize_base_url(base_url)
         if not isinstance(api_key, str) or not api_key or any(c.isspace() for c in api_key):
             raise ValueError("api_key must be a nonempty project service key without whitespace.")

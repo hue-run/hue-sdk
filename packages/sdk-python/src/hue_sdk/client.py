@@ -16,7 +16,6 @@ from opentelemetry import trace
 from opentelemetry._logs import LoggerProvider as ApiLoggerProvider
 from opentelemetry._logs import NoOpLoggerProvider, SeverityNumber
 from opentelemetry.context import Context
-from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk.resources import Resource
@@ -25,6 +24,8 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
+from ._otel_compat import encode_logs
+from ._version import __version__
 from .processors import BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
 from .snapshots import snapshot_content
@@ -36,6 +37,7 @@ from .transport import (
     ExportStatus,
     SafeSession,
     normalize_base_url,
+    reject_positional_api_key,
 )
 
 Redactor = Callable[[str, Any], Any]
@@ -56,6 +58,8 @@ class Project:
 
 class HueSpan:
     """A helper over an ordinary OTel span. Access ``otel_span`` for standard APIs."""
+
+    otel_span: trace.Span
 
     def __init__(self, client: Hue, span: trace.Span, category: str) -> None:
         self._client = client
@@ -160,10 +164,22 @@ class Hue:
     """Explicit, instance-owned OTel setup; never changes global providers.
 
     Use ``Hue(api_key=..., capture_content=...)`` for Hue Cloud. ``base_url``
-    overrides the default origin; existing ``Hue(base_url, api_key, ...)`` calls work.
+    overrides the default origin; existing ``Hue(base_url, api_key, ...)`` calls work,
+    and a bare key in the first position raises ``TypeError`` naming ``api_key=``.
     ``capture_content`` is required. It governs Hue's content helpers only. Arbitrary
     attributes, names, external instrumentors and other exporters remain caller-owned.
+    ``tracer_provider`` and ``logger_provider`` attach Hue's processors to existing SDK
+    providers. A provider Hue creates for the other signal shares the borrowed provider's
+    resource, so spans and correlated logs report one ``service.name``; ``service_name``
+    applies only when Hue creates both providers.
     """
+
+    enabled: bool
+    base_url: str
+    capture_content: bool
+    tracer_provider: trace.TracerProvider
+    tracer: trace.Tracer
+    logger_provider: ApiLoggerProvider
 
     def __init__(
         self,
@@ -173,6 +189,7 @@ class Hue:
         capture_content: bool,
         service_name: str = "hue-python-agent",
         tracer_provider: TracerProvider | None = None,
+        logger_provider: LoggerProvider | None = None,
         redactor: Redactor | None = None,
         export_timeout_seconds: float = 10,
         enabled: bool = True,
@@ -183,6 +200,8 @@ class Hue:
             raise TypeError("enabled must be True or False.")
         self.enabled = enabled
         self._pid = os.getpid()
+        if enabled:
+            reject_positional_api_key(base_url)
         self.base_url = normalize_base_url(base_url) if enabled else DEFAULT_BASE_URL
         if enabled and (
             not isinstance(api_key, str) or not api_key or any(c.isspace() for c in api_key)
@@ -198,6 +217,8 @@ class Hue:
             raise TypeError("redactor must be callable.")
         if tracer_provider is not None and not isinstance(tracer_provider, TracerProvider):
             raise TypeError("tracer_provider must be an OpenTelemetry SDK TracerProvider.")
+        if logger_provider is not None and not isinstance(logger_provider, LoggerProvider):
+            raise TypeError("logger_provider must be an OpenTelemetry SDK LoggerProvider.")
         for value in (max_queue_size, max_queue_bytes):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError("Queue limits must be positive integers.")
@@ -218,13 +239,16 @@ class Hue:
         )
         if not enabled:
             self._owns_provider = False
-            self.tracer_provider: trace.TracerProvider = trace.NoOpTracerProvider()
+            self._owns_logger_provider = False
+            self.tracer_provider = trace.NoOpTracerProvider()
             self.tracer = self.tracer_provider.get_tracer("hue-run")
-            self.logger_provider: ApiLoggerProvider = NoOpLoggerProvider()
+            self.logger_provider = NoOpLoggerProvider()
             self._logger = self.logger_provider.get_logger("hue-run")
             return
         try:
-            self._setup(service_name, tracer_provider, max_queue_size, max_queue_bytes)
+            self._setup(
+                service_name, tracer_provider, logger_provider, max_queue_size, max_queue_bytes
+            )
         except Exception:
             self._closed = True
             for name in ("_span_processor", "_log_processor"):
@@ -241,15 +265,28 @@ class Hue:
         self,
         service_name: str,
         tracer_provider: TracerProvider | None,
+        logger_provider: LoggerProvider | None,
         max_queue_size: int,
         max_queue_bytes: int,
     ) -> None:
-        resource = Resource.create({"service.name": service_name})
         self._owns_provider = tracer_provider is None
+        self._owns_logger_provider = logger_provider is None
+        # A borrowed provider's resource wins: correlated logs must describe the same
+        # service as the spans they reference, not a second service named by Hue.
+        borrowed: TracerProvider | LoggerProvider | None = (
+            tracer_provider if tracer_provider is not None else logger_provider
+        )
+        resource = (
+            borrowed.resource
+            if borrowed is not None
+            else Resource.create({"service.name": service_name})
+        )
         sdk_tracer_provider = tracer_provider or TracerProvider(
             resource=resource, shutdown_on_exit=False
         )
-        sdk_logger_provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
+        sdk_logger_provider = logger_provider or LoggerProvider(
+            resource=resource, shutdown_on_exit=False
+        )
         self.tracer_provider = sdk_tracer_provider
         self.logger_provider = sdk_logger_provider
         self._span_exporter = BoundedSpanExporter(
@@ -274,8 +311,8 @@ class Hue:
         )
         sdk_tracer_provider.add_span_processor(self._span_processor)
         sdk_logger_provider.add_log_record_processor(self._log_processor)
-        self.tracer = self.tracer_provider.get_tracer("hue-run", "0.1.3")
-        self._logger = self.logger_provider.get_logger("hue-run", "0.1.3")
+        self.tracer = self.tracer_provider.get_tracer("hue-run", __version__)
+        self._logger = self.logger_provider.get_logger("hue-run", __version__)
 
     def __repr__(self) -> str:
         return f"Hue(capture_content={self.capture_content!r}, closed={self._closed!r})"
@@ -653,8 +690,12 @@ class Hue:
                             else:
                                 self._span_processor.shutdown()
                         finally:
-                            if isinstance(self.logger_provider, LoggerProvider):
+                            if self._owns_logger_provider and isinstance(
+                                self.logger_provider, LoggerProvider
+                            ):
                                 self.logger_provider.shutdown()
+                            else:
+                                self._log_processor.shutdown()
                         # An expired caller budget is not an export failure.
                         # Recheck completed cleanup without starting another wait.
                         self._shutdown_result = self._drain(monotonic())

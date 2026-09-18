@@ -1,7 +1,6 @@
 import { INVALID_SPAN_CONTEXT, trace, type Span } from "@opentelemetry/api";
 import { types as utilTypes } from "node:util";
 import { MAX_CONTENT_BYTES } from "./config.js";
-import type { JsonValue } from "./types.js";
 
 export function noopSpan(): Span {
   return trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
@@ -92,7 +91,7 @@ export function safeSpan(source: Span, failed: () => void): Span {
 }
 
 /** Validate a bounded data tree without invoking toJSON or property getters. */
-export function encodeContent(value: JsonValue): string {
+export function encodeContent(value: unknown): string {
   let nodes = 0;
   let bytes = 0;
   const ancestors = new Set<object>();

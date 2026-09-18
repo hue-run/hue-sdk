@@ -15,12 +15,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from google.protobuf.message import DecodeError, Message
-from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY, attach, detach, set_value
-from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
+from opentelemetry.context import attach, detach
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.exporter.otlp.proto.http import Compression
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.version import __version__ as OTLP_EXPORTER_VERSION
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceResponse
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceResponse
 from opentelemetry.sdk._logs import ReadableLogRecord
@@ -28,9 +28,27 @@ from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportRes
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
+from ._otel_compat import encode_logs, export_context
+from ._version import __version__
+
 MAX_REQUEST_BYTES = 1_048_576
+# Batches stop 1 KiB short of the wire cap so gzip framing of incompressible data cannot exceed it,
+# matching the TypeScript transport.
+MAX_BATCH_BYTES = MAX_REQUEST_BYTES - 1024
 MAX_CONTENT_BYTES = 262_144
 DEFAULT_BASE_URL = "https://app.hue.run"
+# The OTLP exporter lets caller headers override its own User-Agent; keep its token after
+# Hue's, as the TypeScript transport does.
+USER_AGENT = f"hue-sdk-python/{__version__} OTel-OTLP-Exporter-Python/{OTLP_EXPORTER_VERSION}"
+
+
+def reject_positional_api_key(base_url: object) -> None:
+    """Explain a key passed where the origin goes, without echoing the value."""
+    if isinstance(base_url, str) and base_url and "://" not in base_url:
+        raise TypeError(
+            "base_url is the first positional argument and must be an origin such as "
+            "https://app.hue.run; pass the project service key as api_key=... instead."
+        )
 
 
 def normalize_base_url(value: str) -> str:
@@ -90,8 +108,9 @@ class ExportStatus:
 class SafeSession(requests.Session):
     """Disable redirects and reject partial/malformed OTLP acknowledgements.
 
-    OpenTelemetry 1.44 does not inspect partial_success itself. A rejection is
-    permanent: accepted records must not be retried as a whole batch.
+    The OTLP HTTP exporters in the supported OpenTelemetry range do not inspect
+    partial_success themselves. A rejection is permanent: accepted records must
+    not be retried as a whole batch.
     """
 
     def __init__(self, signal: str | None = None) -> None:
@@ -116,7 +135,7 @@ class SafeSession(requests.Session):
             raise requests.RequestException("Hue telemetry request timed out.")
         # ContextVars do not automatically follow work onto a new thread.
         # Preserve OTel suppression in the actual HTTP call, not only its caller.
-        export_context = set_value(_SUPPRESS_INSTRUMENTATION_KEY, True)
+        suppressed = export_context()
         if not self._request_lock.acquire(blocking=False):
             raise requests.RequestException("Hue telemetry transport is still busy.")
         completed = Event()
@@ -128,15 +147,16 @@ class SafeSession(requests.Session):
             nonlocal result, failure
             token = None
             try:
-                token = attach(export_context)
+                token = attach(suppressed)
                 for attempt in range(6):
                     remaining = deadline - monotonic()
                     if remaining <= 0:
                         raise requests.RequestException("Hue telemetry request timed out.")
                     kwargs["timeout"] = remaining
                     response = self._request(method, url, **kwargs)
-                    # OTel 1.44 omits 429 and Retry-After. Handle them here,
-                    # without replaying partial acknowledgements or 4xx errors.
+                    # The OTLP HTTP exporters in the supported range do not
+                    # honor 429 or Retry-After. Handle them here, without
+                    # replaying partial acknowledgements or 4xx errors.
                     retryable = response.status_code in (408, 429) or response.status_code >= 500
                     retry_after = response.headers.get("Retry-After")
                     if not retryable or (response.status_code != 429 and retry_after is None):
@@ -205,22 +225,22 @@ class SafeSession(requests.Session):
         if self.signal and response.ok:
             if response.status_code != 200:
                 raise requests.RequestException("Hue OTLP response must use HTTP 200.")
-            acknowledgement = (
-                ExportTraceServiceResponse()
-                if self.signal == "traces"
-                else ExportLogsServiceResponse()
-            )
-            try:
-                acknowledgement.ParseFromString(response.content)
-            except DecodeError:
-                raise requests.RequestException("Hue returned an invalid OTLP response.") from None
-            partial = acknowledgement.partial_success
-            rejected = (
-                partial.rejected_spans if self.signal == "traces" else partial.rejected_log_records
-            )
-            if rejected:
+            if _rejected_records(self.signal, response.content):
                 raise requests.RequestException("Hue OTLP receiver rejected records.")
         return response
+
+
+def _rejected_records(signal: str, content: bytes) -> int:
+    try:
+        if signal == "traces":
+            traces = ExportTraceServiceResponse()
+            traces.ParseFromString(content)
+            return traces.partial_success.rejected_spans
+        logs = ExportLogsServiceResponse()
+        logs.ParseFromString(content)
+        return logs.partial_success.rejected_log_records
+    except DecodeError:
+        raise requests.RequestException("Hue returned an invalid OTLP response.") from None
 
 
 def _retry_delay(value: str | None, attempt: int) -> float:
@@ -243,7 +263,7 @@ def _split_batches(
     """Split by actual protobuf bytes, retaining order. Oversized singles stay visible."""
     if not items:
         return []
-    if encode(items).ByteSize() <= MAX_REQUEST_BYTES or len(items) == 1:
+    if encode(items).ByteSize() <= MAX_BATCH_BYTES or len(items) == 1:
         return [items]
     middle = len(items) // 2
     return _split_batches(items[:middle], encode) + _split_batches(items[middle:], encode)
@@ -254,9 +274,9 @@ class BoundedSpanExporter(SpanExporter):
         self._session = SafeSession("traces")
         self._delegate = OTLPSpanExporter(
             endpoint=endpoint,
-            headers=headers,
+            headers={**headers, "User-Agent": USER_AGENT},
             timeout=timeout,
-            compression=Compression.NoCompression,
+            compression=Compression.Gzip,
             session=self._session,
         )
         self._failures = 0
@@ -279,7 +299,7 @@ class BoundedSpanExporter(SpanExporter):
         failed = False
         try:
             for batch in _split_batches(spans, encode_spans):
-                if encode_spans(batch).ByteSize() > MAX_REQUEST_BYTES:
+                if encode_spans(batch).ByteSize() > MAX_BATCH_BYTES:
                     failed = True
                 elif self._delegate.export(batch) is not SpanExportResult.SUCCESS:
                     failed = True
@@ -304,9 +324,9 @@ class BoundedLogExporter(LogRecordExporter):
         self._session = SafeSession("logs")
         self._delegate = OTLPLogExporter(
             endpoint=endpoint,
-            headers=headers,
+            headers={**headers, "User-Agent": USER_AGENT},
             timeout=timeout,
-            compression=Compression.NoCompression,
+            compression=Compression.Gzip,
             session=self._session,
         )
         self._failures = 0
@@ -329,7 +349,7 @@ class BoundedLogExporter(LogRecordExporter):
         failed = False
         try:
             for chunk in _split_batches(batch, encode_logs):
-                if encode_logs(chunk).ByteSize() > MAX_REQUEST_BYTES:
+                if encode_logs(chunk).ByteSize() > MAX_BATCH_BYTES:
                     failed = True
                 elif self._delegate.export(chunk) is not LogRecordExportResult.SUCCESS:
                     failed = True

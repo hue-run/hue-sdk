@@ -159,10 +159,37 @@ jobs:
           uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
           uv run --frozen --all-groups mypy
           uv run --frozen --all-groups python -m build --no-isolation
+  python-lowest-bounds:
+    name: Python ${{ matrix.python }} at the lowest OpenTelemetry bound
+    runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.12.5"
+      # uv.lock stays the certified combination. This throwaway checkout re-resolves every direct
+      # dependency at its declared floor (OpenTelemetry 1.40.0) and runs the same behavioral suite,
+      # including the installed wheel; the regenerated lockfile is never committed.
+      - name: Resolve direct dependencies at their floors and run the suite
+        working-directory: packages/sdk-python
+        env:
+          UV_PYTHON: ${{ matrix.python }}
+        run: |
+          uv lock --resolution lowest-direct
+          uv sync --frozen --all-groups
+          uv run --frozen --all-groups python -c 'from importlib.metadata import version; print(*(f"{name}=={version(name)}" for name in ("opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp-proto-http", "requests", "pytest")), sep="\n")'
+          uv run --frozen --all-groups pytest
   checks-passed:
     name: All checks passed
     if: always()
-    needs: [release-tools, typescript, typescript-node-matrix, typescript-lint, python, docs]
+    needs: [release-tools, typescript, typescript-node-matrix, typescript-lint, python, python-lowest-bounds, docs]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

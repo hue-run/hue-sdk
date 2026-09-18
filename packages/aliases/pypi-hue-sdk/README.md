@@ -1,3 +1,7 @@
+<p align="center">
+  <img alt="Hue" src="https://raw.githubusercontent.com/hue-run/hue-sdk/df0443f98c6096ff331fd0400715e4f3a1936607/.github/assets/hue-ascii-neutral.png" width="720">
+</p>
+
 # hue-sdk (PyPI alias)
 
 `hue-sdk` is an alias of [`hue-run`](https://pypi.org/project/hue-run/), published so that the name

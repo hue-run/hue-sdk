@@ -56,6 +56,7 @@ export function digest(value: unknown): string {
     .update(JSON.stringify(json(value, aggregateBounds(8 * 1024 * 1024))))
     .digest("hex");
 }
+/** SHA-256 hex digest of scorer source, as declared in a `local_code` definition. */
 export function sourceDigest(source: string | Uint8Array): string {
   return createHash("sha256").update(source).digest("hex");
 }

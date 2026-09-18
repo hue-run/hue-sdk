@@ -1,8 +1,20 @@
+<p align="center">
+  <img alt="Hue" src="https://raw.githubusercontent.com/hue-run/hue-sdk/df0443f98c6096ff331fd0400715e4f3a1936607/.github/assets/hue-ascii-neutral.png" width="720">
+</p>
+
 # Hue TypeScript SDK
+
+[![npm](https://img.shields.io/npm/v/%40hue-run%2Fsdk?label=%40hue-run%2Fsdk)](https://www.npmjs.com/package/@hue-run/sdk) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+
+> This README follows `main`, which is ahead of the registries: npm serves [@hue-run/sdk 0.1.5](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.5) (Node 24 or newer) and PyPI serves [hue-run 0.1.3](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.3). Paragraphs marked "from 0.2.0" describe what ships in 0.2.0; the [changelog](https://github.com/hue-run/hue-sdk/blob/main/CHANGELOG.md) lists every pending change.
 
 A client for Hue's standard OTLP HTTP endpoints on Node.js 22 or 24 and Bun 1.4.2. It uses the
 OpenTelemetry JavaScript SDK and official OTLP protobuf exporter components for
 traces and correlated logs. The package is named `@hue-run/sdk`.
+
+[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run)
+
+_Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
 
 ## Install
 
@@ -16,7 +28,8 @@ Or with Bun:
 bun add @hue-run/sdk
 ```
 
-Run the command in your application's server package. See the [compatibility guide](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies.
+Run the command in your application's server package. The package is ESM; CommonJS applications on
+Node.js 22.12 or later load it with `require("@hue-run/sdk")`. See the [compatibility guide](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies.
 
 ## Start
 
@@ -52,35 +65,73 @@ await hue.shutdown(); // flushes and releases providers owned by this client
 The default destination is `https://app.hue.run`. Data goes to
 `/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` with a Bearer project key.
 Set `baseUrl` only for another Hue deployment. It must be an origin without an API path; a trailing slash is accepted.
-HTTPS is required except for loopback HTTP. Redirects are refused for both
-project checks and exports. There is no proprietary tracing protocol, lab API
-wrapper, database dependency, or dependency on the Hue application workspace.
+HTTPS is required except for loopback HTTP or the explicit
+[`allowInsecureHttp`](#local-development-without-a-hue-account) opt-in. Redirects are refused for both
+project checks and exports.
+
+`checkConnection()` rejects with `HueConnectionError`: its fixed message is safe to log, `status`
+carries the HTTP status when Hue answered, and `cause` carries the underlying network, timeout or
+parsing error. `serviceVersion` and `resourceAttributes` (for example
+`{ "deployment.environment.name": "production", "service.namespace": "agents" }`) describe the
+deployment; a client that owns its providers merges them into its resource, with `serviceName`
+and `serviceVersion` taking precedence over same-named keys.
 
 ## Model spans without a framework adapter
 
-When you call a provider SDK directly, `hue.model()` creates the GenAI client span for the call:
+Available from 0.2.0. When you call a provider SDK directly, `hue.model()` creates the GenAI client span for the call.
+Inside it, `setInput` and `setOutput` record `gen_ai.input.messages` / `gen_ai.output.messages`
+when `captureContent` is true. Those attributes carry the OpenTelemetry GenAI message shape
+(`{ role, parts: [{ type: "text", content }] }`, with `finish_reason` on output messages) defined
+by the semantic conventions'
+[input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json)
+and
+[output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json)
+JSON schemas, so any semantic-convention-aware backend can read them. Convert provider-native
+messages before recording them:
 
 ```ts
-await hue.model("gpt-5-mini", { provider: "openai" }, async (span) => {
-  span.setInput(messages); // gen_ai.input.messages when captureContent is true
-  const response = await openai.chat.completions.create({ model: "gpt-5-mini", messages });
-  span.setOutput(response.choices.map((choice) => choice.message));
-  span.setUsage({
-    inputTokens: response.usage?.prompt_tokens,
-    outputTokens: response.usage?.completion_tokens,
-  });
-  return response;
-});
+await hue.model(
+  "gpt-5-mini",
+  async (span) => {
+    span.setInput(
+      messages.map((message) => ({
+        role: message.role,
+        parts: [{ type: "text", content: message.content }],
+      })),
+    );
+    const response = await openai.chat.completions.create({ model: "gpt-5-mini", messages });
+    span.setOutput(
+      response.choices.map((choice) => ({
+        role: choice.message.role,
+        parts: [{ type: "text", content: choice.message.content ?? "" }],
+        finish_reason: choice.finish_reason,
+      })),
+    );
+    span.setUsage({
+      inputTokens: response.usage?.prompt_tokens,
+      outputTokens: response.usage?.completion_tokens,
+    });
+    return response;
+  },
+  { provider: "openai" },
+);
 ```
 
 The span is named `{operation} {model}` (`operation` defaults to `chat`) with
-`gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. `setUsage` records
+`gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. Like `withSpan`, the
+options come after the callback and also accept `name`, `sessionId`, `userId`, `input` (recorded as
+`gen_ai.input.messages`) and `parentContext`. `setUsage` records
 nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
-counted as instrumentation failures. Unknown usage stays absent.
+counted as instrumentation failures. Unknown usage stays absent. `hue.tool(name, input, execute)`
+creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result. Content
+helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`,
+`SpanOptions.input`) accept any value and encode plain JSON data (`JsonValue`) at runtime; a value
+that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
+while the callback result is returned unchanged.
 
 ## Vercel AI SDK 6
 
-AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
+Available from 0.2.0. AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
 `hueExperimentalTelemetry(hue)` from the core entry point; the generated spans parent under
 `withSpan`, inherit session/user identifiers, and record prompts and responses only when
 `captureContent` is true:
@@ -95,7 +146,8 @@ const result = await generateText({
 });
 ```
 
-This requires no `@ai-sdk/otel` peer. `hueTelemetry` remains AI SDK 7 only.
+This requires no `@ai-sdk/otel` peer. `hueTelemetry` remains AI SDK 7 only: it reads the
+installed `ai` major version once per process and throws a `TypeError` below 7.
 
 ## Vercel AI SDK 7
 
@@ -151,7 +203,7 @@ normal OTel setup; Hue does not silently replace it.
 `captureContent: false` disables manual input/output/messages/tool content and
 removes recognized GenAI, Vercel, OpenInference and OpenLLMetry content attributes,
 legacy GenAI content events, log bodies, status messages and exception text before
-export. The exported `contentPrefixes` array lists the attribute keys (and their dotted
+export. From 0.2.0 the exported `contentPrefixes` array lists the attribute keys (and their dotted
 children) that are removed. Model/provider/token metadata remains available. Generic custom attribute
 names cannot be classified automatically; use them deliberately.
 
@@ -163,15 +215,26 @@ Invalid/oversized helper content is omitted with an instrumentation failure; the
 export batch. Do not put user content or secrets in span names or scope names.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
-outputs and usage remain absent. This SDK does not estimate tokens or cost. Error
-helpers mark span status and record an exception; thrown application errors remain
-errors and are rethrown unchanged. `withSpan` ends its span in `finally`.
+outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
+application error marks the span with `error.type` (the error's `name`), an ERROR status and an
+`exception` event carrying only the type; exception messages and stack traces are never recorded by
+the helpers, whatever `captureContent` is, and the error is rethrown unchanged. `withSpan` ends its
+span in `finally`.
+
+`recordMessages` emits the `gen_ai.client.inference.operation.details` log record correlated with
+the active span, with the messages in its body. The record also carries `gen_ai.operation.name`,
+`gen_ai.provider.name` and `gen_ai.request.model` as attributes, copied from the enclosing
+`hue.model()` span or passed as `operation`, `provider` and `model`, and `gen_ai.conversation.id`
+from the active session, so a collector fan-out to another GenAI-aware backend keeps the request
+context.
 
 ## Existing OpenTelemetry providers
 
 Attach processors while constructing your providers. Hue uses local async context
 for its own helpers and never registers/replaces the global tracer, logger, or
-context manager.
+context manager. When your application has registered a context manager, Hue helpers also make
+their span the active OpenTelemetry span for the duration of the callback, so spans from other
+instrumentations (HTTP clients, provider SDKs) that use the global API parent under it.
 
 ```ts
 import { TracerProvider } from "@opentelemetry/sdk-trace";
@@ -191,7 +254,11 @@ await hue.shutdown(); // flushes; does not shut down these externally owned prov
 // During application shutdown, shut down your providers, then await transport.shutdown().
 ```
 
-For external parent context pass `parentContext` to `withSpan`. Across processes, use
+The application's providers own the resource in this mode, so `resourceAttributes` on the
+transport options is ignored and reported as a `warning` issue; set `deployment.environment.name`
+and similar attributes on your own providers.
+
+For external parent context pass `parentContext` to `withSpan`. Across processes, from 0.2.0 use
 `hue.inject(carrier)` inside the producing span and `hue.extract(carrier)` in the worker; both
 speak W3C `traceparent` only and never include the API key or baggage. Hue registers no global
 propagator, so `propagation.inject()` from `@opentelemetry/api` is a no-op unless your
@@ -225,6 +292,22 @@ Collector `otlp` receiver with `http.traces_url_path` and `logs_url_path` set to
 forwarding to Jaeger or the debug exporter) and pass any placeholder `apiKey`; HTTP is allowed
 for loopback origins. `checkConnection()` and `verifyTrace()` are Hue-only diagnostics and are
 not available against a generic collector.
+
+A collector on a private network is not loopback: a docker-compose sibling such as
+`http://otel-collector:4318` or an in-cluster service requires the explicit opt-in
+`allowInsecureHttp: true`. The client then records a one-time `warning` issue because the key and
+telemetry travel unencrypted. Use a placeholder key with such a collector, and never enable the
+option for a real project key on a network you do not control.
+
+```ts
+const hue = createHue({
+  apiKey: "local-placeholder",
+  serviceName: "my-agent",
+  captureContent: true,
+  baseUrl: "http://otel-collector:4318",
+  allowInsecureHttp: true,
+});
+```
 
 ## Delivery behavior
 
@@ -283,7 +366,8 @@ conditions only. Use Hue's UI to inspect captured values and redaction.
 
 ## Dependencies
 
-The tracing core depends only on official `@opentelemetry/*` packages. JSON Schema scoring in
+From 0.2.0 the tracing core depends only on official `@opentelemetry/*` packages (0.1.5 installs `ajv`
+as a regular dependency). JSON Schema scoring in
 `@hue-run/sdk/evals` uses `ajv`, an optional peer dependency that is loaded inside a worker only when
 `builtins.jsonSchema` scores a case; without it that scorer reports `SchemaValidatorUnavailable`.
 Install it when you use that scorer:
@@ -348,7 +432,7 @@ existing-provider flush callbacks and recovery. Local/CI runners remain availabl
 
 ## Serving safely
 
-Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client with an instrumentation failure recorded. Pass `enabled: false` to disable Hue without a key; disabled helpers still execute the application callback. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
+Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client that keeps your `onExportIssue` hook and records the reason as an instrumentation failure. Pass `enabled: false` to disable Hue without a key or a `captureContent` choice; disabled helpers still execute the application callback, and `inject()` keeps propagating the application's own trace context. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
 
 Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production safety](https://docs.hue.run/guides/production-safety).
 
