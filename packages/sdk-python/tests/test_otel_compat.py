@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
+from importlib.metadata import requires
+from pathlib import Path
 
 from opentelemetry.context import (
     _SUPPRESS_INSTRUMENTATION_KEY,
@@ -108,13 +111,31 @@ def test_missing_suppression_key_warns_once_and_still_exports(receiver):
     assert [span.name for span in receiver.spans()] == ["fallback-export"]
 
 
-def test_supported_range_matches_pyproject() -> None:
-    """The ImportError text and pyproject.toml must name the same OpenTelemetry range."""
-    import re
-    from pathlib import Path
+def _specifier_clauses(spec: str) -> frozenset[str]:
+    return frozenset(part.strip() for part in spec.split(",") if part.strip())
 
-    # Parsed with a regex rather than tomllib so the test also runs on Python 3.10.
-    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
-    specifiers = dict(re.findall(r'^\s*"(opentelemetry-[a-z-]+)(>=[^"]+)",?$', text, re.M))
-    assert specifiers, "expected opentelemetry dependencies in pyproject.toml"
-    assert set(specifiers.values()) == {_otel_compat.SUPPORTED_OPENTELEMETRY}
+
+def test_supported_range_matches_package_metadata() -> None:
+    """The ImportError text, installed metadata, and pyproject.toml (when present) agree."""
+    # Release verification copies only this tests/ tree into a fresh venv. Hatchling
+    # normalizes `>=1.40,<2` to `<2,>=1.40` in Requires-Dist, so compare clause sets.
+    expected = _specifier_clauses(_otel_compat.SUPPORTED_OPENTELEMETRY)
+    specifiers: dict[str, frozenset[str]] = {}
+    for requirement in requires("hue-run") or []:
+        name_and_spec = requirement.split(";", 1)[0].strip()
+        match = re.fullmatch(r"(opentelemetry-[a-z-]+)(.+)", name_and_spec)
+        if match:
+            specifiers[match.group(1)] = _specifier_clauses(match.group(2))
+    assert specifiers, "expected opentelemetry dependencies in hue-run metadata"
+    assert set(specifiers.values()) == {expected}
+
+    # Parsed with a regex rather than tomllib so the extra source-tree check also
+    # runs on Python 3.10. Skip the file when tests are copied without pyproject.toml.
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    if not pyproject.is_file():
+        return
+    from_file = dict(
+        re.findall(r'^\s*"(opentelemetry-[a-z-]+)(>=[^"]+)",?$', pyproject.read_text(), re.M)
+    )
+    assert from_file, "expected opentelemetry dependencies in pyproject.toml"
+    assert set(from_file.values()) == {_otel_compat.SUPPORTED_OPENTELEMETRY}
