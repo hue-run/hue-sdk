@@ -252,6 +252,16 @@ run(
   ],
   ai6,
 );
+const installedPackageTests = [
+  "sdk.test.ts",
+  "evals.test.ts",
+  "attempt.test.ts",
+  "environment.test.ts",
+  "simulation.test.ts",
+  "coverage-gap.test.ts",
+  "receipt.test.ts",
+  "managed.test.ts",
+];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
   const chatbot = join(destination, `chatbot-${patch}`);
@@ -273,20 +283,21 @@ for (const patch of [99, 100]) {
       2,
     ),
   );
-  await cp(join(source, "tests"), join(consumer, "tests"), { recursive: true });
+  await mkdir(join(consumer, "tests"));
+  await cp(join(source, "tests", "fixtures"), join(consumer, "tests", "fixtures"), {
+    recursive: true,
+  });
+  await Promise.all(
+    installedPackageTests.map((name) =>
+      cp(join(source, "tests", name), join(consumer, "tests", name)),
+    ),
+  );
   // Consumers compile against the packed declarations without the DOM lib so a
   // browser-only type leaking into dist/*.d.ts fails here instead of at an adopter.
   const consumerTsconfig = JSON.parse(await readFile(join(source, "tsconfig.json"), "utf8"));
   consumerTsconfig.compilerOptions.lib = ["esnext"];
   await writeFile(join(consumer, "tsconfig.json"), JSON.stringify(consumerTsconfig, null, 2));
-  for (const name of [
-    "sdk.test.ts",
-    "evals.test.ts",
-    "environment.test.ts",
-    "simulation.test.ts",
-    "receipt.test.ts",
-    "managed.test.ts",
-  ]) {
+  for (const name of installedPackageTests) {
     const testPath = join(consumer, "tests", name);
     await writeFile(
       testPath,
@@ -322,17 +333,7 @@ for (const patch of [99, 100]) {
   if (process.env.HUE_JUNIT_DIR) await mkdir(process.env.HUE_JUNIT_DIR, { recursive: true });
   run(
     "bun",
-    [
-      "--no-env-file",
-      "test",
-      ...junit,
-      "./tests/sdk.test.ts",
-      "./tests/evals.test.ts",
-      "./tests/environment.test.ts",
-      "./tests/simulation.test.ts",
-      "./tests/receipt.test.ts",
-      "./tests/managed.test.ts",
-    ],
+    ["--no-env-file", "test", ...junit, ...installedPackageTests.map((name) => `./tests/${name}`)],
     consumer,
   );
   const exampleSource = resolve(source, "../../examples/reference-chatbot");

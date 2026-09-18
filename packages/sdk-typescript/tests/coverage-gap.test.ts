@@ -7,7 +7,6 @@ import {
 } from "../src/environment.js";
 import {
   builtins,
-  createEvaluationClient,
   defineLocalScorer,
   scoreLocally,
   type EnvironmentEvidence,

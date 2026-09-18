@@ -1,8 +1,466 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { CoverageGap } from "../environment/types.js";
-import type { JsonValue } from "./types.js";
+import type { JsonValue, SimulationMcpCapability } from "./types.js";
 import { json, valueBounds } from "./json.js";
+
+/** Canonical caller-observed agent configuration after missing evidence is made explicit. */
+export type ActualAgentManifestV2 = {
+  /** Manifest schema discriminator. */
+  schemaVersion: 2;
+  /** Digests for the six strict parity components. */
+  components: {
+    /** Agent implementation identity. */
+    agent: {
+      /** Canonical SHA-256 digest, or `null` when the evidence is missing. */
+      digest: string | null;
+      /** How the caller obtained the digest. */
+      evidence: "observed" | "declared" | "missing";
+    };
+    /** Prompt identity. */
+    prompt: ActualAgentManifestV2["components"]["agent"];
+    /** Model configuration identity. */
+    model: ActualAgentManifestV2["components"]["agent"];
+    /** Effective tool configuration identity. */
+    tools: ActualAgentManifestV2["components"]["agent"];
+    /** Approval-policy identity. */
+    approvals: ActualAgentManifestV2["components"]["agent"];
+    /** Orchestration identity. */
+    orchestration: ActualAgentManifestV2["components"]["agent"];
+  };
+  /** MCP catalogs in effective model-visible order; this array is never sorted. */
+  catalogs: Array<{
+    /** Caller-selected provider instance. */
+    providerInstanceKey: string;
+    /** MCP surface whose catalog was observed or declared. */
+    surfaceKey: "google.gmail/mcp" | "slack/mcp";
+    /** Catalog digest, or `null` when missing. */
+    digest: string | null;
+    /** How the caller obtained the digest. */
+    evidence: "observed" | "declared" | "missing";
+  }>;
+  /** Native helper configurations in their effective order. */
+  helperConfigurations: Array<{
+    /** Caller-selected provider instance. */
+    providerInstanceKey: string;
+    /** Native provider surface whose helper configuration is described. */
+    surfaceKey: "google.gmail/rest" | "slack/web-api";
+    /** Helper-configuration digest, or `null` when missing. */
+    digest: string | null;
+    /** How the caller obtained the digest. */
+    evidence: "observed" | "declared" | "missing";
+  }>;
+};
+
+/** Input form of {@link ActualAgentManifestV2}; omitted evidence normalizes to missing. */
+export type ActualAgentManifestInputV2 =
+  | {
+      /** Optional schema assertion; when present it must be V2. */
+      schemaVersion?: 2;
+      /** Any omitted component is recorded as missing. */
+      components?: Partial<ActualAgentManifestV2["components"]>;
+      /** MCP catalogs in effective model-visible order. */
+      catalogs?: ActualAgentManifestV2["catalogs"];
+      /** Native helper configurations in effective order. */
+      helperConfigurations?: ActualAgentManifestV2["helperConfigurations"];
+    }
+  | undefined;
+
+/** Immutable expected agent evidence pinned by an experiment. */
+export type ExpectedAgentManifestV2 = {
+  /** Manifest schema discriminator. */
+  schemaVersion: 2;
+  /** Required digests and minimum provenance for all strict components. */
+  components: {
+    /** Agent implementation requirement. */
+    agent: {
+      /** Canonical SHA-256 digest pinned by the experiment. */
+      digest: string;
+      /** Weakest provenance the caller may supply. */
+      minimumEvidence: "observed" | "declared";
+    };
+    /** Prompt requirement. */
+    prompt: ExpectedAgentManifestV2["components"]["agent"];
+    /** Model configuration requirement. */
+    model: ExpectedAgentManifestV2["components"]["agent"];
+    /** Effective tool configuration requirement. */
+    tools: ExpectedAgentManifestV2["components"]["agent"];
+    /** Approval-policy requirement. */
+    approvals: ExpectedAgentManifestV2["components"]["agent"];
+    /** Orchestration requirement. */
+    orchestration: ExpectedAgentManifestV2["components"]["agent"];
+  };
+  /** Required MCP catalogs in effective model-visible order. */
+  catalogs: Array<{
+    /** Pinned provider instance. */
+    providerInstanceKey: string;
+    /** Pinned MCP surface. */
+    surfaceKey: "google.gmail/mcp" | "slack/mcp";
+    /** Expected catalog digest. */
+    digest: string;
+    /** Weakest accepted provenance for this catalog. */
+    minimumEvidence: "observed" | "declared";
+  }>;
+  /** Required native helper configurations in effective order. */
+  helperConfigurations: Array<{
+    /** Pinned provider instance. */
+    providerInstanceKey: string;
+    /** Pinned native surface. */
+    surfaceKey: "google.gmail/rest" | "slack/web-api";
+    /** Expected helper-configuration digest. */
+    digest: string;
+    /** Weakest accepted provenance for this helper configuration. */
+    minimumEvidence: "observed" | "declared";
+  }>;
+};
+
+/** Secret-free registration identity for one selected provider surface. */
+export type SurfaceBindingV2 =
+  | {
+      /** Factory-issued registration identity. */
+      surfaceRegistrationId: string;
+      /** Selected MCP surface. */
+      surfaceKey: "google.gmail/mcp" | "slack/mcp";
+      /** Provider protocol revision. */
+      protocolVersion: string;
+      /** Agent-visible contract digest. */
+      contractDigest: string;
+      /** Effective MCP catalog digest. */
+      catalogDigest: string;
+      /** Native helper evidence is inapplicable to MCP. */
+      helperConfigurationDigest: null;
+      /** Runtime registration implementation digest. */
+      runtimeRegistrationDigest: string;
+    }
+  | {
+      /** Factory-issued registration identity. */
+      surfaceRegistrationId: string;
+      /** Selected native provider surface. */
+      surfaceKey: "google.gmail/rest" | "slack/web-api";
+      /** Provider protocol revision. */
+      protocolVersion: string;
+      /** Agent-visible contract digest. */
+      contractDigest: string;
+      /** MCP catalog evidence is inapplicable to native surfaces. */
+      catalogDigest: null;
+      /** Effective native helper-configuration digest. */
+      helperConfigurationDigest: string;
+      /** Runtime registration implementation digest. */
+      runtimeRegistrationDigest: string;
+    };
+
+/** One provider instance and its immutable profile/surface pins. */
+export type DependencyProviderV2 = {
+  /** Caller-visible provider instance key. */
+  providerInstanceKey: string;
+  /** Provider family. */
+  providerId: "google.gmail" | "slack";
+  /** Synthetic principal bound to this world. */
+  syntheticPrincipalId: string;
+  /** Sorted scopes granted to the synthetic principal. */
+  scopes: string[];
+  /** Immutable profile identity and coverage pins. */
+  profile: {
+    /** Versioned profile identifier. */
+    profileId: string;
+    /** Canonical profile digest. */
+    profileDigest: string;
+    /** Adapter build digest. */
+    buildDigest: string;
+    /** Covered-workflow digest. */
+    coverageDigest: string;
+    /** Contract digests sorted by surface key. */
+    contractDigests: Array<{
+      /** Surface described by the contract. */
+      surfaceKey: "google.gmail/mcp" | "google.gmail/rest" | "slack/mcp" | "slack/web-api";
+      /** Agent-visible contract digest. */
+      contractDigest: string;
+    }>;
+  };
+  /** Digest of the supported provider workflow slice. */
+  workflowDigest: string;
+  /** Selected, secret-free surface bindings. */
+  surfaces: SurfaceBindingV2[];
+};
+
+/** Secret-free dependency manifest pinned to one attempt. */
+export type DependencyManifestV2 = {
+  /** Manifest schema discriminator. */
+  schemaVersion: 2;
+  /** Uniquely keyed provider instances sharing the same world. */
+  providers: DependencyProviderV2[];
+};
+
+/** Immutable V2 parity and provider baseline stored with an experiment version. */
+export type AttemptBaselineV2 = {
+  /** Baseline schema discriminator. */
+  schemaVersion: 2;
+  /** Immutable expected-manifest identity. */
+  expectedAgentManifestId: string;
+  /** Digest of the expected manifest. */
+  expectedAgentManifestDigest: string;
+  /** Full expected agent evidence. */
+  expectedAgentManifest: ExpectedAgentManifestV2;
+  /** Secret-free provider dependencies. */
+  dependencyManifest: DependencyManifestV2;
+};
+
+/** Exact provider instance and surface selection requested for an attempt. */
+export type RequestedAttemptProviderV2 = {
+  /** Provider instance pinned by the baseline. */
+  providerInstanceKey: string;
+  /** Selected surface keys in effective order. */
+  surfaceKeys: Array<"google.gmail/mcp" | "google.gmail/rest" | "slack/mcp" | "slack/web-api">;
+};
+
+/** Canonical V2 prepare input after defaulting caller evidence. */
+export type PrepareAttemptInputV2 = {
+  /** Request schema discriminator. */
+  schemaVersion: 2;
+  /** Stable idempotency key for this preparation decision. */
+  idempotencyKey: string;
+  /** Execution identity inserted into the route, not the JSON body. */
+  executionId: string;
+  /** Isolated world bound to the execution. */
+  environmentRunId: string;
+  /** Stale-client assertion for the experiment's expected manifest. */
+  expectedAgentManifestDigest: string;
+  /** Caller-observed agent evidence with missing fields made explicit. */
+  actualManifest: ActualAgentManifestV2;
+  /** Exact provider/surface selection. */
+  requestedProviders: RequestedAttemptProviderV2[];
+};
+
+/** Caller input to {@link EvaluationClient.prepareAttempt}. */
+export type PrepareAttemptRequestV2 = Omit<PrepareAttemptInputV2, "actualManifest"> & {
+  /** Caller-observed evidence; omission records an all-missing V2 manifest. */
+  actualManifest?: ActualAgentManifestInputV2;
+};
+
+/** One strict parity, profile, binding or coverage finding. */
+export type PreflightFindingV2 = {
+  /** Stable finding category. */
+  code:
+    | "baseline_missing"
+    | "baseline_assertion_mismatch"
+    | "manifest_mismatch"
+    | "evidence_missing"
+    | "evidence_insufficient"
+    | "helper_configuration_mismatch"
+    | "catalog_mismatch"
+    | "provider_selection_mismatch"
+    | "profile_unavailable"
+    | "profile_mismatch"
+    | "surface_unsupported"
+    | "coverage_gap";
+  /** Agent component involved, when applicable. */
+  component: "agent" | "prompt" | "model" | "tools" | "approvals" | "orchestration" | null;
+  /** Provider instance involved, when applicable. */
+  providerInstanceKey: string | null;
+  /** Provider surface involved, when applicable. */
+  surfaceKey: "google.gmail/mcp" | "google.gmail/rest" | "slack/mcp" | "slack/web-api" | null;
+  /** Fixed nonsecret explanation for the finding code. */
+  message: string;
+};
+
+/** Credential-free V2 preflight decision. */
+export type PreflightReportV2 = {
+  /** Report schema discriminator. */
+  schemaVersion: 2;
+  /** Whether strict preflight succeeded. */
+  status: "ready" | "environment_incomplete";
+  /** Provenance class for the actual manifest. */
+  evidenceSource: "caller_supplied";
+  /** Empty for ready; otherwise the bounded reasons the environment is incomplete. */
+  findings: PreflightFindingV2[];
+};
+
+/** Stable parity evidence stored without endpoints or credentials. */
+export type ParityEvidenceV2 = {
+  /** Immutable expected-manifest identity. */
+  expectedAgentManifestId: string;
+  /** Expected manifest digest asserted by the request. */
+  expectedAgentManifestDigest: string;
+  /** Canonical digest of the caller-observed manifest. */
+  actualAgentManifestDigest: string;
+  /** Caller-observed manifest used for preflight. */
+  actualManifest: ActualAgentManifestV2;
+  /** Digest of the secret-free dependency manifest. */
+  dependencyManifestDigest: string;
+  /** Digest binding agent evidence, dependencies and attempt identity. */
+  executionManifestDigest: string;
+  /** Provenance class for the actual manifest. */
+  evidenceSource: "caller_supplied";
+};
+
+/** Stable identities shared by every credential generation of an attempt. */
+export type AttemptIdentityV2 = {
+  /** Prepared binding identity. */
+  bindingId: string;
+  /** Local target execution identity. */
+  executionId: string;
+  /** Isolated simulated-world identity. */
+  environmentRunId: string;
+};
+
+/** Credential-bearing V2 provider connections delivered only to the callback. */
+export type AttemptConnectionBundleV2 = AttemptIdentityV2 & {
+  /** Bundle schema discriminator. */
+  schemaVersion: 2;
+  /** Expiry shared by every selected credential in this generation. */
+  expiresAt: string;
+  /** Monotonic credential generation; immutable evidence does not change on rotation. */
+  credentialGeneration: number;
+  /** Selected provider instances and their short-lived connection details. */
+  providers: Array<
+    Omit<DependencyProviderV2, "surfaces"> & {
+      /** Selected surfaces with attempt-scoped connection material. */
+      surfaces: Array<
+        SurfaceBindingV2 & {
+          /** HTTPS provider-facade endpoint. */
+          endpoint: string;
+          /** Short-lived attempt bearer; never persist or log it. */
+          bearer: string;
+        }
+      >;
+    }
+  >;
+  /** Credential-free evidence binding this connection to the strict preflight. */
+  parity: ParityEvidenceV2;
+};
+
+/** Secret-free persisted binding state, discriminated without converting V1 evidence. */
+export type AttemptBindingRead = {
+  /** Stable binding identity. */
+  bindingId: string;
+  /** Bound execution identity. */
+  executionId: string;
+  /** Bound simulated-world identity. */
+  environmentRunId: string;
+  /** Persisted preflight outcome. */
+  outcome: "ready" | "environment_incomplete";
+  /** Last credential generation, or `null` when no live credential was issued. */
+  credentialGeneration: number | null;
+  /** Expected-manifest identity, or `null` for an incomplete legacy baseline. */
+  expectedAgentManifestId: string | null;
+  /** Expected-manifest digest, or `null` for an incomplete legacy baseline. */
+  expectedAgentManifestDigest: string | null;
+  /** Execution-manifest digest, or `null` when strict parity was not established. */
+  executionManifestDigest: string | null;
+  /** Binding creation timestamp. */
+  createdAt: string;
+  /** Revocation timestamp, or `null` while active. */
+  revokedAt: string | null;
+} & (
+  | {
+      /** Legacy evidence remains V1 and is never upgraded in place. */
+      schemaVersion: 1;
+      /** Legacy actual manifest without native-helper evidence. */
+      actualManifest: Omit<
+        ActualAgentManifestV2,
+        "schemaVersion" | "catalogs" | "helperConfigurations"
+      > & {
+        /** Legacy manifest schema discriminator. */
+        schemaVersion: 1;
+        /** Legacy catalogs may refer to any V1 surface. */
+        catalogs: Array<{
+          /** Provider instance described by the catalog. */
+          providerInstanceKey: string;
+          /** Legacy provider surface. */
+          surfaceKey: "google.gmail/mcp" | "google.gmail/rest" | "slack/mcp" | "slack/web-api";
+          /** Catalog digest, or `null` when missing. */
+          digest: string | null;
+          /** How the caller obtained the digest. */
+          evidence: "observed" | "declared" | "missing";
+        }>;
+      };
+      /** Legacy secret-free dependency pins, or `null` for incomplete evidence. */
+      dependencyManifest: null | {
+        /** Legacy manifest schema discriminator. */
+        schemaVersion: 1;
+        /** Legacy provider dependencies. */
+        providers: Array<
+          Omit<DependencyProviderV2, "surfaces"> & {
+            /** Legacy surfaces carried only a catalog digest. */
+            surfaces: Array<{
+              /** Factory-issued registration identity. */
+              surfaceRegistrationId: string;
+              /** Legacy selected surface. */
+              surfaceKey: "google.gmail/mcp" | "google.gmail/rest" | "slack/mcp" | "slack/web-api";
+              /** Provider protocol revision. */
+              protocolVersion: string;
+              /** Agent-visible contract digest. */
+              contractDigest: string;
+              /** Legacy catalog digest. */
+              catalogDigest: string;
+            }>;
+          }
+        >;
+      };
+      /** Coupled legacy preflight evidence. */
+      preflightReport: Omit<PreflightReportV2, "schemaVersion" | "findings"> & {
+        /** Legacy report schema discriminator. */
+        schemaVersion: 1;
+        /** Legacy findings do not include native-helper mismatch. */
+        findings: Array<
+          Omit<PreflightFindingV2, "code"> & {
+            /** Legacy finding category. */
+            code: Exclude<PreflightFindingV2["code"], "helper_configuration_mismatch">;
+          }
+        >;
+      };
+    }
+  | {
+      /** Current binding evidence schema. */
+      schemaVersion: 2;
+      /** Actual V2 agent evidence. */
+      actualManifest: ActualAgentManifestV2;
+      /** Secret-free V2 dependency pins, or `null` for incomplete evidence. */
+      dependencyManifest: DependencyManifestV2 | null;
+      /** Coupled V2 preflight evidence. */
+      preflightReport: PreflightReportV2;
+    }
+);
+
+/** Successful V2 preparation result with fresh callback-only credentials. */
+export interface PrepareAttemptReadyV2 {
+  /** Ready discriminator. */
+  status: "ready";
+  /** Finding-free preflight report. */
+  preflightReport: PreflightReportV2 & {
+    /** Ready discriminator narrowed from the report union. */
+    status: "ready";
+  };
+  /** Fresh credential-bearing connection bundle. */
+  bundle: AttemptConnectionBundleV2;
+}
+
+/** Inconclusive V2 preparation result; no target or scorer may run. */
+export interface PrepareAttemptIncompleteV2 {
+  /** Incomplete discriminator. */
+  status: "environment_incomplete";
+  /** Stable binding identity recorded with the gap. */
+  bindingId: string;
+  /** Preflight findings that prevented strict parity. */
+  preflightReport: PreflightReportV2 & {
+    /** Incomplete discriminator narrowed from the report union. */
+    status: "environment_incomplete";
+  };
+  /** Durable first coverage/preflight gap on the world. */
+  gap: CoverageGap;
+}
+
+/** Discriminated result of preparing one V2 attempt. */
+export type PrepareAttemptResultV2 = PrepareAttemptReadyV2 | PrepareAttemptIncompleteV2;
+/** Successful credential rotation; immutable binding evidence is unchanged. */
+export type RefreshAttemptResultV2 = PrepareAttemptReadyV2;
+/** Confirmation that one attempt binding was revoked. */
+export interface RevokeAttemptResult {
+  /** Revoked binding identity. */
+  bindingId: string;
+  /** Server timestamp of revocation. */
+  revokedAt: string;
+}
 
 const canonicalUuid = z.uuid().transform((value) => value.toLowerCase());
 const sha256Digest = z.string().regex(/^sha256:[0-9a-f]{64}$/);
@@ -82,7 +540,8 @@ const expectedHelperEvidence = z
   .max(64)
   .refine((items) => unique(items, (item) => `${item.providerInstanceKey}/${item.surfaceKey}`));
 
-export const actualAgentManifestV2 = z
+/** Runtime validator for the caller-observed V2 agent manifest supplied before target execution. */
+export const actualAgentManifestV2: z.ZodType<ActualAgentManifestV2, ActualAgentManifestInputV2> = z
   .strictObject({
     schemaVersion: z.literal(2).default(2),
     components,
@@ -108,10 +567,8 @@ export const actualAgentManifestV2 = z
     catalogs: [],
     helperConfigurations: [],
   }));
-export type ActualAgentManifestV2 = z.infer<typeof actualAgentManifestV2>;
-export type ActualAgentManifestInputV2 = z.input<typeof actualAgentManifestV2>;
-
-export const expectedAgentManifestV2 = z.strictObject({
+/** Runtime validator for the immutable expected V2 agent manifest. */
+export const expectedAgentManifestV2: z.ZodType<ExpectedAgentManifestV2> = z.strictObject({
   schemaVersion: z.literal(2),
   components: requirements,
   catalogs: z
@@ -126,8 +583,6 @@ export const expectedAgentManifestV2 = z.strictObject({
     .refine((items) => unique(items, (item) => `${item.providerInstanceKey}/${item.surfaceKey}`)),
   helperConfigurations: expectedHelperEvidence,
 });
-export type ExpectedAgentManifestV2 = z.infer<typeof expectedAgentManifestV2>;
-
 const contractDigestsV2 = z
   .array(z.strictObject({ surfaceKey, contractDigest: sha256Digest }))
   .min(1)
@@ -161,9 +616,11 @@ const nativeSurfaceV2 = z.strictObject({
   catalogDigest: z.null(),
   helperConfigurationDigest: sha256Digest,
 });
-export const surfaceBindingV2 = z.discriminatedUnion("surfaceKey", [mcpSurfaceV2, nativeSurfaceV2]);
-export type SurfaceBindingV2 = z.infer<typeof surfaceBindingV2>;
-
+/** Runtime validator for one secret-free V2 surface binding. */
+export const surfaceBindingV2: z.ZodType<SurfaceBindingV2> = z.discriminatedUnion("surfaceKey", [
+  mcpSurfaceV2,
+  nativeSurfaceV2,
+]);
 const providerFieldsV2 = {
   providerInstanceKey,
   providerId: z.enum(["google.gmail", "slack"]),
@@ -200,13 +657,13 @@ function validProviderV2(value: z.infer<typeof providerBaseV2>) {
     )
   );
 }
-export const dependencyProviderV2 = providerBaseV2.refine(
+/** Runtime validator for one V2 provider dependency. */
+export const dependencyProviderV2: z.ZodType<DependencyProviderV2> = providerBaseV2.refine(
   validProviderV2,
   "Selected surface contracts must match the pinned profile and provider",
 );
-export type DependencyProviderV2 = z.infer<typeof dependencyProviderV2>;
-
-export const dependencyManifestV2 = z.strictObject({
+/** Runtime validator for the secret-free V2 dependency manifest. */
+export const dependencyManifestV2: z.ZodType<DependencyManifestV2> = z.strictObject({
   schemaVersion: z.literal(2),
   providers: z
     .array(dependencyProviderV2)
@@ -217,8 +674,6 @@ export const dependencyManifestV2 = z.strictObject({
       "Provider instances must be unique",
     ),
 });
-export type DependencyManifestV2 = z.infer<typeof dependencyManifestV2>;
-
 function canonicalDigest(value: unknown): string {
   function canonical(input: unknown): string {
     if (input === null || typeof input === "string" || typeof input === "boolean")
@@ -237,6 +692,7 @@ function canonicalDigest(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
 }
 
+/** Computes the canonical digest shared by actual and expected V2 agent manifests. */
 export function agentManifestDigestV2(
   manifest: ActualAgentManifestV2 | ExpectedAgentManifestV2,
 ): string {
@@ -260,7 +716,8 @@ export function agentManifestDigestV2(
   });
 }
 
-export const attemptBaselineV2 = z
+/** Runtime validator for an immutable V2 experiment baseline. */
+export const attemptBaselineV2: z.ZodType<AttemptBaselineV2> = z
   .strictObject({
     schemaVersion: z.literal(2),
     expectedAgentManifestId: canonicalUuid,
@@ -300,34 +757,36 @@ export const attemptBaselineV2 = z
           ),
     );
   }, "Selected MCP/native surfaces require exactly their matching catalog/helper evidence");
-export type AttemptBaselineV2 = z.infer<typeof attemptBaselineV2>;
+/** Internal parser reused by `runSimulation` before an execution exists. */
+export const requestedAttemptProvidersV2: z.ZodType<
+  RequestedAttemptProviderV2[],
+  RequestedAttemptProviderV2[]
+> = z
+  .array(
+    z.strictObject({
+      providerInstanceKey,
+      surfaceKeys: z
+        .array(surfaceKey)
+        .min(1)
+        .max(4)
+        .refine((items) => unique(items, (item) => item)),
+    }),
+  )
+  .min(1)
+  .max(16)
+  .refine((items) => unique(items, (item) => item.providerInstanceKey));
 
-export const prepareAttemptInputV2 = z.strictObject({
-  schemaVersion: z.literal(2),
-  idempotencyKey: canonicalUuid,
-  executionId: canonicalUuid,
-  environmentRunId: canonicalUuid,
-  expectedAgentManifestDigest: sha256Digest,
-  actualManifest: actualAgentManifestV2,
-  requestedProviders: z
-    .array(
-      z.strictObject({
-        providerInstanceKey,
-        surfaceKeys: z
-          .array(surfaceKey)
-          .min(1)
-          .max(4)
-          .refine((items) => unique(items, (item) => item)),
-      }),
-    )
-    .min(1)
-    .max(16)
-    .refine((items) => unique(items, (item) => item.providerInstanceKey)),
-});
-export type PrepareAttemptInputV2 = z.infer<typeof prepareAttemptInputV2>;
-export type PrepareAttemptRequestV2 = z.input<typeof prepareAttemptInputV2>;
-export type RequestedAttemptProviderV2 = PrepareAttemptInputV2["requestedProviders"][number];
-
+/** Runtime validator for the full V2 prepare input, including its route identity. */
+export const prepareAttemptInputV2: z.ZodType<PrepareAttemptInputV2, PrepareAttemptRequestV2> =
+  z.strictObject({
+    schemaVersion: z.literal(2),
+    idempotencyKey: canonicalUuid,
+    executionId: canonicalUuid,
+    environmentRunId: canonicalUuid,
+    expectedAgentManifestDigest: sha256Digest,
+    actualManifest: actualAgentManifestV2,
+    requestedProviders: requestedAttemptProvidersV2,
+  });
 const findingMessagesV2 = {
   baseline_missing: "The immutable attempt baseline is unavailable.",
   baseline_assertion_mismatch:
@@ -351,7 +810,8 @@ const findingCodeV2 = z.enum(
     ...(keyof typeof findingMessagesV2)[],
   ],
 );
-export const preflightFindingV2 = z
+/** Runtime validator for one V2 preflight finding. */
+export const preflightFindingV2: z.ZodType<PreflightFindingV2> = z
   .strictObject({
     code: findingCodeV2,
     component: componentKey.nullable(),
@@ -360,9 +820,8 @@ export const preflightFindingV2 = z
     message: z.string(),
   })
   .refine((value) => value.message === findingMessagesV2[value.code]);
-export type PreflightFindingV2 = z.infer<typeof preflightFindingV2>;
-
-export const preflightReportV2 = z
+/** Runtime validator for the V2 preflight report. */
+export const preflightReportV2: z.ZodType<PreflightReportV2> = z
   .strictObject({
     schemaVersion: z.literal(2),
     status: z.enum(["ready", "environment_incomplete"]),
@@ -370,9 +829,8 @@ export const preflightReportV2 = z
     findings: z.array(preflightFindingV2).max(256),
   })
   .refine((value) => (value.status === "ready") === (value.findings.length === 0));
-export type PreflightReportV2 = z.infer<typeof preflightReportV2>;
-
-export const parityEvidenceV2 = z.strictObject({
+/** Runtime validator for stable, credential-free V2 parity evidence. */
+export const parityEvidenceV2: z.ZodType<ParityEvidenceV2> = z.strictObject({
   expectedAgentManifestId: canonicalUuid,
   expectedAgentManifestDigest: sha256Digest,
   actualAgentManifestDigest: sha256Digest,
@@ -381,8 +839,6 @@ export const parityEvidenceV2 = z.strictObject({
   executionManifestDigest: sha256Digest,
   evidenceSource: z.literal("caller_supplied"),
 });
-export type ParityEvidenceV2 = z.infer<typeof parityEvidenceV2>;
-
 function isSafeHttpsEndpoint(value: string): boolean {
   if (!/^https:\/\//i.test(value) || /[\s\\?#]/u.test(value)) return false;
   for (const character of value) {
@@ -427,13 +883,12 @@ const connectionProviderV2 = z
   })
   .refine(validProviderV2);
 
-export const attemptIdentityV2 = z.strictObject({
+/** Runtime validator for the stable V2 attempt identity. */
+export const attemptIdentityV2: z.ZodType<AttemptIdentityV2> = z.strictObject({
   bindingId: canonicalUuid,
   executionId: canonicalUuid,
   environmentRunId: canonicalUuid,
 });
-export type AttemptIdentityV2 = z.infer<typeof attemptIdentityV2>;
-
 function connectionDependenciesV2(bundle: { providers: z.infer<typeof connectionProviderV2>[] }) {
   return {
     schemaVersion: 2 as const,
@@ -462,6 +917,7 @@ function connectionDependenciesV2(bundle: { providers: z.infer<typeof connection
   };
 }
 
+/** Binds actual agent evidence, secret-free dependencies and stable attempt identities. */
 export function executionManifestDigestV2(
   actualManifest: ActualAgentManifestV2,
   dependencyManifest: DependencyManifestV2,
@@ -475,7 +931,8 @@ export function executionManifestDigestV2(
   });
 }
 
-export const attemptConnectionBundleV2 = z
+/** Runtime validator for a credential-bearing V2 connection bundle. */
+export const attemptConnectionBundleV2: z.ZodType<AttemptConnectionBundleV2> = z
   .strictObject({
     schemaVersion: z.literal(2),
     bindingId: canonicalUuid,
@@ -509,14 +966,16 @@ export const attemptConnectionBundleV2 = z
         })
     );
   }, "Bundle evidence must match its immutable contents and attempt identity");
-export type AttemptConnectionBundleV2 = z.infer<typeof attemptConnectionBundleV2>;
-
+/** Removes endpoints and bearers from a validated bundle, retaining its dependency identity. */
 export function secretFreeBindingV2(bundle: AttemptConnectionBundleV2): DependencyManifestV2 {
   return dependencyManifestV2.parse(connectionDependenciesV2(bundle));
 }
 
 /** Legacy context.mcp is a credential-bearing projection, never another source of binding truth. */
-export function projectMcpConnectionV2(bundle: AttemptConnectionBundleV2, instanceKey: string) {
+export function projectMcpConnectionV2(
+  bundle: AttemptConnectionBundleV2,
+  instanceKey: string,
+): SimulationMcpCapability | null {
   const surface = bundle.providers
     .find((provider) => provider.providerInstanceKey === instanceKey)
     ?.surfaces.find((candidate) => candidate.surfaceKey.endsWith("/mcp"));
@@ -669,24 +1128,11 @@ const attemptBindingReadV2 = z
     preflightReport: preflightReportV2,
   })
   .refine((value) => value.outcome === value.preflightReport.status);
-export const attemptBindingRead = z.union([attemptBindingReadV1, attemptBindingReadV2]);
-export type AttemptBindingRead = z.infer<typeof attemptBindingRead>;
-
-export type PrepareAttemptReadyV2 = {
-  status: "ready";
-  preflightReport: PreflightReportV2 & { status: "ready" };
-  bundle: AttemptConnectionBundleV2;
-};
-export type PrepareAttemptIncompleteV2 = {
-  status: "environment_incomplete";
-  bindingId: string;
-  preflightReport: PreflightReportV2 & { status: "environment_incomplete" };
-  gap: CoverageGap;
-};
-export type PrepareAttemptResultV2 = PrepareAttemptReadyV2 | PrepareAttemptIncompleteV2;
-export type RefreshAttemptResultV2 = PrepareAttemptReadyV2;
-export type RevokeAttemptResult = { bindingId: string; revokedAt: string };
-
+/** Runtime validator for a coupled, secret-free V1 or V2 binding read. */
+export const attemptBindingRead: z.ZodType<AttemptBindingRead> = z.union([
+  attemptBindingReadV1,
+  attemptBindingReadV2,
+]);
 function parseGap(value: unknown): CoverageGap {
   const source = z
     .strictObject({

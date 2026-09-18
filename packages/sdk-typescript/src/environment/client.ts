@@ -22,14 +22,23 @@ import type {
   StepPageOptions,
 } from "./types.js";
 
+/** Connection and retry options for {@link createEnvironmentClient}. */
 export interface EnvironmentClientOptions {
+  /** Project service key sent as a bearer token; server-side only. */
   apiKey: string;
+  /** Hue origin; defaults to `https://app.hue.run`. */
   baseUrl?: string;
+  /** Per-request deadline in milliseconds. */
   timeoutMillis?: number;
+  /** Attempts for idempotent run mutations, 1–10; defaults to 4. */
   maxAttempts?: number;
 }
+/** Sanitized environment API failure that never includes response text or credentials. */
 export class HueEnvironmentError extends Error {
-  constructor(readonly status?: number) {
+  constructor(
+    /** HTTP status when Hue answered; absent for transport, timeout or parse failure. */
+    readonly status?: number,
+  ) {
     super(
       status
         ? `Hue environment request failed (HTTP ${status})`
@@ -49,7 +58,9 @@ const REQUEST_BOUNDS: JsonBounds = { ...valueBounds, bytes: 1024 * 1024 };
  */
 const ENVIRONMENT_PUBLICATION_BOUNDS = aggregateBounds(240_000 + 32);
 
+/** Typed client for authored environments, isolated runs and immutable journals. */
 export class EnvironmentClient {
+  /** Validated Hue origin. */
   readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly timeoutMillis: number;
@@ -168,15 +179,19 @@ export class EnvironmentClient {
     return query.size ? `?${query}` : "";
   }
 
+  /** Creates an environment identity; this non-idempotent registry write is not retried. */
   createEnvironment(input: EnvironmentIdentity) {
     return this.requestOnce<EnvironmentSummary>("POST", "/environments", input);
   }
+  /** Lists active environment identities. */
   listEnvironments(page?: EnvironmentPageOptions) {
     return this.request<EnvironmentPage>("GET", `/environments${this.page(page)}`);
   }
+  /** Reads one environment and its immutable version summaries. */
   getEnvironment(id: string) {
     return this.request<Environment>("GET", `/environments/${uuid(id)}`);
   }
+  /** Publishes an immutable definition; this non-idempotent registry write is not retried. */
   publishVersion(environmentId: string, definition: EnvironmentDefinition) {
     return this.requestOnce<EnvironmentVersionSummary>(
       "POST",
@@ -185,9 +200,11 @@ export class EnvironmentClient {
       ENVIRONMENT_PUBLICATION_BOUNDS,
     );
   }
+  /** Reads a full immutable environment version and generated action catalog. */
   getVersion(id: string) {
     return this.request<EnvironmentVersion>("GET", `/environment-versions/${uuid(id)}`);
   }
+  /** Creates or recovers one fresh isolated world using a stable idempotency key. */
   createRun(input: CreateRunInput) {
     if (
       input.maxSteps !== undefined &&
@@ -207,6 +224,7 @@ export class EnvironmentClient {
       ...(input.executionId === undefined ? {} : { executionId: uuid(input.executionId) }),
     });
   }
+  /** Reads authoritative current or sealed world state. */
   async getRun(runId: string) {
     const run = await this.request<RunState>("GET", `/environment-runs/${uuid(runId)}`);
     return { validity: "not_assessed" as const, coverageGap: null, ...run };
@@ -223,12 +241,14 @@ export class EnvironmentClient {
       input,
     );
   }
+  /** Invokes an action; repeating an invocation identity replays its recorded result. */
   act(runId: string, input: ActionInput) {
     return this.request<ActionResult>("POST", `/environment-runs/${uuid(runId)}/actions`, {
       ...input,
       args: input.args ?? {},
     });
   }
+  /** Pages the immutable journal by step ordinal. */
   listSteps(runId: string, page: StepPageOptions = {}) {
     const query = new URLSearchParams();
     if (page.after !== undefined) {
@@ -246,10 +266,12 @@ export class EnvironmentClient {
       `/environment-runs/${uuid(runId)}/steps${query.size ? `?${query}` : ""}`,
     );
   }
+  /** Seals a world as completed or abandoned and freezes its evidence. */
   finishRun(runId: string, input: FinishRunInput) {
     return this.request<SealedRun>("POST", `/environment-runs/${uuid(runId)}/finish`, input);
   }
 }
+/** Creates a typed simulated-environment client. */
 export function createEnvironmentClient(options: EnvironmentClientOptions): EnvironmentClient {
   return new EnvironmentClient(options);
 }

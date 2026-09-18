@@ -1,14 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ROOT_CONTEXT } from "@opentelemetry/api";
 import type { HueClient } from "../src/client.js";
 import type { EnvironmentClient } from "../src/environment.js";
 import {
+  actualAgentManifestV2,
+  agentManifestDigestV2,
+  attemptBaselineV2,
+  attemptConnectionBundleV2,
   builtins,
+  dependencyManifestV2,
+  dependencyProviderV2,
   defineLocalScorer,
+  executionManifestDigestV2,
   HueApiError,
   runSimulation,
   TargetOutcomeUncertainError,
@@ -26,6 +33,146 @@ const project = {
 };
 const baseUrl = "https://app.hue.test";
 const checksum = "a".repeat(64);
+const componentKeys = ["agent", "prompt", "model", "tools", "approvals", "orchestration"] as const;
+
+function canonicalDigest(value: unknown): string {
+  function canonical(input: unknown): string {
+    if (input === null || typeof input === "string" || typeof input === "boolean")
+      return JSON.stringify(input);
+    if (typeof input === "number" && Number.isSafeInteger(input)) return JSON.stringify(input);
+    if (Array.isArray(input)) return `[${input.map(canonical).join(",")}]`;
+    if (typeof input === "object" && input !== null)
+      return `{${Object.keys(input)
+        .sort()
+        .map(
+          (key) => `${JSON.stringify(key)}:${canonical((input as Record<string, unknown>)[key])}`,
+        )
+        .join(",")}}`;
+    throw new TypeError("Fixture digest input must be JSON");
+  }
+  return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
+}
+
+function providerAttemptFixture() {
+  const digest = (label: string) => canonicalDigest({ fixture: label });
+  const catalogDigest = digest("gmail-catalog");
+  const components = Object.fromEntries(
+    componentKeys.map((key) => [key, { digest: digest(key), evidence: "observed" }]),
+  );
+  const actualManifest = actualAgentManifestV2.parse({
+    schemaVersion: 2,
+    components,
+    catalogs: [
+      {
+        providerInstanceKey: "gmail-primary",
+        surfaceKey: "google.gmail/mcp",
+        digest: catalogDigest,
+        evidence: "observed",
+      },
+    ],
+    helperConfigurations: [],
+  });
+  const expectedManifest = {
+    schemaVersion: 2 as const,
+    components: Object.fromEntries(
+      componentKeys.map((key) => [
+        key,
+        { digest: digest(key), minimumEvidence: "observed" as const },
+      ]),
+    ) as Record<(typeof componentKeys)[number], { digest: string; minimumEvidence: "observed" }>,
+    catalogs: [
+      {
+        providerInstanceKey: "gmail-primary",
+        surfaceKey: "google.gmail/mcp" as const,
+        digest: catalogDigest,
+        minimumEvidence: "observed" as const,
+      },
+    ],
+    helperConfigurations: [],
+  };
+  const provider = dependencyProviderV2.parse({
+    providerInstanceKey: "gmail-primary",
+    providerId: "google.gmail",
+    syntheticPrincipalId: randomUUID(),
+    scopes: ["mail.read"],
+    profile: {
+      profileId: "test.gmail.v2",
+      profileDigest: digest("profile"),
+      buildDigest: digest("build"),
+      coverageDigest: digest("coverage"),
+      contractDigests: [{ surfaceKey: "google.gmail/mcp", contractDigest: digest("mcp-contract") }],
+    },
+    workflowDigest: digest("workflow"),
+    surfaces: [
+      {
+        surfaceRegistrationId: "test.gmail.mcp.v2",
+        surfaceKey: "google.gmail/mcp",
+        protocolVersion: "2025-06-18",
+        contractDigest: digest("mcp-contract"),
+        catalogDigest,
+        helperConfigurationDigest: null,
+        runtimeRegistrationDigest: digest("mcp-registration"),
+      },
+    ],
+  });
+  const dependencyManifest = dependencyManifestV2.parse({
+    schemaVersion: 2,
+    providers: [provider],
+  });
+  const expectedAgentManifestDigest = agentManifestDigestV2(expectedManifest);
+  const baseline = attemptBaselineV2.parse({
+    schemaVersion: 2,
+    expectedAgentManifestId: randomUUID(),
+    expectedAgentManifestDigest,
+    expectedAgentManifest: expectedManifest,
+    dependencyManifest,
+  });
+  const requestedProviders = [
+    { providerInstanceKey: "gmail-primary", surfaceKeys: ["google.gmail/mcp" as const] },
+  ];
+  const mcpSurface = {
+    providerInstanceKey: "gmail-primary",
+    surfaceKey: "google.gmail/mcp" as const,
+  };
+  const bearer = "attempt-memory-only-bearer-000000000000000000000000";
+  const bundle = (executionId: string, environmentRunId: string) => {
+    const bindingId = randomUUID();
+    return attemptConnectionBundleV2.parse({
+      schemaVersion: 2,
+      bindingId,
+      executionId,
+      environmentRunId,
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      credentialGeneration: 0,
+      providers: [
+        {
+          ...provider,
+          surfaces: [
+            {
+              ...provider.surfaces[0]!,
+              endpoint: `https://simulation.invalid/api/v1/provider-facades/${bindingId}/${randomUUID()}`,
+              bearer,
+            },
+          ],
+        },
+      ],
+      parity: {
+        expectedAgentManifestId: baseline.expectedAgentManifestId,
+        expectedAgentManifestDigest,
+        actualAgentManifestDigest: agentManifestDigestV2(actualManifest),
+        actualManifest,
+        dependencyManifestDigest: canonicalDigest(dependencyManifest),
+        executionManifestDigest: executionManifestDigestV2(actualManifest, dependencyManifest, {
+          bindingId,
+          executionId,
+          environmentRunId,
+        }),
+        evidenceSource: "caller_supplied",
+      },
+    });
+  };
+  return { actualManifest, baseline, bearer, bundle, mcpSurface, requestedProviders };
+}
 const scenario = {
   kind: "repository" as const,
   name: "Repository scenario",
@@ -402,6 +549,7 @@ function harness(
     hue,
     worlds,
     experiments,
+    scorers,
     results,
     targetCalls: () => targetCalls,
     target: async (_inputs: JsonValue, context: any) => {
@@ -444,6 +592,283 @@ describe("one-shot simulation workflow", () => {
       expect(fixture.worlds.size).toBe(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("prepares V2 before the target and keeps credentials out of checkpoints", async () => {
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const attempt = providerAttemptFixture();
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-v2-ready-"));
+    const progress: SimulationProgress[] = [];
+    let targetCalls = 0;
+    (fixture.client as any).prepareAttempt = async (input: any) => ({
+      status: "ready",
+      preflightReport: {
+        schemaVersion: 2,
+        status: "ready",
+        evidenceSource: "caller_supplied",
+        findings: [],
+      },
+      bundle: attempt.bundle(input.executionId, input.environmentRunId),
+    });
+    try {
+      const report = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario: {
+          ...scenario,
+          config: { attemptBaselineV2: attempt.baseline },
+        },
+        actualAgentManifest: attempt.actualManifest,
+        requestedProviders: attempt.requestedProviders,
+        mcpSurface: attempt.mcpSurface,
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+        onProgress(event) {
+          progress.push(event);
+        },
+        target: async (_inputs, context) => {
+          targetCalls++;
+          const bundle = context.connectionBundle;
+          expect(bundle?.schemaVersion).toBe(2);
+          if (!bundle) throw new Error("Expected a prepared connection bundle");
+          expect(context.mcp).toEqual({
+            url: bundle.providers[0]!.surfaces[0]!.endpoint,
+            token: attempt.bearer,
+            expiresAt: bundle.expiresAt,
+          });
+          await context.tools.save!.execute({});
+          return "saved";
+        },
+      });
+      expect(report.runUrl).toBe(`${baseUrl}/experiments/${report.experimentId}`);
+      expect(targetCalls).toBe(1);
+      expect(progress.map((event) => event.type)).toEqual([
+        "run_created",
+        "world_created",
+        "attempt_prepared",
+        "target_started",
+        "world_sealed",
+      ]);
+      const checkpointFiles = (await readdir(directory, { recursive: true })).filter((entry) =>
+        entry.endsWith(".json"),
+      );
+      const checkpointText = (
+        await Promise.all(checkpointFiles.map((entry) => readFile(join(directory, entry), "utf8")))
+      ).join("\n");
+      expect(checkpointText).not.toContain(attempt.bearer);
+      expect(checkpointText).not.toContain("/api/v1/provider-facades/");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a V2 preflight gap skips the callback and scorer", async () => {
+    let targetCalls = 0;
+    let scorerCalls = 0;
+    const scorer = defineLocalScorer({
+      source: "must-not-score-a-preflight-gap",
+      entrypoint: "score",
+      metrics: [{ name: "quality", type: "boolean" }],
+      score() {
+        scorerCalls++;
+        throw new Error("must not run");
+      },
+    });
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const attempt = providerAttemptFixture();
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-v2-incomplete-"));
+    (fixture.client as any).prepareAttempt = async (input: any) => {
+      const world = fixture.worlds.get(input.environmentRunId);
+      world.validity = "environment_incomplete";
+      world.coverageGap = {
+        provider: "hue.attempt",
+        operation: "prepare_attempt",
+        code: "attempt_preflight_incomplete",
+        args: { findingCodes: ["manifest_mismatch"] },
+        description: "Attempt preflight could not establish the required simulation parity.",
+        reportedAt: new Date().toISOString(),
+        reportedBy: { kind: "project_key", id: randomUUID() },
+      };
+      return {
+        status: "environment_incomplete",
+        bindingId: randomUUID(),
+        preflightReport: {
+          schemaVersion: 2,
+          status: "environment_incomplete",
+          evidenceSource: "caller_supplied",
+          findings: [
+            {
+              code: "manifest_mismatch",
+              component: "tools",
+              providerInstanceKey: null,
+              surfaceKey: null,
+              message: "The actual agent manifest does not match the experiment baseline.",
+            },
+          ],
+        },
+        gap: world.coverageGap,
+      };
+    };
+    try {
+      await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario: {
+          ...scenario,
+          config: { attemptBaselineV2: attempt.baseline },
+          scorers: [{ name: "Quality", slug: "quality", scorer }],
+        },
+        actualAgentManifest: attempt.actualManifest,
+        requestedProviders: attempt.requestedProviders,
+        mcpSurface: attempt.mcpSurface,
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+        target: async () => {
+          targetCalls++;
+          return "must not run";
+        },
+      });
+      expect(targetCalls).toBe(0);
+      expect(scorerCalls).toBe(0);
+      expect(fixture.results).toEqual([
+        expect.objectContaining({
+          state: "skipped",
+          explanation: "Environment incomplete: provider behavior is not implemented.",
+        }),
+      ]);
+      expect([...fixture.worlds.values()][0]).toMatchObject({
+        status: "completed",
+        validity: "environment_incomplete",
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a lost V2 prepare acknowledgement stays uncertain and never replays the callback", async () => {
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const attempt = providerAttemptFixture();
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-v2-uncertain-"));
+    let prepareCalls = 0;
+    let targetCalls = 0;
+    (fixture.client as any).prepareAttempt = async () => {
+      prepareCalls++;
+      throw new HueApiError();
+    };
+    const options = {
+      ...fixture,
+      checkpointDirectory: directory,
+      scenario: {
+        ...scenario,
+        config: { attemptBaselineV2: attempt.baseline },
+      },
+      actualAgentManifest: attempt.actualManifest,
+      requestedProviders: attempt.requestedProviders,
+      mcpSurface: attempt.mcpSurface,
+      persistResultContent: false,
+      traceEvidence: { mode: "required" as const },
+      target: async () => {
+        targetCalls++;
+        return "must not run";
+      },
+    };
+    try {
+      await expect(runSimulation(options)).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+      await expect(runSimulation(options)).rejects.toBeInstanceOf(UncertainExecutionError);
+      expect(prepareCalls).toBe(1);
+      expect(targetCalls).toBe(0);
+      expect([...fixture.worlds.values()][0]?.status).toBe("open");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("publishes the supported scorer defaults and rejects server-only scorer kinds", async () => {
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-scorer-defaults-"));
+    try {
+      await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario: {
+          ...scenario,
+          scorers: [
+            {
+              name: "Judge",
+              slug: "judge",
+              scorer: {
+                kind: "llm_judge",
+                config: {
+                  model: "openai/gpt-5",
+                  provider: "openai",
+                  rubric: "  Assess quality  ",
+                  bindings: [{ name: "output", path: "/output" }],
+                },
+                metrics: [{ name: "quality", type: "boolean" }],
+              } as any,
+            },
+          ],
+        },
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+      });
+      expect([...fixture.scorers.values()][0]?.versions[0]?.definition).toMatchObject({
+        config: {
+          rubric: "Assess quality",
+          bindings: [{ name: "output", path: "/output", required: true }],
+          maxOutputTokens: 1024,
+          timeoutMs: 60_000,
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+
+    const unsupported = harness();
+    const unsupportedDirectory = await mkdtemp(
+      join(tmpdir(), "hue-simulation-unsupported-scorer-"),
+    );
+    try {
+      await expect(
+        runSimulation({
+          ...unsupported,
+          checkpointDirectory: unsupportedDirectory,
+          scenario: {
+            ...scenario,
+            scorers: [
+              {
+                name: "Document verifier",
+                slug: "document-verifier",
+                scorer: { kind: "document_verifier", metrics: [] } as any,
+              },
+            ],
+          },
+          persistResultContent: false,
+          traceEvidence: { mode: "required" },
+        }),
+      ).rejects.toThrow("Unsupported or invalid SDK scorer definition");
+      expect(unsupported.scorers.size).toBe(0);
+      expect(unsupported.worlds.size).toBe(0);
+      expect(unsupported.targetCalls()).toBe(0);
+    } finally {
+      await rm(unsupportedDirectory, { recursive: true, force: true });
     }
   });
 
@@ -616,7 +1041,6 @@ describe("one-shot simulation workflow", () => {
       expect(fixture.results).toEqual([
         expect.objectContaining({
           state: "skipped",
-          metrics: [],
           explanation: "Environment incomplete: provider behavior is not implemented.",
         }),
       ]);

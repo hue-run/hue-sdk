@@ -49,14 +49,17 @@ export class OutcomeSerializationError extends Error {
     this.name = "OutcomeSerializationError";
   }
 }
+/** Thrown when cooperative caller cancellation stops target execution. */
 export class TargetCancelledError extends Error {
   constructor() {
     super("Target execution was cancelled");
     this.name = "TargetCancelledError";
   }
 }
+/** Thrown when the target or world may have committed but acknowledgement is unavailable. */
 export class TargetOutcomeUncertainError extends Error {
   constructor(
+    /** Execution whose target outcome must never be replayed automatically. */
     readonly executionId: string,
     options?: ErrorOptions,
   ) {
@@ -80,6 +83,7 @@ interface RunnerOptions {
   concurrency?: number;
   /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */
   schemaTimeoutMillis?: number;
+  /** Resolve sealed world evidence for local scoring and historical rescoring. */
   environmentEvidence?: "required";
 }
 /** Options for {@link runExperiment}. */

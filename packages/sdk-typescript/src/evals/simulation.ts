@@ -8,17 +8,17 @@ import { HueApiError, type EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";
 import { aggregateBounds, digest, json } from "./json.js";
+import { normalizeScorerDefinitionForPublication } from "./scorer-publication.js";
 import {
   actualAgentManifestV2,
   attemptBaselineV2,
-  prepareAttemptInputV2,
   projectMcpConnectionV2,
+  requestedAttemptProvidersV2,
   validateAttemptConnectionBundleV2,
   type ActualAgentManifestInputV2,
   type AttemptBaselineV2,
   type AttemptConnectionBundleV2,
   type RequestedAttemptProviderV2,
-  type SurfaceBindingV2,
 } from "./attempt.js";
 import {
   runExperiment,
@@ -37,52 +37,102 @@ import type {
   SimulationMcpCapability,
 } from "./types.js";
 
+/** Repository-authored scorer identity and its public definition or local binding. */
 export interface RepositorySimulationScorer extends Identity {
+  /** Scorer definition to publish, or a local callback bound to its source digest. */
   scorer: ScorerDefinition | LocalScorer;
 }
+/** One repository-authored scenario case. */
 export interface RepositorySimulationCase {
+  /** Stable key unique within this scenario dataset. */
   externalKey: string;
+  /** JSON inputs passed to the local target callback. */
   inputs: JsonValue;
+  /** Optional reference output for scorers. */
   expected?: JsonValue;
+  /** Optional caller-owned case metadata. */
   metadata?: Record<string, JsonValue>;
 }
+/** Immutable app-authored experiment reference or repository-authored scenario definition. */
 export type SimulationScenario =
-  | { kind: "experiment"; experimentId: string }
   | {
+      /** Select an existing app-authored immutable experiment template. */
+      kind: "experiment";
+      /** Experiment to clone into a fresh attempt. */
+      experimentId: string;
+    }
+  | {
+      /** Publish and resolve the repository-authored definition. */
       kind: "repository";
+      /** Experiment display name. */
       name: string;
+      /** Stable dataset slug used for immutable version resolution. */
       slug: string;
+      /** Optional experiment/dataset description. */
       description?: string;
-      environment: EnvironmentIdentity & { definition: EnvironmentDefinition };
+      /** Environment identity and authored world definition. */
+      environment: EnvironmentIdentity & {
+        /** Definition normalized and published as an immutable version. */
+        definition: EnvironmentDefinition;
+      };
+      /** Cases published into one frozen dataset version. */
       cases: RepositorySimulationCase[];
+      /** Scorers published and pinned by immutable version. */
       scorers: RepositorySimulationScorer[];
+      /** JSON configuration passed to every target callback. */
       config?: JsonValue;
     };
 
+/** Progress emitted without target output, credentials or other sensitive content. */
 export type SimulationProgress =
-  | { type: "run_created"; experimentId: string; runUrl: string }
   | {
-      type: "world_created" | "target_started" | "world_sealed";
+      /** Emitted as soon as the inspectable experiment exists. */
+      type: "run_created";
+      /** Fresh experiment identity. */
       experimentId: string;
+      /** Browser URL for inspecting progress and evidence. */
+      runUrl: string;
+    }
+  | {
+      /** World/target lifecycle event. */
+      type: "world_created" | "target_started" | "world_sealed";
+      /** Fresh experiment identity. */
+      experimentId: string;
+      /** Target execution identity. */
       executionId: string;
+      /** Frozen experiment-case identity. */
       caseId: string;
+      /** Isolated simulated-world identity. */
       environmentRunId: string;
     }
   | {
+      /** Strict provider-profile preflight decision. */
       type: "attempt_prepared";
+      /** Fresh experiment identity. */
       experimentId: string;
+      /** Target execution identity. */
       executionId: string;
+      /** Frozen experiment-case identity. */
       caseId: string;
+      /** Isolated simulated-world identity. */
       environmentRunId: string;
+      /** Stable attempt binding identity. */
       bindingId: string;
+      /** Whether strict parity was established. */
       status: "ready" | "environment_incomplete";
+      /** Stable nonsecret finding codes. */
       findingCodes: string[];
+      /** Credential-free execution manifest digest for ready attempts. */
       executionManifestDigest?: AttemptConnectionBundleV2["parity"]["executionManifestDigest"];
     };
 
+/** Context supplied to the existing local agent callback for one case attempt. */
 export interface SimulationTargetContext {
+  /** Frozen experiment configuration. */
   config: JsonValue;
+  /** Frozen case including its immutable environment-version pin. */
   item: ExperimentCase;
+  /** Target execution identity. */
   executionId: string;
   /** Stable world identity for adapter control operations such as coverage reporting. */
   environmentRunId: string;
@@ -97,7 +147,6 @@ export interface SimulationTargetContext {
   signal?: AbortSignal;
 }
 
-type McpSurfaceKeyV2 = Extract<SurfaceBindingV2["surfaceKey"], `${string}/mcp`>;
 type ActualAgentManifestResolverV2 =
   | ActualAgentManifestInputV2
   | ((context: {
@@ -106,37 +155,82 @@ type ActualAgentManifestResolverV2 =
       signal?: AbortSignal;
     }) => ActualAgentManifestInputV2 | Promise<ActualAgentManifestInputV2>);
 
+/** Options for {@link runSimulation}. */
 export interface RunSimulationOptions {
+  /** Evaluation client for the target Hue project. */
   client: EvaluationClient;
+  /** Environment client for the same Hue origin and project. */
   environmentClient: EnvironmentClient;
+  /** Hue telemetry client used for target and tool spans. */
   hue: HueClient;
+  /** Dedicated private directory for resumable checkpoints. */
   checkpointDirectory: string;
+  /** App-authored reference or repository-authored scenario. */
   scenario: SimulationScenario;
   /** Required privacy decision for saved target/scorer content. */
   persistResultContent: boolean;
-  traceEvidence: { mode: "required" } | { mode: "omit"; reason: string };
+  /** Required trace receipt policy for every target attempt. */
+  traceEvidence:
+    | {
+        /** Wait for acknowledged trace/log export. */
+        mode: "required";
+      }
+    | {
+        /** Explicitly omit stored trace evidence. */
+        mode: "omit";
+        /** Bounded explanation for the omission. */
+        reason: string;
+      };
+  /** Local scorer callbacks bound by their declared source digests. */
   localScorers?: LocalScorer[];
+  /** Cases in flight, 1–16; defaults to 1. */
   concurrency?: number;
+  /** JSON Schema worker deadline in milliseconds. */
   schemaTimeoutMillis?: number;
+  /** Per-world action ceiling, 1–500. */
   maxSteps?: number;
+  /** Per-world lease in seconds, 1–86400. */
   ttlSeconds?: number;
+  /** Cooperative caller cancellation signal. */
   signal?: AbortSignal;
+  /** Optional display name for the fresh experiment. */
   runName?: string;
   /** Opt into immutable provider-profile preflight. Provider selection and the MCP
    * projection are required together. Omitted actual evidence normalizes to explicit
    * V2 missing evidence; it is never assumed equal to the baseline. */
-  actualAgentManifest?: ActualAgentManifestResolverV2;
+  actualAgentManifest?:
+    | ActualAgentManifestInputV2
+    | ((context: {
+        /** Frozen experiment configuration. */
+        config: JsonValue;
+        /** Frozen case selected for this attempt. */
+        item: ExperimentCase;
+        /** Cooperative caller cancellation signal. */
+        signal?: AbortSignal;
+      }) => ActualAgentManifestInputV2 | Promise<ActualAgentManifestInputV2>);
+  /** Exact provider instances and ordered surfaces asserted for strict preflight. */
   requestedProviders?: RequestedAttemptProviderV2[];
-  mcpSurface?: { providerInstanceKey: string; surfaceKey: McpSurfaceKeyV2 };
+  /** Requested MCP surface projected to the backwards-compatible `context.mcp`. */
+  mcpSurface?: {
+    /** Provider instance selected from `requestedProviders`. */
+    providerInstanceKey: string;
+    /** Selected MCP surface. */
+    surfaceKey: "google.gmail/mcp" | "slack/mcp";
+  };
+  /** Invokes the existing local agent exactly once for this attempt. */
   target(
     inputs: JsonValue,
     context: SimulationTargetContext,
   ): JsonValue | undefined | Promise<JsonValue | undefined>;
+  /** Receives bounded nonsecret lifecycle progress. */
   onProgress?(event: SimulationProgress): void | Promise<void>;
 }
 
+/** Completed simulation report with its inspectable experiment identity. */
 export interface SimulationReport extends RunnerReport {
+  /** Fresh experiment created for this invocation. */
   experimentId: string;
+  /** Browser URL joining task, trace, world evidence and scoring. */
   runUrl: string;
 }
 
@@ -154,7 +248,7 @@ const scorerDefinition = (entry: RepositorySimulationScorer) =>
 type AttemptPreparationV2 = {
   actualAgentManifest: ActualAgentManifestResolverV2;
   requestedProviders: RequestedAttemptProviderV2[];
-  mcpSurface: { providerInstanceKey: string; surfaceKey: McpSurfaceKeyV2 };
+  mcpSurface: NonNullable<RunSimulationOptions["mcpSurface"]>;
 };
 
 function requestedAttempt(options: RunSimulationOptions): AttemptPreparationV2 | undefined {
@@ -167,9 +261,7 @@ function requestedAttempt(options: RunSimulationOptions): AttemptPreparationV2 |
   }
   if (!requested || !selected)
     throw new TypeError("requestedProviders and mcpSurface must be supplied together");
-  const requestedProviders = prepareAttemptInputV2.shape.requestedProviders.parse(
-    options.requestedProviders,
-  );
+  const requestedProviders = requestedAttemptProvidersV2.parse(options.requestedProviders);
   const mcpSurface = options.mcpSurface!;
   const provider = requestedProviders.find(
     (candidate) => candidate.providerInstanceKey === mcpSurface.providerInstanceKey,
@@ -237,15 +329,6 @@ function normalizedEnvironmentDefinition(definition: EnvironmentDefinition): Jso
   );
 }
 
-function normalizedScorerDefinition(definition: ScorerDefinition): JsonValue {
-  if (definition.kind === "builtin" && definition.entry === "hue.includes.v1")
-    return json({
-      ...definition,
-      config: { caseSensitive: definition.config.caseSensitive ?? true },
-    });
-  return json(definition);
-}
-
 function scenarioIdentity(scenario: SimulationScenario): JsonValue {
   if (scenario.kind === "experiment") return scenario;
   return json(
@@ -261,7 +344,9 @@ function scenarioIdentity(scenario: SimulationScenario): JsonValue {
       cases: scenario.cases,
       scorers: scenario.scorers.map(({ scorer, ...identity }) => ({
         ...identity,
-        definition: normalizedScorerDefinition("definition" in scorer ? scorer.definition : scorer),
+        definition: normalizeScorerDefinitionForPublication(
+          "definition" in scorer ? scorer.definition : scorer,
+        ),
       })),
       config: scenario.config ?? {},
     },
@@ -366,7 +451,8 @@ async function resolveScorers(
   const versionIds: string[] = [];
   const bindings: LocalScorer[] = [];
   for (const source of sources) {
-    const definition = scorerDefinition(source);
+    const supplied = scorerDefinition(source);
+    const definition = normalizeScorerDefinitionForPublication(supplied);
     let identity = await findBySlug(
       (after) => client.listScorers({ after, limit: 100, includeArchived: true }),
       source.slug,
@@ -392,7 +478,7 @@ async function resolveScorers(
     }
     if (identity.archivedAt) throw new Error("Repository scenario scorer is archived");
     const full = await client.getScorer(identity.id);
-    const definitionDigest = digest(normalizedScorerDefinition(definition));
+    const definitionDigest = digest(definition);
     let version = full.versions?.find((item) => item.contentDigest === definitionDigest);
     if (!version) {
       try {

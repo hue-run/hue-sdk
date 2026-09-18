@@ -23,6 +23,7 @@ refuses to publish a version without a matching entry below.
 
 - TypeScript environment APIs and bounded local tools through the new `@hue-run/sdk/environment` export, plus evaluation-client support for execution-scoped hosted MCP capabilities.
 - TypeScript `runSimulation()` for repository-authored or app-authored scenarios, with immutable definition pins, fresh isolated worlds, resumable uploads, evidence-aware scoring, and early run URLs.
+- V2 attempt-profile preflight for `runSimulation()`, including explicit actual-manifest evidence, typed provider connection bundles, secret-free V1/V2 binding reads, stable refresh/revocation checks, and the backwards-compatible `context.mcp` projection.
 - `./package.json` export, `sideEffects` metadata, `bugs` and `keywords` in the package manifest.
 - `hue.model(model, callback, options)` creates a GenAI client span for a direct provider call, taking the callback before its options like `withSpan`; `options` carries `provider`, `operation` and `name` plus `sessionId`, `userId`, `input` (recorded as `gen_ai.input.messages`) and `parentContext`. `HueSpan.setUsage()` records validated token counts, matching the Python helpers.
 - `hue.inject()` / `hue.extract()` carry W3C trace context between processes without baggage or credentials.
@@ -50,6 +51,7 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
+- Repository simulations normalize every public scorer definition default before immutable digest lookup and reject unsupported server-only scorer kinds instead of publishing an incompatible identity.
 - The managed-target README snippet passes `tracer: hue.tracer`; without it every invocation returned `uncertain`.
 - `withSpan`, `tool`, `model` and `hue.tracer.startActiveSpan` make their span the active OpenTelemetry span while the callback runs, so spans from instrumentations that use the global API parent under Hue spans when the application has registered a context manager; Hue still registers none. A disabled client leaves the application's active span visible through `getContext()`, `HueSpan.context` and `inject()`.
 - Owned providers export the OpenTelemetry default resource (`telemetry.sdk.language`, `telemetry.sdk.name`, `telemetry.sdk.version`) beside `service.name` and `service.version`. **Wire**
