@@ -4,6 +4,7 @@
   "entryPoints": [
     "packages/sdk-typescript/src/index.ts",
     "packages/sdk-typescript/src/ai-sdk.ts",
+    "packages/sdk-typescript/src/environment.ts",
     "packages/sdk-typescript/src/evals.ts",
     "packages/sdk-typescript/src/managed.ts"
   ],
@@ -12,5 +13,19 @@
   "readme": "none",
   "excludePrivate": true,
   "excludeInternal": true,
-  "treatWarningsAsErrors": true
+  "treatWarningsAsErrors": true,
+  "requiredToBeDocumented": [
+    "Class",
+    "Interface",
+    "Method",
+    "Property",
+    "Function",
+    "TypeAlias"
+  ],
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "rewrittenLink": true,
+    "notDocumented": true
+  }
 }

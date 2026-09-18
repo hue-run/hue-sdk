@@ -12,11 +12,12 @@ software, which keeps its own license. Transitive dependencies are recorded in
 | `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and their transitives | Apache-2.0 | `hue-run` |
 | `requests` (with `certifi` under MPL-2.0, `urllib3`, `charset-normalizer`, `idna`) | Apache-2.0 / MPL-2.0 / MIT / BSD-3-Clause | `hue-run` |
 
-## Optional dependencies for JSON Schema scoring
+## Optional dependencies for evaluations
 
 | Package | License | Used by |
 | --- | --- | --- |
-| `ajv` (with `fast-uri` under BSD-3-Clause, `fast-deep-equal`, `json-schema-traverse`, `require-from-string`) | MIT | `@hue-run/sdk/evals`, optional peer dependency |
+| `zod` | MIT | `@hue-run/sdk/evals`; optional peer dependency from 0.2.0 |
+| `ajv` (with `fast-uri` under BSD-3-Clause, `fast-deep-equal`, `json-schema-traverse`, `require-from-string`) | MIT | `@hue-run/sdk/evals`; regular dependency in 0.1.x, optional peer dependency from 0.2.0 |
 | `jsonschema`, `referencing`, `jsonschema-specifications`, `rpds-py`, `attrs` | MIT | `hue-run[evals]` |
 
 ## Test material

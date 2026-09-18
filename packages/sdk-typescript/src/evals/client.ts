@@ -1,6 +1,16 @@
 import { validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
-import { json, uuid } from "./json.js";
+import { json, uuid, valueBounds } from "./json.js";
+import {
+  attemptBindingRead,
+  parsePrepareAttemptResultV2,
+  parseRefreshedAttemptResultV2,
+  parseRevocationResult,
+  prepareAttemptInputV2,
+  validateAttemptConnectionBundleV2,
+  type AttemptConnectionBundleV2,
+  type PrepareAttemptRequestV2,
+} from "./attempt.js";
 import type {
   CaseWrite,
   CompleteExecution,
@@ -10,6 +20,7 @@ import type {
   DatasetVersion,
   EvaluationItem,
   EvaluationRun,
+  EnvironmentEvidenceSnapshot,
   Execution,
   Experiment,
   ExperimentCase,
@@ -20,31 +31,46 @@ import type {
   JudgeJob,
   Page,
   PageOptions,
+  RegistryPageOptions,
   Result,
   ResultSummary,
   Scorer,
   ScorerDefinition,
   ScorerVersion,
+  SimulationMcpCapability,
   StartExecution,
   Subject,
   StoredResult,
 } from "./types.js";
 
+/** Connection options for {@link createEvaluationClient}. */
 export interface EvaluationClientOptions {
+  /** Project service key sent as a Bearer token; server side only. */
   apiKey: string;
+  /** Hue origin, `https://app.hue.run` by default; HTTPS except for loopback. */
   baseUrl?: string;
+  /** Per-request budget in milliseconds, 100–60000. Default 10000. */
   timeoutMillis?: number;
 }
+/** Thrown for a failed evaluation API request; the message is fixed and never includes response text. */
 export class HueApiError extends Error {
-  constructor(readonly status?: number) {
+  constructor(
+    /** HTTP status when Hue answered; absent for network, timeout and parsing failures. */
+    readonly status?: number,
+  ) {
     super(
       status ? `Hue API request failed (HTTP ${status})` : "Hue API connection or response failed",
     );
     this.name = "HueApiError";
   }
 }
-/** No implicit mutation retry: callers retain stable idempotency keys for experiments/results. */
+/**
+ * Typed client for Hue's evaluation REST API: datasets, scorers, experiments, executions, runs,
+ * results and hosted judge jobs. No implicit mutation retry: callers retain stable idempotency keys
+ * for experiments and results. Responses are bounded to 4 MiB.
+ */
 export class EvaluationClient {
+  /** Validated Hue origin. */
   readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly timeoutMillis: number;
@@ -58,7 +84,12 @@ export class EvaluationClient {
     this.apiKey = validated.apiKey;
     this.timeoutMillis = validated.timeoutMillis;
   }
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    bounds = { ...valueBounds, bytes: 1024 * 1024 },
+  ): Promise<T> {
     // Optional top-level fields are omitted intentionally; nested undefined remains invalid.
     const payload =
       body === undefined
@@ -68,7 +99,7 @@ export class EvaluationClient {
               Object.fromEntries(
                 Object.entries(body as object).filter(([, value]) => value !== undefined),
               ),
-              1024 * 1024,
+              bounds,
             ),
           );
     let response: Response;
@@ -121,57 +152,82 @@ export class EvaluationClient {
     }
     return query.size ? `?${query}` : "";
   }
+  private registryPage(options: RegistryPageOptions = {}): string {
+    const query = new URLSearchParams(this.page(options).slice(1));
+    if (options.includeArchived !== undefined)
+      query.set("includeArchived", String(options.includeArchived));
+    return query.size ? `?${query}` : "";
+  }
+  /** Reads the current project to confirm the key and origin. */
   checkConnection() {
     return this.request<ProjectConnection>("GET", "/projects/current");
   }
+  /** Creates a dataset with an initial draft version. */
   createDataset(input: Identity) {
     return this.request<Dataset>("POST", "/datasets", input);
   }
+  /** Reads a dataset and its versions. */
   getDataset(id: string) {
     return this.request<Dataset>("GET", `/datasets/${uuid(id)}`);
   }
-  listDatasets(page?: PageOptions) {
-    return this.request<Page<Omit<Dataset, "versions">>>("GET", `/datasets${this.page(page)}`);
+  /** Lists datasets without their versions. */
+  listDatasets(page?: RegistryPageOptions) {
+    return this.request<Page<Omit<Dataset, "versions">>>(
+      "GET",
+      `/datasets${this.registryPage(page)}`,
+    );
   }
+  /** Creates a new draft version, optionally copying cases from an existing version. */
   createDatasetVersion(id: string, input: { fromVersionId?: string } = {}) {
     return this.request<DatasetVersion>("POST", `/datasets/${uuid(id)}/versions`, input);
   }
+  /** Reads a dataset version. */
   getDatasetVersion(id: string) {
     return this.request<DatasetVersion>("GET", `/dataset-versions/${uuid(id)}`);
   }
+  /** Lists the full cases of a dataset version; use small page limits for large values. */
   listCases(id: string, page?: PageOptions) {
     return this.request<Page<DatasetCase>>(
       "GET",
       `/dataset-versions/${uuid(id)}/cases${this.page(page)}`,
     );
   }
+  /** Adds a case to a draft version using optimistic concurrency on `expectedRevision`. */
   addCase(id: string, input: CaseWrite) {
-    return this.request<{ item: DatasetCase; version: DatasetVersion }>(
-      "POST",
-      `/dataset-versions/${uuid(id)}/cases`,
-      input,
-    );
+    return this.request<{
+      /** The stored case. */
+      item: DatasetCase;
+      /** The version with its new revision. */
+      version: DatasetVersion;
+    }>("POST", `/dataset-versions/${uuid(id)}/cases`, input);
   }
+  /** Freezes a draft version at the given revision; frozen versions are immutable. */
   freezeDatasetVersion(id: string, expectedRevision: number) {
     return this.request<DatasetVersion>("POST", `/dataset-versions/${uuid(id)}/freeze`, {
       expectedRevision,
     });
   }
+  /** Creates a scorer identity; publish definitions with {@link publishScorerVersion}. */
   createScorer(input: Identity) {
     return this.request<Scorer>("POST", "/scorers", input);
   }
+  /** Reads a scorer and its published versions. */
   getScorer(id: string) {
     return this.request<Scorer>("GET", `/scorers/${uuid(id)}`);
   }
-  listScorers(page?: PageOptions) {
-    return this.request<Page<Scorer>>("GET", `/scorers${this.page(page)}`);
+  /** Lists scorers. */
+  listScorers(page?: RegistryPageOptions) {
+    return this.request<Page<Scorer>>("GET", `/scorers${this.registryPage(page)}`);
   }
+  /** Publishes an immutable scorer version; the server validates the pinned definition. */
   publishScorerVersion(id: string, definition: ScorerDefinition) {
     return this.request<ScorerVersion>("POST", `/scorers/${uuid(id)}/versions`, { definition });
   }
+  /** Reads a published scorer version. */
   getScorerVersion(id: string) {
     return this.request<ScorerVersion>("GET", `/scorer-versions/${uuid(id)}`);
   }
+  /** Creates an experiment over a frozen dataset version with pinned scorer versions and a configuration. */
   createExperiment(input: {
     idempotencyKey: string;
     name: string;
@@ -179,20 +235,29 @@ export class EvaluationClient {
     scorerVersionIds: string[];
     config: JsonValue;
   }) {
-    return this.request<{ id: string; evaluationRunId: string }>("POST", "/experiments", input);
+    return this.request<{
+      /** Experiment ID. */
+      id: string;
+      /** ID of the experiment's evaluation run. */
+      evaluationRunId: string;
+    }>("POST", "/experiments", input);
   }
+  /** Reads an experiment with its evaluation run and execution counts. */
   getExperiment(id: string) {
     return this.request<Experiment>("GET", `/experiments/${uuid(id)}`);
   }
+  /** Lists an experiment's cases with their latest executions. */
   listExperimentItems(id: string, page?: PageOptions) {
     return this.request<Page<ExperimentItem>>(
       "GET",
       `/experiments/${uuid(id)}/items${this.page(page)}`,
     );
   }
+  /** Reads one frozen case of an experiment. */
   getExperimentCase(id: string, caseId: string) {
     return this.request<ExperimentCase>("GET", `/experiments/${uuid(id)}/items/${uuid(caseId)}`);
   }
+  /** Starts (or, with the same key, replays) a target execution for a case. */
   startExecution(id: string, caseId: string, input: StartExecution) {
     return this.request<Execution>(
       "POST",
@@ -200,51 +265,160 @@ export class EvaluationClient {
       input,
     );
   }
+  /** Reads an execution. */
   getExecution(id: string) {
     return this.request<Execution>("GET", `/experiment-executions/${uuid(id)}`);
   }
+  /** Reads the sealed environment evidence linked to an execution. */
+  getEnvironmentEvidence(executionId: string) {
+    return this.request<EnvironmentEvidenceSnapshot>(
+      "GET",
+      `/experiment-executions/${uuid(executionId)}/environment`,
+    );
+  }
+  /** Pages the sealed environment journal linked to an execution. */
+  getEnvironmentSteps(executionId: string, page: { after?: number; limit?: number } = {}) {
+    if (page.after !== undefined && (!Number.isInteger(page.after) || page.after < -1))
+      throw new RangeError("Step cursor must be an integer at least -1");
+    if (
+      page.limit !== undefined &&
+      (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > 100)
+    )
+      throw new RangeError("Step page size must be 1–100");
+    const query = new URLSearchParams();
+    if (page.after !== undefined) query.set("after", String(page.after));
+    if (page.limit !== undefined) query.set("limit", String(page.limit));
+    return this.request<import("../environment/types.js").StepPage>(
+      "GET",
+      `/experiment-executions/${uuid(executionId)}/environment/steps${query.size ? `?${query}` : ""}`,
+    );
+  }
+  /**
+   * Prepares the immutable provider-profile binding for one execution. The route identity is
+   * removed from the JSON body, and credential-bearing responses are validated against the
+   * request before being returned.
+   */
+  async prepareAttempt(input: PrepareAttemptRequestV2) {
+    const request = prepareAttemptInputV2.parse(input);
+    const { executionId, ...body } = request;
+    const response = await this.request<unknown>(
+      "POST",
+      `/experiment-executions/${executionId}/prepare-attempt`,
+      body,
+      { ...valueBounds, bytes: 128_000 },
+    );
+    try {
+      return parsePrepareAttemptResultV2(response, request);
+    } catch {
+      // A malformed success response may follow a committed decision. Never expose
+      // credential-bearing response details or imply that replay is automatically safe.
+      throw new HueApiError();
+    }
+  }
+  /** Reads coupled, secret-free V1 or V2 binding evidence; it never reacquires credentials. */
+  async getAttemptBinding(bindingId: string) {
+    const response = await this.request<unknown>("GET", `/attempt-bindings/${uuid(bindingId)}`);
+    try {
+      return attemptBindingRead.parse(response);
+    } catch {
+      throw new HueApiError();
+    }
+  }
+  /** Rotates an unexpired V2 connection while preserving its immutable binding evidence. */
+  async refreshAttemptConnection(
+    previous: AttemptConnectionBundleV2,
+    input: { idempotencyKey: string },
+  ) {
+    const source = validateAttemptConnectionBundleV2(previous);
+    const response = await this.request<unknown>(
+      "POST",
+      `/attempt-bindings/${source.bindingId}/refresh`,
+      {
+        idempotencyKey: uuid(input.idempotencyKey),
+        expectedGeneration: source.credentialGeneration,
+      },
+      { ...valueBounds, bytes: 128_000 },
+    );
+    try {
+      return parseRefreshedAttemptResultV2(response, source);
+    } catch {
+      throw new HueApiError();
+    }
+  }
+  /** Revokes an attempt binding. A revoked connection must not be reused or refreshed. */
+  async revokeAttemptConnection(input: { bindingId: string }) {
+    const bindingId = uuid(input.bindingId);
+    const response = await this.request<unknown>(
+      "POST",
+      `/attempt-bindings/${bindingId}/revoke`,
+      {},
+      { ...valueBounds, bytes: 128_000 },
+    );
+    try {
+      return parseRevocationResult(response, bindingId);
+    } catch {
+      throw new HueApiError();
+    }
+  }
+  /** Saves an execution's outcome and creates its immutable subject. */
   completeExecution(id: string, input: CompleteExecution) {
     return this.request<Completion>("POST", `/experiment-executions/${uuid(id)}/complete`, input);
   }
+  /** Marks an experiment finished. */
   finishExperiment(id: string, idempotencyKey: string) {
-    return this.request<{ id: string; finishedAt: string }>(
-      "POST",
-      `/experiments/${uuid(id)}/finish`,
-      { idempotencyKey },
-    );
+    return this.request<{
+      /** Experiment ID. */
+      id: string;
+      /** When it was finished. */
+      finishedAt: string;
+    }>("POST", `/experiments/${uuid(id)}/finish`, { idempotencyKey });
   }
+  /** Creates a historical evaluation run that rescores existing subjects with pinned scorer versions. */
   createEvaluationRun(input: {
     idempotencyKey: string;
     name: string;
     subjectIds: string[];
     scorerVersionIds: string[];
   }) {
-    return this.request<{ id: string }>("POST", "/evaluation-runs", input);
+    return this.request<{
+      /** Evaluation run ID. */
+      id: string;
+    }>("POST", "/evaluation-runs", input);
   }
+  /** Reads an evaluation run and its scoring progress. */
   getEvaluationRun(id: string) {
     return this.request<EvaluationRun>("GET", `/evaluation-runs/${uuid(id)}`);
   }
+  /** Lists the subjects of an evaluation run. */
   listEvaluationItems(id: string, page?: PageOptions) {
     return this.request<Page<EvaluationItem>>(
       "GET",
       `/evaluation-runs/${uuid(id)}/items${this.page(page)}`,
     );
   }
+  /** Reads an immutable subject, including output and reference when available. */
   getSubject(id: string) {
     return this.request<Subject>("GET", `/evaluation-subjects/${uuid(id)}`);
   }
+  /** Uploads scorer results for an evaluation run; a replayed key returns the same IDs. */
   submitResults(id: string, input: { idempotencyKey: string; results: Result[] }) {
-    return this.request<{ ids: string[] }>("POST", `/evaluation-runs/${uuid(id)}/results`, input);
+    return this.request<{
+      /** Stored result IDs, in input order. */
+      ids: string[];
+    }>("POST", `/evaluation-runs/${uuid(id)}/results`, input);
   }
+  /** Lists result summaries of an evaluation run. */
   listResults(id: string, page?: PageOptions) {
     return this.request<Page<ResultSummary>>(
       "GET",
       `/evaluation-runs/${uuid(id)}/results${this.page(page)}`,
     );
   }
+  /** Reads a full stored result. */
   getResult(id: string) {
     return this.request<StoredResult>("GET", `/evaluation-results/${uuid(id)}`);
   }
+  /** Dispatches hosted judge jobs for `llm_judge` pins; check {@link getJudgeBudget} first. */
   createJudgeJobs(
     id: string,
     input: {
@@ -252,32 +426,51 @@ export class EvaluationClient {
       jobs: { evaluationItemId: string; scorerVersionId: string }[];
     },
   ) {
-    return this.request<{ ids: string[] }>(
-      "POST",
-      `/evaluation-runs/${uuid(id)}/judge-jobs`,
-      input,
-    );
+    return this.request<{
+      /** Created job IDs, in input order. */
+      ids: string[];
+    }>("POST", `/evaluation-runs/${uuid(id)}/judge-jobs`, input);
   }
+  /** Lists hosted judge jobs of an evaluation run. */
   listJudgeJobs(id: string, page?: PageOptions) {
     return this.request<Page<JudgeJob>>(
       "GET",
       `/evaluation-runs/${uuid(id)}/judge-jobs${this.page(page)}`,
     );
   }
+  /** Reads a hosted judge job, including its charge accounting. */
   getJudgeJob(id: string) {
     return this.request<JudgeJob>("GET", `/judge-jobs/${uuid(id)}`);
   }
+  /** Requests cancellation of a hosted judge job. */
   cancelJudgeJob(id: string, reason: string) {
-    return this.request<{ id: string; state: JudgeJob["state"]; cancellationRequested?: boolean }>(
-      "POST",
-      `/judge-jobs/${uuid(id)}/cancel`,
-      { reason },
-    );
+    return this.request<{
+      /** Job ID. */
+      id: string;
+      /** Job state after the request. */
+      state: JudgeJob["state"];
+      /** Whether a cancellation request was recorded. */
+      cancellationRequested?: boolean;
+    }>("POST", `/judge-jobs/${uuid(id)}/cancel`, { reason });
   }
+  /** Reads the project's hosted judge budget and admission controls. */
   getJudgeBudget() {
     return this.request<JudgeBudget>("GET", "/judge-budget");
   }
+  /** Creates the legacy execution-scoped generic MCP capability for one world. */
+  createSimulationMcpCapability(input: { runId: string; executionId: string }) {
+    return this.request<SimulationMcpCapability>(
+      "POST",
+      "/local-agent-worker/mcp-capability",
+      input,
+    );
+  }
 }
+/**
+ * Creates an {@link EvaluationClient}.
+ *
+ * @throws TypeError for an invalid key, origin or budget.
+ */
 export function createEvaluationClient(options: EvaluationClientOptions): EvaluationClient {
   return new EvaluationClient(options);
 }

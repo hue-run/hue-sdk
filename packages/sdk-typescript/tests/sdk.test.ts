@@ -220,6 +220,279 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("helpers accept interface-typed values without casts and omit non-JSON values", async () => {
+    interface ToolInput {
+      city: string;
+      units?: "c" | "f";
+    }
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "typed-inputs",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      const input: ToolInput = { city: "Oslo" };
+      const when = await hue.withSpan(
+        "request",
+        async (span) => {
+          span.setOutput(input);
+          hue.recordMessages({ output: input });
+          return hue.tool("weather", input, () => new Date(0));
+        },
+        { input },
+      );
+      expect(when).toBeInstanceOf(Date);
+      // A Date is not JSON data: the result is omitted and counted, and still returned to the caller.
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(1);
+      expect(result.report.acceptedLogs).toBe(1);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const root = spans.find((span) => span.name === "request")!;
+      const tool = spans.find((span) => span.name === "execute_tool weather")!;
+      expect(JSON.parse(attr(root, "input.value")!.stringValue!)).toEqual({ city: "Oslo" });
+      expect(JSON.parse(attr(root, "output.value")!.stringValue!)).toEqual({ city: "Oslo" });
+      expect(JSON.parse(attr(tool, "gen_ai.tool.call.arguments")!.stringValue!)).toEqual({
+        city: "Oslo",
+      });
+      expect(attr(tool, "gen_ai.tool.call.result")).toBeUndefined();
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("tool records an optional call id and counts a blank one as an instrumentation failure", async () => {
+    const endpoint = receiver();
+    // The id is metadata, so it must survive metadata-only mode.
+    const hue = createHue({
+      apiKey,
+      serviceName: "tool-call-ids",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      expect(await hue.tool("lookup", { q: 1 }, () => "found", { callId: "call_1" })).toBe("found");
+      expect(await hue.tool("plain", null, () => "ok")).toBe("ok");
+      expect(await hue.tool("blank", null, () => "ran", { callId: "" })).toBe("ran");
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(1);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const lookup = spans.find((span) => span.name === "execute_tool lookup")!;
+      expect(attr(lookup, "gen_ai.operation.name")?.stringValue).toBe("execute_tool");
+      expect(attr(lookup, "gen_ai.tool.name")?.stringValue).toBe("lookup");
+      expect(attr(lookup, "gen_ai.tool.call.id")?.stringValue).toBe("call_1");
+      expect(attr(lookup, "gen_ai.tool.call.arguments")).toBeUndefined();
+      for (const name of ["execute_tool plain", "execute_tool blank"]) {
+        const span = spans.find((record) => record.name === name)!;
+        expect(attr(span, "gen_ai.tool.call.id")).toBeUndefined();
+      }
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
+    // Attach mode: the application owns the resource, so the option is a warning, not a failure.
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "attached",
+      captureContent: false,
+      baseUrl: "http://127.0.0.1:9",
+      resourceAttributes: { "deployment.environment.name": "staging" },
+    });
+    const attached = createHue({
+      transport,
+      tracerProvider: new TracerProvider({ spanProcessors: [transport.spanProcessor] }),
+      loggerProvider: new LoggerProvider({ processors: [transport.logRecordProcessor] }),
+    });
+    expect(transport.getIssues()).toHaveLength(1);
+    expect(transport.getIssues()[0]).toMatchObject({ kind: "warning", count: 0 });
+    expect(transport.getIssues()[0].message).toContain("resourceAttributes");
+    expect(transport.getFailureSequence()).toBe(0);
+    await attached.shutdown();
+    await transport.shutdown();
+    expect(() =>
+      createHue({
+        apiKey,
+        serviceName: "invalid",
+        captureContent: false,
+        resourceAttributes: ["deployment.environment.name=staging"] as never,
+      }),
+    ).toThrow(TypeError);
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "resources",
+      serviceVersion: "1.2.3",
+      captureContent: false,
+      baseUrl: endpoint.url,
+      resourceAttributes: {
+        "deployment.environment.name": "staging",
+        "service.namespace": "agents",
+      },
+    });
+    try {
+      await hue.withSpan("request", () => undefined);
+      await hue.flush();
+      const resource = (
+        JSON.parse(endpoint.requests[0].raw) as {
+          resourceSpans: { resource: { attributes: Attribute[] } }[];
+        }
+      ).resourceSpans[0].resource.attributes;
+      const value = (key: string) => resource.find((item) => item.key === key)?.value.stringValue;
+      expect(value("service.name")).toBe("resources");
+      expect(value("service.version")).toBe("1.2.3");
+      expect(value("deployment.environment.name")).toBe("staging");
+      expect(value("service.namespace")).toBe("agents");
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("allowInsecureHttp opts in to plain HTTP for non-loopback hosts with a one-time warning", async () => {
+    const options = {
+      apiKey,
+      serviceName: "insecure",
+      captureContent: false,
+      baseUrl: "http://otel-collector:4318",
+    };
+    expect(() => createHue(options)).toThrow(/allowInsecureHttp/);
+    expect(() => createHue({ ...options, allowInsecureHttp: "yes" as never })).toThrow(TypeError);
+    const hue = createHue({ ...options, allowInsecureHttp: true });
+    try {
+      expect(hue.enabled).toBe(true);
+      expect(hue.transport.options.baseUrl).toBe("http://otel-collector:4318");
+      const issues = hue.transport.getIssues();
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatchObject({ kind: "warning", count: 0 });
+      expect(issues[0].message).toContain("allowInsecureHttp");
+      expect(hue.transport.getFailureSequence()).toBe(0);
+    } finally {
+      // Nothing was emitted, so shutdown sends no request to the unresolvable host.
+      expect((await hue.shutdownSafe()).ok).toBe(true);
+    }
+    // Loopback never needed the opt-in and records no warning when it is set anyway.
+    const loopback = createHue({
+      apiKey,
+      serviceName: "loopback",
+      captureContent: false,
+      baseUrl: "http://127.0.0.1:9",
+      allowInsecureHttp: true,
+    });
+    expect(loopback.transport.getIssues()).toEqual([]);
+    await loopback.shutdownSafe();
+  });
+  test("checkConnection exposes the underlying network or parsing error as cause", async () => {
+    const closed = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("never"),
+    });
+    const closedUrl = `http://127.0.0.1:${closed.port}`;
+    await closed.stop(true);
+    const invalid = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => Response.json({ id: 42 }),
+    });
+    const unreachable = createHue({
+      apiKey,
+      serviceName: "cause",
+      captureContent: false,
+      baseUrl: closedUrl,
+      timeoutMillis: 2000,
+    });
+    const malformed = createHue({
+      apiKey,
+      serviceName: "cause",
+      captureContent: false,
+      baseUrl: `http://127.0.0.1:${invalid.port}`,
+    });
+    try {
+      const network = await unreachable.checkConnection().catch((error: unknown) => error);
+      expect(network).toBeInstanceOf(HueConnectionError);
+      expect((network as HueConnectionError).status).toBeUndefined();
+      expect((network as HueConnectionError).cause).toBeInstanceOf(Error);
+      const parsing = await malformed.checkConnection().catch((error: unknown) => error);
+      expect(parsing).toBeInstanceOf(HueConnectionError);
+      expect((parsing as HueConnectionError).message).toBe(
+        "Hue returned an invalid project response",
+      );
+      expect((parsing as HueConnectionError).cause).toBeInstanceOf(Error);
+    } finally {
+      await unreachable.shutdownSafe();
+      await malformed.shutdownSafe();
+      invalid.stop(true);
+    }
+  });
+  test("message records carry GenAI request attributes from the enclosing model span or the caller", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "message-attributes",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan(
+        "request",
+        async (root) => {
+          await hue.model(
+            "synthetic-model",
+            async () => {
+              hue.recordMessages({
+                output: [{ role: "assistant", parts: [{ type: "text", content: "hi" }] }],
+              });
+            },
+            { provider: "synthetic", operation: "generate_content" },
+          );
+          // Outside a model span the caller supplies the request metadata.
+          hue.recordMessages({
+            output: "plain",
+            operation: "chat",
+            provider: "caller",
+            model: "caller-model",
+          });
+          // Without either source only the active session is stamped.
+          hue.recordMessages({ output: "bare" });
+          // An invalid explicit value is omitted and counted; the record is still emitted.
+          hue.recordMessages({ output: "invalid", model: "" }, root.context);
+        },
+        { sessionId: "session-attributes" },
+      );
+      const result = await hue.flushSafe();
+      expect(result.report.acceptedLogs).toBe(4);
+      expect(result.report.instrumentationFailures).toBe(1);
+      const logs = endpoint.requests
+        .filter((request) => request.signal === "logs")
+        .flatMap((request) => request.records);
+      const byOutput = (text: string) =>
+        logs.find((log) => JSON.stringify(log.body).includes(text))!;
+      const inherited = byOutput("assistant");
+      expect(attr(inherited, "gen_ai.operation.name")?.stringValue).toBe("generate_content");
+      expect(attr(inherited, "gen_ai.provider.name")?.stringValue).toBe("synthetic");
+      expect(attr(inherited, "gen_ai.request.model")?.stringValue).toBe("synthetic-model");
+      expect(attr(inherited, "gen_ai.conversation.id")?.stringValue).toBe("session-attributes");
+      const explicit = byOutput("plain");
+      expect(attr(explicit, "gen_ai.operation.name")?.stringValue).toBe("chat");
+      expect(attr(explicit, "gen_ai.provider.name")?.stringValue).toBe("caller");
+      expect(attr(explicit, "gen_ai.request.model")?.stringValue).toBe("caller-model");
+      expect(byOutput("bare").attributes?.map((item) => item.key)).toEqual([
+        "gen_ai.conversation.id",
+      ]);
+      const invalid = byOutput("invalid");
+      expect(attr(invalid, "gen_ai.request.model")).toBeUndefined();
+      expect(attr(invalid, "gen_ai.conversation.id")?.stringValue).toBe("session-attributes");
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("inject and extract carry W3C trace context without baggage or credentials", async () => {
     const endpoint = receiver();
     const hue = createHue({
@@ -1035,14 +1308,14 @@ describe("Application failure isolation", () => {
         const result = await hue.withSpan(
           "safe",
           async (span) => {
-            span.setOutput(value as never);
-            hue.recordMessages({ output: value as never });
-            return hue.tool("effect", value as never, () => {
+            span.setOutput(value);
+            hue.recordMessages({ output: value });
+            return hue.tool("effect", value, () => {
               executions++;
-              return value as never;
+              return value;
             });
           },
-          { input: value as never },
+          { input: value },
         );
         expect(result as unknown).toBe(value);
       }
@@ -1601,6 +1874,34 @@ describe("model() metadata validation", () => {
     });
     await hue.model("", async () => "ok", { provider: "synthetic" });
     expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+    await hue.shutdownSafe({ timeoutMillis: 200 });
+  });
+});
+
+describe("warning issues", () => {
+  test("do not consume the once-a-second onExportIssue slot", async () => {
+    const seen: string[] = [];
+    const hue = createHue({
+      apiKey: "hue_test_key",
+      serviceName: "warning-slot",
+      captureContent: false,
+      baseUrl: "http://collector.internal:4318",
+      allowInsecureHttp: true,
+      onExportIssue: (issue) => {
+        seen.push(issue.kind);
+      },
+    });
+    // The warning's callback settles over two microtasks; wait for a macrotask before the failure.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // `issue` is @internal (stripped from the published declarations); reach it through a cast so
+    // the installed-package typecheck of this file still passes.
+    (
+      hue.transport as unknown as {
+        issue(signal: "traces", kind: "failed", count: number, message: string): void;
+      }
+    ).issue("traces", "failed", 1, "synthetic failure");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(["warning", "failed"]);
     await hue.shutdownSafe({ timeoutMillis: 200 });
   });
 });

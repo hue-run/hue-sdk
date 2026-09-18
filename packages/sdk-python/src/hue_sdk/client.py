@@ -166,8 +166,9 @@ class Hue:
     Use ``Hue(api_key=..., capture_content=...)`` for Hue Cloud. ``base_url``
     overrides the default origin; existing ``Hue(base_url, api_key, ...)`` calls work,
     and a bare key in the first position raises ``TypeError`` naming ``api_key=``.
-    ``capture_content`` is required. It governs Hue's content helpers only. Arbitrary
-    attributes, names, external instrumentors and other exporters remain caller-owned.
+    ``capture_content`` is required. It governs Hue's content helpers and, at export time,
+    recognized third-party content attributes; unrecognized custom attributes, span names
+    and other exporters remain caller-owned.
     ``tracer_provider`` and ``logger_provider`` attach Hue's processors to existing SDK
     providers. A provider Hue creates for the other signal shares the borrowed provider's
     resource, so spans and correlated logs report one ``service.name``; ``service_name``

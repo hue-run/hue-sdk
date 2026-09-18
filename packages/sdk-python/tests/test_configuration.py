@@ -99,15 +99,15 @@ def test_invalid_explicit_origin_does_not_fall_back_to_cloud(client_class, base_
 def test_bare_key_in_first_position_names_the_api_key_keyword(client_class):
     options = {"capture_content": False} if client_class is Hue else {}
     with pytest.raises(TypeError, match="api_key=") as error:
-        client_class("hue_sk_live_synthetic_positional_key", **options)
+        client_class("hue_sk_test_synthetic_positional_key", **options)
     assert "synthetic" not in str(error.value)
     with pytest.raises(TypeError, match="api_key="):
-        client_class("hue_sk_live_synthetic_positional_key", KEY, **options)
+        client_class("hue_sk_test_synthetic_positional_key", KEY, **options)
     if client_class is Hue:
-        fallback = create_hue_safe("hue_sk_live_synthetic_positional_key", capture_content=False)
+        fallback = create_hue_safe("hue_sk_test_synthetic_positional_key", capture_content=False)
         assert not fallback.enabled
         assert fallback.export_status.instrumentation_failures == 1
-        assert Hue("hue_sk_live_synthetic_positional_key", enabled=False, capture_content=False)
+        assert Hue("hue_sk_test_synthetic_positional_key", enabled=False, capture_content=False)
 
 
 @pytest.mark.parametrize("client_class", [Hue, EvaluationClient])

@@ -49,7 +49,7 @@ def py_all(module: Path) -> set[str]:
 def main() -> int:
     checks = {
         "https://docs.hue.run/reference/typescript.md": set().union(
-            *(ts_exports(TS / name) for name in ("index.ts", "ai-sdk.ts", "evals.ts", "managed.ts"))
+            *(ts_exports(TS / name) for name in ("index.ts", "ai-sdk.ts", "environment.ts", "evals.ts", "managed.ts"))
         ),
         "https://docs.hue.run/reference/python.md": set().union(
             *(py_all(PY / name) for name in ("__init__.py", "evals/__init__.py", "managed.py"))

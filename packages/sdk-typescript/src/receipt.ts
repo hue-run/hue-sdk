@@ -9,10 +9,17 @@ import type {
 const fields: TraceReceiptField[] = ["input", "output", "model", "usage", "session"];
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
+/**
+ * Thrown by {@link HueClient.verifyTrace} when verification cannot proceed: denied key, unsupported
+ * or refusing server, unreachable network or an invalid receipt. A timeout is not an error; it
+ * returns `verified: false`.
+ */
 export class HueTraceVerificationError extends Error {
   constructor(
+    /** Safe failure class for branching without parsing the message. */
     readonly code: "authentication" | "http" | "invalid_response" | "transport",
     message: string,
+    /** HTTP status when Hue answered. */
     readonly status?: number,
   ) {
     super(message);

@@ -4,6 +4,7 @@ import type { HueClient } from "../client.js";
 import { HueExportError } from "../transport.js";
 import type { HueSpan } from "../types.js";
 import { EvaluationClient } from "./client.js";
+import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { json, uuid } from "./json.js";
 import { persistedScore, scoreLocally, validateScorerBindings } from "./scorers.js";
@@ -19,9 +20,15 @@ import type {
   TerminalState,
 } from "./types.js";
 
+/**
+ * Thrown when a case has a started attempt without a saved outcome. The runner never reruns the
+ * target; inspect the execution and authorize a new attempt explicitly through `startExecution`.
+ */
 export class UncertainExecutionError extends Error {
   constructor(
+    /** The affected case (experiment item) ID. */
     readonly caseId: string,
+    /** The execution without a saved outcome, when known. */
     readonly executionId?: string,
   ) {
     super(
@@ -30,38 +37,93 @@ export class UncertainExecutionError extends Error {
     this.name = "UncertainExecutionError";
   }
 }
+/** Thrown when a completed target's output is not serializable JSON; the target is not invoked again. */
 export class OutcomeSerializationError extends Error {
-  constructor(readonly executionId: string) {
+  constructor(
+    /** The execution whose output could not be serialized. */
+    readonly executionId: string,
+  ) {
     super(
       "Target completed, but its output could not be serialized. Resolve completion explicitly; the runner will not invoke the target again.",
     );
     this.name = "OutcomeSerializationError";
   }
 }
-interface RunnerOptions {
-  client: EvaluationClient;
-  checkpointDirectory: string;
-  persistResultContent: boolean;
-  scorers?: LocalScorer[];
-  concurrency?: number;
-  schemaTimeoutMillis?: number;
+/** Thrown when cooperative caller cancellation stops target execution. */
+export class TargetCancelledError extends Error {
+  constructor() {
+    super("Target execution was cancelled");
+    this.name = "TargetCancelledError";
+  }
 }
+/** Thrown when the target or world may have committed but acknowledgement is unavailable. */
+export class TargetOutcomeUncertainError extends Error {
+  constructor(
+    /** Execution whose target outcome must never be replayed automatically. */
+    readonly executionId: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `Target outcome or environment finalization is uncertain for execution ${executionId}; resume will not invoke the target again`,
+      options,
+    );
+    this.name = "TargetOutcomeUncertainError";
+  }
+}
+interface RunnerOptions {
+  /** Evaluation API client for the same project and origin as `hue`. */
+  client: EvaluationClient;
+  /** Dedicated directory (mode 0700) for resumable checkpoints; one per experiment or rescore run. */
+  checkpointDirectory: string;
+  /** Whether outputs, error messages, evidence and explanations are stored in Hue and in checkpoints. Required. */
+  persistResultContent: boolean;
+  /** Local callbacks bound to `local_code` scorer pins by digest. */
+  scorers?: LocalScorer[];
+  /** Cases in flight at once, 1–16. Default 1. */
+  concurrency?: number;
+  /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */
+  schemaTimeoutMillis?: number;
+  /** Resolve sealed world evidence for local scoring and historical rescoring. */
+  environmentEvidence?: "required";
+}
+/** Options for {@link runExperiment}. */
 export interface RunExperimentOptions extends RunnerOptions {
+  /** Hue tracing client; each case runs inside a `hue.experiment.case` span. */
   hue: HueClient;
+  /** Experiment to run; its dataset version must be frozen. */
   experimentId: string;
-  traceEvidence: { mode: "required" } | { mode: "omit"; reason: string };
+  /** Whether each case waits for acknowledged trace export or explicitly omits evidence. Required. */
+  traceEvidence:
+    | {
+        /** Wait for trace and log acknowledgement after the case span ends. */
+        mode: "required";
+      }
+    | {
+        /** Store the declared trace ID without evidence. */
+        mode: "omit";
+        /** Why evidence is omitted, up to 4000 characters. */
+        reason: string;
+      };
+  /** Runs the application for one frozen case; return the output, or `undefined` when unavailable. */
   target(
     inputs: JsonValue,
-    context: { config: JsonValue; item: ExperimentCase; span: HueSpan },
+    context: { config: JsonValue; item: ExperimentCase; span: HueSpan; executionId: string },
   ): JsonValue | undefined | Promise<JsonValue | undefined>;
 }
+/** Options for {@link rescore}. */
 export interface RescoreOptions extends RunnerOptions {
+  /** Evaluation run created with `createEvaluationRun` over existing subjects. */
   runId: string;
 }
+/** Outcome of a runner call. */
 export interface RunnerReport {
+  /** Evaluation run the results belong to. */
   runId: string;
+  /** Subjects created or scored, in completion order. */
   subjectIds: string[];
+  /** Result IDs uploaded by this call. */
   resultIds: string[];
+  /** `llm_judge` and `manual` pins left pending for hosted or human scoring. */
   deferredScorerVersionIds: string[];
 }
 type SavedResult = {
@@ -83,6 +145,8 @@ type CaseCheckpoint =
   | { stage: "running" | "serialization_failed"; executionId: string };
 
 function settings(options: RunnerOptions): number {
+  if (options.environmentEvidence !== undefined && options.environmentEvidence !== "required")
+    throw new TypeError("environmentEvidence must be required when supplied");
   if (typeof options.persistResultContent !== "boolean")
     throw new TypeError("Choose persistResultContent explicitly: true or false");
   const concurrency = options.concurrency ?? 1;
@@ -140,13 +204,27 @@ async function scoresFor(
   versions: ScorerVersion[],
   context: ScoreContext,
   options: RunnerOptions,
+  executionId: string,
 ): Promise<SavedResult[]> {
   const scores: SavedResult[] = [];
+  let environmentUnavailable = false;
+  if (options.environmentEvidence === "required") {
+    try {
+      context = {
+        ...context,
+        environment: await loadEnvironmentEvidence(options.client, executionId),
+      };
+    } catch {
+      environmentUnavailable = true;
+    }
+  }
   for (const version of versions) {
     // Hosted/manual pins remain pending for their authorized executor.
     if (version.definition.kind === "llm_judge" || version.definition.kind === "manual") continue;
     const score = persistedScore(
-      await scoreLocally(version, context, options),
+      environmentUnavailable && version.definition.kind === "local_code"
+        ? { state: "error", error: { type: "EnvironmentEvidenceUnavailable" } }
+        : await scoreLocally(version, context, options),
       options.persistResultContent,
     );
     scores.push({
@@ -181,6 +259,15 @@ async function uploadScores(
   }
 }
 
+/**
+ * Runs every case of a frozen experiment through `target` on this machine, completes each
+ * execution, scores it with local scorers and uploads the results, checkpointing so an interrupted
+ * run resumes without invoking the target twice.
+ *
+ * @throws UncertainExecutionError when a case has a started attempt without a saved outcome.
+ * @throws OutcomeSerializationError when a completed target's output is not serializable.
+ * @throws HueApiError for evaluation API failures; the checkpoint keeps prepared payloads for a retry.
+ */
 export async function runExperiment(options: RunExperimentOptions): Promise<RunnerReport> {
   const concurrency = settings(options);
   if (!options.traceEvidence || !["required", "omit"].includes(options.traceEvidence.mode))
@@ -223,6 +310,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     persistResultContent: options.persistResultContent,
     captureContent: options.hue.captureContent,
     traceEvidence: options.traceEvidence,
+    ...(options.environmentEvidence ? { environmentEvidence: options.environmentEvidence } : {}),
   });
   const report: RunnerReport = {
     runId: experiment.evaluation.id,
@@ -253,6 +341,8 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
         if (frozenCase.datasetVersionId !== version.id)
           throw new Error("Case is not from the pinned dataset version");
+        const targetInputs = json(frozenCase.inputs);
+        const targetConfig = json(experiment.config);
         const failureSequenceBefore = options.hue.transport.getFailureSequence();
         checkpoint = await options.hue.withSpan(
           "hue.experiment.case",
@@ -272,13 +362,15 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             let output: JsonValue | undefined;
             let targetError: unknown;
             try {
-              output = await options.target(json(frozenCase.inputs), {
-                config: json(experiment.config),
+              output = await options.target(targetInputs, {
+                config: targetConfig,
                 item: structuredClone(frozenCase),
                 span,
+                executionId: execution.id,
               });
             } catch (error) {
-              state = "error";
+              if (error instanceof TargetOutcomeUncertainError) throw error;
+              state = error instanceof TargetCancelledError ? "cancelled" : "error";
               targetError = error;
               options.hue.recordError(span.span, error);
             }
@@ -307,6 +399,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 executionState: state,
               },
               options,
+              execution.id,
             );
             const complete: CompleteExecution = {
               idempotencyKey: randomUUID(),
@@ -421,6 +514,7 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
       .map(({ id, contentDigest }) => ({ id, contentDigest }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     persistResultContent: options.persistResultContent,
+    ...(options.environmentEvidence ? { environmentEvidence: options.environmentEvidence } : {}),
   });
   const report: RunnerReport = {
     runId: run.id,
@@ -448,6 +542,7 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
             executionState: subject.executionState,
           },
           options,
+          subject.executionId,
         );
         for (const score of scores) score.payload.evaluationItemId = item.id;
         saved = { scores };

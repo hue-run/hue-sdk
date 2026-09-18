@@ -1,5 +1,12 @@
 # Local evaluations
 
+Install the optional runtime-contract peer with the SDK before importing
+`@hue-run/sdk/evals`:
+
+```bash
+npm install @hue-run/sdk zod
+```
+
 The SDK executes targets and scorers on your machine. Hue stores pinned definitions, experiment progress and results. It does not execute uploaded source code. Follow the [installation guide](https://docs.hue.run/installation) to add `@hue-run/sdk` to your application.
 
 ```ts
@@ -62,6 +69,11 @@ try {
 ```
 
 Create another experiment with the same frozen version and different `config` to compare configurations. The runner reads the exact experiment case/version and scorer definitions; it never resolves a mutable latest version. `rescore` accepts an existing evaluation-run ID and has no target callback. Subject IDs refer to immutable saved outputs and trace evidence.
+
+For the shorter agent-against-a-hosted-world workflow, use `runSimulation`. It owns immutable
+resolution, a fresh linked world per case, local and hosted MCP tools, finalization, sealed
+evidence and scoring while retaining this runner's checkpoint guarantees. See
+[Simulated environments](ENVIRONMENTS.md#run-a-scenario-like-a-test).
 
 ## Content and result states
 

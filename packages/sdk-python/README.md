@@ -12,7 +12,7 @@ Python helpers around the official OpenTelemetry trace and log SDKs and OTLP HTT
 
 The distribution is named `hue-run` (`import hue_sdk`). Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
 
-[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run)
+[Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run)
 
 _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
 
@@ -54,7 +54,7 @@ The SDK uses `https://app.hue.run` by default. Set `base_url` only for a differe
 
 `capture_content` has no default. `False` makes `set_input`, `set_output` and inference-log bodies omit content before it reaches an OTel queue. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
-When capture is disabled, Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes (including OpenInference retrieval documents, embeddings, reranker documents, prompt-template variables and images), legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. [COMPATIBILITY.md](https://github.com/hue-run/hue-sdk/blob/main/COMPATIBILITY.md) lists the exact keys. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
+When capture is disabled Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes (including OpenInference retrieval documents, embeddings, reranker documents, prompt-template variables and images), legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. [COMPATIBILITY.md](https://github.com/hue-run/hue-sdk/blob/main/COMPATIBILITY.md) lists the exact keys. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
 
 Use `redactor=lambda field, value: ...` to transform content in supported helpers. It runs synchronously before serialization and export. Return a redacted JSON value; failures omit the field and increment `export_status.instrumentation_failures` without changing application behavior. It does not inspect arbitrary OTel attributes or logs:
 
