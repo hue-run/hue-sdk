@@ -20,6 +20,9 @@ from .types import LocalScorer, RunnerReport, ScoreContext, TargetContext, Trace
 
 
 class UncertainExecutionError(RuntimeError):
+    case_id: str
+    execution_id: str | None
+
     def __init__(self, case_id: str, execution_id: str | None = None) -> None:
         self.case_id, self.execution_id = case_id, execution_id
         super().__init__(
@@ -29,6 +32,8 @@ class UncertainExecutionError(RuntimeError):
 
 
 class OutcomeSerializationError(RuntimeError):
+    execution_id: str
+
     def __init__(self, execution_id: str) -> None:
         self.execution_id = execution_id
         super().__init__(
@@ -38,6 +43,8 @@ class OutcomeSerializationError(RuntimeError):
 
 
 class TelemetryExportError(RuntimeError):
+    execution_id: str
+
     def __init__(self, execution_id: str) -> None:
         self.execution_id = execution_id
         super().__init__(

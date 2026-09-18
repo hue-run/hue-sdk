@@ -24,7 +24,7 @@ from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
 from .snapshots import snapshot_log, snapshot_span
-from .transport import MAX_REQUEST_BYTES
+from .transport import MAX_BATCH_BYTES
 
 
 class _BoundedProcessor:
@@ -91,7 +91,7 @@ class _BoundedProcessor:
                 if self._closed:
                     self._dropped += 1
                     return
-                if size > MAX_REQUEST_BYTES:
+                if size > MAX_BATCH_BYTES:
                     self._dropped += 1
                     self._exporter.record_failure()
                 elif (
@@ -165,7 +165,7 @@ class _BoundedProcessor:
                 batch_bytes = 0
                 while self._queue and len(batch) < 64:
                     size = self._queue[0][1]
-                    if batch_bytes + size > MAX_REQUEST_BYTES:
+                    if batch_bytes + size > MAX_BATCH_BYTES:
                         break
                     batch.append(self._queue.popleft())
                     batch_bytes += size

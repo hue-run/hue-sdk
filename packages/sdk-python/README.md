@@ -48,13 +48,13 @@ with Hue(
         raise RuntimeError("Telemetry export failed; inspect Hue export_status.")
 ```
 
-The SDK uses `https://app.hue.run` by default. Set `base_url` only for a different Hue deployment or a local receiver, using an origin without an API suffix. Existing `Hue(base_url, api_key, ...)` calls remain supported. The project service key determines the project. The SDK validates the project at `GET /api/v1/projects/current` when explicitly requested; construction itself does not perform a request. HTTP is permitted only for `localhost` and loopback IPs. Userinfo, query strings, fragments, paths and redirects are rejected. The key is sent only as `Authorization: Bearer …`; `repr(hue)`, SDK errors and status counters omit it.
+The SDK uses `https://app.hue.run` by default. Set `base_url` only for a different Hue deployment or a local receiver, using an origin without an API suffix. Existing `Hue(base_url, api_key, ...)` calls remain supported; a bare key passed as the first positional argument raises `TypeError` pointing at `api_key=`. The project service key determines the project. The SDK validates the project at `GET /api/v1/projects/current` when explicitly requested; construction itself does not perform a request. HTTP is permitted only for `localhost` and loopback IPs. Userinfo, query strings, fragments, paths and redirects are rejected. The key is sent only as `Authorization: Bearer …`; `repr(hue)`, SDK errors and status counters omit it.
 
 ## Content and semantic fields
 
 `capture_content` has no default. `False` makes `set_input`, `set_output` and inference-log bodies omit content before it reaches an OTel queue. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
-When capture is disabled, Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes, legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
+When capture is disabled, Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes (including OpenInference retrieval documents, embeddings, reranker documents, prompt-template variables and images), legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. [COMPATIBILITY.md](https://github.com/hue-run/hue-sdk/blob/main/COMPATIBILITY.md) lists the exact keys. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
 
 Use `redactor=lambda field, value: ...` to transform content in supported helpers. It runs synchronously before serialization and export. Return a redacted JSON value; failures omit the field and increment `export_status.instrumentation_failures` without changing application behavior. It does not inspect arbitrary OTel attributes or logs:
 
@@ -86,7 +86,7 @@ For model helpers, pass the message representation produced by your integration.
 
 ## Existing instrumentation
 
-Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter. Hue's processor then exports every span that ends on that provider, the same default as other OpenTelemetry exporters; wrap the processor if only part of the provider's spans should reach Hue. Session/user identifiers from `hue.context()` are stamped on Hue helper spans only. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; a borrowed tracer provider and its other processors stay usable. Finish traced work before shutting Hue down: spans ending or external records emitted afterward increment Hue's dropped-record counters, including emissions through a borrowed provider. New Hue helpers after shutdown are no-ops. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
+Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter, and an existing `opentelemetry.sdk._logs.LoggerProvider` through `logger_provider=` when the application already owns one. A provider Hue creates for the other signal reuses the borrowed provider's resource, so spans and correlated logs report the same `service.name`; `service_name` applies only when Hue creates both providers. Hue's processor then exports every span that ends on that provider, the same default as other OpenTelemetry exporters; wrap the processor if only part of the provider's spans should reach Hue. Session/user identifiers from `hue.context()` are stamped on Hue helper spans only. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; borrowed providers and their other processors stay usable. Finish traced work before shutting Hue down: spans ending or external records emitted afterward increment Hue's dropped-record counters, including emissions through a borrowed provider. New Hue helpers after shutdown are no-ops. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
 
 An instrumentor that accepts `tracer_provider` can receive `hue.tracer_provider`; follow that instrumentor's own capture/redaction configuration. OpenInference and other OTel instrumentors are optional dependencies, not implicitly enabled. Hue's export path strips their recognized content attributes when `capture_content` is `False`, but configure their own capture controls as well: unrecognized custom keys pass through, and the instrumentor may still send content to other exporters. The optional compatibility group pins **OpenAI 3.14.0**, **OpenInference OpenAI 0.1.60** and its resolved **OpenInference instrumentation 0.1.63**. A synthetic HTTP streaming response verifies parentage, canonical model/usage attributes and enabled/disabled message capture with `TraceConfig(enable_genai_semconv=True, hide_inputs=..., hide_outputs=..., hide_input_messages=..., hide_output_messages=...)`. This is a tested adapter combination, not a claim about all OpenAI APIs or live-provider compatibility. See the [instrumentor's official source](https://github.com/Arize-ai/openinference/tree/main/python/instrumentation/openinference-instrumentation-openai). See the [Python integration guide](https://docs.hue.run/sdks/python) for application setup.
 
@@ -96,7 +96,7 @@ Hue speaks standard OTLP, so any local collector works. Point `base_url` at a lo
 
 ## Export behavior and limits
 
-- Traces go to `/api/v1/otlp/v1/traces`; correlated logs go to `/api/v1/otlp/v1/logs`. Both use the official OTLP HTTP/protobuf exporter, uncompressed. The official exporter handles retryable network/service failures; Hue additionally honors 429 and Retry-After within its transport budget. There is no proprietary provider transport.
+- Traces go to `/api/v1/otlp/v1/traces`; correlated logs go to `/api/v1/otlp/v1/logs`. Both use the official OTLP HTTP/protobuf exporter with gzip-compressed request bodies and a `hue-sdk-python/<version>` User-Agent ahead of the exporter's own token. The official exporter handles retryable network/service failures; Hue additionally honors 429 and Retry-After within its transport budget. There is no proprietary provider transport.
 - Exporter work and its HTTP worker run with OpenTelemetry instrumentation suppressed. Hue ignores records emitted within that suppressed scope, preventing HTTP instrumentation and exporter diagnostics from feeding back into its own queues. Application instrumentation resumes outside that scope.
 - Batches initially contain at most 64 records and are split by encoded protobuf size to fit **1 MiB**, both on wire and after decoding. A single oversized record fails visibly through export status. Helper content exceeding **256 KiB** UTF-8 JSON is omitted before enqueue and increments instrumentation failures; it is never silently truncated by Hue. Third-party record validation remains the receiver's responsibility. OTel's own attribute/count/environment limits can still affect externally configured providers.
 - Hue accepts at most **2,000 distinct spans per trace**. This is enforced by the receiver across distributed producers; the client cannot guarantee a global count.
@@ -109,13 +109,17 @@ Hue speaks standard OTLP, so any local collector works. Point `base_url` at a lo
 ## Dependencies
 
 The tracing core depends on the official OpenTelemetry packages and `requests` only. JSON Schema
-scoring (`builtins.json_schema`) runs `jsonschema` in an isolated process and needs the optional extra;
-without it `builtins.json_schema` raises `ImportError` and stored schema scorers report
+scoring (`builtin_scorers.json_schema`) runs `jsonschema` in an isolated process and needs the optional
+extra; without it `builtin_scorers.json_schema` raises `ImportError` and stored schema scorers report
 `SchemaValidatorUnavailable`:
 
 ```bash
 pip install 'hue-run[evals]'
 ```
+
+Import the bundle as `from hue_sdk.evals import builtin_scorers`. The `builtins` name remains as an
+alias for parity with TypeScript, but it shadows the standard-library module of the same name inside
+any file that imports it.
 
 See [THIRD_PARTY_NOTICES.md](https://github.com/hue-run/hue-sdk/blob/main/THIRD_PARTY_NOTICES.md) for licenses.
 

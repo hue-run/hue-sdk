@@ -253,6 +253,56 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("contentPrefixes lists every recognized content key, identical to the Python SDK", () => {
+    expect(contentPrefixes).toEqual([
+      "gen_ai.input.messages",
+      "gen_ai.output.messages",
+      "gen_ai.system_instructions",
+      "gen_ai.prompt",
+      "gen_ai.completion",
+      "gen_ai.tool.call.arguments",
+      "gen_ai.tool.call.result",
+      "gen_ai.tool.definitions",
+      "gen_ai.event.content",
+      "llm.input_messages",
+      "llm.output_messages",
+      "llm.prompts",
+      "llm.completions",
+      "llm.invocation_parameters",
+      "llm.prompt_template.template",
+      "llm.prompt_template.variables",
+      "llm.tools",
+      "llm.function_call",
+      "llm.choices",
+      "input.value",
+      "output.value",
+      "input.images",
+      "output.images",
+      "retrieval.documents",
+      "embedding.embeddings",
+      "reranker.query",
+      "reranker.input_documents",
+      "reranker.output_documents",
+      "ai.prompt",
+      "ai.response.text",
+      "ai.response.object",
+      "ai.response.reasoning",
+      "ai.response.files",
+      "ai.response.toolCalls",
+      "ai.response.body",
+      "ai.toolCall.args",
+      "ai.toolCall.result",
+      "ai.value",
+      "ai.values",
+      "ai.embedding",
+      "ai.embeddings",
+      "traceloop.entity.input",
+      "traceloop.entity.output",
+      "tool.parameters",
+      "exception.message",
+      "exception.stacktrace",
+    ]);
+  });
   test.each([true, false])(
     "export strips every recognized content prefix from borrowed-provider spans (captureContent=%p)",
     async (captureContent) => {
@@ -275,8 +325,26 @@ describe("Hue SDK contract", () => {
         span.setAttribute("gen_ai.request.model", "synthetic-model");
         span.addEvent("gen_ai.user.message", { content: "private-value" });
         span.end();
+        // An OpenInference retriever span: document text is content, the score is metadata.
+        const retriever = tracerProvider.getTracer("third-party").startSpan("retrieve");
+        retriever.setAttribute("openinference.span.kind", "RETRIEVER");
+        retriever.setAttribute("retrieval.documents.0.document.content", "private-value");
+        retriever.setAttribute("retrieval.documents.0.document.score", 0.42);
+        retriever.setAttribute("ai.response.reasoning", "private-value");
+        retriever.setAttribute("ai.response.finishReason", "stop");
+        retriever.end();
         await hue.flush();
-        const [record] = endpoint.requests.flatMap((request) => request.records);
+        const records = endpoint.requests.flatMap((request) => request.records);
+        const record = records.find((candidate) => candidate.name === "external")!;
+        const retrieved = records.find((candidate) => candidate.name === "retrieve")!;
+        const retrievedKeys = (retrieved.attributes ?? []).map((attribute) => attribute.key);
+        expect(retrievedKeys).toContain("openinference.span.kind");
+        expect(retrievedKeys).toContain("ai.response.finishReason");
+        expect(retrievedKeys.includes("retrieval.documents.0.document.content")).toBe(
+          captureContent,
+        );
+        expect(retrievedKeys.includes("retrieval.documents.0.document.score")).toBe(captureContent);
+        expect(retrievedKeys.includes("ai.response.reasoning")).toBe(captureContent);
         const keys = (record.attributes ?? []).map((attribute) => attribute.key);
         const content = keys.filter((key) =>
           contentPrefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}.`)),

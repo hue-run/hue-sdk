@@ -7,7 +7,7 @@ import requests
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
-from hue_sdk import Hue, __version__
+from hue_sdk import Hue, __version__, create_hue_safe
 from hue_sdk.evals import EvaluationClient
 
 KEY = "synthetic-configuration-key"
@@ -48,6 +48,9 @@ def test_cloud_defaults_route_validation_traces_logs_and_evaluations(receiver, m
     for path, headers, body in receiver.requests:
         assert headers["Authorization"] == f"Bearer {KEY}"
         assert b"content-must-stay-private" not in body
+        if "/otlp/" in path:
+            assert headers["Content-Encoding"] == "gzip"
+            assert headers["User-Agent"].startswith(f"hue-sdk-python/{__version__} OTel-OTLP-")
         if path.endswith("/traces"):
             message = ExportTraceServiceRequest.FromString(body)
             scope = message.resource_spans[0].scope_spans[0].scope
@@ -90,6 +93,21 @@ def test_invalid_explicit_origin_does_not_fall_back_to_cloud(client_class, base_
         client_class(base_url=base_url, api_key=KEY, **options)
     assert "secret" not in str(error.value)
     assert KEY not in str(error.value)
+
+
+@pytest.mark.parametrize("client_class", [Hue, EvaluationClient])
+def test_bare_key_in_first_position_names_the_api_key_keyword(client_class):
+    options = {"capture_content": False} if client_class is Hue else {}
+    with pytest.raises(TypeError, match="api_key=") as error:
+        client_class("hue_sk_live_synthetic_positional_key", **options)
+    assert "synthetic" not in str(error.value)
+    with pytest.raises(TypeError, match="api_key="):
+        client_class("hue_sk_live_synthetic_positional_key", KEY, **options)
+    if client_class is Hue:
+        fallback = create_hue_safe("hue_sk_live_synthetic_positional_key", capture_content=False)
+        assert not fallback.enabled
+        assert fallback.export_status.instrumentation_failures == 1
+        assert Hue("hue_sk_live_synthetic_positional_key", enabled=False, capture_content=False)
 
 
 @pytest.mark.parametrize("client_class", [Hue, EvaluationClient])
