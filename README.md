@@ -16,8 +16,6 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 Hue Cloud is currently invite-only; to request access, email [team@hue.run](mailto:team@hue.run). Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
 
-<!-- TODO(maintainer): add one screenshot of a stored trace in Hue here before launch. -->
-
 </div>
 
 _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
@@ -198,7 +196,7 @@ After a real request and its exporter flush, `verifyTrace()` / `verify_trace()` 
 
 ## Repository history
 
-The SDKs were extracted from Hue's application monorepo at TypeScript 0.1.1 / Python 0.1.0.dev0, the pre-publication pilot builds. This repository contains only the SDKs, standalone examples and the coding-agent skill, with no application source. The project is maintained by a small team. Every change lands through a pull request whose CI builds the tarball and wheel, installs them into fresh consumers and runs the behavioral suites against the installed packages on Node 22, 24 and 26, Bun 1.4.2 and Python 3.10 and 3.14.
+The SDKs were extracted from Hue's application monorepo at TypeScript 0.1.1 / Python 0.1.0.dev0, the pre-publication pilot builds. This repository contains only the SDKs, standalone examples and the coding-agent skill, with no application source. The project currently has one maintainer; every change lands through a pull request whose CI runs the installed-package suites on Node 22, 24 and 26, Bun 1.4.2 and Python 3.10 and 3.14.
 
 ## License
 

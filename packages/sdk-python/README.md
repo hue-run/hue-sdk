@@ -12,7 +12,7 @@ Python helpers around the official OpenTelemetry trace and log SDKs and OTLP HTT
 
 The distribution is named `hue-run` (`import hue_sdk`). Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
 
-[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run)
+[Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run)
 
 _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
 

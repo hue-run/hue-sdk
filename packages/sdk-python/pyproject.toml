@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# JSON Schema scoring (builtins.json_schema) runs jsonschema in an isolated worker process.
+# JSON Schema scoring (builtin_scorers.json_schema) runs jsonschema in an isolated worker process.
 evals = ["jsonschema>=4.18,<5", "referencing>=0.28"]
 
 [project.urls]

@@ -21,11 +21,12 @@ Python declares `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-expo
 
 | Contract | TypeScript | Python |
 | --- | --- | --- |
-| Explicit content choice | Required `captureContent` | Required `capture_content` |
+| Explicit content choice | Required `captureContent` for enabled clients (`enabled: false` defaults it to false) | Required `capture_content` |
 | Metadata-only scope | Hue helpers plus recognized external content fields on Hue's export path | Hue helpers plus recognized external content fields on Hue's export path |
 | Arbitrary custom metadata | Application-controlled | Application-controlled |
 | Failed delivery | `flush()` throws for new export failures; warning-only acknowledgements succeed and counters remain cumulative | `force_flush()` remains false after an export failure, dropped record or instrumentation failure during the client's lifetime |
 | Borrowed provider | Not shut down by the client | Not shut down by the client |
+| Non-loopback HTTP collector | `allowInsecureHttp: true` opt-in with a one-time warning | Not available; use HTTPS or a loopback sidecar |
 
 In metadata-only mode both SDKs drop attributes whose keys start with a recognized content prefix: OpenTelemetry GenAI (`gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.prompt`, `gen_ai.completion`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.tool.definitions`, `gen_ai.event.content`), OpenInference (`input.value`, `output.value`, `input.images`, `output.images`, `llm.input_messages`, `llm.output_messages`, `llm.prompts`, `llm.completions`, `llm.choices`, `llm.function_call`, `llm.tools`, `llm.invocation_parameters`, `llm.prompt_template.template`, `llm.prompt_template.variables`, `retrieval.documents`, `embedding.embeddings`, `reranker.query`, `reranker.input_documents`, `reranker.output_documents`), OpenLLMetry (`traceloop.entity.input`, `traceloop.entity.output`), Vercel AI SDK (`ai.prompt`, `ai.response.text`, `ai.response.object`, `ai.response.reasoning`, `ai.response.files`, `ai.response.toolCalls`, `ai.response.body`, `ai.toolCall.args`, `ai.toolCall.result`, `ai.value`, `ai.values`, `ai.embedding`, `ai.embeddings`), plus `tool.parameters`, `exception.message` and `exception.stacktrace`. The TypeScript list is exported as `contentPrefixes`; Python's `CONTENT_PREFIXES` is identical and both test suites assert the full list. Unrecognized custom keys (for example a document's `metadata` under a custom key) pass through.
 

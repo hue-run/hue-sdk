@@ -10,7 +10,7 @@ A client for Hue's standard OTLP HTTP endpoints on Node.js 22 or 24 and Bun 1.4.
 OpenTelemetry JavaScript SDK and official OTLP protobuf exporter components for
 traces and correlated logs. The package is named `@hue-run/sdk`.
 
-[Documentation](https://docs.hue.run) · [Open Hue](https://app.hue.run)
+[Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run)
 
 _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not affiliated with Philips Hue / Signify smart lighting or Cloudera Hue._
 
@@ -121,7 +121,8 @@ options come after the callback and also accept `name`, `sessionId`, `userId`, `
 `gen_ai.input.messages`) and `parentContext`. `setUsage` records
 nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
 counted as instrumentation failures. Unknown usage stays absent. `hue.tool(name, input, execute)`
-creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result. Content
+creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result; an optional
+fourth argument `{ callId }` records the provider's tool call id as `gen_ai.tool.call.id`. Content
 helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`,
 `SpanOptions.input`) accept any value and encode plain JSON data (`JsonValue`) at runtime; a value
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
@@ -392,7 +393,7 @@ HTTP exporter suite against that installed package, and installs/builds the
 standalone reference chatbot. It prints the artifact paths. No package is
 published. The chatbot README describes running that external installation.
 
-# Local evaluation workflows
+## Local evaluation workflows
 
 The optional `@hue-run/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.
 

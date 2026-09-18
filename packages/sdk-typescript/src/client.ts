@@ -6,6 +6,7 @@ import {
   SpanKind,
   SpanStatusCode,
   trace,
+  type Attributes,
   type Context,
   type Span,
   type SpanOptions as OtelSpanOptions,
@@ -85,6 +86,11 @@ function identifier(value: string | undefined): string | undefined {
   )
     throw new TypeError("Session/user identifiers must contain 1–4096 valid characters");
   return value;
+}
+
+/** A usable metadata label: a non-blank string of at most 256 characters. */
+function isLabel(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "" && value.length <= 256;
 }
 
 type Outcome<T> = { value: T } | { error: unknown };
@@ -388,13 +394,27 @@ export class HueClient {
    * Runs `execute` inside an `execute_tool` span named after the tool. `input` and a defined result
    * are recorded as `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` when `captureContent`
    * is true; values that are not JSON-encodable are omitted with an instrumentation failure.
+   * `options.callId` is recorded as `gen_ai.tool.call.id`, like the Python `call_id=` keyword.
    */
   async tool<T>(
     name: string,
     input: unknown,
     execute: () => Promise<T> | T,
-    options: Pick<SpanOptions, "parentContext"> = {},
+    options: Pick<SpanOptions, "parentContext"> & {
+      /** Provider-issued identifier of this tool call, recorded as `gen_ai.tool.call.id`. */
+      callId?: string;
+    } = {},
   ): Promise<T> {
+    const attributes: Attributes = {
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.tool.name": name,
+    };
+    const callId = options.callId;
+    if (callId !== undefined) {
+      // A blank or non-string id is omitted and counted; the tool call itself still runs.
+      if (isLabel(callId)) attributes["gen_ai.tool.call.id"] = callId;
+      else if (this.enabled && !this.closed) this.transport.instrumentationFailure();
+    }
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {
@@ -404,7 +424,7 @@ export class HueClient {
         return result;
       },
       {
-        attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name },
+        attributes,
         ...(options.parentContext ? { parentContext: options.parentContext } : {}),
       },
     );
@@ -427,7 +447,7 @@ export class HueClient {
     // failure either; only an active client records it (matching the other helpers).
     const active = this.enabled && !this.closed;
     const label = (value: unknown, fallback: string): string => {
-      if (typeof value === "string" && value.trim() && value.length <= 256) return value;
+      if (isLabel(value)) return value;
       if (active) this.transport.instrumentationFailure();
       return fallback;
     };
