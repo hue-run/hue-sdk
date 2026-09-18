@@ -1,3 +1,5 @@
+import { setTimeout as wait } from "node:timers/promises";
+import { HueApiError } from "./client.js";
 import type { EvaluationClient } from "./client.js";
 import { json, uuid } from "./json.js";
 import {
@@ -9,6 +11,23 @@ import type { EnvironmentEvidence } from "./types.js";
 
 const maxBytes = 8 * 1024 * 1024;
 const hexDigest = /^[a-f0-9]{64}$/;
+
+async function readEvidence<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      const retryable =
+        error instanceof HueApiError &&
+        (error.status === undefined ||
+          error.status === 408 ||
+          error.status === 429 ||
+          error.status >= 500);
+      if (!retryable || attempt >= 4) throw error;
+      await wait(25 * 2 ** (attempt - 1));
+    }
+  }
+}
 
 export function validateEnvironmentEvidence(evidence: EnvironmentEvidence): void {
   uuid(evidence.runId);
@@ -47,7 +66,7 @@ export async function loadEnvironmentEvidence(
   client: EvaluationClient,
   executionId: string,
 ): Promise<EnvironmentEvidence> {
-  const snapshot = await client.getEnvironmentEvidence(executionId);
+  const snapshot = await readEvidence(() => client.getEnvironmentEvidence(executionId));
   if (snapshot.executionId !== executionId) throw new TypeError("Environment execution differs");
   if (!Number.isInteger(snapshot.stepCount) || snapshot.stepCount < 0 || snapshot.stepCount > 500)
     throw new TypeError("Invalid environment step count");
@@ -55,7 +74,9 @@ export async function loadEnvironmentEvidence(
   let size = Buffer.byteLength(JSON.stringify(evidence));
   let after: number | undefined;
   for (;;) {
-    const page = await client.getEnvironmentSteps(executionId, { after, limit: 5 });
+    const page = await readEvidence(() =>
+      client.getEnvironmentSteps(executionId, { after, limit: 5 }),
+    );
     if (!Array.isArray(page.items)) throw new TypeError("Invalid environment history page");
     for (const step of page.items) {
       if (step.ordinal !== evidence.steps.length || evidence.steps.length >= snapshot.stepCount)

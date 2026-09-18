@@ -8,6 +8,7 @@ import type { HueClient } from "../src/client.js";
 import type { EnvironmentClient } from "../src/environment.js";
 import {
   builtins,
+  HueApiError,
   runSimulation,
   TargetOutcomeUncertainError,
   UncertainExecutionError,
@@ -59,6 +60,7 @@ function harness(options: { uncertainSeal?: boolean } = {}) {
   let targetCalls = 0;
   let loseCompletion = true;
   let loseSealAcknowledgement = true;
+  let evidenceFailures = 1;
   const client = {
     baseUrl,
     checkConnection: async () => project,
@@ -195,6 +197,7 @@ function harness(options: { uncertainSeal?: boolean } = {}) {
     },
     getExecution: async (id: string) => executions.get(id),
     getEnvironmentEvidence: async (executionId: string) => {
+      if (evidenceFailures-- > 0) throw new HueApiError(503);
       const world = [...worlds.values()].find((value) => value.executionId === executionId);
       return {
         runId: world.id,

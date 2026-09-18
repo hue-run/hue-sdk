@@ -163,7 +163,23 @@ export class EnvironmentClient {
     return this.request<EnvironmentVersion>("GET", `/environment-versions/${uuid(id)}`);
   }
   createRun(input: CreateRunInput) {
-    return this.request<EnvironmentRun>("POST", "/environment-runs", input);
+    if (
+      input.maxSteps !== undefined &&
+      (!Number.isInteger(input.maxSteps) || input.maxSteps < 1 || input.maxSteps > 500)
+    )
+      throw new RangeError("maxSteps must be 1–500");
+    if (
+      input.ttlSeconds !== undefined &&
+      (!Number.isInteger(input.ttlSeconds) || input.ttlSeconds < 1 || input.ttlSeconds > 86_400)
+    )
+      throw new RangeError("ttlSeconds must be 1–86400");
+    if (input.seed !== undefined && !/^[a-f0-9]{32}$/.test(input.seed))
+      throw new TypeError("Seed must be 32 lowercase hexadecimal characters");
+    return this.request<EnvironmentRun>("POST", "/environment-runs", {
+      ...input,
+      environmentVersionId: uuid(input.environmentVersionId),
+      ...(input.executionId === undefined ? {} : { executionId: uuid(input.executionId) }),
+    });
   }
   getRun(runId: string) {
     return this.request<RunState>("GET", `/environment-runs/${uuid(runId)}`);

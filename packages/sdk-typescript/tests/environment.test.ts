@@ -48,6 +48,13 @@ describe("environment HTTP client", () => {
         environmentId,
       );
       expect((await client.publishVersion(environmentId, definition)).id).toBe(versionId);
+      expect(() =>
+        client.createRun({
+          idempotencyKey: randomUUID(),
+          environmentVersionId: versionId,
+          maxSteps: 501,
+        }),
+      ).toThrow(RangeError);
       expect(requests).toEqual([
         "POST /environments",
         `POST /environments/${environmentId}/versions`,
