@@ -16,6 +16,7 @@ refuses to publish a version without a matching entry below.
 - Export requests use explicit configuration only: `OTEL_EXPORTER_OTLP_*` environment variables no longer reach Hue's endpoint, and requests carry a `hue-sdk-typescript/<version>` User-Agent. **Wire** Migration: none for documented configuration; headers or endpoints that reached Hue through those variables were unintended and have no replacement.
 - `hue.tool()` spans are named `execute_tool {name}` (`gen_ai.tool.name` keeps the bare name), matching the Python SDK and the GenAI semantic conventions. **Wire** Migration: match tool spans on `gen_ai.tool.name` or the `execute_tool ` prefix instead of the bare span name.
 - Failed helper spans carry `error.type` (the error's `name`), an ERROR status without a description and an `exception` event with only `exception.type`; exception messages and stack traces are no longer recorded even with `captureContent: true`, matching the Python SDK. **Wire** Migration: group error dashboards on `error.type` and keep stack traces in application logs.
+- Metadata-only mode also strips OpenInference retrieval documents, embeddings, reranker query and documents, prompt-template text and variables, `llm.tools`, `llm.function_call`, `llm.choices`, input/output images, and AI SDK `ai.response.reasoning` and `ai.response.files`; `contentPrefixes` lists the full set. **Wire** Migration: applications that relied on those fields reaching Hue with `captureContent: false` must set `captureContent: true`.
 
 #### Added
 
@@ -92,10 +93,20 @@ refuses to publish a version without a matching entry below.
 
 - `capture_content=False` now strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes, legacy `gen_ai.*` message events, log bodies and status descriptions from every exported record, including spans from third-party instrumentors on the same provider, matching the TypeScript export path. **Wire** Migration: applications that expected third-party instrumentor content to reach Hue in metadata-only mode must set `capture_content=True` and rely on the instrumentor's own capture controls and the redactor.
 - `jsonschema` and `referencing` move to the optional `hue-run[evals]` extra used only by `builtins.json_schema`; without it that helper raises `ImportError` and stored schema scorers report `SchemaValidatorUnavailable`. The tracing core now depends only on OpenTelemetry packages and `requests`. Migration: install `hue-run[evals]` where `builtins.json_schema` or stored schema scorers are used.
+- The metadata-only content list also covers OpenInference retrieval documents, embeddings, reranker query and documents, prompt-template text and variables, `llm.tools`, `llm.function_call`, `llm.choices`, input/output images, and AI SDK `ai.response.reasoning` and `ai.response.files`, identical to TypeScript's `contentPrefixes`. **Wire** Migration: set `capture_content=True` where those fields must reach Hue.
+- In attach mode the `LoggerProvider` Hue creates for correlated logs reuses the borrowed `tracer_provider`'s resource instead of a resource built from `service_name`, so logs and spans report one `service.name`. **Wire** Migration: none for applications expecting a single service; set `service.name` on the borrowed provider's resource, or pass `logger_provider=` to control the log resource explicitly.
 
 #### Added
 
 - Repository, changelog and issue URLs, classifiers and keywords in the package metadata.
+- `logger_provider=` attaches Hue's log processor to an existing SDK `LoggerProvider`, mirroring the TypeScript existing-provider mode; borrowed providers are not shut down by the client.
+- `hue_sdk.evals.builtin_scorers` names the built-in scorer bundle without shadowing the standard-library `builtins` module; `builtins` remains an alias.
+
+#### Changed
+
+- OTLP export requests are gzip-compressed and carry a `hue-sdk-python/<version>` User-Agent ahead of the OpenTelemetry exporter's token, matching TypeScript. **Wire**
+- `Hue("<key>")` and `EvaluationClient("<key>")` raise `TypeError` naming `api_key=` instead of a `base_url` `ValueError`; existing positional `(base_url, api_key)` calls are unchanged.
+- `Hue.base_url`, `Hue.tracer`, `Hue.tracer_provider`, `Hue.logger_provider`, `EvaluationClient.base_url` and the evaluation error attributes carry class-level annotations, and the mypy gate no longer ignores missing stubs (`types-protobuf` and `types-jsonschema` join the dev group).
 
 #### Fixed
 
