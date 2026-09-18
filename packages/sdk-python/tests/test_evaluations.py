@@ -613,7 +613,7 @@ def test_worker_waiting_to_dequeue_cannot_start_after_sibling_failure(monkeypatc
 
 def test_concurrent_flush_drains_later_spans_after_an_earlier_trace_drain(receiver):
     receiver.delay_seconds = 0.1
-    with Hue(receiver.url, "synthetic-key", capture_content=False) as hue:
+    with Hue(receiver.url, "synthetic-key", capture_content=True) as hue:
         with hue.span("first") as first:
             first.log_inference(output=None)
         with ThreadPoolExecutor(2) as executor:

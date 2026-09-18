@@ -52,7 +52,7 @@ The SDK uses `https://app.hue.run` by default. Set `base_url` only for a differe
 
 ## Content and semantic fields
 
-`capture_content` has no default. `False` makes `set_input`, `set_output` and inference-log bodies omit content before it reaches an OTel queue. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
+`capture_content` has no default. `False` makes `set_input` and `set_output` omit content before it reaches an OTel queue and makes `log_inference` emit no record. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
 When capture is disabled Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes (including OpenInference retrieval documents, embeddings, reranker documents, prompt-template variables and images), legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. [COMPATIBILITY.md](https://github.com/hue-run/hue-sdk/blob/main/COMPATIBILITY.md) lists the exact keys. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
 
@@ -76,13 +76,13 @@ Before redaction, helpers copy supported content into detached built-in containe
 | `tool(name, call_id=...)`                      | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, call ID, arguments and result                                                        |
 | `context(session_id=..., user_id=...)`         | Task-local `gen_ai.conversation.id` / `user.id` on nested Hue helpers; observed users are not Hue account identities                           |
 | `span.set_usage(...)`                          | Nonnegative reported `gen_ai.usage.input_tokens` / `output_tokens`; `None` leaves a field absent                                               |
-| `span.log_inference(input=..., output=...)`    | Correlated `gen_ai.client.inference.operation.details` log, explicitly linked to that span                                                     |
+| `span.log_inference(input=..., output=...)`    | Correlated `gen_ai.client.inference.operation.details` log linked to that span: structured body plus request metadata and session attributes |
 | `span.record_error(error)`                     | Exception type event and ERROR status; context managers also record escaping errors/cancellation                                               |
 | `Hue.inject(headers)` / `Hue.extract(headers)` | W3C trace context propagation; pass extracted context to `span(parent_context=...)`                                                            |
 
 Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
 
-For model helpers, pass the message representation produced by your integration. Prefer current [GenAI message conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) when authoring your own messages. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. Structured log fields contain JSON strings so null remains distinguishable from protobuf's absent value.
+For model helpers, pass the message representation produced by your integration. Prefer current [GenAI message conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) when authoring your own messages. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. `log_inference` sends a structured body (an explicit `None` field keeps its key with an empty value, distinct from an absent field) and copies `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` from the enclosing `model()` block, or from its `operation=`, `provider=` and `model=` keywords, plus `gen_ai.conversation.id` from `context()`, onto the record's attributes. A blank or over-long keyword is omitted and counted as an instrumentation failure.
 
 ## Existing instrumentation
 
