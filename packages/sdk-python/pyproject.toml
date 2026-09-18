@@ -54,7 +54,7 @@ dev = [
   "types-requests>=2.32,<3",
   "types-protobuf>=7.35,<8",
   "types-jsonschema>=4.26,<5",
-  "pdoc>=15,<16",
+  "pdoc>=16.0.0,<17",
 ]
 compatibility = ["openai==3.14.0", "openinference-instrumentation-openai==0.1.60"]
 
