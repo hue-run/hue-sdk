@@ -110,15 +110,11 @@ def test_missing_suppression_key_warns_once_and_still_exports(receiver):
 
 def test_supported_range_matches_pyproject() -> None:
     """The ImportError text and pyproject.toml must name the same OpenTelemetry range."""
+    import re
     from pathlib import Path
 
-    import tomllib
-
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-    specifiers = {
-        dep[len("opentelemetry-") :].split(">=")[0]: dep[dep.index(">=") :]
-        for dep in pyproject["project"]["dependencies"]
-        if dep.startswith("opentelemetry-")
-    }
+    # Parsed with a regex rather than tomllib so the test also runs on Python 3.10.
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    specifiers = dict(re.findall(r'^\s*"(opentelemetry-[a-z-]+)(>=[^"]+)",?$', text, re.M))
     assert specifiers, "expected opentelemetry dependencies in pyproject.toml"
     assert set(specifiers.values()) == {_otel_compat.SUPPORTED_OPENTELEMETRY}
