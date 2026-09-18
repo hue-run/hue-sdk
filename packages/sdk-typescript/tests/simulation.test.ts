@@ -14,6 +14,7 @@ import {
   UncertainExecutionError,
   type EvaluationClient,
   type JsonValue,
+  type SimulationProgress,
 } from "../src/evals.js";
 
 const project = {
@@ -49,7 +50,14 @@ const scenario = {
   scorers: [{ name: "Exact", slug: "exact", scorer: builtins.exactMatch() }],
 };
 
-function harness(options: { uncertainSeal?: boolean } = {}) {
+function harness(
+  options: {
+    uncertainSeal?: boolean;
+    evidenceFailures?: number;
+    loseCompletionAcknowledgement?: boolean;
+    loseSealAcknowledgement?: boolean;
+  } = {},
+) {
   const datasets = new Map<string, any>();
   const scorers = new Map<string, any>();
   const environments = new Map<string, any>();
@@ -58,9 +66,9 @@ function harness(options: { uncertainSeal?: boolean } = {}) {
   const worlds = new Map<string, any>();
   const completions = new Map<string, any>();
   let targetCalls = 0;
-  let loseCompletion = true;
-  let loseSealAcknowledgement = true;
-  let evidenceFailures = 1;
+  let loseCompletion = options.loseCompletionAcknowledgement ?? true;
+  let loseSealAcknowledgement = options.loseSealAcknowledgement ?? true;
+  let evidenceFailures = options.evidenceFailures ?? 1;
   const client = {
     baseUrl,
     checkConnection: async () => project,
@@ -455,6 +463,47 @@ describe("one-shot simulation workflow", () => {
       await expect(runSimulation(options)).rejects.toBeInstanceOf(UncertainExecutionError);
       expect(fixture.targetCalls()).toBe(1);
       expect([...fixture.worlds.values()][0]?.status).toBe("open");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("publishes the run URL before target work and cancels without invoking the callback", async () => {
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-cancelled-"));
+    const controller = new AbortController();
+    const progress: SimulationProgress[] = [];
+    controller.abort(new Error("stop requested"));
+    try {
+      const report = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario,
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+        signal: controller.signal,
+        onProgress(event) {
+          progress.push(event);
+        },
+      });
+      expect(fixture.targetCalls()).toBe(0);
+      expect(progress.map((event) => event.type)).toEqual([
+        "run_created",
+        "world_created",
+        "world_sealed",
+      ]);
+      expect(progress[0]).toEqual({
+        type: "run_created",
+        experimentId: report.experimentId,
+        runUrl: report.runUrl,
+      });
+      expect([...fixture.worlds.values()][0]?.status).toBe("abandoned");
+      const [item] = (await fixture.client.listExperimentItems(report.experimentId)).items;
+      expect(item?.execution?.state).toBe("cancelled");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
