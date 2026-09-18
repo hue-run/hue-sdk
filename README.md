@@ -173,8 +173,8 @@ Hue's SDKs are deliberately small. The following are design choices, not missing
 - No bundled provider auto-instrumentation and no per-framework adapters beyond the AI SDK 7 helper. Use the provider's or framework's own OpenTelemetry export (OpenInference, OpenLLMetry, native OTel) and configure its content controls; Hue recognizes those conventions.
 - No native SDKs beyond TypeScript and Python. Other languages use the official OpenTelemetry SDK pointed at Hue's OTLP endpoints.
 - No proprietary event protocol, live token streaming, attachments or feature-flag API. Spans are exported when they complete; use standard attributes and span events.
-- No browser, edge or CommonJS builds: the project service key is a server-side credential.
-- No environment-variable reading in constructors, no token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
+- No browser or edge builds: the project service key is a server-side credential. There is no separate CommonJS build; Node.js 22.12 or later loads the ESM build from `require()`.
+- Constructors never read Hue settings (key, endpoint, capture policy, budgets) from environment variables; only OpenTelemetry's own resource conventions apply, and the TypeScript SDK does not read `OTEL_RESOURCE_ATTRIBUTES` either. No token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
 - The SDK service key is write-only plus receipts. Trace browsing for coding agents is provided by the [Hue MCP server](https://docs.hue.run/agents/mcp-server) with a separate read-only key, not by these clients; feedback or score ingestion for stored traces and a one-call evaluation entrypoint are platform decisions tracked separately.
 
 See [VERSIONING.md](./VERSIONING.md) for what may change between releases.

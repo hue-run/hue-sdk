@@ -14,25 +14,34 @@ refuses to publish a version without a matching entry below.
 
 - `ajv` is an optional peer dependency used only by `builtins.jsonSchema`; without it that scorer reports `SchemaValidatorUnavailable` instead of validating. The tracing core now depends only on `@opentelemetry/*` packages. Migration: run `npm install ajv` (8.17 or later) in projects that use `builtins.jsonSchema` or stored schema scorers.
 - Export requests use explicit configuration only: `OTEL_EXPORTER_OTLP_*` environment variables no longer reach Hue's endpoint, and requests carry a `hue-sdk-typescript/<version>` User-Agent. **Wire** Migration: none for documented configuration; headers or endpoints that reached Hue through those variables were unintended and have no replacement.
+- `hue.tool()` spans are named `execute_tool {name}` (`gen_ai.tool.name` keeps the bare name), matching the Python SDK and the GenAI semantic conventions. **Wire** Migration: match tool spans on `gen_ai.tool.name` or the `execute_tool ` prefix instead of the bare span name.
+- Failed helper spans carry `error.type` (the error's `name`), an ERROR status without a description and an `exception` event with only `exception.type`; exception messages and stack traces are no longer recorded even with `captureContent: true`, matching the Python SDK. **Wire** Migration: group error dashboards on `error.type` and keep stack traces in application logs.
 
 #### Added
 
 - `./package.json` export, `sideEffects` metadata, `bugs` and `keywords` in the package manifest.
-- `hue.model()` creates a GenAI client span for a direct provider call, and `HueSpan.setUsage()` records validated token counts, matching the Python helpers.
+- `hue.model(model, callback, options)` creates a GenAI client span for a direct provider call, taking the callback before its options like `withSpan`; `options` carries `provider`, `operation` and `name` plus `sessionId`, `userId`, `input` (recorded as `gen_ai.input.messages`) and `parentContext`. `HueSpan.setUsage()` records validated token counts, matching the Python helpers.
 - `hue.inject()` / `hue.extract()` carry W3C trace context between processes without baggage or credentials.
 - `hueExperimentalTelemetry(hue)` from the core entry point for AI SDK 6 `experimental_telemetry`; `hueTelemetry` remains AI SDK 7 only.
 - `contentPrefixes` exports the attribute keys removed in metadata-only mode.
 - Bun 1.4.2 runs the installed-package behavioral suite and the reference chatbot in package verification, and `bun pm pack` must agree with `npm pack` on package contents.
+- `require("@hue-run/sdk")` and the other entry points work from CommonJS on Node.js 22.12 or later: every `exports` entry carries a `default` condition and the build has no top-level `await`; package verification exercises the `require()` path.
 
 #### Changed
 
 - The instrumentation scope version and export User-Agent come from a literal generated from `package.json` at build time; nothing reads `package.json` at import time, so bundled deployments are unaffected.
 - `engines.node` is `>=22.12`; Node 22 and 24 are tested and Node 26 runs in CI.
 - npm releases carry provenance attestations; the release workflow refuses to publish from a private source repository.
+- `createHue({ enabled: false })` no longer requires `captureContent`; a disabled client defaults it to `false`.
+- Export requests are sized from each record's own encoding and encoded once when sent, instead of re-encoding the growing batch for every record; the 1 MiB request split and oversized-record reporting are unchanged.
 
 #### Fixed
 
 - The managed-target README snippet passes `tracer: hue.tracer`; without it every invocation returned `uncertain`.
+- `withSpan`, `tool`, `model` and `hue.tracer.startActiveSpan` make their span the active OpenTelemetry span while the callback runs, so spans from instrumentations that use the global API parent under Hue spans when the application has registered a context manager; Hue still registers none. A disabled client leaves the application's active span visible through `getContext()`, `HueSpan.context` and `inject()`.
+- Owned providers export the OpenTelemetry default resource (`telemetry.sdk.language`, `telemetry.sdk.name`, `telemetry.sdk.version`) beside `service.name` and `service.version`. **Wire**
+- `createHueSafe` keeps the caller's `onExportIssue` on the disabled fallback client and records the configuration error's message as the reported issue.
+- `hue.inject()` propagates W3C trace context when the client is disabled or closed, matching the Python SDK.
 
 ### [0.1.5](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.5) - 2026-09-17
 

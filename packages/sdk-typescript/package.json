@@ -41,19 +41,23 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./ai-sdk": {
       "types": "./dist/ai-sdk.d.ts",
-      "import": "./dist/ai-sdk.js"
+      "import": "./dist/ai-sdk.js",
+      "default": "./dist/ai-sdk.js"
     },
     "./evals": {
       "types": "./dist/evals.d.ts",
-      "import": "./dist/evals.js"
+      "import": "./dist/evals.js",
+      "default": "./dist/evals.js"
     },
     "./managed": {
       "types": "./dist/managed.d.ts",
-      "import": "./dist/managed.js"
+      "import": "./dist/managed.js",
+      "default": "./dist/managed.js"
     },
     "./package.json": "./package.json"
   },
@@ -74,6 +78,7 @@
   "devDependencies": {
     "@ai-sdk/otel": "1.0.99",
     "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/context-async-hooks": "2.11.0",
     "@types/bun": "1.4.2",
     "@types/node": "24.10.1",
     "ai": "7.0.99",
