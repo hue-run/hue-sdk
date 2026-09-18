@@ -28,12 +28,18 @@ from .transport import MAX_REQUEST_BYTES
 
 
 class _BoundedProcessor:
-    _snapshot: Callable[[Any], Any]
+    _snapshot: Callable[[Any, bool], Any]
 
     def __init__(
-        self, exporter: Any, encode: Callable[[Any], Any], max_records: int, max_bytes: int
+        self,
+        exporter: Any,
+        encode: Callable[[Any], Any],
+        max_records: int,
+        max_bytes: int,
+        capture_content: bool = True,
     ) -> None:
         self._pid = os.getpid()
+        self._capture_content = capture_content
         self._exporter = exporter
         self._encode = encode
         self._max_records = max_records
@@ -74,7 +80,7 @@ class _BoundedProcessor:
                 # Flush must also wait for this admission to finish or be dropped.
                 self._admissions += 1
                 admitted = True
-            item = self._snapshot(item)
+            item = self._snapshot(item, self._capture_content)
             size = self._encode((item,)).ByteSize()
             with self._condition:
                 # Transfer the reservation into the queue (or drop accounting)

@@ -259,10 +259,18 @@ class Hue:
             f"{self.base_url}/api/v1/otlp/v1/logs", self._headers, self._timeout
         )
         self._span_processor = BoundedSpanProcessor(
-            self._span_exporter, encode_spans, max_queue_size, max_queue_bytes
+            self._span_exporter,
+            encode_spans,
+            max_queue_size,
+            max_queue_bytes,
+            capture_content=self.capture_content,
         )
         self._log_processor = BoundedLogProcessor(
-            self._log_exporter, encode_logs, max_queue_size, max_queue_bytes
+            self._log_exporter,
+            encode_logs,
+            max_queue_size,
+            max_queue_bytes,
+            capture_content=self.capture_content,
         )
         sdk_tracer_provider.add_span_processor(self._span_processor)
         sdk_logger_provider.add_log_record_processor(self._log_processor)

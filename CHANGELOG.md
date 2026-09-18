@@ -10,14 +10,25 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `hue.model()` creates a GenAI client span for a direct provider call, and `HueSpan.setUsage()` records validated token counts, matching the Python helpers.
+- `hue.inject()` / `hue.extract()` carry W3C trace context between processes without baggage or credentials.
+- `hueExperimentalTelemetry(hue)` from the core entry point for AI SDK 6 `experimental_telemetry`; `hueTelemetry` remains AI SDK 7 only.
+- `contentPrefixes` exports the attribute keys removed in metadata-only mode.
+
 #### Changed
 
+- Export requests use explicit configuration only: `OTEL_EXPORTER_OTLP_*` environment variables no longer reach Hue's endpoint, and requests carry a `hue-sdk-typescript/<version>` User-Agent. **Wire**
+- The instrumentation scope version is read from `package.json` instead of a hand-maintained literal.
 - `ajv` is an optional peer dependency used only by `builtins.jsonSchema`; without it that scorer reports `SchemaValidatorUnavailable`. The tracing core now depends only on `@opentelemetry/*` packages.
 - npm releases carry provenance attestations now that the source repository is public.
 
-#### Added
-
 - `./package.json` export, `sideEffects` metadata, `bugs` and `keywords` in the package manifest.
+
+#### Fixed
+
+- The managed-target README snippet passes `tracer: hue.tracer`; without it every invocation returned `uncertain`.
 
 ### [0.1.5](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.1.5) - 2026-09-17
 
@@ -66,11 +77,16 @@ refuses to publish a version without a matching entry below.
 
 #### Changed
 
+- `capture_content=False` now strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes, legacy `gen_ai.*` message events, log bodies and status descriptions from every exported record, including spans from third-party instrumentors on the same provider, matching the TypeScript export path. **Wire**
 - `jsonschema` and `referencing` move to the optional `hue-run[evals]` extra used only by `builtins.json_schema`; without it that helper raises `ImportError` and stored schema scorers report `SchemaValidatorUnavailable`. The tracing core now depends only on OpenTelemetry packages and `requests`.
 
 #### Added
 
 - Repository, changelog and issue URLs, classifiers and keywords in the package metadata.
+
+#### Fixed
+
+- The managed-target README snippet passes `tracer=hue.tracer`; without it every invocation returned `uncertain`.
 
 ### [0.1.3](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.1.3) - 2026-09-17
 
@@ -115,6 +131,8 @@ refuses to publish a version without a matching entry below.
 
 ## Coding-agent skill (skills/hue)
 
+- 0.1.9 (unreleased): AI SDK 6 per-call telemetry, TypeScript `model()` helper and export-time content stripping in both SDKs.
+- 0.1.8 (unreleased): fixed Next.js streaming anchor, troubleshooting table and handoff templates.
 - 0.1.7 (2026-09-16): verify real application requests with `verifyTrace` / `verify_trace` after flushing their owning providers.
 
 ## Pre-publication pilot builds

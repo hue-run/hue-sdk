@@ -531,7 +531,8 @@ def test_export_suppression_prevents_http_and_diagnostic_feedback(
     from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY, get_value
     from opentelemetry.sdk._logs import LoggingHandler
 
-    hue = Hue(receiver.url, KEY, capture_content=False, export_timeout_seconds=0.1)
+    # Records are identified by log body below; metadata-only mode drops bodies at export.
+    hue = Hue(receiver.url, KEY, capture_content=True, export_timeout_seconds=0.1)
     processor = hue._span_processor if signal == "traces" else hue._log_processor
     original_request = requests.Session.request
     original_export = processor._exporter._delegate.export
@@ -617,9 +618,7 @@ def test_busy_http_worker_retains_queue_until_recovery_or_accounted_shutdown(
         return original_request(session, method, url, **kwargs)
 
     monkeypatch.setattr(SafeSession, "_request", blocked_request)
-    hue = Hue(
-        receiver.url, KEY, capture_content=False, export_timeout_seconds=0.3, max_queue_size=3
-    )
+    hue = Hue(receiver.url, KEY, capture_content=True, export_timeout_seconds=0.3, max_queue_size=3)
     processor = hue._span_processor if signal == "traces" else hue._log_processor
     try:
         _emit_isolation_record(hue, signal, "ambiguous")
@@ -674,10 +673,10 @@ def test_flush_waits_for_snapshot_admission_racing_shutdown(receiver, monkeypatc
     started, release = Event(), Event()
     errors = []
 
-    def paused_snapshot(item):
+    def paused_snapshot(item, capture_content):
         started.set()
         assert release.wait(5), "test did not release snapshot admission"
-        return original_snapshot(item)
+        return original_snapshot(item, capture_content)
 
     def emit():
         try:
@@ -882,7 +881,8 @@ def test_queued_log_owns_nested_body_and_attributes_after_emit(receiver):
         def force_flush(self, timeout_millis=30000):
             return True
 
-    hue = Hue(receiver.url, KEY, capture_content=False, max_queue_bytes=2048)
+    # Ownership of queued content is under test, so content capture stays enabled.
+    hue = Hue(receiver.url, KEY, capture_content=True, max_queue_bytes=2048)
     retain = RetainRecord()
     hue.logger_provider.add_log_record_processor(retain)
     body = {"nested": ["before"]}
@@ -945,7 +945,8 @@ def test_queued_span_owns_attributes_events_links_and_preserves_drop_counts(rece
 def test_recursive_log_body_is_dropped_without_traversing_application_graph(receiver):
     body = []
     body.append(body)
-    hue = Hue(receiver.url, KEY, capture_content=False)
+    # Metadata-only capture discards log bodies before traversal; enable capture to exercise it.
+    hue = Hue(receiver.url, KEY, capture_content=True)
     hue.logger_provider.get_logger("external").emit(body=body)
     assert hue.export_status.dropped_log_records == 1
     assert hue.export_status.queued_log_bytes == 0
