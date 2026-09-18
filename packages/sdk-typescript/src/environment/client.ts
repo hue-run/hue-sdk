@@ -1,5 +1,5 @@
 import { validateOptions } from "../config.js";
-import { json, uuid, valueBounds } from "../evals/json.js";
+import { aggregateBounds, json, uuid, valueBounds, type JsonBounds } from "../evals/json.js";
 import type {
   ActionInput,
   ActionResult,
@@ -41,6 +41,13 @@ export class HueEnvironmentError extends Error {
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const REQUEST_BOUNDS: JsonBounds = { ...valueBounds, bytes: 1024 * 1024 };
+/** The server bounds JSON inside each entity independently, then permits the parsed
+ * definition to contain up to 240 KB. The publication wrapper adds one node/depth
+ * level and a small fixed byte prefix. Aggregate bounds cover every server-valid
+ * definition without relaxing action/run request envelopes.
+ */
+const ENVIRONMENT_PUBLICATION_BOUNDS = aggregateBounds(240_000 + 32);
 
 export class EnvironmentClient {
   readonly baseUrl: string;
@@ -104,19 +111,19 @@ export class EnvironmentClient {
     }
   }
 
-  private encode(body: unknown): string {
-    return JSON.stringify(
-      json(
-        Object.fromEntries(
-          Object.entries(body as object).filter(([, value]) => value !== undefined),
-        ),
-        { ...valueBounds, bytes: 1024 * 1024 },
-      ),
-    );
-  }
-
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const payload = body === undefined ? undefined : this.encode(body);
+    // Serialize once: a body this client cannot encode is a caller error that no retry fixes.
+    const payload =
+      body === undefined
+        ? undefined
+        : JSON.stringify(
+            json(
+              Object.fromEntries(
+                Object.entries(body as object).filter(([, value]) => value !== undefined),
+              ),
+              REQUEST_BOUNDS,
+            ),
+          );
     for (let attempt = 1; ; attempt++) {
       try {
         return await this.send<T>(method, path, payload);
@@ -130,8 +137,24 @@ export class EnvironmentClient {
     }
   }
 
-  private requestOnce<T>(method: string, path: string, body?: unknown): Promise<T> {
-    return this.send<T>(method, path, body === undefined ? undefined : this.encode(body));
+  private requestOnce<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    bounds: JsonBounds = REQUEST_BOUNDS,
+  ): Promise<T> {
+    const payload =
+      body === undefined
+        ? undefined
+        : JSON.stringify(
+            json(
+              Object.fromEntries(
+                Object.entries(body as object).filter(([, value]) => value !== undefined),
+              ),
+              bounds,
+            ),
+          );
+    return this.send<T>(method, path, payload);
   }
 
   private page(options: EnvironmentPageOptions = {}): string {
@@ -159,6 +182,7 @@ export class EnvironmentClient {
       "POST",
       `/environments/${uuid(environmentId)}/versions`,
       { definition },
+      ENVIRONMENT_PUBLICATION_BOUNDS,
     );
   }
   getVersion(id: string) {

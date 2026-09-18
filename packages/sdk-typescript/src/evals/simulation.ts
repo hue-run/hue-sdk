@@ -1,13 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { HueClient } from "../client.js";
-import type { EnvironmentClient } from "../environment/client.js";
+import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
 import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
 import type { EnvironmentDefinition, EnvironmentIdentity } from "../environment/types.js";
-import type { EvaluationClient } from "./client.js";
+import { HueApiError, type EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";
-import { aggregateBounds, digest, json, valueBounds } from "./json.js";
+import { aggregateBounds, digest, json } from "./json.js";
+import {
+  actualAgentManifestV2,
+  attemptBaselineV2,
+  prepareAttemptInputV2,
+  projectMcpConnectionV2,
+  validateAttemptConnectionBundleV2,
+  type ActualAgentManifestInputV2,
+  type AttemptBaselineV2,
+  type AttemptConnectionBundleV2,
+  type RequestedAttemptProviderV2,
+  type SurfaceBindingV2,
+} from "./attempt.js";
 import {
   runExperiment,
   TargetCancelledError,
@@ -46,6 +58,7 @@ export type SimulationScenario =
       scorers: RepositorySimulationScorer[];
       config?: JsonValue;
     };
+
 export type SimulationProgress =
   | { type: "run_created"; experimentId: string; runUrl: string }
   | {
@@ -54,23 +67,52 @@ export type SimulationProgress =
       executionId: string;
       caseId: string;
       environmentRunId: string;
+    }
+  | {
+      type: "attempt_prepared";
+      experimentId: string;
+      executionId: string;
+      caseId: string;
+      environmentRunId: string;
+      bindingId: string;
+      status: "ready" | "environment_incomplete";
+      findingCodes: string[];
+      executionManifestDigest?: AttemptConnectionBundleV2["parity"]["executionManifestDigest"];
     };
+
 export interface SimulationTargetContext {
   config: JsonValue;
   item: ExperimentCase;
   executionId: string;
   /** Stable world identity for adapter control operations such as coverage reporting. */
   environmentRunId: string;
+  /** Framework-neutral local callables backed by this attempt's isolated world. */
   tools: Record<string, EnvironmentTool>;
+  /** Short-lived capability for providers that execute MCP remotely. */
   mcp: SimulationMcpCapability;
+  /** Credential-bearing provider connections for this callback only. Hue never
+   * checkpoints, logs or adds this response to parity digests. */
+  connectionBundle?: AttemptConnectionBundleV2;
+  /** Cancellation is cooperative: pass this signal into the real agent/provider call. */
   signal?: AbortSignal;
 }
+
+type McpSurfaceKeyV2 = Extract<SurfaceBindingV2["surfaceKey"], `${string}/mcp`>;
+type ActualAgentManifestResolverV2 =
+  | ActualAgentManifestInputV2
+  | ((context: {
+      config: JsonValue;
+      item: ExperimentCase;
+      signal?: AbortSignal;
+    }) => ActualAgentManifestInputV2 | Promise<ActualAgentManifestInputV2>);
+
 export interface RunSimulationOptions {
   client: EvaluationClient;
   environmentClient: EnvironmentClient;
   hue: HueClient;
   checkpointDirectory: string;
   scenario: SimulationScenario;
+  /** Required privacy decision for saved target/scorer content. */
   persistResultContent: boolean;
   traceEvidence: { mode: "required" } | { mode: "omit"; reason: string };
   localScorers?: LocalScorer[];
@@ -80,16 +122,24 @@ export interface RunSimulationOptions {
   ttlSeconds?: number;
   signal?: AbortSignal;
   runName?: string;
+  /** Opt into immutable provider-profile preflight. Provider selection and the MCP
+   * projection are required together. Omitted actual evidence normalizes to explicit
+   * V2 missing evidence; it is never assumed equal to the baseline. */
+  actualAgentManifest?: ActualAgentManifestResolverV2;
+  requestedProviders?: RequestedAttemptProviderV2[];
+  mcpSurface?: { providerInstanceKey: string; surfaceKey: McpSurfaceKeyV2 };
   target(
     inputs: JsonValue,
     context: SimulationTargetContext,
   ): JsonValue | undefined | Promise<JsonValue | undefined>;
   onProgress?(event: SimulationProgress): void | Promise<void>;
 }
+
 export interface SimulationReport extends RunnerReport {
   experimentId: string;
   runUrl: string;
 }
+
 type Attempt = {
   scenarioDigest: string;
   idempotencyKey: string;
@@ -100,6 +150,59 @@ type Attempt = {
 
 const scorerDefinition = (entry: RepositorySimulationScorer) =>
   "definition" in entry.scorer ? entry.scorer.definition : entry.scorer;
+
+type AttemptPreparationV2 = {
+  actualAgentManifest: ActualAgentManifestResolverV2;
+  requestedProviders: RequestedAttemptProviderV2[];
+  mcpSurface: { providerInstanceKey: string; surfaceKey: McpSurfaceKeyV2 };
+};
+
+function requestedAttempt(options: RunSimulationOptions): AttemptPreparationV2 | undefined {
+  const requested = options.requestedProviders !== undefined;
+  const selected = options.mcpSurface !== undefined;
+  if (!requested && !selected) {
+    if (options.actualAgentManifest !== undefined)
+      throw new TypeError("actualAgentManifest requires requestedProviders and mcpSurface");
+    return undefined;
+  }
+  if (!requested || !selected)
+    throw new TypeError("requestedProviders and mcpSurface must be supplied together");
+  const requestedProviders = prepareAttemptInputV2.shape.requestedProviders.parse(
+    options.requestedProviders,
+  );
+  const mcpSurface = options.mcpSurface!;
+  const provider = requestedProviders.find(
+    (candidate) => candidate.providerInstanceKey === mcpSurface.providerInstanceKey,
+  );
+  if (!provider?.surfaceKeys.includes(mcpSurface.surfaceKey))
+    throw new TypeError("mcpSurface must identify an exactly requested MCP surface");
+  const actualAgentManifest =
+    typeof options.actualAgentManifest === "function"
+      ? options.actualAgentManifest
+      : actualAgentManifestV2.parse(options.actualAgentManifest);
+  return {
+    actualAgentManifest,
+    requestedProviders,
+    mcpSurface: { ...mcpSurface },
+  };
+}
+
+function expectedManifestDigest(
+  config: JsonValue,
+): AttemptBaselineV2["expectedAgentManifestDigest"] {
+  if (!config || typeof config !== "object" || Array.isArray(config))
+    throw new TypeError("Provider-profile simulations require an immutable V2 attempt baseline");
+  const source = config as Record<string, JsonValue>;
+  const baseline = attemptBaselineV2.safeParse(source.attemptBaselineV2);
+  if (!baseline.success) {
+    if (source.attemptBaselineV2 === undefined && source.attemptBaselineV1 !== undefined)
+      throw new TypeError("Legacy V1 attempts require a fresh experiment with a V2 baseline");
+    if (source.attemptBaselineV2 !== undefined)
+      throw new TypeError("The immutable V2 attempt baseline is invalid");
+    throw new TypeError("Provider-profile simulations require an immutable V2 attempt baseline");
+  }
+  return baseline.data.expectedAgentManifestDigest;
+}
 
 function normalizedEnvironmentDefinition(definition: EnvironmentDefinition): JsonValue {
   return json(
@@ -130,7 +233,7 @@ function normalizedEnvironmentDefinition(definition: EnvironmentDefinition): Jso
       provenance: definition.provenance ?? { kind: "handwritten" },
       metadata: definition.metadata ?? {},
     },
-    { ...valueBounds, bytes: 1024 * 1024 },
+    aggregateBounds(240_000),
   );
 }
 
@@ -142,6 +245,7 @@ function normalizedScorerDefinition(definition: ScorerDefinition): JsonValue {
     });
   return json(definition);
 }
+
 function scenarioIdentity(scenario: SimulationScenario): JsonValue {
   if (scenario.kind === "experiment") return scenario;
   return json(
@@ -164,6 +268,7 @@ function scenarioIdentity(scenario: SimulationScenario): JsonValue {
     aggregateBounds(8 * 1024 * 1024),
   );
 }
+
 async function findBySlug<T extends { id: string; slug: string }>(
   page: (after?: string) => Promise<{ items: T[]; nextCursor: string | null }>,
   slug: string,
@@ -177,6 +282,38 @@ async function findBySlug<T extends { id: string; slug: string }>(
     after = result.nextCursor;
   }
 }
+
+type HueWriteError = HueApiError | HueEnvironmentError;
+
+function canReconcileWrite(error: unknown): error is HueWriteError {
+  if (!(error instanceof HueApiError || error instanceof HueEnvironmentError)) return false;
+  return error.status === undefined || error.status === 409 || error.status >= 500;
+}
+
+/** Re-read only writes whose acknowledgement can be ambiguous or whose 409 can be a
+ * concurrent matching publication. Local encoding and deterministic 4xx failures are
+ * caller errors and retain their original type/status.
+ */
+async function reconcileWrite<T>(
+  error: unknown,
+  read: () => Promise<T | undefined>,
+  unavailableMessage: string,
+): Promise<T> {
+  if (!canReconcileWrite(error)) throw error;
+  let recovered: T | undefined;
+  try {
+    recovered = await read();
+  } catch (readError) {
+    throw new Error(unavailableMessage, {
+      cause: new AggregateError([error, readError], "Write and reconciliation both failed"),
+    });
+  }
+  if (recovered !== undefined) return recovered;
+  // A received conflict is deterministic when no matching concurrent write exists.
+  if (error.status === 409) throw error;
+  throw new Error(unavailableMessage, { cause: error });
+}
+
 async function resolveEnvironment(
   client: EnvironmentClient,
   source: Extract<SimulationScenario, { kind: "repository" }>["environment"],
@@ -192,30 +329,35 @@ async function resolveEnvironment(
         slug: source.slug,
         ...(source.description === undefined ? {} : { description: source.description }),
       });
-    } catch {
-      identity = await findBySlug(
-        (after) => client.listEnvironments({ after, limit: 100 }),
-        source.slug,
+    } catch (error) {
+      identity = await reconcileWrite(
+        error,
+        () => findBySlug((after) => client.listEnvironments({ after, limit: 100 }), source.slug),
+        "Environment creation acknowledgement is unavailable",
       );
-      if (!identity) throw new Error("Environment creation outcome is unavailable");
     }
   }
   if (identity.archivedAt) throw new Error("Repository scenario environment is archived");
   const definitionDigest = digest(normalizedEnvironmentDefinition(source.definition));
-  const existing = (await client.getEnvironment(identity.id)).versions.find(
-    (version) => version.contentDigest === definitionDigest,
-  );
+  const current = await client.getEnvironment(identity.id);
+  const existing = current.versions.find((version) => version.contentDigest === definitionDigest);
   if (existing) return existing.id;
   try {
     return (await client.publishVersion(identity.id, source.definition)).id;
-  } catch {
-    const recovered = (await client.getEnvironment(identity.id)).versions.find(
-      (version) => version.contentDigest === definitionDigest,
-    );
-    if (!recovered) throw new Error("Environment publication outcome is unavailable");
-    return recovered.id;
+  } catch (error) {
+    return (
+      await reconcileWrite(
+        error,
+        async () =>
+          (await client.getEnvironment(identity.id)).versions.find(
+            (version) => version.contentDigest === definitionDigest,
+          ),
+        "Environment publication acknowledgement is unavailable",
+      )
+    ).id;
   }
 }
+
 async function resolveScorers(
   client: EvaluationClient,
   sources: RepositorySimulationScorer[],
@@ -226,7 +368,7 @@ async function resolveScorers(
   for (const source of sources) {
     const definition = scorerDefinition(source);
     let identity = await findBySlug(
-      (after) => client.listScorers({ after, limit: 100 }),
+      (after) => client.listScorers({ after, limit: 100, includeArchived: true }),
       source.slug,
     );
     if (!identity) {
@@ -236,26 +378,34 @@ async function resolveScorers(
           slug: source.slug,
           ...(source.description === undefined ? {} : { description: source.description }),
         });
-      } catch {
-        identity = await findBySlug(
-          (after) => client.listScorers({ after, limit: 100 }),
-          source.slug,
+      } catch (error) {
+        identity = await reconcileWrite(
+          error,
+          () =>
+            findBySlug(
+              (after) => client.listScorers({ after, limit: 100, includeArchived: true }),
+              source.slug,
+            ),
+          "Scorer creation acknowledgement is unavailable",
         );
-        if (!identity) throw new Error("Scorer creation outcome is unavailable");
       }
     }
+    if (identity.archivedAt) throw new Error("Repository scenario scorer is archived");
+    const full = await client.getScorer(identity.id);
     const definitionDigest = digest(normalizedScorerDefinition(definition));
-    let version = (await client.getScorer(identity.id)).versions?.find(
-      (item) => item.contentDigest === definitionDigest,
-    );
+    let version = full.versions?.find((item) => item.contentDigest === definitionDigest);
     if (!version) {
       try {
         version = await client.publishScorerVersion(identity.id, definition);
-      } catch {
-        version = (await client.getScorer(identity.id)).versions?.find(
-          (item) => item.contentDigest === definitionDigest,
+      } catch (error) {
+        version = await reconcileWrite(
+          error,
+          async () =>
+            (await client.getScorer(identity.id)).versions?.find(
+              (item) => item.contentDigest === definitionDigest,
+            ),
+          "Scorer publication acknowledgement is unavailable",
         );
-        if (!version) throw new Error("Scorer publication outcome is unavailable");
       }
     }
     versionIds.push(version.id);
@@ -263,6 +413,7 @@ async function resolveScorers(
   }
   return { versionIds, bindings };
 }
+
 const normalizedCase = (
   value: RepositorySimulationCase,
   environmentVersionId: string,
@@ -273,26 +424,22 @@ const normalizedCase = (
   metadata: json(value.metadata ?? {}) as Record<string, JsonValue>,
   environmentVersionId,
 });
-const caseDigestValue = (value: Omit<CaseWrite, "expectedRevision"> | DatasetCase) => ({
+
+type CaseDigestInput = Omit<CaseWrite, "expectedRevision"> &
+  Partial<Pick<DatasetCase, "sourceTraceId" | "sourceTraceRevision" | "artifactManifestId">>;
+
+const caseDigestValue = (value: CaseDigestInput) => ({
   externalKey: value.externalKey,
   inputs: value.inputs,
   expected: Object.hasOwn(value, "expected") ? value.expected! : null,
   hasExpected: Object.hasOwn(value, "expected"),
   metadata: value.metadata ?? {},
-  sourceTraceId: null,
-  sourceTraceRevision: null,
+  sourceTraceId: value.sourceTraceId ?? null,
+  sourceTraceRevision: value.sourceTraceRevision ?? null,
+  ...(value.artifactManifestId ? { artifactManifestId: value.artifactManifestId } : {}),
   ...(value.environmentVersionId ? { environmentVersionId: value.environmentVersionId } : {}),
 });
-async function allCases(client: EvaluationClient, versionId: string): Promise<DatasetCase[]> {
-  const items: DatasetCase[] = [];
-  let after: string | undefined;
-  for (;;) {
-    const page = await client.listCases(versionId, { after, limit: 100 });
-    items.push(...page.items);
-    if (!page.nextCursor) return items;
-    after = page.nextCursor;
-  }
-}
+
 async function resolveDataset(
   client: EvaluationClient,
   scenario: Extract<SimulationScenario, { kind: "repository" }>,
@@ -300,14 +447,15 @@ async function resolveDataset(
 ): Promise<string> {
   if (!scenario.cases.length) throw new TypeError("Repository scenarios require at least one case");
   const cases = scenario.cases.map((item) => normalizedCase(item, environmentVersionId));
-  if (new Set(cases.map((item) => item.externalKey)).size !== cases.length)
+  const keys = new Set(cases.map((item) => item.externalKey));
+  if (keys.size !== cases.length)
     throw new TypeError("Repository scenario case keys must be unique");
   const ordered = [...cases].sort((a, b) =>
     Buffer.compare(Buffer.from(a.externalKey), Buffer.from(b.externalKey)),
   );
   const wantedDigest = digest(ordered.map(caseDigestValue));
   let identity = await findBySlug(
-    (after) => client.listDatasets({ after, limit: 100 }),
+    (after) => client.listDatasets({ after, limit: 100, includeArchived: true }),
     scenario.slug,
   );
   if (!identity) {
@@ -317,14 +465,19 @@ async function resolveDataset(
         slug: scenario.slug,
         ...(scenario.description === undefined ? {} : { description: scenario.description }),
       });
-    } catch {
-      identity = await findBySlug(
-        (after) => client.listDatasets({ after, limit: 100 }),
-        scenario.slug,
+    } catch (error) {
+      identity = await reconcileWrite(
+        error,
+        () =>
+          findBySlug(
+            (after) => client.listDatasets({ after, limit: 100, includeArchived: true }),
+            scenario.slug,
+          ),
+        "Dataset creation acknowledgement is unavailable",
       );
-      if (!identity) throw new Error("Dataset creation outcome is unavailable");
     }
   }
+  if (identity.archivedAt) throw new Error("Repository scenario dataset is archived");
   let dataset = await client.getDataset(identity.id);
   const frozen = dataset.versions.find((version) => version.contentDigest === wantedDigest);
   if (frozen) return frozen.id;
@@ -332,14 +485,20 @@ async function resolveDataset(
   if (!draft) {
     try {
       draft = await client.createDatasetVersion(identity.id);
-    } catch {
-      dataset = await client.getDataset(identity.id);
-      draft = dataset.versions.find((version) => !version.frozenAt);
-      if (!draft) throw new Error("Dataset draft creation outcome is unavailable");
+    } catch (error) {
+      draft = await reconcileWrite(
+        error,
+        async () => {
+          dataset = await client.getDataset(identity.id);
+          return dataset.versions.find((version) => !version.frozenAt);
+        },
+        "Dataset draft creation acknowledgement is unavailable",
+      );
     }
   }
+  const current = await allCases(client, draft.id);
   const desired = new Map(cases.map((item) => [item.externalKey, item]));
-  for (const item of await allCases(client, draft.id)) {
+  for (const item of current) {
     const expected = desired.get(item.externalKey);
     if (!expected || digest(caseDigestValue(item)) !== digest(caseDigestValue(expected)))
       throw new Error("Repository scenario conflicts with an existing mutable dataset draft");
@@ -347,29 +506,57 @@ async function resolveDataset(
   }
   for (const item of cases) {
     if (!desired.has(item.externalKey)) continue;
+    const draftId = draft.id;
+    const expectedRevision = draft.revision;
     try {
-      ({ version: draft } = await client.addCase(draft.id, {
+      const added = await client.addCase(draftId, {
         ...item,
-        expectedRevision: draft.revision,
-      }));
-    } catch {
-      const recovered = (await allCases(client, draft.id)).find(
-        (value) => value.externalKey === item.externalKey,
+        expectedRevision,
+      });
+      draft = added.version;
+    } catch (error) {
+      await reconcileWrite(
+        error,
+        async () => {
+          const recovered = (await allCases(client, draftId)).find(
+            (value) => value.externalKey === item.externalKey,
+          );
+          return recovered && digest(caseDigestValue(recovered)) === digest(caseDigestValue(item))
+            ? recovered
+            : undefined;
+        },
+        "Dataset case write acknowledgement is unavailable",
       );
-      if (!recovered || digest(caseDigestValue(recovered)) !== digest(caseDigestValue(item)))
-        throw new Error("Dataset case write outcome is unavailable");
-      draft = await client.getDatasetVersion(draft.id);
+      draft = await client.getDatasetVersion(draftId);
     }
   }
   try {
     return (await client.freezeDatasetVersion(draft.id, draft.revision)).id;
-  } catch {
-    const recovered = await client.getDatasetVersion(draft.id);
-    if (recovered.contentDigest !== wantedDigest)
-      throw new Error("Dataset freeze outcome is unavailable");
-    return recovered.id;
+  } catch (error) {
+    return (
+      await reconcileWrite(
+        error,
+        async () => {
+          const recovered = await client.getDatasetVersion(draft.id);
+          return recovered.contentDigest === wantedDigest ? recovered : undefined;
+        },
+        "Dataset freeze acknowledgement is unavailable",
+      )
+    ).id;
   }
 }
+
+async function allCases(client: EvaluationClient, versionId: string) {
+  const items = [];
+  let after: string | undefined;
+  for (;;) {
+    const page = await client.listCases(versionId, { after, limit: 100 });
+    items.push(...page.items);
+    if (!page.nextCursor) return items;
+    after = page.nextCursor;
+  }
+}
+
 async function resolveExperiment(
   options: RunSimulationOptions,
   idempotencyKey: string,
@@ -407,6 +594,7 @@ async function resolveExperiment(
     bindings: [...scorers.bindings, ...(options.localScorers ?? [])],
   };
 }
+
 async function seal(
   client: EnvironmentClient,
   runId: string,
@@ -424,7 +612,11 @@ async function seal(
   }
 }
 
+/** Run an existing agent callback against one fresh hosted world per case. The helper
+ * owns immutable resolution, execution linkage, finalization, scoring and resumable uploads.
+ */
 export async function runSimulation(options: RunSimulationOptions): Promise<SimulationReport> {
+  const requestedConfiguration = requestedAttempt(options);
   if (
     options.maxSteps !== undefined &&
     (!Number.isInteger(options.maxSteps) ||
@@ -451,7 +643,11 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
     if (attempt && attempt.stage !== "completed" && attempt.scenarioDigest !== scenarioDigest)
       throw new Error("Recover the unfinished simulation before running a changed scenario");
     if (!attempt || attempt.stage === "completed") {
-      attempt = { scenarioDigest, idempotencyKey: randomUUID(), stage: "preparing" };
+      attempt = {
+        scenarioDigest,
+        idempotencyKey: randomUUID(),
+        stage: "preparing",
+      };
       await store.write("active-attempt", attempt);
     }
     let bindings = options.localScorers ?? [];
@@ -472,6 +668,14 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
     const experimentId = attempt.experimentId;
     const runUrl = new URL(`/experiments/${experimentId}`, options.client.baseUrl).toString();
     await options.onProgress?.({ type: "run_created", experimentId, runUrl });
+    const requested = requestedConfiguration
+      ? {
+          ...requestedConfiguration,
+          expectedAgentManifestDigest: expectedManifestDigest(
+            (await options.client.getExperiment(experimentId)).config,
+          ),
+        }
+      : undefined;
     const report = await runExperiment({
       client: options.client,
       hue: options.hue,
@@ -494,7 +698,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
           maxSteps: options.maxSteps,
           ttlSeconds: options.ttlSeconds,
         });
-        const progress = (type: Exclude<SimulationProgress["type"], "run_created">) =>
+        const progress = (type: "world_created" | "target_started" | "world_sealed") =>
           options.onProgress?.({
             type,
             experimentId,
@@ -512,10 +716,77 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
             run,
             parentContext: context.span.context,
           });
-          const mcp = await options.client.createSimulationMcpCapability({
-            runId: run.id,
-            executionId: context.executionId,
-          });
+          let connectionBundle: AttemptConnectionBundleV2 | undefined;
+          let mcp: SimulationMcpCapability;
+          if (requested) {
+            const actualManifest = actualAgentManifestV2.parse(
+              typeof requested.actualAgentManifest === "function"
+                ? await requested.actualAgentManifest({
+                    config: context.config,
+                    item: structuredClone(context.item),
+                    signal: options.signal,
+                  })
+                : requested.actualAgentManifest,
+            );
+            let prepared;
+            try {
+              prepared = await options.client.prepareAttempt({
+                schemaVersion: 2,
+                idempotencyKey: randomUUID(),
+                executionId: context.executionId,
+                environmentRunId: run.id,
+                expectedAgentManifestDigest: requested.expectedAgentManifestDigest,
+                actualManifest,
+                requestedProviders: requested.requestedProviders,
+              });
+            } catch (error) {
+              // A transport failure or malformed credential-bearing response may
+              // follow a committed decision. Preserve the running checkpoint and
+              // never reacquire credentials or replay the target on resume.
+              throw new TargetOutcomeUncertainError(context.executionId, { cause: error });
+            }
+            await options.onProgress?.({
+              type: "attempt_prepared",
+              experimentId,
+              executionId: context.executionId,
+              caseId: context.item.id,
+              environmentRunId: run.id,
+              bindingId:
+                prepared.status === "ready" ? prepared.bundle.bindingId : prepared.bindingId,
+              status: prepared.status,
+              findingCodes: prepared.preflightReport.findings.map((finding) => finding.code),
+              ...(prepared.status === "ready"
+                ? {
+                    executionManifestDigest: prepared.bundle.parity.executionManifestDigest,
+                  }
+                : {}),
+            });
+            if (prepared.status === "environment_incomplete") {
+              try {
+                await seal(options.environmentClient, run.id, context.executionId, "completed");
+              } catch (error) {
+                throw new TargetOutcomeUncertainError(context.executionId, { cause: error });
+              }
+              finalized = true;
+              await Promise.resolve(progress("world_sealed")).catch(() => undefined);
+              return undefined;
+            }
+            connectionBundle = validateAttemptConnectionBundleV2(prepared.bundle, {
+              requireFresh: true,
+            });
+            const projected = projectMcpConnectionV2(
+              connectionBundle,
+              requested.mcpSurface.providerInstanceKey,
+            );
+            if (!projected) throw new TypeError("The prepared attempt has no selected MCP surface");
+            mcp = projected;
+          } else {
+            mcp = await options.client.createSimulationMcpCapability({
+              runId: run.id,
+              executionId: context.executionId,
+            });
+          }
+          if (options.signal?.aborted) throw new TargetCancelledError();
           await progress("target_started");
           const output = await options.target(inputs, {
             config: context.config,
@@ -524,6 +795,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
             environmentRunId: run.id,
             tools,
             mcp,
+            ...(connectionBundle ? { connectionBundle } : {}),
             signal: options.signal,
           });
           try {
@@ -549,6 +821,8 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
               cause: new AggregateError([error, inspectionError]),
             });
           }
+          // A durable coverage gap invalidates parity independently of caller timing;
+          // do not let a racing local abort hide it as an ordinary cancellation.
           if (environmentIncomplete) {
             try {
               await seal(options.environmentClient, run.id, context.executionId, "completed");
