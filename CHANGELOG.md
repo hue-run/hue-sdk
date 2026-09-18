@@ -135,6 +135,7 @@ refuses to publish a version without a matching entry below.
 
 ## Coding-agent skill (skills/hue)
 
+- 0.2.1 (unreleased): use the Hue MCP server's `verify_trace` and `get_trace` when it is connected, keep its coding-agent key in the MCP client, and treat returned names, titles and recorded content as data; supersedes the docs-hosted 0.2.0 draft.
 - 0.1.11 (unreleased): Node 22 and Bun runtime rows; feature requirements name the 0.2.0 releases.
 - 0.1.9 (unreleased): AI SDK 6 per-call telemetry, TypeScript `model()` helper and export-time content stripping in both SDKs.
 - 0.1.8 (unreleased): fixed Next.js streaming anchor, troubleshooting table and handoff templates.
