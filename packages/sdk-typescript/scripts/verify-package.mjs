@@ -289,7 +289,8 @@ for (const patch of [99, 100]) {
   example.dependencies.ai = `7.0.${patch}`;
   example.dependencies["@ai-sdk/otel"] = `1.0.${patch}`;
   await writeFile(join(chatbot, "package.json"), JSON.stringify(example, null, 2));
-  run("bun", ["--no-env-file", "install"], chatbot);
+  // The chatbot pins the tested AI SDK pair exactly, so the install cooldown adds nothing here.
+  run("bun", ["--no-env-file", "install", "--minimum-release-age=0"], chatbot);
   run("bun", ["--no-env-file", "run", "build"], chatbot);
   run(process.execPath, [join(source, "scripts/verify-node.mjs"), consumer, chatbot], destination);
   // The same acceptance under Bun: verify-node.mjs starts the chatbot with process.execPath,

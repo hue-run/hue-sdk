@@ -152,8 +152,18 @@ jobs:
       - run: cd .artifacts && sha256sum --check SHA256SUMS
       # Trusted publishing needs npm >= 11.5.1; the version is exact-pinned and scripts are disabled.
       - run: npm install --global npm@11.15.0 --ignore-scripts --registry=https://registry.npmjs.org # zizmor: ignore[adhoc-packages]
-      # OIDC trusted publishing is configured on the npm package. npm generates
-      # provenance attestations automatically because the source repository is public.
+      # OIDC trusted publishing is configured on the npm package. npm generates provenance
+      # attestations only for a public source repository, and accept-npm requires them, so a
+      # private-repository dispatch must fail here rather than after publishing.
+      - name: Require a public source repository for npm provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .visibility)"
+          if [ "$visibility" != "public" ]; then
+            echo "::error::npm provenance requires a public source repository (visibility: ${visibility}); make the repository public before publishing"
+            exit 1
+          fi
       - run: npm publish ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz" --access public --ignore-scripts --registry=https://registry.npmjs.org
 
   publish-pypi:

@@ -82,7 +82,10 @@ jobs:
           bun-version-file: .bun-version
       # Root tooling (eslint, prettier) plus the SDK's own dependencies for type-checked lint.
       - run: bun install --frozen-lockfile
+      # Advisory for the lint/docs tooling; the published package's dependencies are audited as a
+      # blocking step in the typescript job.
       - run: bun audit --audit-level=high
+        continue-on-error: true
       - run: bun install --frozen-lockfile
         working-directory: packages/sdk-typescript
       - run: bun run lint

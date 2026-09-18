@@ -1,6 +1,6 @@
 # Compatibility
 
-This matrix describes the current releases: TypeScript `0.1.5` and Python `0.1.3`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This matrix describes the next releases, TypeScript `0.2.0` and Python `0.2.0` (unreleased; see the Unreleased sections of [CHANGELOG.md](./CHANGELOG.md)). The published TypeScript `0.1.5` and Python `0.1.3` packages declare `engines.node >=24` and strip external content only in TypeScript. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -26,6 +26,8 @@ Python's exact OTel pins can conflict with applications that require a different
 | Arbitrary custom metadata | Application-controlled | Application-controlled |
 | Failed delivery | `flush()` throws for new export failures; warning-only acknowledgements succeed and counters remain cumulative | `force_flush()` remains false after an export failure, dropped record or instrumentation failure during the client's lifetime |
 | Borrowed provider | Not shut down by the client | Not shut down by the client |
+
+In metadata-only mode both SDKs drop attributes whose keys start with a recognized content prefix: OpenTelemetry GenAI (`gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.prompt`, `gen_ai.completion`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.tool.definitions`, `gen_ai.event.content`), OpenInference (`input.value`, `output.value`, `llm.input_messages`, `llm.output_messages`, `llm.prompts`, `llm.completions`, `llm.invocation_parameters`), OpenLLMetry (`traceloop.entity.input`, `traceloop.entity.output`), Vercel AI SDK (`ai.prompt`, `ai.response.text`, `ai.response.object`, `ai.response.toolCalls`, `ai.response.body`, `ai.toolCall.args`, `ai.toolCall.result`, `ai.value`, `ai.values`, `ai.embedding`, `ai.embeddings`), plus `tool.parameters`, `exception.message` and `exception.stacktrace`. The TypeScript list is exported as `contentPrefixes`; Python uses the same list. Unrecognized custom keys pass through.
 
 Neither SDK estimates unavailable token usage or cost. Queues are bounded and in memory; a successful model response does not establish telemetry delivery. Message content recorded through `recordMessages` / `log_inference` travels in the body of the `gen_ai.client.inference.operation.details` log record (structured in TypeScript, JSON strings in Python so null stays distinct) rather than as the Development-status event attributes; Hue's receiver reads the body.
 

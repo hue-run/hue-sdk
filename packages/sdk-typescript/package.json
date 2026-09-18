@@ -58,7 +58,7 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/write-version.mjs && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test tests"
   },

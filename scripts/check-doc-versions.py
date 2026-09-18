@@ -20,7 +20,7 @@ ALLOWED_FILES = {"CHANGELOG.md", "RELEASING.md"}
 # Sentences that legitimately name the release a feature first appeared in.
 ALLOWED_CONTEXT = re.compile(
     r"(requires?|available in|since|added in|older|shipped in|0\.1\.0\.dev0|pilot"
-    r"|OpenInference|instrumentation|^\s*version:)",
+    r"|OpenInference|instrumentation|unreleased|next releases?|published|^\s*version:)",
     re.I,
 )
 

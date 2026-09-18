@@ -1,6 +1,6 @@
 # Standalone Hue reference chatbot
 
-A Node 24 HTTP server with a small streaming chat page, Vercel AI SDK 7
+A Node.js 22+ (or Bun 1.4) HTTP server with a small streaming chat page, Vercel AI SDK 7
 `ToolLoopAgent`, a real text-statistics tool and a controlled-error action. The
 browser receives streamed model text and a trace ID; the server exports standard
 OTLP traces and correlated message logs. It imports only the packed public SDK.
