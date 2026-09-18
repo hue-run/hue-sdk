@@ -4,10 +4,7 @@ import {
   OTLPExporterBase,
   OTLPExporterError,
 } from "@opentelemetry/otlp-exporter-base";
-import {
-  convertLegacyHttpOptions,
-  createOtlpHttpExportDelegate,
-} from "@opentelemetry/otlp-exporter-base/node-http";
+import { createOtlpHttpExportDelegate } from "@opentelemetry/otlp-exporter-base/node-http";
 import {
   LogsExporterMetricsHelper,
   ProtobufLogsSerializer,
@@ -30,6 +27,7 @@ import { MAX_BODY_BYTES, validateOptions } from "./config.js";
 import { estimateRecordBytes } from "./safety.js";
 import { snapshotLog, snapshotSpan } from "./snapshot.js";
 import { redactLog, redactSpan, type ResourceCache } from "./privacy.js";
+import { sdkVersion } from "./version.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
 type Response = {
@@ -506,27 +504,29 @@ class ReportingExporter<T extends RecordValue> {
       },
     };
     const endpoint = `${options.baseUrl}/api/v1/otlp/v1/${this.signal}`;
+    // Explicit configuration only. OTEL_EXPORTER_OTLP_* environment variables are meant
+    // for generic exporters; merging them here could send another vendor's headers to Hue.
     const delegate = createOtlpHttpExportDelegate(
-      convertLegacyHttpOptions(
-        {
-          url: endpoint,
-          headers: { Authorization: `Bearer ${options.apiKey}` },
-          timeoutMillis: options.timeoutMillis,
-          concurrencyLimit: 1,
-          compression: CompressionAlgorithm.GZIP,
-          httpAgentOptions: async (protocol: string) => {
-            if (expired || Date.now() >= deadline) throw new Error("Hue export deadline exceeded");
-            const { Agent } = await import(protocol === "https:" ? "node:https" : "node:http");
-            const agent = new Agent({ keepAlive: false });
-            agents.add(agent);
-            if (expired) agent.destroy();
-            return agent;
-          },
+      {
+        url: endpoint,
+        headers: async () => ({
+          "Content-Type": "application/x-protobuf",
+          Authorization: `Bearer ${options.apiKey}`,
+        }),
+        // The transport prefixes this to OpenTelemetry's own User-Agent token.
+        userAgent: `hue-sdk-typescript/${sdkVersion}`,
+        timeoutMillis: options.timeoutMillis,
+        concurrencyLimit: 1,
+        compression: CompressionAlgorithm.GZIP,
+        agentFactory: async (protocol: string) => {
+          if (expired || Date.now() >= deadline) throw new Error("Hue export deadline exceeded");
+          const { Agent } = await import(protocol === "https:" ? "node:https" : "node:http");
+          const agent = new Agent({ keepAlive: false });
+          agents.add(agent);
+          if (expired) agent.destroy();
+          return agent;
         },
-        this.signal === "traces" ? "TRACES" : "LOGS",
-        `v1/${this.signal}`,
-        { "Content-Type": "application/x-protobuf" },
-      ),
+      },
       serializer,
       this.signal === "traces" ? "otlp_http_span_exporter" : "otlp_http_log_exporter",
       this.metrics,

@@ -4,7 +4,8 @@ import { resourceFromAttributes, type Resource } from "@opentelemetry/resources"
 import type { HueOptions } from "./types.js";
 import { MAX_BODY_BYTES, MAX_CONTENT_BYTES } from "./config.js";
 
-const contentPrefixes = [
+/** Attribute keys (and their dotted children) removed in metadata-only mode. */
+export const contentPrefixes = [
   "gen_ai.input.messages",
   "gen_ai.output.messages",
   "gen_ai.system_instructions",

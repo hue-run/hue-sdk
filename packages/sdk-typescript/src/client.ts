@@ -10,13 +10,16 @@ import {
   type SpanOptions as OtelSpanOptions,
   type Tracer,
 } from "@opentelemetry/api";
+import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { encodeContent, noopSpan, safeSpan } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
+import { sdkVersion } from "./version.js";
 import type {
   ExportReport,
   FlushableLoggerProvider,
@@ -24,8 +27,10 @@ import type {
   HueOptions,
   HueSpan,
   JsonValue,
+  ModelOptions,
   ProjectConnection,
   SpanOptions,
+  TokenUsage,
   VerifyTraceOptions,
   TraceVerification,
   SafeLifecycleOptions,
@@ -147,6 +152,8 @@ class ContextualTracer implements Tracer {
   }
 }
 
+const propagator = new W3CTraceContextPropagator();
+
 export class HueClient {
   readonly transport: HueTransport;
   readonly tracer: Tracer;
@@ -191,12 +198,12 @@ export class HueClient {
     this.captureContent = this.transport.options.captureContent;
     this.enabled = this.transport.options.enabled !== false;
     this.tracer = new ContextualTracer(
-      this.tracerProvider.getTracer("@hue-run/sdk", "0.1.5"),
+      this.tracerProvider.getTracer("@hue-run/sdk", sdkVersion),
       this.storage,
       () => this.enabled && !this.closed,
       () => this.transport.instrumentationFailure(),
     );
-    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", "0.1.5");
+    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", sdkVersion);
   }
 
   verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
@@ -253,6 +260,7 @@ export class HueClient {
       spanId: span.spanContext().spanId,
       setInput: (value) => this.setContent(span, "input.value", value),
       setOutput: (value) => this.setContent(span, "output.value", value),
+      setUsage: (usage) => this.setUsage(span, usage),
     };
     return this.storage.run({ ...active, context: spanContext }, async () => {
       // Setup, capture and cleanup have separate failure boundaries from customer code.
@@ -288,6 +296,84 @@ export class HueClient {
       },
       { attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name } },
     );
+  }
+
+  /** A GenAI client span for one model call. `setInput`/`setOutput` record message content. */
+  async model<T>(
+    model: string,
+    options: ModelOptions,
+    callback: (span: HueSpan) => Promise<T> | T,
+    spanOptions: Omit<SpanOptions, "kind" | "attributes"> = {},
+  ): Promise<T> {
+    const label = (value: unknown, fallback: string): string => {
+      if (typeof value === "string" && value.trim() && value.length <= 256) return value;
+      this.transport.instrumentationFailure();
+      return fallback;
+    };
+    const requestModel = label(model, "unknown");
+    const operation = label(options?.operation ?? "chat", "chat");
+    const provider = label(options?.provider, "unknown");
+    const name =
+      options?.name === undefined
+        ? `${operation} ${requestModel}`
+        : label(options.name, `${operation} ${requestModel}`);
+    return this.withSpan(
+      name,
+      (span) =>
+        callback({
+          ...span,
+          setInput: (value) => this.setContent(span.span, "gen_ai.input.messages", value),
+          setOutput: (value) => this.setContent(span.span, "gen_ai.output.messages", value),
+        }),
+      {
+        ...spanOptions,
+        kind: SpanKind.CLIENT,
+        attributes: {
+          "gen_ai.operation.name": operation,
+          "gen_ai.request.model": requestModel,
+          "gen_ai.provider.name": provider,
+        },
+      },
+    );
+  }
+
+  private setUsage(span: Span, usage: TokenUsage): void {
+    if (!this.enabled || this.closed) return;
+    for (const [key, value] of [
+      ["gen_ai.usage.input_tokens", usage?.inputTokens],
+      ["gen_ai.usage.output_tokens", usage?.outputTokens],
+    ] as const) {
+      if (value === undefined) continue;
+      if (!Number.isInteger(value) || value < 0) {
+        this.transport.instrumentationFailure();
+        continue;
+      }
+      try {
+        span.setAttribute(key, value);
+      } catch {
+        this.transport.instrumentationFailure();
+      }
+    }
+  }
+
+  /** Writes W3C `traceparent` for the active Hue span into a carrier; never the API key or baggage. */
+  inject(carrier: Record<string, string>, activeContext: Context = this.getContext()): void {
+    if (!this.enabled || this.closed) return;
+    try {
+      propagator.inject(activeContext, carrier, defaultTextMapSetter);
+    } catch {
+      this.transport.instrumentationFailure();
+    }
+  }
+
+  /** Reads W3C trace context from a carrier for use as `parentContext`. */
+  extract(carrier: Record<string, string | string[] | undefined>): Context {
+    try {
+      return propagator.extract(ROOT_CONTEXT, carrier, defaultTextMapGetter);
+    } catch {
+      this.transport.instrumentationFailure();
+      return ROOT_CONTEXT;
+    }
   }
 
   recordError(span: Span, error: unknown): void {

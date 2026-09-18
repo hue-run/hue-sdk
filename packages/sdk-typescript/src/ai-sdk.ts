@@ -11,7 +11,7 @@ export function hueTelemetry(hue: HueClient): TelemetryOptions {
     const [major, minor, patch] = version.split(".").map(Number);
     if (major !== 7 || (minor === 0 && patch < 99))
       throw new TypeError(
-        "hueTelemetry requires ai@^7.0.99; AI SDK 6 applications can use Hue core tracing with their existing OpenTelemetry integration",
+        "hueTelemetry requires ai@^7.0.99; AI SDK 6 applications pass hueExperimentalTelemetry(hue) from @hue-run/sdk as experimental_telemetry",
       );
   }
   return {
