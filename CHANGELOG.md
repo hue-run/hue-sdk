@@ -17,6 +17,7 @@ refuses to publish a version without a matching entry below.
 - `hue.tool()` spans are named `execute_tool {name}` (`gen_ai.tool.name` keeps the bare name), matching the Python SDK and the GenAI semantic conventions. **Wire** Migration: match tool spans on `gen_ai.tool.name` or the `execute_tool ` prefix instead of the bare span name.
 - Failed helper spans carry `error.type` (the error's `name`), an ERROR status without a description and an `exception` event with only `exception.type`; exception messages and stack traces are no longer recorded even with `captureContent: true`, matching the Python SDK. **Wire** Migration: group error dashboards on `error.type` and keep stack traces in application logs.
 - Metadata-only mode also strips OpenInference retrieval documents, embeddings, reranker query and documents, prompt-template text and variables, `llm.tools`, `llm.function_call`, `llm.choices`, input/output images, and AI SDK `ai.response.reasoning` and `ai.response.files`; `contentPrefixes` lists the full set. **Wire** Migration: applications that relied on those fields reaching Hue with `captureContent: false` must set `captureContent: true`.
+- `HueTransport`'s exporter plumbing (`finish`, `acceptedRecords`, `issue`, `instrumentationFailure`) is `@internal` and no longer appears in the published declarations. Migration: none for documented usage; read `getReport()`, `getIssues()` and `getFailureSequence()` instead of calling these members.
 
 #### Added
 
@@ -27,6 +28,10 @@ refuses to publish a version without a matching entry below.
 - `contentPrefixes` exports the attribute keys removed in metadata-only mode.
 - Bun 1.4.2 runs the installed-package behavioral suite and the reference chatbot in package verification, and `bun pm pack` must agree with `npm pack` on package contents.
 - `require("@hue-run/sdk")` and the other entry points work from CommonJS on Node.js 22.12 or later: every `exports` entry carries a `default` condition and the build has no top-level `await`; package verification exercises the `require()` path.
+- `resourceAttributes` on owned-client options adds resource attributes such as `deployment.environment.name` to the owned resource, with `serviceName` and `serviceVersion` taking precedence over same-named keys; attach mode ignores it with a warning issue.
+- `allowInsecureHttp: true` permits `http://` to hosts other than loopback, such as a docker-compose or in-cluster collector, and records a one-time warning issue.
+- `HueConnectionError.cause` carries the underlying network, timeout or parsing error from `checkConnection()`.
+- `recordMessages` accepts `operation`, `provider` and `model` for the request attributes of the details record.
 
 #### Changed
 
@@ -35,6 +40,10 @@ refuses to publish a version without a matching entry below.
 - npm releases carry provenance attestations; the release workflow refuses to publish from a private source repository.
 - `createHue({ enabled: false })` no longer requires `captureContent`; a disabled client defaults it to `false`.
 - Export requests are sized from each record's own encoding and encoded once when sent, instead of re-encoding the growing batch for every record; the 1 MiB request split and oversized-record reporting are unchanged.
+- `hue.tool`, `setInput`, `setOutput`, `recordMessages` and `SpanOptions.input` accept `unknown`, so interface-typed values compile without casts; `JsonValue` remains the documented wire shape and values that are not JSON are still omitted at runtime with an instrumentation failure.
+- `recordMessages` sets `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` (from the enclosing `model()` span or the caller) and `gen_ai.conversation.id` (from the active session) as attributes on the `gen_ai.client.inference.operation.details` log record, alongside the existing body. **Wire** The Python `log_inference` record does not carry these attributes yet (tracked in #37).
+- `hueTelemetry` reads the installed `ai` major version once per process and rejects only versions below 7; the peer range enforces the `7.0.99` floor.
+- Every exported type, option and member of the four entry points carries API documentation, and the TypeScript reference build fails on undocumented public API.
 
 #### Fixed
 

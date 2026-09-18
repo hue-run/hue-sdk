@@ -19,9 +19,15 @@ import type {
   TerminalState,
 } from "./types.js";
 
+/**
+ * Thrown when a case has a started attempt without a saved outcome. The runner never reruns the
+ * target; inspect the execution and authorize a new attempt explicitly through `startExecution`.
+ */
 export class UncertainExecutionError extends Error {
   constructor(
+    /** The affected case (experiment item) ID. */
     readonly caseId: string,
+    /** The execution without a saved outcome, when known. */
     readonly executionId?: string,
   ) {
     super(
@@ -30,8 +36,12 @@ export class UncertainExecutionError extends Error {
     this.name = "UncertainExecutionError";
   }
 }
+/** Thrown when a completed target's output is not serializable JSON; the target is not invoked again. */
 export class OutcomeSerializationError extends Error {
-  constructor(readonly executionId: string) {
+  constructor(
+    /** The execution whose output could not be serialized. */
+    readonly executionId: string,
+  ) {
     super(
       "Target completed, but its output could not be serialized. Resolve completion explicitly; the runner will not invoke the target again.",
     );
@@ -39,29 +49,57 @@ export class OutcomeSerializationError extends Error {
   }
 }
 interface RunnerOptions {
+  /** Evaluation API client for the same project and origin as `hue`. */
   client: EvaluationClient;
+  /** Dedicated directory (mode 0700) for resumable checkpoints; one per experiment or rescore run. */
   checkpointDirectory: string;
+  /** Whether outputs, error messages, evidence and explanations are stored in Hue and in checkpoints. Required. */
   persistResultContent: boolean;
+  /** Local callbacks bound to `local_code` scorer pins by digest. */
   scorers?: LocalScorer[];
+  /** Cases in flight at once, 1–16. Default 1. */
   concurrency?: number;
+  /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */
   schemaTimeoutMillis?: number;
 }
+/** Options for {@link runExperiment}. */
 export interface RunExperimentOptions extends RunnerOptions {
+  /** Hue tracing client; each case runs inside a `hue.experiment.case` span. */
   hue: HueClient;
+  /** Experiment to run; its dataset version must be frozen. */
   experimentId: string;
-  traceEvidence: { mode: "required" } | { mode: "omit"; reason: string };
+  /** Whether each case waits for acknowledged trace export or explicitly omits evidence. Required. */
+  traceEvidence:
+    | {
+        /** Wait for trace and log acknowledgement after the case span ends. */
+        mode: "required";
+      }
+    | {
+        /** Store the declared trace ID without evidence. */
+        mode: "omit";
+        /** Why evidence is omitted, up to 4000 characters. */
+        reason: string;
+      };
+  /** Runs the application for one frozen case; return the output, or `undefined` when unavailable. */
   target(
     inputs: JsonValue,
     context: { config: JsonValue; item: ExperimentCase; span: HueSpan },
   ): JsonValue | undefined | Promise<JsonValue | undefined>;
 }
+/** Options for {@link rescore}. */
 export interface RescoreOptions extends RunnerOptions {
+  /** Evaluation run created with `createEvaluationRun` over existing subjects. */
   runId: string;
 }
+/** Outcome of a runner call. */
 export interface RunnerReport {
+  /** Evaluation run the results belong to. */
   runId: string;
+  /** Subjects created or scored, in completion order. */
   subjectIds: string[];
+  /** Result IDs uploaded by this call. */
   resultIds: string[];
+  /** `llm_judge` and `manual` pins left pending for hosted or human scoring. */
   deferredScorerVersionIds: string[];
 }
 type SavedResult = {
@@ -181,6 +219,15 @@ async function uploadScores(
   }
 }
 
+/**
+ * Runs every case of a frozen experiment through `target` on this machine, completes each
+ * execution, scores it with local scorers and uploads the results, checkpointing so an interrupted
+ * run resumes without invoking the target twice.
+ *
+ * @throws UncertainExecutionError when a case has a started attempt without a saved outcome.
+ * @throws OutcomeSerializationError when a completed target's output is not serializable.
+ * @throws HueApiError for evaluation API failures; the checkpoint keeps prepared payloads for a retry.
+ */
 export async function runExperiment(options: RunExperimentOptions): Promise<RunnerReport> {
   const concurrency = settings(options);
   if (!options.traceEvidence || !["required", "omit"].includes(options.traceEvidence.mode))

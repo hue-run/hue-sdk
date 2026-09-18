@@ -27,7 +27,6 @@ import type {
   FlushableTracerProvider,
   HueOptions,
   HueSpan,
-  JsonValue,
   ModelOptions,
   ProjectConnection,
   SpanOptions,
@@ -42,19 +41,35 @@ interface LocalContext {
   context: Context;
   sessionId?: string;
   userId?: string;
+  /** Request metadata of the enclosing `model()` call, copied onto message records. */
+  model?: { operation: string; provider: string; requestModel: string };
 }
+/**
+ * Attach mode: the application owns its OpenTelemetry providers and passes the transport whose
+ * processors it attached to them. The client flushes these providers but never shuts them down.
+ */
 export interface ExistingHueProviders {
+  /** Transport from {@link createHueTransport} whose processors are attached to the providers below. */
   transport: HueTransport;
+  /** Application-owned tracer provider; must support `forceFlush()`. */
   tracerProvider: FlushableTracerProvider;
+  /** Application-owned logger provider; must support `forceFlush()`. */
   loggerProvider: FlushableLoggerProvider;
 }
 
+/**
+ * Thrown by {@link HueClient.checkConnection} and {@link HueClient.verifyTrace} when Hue cannot be
+ * reached, rejects the project key or answers unexpectedly. The message is fixed and safe to log;
+ * the underlying network, timeout or parsing error, when there is one, is available as `cause`.
+ */
 export class HueConnectionError extends Error {
   constructor(
     message: string,
+    /** HTTP status when Hue answered; absent for network, timeout and parsing failures. */
     readonly status?: number,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, options);
     this.name = "HueConnectionError";
   }
 }
@@ -193,10 +208,19 @@ class ContextualTracer implements Tracer {
 
 const propagator = new W3CTraceContextPropagator();
 
+/**
+ * Hue tracing client. Helpers create spans through a private tracer and local async context, never
+ * through global OpenTelemetry registration, and they fail open: capture problems are counted in
+ * the export report while application code runs and returns unchanged.
+ */
 export class HueClient {
+  /** Export pipeline: counters, issue history and the processors that feed Hue. */
   readonly transport: HueTransport;
+  /** Hue's tracer for other instrumentations; spans parent under `withSpan` and inherit identifiers. */
   readonly tracer: Tracer;
+  /** Whether helpers record content, as configured. */
   readonly captureContent: boolean;
+  /** False for `enabled: false` clients and for `createHueSafe` fallbacks; helpers then only run callbacks. */
   readonly enabled: boolean;
   private logger: Logger;
   private storage = new AsyncLocalStorage<LocalContext>();
@@ -214,12 +238,22 @@ export class HueClient {
       this.transport = options.transport;
       this.tracerProvider = options.tracerProvider;
       this.loggerProvider = options.loggerProvider;
+      if (this.transport.options.resourceAttributes !== undefined)
+        this.transport.issue(
+          "traces",
+          "warning",
+          0,
+          "resourceAttributes are ignored in attach mode; configure the resource on the application's providers",
+        );
     } else {
       this.transport = createHueTransport(options);
       // The OpenTelemetry default resource supplies the required telemetry.sdk.* attributes and
-      // Hue's service identity is merged on top. Nothing here reads environment variables.
+      // Hue's service identity is merged on top of any caller-supplied resourceAttributes, so
+      // serviceName and serviceVersion take precedence over same-named keys. Nothing here reads
+      // environment variables.
       const resource = defaultResource().merge(
         resourceFromAttributes({
+          ...options.resourceAttributes,
           "service.name": this.transport.options.serviceName,
           ...(options.serviceVersion ? { "service.version": options.serviceVersion } : {}),
         }),
@@ -249,11 +283,20 @@ export class HueClient {
     this.logger = this.loggerProvider.getLogger("@hue-run/sdk", sdkVersion);
   }
 
+  /**
+   * Verifies that Hue stored a trace by ID, optionally waiting for expected span IDs and normalized
+   * fields within the budget. Read-only; it does not flush or inspect content.
+   *
+   * @throws HueConnectionError when the client is disabled.
+   * @throws HueTraceVerificationError for authentication, unsupported endpoint, transport or invalid response failures.
+   * @throws TypeError for an invalid trace ID or options.
+   */
   verifyTrace(traceId: string, options: VerifyTraceOptions = {}): Promise<TraceVerification> {
     if (!this.enabled) return Promise.reject(new HueConnectionError("Hue telemetry is disabled"));
     return verifyTrace(this.transport.options, traceId, options);
   }
 
+  /** The helper's current context: the innermost active Hue span, else the OpenTelemetry active context. */
   getContext(): Context {
     try {
       return this.storage.getStore()?.context ?? context.active();
@@ -263,6 +306,10 @@ export class HueClient {
     }
   }
 
+  /**
+   * Runs `callback` inside a new span that nests under the active Hue span. Application errors are
+   * recorded on the span and rethrown unchanged; the span always ends when the callback settles.
+   */
   async withSpan<T>(
     name: string,
     callback: (span: HueSpan) => Promise<T> | T,
@@ -277,6 +324,7 @@ export class HueClient {
           context: options.parentContext ?? inherited?.context ?? context.active(),
           sessionId: identifier(options.sessionId ?? inherited?.sessionId),
           userId: identifier(options.userId ?? inherited?.userId),
+          model: inherited?.model,
         };
         span = this.storage.run(active, () =>
           this.tracer.startSpan(
@@ -336,11 +384,12 @@ export class HueClient {
     );
   }
 
-  async tool<T extends JsonValue | undefined>(
-    name: string,
-    input: JsonValue,
-    execute: () => Promise<T> | T,
-  ): Promise<T> {
+  /**
+   * Runs `execute` inside an `execute_tool` span named after the tool. `input` and a defined result
+   * are recorded as `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` when `captureContent`
+   * is true; values that are not JSON-encodable are omitted with an instrumentation failure.
+   */
+  async tool<T>(name: string, input: unknown, execute: () => Promise<T> | T): Promise<T> {
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {
@@ -354,9 +403,12 @@ export class HueClient {
   }
 
   /**
-   * A GenAI client span for one model call, named `{operation} {model}` unless `options.name` is
-   * given. The handle's `setInput`/`setOutput` record `gen_ai.input.messages` /
-   * `gen_ai.output.messages`; the argument order matches `withSpan`.
+   * Runs `callback` inside a GenAI client span for one direct provider call, named
+   * `{operation} {model}` unless `options.name` is given and carrying `gen_ai.operation.name`,
+   * `gen_ai.request.model` and `gen_ai.provider.name`. The argument order matches `withSpan`. The
+   * handle's `setInput`/`setOutput` record `gen_ai.input.messages` / `gen_ai.output.messages`,
+   * which should use the GenAI semantic-convention message shape; `recordMessages` inside the
+   * callback inherits the request metadata.
    */
   async model<T>(
     model: string,
@@ -378,6 +430,7 @@ export class HueClient {
       options?.name === undefined
         ? `${operation} ${requestModel}`
         : label(options.name, `${operation} ${requestModel}`);
+    const metadata = { operation, provider, requestModel };
     const { sessionId, userId, parentContext, input }: Partial<ModelOptions> = options ?? {};
     return this.withSpan(
       name,
@@ -388,7 +441,9 @@ export class HueClient {
           setOutput: (value) => this.setContent(span.span, "gen_ai.output.messages", value),
         };
         if (input !== undefined) handle.setInput(input);
-        return callback(handle);
+        // recordMessages inside the callback copies this request metadata onto its log record.
+        const store = this.storage.getStore() ?? { context: span.context };
+        return this.storage.run({ ...store, model: metadata }, () => callback(handle));
       },
       {
         sessionId,
@@ -462,22 +517,58 @@ export class HueClient {
     }
   }
 
+  /**
+   * Emits a `gen_ai.client.inference.operation.details` log record correlated with the active (or
+   * given) span, carrying the messages in its body. `gen_ai.operation.name`, `gen_ai.provider.name`
+   * and `gen_ai.request.model` are set as record attributes from the caller's values or the
+   * enclosing {@link model} span, and `gen_ai.conversation.id` from the active session. Nothing is
+   * emitted when `captureContent` is false; capture failures are counted, never thrown.
+   */
   recordMessages(
-    messages: { input?: JsonValue; output?: JsonValue },
+    messages: {
+      /** Input messages, ideally in the GenAI semantic-convention shape; any JSON-encodable value. */
+      input?: unknown;
+      /** Output messages, ideally in the GenAI semantic-convention shape; any JSON-encodable value. */
+      output?: unknown;
+      /** `gen_ai.operation.name` for the record; defaults to the enclosing `model()` span's value. */
+      operation?: string;
+      /** `gen_ai.provider.name` for the record; defaults to the enclosing `model()` span's value. */
+      provider?: string;
+      /** `gen_ai.request.model` for the record; defaults to the enclosing `model()` span's value. */
+      model?: string;
+    },
     explicitContext?: Context,
   ): void {
     if (!this.enabled || this.closed || !this.captureContent) return;
     try {
-      const active = explicitContext ?? this.getContext();
+      const store = this.storage.getStore();
+      const active = explicitContext ?? store?.context ?? context.active();
       if (!trace.getSpanContext(active))
         throw new Error("Message records require an active span or explicit span context");
-      const body: Record<string, JsonValue> = {};
+      const body: Record<string, unknown> = {};
       if (messages.input !== undefined) body["gen_ai.input.messages"] = messages.input;
       if (messages.output !== undefined) body["gen_ai.output.messages"] = messages.output;
+      // Request metadata is inherited only when the record correlates with the enclosing helper
+      // scope; an unrelated explicit context carries caller-supplied values alone.
+      const enclosing =
+        explicitContext === undefined || explicitContext === store?.context ? store : undefined;
+      const attributes: Record<string, string> = {};
+      const stamp = (key: string, explicit: unknown, inherited: string | undefined) => {
+        if (explicit === undefined) {
+          if (inherited !== undefined) attributes[key] = inherited;
+        } else if (typeof explicit === "string" && explicit.trim() && explicit.length <= 256)
+          attributes[key] = explicit;
+        else this.transport.instrumentationFailure("logs");
+      };
+      stamp("gen_ai.operation.name", messages.operation, enclosing?.model?.operation);
+      stamp("gen_ai.provider.name", messages.provider, enclosing?.model?.provider);
+      stamp("gen_ai.request.model", messages.model, enclosing?.model?.requestModel);
+      stamp("gen_ai.conversation.id", undefined, enclosing?.sessionId);
       this.logger.emit({
         context: active,
         severityNumber: SeverityNumber.INFO,
         eventName: "gen_ai.client.inference.operation.details",
+        attributes,
         body: JSON.parse(encodeContent(body)),
       });
     } catch {
@@ -485,7 +576,7 @@ export class HueClient {
     }
   }
 
-  private setContent(span: Span, key: string, value: JsonValue): void {
+  private setContent(span: Span, key: string, value: unknown): void {
     if (!this.enabled || this.closed || !this.captureContent) return;
     try {
       span.setAttribute(key, encodeContent(value));
@@ -494,6 +585,13 @@ export class HueClient {
     }
   }
 
+  /**
+   * Confirms the key and origin by reading the current project; a setup and CI diagnostic, not a
+   * readiness gate. Redirects are refused and the response is bounded.
+   *
+   * @throws HueConnectionError when the client is disabled, Hue is unreachable (the network or
+   * timeout error is the `cause`), the key is rejected (`status` is set) or the response is invalid.
+   */
   async checkConnection(): Promise<ProjectConnection> {
     if (!this.enabled) throw new HueConnectionError("Hue telemetry is disabled");
     const options = this.transport.options;
@@ -504,8 +602,12 @@ export class HueClient {
         redirect: "error",
         signal: AbortSignal.timeout(options.timeoutMillis),
       });
-    } catch {
-      throw new HueConnectionError("Unable to connect to Hue; check the endpoint and network");
+    } catch (error) {
+      throw new HueConnectionError(
+        "Unable to connect to Hue; check the endpoint and network",
+        undefined,
+        { cause: error },
+      );
     }
     if (!response.ok) {
       await response.body?.cancel();
@@ -540,8 +642,10 @@ export class HueClient {
         organizationId: fields.organizationId as string,
         slug: fields.slug as string,
       };
-    } catch {
-      throw new HueConnectionError("Hue returned an invalid project response");
+    } catch (error) {
+      throw new HueConnectionError("Hue returned an invalid project response", undefined, {
+        cause: error,
+      });
     }
   }
 
@@ -604,6 +708,13 @@ export class HueClient {
     }
   }
 
+  /**
+   * Drains the trace and log providers and waits for Hue's acknowledgements. Each caller gets a
+   * fresh serialized drain that includes records emitted before its call.
+   *
+   * @throws HueExportError when this drain observed a new rejection, delivery failure, drop or
+   * invalid record; its `issues` and `report` are sanitized counts, never server text.
+   */
   flush(): Promise<ExportReport> {
     // Each caller needs a drain after its own preceding span/log emissions.
     // Joining an earlier drain can acknowledge records that were not in its batch.
@@ -644,6 +755,12 @@ export class HueClient {
     return this.transport.flush();
   }
 
+  /**
+   * Flushes, then shuts down the providers this client owns; borrowed providers are left running.
+   * Idempotent: later calls return the same promise, and later helper calls only run their callbacks.
+   *
+   * @throws HueExportError when the final flush observed new failures; owned providers are still released.
+   */
   shutdown(): Promise<ExportReport> {
     this.shutdownPromise ??= (async () => {
       this.closed = true;
@@ -663,11 +780,21 @@ export class HueClient {
   }
 }
 
+/**
+ * Creates a client that owns its providers ({@link HueOptions}) or attaches to the application's
+ * ({@link ExistingHueProviders}). Strict: use it for setup and CI, `createHueSafe` in serving code.
+ *
+ * @throws TypeError for invalid options, including a missing `captureContent` choice, an invalid
+ * key or `serviceName`, a non-origin or insecure `baseUrl`, or out-of-range budgets.
+ */
 export function createHue(options: HueOptions | ExistingHueProviders): HueClient {
   return new HueClient(options);
 }
 
-/** Fail-open initialization for production; strict createHue remains available for setup/CI. */
+/**
+ * Fail-open initialization for production: invalid options return a disabled client with one
+ * instrumentation failure recorded instead of throwing. Strict {@link createHue} remains for setup/CI.
+ */
 export function createHueSafe(options: HueOptions | ExistingHueProviders): HueClient {
   try {
     return new HueClient(options);

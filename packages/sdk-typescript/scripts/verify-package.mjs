@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -42,6 +43,12 @@ if (!values.archive && !values["registry-version"]) {
   run("node", ["scripts/write-version.mjs", "--check"], staging);
   run("bun", ["--no-env-file", "run", "typecheck"], staging);
   run("bun", ["--no-env-file", "run", "build"], staging);
+  // stripInternal must keep the transport's @internal mutators out of the published declarations.
+  const transportTypes = readFileSync(join(staging, "dist", "transport.d.ts"), "utf8");
+  for (const member of ["finish", "acceptedRecords", "issue", "instrumentationFailure"]) {
+    if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
+      throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);
+  }
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
   // Bun's packer must agree with npm's file inventory; the release artifact stays npm pack.
   const bunPack = spawnSync("bun", ["--no-env-file", "pm", "pack", "--dry-run"], {
