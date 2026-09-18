@@ -35,7 +35,7 @@ Neither SDK estimates unavailable token usage or cost. Queues are bounded and in
 
 Both SDKs support dataset/scorer creation, frozen versions, local experiments, built-in/custom scorers, resumable result uploads and historical rescoring. Hosted judge job/budget methods are available, but credential resolution is not proof of a successful provider call. Activation belongs to the platform environment.
 
-The clients do not yet expose every platform REST operation. Dataset editing/archival, case replacement/deletion, promotion from a trace, copying published scorers, experiment/run listing and frozen-trace snapshot reads are not convenience methods in these clients. There is no general service-key trace-search client. Open pull requests are not released functionality.
+The clients do not yet expose every platform REST operation. Dataset editing/archival, case replacement/deletion, promotion from a trace, copying published scorers, experiment/run listing and frozen-trace snapshot reads are not convenience methods in these clients. Trace browsing for coding agents is served by the [Hue MCP server](https://docs.hue.run/agents/mcp-server) with a separate `project_read` key capability, not by these clients. Open pull requests are not released functionality.
 
 API responses are limited to 4 MiB by the clients. Full dataset pages can exceed this limit when cases contain large values. Use smaller explicit page limits when listing full cases; the local experiment runner separately reads summaries and individual cases. A response-size failure does not establish that the server rejected the request.
 
