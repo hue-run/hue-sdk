@@ -3,15 +3,15 @@ import type { HueOptions, SharedHueOptions } from "./types.js";
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const MAX_CONTENT_BYTES = 256 * 1024;
 
-export type ValidatedHueOptions = HueOptions &
+// The return type stays anonymous: HueTransport.options exposes it through ReturnType, and the
+// API reference must not reference a name that is not part of the public entry points.
+export function validateOptions(options: HueOptions): HueOptions &
   Required<
     Pick<SharedHueOptions, "captureContent" | "baseUrl" | "timeoutMillis" | "maxQueueBytes">
   > & {
     apiKey: string;
     serviceName: string;
-  };
-
-export function validateOptions(options: HueOptions): ValidatedHueOptions {
+  } {
   if (options.enabled !== undefined && typeof options.enabled !== "boolean")
     throw new TypeError("enabled must be a boolean");
   if (options.enabled === false) {
