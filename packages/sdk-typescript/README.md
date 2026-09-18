@@ -1,3 +1,7 @@
+<p align="center">
+  <img alt="Hue" src="https://raw.githubusercontent.com/hue-run/hue-sdk/df0443f98c6096ff331fd0400715e4f3a1936607/.github/assets/hue-ascii-neutral.png" width="720">
+</p>
+
 # Hue TypeScript SDK
 
 [![npm](https://img.shields.io/npm/v/%40hue-run%2Fsdk?label=%40hue-run%2Fsdk)](https://www.npmjs.com/package/@hue-run/sdk) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)

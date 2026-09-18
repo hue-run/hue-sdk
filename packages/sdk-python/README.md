@@ -1,3 +1,7 @@
+<p align="center">
+  <img alt="Hue" src="https://raw.githubusercontent.com/hue-run/hue-sdk/df0443f98c6096ff331fd0400715e4f3a1936607/.github/assets/hue-ascii-neutral.png" width="720">
+</p>
+
 # Hue Python SDK
 
 [![PyPI](https://img.shields.io/pypi/v/hue-run?label=hue-run)](https://pypi.org/project/hue-run/) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
