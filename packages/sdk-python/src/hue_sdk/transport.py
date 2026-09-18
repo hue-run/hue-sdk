@@ -28,8 +28,8 @@ from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportRes
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
-from ._version import __version__
 from ._otel_compat import encode_logs, export_context
+from ._version import __version__
 
 MAX_REQUEST_BYTES = 1_048_576
 # Batches stop 1 KiB short of the wire cap so gzip framing of incompressible data cannot exceed it,

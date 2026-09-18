@@ -24,8 +24,8 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
-from ._version import __version__
 from ._otel_compat import encode_logs
+from ._version import __version__
 from .processors import BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
 from .snapshots import snapshot_content
