@@ -1,12 +1,12 @@
 [project]
 name = "hue-sdk"
-version = "0.2.0"
+version = "0.2.1"
 description = "Alias of hue-run. Install hue-run directly; this distribution only depends on it."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["hue-run==0.2.0"]
+dependencies = ["hue-run==0.2.1"]
 
 [project.urls]
 Homepage = "https://docs.hue.run"
