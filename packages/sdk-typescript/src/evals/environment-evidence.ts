@@ -11,6 +11,7 @@ import type { EnvironmentEvidence } from "./types.js";
 
 const maxBytes = 8 * 1024 * 1024;
 const hexDigest = /^[a-f0-9]{64}$/;
+export const MAX_ENVIRONMENT_STEPS = 500;
 
 async function readEvidence<T>(operation: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
@@ -40,7 +41,7 @@ export function validateEnvironmentEvidence(evidence: EnvironmentEvidence): void
     !["completed", "abandoned", "expired"].includes(evidence.status) ||
     !Number.isInteger(evidence.stepCount) ||
     evidence.stepCount < 0 ||
-    evidence.stepCount > 500 ||
+    evidence.stepCount > MAX_ENVIRONMENT_STEPS ||
     !Array.isArray(evidence.steps) ||
     evidence.steps.length !== evidence.stepCount
   )
@@ -68,7 +69,11 @@ export async function loadEnvironmentEvidence(
 ): Promise<EnvironmentEvidence> {
   const snapshot = await readEvidence(() => client.getEnvironmentEvidence(executionId));
   if (snapshot.executionId !== executionId) throw new TypeError("Environment execution differs");
-  if (!Number.isInteger(snapshot.stepCount) || snapshot.stepCount < 0 || snapshot.stepCount > 500)
+  if (
+    !Number.isInteger(snapshot.stepCount) ||
+    snapshot.stepCount < 0 ||
+    snapshot.stepCount > MAX_ENVIRONMENT_STEPS
+  )
     throw new TypeError("Invalid environment step count");
   const evidence: EnvironmentEvidence = { ...snapshot, steps: [] };
   let size = Buffer.byteLength(JSON.stringify(evidence));

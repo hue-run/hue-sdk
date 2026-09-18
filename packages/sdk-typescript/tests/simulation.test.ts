@@ -380,6 +380,27 @@ function harness(options: { uncertainSeal?: boolean } = {}) {
 }
 
 describe("one-shot simulation workflow", () => {
+  test("rejects invalid world limits before consuming a scenario case", async () => {
+    const fixture = harness();
+    const options = {
+      ...fixture,
+      checkpointDirectory: join(tmpdir(), "unused-hue-simulation-checkpoint"),
+      scenario,
+      persistResultContent: false,
+      traceEvidence: { mode: "required" as const },
+    };
+
+    await expect(runSimulation({ ...options, maxSteps: 501 })).rejects.toThrow(
+      "maxSteps must be 1–500",
+    );
+    await expect(runSimulation({ ...options, ttlSeconds: 86_401 })).rejects.toThrow(
+      "ttlSeconds must be 1–86400",
+    );
+    expect(fixture.targetCalls()).toBe(0);
+    expect(fixture.worlds.size).toBe(0);
+    expect(fixture.experiments.size).toBe(0);
+  });
+
   test("recovers an upload without rerunning the target and reruns in a fresh world", async () => {
     const fixture = harness();
     const directory = await mkdtemp(join(tmpdir(), "hue-simulation-"));

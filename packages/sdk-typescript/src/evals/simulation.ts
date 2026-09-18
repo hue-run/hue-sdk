@@ -6,6 +6,7 @@ import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools
 import type { EnvironmentDefinition, EnvironmentIdentity } from "../environment/types.js";
 import type { EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
+import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";
 import { digest, json } from "./json.js";
 import {
   runExperiment,
@@ -416,6 +417,18 @@ async function seal(
 }
 
 export async function runSimulation(options: RunSimulationOptions): Promise<SimulationReport> {
+  if (
+    options.maxSteps !== undefined &&
+    (!Number.isInteger(options.maxSteps) ||
+      options.maxSteps < 1 ||
+      options.maxSteps > MAX_ENVIRONMENT_STEPS)
+  )
+    throw new RangeError(`maxSteps must be 1–${MAX_ENVIRONMENT_STEPS}`);
+  if (
+    options.ttlSeconds !== undefined &&
+    (!Number.isInteger(options.ttlSeconds) || options.ttlSeconds < 1 || options.ttlSeconds > 86_400)
+  )
+    throw new RangeError("ttlSeconds must be 1–86400");
   if (options.environmentClient.baseUrl !== options.client.baseUrl)
     throw new Error("Environments and evaluations must use the same Hue origin");
   const project = await options.client.checkConnection();
