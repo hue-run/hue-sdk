@@ -15,8 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from google.protobuf.message import DecodeError, Message
-from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY, attach, detach, set_value
-from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
+from opentelemetry.context import attach, detach
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.exporter.otlp.proto.http import Compression
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -29,6 +28,7 @@ from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportRes
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
+from ._otel_compat import encode_logs, export_context
 from ._version import __version__
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -108,8 +108,9 @@ class ExportStatus:
 class SafeSession(requests.Session):
     """Disable redirects and reject partial/malformed OTLP acknowledgements.
 
-    OpenTelemetry 1.44 does not inspect partial_success itself. A rejection is
-    permanent: accepted records must not be retried as a whole batch.
+    The OTLP HTTP exporters in the supported OpenTelemetry range do not inspect
+    partial_success themselves. A rejection is permanent: accepted records must
+    not be retried as a whole batch.
     """
 
     def __init__(self, signal: str | None = None) -> None:
@@ -134,7 +135,7 @@ class SafeSession(requests.Session):
             raise requests.RequestException("Hue telemetry request timed out.")
         # ContextVars do not automatically follow work onto a new thread.
         # Preserve OTel suppression in the actual HTTP call, not only its caller.
-        export_context = set_value(_SUPPRESS_INSTRUMENTATION_KEY, True)
+        suppressed = export_context()
         if not self._request_lock.acquire(blocking=False):
             raise requests.RequestException("Hue telemetry transport is still busy.")
         completed = Event()
@@ -146,15 +147,16 @@ class SafeSession(requests.Session):
             nonlocal result, failure
             token = None
             try:
-                token = attach(export_context)
+                token = attach(suppressed)
                 for attempt in range(6):
                     remaining = deadline - monotonic()
                     if remaining <= 0:
                         raise requests.RequestException("Hue telemetry request timed out.")
                     kwargs["timeout"] = remaining
                     response = self._request(method, url, **kwargs)
-                    # OTel 1.44 omits 429 and Retry-After. Handle them here,
-                    # without replaying partial acknowledgements or 4xx errors.
+                    # The OTLP HTTP exporters in the supported range do not
+                    # honor 429 or Retry-After. Handle them here, without
+                    # replaying partial acknowledgements or 4xx errors.
                     retryable = response.status_code in (408, 429) or response.status_code >= 500
                     retry_after = response.headers.get("Retry-After")
                     if not retryable or (response.status_code != 429 and retry_after is None):

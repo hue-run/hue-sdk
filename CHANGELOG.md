@@ -117,6 +117,10 @@ refuses to publish a version without a matching entry below.
 - `Hue("<key>")` and `EvaluationClient("<key>")` raise `TypeError` naming `api_key=` instead of a `base_url` `ValueError`; existing positional `(base_url, api_key)` calls are unchanged.
 - `Hue.base_url`, `Hue.tracer`, `Hue.tracer_provider`, `Hue.logger_provider`, `EvaluationClient.base_url` and the evaluation error attributes carry class-level annotations, and the mypy gate no longer ignores missing stubs (`types-protobuf` and `types-jsonschema` join the dev group).
 
+#### Changed
+
+- `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as `>=1.40,<2` instead of exactly 1.44.0, so `hue-run` installs next to applications and instrumentation packages on another OpenTelemetry 1.x release. `uv.lock` keeps 1.44.0 as the certified combination, and a new CI job re-resolves every direct dependency at its declared floor (`uv lock --resolution lowest-direct`) and runs the full suite, including the installed wheel, on Python 3.12 with OpenTelemetry 1.40.0. The two OpenTelemetry internals the transport uses are guarded: a missing OTLP log encoder raises an `ImportError` naming the supported range, and a missing instrumentation-suppression key emits a one-time `RuntimeWarning` and exports without suppression.
+
 #### Fixed
 
 - The managed-target README snippet passes `tracer=hue.tracer`; without it every invocation returned `uncertain`.
