@@ -209,9 +209,9 @@ export class HueClient {
     } else {
       this.transport = createHueTransport(options);
       const resource = resourceFromAttributes({
+        ...options.resourceAttributes,
         "service.name": options.serviceName,
         ...(options.serviceVersion ? { "service.version": options.serviceVersion } : {}),
-        ...options.resourceAttributes,
       });
       const tracer = new TracerProvider({
         resource,

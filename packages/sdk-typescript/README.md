@@ -61,8 +61,8 @@ wrapper, database dependency, or dependency on the Hue application workspace.
 carries the HTTP status when Hue answered, and `cause` carries the underlying network, timeout or
 parsing error. `serviceVersion` and `resourceAttributes` (for example
 `{ "deployment.environment.name": "production", "service.namespace": "agents" }`) describe the
-deployment; a client that owns its providers merges them after `service.name` and
-`service.version` into its resource.
+deployment; a client that owns its providers merges them into its resource, with `serviceName`
+and `serviceVersion` taking precedence over same-named keys.
 
 ## Model spans without a framework adapter
 
@@ -71,9 +71,9 @@ Inside it, `setInput` and `setOutput` record `gen_ai.input.messages` / `gen_ai.o
 when `captureContent` is true. Those attributes carry the OpenTelemetry GenAI message shape
 (`{ role, parts: [{ type: "text", content }] }`, with `finish_reason` on output messages) defined
 by the semantic conventions'
-[input messages](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-input-messages.json)
+[input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json)
 and
-[output messages](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-output-messages.json)
+[output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json)
 JSON schemas, so any semantic-convention-aware backend can read them. Convert provider-native
 messages before recording them:
 

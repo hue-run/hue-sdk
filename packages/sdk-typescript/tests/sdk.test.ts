@@ -1762,3 +1762,24 @@ describe("model() metadata validation", () => {
     await hue.shutdownSafe({ timeoutMillis: 200 });
   });
 });
+
+describe("warning issues", () => {
+  test("do not consume the once-a-second onExportIssue slot", async () => {
+    const seen: string[] = [];
+    const hue = createHue({
+      apiKey: "hue_test_key",
+      serviceName: "warning-slot",
+      captureContent: false,
+      baseUrl: "http://collector.internal:4318",
+      allowInsecureHttp: true,
+      onExportIssue: (issue) => {
+        seen.push(issue.kind);
+      },
+    });
+    await Promise.resolve();
+    hue.transport.issue("traces", "failed", 1, "synthetic failure");
+    await Promise.resolve();
+    expect(seen).toEqual(["warning", "failed"]);
+    await hue.shutdownSafe({ timeoutMillis: 200 });
+  });
+});

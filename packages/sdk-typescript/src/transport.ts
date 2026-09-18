@@ -290,7 +290,9 @@ export class HueTransport {
       Date.now() - this.lastDiagnosticAt >= 1000
     ) {
       this.diagnosticPending = true;
-      this.lastDiagnosticAt = Date.now();
+      // Warnings (for example the allowInsecureHttp notice) do not consume the slot, so the first
+      // real failure still reaches the callback promptly.
+      if (kind !== "warning") this.lastDiagnosticAt = Date.now();
       void Promise.resolve()
         .then(() => this.options.onExportIssue?.({ ...issue }))
         .then(
