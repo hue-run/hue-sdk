@@ -1,3 +1,4 @@
+import type { Agent } from "node:http";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import {
   CompressionAlgorithm,
@@ -53,6 +54,9 @@ interface ExportSink {
     status?: number,
   ): void;
 }
+
+/** Per-record allowance for protobuf length prefixes that grow when records are grouped. */
+const RECORD_FRAMING_BYTES = 64;
 
 function recordData(record: RecordValue, signal: Signal): unknown {
   if (signal === "traces") {
@@ -307,14 +311,12 @@ export class HueTransport {
   }
 
   /** @internal Counts a helper capture or instrumentation failure that preserved application execution. */
-  instrumentationFailure(signal: Signal = "traces"): void {
+  instrumentationFailure(
+    signal: Signal = "traces",
+    message = "Telemetry capture or instrumentation failed; application execution was preserved",
+  ): void {
     this.instrumentationFailures++;
-    this.issue(
-      signal,
-      "invalid",
-      0,
-      "Telemetry capture or instrumentation failed; application execution was preserved",
-    );
+    this.issue(signal, "invalid", 0, message);
   }
 
   /** Cumulative counters and current queue gauges. */
@@ -479,7 +481,13 @@ class ReportingExporter<T extends RecordValue> {
         );
       }
     }
+    // Each record is encoded once to measure it; a request is encoded once more when it is sent.
+    // Records sharing a resource and scope are grouped on the wire, so the sum of the individual
+    // encodings plus a fixed framing margin bounds the request size. Room is left for gzip
+    // headers/blocks when otherwise incompressible data is near the wire cap.
+    const limit = MAX_BODY_BYTES - 1024;
     let batch: T[] = [];
+    let batchBytes = 0;
     for (const record of accepted) {
       let recordBytes: number;
       try {
@@ -489,15 +497,13 @@ class ReportingExporter<T extends RecordValue> {
         this.transport.issue(this.signal, "invalid", 1, "Telemetry record could not be serialized");
         continue;
       }
-      const candidate = [...batch, record];
-      // Leave room for gzip headers/blocks when otherwise incompressible data is near the wire cap.
-      if ((this.serializer.serializeRequest(candidate)?.byteLength ?? 0) <= MAX_BODY_BYTES - 1024) {
-        batch = candidate;
-        continue;
+      const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
+      if (batch.length && batchBytes + framedBytes > limit) {
+        if (!(await this.send(batch))) failed = true;
+        batch = [];
+        batchBytes = 0;
       }
-      if (batch.length && !(await this.send(batch))) failed = true;
-      batch = [];
-      if (recordBytes > MAX_BODY_BYTES - 1024) {
+      if (recordBytes > limit) {
         failed = true;
         this.transport.issue(
           this.signal,
@@ -505,7 +511,10 @@ class ReportingExporter<T extends RecordValue> {
           1,
           "Telemetry record exceeds the 1 MiB request limit",
         );
-      } else batch = [record];
+        continue;
+      }
+      batch.push(record);
+      batchBytes += framedBytes;
     }
     if (batch.length && !(await this.send(batch))) failed = true;
     if (failed) throw new Error("Hue telemetry export failed");
@@ -654,4 +663,3 @@ class ReportingExporter<T extends RecordValue> {
 export function createHueTransport(options: HueOptions): HueTransport {
   return new HueTransport(options);
 }
-import type { Agent } from "node:http";

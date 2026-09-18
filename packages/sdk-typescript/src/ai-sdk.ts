@@ -1,5 +1,5 @@
-import { OpenTelemetry } from "@ai-sdk/otel";
 import { createRequire } from "node:module";
+import { OpenTelemetry } from "@ai-sdk/otel";
 import type { TelemetryOptions } from "ai";
 import type { HueClient } from "./client.js";
 

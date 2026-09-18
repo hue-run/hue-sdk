@@ -115,6 +115,39 @@ run(
   ],
   minimal,
 );
+// CommonJS applications on the Node floor (22.12+) load the ESM build through require(esm):
+// every entry point resolves through its "default" condition, and the build must stay free of
+// top-level await, which require() rejects with ERR_REQUIRE_ASYNC_MODULE.
+run(
+  process.execPath,
+  [
+    "--input-type=commonjs",
+    "-e",
+    `
+  const assert = require("node:assert/strict");
+  const sdk = require("@hue-run/sdk");
+  const evals = require("@hue-run/sdk/evals");
+  const managed = require("@hue-run/sdk/managed");
+  assert.equal(typeof sdk.createHue, "function");
+  assert.equal(typeof sdk.createHueSafe, "function");
+  assert.equal(typeof evals.scoreLocally, "function");
+  assert.equal(typeof managed.createManagedTargetHandler, "function");
+  const hue = sdk.createHue({ enabled: false });
+  hue
+    .withSpan("require", () => 42)
+    .then(async (value) => {
+      assert.equal(value, 42);
+      await hue.shutdownSafe();
+      console.log("require(esm) consumer ok");
+    })
+    .catch((error) => {
+      console.error(error);
+      process.exit(1);
+    });
+`,
+  ],
+  minimal,
+);
 // Core imports must coexist with an existing AI SDK 6 application without
 // forcing an upgrade. Its AI SDK telemetry adapter remains explicitly v7-only.
 const ai6 = join(destination, "ai6-core-consumer");
@@ -206,10 +239,13 @@ run(
     "-e",
     `
   import { strict as assert } from "node:assert";
+  import { createRequire } from "node:module";
   import { createHue } from "@hue-run/sdk";
   import { hueTelemetry } from "@hue-run/sdk/ai-sdk";
   const hue = createHue({ apiKey: "synthetic-key", serviceName: "compatibility", captureContent: false });
   assert.throws(() => hueTelemetry(hue), /requires ai@/);
+  // The adapter entry point is also reachable from CommonJS once its peer is installed.
+  assert.equal(createRequire(import.meta.url)("@hue-run/sdk/ai-sdk").hueTelemetry, hueTelemetry);
   await hue.shutdownSafe();
 `,
   ],

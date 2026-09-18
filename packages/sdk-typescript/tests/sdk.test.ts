@@ -1,7 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { context, trace, type TraceState } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import { ProtobufTraceSerializer } from "@opentelemetry/otlp-transformer";
 import { detectResources, resourceFromAttributes } from "@opentelemetry/resources";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
@@ -12,6 +14,7 @@ import {
   HueConnectionError,
   HueExportError,
   contentPrefixes,
+  type ExportIssue,
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { generateText, streamText } from "ai";
@@ -179,13 +182,16 @@ describe("Hue SDK contract", () => {
     });
     try {
       await hue.withSpan("request", async () => {
-        await hue.model("synthetic-model", { provider: "synthetic" }, async (span) => {
-          span.setInput([{ role: "user", content: "hi" }]);
-          span.setOutput([{ role: "assistant", content: "hello" }]);
-          span.setUsage({ inputTokens: 3, outputTokens: 2 });
-          // Invalid counts are omitted and counted, never thrown into application code.
-          span.setUsage({ inputTokens: -1 });
-        });
+        await hue.model(
+          "synthetic-model",
+          async (span) => {
+            span.setOutput([{ role: "assistant", content: "hello" }]);
+            span.setUsage({ inputTokens: 3, outputTokens: 2 });
+            // Invalid counts are omitted and counted, never thrown into application code.
+            span.setUsage({ inputTokens: -1 });
+          },
+          { provider: "synthetic", input: [{ role: "user", content: "hi" }], userId: "user-1" },
+        );
       });
       // The counted omission fails a strict flush by contract; the safe path reports it.
       const result = await hue.flushSafe();
@@ -198,6 +204,9 @@ describe("Hue SDK contract", () => {
       expect(attr(model, "gen_ai.operation.name")?.stringValue).toBe("chat");
       expect(attr(model, "gen_ai.request.model")?.stringValue).toBe("synthetic-model");
       expect(attr(model, "gen_ai.provider.name")?.stringValue).toBe("synthetic");
+      expect(attr(model, "user.id")?.stringValue).toBe("user-1");
+      // The `input` option of a model span is message content, not a generic input value.
+      expect(attr(model, "input.value")).toBeUndefined();
       expect(JSON.parse(attr(model, "gen_ai.input.messages")!.stringValue!)).toEqual([
         { role: "user", content: "hi" },
       ]);
@@ -243,7 +252,7 @@ describe("Hue SDK contract", () => {
         .filter((request) => request.signal === "traces")
         .flatMap((request) => request.records);
       const root = spans.find((span) => span.name === "request")!;
-      const tool = spans.find((span) => span.name === "weather")!;
+      const tool = spans.find((span) => span.name === "execute_tool weather")!;
       expect(JSON.parse(attr(root, "input.value")!.stringValue!)).toEqual({ city: "Oslo" });
       expect(JSON.parse(attr(root, "output.value")!.stringValue!)).toEqual({ city: "Oslo" });
       expect(JSON.parse(attr(tool, "gen_ai.tool.call.arguments")!.stringValue!)).toEqual({
@@ -403,12 +412,12 @@ describe("Hue SDK contract", () => {
         async (root) => {
           await hue.model(
             "synthetic-model",
-            { provider: "synthetic", operation: "generate_content" },
             async () => {
               hue.recordMessages({
                 output: [{ role: "assistant", parts: [{ type: "text", content: "hi" }] }],
               });
             },
+            { provider: "synthetic", operation: "generate_content" },
           );
           // Outside a model span the caller supplies the request metadata.
           hue.recordMessages({
@@ -485,6 +494,56 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("contentPrefixes lists every recognized content key, identical to the Python SDK", () => {
+    expect(contentPrefixes).toEqual([
+      "gen_ai.input.messages",
+      "gen_ai.output.messages",
+      "gen_ai.system_instructions",
+      "gen_ai.prompt",
+      "gen_ai.completion",
+      "gen_ai.tool.call.arguments",
+      "gen_ai.tool.call.result",
+      "gen_ai.tool.definitions",
+      "gen_ai.event.content",
+      "llm.input_messages",
+      "llm.output_messages",
+      "llm.prompts",
+      "llm.completions",
+      "llm.invocation_parameters",
+      "llm.prompt_template.template",
+      "llm.prompt_template.variables",
+      "llm.tools",
+      "llm.function_call",
+      "llm.choices",
+      "input.value",
+      "output.value",
+      "input.images",
+      "output.images",
+      "retrieval.documents",
+      "embedding.embeddings",
+      "reranker.query",
+      "reranker.input_documents",
+      "reranker.output_documents",
+      "ai.prompt",
+      "ai.response.text",
+      "ai.response.object",
+      "ai.response.reasoning",
+      "ai.response.files",
+      "ai.response.toolCalls",
+      "ai.response.body",
+      "ai.toolCall.args",
+      "ai.toolCall.result",
+      "ai.value",
+      "ai.values",
+      "ai.embedding",
+      "ai.embeddings",
+      "traceloop.entity.input",
+      "traceloop.entity.output",
+      "tool.parameters",
+      "exception.message",
+      "exception.stacktrace",
+    ]);
+  });
   test.each([true, false])(
     "export strips every recognized content prefix from borrowed-provider spans (captureContent=%p)",
     async (captureContent) => {
@@ -507,8 +566,26 @@ describe("Hue SDK contract", () => {
         span.setAttribute("gen_ai.request.model", "synthetic-model");
         span.addEvent("gen_ai.user.message", { content: "private-value" });
         span.end();
+        // An OpenInference retriever span: document text is content, the score is metadata.
+        const retriever = tracerProvider.getTracer("third-party").startSpan("retrieve");
+        retriever.setAttribute("openinference.span.kind", "RETRIEVER");
+        retriever.setAttribute("retrieval.documents.0.document.content", "private-value");
+        retriever.setAttribute("retrieval.documents.0.document.score", 0.42);
+        retriever.setAttribute("ai.response.reasoning", "private-value");
+        retriever.setAttribute("ai.response.finishReason", "stop");
+        retriever.end();
         await hue.flush();
-        const [record] = endpoint.requests.flatMap((request) => request.records);
+        const records = endpoint.requests.flatMap((request) => request.records);
+        const record = records.find((candidate) => candidate.name === "external")!;
+        const retrieved = records.find((candidate) => candidate.name === "retrieve")!;
+        const retrievedKeys = (retrieved.attributes ?? []).map((attribute) => attribute.key);
+        expect(retrievedKeys).toContain("openinference.span.kind");
+        expect(retrievedKeys).toContain("ai.response.finishReason");
+        expect(retrievedKeys.includes("retrieval.documents.0.document.content")).toBe(
+          captureContent,
+        );
+        expect(retrievedKeys.includes("retrieval.documents.0.document.score")).toBe(captureContent);
+        expect(retrievedKeys.includes("ai.response.reasoning")).toBe(captureContent);
         const keys = (record.attributes ?? []).map((attribute) => attribute.key);
         const content = keys.filter((key) =>
           contentPrefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}.`)),
@@ -687,9 +764,11 @@ describe("Hue SDK contract", () => {
         .filter((request) => request.signal === "traces")
         .flatMap((request) => request.records);
       const parent = spans.find((span) => span.name === "chat")!;
-      const tool = spans.find((span) => span.name === "lookup")!;
+      const tool = spans.find((span) => span.name === "execute_tool lookup")!;
       expect(tool.traceId).toBe(parent.traceId);
       expect(tool.parentSpanId).toBe(parent.spanId);
+      expect(attr(tool, "gen_ai.operation.name")?.stringValue).toBe("execute_tool");
+      expect(attr(tool, "gen_ai.tool.name")?.stringValue).toBe("lookup");
       expect(attr(parent, "output.value")?.stringValue).toBe("null");
       expect(attr(tool, "gen_ai.tool.call.result")?.stringValue).toBe("null");
       expect(
@@ -1738,12 +1817,16 @@ describe("Queued telemetry snapshots", () => {
 
 describe("model() metadata validation", () => {
   test("a disabled client runs the callback and records no instrumentation failure", async () => {
-    const hue = createHue({ enabled: false, captureContent: false });
-    const result = await hue.model("", { provider: "", operation: " " }, async (span) => {
-      span.setInput({ messages: [] });
-      span.setUsage({ inputTokens: -1 });
-      return "ok";
-    });
+    const hue = createHue({ enabled: false });
+    const result = await hue.model(
+      "",
+      async (span) => {
+        span.setInput({ messages: [] });
+        span.setUsage({ inputTokens: -1 });
+        return "ok";
+      },
+      { provider: "", operation: " " },
+    );
     expect(result).toBe("ok");
     expect(hue.transport.getReport().instrumentationFailures).toBe(0);
     expect((await hue.flushSafe()).ok).toBe(true);
@@ -1757,7 +1840,7 @@ describe("model() metadata validation", () => {
       captureContent: false,
       baseUrl: "http://127.0.0.1:9",
     });
-    await hue.model("", { provider: "synthetic" }, async () => "ok");
+    await hue.model("", async () => "ok", { provider: "synthetic" });
     expect(hue.transport.getReport().instrumentationFailures).toBe(1);
     await hue.shutdownSafe({ timeoutMillis: 200 });
   });
@@ -1788,5 +1871,280 @@ describe("warning issues", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(seen).toEqual(["warning", "failed"]);
     await hue.shutdownSafe({ timeoutMillis: 200 });
+  });
+});
+
+describe("OpenTelemetry interoperability", () => {
+  test("helpers make their span the active OpenTelemetry span when a context manager is registered", async () => {
+    const endpoint = receiver();
+    const previousContext = context.active();
+    const manager = new AsyncLocalStorageContextManager().enable();
+    expect(context.setGlobalContextManager(manager)).toBe(true);
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "interop",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    expect(trace.setGlobalTracerProvider(tracerProvider)).toBe(true);
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    const disabled = createHue({ enabled: false });
+    const ids: Record<string, string> = {};
+    const carrier: Record<string, string> = {};
+    const activeSpanId = () => trace.getActiveSpan()?.spanContext().spanId;
+    try {
+      await hue.withSpan("request", async (request) => {
+        ids.request = request.spanId;
+        expect(activeSpanId()).toBe(request.spanId);
+        // Instrumentation that only knows the global API (HTTP clients, provider SDKs) joins the trace.
+        trace.getTracer("third-party-instrumentation").startSpan("HTTP POST").end();
+        await hue.tool("lookup", null, () => {
+          ids.tool = activeSpanId() ?? "";
+          return null;
+        });
+        await hue.model(
+          "synthetic-model",
+          () => {
+            ids.model = activeSpanId() ?? "";
+            return null;
+          },
+          { provider: "synthetic" },
+        );
+        hue.tracer.startActiveSpan("nested", (nested) => {
+          ids.nested = nested.spanContext().spanId;
+          expect(activeSpanId()).toBe(ids.nested);
+          nested.end();
+        });
+        // The kill switch neither hides the application's active span nor blocks propagation.
+        await disabled.withSpan("kill-switch", (span) => {
+          expect(activeSpanId()).toBe(request.spanId);
+          expect(trace.getSpan(span.context)?.spanContext().spanId).toBe(request.spanId);
+          expect(trace.getSpan(disabled.getContext())?.spanContext().spanId).toBe(request.spanId);
+          disabled.inject(carrier);
+        });
+        expect(activeSpanId()).toBe(request.spanId);
+      });
+      expect(trace.getActiveSpan()).toBeUndefined();
+      expect(carrier.traceparent).toContain(ids.request);
+      // The other direction: a Hue span started under an application span joins its trace.
+      await tracerProvider.getTracer("application").startActiveSpan("outer", async (outer) => {
+        ids.outer = outer.spanContext().spanId;
+        await hue.withSpan("inner", () => undefined);
+        outer.end();
+      });
+      await hue.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const hex = (id: string) => Buffer.from(id, "base64").toString("hex");
+      const byName = (name: string) => spans.find((span) => span.name === name)!;
+      const request = byName("request");
+      expect(hex(request.spanId)).toBe(ids.request);
+      for (const name of ["HTTP POST", "execute_tool lookup", "chat synthetic-model", "nested"]) {
+        expect(hex(byName(name).parentSpanId!)).toBe(ids.request);
+        expect(byName(name).traceId).toBe(request.traceId);
+      }
+      expect(hex(byName("execute_tool lookup").spanId)).toBe(ids.tool);
+      expect(hex(byName("chat synthetic-model").spanId)).toBe(ids.model);
+      expect(hex(byName("nested").spanId)).toBe(ids.nested);
+      expect(spans.some((span) => span.name === "kill-switch")).toBe(false);
+      expect(hex(byName("inner").parentSpanId!)).toBe(ids.outer);
+    } finally {
+      context.disable();
+      trace.disable();
+      await hue.shutdown();
+      await disabled.shutdownSafe();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+    expect(context.active()).toBe(previousContext);
+  });
+
+  test("export batches encode each record once and each request once", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "linear-export",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const serialize = spyOn(ProtobufTraceSerializer, "serializeRequest");
+    try {
+      const count = 2000; // within the 2048-record queue
+      for (let index = 0; index < count; index++)
+        hue.tracer.startSpan("burst", { attributes: { index } }).end();
+      const started = performance.now();
+      expect((await hue.flush()).acceptedSpans).toBe(count);
+      const elapsed = performance.now() - started;
+      const requests = endpoint.requests.filter((request) => request.signal === "traces");
+      expect(requests.flatMap((request) => request.records)).toHaveLength(count);
+      // Each record is encoded once to measure it and once more inside its request; the growing
+      // batch is never re-encoded, so the encoded record total is exactly twice the record count.
+      const encoded = serialize.mock.calls.map(([records]) => records.length);
+      expect(encoded.filter((size) => size === 1).length).toBeGreaterThanOrEqual(count);
+      expect(encoded.reduce((total, size) => total + size, 0)).toBe(2 * count);
+      expect(serialize).toHaveBeenCalledTimes(count + requests.length);
+      expect(elapsed).toBeLessThan(1000);
+    } finally {
+      serialize.mockRestore();
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("owned providers export the OpenTelemetry default resource with Hue's service identity", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "resource-owner",
+      serviceVersion: "1.2.3",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan("request", () => hue.recordMessages({ output: null }));
+      await hue.flush();
+      for (const signal of ["traces", "logs"] as const) {
+        const request = endpoint.requests.find((request) => request.signal === signal)!;
+        const data = JSON.parse(request.raw);
+        const [group] = signal === "traces" ? data.resourceSpans : data.resourceLogs;
+        const attributes = Object.fromEntries(
+          (group.resource.attributes as Attribute[]).map((attribute) => [
+            attribute.key,
+            attribute.value.stringValue,
+          ]),
+        );
+        expect(attributes).toMatchObject({
+          "service.name": "resource-owner",
+          "service.version": "1.2.3",
+          "telemetry.sdk.name": "opentelemetry",
+          "telemetry.sdk.language": "nodejs",
+        });
+        expect(attributes["telemetry.sdk.version"]).toMatch(/^\d+\.\d+\.\d+/);
+      }
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("failed spans record error.type and status without exception text at either capture setting", async () => {
+    class ProviderTimeout extends Error {
+      override name = "ProviderTimeout";
+    }
+    for (const captureContent of [true, false]) {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "errors",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await expect(
+          hue.withSpan("failure", () => {
+            throw new RangeError("private synthetic message");
+          }),
+        ).rejects.toBeInstanceOf(RangeError);
+        await expect(
+          hue.tool("timeout", null, () => {
+            throw new ProviderTimeout("private synthetic message");
+          }),
+        ).rejects.toBeInstanceOf(ProviderTimeout);
+        await hue.flush();
+        const spans = endpoint.requests.flatMap((request) => request.records);
+        const failure = spans.find((span) => span.name === "failure")!;
+        const tool = spans.find((span) => span.name === "execute_tool timeout")!;
+        for (const [span, type] of [
+          [failure, "RangeError"],
+          [tool, "ProviderTimeout"],
+        ] as const) {
+          expect(span.status?.code).toBe(2);
+          expect(span.status?.message).toBeUndefined();
+          expect(attr(span, "error.type")?.stringValue).toBe(type);
+          expect(span.events).toHaveLength(1);
+          expect(span.events![0]!.name).toBe("exception");
+          expect(span.events![0]!.attributes).toEqual([
+            { key: "exception.type", value: { stringValue: type } },
+          ]);
+        }
+        expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain(
+          "private synthetic message",
+        );
+      } finally {
+        await hue.shutdown();
+        endpoint.server.stop(true);
+      }
+    }
+  });
+});
+
+describe("Kill switch and safe initialization", () => {
+  test("the kill switch needs neither credentials nor a capture decision and still propagates", async () => {
+    const hue = createHue({ enabled: false });
+    expect(hue.enabled).toBe(false);
+    expect(hue.captureContent).toBe(false);
+    expect(await hue.withSpan("off", () => 42)).toBe(42);
+    const traceparent = `00-${"a".repeat(32)}-${"b".repeat(16)}-01`;
+    const carrier: Record<string, string> = {};
+    hue.inject(carrier, hue.extract({ traceparent }));
+    expect(carrier).toEqual({ traceparent });
+    expect(() => createHue({ enabled: false, captureContent: "yes" } as never)).toThrow(
+      new TypeError("captureContent must be a boolean"),
+    );
+    expect(hue.transport.getReport().instrumentationFailures).toBe(0);
+    expect((await hue.shutdownSafe()).ok).toBe(true);
+  });
+
+  test("safe initialization keeps the diagnostics hook and reports why telemetry is off", async () => {
+    const issues: ExportIssue[] = [];
+    const onExportIssue = (issue: ExportIssue) => {
+      issues.push(issue);
+    };
+    const hue = createHueSafe({
+      apiKey: "bad key",
+      serviceName: "safe",
+      captureContent: false,
+      onExportIssue,
+    });
+    expect(hue.enabled).toBe(false);
+    expect(hue.captureContent).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0)); // the hook runs asynchronously
+    expect(issues).toEqual([
+      expect.objectContaining({
+        signal: "traces",
+        kind: "invalid",
+        count: 0,
+        message: "Hue is disabled: A valid Hue project API key is required",
+      }),
+    ]);
+    expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+    expect(JSON.stringify(hue.transport.getIssues())).not.toContain("bad key");
+    await hue.shutdownSafe();
+    // A broken borrowed provider disables the client the same way, through the transport's hook.
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "safe",
+      captureContent: false,
+      onExportIssue,
+    });
+    const borrowed = createHueSafe({
+      transport,
+      tracerProvider: {
+        getTracer: () => {
+          throw new Error("provider failure");
+        },
+        async forceFlush() {},
+      } as never,
+      loggerProvider: new LoggerProvider({ processors: [] }),
+    });
+    expect(borrowed.enabled).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(issues).toHaveLength(2);
+    expect(issues[1]!.message).toBe("Hue is disabled: provider failure");
+    await borrowed.shutdownSafe();
+    await transport.shutdown();
   });
 });

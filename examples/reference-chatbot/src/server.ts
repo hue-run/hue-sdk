@@ -43,9 +43,23 @@ async function readRequest(request: IncomingMessage) {
 function event(response: ServerResponse, name: string, data: unknown) {
   if (!response.destroyed) response.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
 }
+const port = Number(process.env.PORT ?? "3401");
+if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid PORT");
+// This local example serves loopback browsers only. Comparing Origin with the
+// client-supplied Host header alone is bypassable through DNS rebinding, so the
+// Host header is allow-listed against the bound loopback address first.
+function allowedHost(host: string | undefined, listeningPort: number): boolean {
+  return host === `127.0.0.1:${listeningPort}` || host === `localhost:${listeningPort}`;
+}
 const server = createServer(async (request, response) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Cache-Control", "no-store");
+  const address = server.address();
+  const listeningPort = typeof address === "object" && address ? address.port : port;
+  if (!allowedHost(request.headers.host, listeningPort)) {
+    response.writeHead(403).end();
+    return;
+  }
   if (request.method === "GET" && request.url === "/") {
     response.setHeader("Content-Type", "text/html; charset=utf-8");
     response.end(html);
@@ -66,7 +80,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(404).end();
     return;
   }
-  // This local example accepts same-origin browser requests only.
+  // Same-origin browser requests only; Host was allow-listed above.
   if (request.headers.origin && request.headers.origin !== `http://${request.headers.host}`) {
     response.writeHead(403).end();
     return;
@@ -138,8 +152,6 @@ const server = createServer(async (request, response) => {
   event(response, "done", { traceId });
   response.end();
 });
-const port = Number(process.env.PORT ?? "3401");
-if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid PORT");
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   console.log(

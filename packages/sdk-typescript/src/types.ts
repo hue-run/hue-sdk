@@ -25,7 +25,10 @@ export type Signal = "traces" | "logs";
 
 /** Options accepted by every Hue client and transport, whether enabled or disabled. */
 export interface SharedHueOptions {
-  /** Whether helpers record prompts, responses, tool arguments and results. Required; there is no default. */
+  /**
+   * Whether helpers record prompts, responses, tool arguments and results. Required for an enabled
+   * client, with no default; a disabled client (`enabled: false`) defaults it to `false`.
+   */
   captureContent: boolean;
   /** Hue origin, `https://app.hue.run` by default. An origin only: no path, query, fragment or credentials. */
   baseUrl?: string;
@@ -55,28 +58,30 @@ export interface SharedHueOptions {
 }
 
 /**
- * Options for a client that owns its OpenTelemetry providers. An enabled client needs `apiKey` and
- * `serviceName`; `enabled: false` disables telemetry while helpers keep running application code.
+ * Options for a client that owns its OpenTelemetry providers. An enabled client needs a project
+ * key, a service name and an explicit `captureContent` choice. The kill switch (`enabled: false`)
+ * exports nothing while helpers keep running application code, so it needs no key and
+ * `captureContent` defaults to `false`.
  */
-export type HueOptions = SharedHueOptions &
-  (
-    | {
-        /** Telemetry is on (the default). */
-        enabled?: true;
-        /** Project service key sent as a Bearer token; server side only. */
-        apiKey: string;
-        /** Recorded as the `service.name` resource attribute, 1–256 characters. */
-        serviceName: string;
-      }
-    | {
-        /** Local kill switch: no providers, exports or connection checks. */
-        enabled: false;
-        /** Ignored when disabled. */
-        apiKey?: string;
-        /** Ignored when disabled. */
-        serviceName?: string;
-      }
-  );
+export type HueOptions =
+  | (SharedHueOptions & {
+      /** Telemetry is on (the default). */
+      enabled?: true;
+      /** Project service key sent as a Bearer token; server side only. */
+      apiKey: string;
+      /** Recorded as the `service.name` resource attribute, 1–256 characters. */
+      serviceName: string;
+    })
+  | (Omit<SharedHueOptions, "captureContent"> & {
+      /** Local kill switch: no providers, exports or connection checks. */
+      enabled: false;
+      /** Ignored when disabled. */
+      apiKey?: string;
+      /** Ignored when disabled. */
+      serviceName?: string;
+      /** Optional when disabled; defaults to `false` because nothing is exported. */
+      captureContent?: boolean;
+    });
 
 /** One sanitized delivery or instrumentation problem, kept in a bounded history of 128. */
 export interface ExportIssue {
@@ -162,8 +167,12 @@ export interface TokenUsage {
   outputTokens?: number;
 }
 
-/** Request metadata for {@link HueClient.model}. */
-export interface ModelOptions {
+/**
+ * Options for {@link HueClient.model}: GenAI request metadata plus the {@link SpanOptions} that
+ * apply to a client span. `input` is recorded as `gen_ai.input.messages`.
+ */
+export interface ModelOptions
+  extends Pick<SpanOptions, "sessionId" | "userId" | "input" | "parentContext"> {
   /** Provider identifier recorded as `gen_ai.provider.name`, for example "openai". */
   provider: string;
   /** Recorded as `gen_ai.operation.name`; defaults to "chat". */

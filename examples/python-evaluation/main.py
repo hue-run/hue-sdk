@@ -16,7 +16,7 @@ from hue_sdk.evals import (
     ScoreContext,
     TargetContext,
     TraceEvidence,
-    builtins,
+    builtin_scorers,
     define_local_scorer,
     rescore,
     run_experiment,
@@ -48,9 +48,9 @@ def main() -> None:
         score=has_value,
     )
     definitions = [
-        builtins.exact_match(),
-        builtins.includes(False),
-        builtins.json_schema({"type": ["string", "null"]}),
+        builtin_scorers.exact_match(),
+        builtin_scorers.includes(False),
+        builtin_scorers.json_schema({"type": ["string", "null"]}),
         local.definition,
     ]
     versions = []
