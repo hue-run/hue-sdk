@@ -57,7 +57,8 @@
     },
     "./environment": {
       "types": "./dist/environment.d.ts",
-      "import": "./dist/environment.js"
+      "import": "./dist/environment.js",
+      "default": "./dist/environment.js"
     },
     "./managed": {
       "types": "./dist/managed.d.ts",
@@ -78,8 +79,7 @@
     "@opentelemetry/otlp-transformer": "0.222.0",
     "@opentelemetry/resources": "2.11.0",
     "@opentelemetry/sdk-logs": "0.222.0",
-    "@opentelemetry/sdk-trace": "2.11.0",
-    "zod": "4.6.5"
+    "@opentelemetry/sdk-trace": "2.11.0"
   },
   "devDependencies": {
     "@ai-sdk/otel": "1.0.99",
@@ -90,13 +90,15 @@
     "ai": "7.0.99",
     "ajv": "8.20.0",
     "protobufjs": "8.8.0",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "zod": "4.6.5"
   },
   "peerDependencies": {
     "@ai-sdk/otel": "^1.0.99",
     "@opentelemetry/api": "^1.9.1",
     "ai": "^6.0.0 || ^7.0.99",
-    "ajv": "^8.17.0"
+    "ajv": "^8.17.0",
+    "zod": "^4.6.5"
   },
   "peerDependenciesMeta": {
     "@ai-sdk/otel": {
@@ -106,6 +108,9 @@
       "optional": true
     },
     "ajv": {
+      "optional": true
+    },
+    "zod": {
       "optional": true
     }
   },

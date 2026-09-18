@@ -80,7 +80,8 @@ def inspect(path: Path, language: str, version: str) -> None:
             )
         )
         for entry in metadata["exports"].values():
-            for target in entry.values():
+            targets = entry.values() if isinstance(entry, dict) else (entry,)
+            for target in targets:
                 assert "package/" + target.removeprefix("./") in files, (
                     "Missing public export"
                 )

@@ -1,5 +1,11 @@
 # Simulated environments
 
+Install the optional evaluation runtime-contract peer with the SDK:
+
+```bash
+npm install @hue-run/sdk zod
+```
+
 Your agent runs in your process while a disposable simulated world runs in Hue. The world is
 authoritative and records an ordered journal; Hue does not execute your agent code or provider
 credentials.

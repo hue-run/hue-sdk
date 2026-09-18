@@ -367,12 +367,14 @@ conditions only. Use Hue's UI to inspect captured values and redaction.
 ## Dependencies
 
 From 0.2.0 the tracing core depends only on official `@opentelemetry/*` packages (0.1.5 installs `ajv`
-as a regular dependency). JSON Schema scoring in
-`@hue-run/sdk/evals` uses `ajv`, an optional peer dependency that is loaded inside a worker only when
-`builtins.jsonSchema` scores a case; without it that scorer reports `SchemaValidatorUnavailable`.
-Install it when you use that scorer:
+as a regular dependency). The optional `@hue-run/sdk/evals` entry point uses `zod` for its bounded
+runtime contracts. Install that peer when you use evaluations or simulations. JSON Schema scoring
+also uses `ajv`, loaded inside a worker only when `builtins.jsonSchema` scores a case; without it that
+scorer reports `SchemaValidatorUnavailable`.
 
 ```bash
+npm install zod
+# Add ajv too when using builtins.jsonSchema.
 npm install ajv
 ```
 

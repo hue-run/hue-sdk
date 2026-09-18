@@ -102,16 +102,8 @@ run(
   import { strict as assert } from "node:assert";
   await import("@hue-run/sdk");
   await import("@hue-run/sdk/managed");
-  await import("@hue-run/sdk/environment");
-  const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
-  // ajv is an optional peer: a tracing-only install must load evals and report the missing
-  // validator as a scorer error instead of failing at import or crashing a worker.
-  const score = await scoreLocally(
-    { definition: builtins.jsonSchema({ type: "string" }) },
-    { inputs: {}, output: "text", hasOutput: true, hasExpected: false },
-  );
-  assert.equal(score.state, "error");
-  assert.equal(score.error.type, "SchemaValidatorUnavailable");
+  const environment = await import("@hue-run/sdk/environment");
+  assert.equal(typeof environment.createEnvironmentClient, "function");
 `,
   ],
   minimal,
@@ -127,11 +119,11 @@ run(
     `
   const assert = require("node:assert/strict");
   const sdk = require("@hue-run/sdk");
-  const evals = require("@hue-run/sdk/evals");
+  const environment = require("@hue-run/sdk/environment");
   const managed = require("@hue-run/sdk/managed");
   assert.equal(typeof sdk.createHue, "function");
   assert.equal(typeof sdk.createHueSafe, "function");
-  assert.equal(typeof evals.scoreLocally, "function");
+  assert.equal(typeof environment.createEnvironmentClient, "function");
   assert.equal(typeof managed.createManagedTargetHandler, "function");
   const hue = sdk.createHue({ enabled: false });
   hue
@@ -148,6 +140,43 @@ run(
 `,
   ],
   minimal,
+);
+// Evaluation/simulation users install the optional validation peer. Ajv remains separately
+// optional: without it the JSON Schema scorer reports a typed error instead of crashing.
+const evaluation = join(destination, "evaluation-consumer");
+await mkdir(evaluation);
+await writeFile(
+  join(evaluation, "package.json"),
+  JSON.stringify({
+    private: true,
+    type: "module",
+    dependencies: { "@hue-run/sdk": packageSpec, zod: pkg.devDependencies.zod },
+  }),
+);
+run(
+  "npm",
+  ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"],
+  evaluation,
+);
+run(
+  process.execPath,
+  [
+    "--input-type=module",
+    "-e",
+    `
+  import { strict as assert } from "node:assert";
+  import { createRequire } from "node:module";
+  const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
+  const score = await scoreLocally(
+    { definition: builtins.jsonSchema({ type: "string" }) },
+    { inputs: {}, output: "text", hasOutput: true, hasExpected: false },
+  );
+  assert.equal(score.state, "error");
+  assert.equal(score.error.type, "SchemaValidatorUnavailable");
+  assert.equal(createRequire(import.meta.url)("@hue-run/sdk/evals").scoreLocally, scoreLocally);
+`,
+  ],
+  evaluation,
 );
 // Core imports must coexist with an existing AI SDK 6 application without
 // forcing an upgrade. Its AI SDK telemetry adapter remains explicitly v7-only.

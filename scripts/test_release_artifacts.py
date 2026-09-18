@@ -24,7 +24,8 @@ class ArchiveGateTests(unittest.TestCase):
             "license": "MIT",
             "publishConfig": {"access": "public"},
             "exports": {
-                ".": {"import": "./dist/index.js", "types": "./dist/index.d.ts"}
+                ".": {"import": "./dist/index.js", "types": "./dist/index.d.ts"},
+                "./package.json": "./package.json",
             },
         }
         metadata.update(metadata_changes or {})
