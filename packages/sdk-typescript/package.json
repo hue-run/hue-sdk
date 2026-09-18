@@ -1,6 +1,6 @@
 {
   "name": "@hue-run/sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "license": "MIT",
   "publishConfig": {
@@ -16,7 +16,7 @@
     "url": "git+https://github.com/hue-run/hue-sdk.git",
     "directory": "packages/sdk-typescript"
   },
-  "description": "Hue OpenTelemetry helpers for Node.js agent applications (hue.run, not Philips Hue)",
+  "description": "Hue OpenTelemetry helpers for Node.js agent applications",
   "keywords": [
     "opentelemetry",
     "otlp",
