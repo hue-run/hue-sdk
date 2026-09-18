@@ -29,11 +29,19 @@ export interface SharedHueOptions {
   maxQueueBytes?: number;
 }
 
-export type HueOptions = SharedHueOptions &
-  (
-    | { enabled?: true; apiKey: string; serviceName: string }
-    | { enabled: false; apiKey?: string; serviceName?: string }
-  );
+/**
+ * An enabled client needs a project key, a service name and an explicit `captureContent` choice.
+ * The kill switch (`enabled: false`) exports nothing, so it needs no key and `captureContent`
+ * defaults to `false`.
+ */
+export type HueOptions =
+  | (SharedHueOptions & { enabled?: true; apiKey: string; serviceName: string })
+  | (Omit<SharedHueOptions, "captureContent"> & {
+      enabled: false;
+      apiKey?: string;
+      serviceName?: string;
+      captureContent?: boolean;
+    });
 
 export interface ExportIssue {
   sequence: number;
@@ -86,7 +94,12 @@ export interface TokenUsage {
   outputTokens?: number;
 }
 
-export interface ModelOptions {
+/**
+ * Options for `hue.model()`: GenAI request metadata plus the `withSpan` options that apply to a
+ * client span. `input` is recorded as `gen_ai.input.messages`.
+ */
+export interface ModelOptions
+  extends Pick<SpanOptions, "sessionId" | "userId" | "input" | "parentContext"> {
   /** Provider identifier recorded as `gen_ai.provider.name`, for example "openai". */
   provider: string;
   /** Recorded as `gen_ai.operation.name`; defaults to "chat". */

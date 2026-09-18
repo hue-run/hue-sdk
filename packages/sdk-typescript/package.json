@@ -78,6 +78,7 @@
   "devDependencies": {
     "@ai-sdk/otel": "1.0.99",
     "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/context-async-hooks": "2.11.0",
     "@types/bun": "1.4.2",
     "@types/node": "24.10.1",
     "ai": "7.0.99",

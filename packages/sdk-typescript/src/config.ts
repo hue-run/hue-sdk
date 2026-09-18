@@ -1,24 +1,29 @@
-import type { HueOptions } from "./types.js";
+import type { HueOptions, SharedHueOptions } from "./types.js";
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const MAX_CONTENT_BYTES = 256 * 1024;
 
-export function validateOptions(
-  options: HueOptions,
-): Required<
-  Pick<
-    HueOptions,
-    "apiKey" | "serviceName" | "baseUrl" | "captureContent" | "timeoutMillis" | "maxQueueBytes"
-  >
-> &
-  HueOptions {
-  if (typeof options.captureContent !== "boolean")
-    throw new TypeError("Choose captureContent explicitly: true or false");
+export type ValidatedHueOptions = HueOptions &
+  Required<
+    Pick<SharedHueOptions, "captureContent" | "baseUrl" | "timeoutMillis" | "maxQueueBytes">
+  > & {
+    apiKey: string;
+    serviceName: string;
+  };
+
+export function validateOptions(options: HueOptions): ValidatedHueOptions {
   if (options.enabled !== undefined && typeof options.enabled !== "boolean")
     throw new TypeError("enabled must be a boolean");
-  if (options.enabled === false)
+  if (options.enabled === false) {
+    // The kill switch exports nothing, so the content decision defaults to metadata-only. The
+    // diagnostics hook stays attached so a disabled client can still report why it is off.
+    if (options.captureContent !== undefined && typeof options.captureContent !== "boolean")
+      throw new TypeError("captureContent must be a boolean");
     return {
-      captureContent: options.captureContent,
+      ...(typeof options.onExportIssue === "function"
+        ? { onExportIssue: options.onExportIssue }
+        : {}),
+      captureContent: options.captureContent ?? false,
       enabled: false,
       apiKey: "",
       serviceName: "hue-disabled",
@@ -26,6 +31,9 @@ export function validateOptions(
       timeoutMillis: 10000,
       maxQueueBytes: 8 * 1024 * 1024,
     };
+  }
+  if (typeof options.captureContent !== "boolean")
+    throw new TypeError("Choose captureContent explicitly: true or false");
   if (
     typeof options.apiKey !== "string" ||
     !options.apiKey ||
