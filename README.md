@@ -190,7 +190,7 @@ Hue's SDKs are deliberately small. The following are design choices, not missing
 - No proprietary event protocol, live token streaming, attachments or feature-flag API. Spans are exported when they complete; use standard attributes and span events.
 - No browser, edge or CommonJS builds: the project service key is a server-side credential.
 - No environment-variable reading in constructors, no token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
-- The service key is write-only plus receipts. General trace browsing, feedback, and score ingestion for stored traces remain platform concerns. TypeScript's explicit `runSimulation()` helper orchestrates versioned simulation resources; it does not grant general read access or hide provider execution.
+- The SDK service key is write-only plus receipts. Trace browsing for coding agents is provided by the [Hue MCP server](https://docs.hue.run/agents/mcp-server) with a separate read-only key, not by these clients; feedback or score ingestion for stored traces remain platform concerns. TypeScript's explicit `runSimulation()` helper orchestrates versioned simulation resources; it does not grant general read access or hide provider execution.
 
 See [VERSIONING.md](./VERSIONING.md) for what may change between releases.
 
