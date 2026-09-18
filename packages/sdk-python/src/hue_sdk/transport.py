@@ -32,6 +32,9 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from ._version import __version__
 
 MAX_REQUEST_BYTES = 1_048_576
+# Batches stop 1 KiB short of the wire cap so gzip framing of incompressible data cannot exceed it,
+# matching the TypeScript transport.
+MAX_BATCH_BYTES = MAX_REQUEST_BYTES - 1024
 MAX_CONTENT_BYTES = 262_144
 DEFAULT_BASE_URL = "https://app.hue.run"
 # The OTLP exporter lets caller headers override its own User-Agent; keep its token after
@@ -258,7 +261,7 @@ def _split_batches(
     """Split by actual protobuf bytes, retaining order. Oversized singles stay visible."""
     if not items:
         return []
-    if encode(items).ByteSize() <= MAX_REQUEST_BYTES or len(items) == 1:
+    if encode(items).ByteSize() <= MAX_BATCH_BYTES or len(items) == 1:
         return [items]
     middle = len(items) // 2
     return _split_batches(items[:middle], encode) + _split_batches(items[middle:], encode)
@@ -294,7 +297,7 @@ class BoundedSpanExporter(SpanExporter):
         failed = False
         try:
             for batch in _split_batches(spans, encode_spans):
-                if encode_spans(batch).ByteSize() > MAX_REQUEST_BYTES:
+                if encode_spans(batch).ByteSize() > MAX_BATCH_BYTES:
                     failed = True
                 elif self._delegate.export(batch) is not SpanExportResult.SUCCESS:
                     failed = True
@@ -344,7 +347,7 @@ class BoundedLogExporter(LogRecordExporter):
         failed = False
         try:
             for chunk in _split_batches(batch, encode_logs):
-                if encode_logs(chunk).ByteSize() > MAX_REQUEST_BYTES:
+                if encode_logs(chunk).ByteSize() > MAX_BATCH_BYTES:
                     failed = True
                 elif self._delegate.export(chunk) is not LogRecordExportResult.SUCCESS:
                     failed = True

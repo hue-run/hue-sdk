@@ -400,7 +400,7 @@ def test_encoded_batches_are_split_and_single_oversize_is_visible(receiver):
                 span.log_inference(output="y" * 200_000)
         assert hue.force_flush()
         assert len(receiver.spans()) == len(receiver.logs()) == 8
-        assert all(len(body) <= 1_048_576 for _, _, body in receiver.requests)
+        assert all(int(h["X-Wire-Bytes"]) <= 1_048_576 for _, h, _ in receiver.requests)
         assert len(receiver.requests) >= 4
         with hue.span("too-large-custom-record") as span:
             # Caller-controlled arbitrary attributes are not silently truncated by Hue.
