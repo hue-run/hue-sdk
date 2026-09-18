@@ -3,7 +3,7 @@
 This repository is public and MIT-licensed. Read README.md and the relevant package guide before changing code.
 
 - Keep the TypeScript and Python SDKs usable from a standalone checkout. Do not import Hue application code or connect SDK tests to customer databases.
-- Use Node 24, Bun 1.3.9 and uv 0.12.5; preserve frozen lockfiles and the tested compatibility matrix.
+- Use Node 24, Bun 1.4.2 and uv 0.12.5; preserve frozen lockfiles and the tested compatibility matrix.
 - Test changed behavior from an installed tarball/wheel, including exporter acknowledgements and privacy boundaries. Use synthetic HTTP providers and loopback receivers; do not call paid providers to test implementation.
 - Preserve public API presence bits, explicit capture policy, flush/shutdown results and existing OpenTelemetry ownership.
 - Never print or commit real keys, customer data, internal links or unreleased platform details. Pull request descriptions and commit messages are public. Keep local environments ignored.

@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.1.9"
+  version: "0.1.10"
 ---
 
 # Hue tracing
@@ -16,7 +16,8 @@ Read the application's repository instructions and inspect its runtime, dependen
 
 | Application | Path |
 | --- | --- |
-| Node.js 24, without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript) |
+| Node.js 22 or 24, without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript) |
+| Bun 1.4 (server-side) | [TypeScript SDK](https://docs.hue.run/sdks/typescript); the installed-package suite and reference chatbot run under Bun in CI, resource-bound checks on Node only |
 | Python 3.10+ | [Python SDK](https://docs.hue.run/sdks/python) |
 | Existing OTel provider or framework instrumentation | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); retain the provider and other exporters |
 

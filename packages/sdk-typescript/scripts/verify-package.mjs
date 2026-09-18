@@ -41,6 +41,34 @@ if (!values.archive && !values["registry-version"]) {
   run("bun", ["--no-env-file", "run", "typecheck"], staging);
   run("bun", ["--no-env-file", "run", "build"], staging);
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
+  // Bun's packer must agree with npm's file inventory; the release artifact stays npm pack.
+  const bunPack = spawnSync("bun", ["--no-env-file", "pm", "pack", "--dry-run"], {
+    cwd: staging,
+    encoding: "utf8",
+    env: process.env,
+  });
+  if (bunPack.status !== 0) throw new Error("bun pm pack --dry-run failed");
+  const bunFiles = new Set(
+    bunPack.stdout
+      .split("\n")
+      .map((line) => /^packed\s+\S+\s+(.+)$/u.exec(line)?.[1])
+      .filter(Boolean),
+  );
+  const tarList = spawnSync("tar", ["-tzf", tarball], { encoding: "utf8" });
+  if (tarList.status !== 0) throw new Error("Unable to list the packed tarball");
+  const npmFiles = new Set(
+    tarList.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((entry) => entry.replace(/^package\//u, "")),
+  );
+  const onlyNpm = [...npmFiles].filter((file) => !bunFiles.has(file));
+  const onlyBun = [...bunFiles].filter((file) => !npmFiles.has(file));
+  if (onlyNpm.length || onlyBun.length)
+    throw new Error(
+      `npm pack and bun pm pack disagree on package contents: npm-only ${JSON.stringify(onlyNpm)}, bun-only ${JSON.stringify(onlyBun)}`,
+    );
+  console.log(`pack inventory: ${npmFiles.size} files agree between npm pack and bun pm pack`);
 }
 const packageSpec = values["registry-version"] ?? `file:${tarball}`;
 // Check the advertised install before adding any test or optional AI dependencies.
@@ -229,11 +257,20 @@ for (const patch of [99, 100]) {
     throw new Error("Installed package does not match this checkout");
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
+  // HUE_JUNIT_DIR (set by CI) collects a JUnit report per AI SDK pair for the workflow summary.
+  const junit = process.env.HUE_JUNIT_DIR
+    ? [
+        "--reporter=junit",
+        `--reporter-outfile=${join(process.env.HUE_JUNIT_DIR, `bun-test-ai7.0.${patch}.xml`)}`,
+      ]
+    : [];
+  if (process.env.HUE_JUNIT_DIR) await mkdir(process.env.HUE_JUNIT_DIR, { recursive: true });
   run(
     "bun",
     [
       "--no-env-file",
       "test",
+      ...junit,
       "./tests/sdk.test.ts",
       "./tests/evals.test.ts",
       "./tests/receipt.test.ts",
@@ -255,6 +292,13 @@ for (const patch of [99, 100]) {
   run("bun", ["--no-env-file", "install"], chatbot);
   run("bun", ["--no-env-file", "run", "build"], chatbot);
   run(process.execPath, [join(source, "scripts/verify-node.mjs"), consumer, chatbot], destination);
+  // The same acceptance under Bun: verify-node.mjs starts the chatbot with process.execPath,
+  // so this exercises the installed package and the reference chatbot on the Bun runtime.
+  run(
+    "bun",
+    ["--no-env-file", join(source, "scripts/verify-node.mjs"), consumer, chatbot],
+    destination,
+  );
   run(
     process.execPath,
     ["--unhandled-rejections=strict", join(source, "scripts/verify-safety.mjs"), consumer],

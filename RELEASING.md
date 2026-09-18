@@ -53,7 +53,7 @@ Do not rerun the publishing workflow for the version already published manually.
 
 ## Local preparation and acceptance
 
-Use Node 24, Bun 1.3.9 and uv 0.12.5. Run commands from the repository root. `scripts/release-artifacts.py` and `scripts/verify-python-release.py` require Python 3.11+ to orchestrate checks; the latter installs and tests SDK consumers on the selected Python 3.10 or 3.14 runtime.
+Use Node 24, Bun 1.4.2 and uv 0.12.5. Run commands from the repository root. `scripts/release-artifacts.py` and `scripts/verify-python-release.py` require Python 3.11+ to orchestrate checks; the latter installs and tests SDK consumers on the selected Python 3.10 or 3.14 runtime.
 
 ### TypeScript
 

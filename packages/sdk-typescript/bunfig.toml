@@ -1,0 +1,6 @@
+# Supply-chain cooldown for non-frozen installs (bun add / bun update): refuse package versions
+# younger than three days, when publish-and-yank attacks are usually still undetected.
+# Frozen installs are unaffected. One-off override: bun install --minimum-release-age 0
+[install]
+minimumReleaseAge = 259200
+minimumReleaseAgeExcludes = ["@hue-run/sdk"]

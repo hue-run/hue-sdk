@@ -16,11 +16,13 @@ refuses to publish a version without a matching entry below.
 - `hue.inject()` / `hue.extract()` carry W3C trace context between processes without baggage or credentials.
 - `hueExperimentalTelemetry(hue)` from the core entry point for AI SDK 6 `experimental_telemetry`; `hueTelemetry` remains AI SDK 7 only.
 - `contentPrefixes` exports the attribute keys removed in metadata-only mode.
+- Bun 1.4.2 runs the installed-package behavioral suite and the reference chatbot in package verification, and `bun pm pack` must agree with `npm pack` on package contents.
 
 #### Changed
 
 - Export requests use explicit configuration only: `OTEL_EXPORTER_OTLP_*` environment variables no longer reach Hue's endpoint, and requests carry a `hue-sdk-typescript/<version>` User-Agent. **Wire**
 - The instrumentation scope version is read from `package.json` instead of a hand-maintained literal.
+- `engines.node` is `>=22.12`; Node 22 and 24 are tested and Node 26 runs in CI.
 - `ajv` is an optional peer dependency used only by `builtins.jsonSchema`; without it that scorer reports `SchemaValidatorUnavailable`. The tracing core now depends only on `@opentelemetry/*` packages.
 - npm releases carry provenance attestations now that the source repository is public.
 
@@ -131,6 +133,7 @@ refuses to publish a version without a matching entry below.
 
 ## Coding-agent skill (skills/hue)
 
+- 0.1.10 (unreleased): Node 22 and Bun runtime rows.
 - 0.1.9 (unreleased): AI SDK 6 per-call telemetry, TypeScript `model()` helper and export-time content stripping in both SDKs.
 - 0.1.8 (unreleased): fixed Next.js streaming anchor, troubleshooting table and handoff templates.
 - 0.1.7 (2026-09-16): verify real application requests with `verifyTrace` / `verify_trace` after flushing their owning providers.
