@@ -34,7 +34,11 @@ def test_cloud_defaults_route_validation_traces_logs_and_evaluations(receiver, m
         assert hue.validate_project().slug == client.check_connection()["slug"]
         with hue.span("configured-default") as span:
             span.set_input("content-must-stay-private")
-            span.log_inference(output="content-must-stay-private")
+            span.log_inference(output="content-must-stay-private")  # Emits nothing in this mode.
+            # Exercise the default /logs route with a record whose body metadata-only mode strips.
+            hue.logger_provider.get_logger("hue-run", __version__).emit(
+                body="content-must-stay-private"
+            )
         assert hue.force_flush()
 
     assert len(destinations) == 4

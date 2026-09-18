@@ -112,6 +112,10 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- `log_inference` emits the `gen_ai.client.inference.operation.details` record with a structured body instead of JSON-string fields (an explicit `None` field keeps its key with an empty value, as in TypeScript), sets `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` as record attributes from the enclosing `model()` block or the new `operation=`, `provider=` and `model=` keywords, and `gen_ai.conversation.id` from the enclosing `context()`, matching TypeScript `recordMessages` (#37). With `capture_content=False` no record is emitted, and the Python-only `hue.capture_content` record attribute is gone. **Wire**
+
 ### [0.2.1](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.2.1) - 2026-09-18
 
 #### Changed

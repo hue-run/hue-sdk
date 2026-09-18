@@ -86,9 +86,25 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
             payload = b"".join(body for _, _, body in receiver.requests[offset:])
             assert b"Double 10.5" not in payload
             assert b"The synthetic " not in payload
+            assert not any(path.endswith("/logs") for path, _, _ in receiver.requests[offset:])
     spans = receiver.spans()
     assert len(spans) == 8  # Four spans for each capture mode.
-    assert len(receiver.logs()) == 2
+    logs = receiver.logs()
+    assert len(logs) == 1  # Only the content-capturing run emits the inference record.
+    log = logs[0]
+    assert any(
+        span.name == "chat synthetic-stream-v1" and span.span_id == log.span_id for span in spans
+    )
+    assert {item.key: item.value.string_value for item in log.attributes} == {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "synthetic",
+        "gen_ai.request.model": "synthetic-stream-v1",
+        "gen_ai.conversation.id": "python-reference-session",
+    }
+    (field,) = log.body.kvlist_value.values
+    assert field.key == "gen_ai.output.messages"
+    role = field.value.array_value.values[0].kvlist_value.values[0]
+    assert role.key == "role" and role.value.string_value == "assistant"
     assert len([span for span in spans if span.status.code == 2]) == 2
     assert (
         len([event for span in spans for event in span.events if event.name == "stream.chunk"]) == 6

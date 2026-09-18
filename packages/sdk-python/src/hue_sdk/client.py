@@ -44,6 +44,11 @@ Redactor = Callable[[str, Any], Any]
 _MISSING = object()
 
 
+def _is_label(value: Any) -> bool:
+    """A non-blank string of at most 256 characters, matching TypeScript's ``isLabel``."""
+    return type(value) is str and bool(value.strip()) and len(value) <= 256
+
+
 class ProjectValidationError(RuntimeError):
     """Authentication, connectivity or invalid project response; never contains a key."""
 
@@ -61,10 +66,18 @@ class HueSpan:
 
     otel_span: trace.Span
 
-    def __init__(self, client: Hue, span: trace.Span, category: str) -> None:
+    def __init__(
+        self,
+        client: Hue,
+        span: trace.Span,
+        category: str,
+        record_attributes: Mapping[str, str] | None = None,
+    ) -> None:
         self._client = client
         self.otel_span = span
         self._category = category
+        # Request metadata and session copied onto inference-log records; see ``Hue.span``.
+        self._record_attributes = dict(record_attributes or {})
 
     @property
     def trace_id(self) -> str:
@@ -131,32 +144,67 @@ class HueSpan:
             lambda: self.otel_span.add_event("exception", {"exception.type": error_type})
         )
 
-    def log_inference(self, *, input: Any = _MISSING, output: Any = _MISSING) -> None:
+    def log_inference(
+        self,
+        *,
+        input: Any = _MISSING,
+        output: Any = _MISSING,
+        operation: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
         """Emit a standard GenAI details log correlated to this span, even outside its scope.
 
         Use this instead of repeating identical content in both logs and span attributes.
-        JSON null is serialized as ``"null"`` so protobuf's absent AnyValue stays distinct.
+        The body is structured: an explicit ``None`` field keeps its key with an empty value,
+        distinct from an absent field. ``gen_ai.operation.name``, ``gen_ai.provider.name`` and
+        ``gen_ai.request.model`` come from the keywords or the enclosing ``model()`` block, and
+        ``gen_ai.conversation.id`` from the enclosing ``context()``. Nothing is emitted when
+        ``capture_content`` is False.
         """
-        if not self._client._active:
+        if not self._client._active or not self._client.capture_content:
             return
-        self._client._instrument(lambda: self._log_inference(input, output))
+        self._client._instrument(
+            lambda: self._log_inference(input, output, operation, provider, model)
+        )
 
-    def _log_inference(self, input: Any, output: Any) -> None:
-        body: dict[str, str] = {}
-        if self._client.capture_content:
-            for key, value in (
-                ("gen_ai.input.messages", input),
-                ("gen_ai.output.messages", output),
-            ):
-                if value is not _MISSING:
-                    body[key] = self._client._content(key, value)
+    def _log_inference(
+        self,
+        input: Any,
+        output: Any,
+        operation: str | None,
+        provider: str | None,
+        model: str | None,
+    ) -> None:
+        attributes = dict(self._record_attributes)
+        for key, label in (
+            ("gen_ai.operation.name", operation),
+            ("gen_ai.provider.name", provider),
+            ("gen_ai.request.model", model),
+        ):
+            if label is None:
+                continue
+            if _is_label(label):
+                attributes[key] = label
+            else:
+                # An unusable explicit label is omitted rather than replaced by the inherited one.
+                attributes.pop(key, None)
+                self._client._record_issue()
+        body: dict[str, Any] = {}
+        for key, value in (
+            ("gen_ai.input.messages", input),
+            ("gen_ai.output.messages", output),
+        ):
+            if value is not _MISSING:
+                # Bound and redact each field as JSON, then send the structure rather than its text.
+                body[key] = json.loads(self._client._content(key, value))
         self._client._logger.emit(
             timestamp=time_ns(),
             context=trace.set_span_in_context(self.otel_span),
             severity_number=SeverityNumber.INFO,
             event_name="gen_ai.client.inference.operation.details",
-            body=body or None,
-            attributes={"hue.capture_content": self._client.capture_content},
+            body=body,
+            attributes=attributes,
         )
 
 
@@ -238,6 +286,7 @@ class Hue:
         self._context_attributes: ContextVar[dict[str, AttributeValue] | None] = ContextVar(
             "hue_context", default=None
         )
+        self._model_scope: ContextVar[dict[str, str] | None] = ContextVar("hue_model", default=None)
         if not enabled:
             self._owns_provider = False
             self._owns_logger_provider = False
@@ -416,9 +465,17 @@ class Hue:
     ) -> Iterator[HueSpan]:
         otel_span: trace.Span = trace.INVALID_SPAN
         scope = None
+        record_attributes: dict[str, str] | None = None
         if self._active:
             try:
-                merged = {**(self._context_attributes.get() or {}), **(attributes or {})}
+                inherited = self._context_attributes.get() or {}
+                merged = {**inherited, **(attributes or {})}
+                # Copied now so log_inference keeps the enclosing model() metadata and session
+                # even after their blocks exit.
+                record_attributes = dict(self._model_scope.get() or {})
+                session_id = inherited.get("gen_ai.conversation.id")
+                if isinstance(session_id, str):
+                    record_attributes["gen_ai.conversation.id"] = session_id
                 otel_span = self.tracer.start_span(
                     name, attributes=merged, kind=kind, context=parent_context
                 )
@@ -432,7 +489,7 @@ class Hue:
             except Exception:
                 self._record_issue()
                 scope = None
-        helper = HueSpan(self, otel_span, _category)
+        helper = HueSpan(self, otel_span, _category, record_attributes)
         try:
             # The business block is yielded exactly ONCE, outside setup catches.
             yield helper
@@ -467,17 +524,38 @@ class Hue:
         operation = self._metadata_string(operation, "chat")
         provider = self._metadata_string(provider, "unknown")
         name = self._metadata_string(name, "") if name is not None else ""
-        with self.span(
-            name or f"{operation} {model}",
-            kind=SpanKind.CLIENT,
-            attributes={
-                "gen_ai.operation.name": operation,
-                "gen_ai.request.model": model,
-                "gen_ai.provider.name": provider,
-            },
-            _category="model",
-        ) as span:
-            yield span
+        token = None
+        if self._active:
+            try:
+                # log_inference on this helper, and on helpers created inside the block, copies
+                # the request metadata onto its record, like TypeScript's inherited scope.
+                token = self._model_scope.set(
+                    {
+                        "gen_ai.operation.name": operation,
+                        "gen_ai.provider.name": provider,
+                        "gen_ai.request.model": model,
+                    }
+                )
+            except Exception:
+                self._record_issue()
+        try:
+            with self.span(
+                name or f"{operation} {model}",
+                kind=SpanKind.CLIENT,
+                attributes={
+                    "gen_ai.operation.name": operation,
+                    "gen_ai.request.model": model,
+                    "gen_ai.provider.name": provider,
+                },
+                _category="model",
+            ) as span:
+                yield span
+        finally:
+            if token is not None:
+                try:
+                    self._model_scope.reset(token)
+                except Exception:
+                    self._record_issue()
 
     @contextmanager
     def tool(self, name: str, *, call_id: str | None = None) -> Iterator[HueSpan]:

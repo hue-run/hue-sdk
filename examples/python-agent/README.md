@@ -1,6 +1,6 @@
 # Python reference agent
 
-This small application imports only the installed `hue_sdk` public package. It produces an explicitly synthetic streamed model response, a tool execution and a handled tool failure. It uses both OTLP traces and correlated inference logs.
+This small application imports only the installed `hue_sdk` public package. It produces an explicitly synthetic streamed model response, a tool execution and a handled tool failure. It uses OTLP traces and, when content capture is enabled, a correlated inference log.
 
 Install the published package into a virtual environment (`pip install -r examples/python-agent/requirements.txt`), then set `HUE_API_KEY` (and `HUE_BASE_URL` for a deployment other than Hue Cloud) in your environment without committing their values:
 

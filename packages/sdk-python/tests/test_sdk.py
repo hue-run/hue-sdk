@@ -36,6 +36,10 @@ def attrs(span):
     return {attribute.key: attribute.value for attribute in span.attributes}
 
 
+def body_of(log):
+    return {entry.key: entry.value for entry in log.body.kvlist_value.values}
+
+
 def test_actual_trace_log_correlation_and_content(receiver):
     with Hue(receiver.url + "/", KEY, capture_content=True) as hue:
         assert hue.validate_project().slug == "synthetic-sdk"
@@ -66,12 +70,103 @@ def test_actual_trace_log_correlation_and_content(receiver):
     log = receiver.logs()[0]
     assert log.trace_id == model.trace_id and log.span_id == model.span_id
     assert log.event_name == "gen_ai.client.inference.operation.details"
-    assert log.body.kvlist_value.values[0].value.string_value == "null"
+    (field,) = log.body.kvlist_value.values
+    assert field.key == "gen_ai.output.messages" and field.value.WhichOneof("value") is None
+    assert attrs(log)["gen_ai.operation.name"].string_value == "chat"
+    assert attrs(log)["gen_ai.provider.name"].string_value == "synthetic"
+    assert attrs(log)["gen_ai.request.model"].string_value == "test-model"
+    assert attrs(log)["gen_ai.conversation.id"].string_value == "conversation"
+    assert "hue.capture_content" not in attrs(log)
     for path, headers, _ in receiver.requests:
         assert path.startswith("/api/v1/")
         assert headers["Authorization"] == f"Bearer {KEY}"
         if path.endswith(("/traces", "/logs")):
             assert headers["Content-Type"] == "application/x-protobuf"
+
+
+def test_inference_log_carries_request_metadata_and_a_structured_body(receiver):
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.context(session_id="session-attributes"), hue.span("request") as root:
+            with hue.model(
+                "synthetic-model", provider="synthetic", operation="generate_content"
+            ) as model:
+                model.log_inference(
+                    output=[{"role": "assistant", "parts": [{"type": "text", "content": "hi"}]}]
+                )
+                with hue.tool("lookup") as tool:
+                    tool.log_inference(output="nested")  # Inherited through the task-local scope.
+                model.log_inference(output="override", model="explicit-model")
+                model.log_inference()  # No fields: an empty structured body, attributes intact.
+            model.log_inference(output="after")  # The helper keeps its metadata after the block.
+            root.log_inference(
+                output="plain", operation="chat", provider="caller", model="caller-model"
+            )
+            root.log_inference(output="bare")
+            assert hue.export_status.instrumentation_failures == 0
+            root.log_inference(output="invalid", model="")
+            assert hue.export_status.instrumentation_failures == 1
+        assert not hue.force_flush()  # The counted label failure, not a delivery problem.
+        status = hue.export_status
+        assert status.failed_log_batches == status.dropped_log_records == 0
+    spans = {span.name: span for span in receiver.spans()}
+    logs = receiver.logs()
+    assert len(logs) == 8
+    structured, nested, override, empty, after, plain, bare, invalid = logs
+    assert [body_of(log)["gen_ai.output.messages"].string_value for log in logs[4:]] == [
+        "after",
+        "plain",
+        "bare",
+        "invalid",
+    ]
+    for log in (structured, nested, empty, after):
+        assert attrs(log)["gen_ai.operation.name"].string_value == "generate_content"
+        assert attrs(log)["gen_ai.provider.name"].string_value == "synthetic"
+        assert attrs(log)["gen_ai.request.model"].string_value == "synthetic-model"
+        assert attrs(log)["gen_ai.conversation.id"].string_value == "session-attributes"
+    assert structured.span_id == after.span_id == spans["generate_content synthetic-model"].span_id
+    (message,) = body_of(structured)["gen_ai.output.messages"].array_value.values
+    fields = {entry.key: entry.value for entry in message.kvlist_value.values}
+    assert fields["role"].string_value == "assistant"
+    (part,) = fields["parts"].array_value.values
+    part_fields = {entry.key: entry.value for entry in part.kvlist_value.values}
+    assert part_fields["type"].string_value == "text"
+    assert part_fields["content"].string_value == "hi"
+    assert nested.span_id == spans["execute_tool lookup"].span_id
+    assert body_of(nested)["gen_ai.output.messages"].string_value == "nested"
+    assert body_of(override)["gen_ai.output.messages"].string_value == "override"
+    assert attrs(override)["gen_ai.request.model"].string_value == "explicit-model"
+    assert attrs(override)["gen_ai.operation.name"].string_value == "generate_content"
+    assert attrs(override)["gen_ai.provider.name"].string_value == "synthetic"
+    assert empty.body.WhichOneof("value") == "kvlist_value" and not empty.body.kvlist_value.values
+    assert plain.span_id == spans["request"].span_id
+    assert attrs(plain)["gen_ai.operation.name"].string_value == "chat"
+    assert attrs(plain)["gen_ai.provider.name"].string_value == "caller"
+    assert attrs(plain)["gen_ai.request.model"].string_value == "caller-model"
+    assert attrs(plain)["gen_ai.conversation.id"].string_value == "session-attributes"
+    assert [attribute.key for attribute in bare.attributes] == ["gen_ai.conversation.id"]
+    assert set(attrs(invalid)) == {"gen_ai.conversation.id"}
+    assert all("hue.capture_content" not in attrs(log) for log in logs)
+
+
+def test_nested_model_scopes_restore_the_outer_request_metadata(receiver):
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.model("outer", provider="p") as outer:
+            with hue.model("inner", provider="q") as inner:
+                inner.log_inference(output="inner")
+            with hue.span("sibling") as sibling:
+                sibling.log_inference(output="sibling")  # Created after inner exited: outer again.
+            outer.log_inference(output="outer")
+        with hue.span("outside") as outside:
+            outside.log_inference(output="outside")  # No scope, no session: no attributes.
+        assert hue.export_status.instrumentation_failures == 0
+        assert hue.force_flush()
+    inner_log, sibling_log, outer_log, outside_log = receiver.logs()
+    assert attrs(inner_log)["gen_ai.request.model"].string_value == "inner"
+    assert attrs(inner_log)["gen_ai.provider.name"].string_value == "q"
+    assert attrs(sibling_log)["gen_ai.request.model"].string_value == "outer"
+    assert attrs(outer_log)["gen_ai.request.model"].string_value == "outer"
+    assert attrs(outer_log)["gen_ai.provider.name"].string_value == "p"
+    assert list(outside_log.attributes) == []
 
 
 def test_metadata_only_excludes_helper_content_and_exception_text(receiver):
@@ -85,6 +180,7 @@ def test_metadata_only_excludes_helper_content_and_exception_text(receiver):
             span.log_inference(input="sensitive-log", output="sensitive-output")
             raise RuntimeError("sensitive-exception-message")
         assert hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
         assert KEY not in repr(hue)
     combined = b"".join(body for _, _, body in receiver.requests)
     assert b"sensitive-" not in combined
@@ -92,7 +188,8 @@ def test_metadata_only_excludes_helper_content_and_exception_text(receiver):
     span = receiver.spans()[0]
     assert span.status.code == 2
     assert "input.value" not in attrs(span)
-    assert receiver.logs()[0].body.WhichOneof("value") is None
+    assert receiver.logs() == []
+    assert not any(path.endswith("/logs") for path, _, _ in receiver.requests)
 
 
 def test_redaction_before_export_and_failure_does_not_leak(receiver):
