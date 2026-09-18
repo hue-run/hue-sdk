@@ -34,7 +34,21 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
+      - name: Audit locked dependencies
+        working-directory: packages/sdk-typescript
+        run: |
+          bun install --frozen-lockfile
+          bun audit --audit-level=high
       - run: node packages/sdk-typescript/scripts/verify-package.mjs
+        env:
+          HUE_JUNIT_DIR: ${{ runner.temp }}/junit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: bun-test-junit-${{ github.run_id }}
+          path: ${{ runner.temp }}/junit
+          if-no-files-found: ignore
+          retention-days: 14
   typescript-node-matrix:
     name: TypeScript installed package (Node ${{ matrix.node }})
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -68,7 +82,13 @@ jobs:
           bun-version-file: .bun-version
       # Root tooling (eslint, prettier) plus the SDK's own dependencies for type-checked lint.
       - run: bun install --frozen-lockfile
+      # Advisory for the lint/docs tooling; the published package's dependencies are audited as a
+      # blocking step in the typescript job.
+      - run: bun audit --audit-level=high
+        continue-on-error: true
       - run: bun install --frozen-lockfile
+        working-directory: packages/sdk-typescript
+      - run: node scripts/write-version.mjs --check
         working-directory: packages/sdk-typescript
       - run: bun run lint
       - run: bun run format:check

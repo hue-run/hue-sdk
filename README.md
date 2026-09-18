@@ -44,7 +44,7 @@ _Hue (hue.run) is a tracing and evaluation platform for AI agents. It is not aff
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` | Node.js 24; Bun 1.3.9 for development | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` | Node.js 22 or 24 (26 in CI; the published 0.1.5 requires 24); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) |
 | Python | `hue-run`; `hue_sdk`, `hue_sdk.evals`, `hue_sdk.managed` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 | Any other language | The official OpenTelemetry SDK with an OTLP/HTTP exporter | Go, Java, .NET, Rust, Ruby and others | [Existing OpenTelemetry](https://docs.hue.run/integrations/opentelemetry) |
 
@@ -152,7 +152,7 @@ For applications that already use OpenTelemetry, follow the [existing-provider g
 
 ## Build and verify from a standalone clone
 
-Use Node 24, Bun 1.3.9 and uv 0.12.5. No Hue application checkout, database or management credentials are needed.
+Use Node 24, Bun 1.4.2 and uv 0.12.5. No Hue application checkout, database or management credentials are needed.
 
 ```bash
 node packages/sdk-typescript/scripts/verify-package.mjs

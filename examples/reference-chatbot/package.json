@@ -19,6 +19,6 @@
     "typescript": "7.0.2"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=22.12"
   }
 }

@@ -10,21 +10,25 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Breaking
+
+- `ajv` is an optional peer dependency used only by `builtins.jsonSchema`; without it that scorer reports `SchemaValidatorUnavailable` instead of validating. The tracing core now depends only on `@opentelemetry/*` packages. Migration: run `npm install ajv` (8.17 or later) in projects that use `builtins.jsonSchema` or stored schema scorers.
+- Export requests use explicit configuration only: `OTEL_EXPORTER_OTLP_*` environment variables no longer reach Hue's endpoint, and requests carry a `hue-sdk-typescript/<version>` User-Agent. **Wire** Migration: none for documented configuration; headers or endpoints that reached Hue through those variables were unintended and have no replacement.
+
 #### Added
 
+- `./package.json` export, `sideEffects` metadata, `bugs` and `keywords` in the package manifest.
 - `hue.model()` creates a GenAI client span for a direct provider call, and `HueSpan.setUsage()` records validated token counts, matching the Python helpers.
 - `hue.inject()` / `hue.extract()` carry W3C trace context between processes without baggage or credentials.
 - `hueExperimentalTelemetry(hue)` from the core entry point for AI SDK 6 `experimental_telemetry`; `hueTelemetry` remains AI SDK 7 only.
 - `contentPrefixes` exports the attribute keys removed in metadata-only mode.
+- Bun 1.4.2 runs the installed-package behavioral suite and the reference chatbot in package verification, and `bun pm pack` must agree with `npm pack` on package contents.
 
 #### Changed
 
-- Export requests use explicit configuration only: `OTEL_EXPORTER_OTLP_*` environment variables no longer reach Hue's endpoint, and requests carry a `hue-sdk-typescript/<version>` User-Agent. **Wire**
-- The instrumentation scope version is read from `package.json` instead of a hand-maintained literal.
-- `ajv` is an optional peer dependency used only by `builtins.jsonSchema`; without it that scorer reports `SchemaValidatorUnavailable`. The tracing core now depends only on `@opentelemetry/*` packages.
-- npm releases carry provenance attestations now that the source repository is public.
-
-- `./package.json` export, `sideEffects` metadata, `bugs` and `keywords` in the package manifest.
+- The instrumentation scope version and export User-Agent come from a literal generated from `package.json` at build time; nothing reads `package.json` at import time, so bundled deployments are unaffected.
+- `engines.node` is `>=22.12`; Node 22 and 24 are tested and Node 26 runs in CI.
+- npm releases carry provenance attestations; the release workflow refuses to publish from a private source repository.
 
 #### Fixed
 
@@ -75,10 +79,10 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
-#### Changed
+#### Breaking
 
-- `capture_content=False` now strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes, legacy `gen_ai.*` message events, log bodies and status descriptions from every exported record, including spans from third-party instrumentors on the same provider, matching the TypeScript export path. **Wire**
-- `jsonschema` and `referencing` move to the optional `hue-run[evals]` extra used only by `builtins.json_schema`; without it that helper raises `ImportError` and stored schema scorers report `SchemaValidatorUnavailable`. The tracing core now depends only on OpenTelemetry packages and `requests`.
+- `capture_content=False` now strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes, legacy `gen_ai.*` message events, log bodies and status descriptions from every exported record, including spans from third-party instrumentors on the same provider, matching the TypeScript export path. **Wire** Migration: applications that expected third-party instrumentor content to reach Hue in metadata-only mode must set `capture_content=True` and rely on the instrumentor's own capture controls and the redactor.
+- `jsonschema` and `referencing` move to the optional `hue-run[evals]` extra used only by `builtins.json_schema`; without it that helper raises `ImportError` and stored schema scorers report `SchemaValidatorUnavailable`. The tracing core now depends only on OpenTelemetry packages and `requests`. Migration: install `hue-run[evals]` where `builtins.json_schema` or stored schema scorers are used.
 
 #### Added
 
@@ -131,6 +135,7 @@ refuses to publish a version without a matching entry below.
 
 ## Coding-agent skill (skills/hue)
 
+- 0.1.11 (unreleased): Node 22 and Bun runtime rows; feature requirements name the 0.2.0 releases.
 - 0.1.9 (unreleased): AI SDK 6 per-call telemetry, TypeScript `model()` helper and export-time content stripping in both SDKs.
 - 0.1.8 (unreleased): fixed Next.js streaming anchor, troubleshooting table and handoff templates.
 - 0.1.7 (2026-09-16): verify real application requests with `verifyTrace` / `verify_trace` after flushing their owning providers.

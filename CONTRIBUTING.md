@@ -8,7 +8,7 @@ This repository is licensed under the [MIT License](LICENSE). By submitting a pu
 
 ## Development
 
-Use Node 24, Bun 1.3.9 and uv 0.12.5. Each package owns its dependencies and lockfile; the repository is not a shared runtime workspace.
+Use Node 24, Bun 1.4.2 and uv 0.12.5 (`.tool-versions` and `.bun-version` record them). Each package owns its dependencies and lockfile; the repository is not a shared runtime workspace. `bunfig.toml` refuses package versions younger than three days on non-frozen installs; pass `--minimum-release-age 0` for a deliberate one-off.
 
 - TypeScript: run `node packages/sdk-typescript/scripts/verify-package.mjs` from the root. It validates public imports from installed packages with both tested AI SDK patch pairs.
 - Python: use the commands in [README.md](README.md), then repeat pytest on Python 3.10 for compatibility changes.

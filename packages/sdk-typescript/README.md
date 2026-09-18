@@ -1,6 +1,6 @@
 # Hue TypeScript SDK
 
-A Node 24 / Bun 1.3.9 client for Hue's standard OTLP HTTP endpoints. It uses the
+A client for Hue's standard OTLP HTTP endpoints on Node.js 22 or 24 and Bun 1.4.2. It uses the
 OpenTelemetry JavaScript SDK and official OTLP protobuf exporter components for
 traces and correlated logs. The package is named `@hue-run/sdk`.
 
@@ -296,7 +296,7 @@ See [THIRD_PARTY_NOTICES.md](https://github.com/hue-run/hue-sdk/blob/main/THIRD_
 
 ## Package verification
 
-From the repository root with Node 24 and Bun 1.3.9 on PATH:
+From the repository root with Node 24 and Bun 1.4.2 on PATH:
 
 ```sh
 node packages/sdk-typescript/scripts/verify-package.mjs

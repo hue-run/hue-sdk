@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are released for the latest minor version of each package: `@hue-run/sdk` 0.1.x on npm and `hue-run` 0.1.x on PyPI. Earlier versions do not receive fixes; upgrade to the current release.
+Security fixes are released for the latest `0.MINOR` line of each package (`@hue-run/sdk` on npm and `hue-run` on PyPI), as listed at the top of [CHANGELOG.md](./CHANGELOG.md). Earlier versions do not receive fixes; upgrade to the current release.
 
 ## Reporting a vulnerability
 
