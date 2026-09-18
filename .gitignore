@@ -17,3 +17,7 @@ htmlcov/
 .DS_Store
 # Generated API reference (typedoc, pdoc)
 docs/reference/
+# Agent workspace scratch. Previously only in .git/info/exclude, which is per-clone
+# and does not survive a fresh clone or a fork.
+.context/
+.conductor/settings.local.*
