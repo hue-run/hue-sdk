@@ -125,7 +125,13 @@ jobs:
       - name: Markdown links resolve
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --no-progress --include-fragments --exclude-path node_modules --exclude-path docs/reference "./**/*.md"
+          # npmjs.com rejects automated link-check requests with 403. Package/version freshness is
+          # checked from the registry by Fern's ecosystem audit; keep only that known UI excluded.
+          args: >-
+            --no-progress --include-fragments
+            --exclude-path node_modules --exclude-path docs/reference
+            --exclude '^https://www\.npmjs\.com/package/@hue-run/sdk/?$'
+            "./**/*.md"
           fail: true
   python:
     name: Python ${{ matrix.python }} source and installed wheel
