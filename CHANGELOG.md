@@ -10,7 +10,7 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
-### [0.3.0](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.0) - 2026-09-19
+### [0.3.0] - 2026-09-19
 
 #### Breaking
 
