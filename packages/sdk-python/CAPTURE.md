@@ -1,5 +1,9 @@
 # Source capture
 
+This API is an unreleased source addition and is not included in the `hue-run` `0.2.2`
+registry package. Build and install a reviewed wheel from this checkout to use it; a
+matching Hue deployment with the capture endpoints is also required.
+
 `hue_sdk.capture.CaptureSession` records portable source evidence independently of telemetry `capture_content`. Use a separate `capture_write` key. No capture network calls occur when `source_content=False`.
 
 ```python

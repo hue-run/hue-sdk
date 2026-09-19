@@ -203,7 +203,10 @@ the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-
 and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider
 flush callbacks and recovery. Local/CI runners remain available.
 
-## Source capture
+## Source capture (unreleased)
+
+The capture API is not included in the `hue-run` `0.2.2` registry package. Build and
+install a reviewed wheel from this checkout; a matching Hue API deployment is required.
 
 `hue_sdk.capture.CaptureSession` explicitly records source evidence from synchronous or async
 tool calls, with bounded queues, credential filtering and retryable acknowledgements.
