@@ -120,6 +120,18 @@ function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function needsAttention(error: unknown, seen = new Set<unknown>()): boolean {
+  if (
+    error instanceof TargetOutcomeUncertainError ||
+    error instanceof UncertainExecutionError ||
+    error instanceof OutcomeSerializationError
+  )
+    return true;
+  if (!(error instanceof AggregateError) || seen.has(error)) return false;
+  seen.add(error);
+  return error.errors.some((nested: unknown) => needsAttention(nested, seen));
+}
+
 /** Confirm the authoritative seal after an uncertain acknowledgement without rerunning the agent. */
 async function sealLocalRun(
   client: EnvironmentClient,
@@ -267,12 +279,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
         // failures claimed so the same worker can resume them through its checkpoints.
         // Attention is terminal in the queue and is reserved for explicit unsafe-to-resume
         // outcomes that require operator intervention.
-        if (
-          !experimentFinished &&
-          (error instanceof TargetOutcomeUncertainError ||
-            error instanceof UncertainExecutionError ||
-            error instanceof OutcomeSerializationError)
-        )
+        if (!experimentFinished && needsAttention(error))
           await options.client
             .completeLocalAgentRun({
               runId: claim.runId,

@@ -26,6 +26,8 @@ function fixture(options: {
   loseSealAcknowledgement?: boolean;
   failWorldRead?: boolean;
   failCompletionOnce?: boolean;
+  caseCount?: number;
+  completionFailures?: number;
 }) {
   const projectId = randomUUID();
   const datasetVersionId = randomUUID();
@@ -42,6 +44,11 @@ function fixture(options: {
     metadata: { provenance: "evaluator-private" },
     environmentVersionId,
   };
+  const items = Array.from({ length: options.caseCount ?? 1 }, (_, index) =>
+    index === 0
+      ? item
+      : { ...structuredClone(item), id: randomUUID(), externalKey: `pinned-${index}` },
+  );
   const experiment: Experiment = {
     id: randomUUID(),
     name: "simulation",
@@ -52,12 +59,19 @@ function fixture(options: {
       id: randomUUID(),
       name: "default",
       scorerVersions: [],
-      itemCount: 1,
+      itemCount: items.length,
       scores: { scored: 0, error: 0, skipped: 0, pending: 0 },
     },
-    caseCount: 1,
+    caseCount: items.length,
     finishedAt: null,
-    execution: { unstarted: 1, started: 0, uncertain: 0, succeeded: 0, error: 0, cancelled: 0 },
+    execution: {
+      unstarted: items.length,
+      started: 0,
+      uncertain: 0,
+      succeeded: 0,
+      error: 0,
+      cancelled: 0,
+    },
   };
   const executions = new Map<string, Execution>();
   const worlds = new Map<
@@ -74,7 +88,7 @@ function fixture(options: {
   };
   let queueState: "queued" | "claimed" | "completed" | "attention" = "queued";
   let claimedWorkerId: string | undefined;
-  let completionFailures = options.failCompletionOnce ? 1 : 0;
+  let completionFailures = options.completionFailures ?? (options.failCompletionOnce ? 1 : 0);
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -148,18 +162,19 @@ function fixture(options: {
       if (path === `/experiments/${experiment.id}`) return Response.json(experiment);
       if (path === `/experiments/${experiment.id}/items`)
         return Response.json({
-          items: [
-            {
-              id: item.id,
-              externalKey: item.externalKey,
-              hasExpected: item.hasExpected,
-              execution: null,
-            },
-          ],
+          items: items.map((item) => ({
+            id: item.id,
+            externalKey: item.externalKey,
+            hasExpected: item.hasExpected,
+            execution: null,
+          })),
           nextCursor: null,
         });
-      if (path === `/experiments/${experiment.id}/items/${item.id}`) return Response.json(item);
-      if (path === `/experiments/${experiment.id}/items/${item.id}/start`) {
+      const frozenCase = items.find(
+        (item) => path === `/experiments/${experiment.id}/items/${item.id}`,
+      );
+      if (frozenCase) return Response.json(frozenCase);
+      if (items.some((item) => path === `/experiments/${experiment.id}/items/${item.id}/start`)) {
         const execution: Execution = {
           id: randomUUID(),
           state: "started",
@@ -537,6 +552,122 @@ test("a failed completion upload retains the worker claim and resumes without re
     expect(f.calls.completions[0]).toMatchObject({ state: "succeeded" });
     expect(f.calls.localRun).toEqual([{ state: "completed" }]);
     expect(f.queueState()).toBe("completed");
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
+    await rm(checkpointDirectory, { recursive: true, force: true });
+  }
+});
+
+test.each(["uncertain", "operational"] as const)(
+  "concurrent %s failures preserve the correct queue recovery state",
+  async (failure) => {
+    const f = fixture({
+      capabilityStatus: 200,
+      caseCount: 2,
+      loseSealAcknowledgement: failure === "uncertain",
+      failWorldRead: failure === "uncertain",
+      completionFailures: failure === "operational" ? 2 : 0,
+    });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "concurrent-recovery",
+      captureContent: false,
+    });
+    const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-concurrent-recovery-"));
+    let targets = 0;
+    const options = {
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        maxAttempts: 1,
+      }),
+      hue,
+      checkpointDirectory,
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      concurrency: 2,
+      maxRuns: 1,
+      target() {
+        targets++;
+        return "reply saved";
+      },
+    };
+    try {
+      const failureResult = await runLocalAgent(options).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(failureResult).toBeInstanceOf(AggregateError);
+      expect((failureResult as AggregateError).errors).toHaveLength(2);
+      expect(targets).toBe(2);
+      expect(f.calls.completions).toEqual([]);
+      if (failure === "uncertain") {
+        expect(
+          (failureResult as AggregateError).errors.every(
+            (error: unknown) => error instanceof TargetOutcomeUncertainError,
+          ),
+        ).toBe(true);
+        expect(f.queueState()).toBe("attention");
+        expect(f.calls.localRun).toEqual([{ state: "attention", failureType: "AggregateError" }]);
+        f.reclaim();
+        await expect(runLocalAgent(options)).rejects.toBeInstanceOf(AggregateError);
+        expect(f.queueState()).toBe("attention");
+        expect(f.calls.completions).toEqual([]);
+      } else {
+        expect(f.queueState()).toBe("claimed");
+        expect(f.calls.localRun).toEqual([]);
+        await runLocalAgent(options);
+        expect(f.queueState()).toBe("completed");
+        expect(f.calls.completions).toHaveLength(2);
+        expect(f.calls.completions.every((completion) => completion.state === "succeeded")).toBe(
+          true,
+        );
+      }
+      expect(targets).toBe(2);
+      expect(f.calls.finishes).toHaveLength(2);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+      await rm(checkpointDirectory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("nested aggregate failures retain an unsafe-to-resume queue decision", async () => {
+  const f = fixture({ capabilityStatus: 200 });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "nested-recovery",
+    captureContent: false,
+  });
+  const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-nested-recovery-"));
+  const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl });
+  // A composed client can propagate an already aggregated failure into the runner.
+  client.completeExecution = async (executionId) => {
+    throw new AggregateError([new AggregateError([new TargetOutcomeUncertainError(executionId)])]);
+  };
+  let targets = 0;
+  try {
+    await expect(
+      runLocalAgent({
+        client,
+        environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+        hue,
+        checkpointDirectory,
+        agent: { key: "reference", name: "Reference", revision: "1" },
+        maxRuns: 1,
+        target() {
+          targets++;
+          return "reply saved";
+        },
+      }),
+    ).rejects.toBeInstanceOf(AggregateError);
+    expect(targets).toBe(1);
+    expect(f.queueState()).toBe("attention");
+    expect(f.calls.localRun).toEqual([{ state: "attention", failureType: "AggregateError" }]);
   } finally {
     await hue.shutdown();
     f.server.stop(true);
