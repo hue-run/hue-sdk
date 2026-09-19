@@ -77,6 +77,18 @@ if (!values.archive && !values["registry-version"]) {
     throw new Error(
       `npm pack and bun pm pack disagree on package contents: npm-only ${JSON.stringify(onlyNpm)}, bun-only ${JSON.stringify(onlyBun)}`,
     );
+  const forbiddenCaptureFiles = [...npmFiles].filter(
+    (file) =>
+      file === "CAPTURE.md" ||
+      file === "dist/capture.js" ||
+      file.startsWith("dist/capture/") ||
+      file === "dist/uploads.js" ||
+      file.startsWith("dist/uploads/"),
+  );
+  if (Object.hasOwn(pkg.exports, "./capture") || forbiddenCaptureFiles.length)
+    throw new Error(
+      `Portable capture assets are outside this release: ${JSON.stringify(forbiddenCaptureFiles)}`,
+    );
   console.log(`pack inventory: ${npmFiles.size} files agree between npm pack and bun pm pack`);
 }
 const packageSpec = values["registry-version"] ?? `file:${tarball}`;
@@ -287,6 +299,7 @@ const installedPackageTests = [
   "attempt.test.ts",
   "environment.test.ts",
   "simulation.test.ts",
+  "local-worker.test.ts",
   "coverage-gap.test.ts",
   "receipt.test.ts",
   "managed.test.ts",

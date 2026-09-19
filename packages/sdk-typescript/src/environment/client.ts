@@ -7,7 +7,7 @@ import type {
   CoverageGapResult,
   CreateRunInput,
   Environment,
-  EnvironmentDefinition,
+  PublishableEnvironmentDefinition,
   EnvironmentIdentity,
   EnvironmentPage,
   EnvironmentPageOptions,
@@ -192,7 +192,7 @@ export class EnvironmentClient {
     return this.request<Environment>("GET", `/environments/${uuid(id)}`);
   }
   /** Publishes an immutable definition; this non-idempotent registry write is not retried. */
-  publishVersion(environmentId: string, definition: EnvironmentDefinition) {
+  publishVersion(environmentId: string, definition: PublishableEnvironmentDefinition) {
     return this.requestOnce<EnvironmentVersionSummary>(
       "POST",
       `/environments/${uuid(environmentId)}/versions`,

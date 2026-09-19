@@ -23,7 +23,7 @@ class DocumentationContractTests(unittest.TestCase):
     def test_contract_contains_only_public_package_surfaces(self):
         contract = generator.build_contract(ROOT)
         self.assertEqual(contract["schemaVersion"], 1)
-        self.assertEqual(contract["packages"]["typescript"]["version"], "0.2.2")
+        self.assertEqual(contract["packages"]["typescript"]["version"], "0.3.0")
         self.assertEqual(contract["packages"]["python"]["version"], "0.2.2")
         self.assertIn(
             "createHue",
@@ -33,6 +33,22 @@ class DocumentationContractTests(unittest.TestCase):
             "create_hue_safe",
             contract["packages"]["python"]["modules"]["hue_sdk"]["publicExports"],
         )
+        self.assertIn(
+            "runLocalAgent",
+            contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk/evals"]["publicExports"],
+        )
+        for name in (
+            "EnvironmentDefinitionV1",
+            "EnvironmentDefinitionV2",
+            "GmailProviderInstance",
+            "PublishableEnvironmentDefinition",
+        ):
+            self.assertIn(
+                name,
+                contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk/environment"][
+                    "publicExports"
+                ],
+            )
         self.assertNotIn("generatedAt", contract)
 
     def test_typescript_export_parser_handles_aliases_star_types_and_declarations(self):

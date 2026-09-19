@@ -10,6 +10,19 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.3.0] - 2026-09-19
+
+#### Breaking
+
+- `runSimulation()` now gives candidate callbacks only case identity and cloned task inputs, excluding expected criteria, case metadata and environment pins. Migration: move candidate-visible metadata into task inputs or candidate configuration. Scorers retain their evaluation context; generic `runExperiment()` callbacks are unchanged.
+- `EnvironmentVersion.definition`, `EnvironmentClient.publishVersion()` and repository-authored simulation definitions now use `PublishableEnvironmentDefinition`, whose discriminator is `schemaVersion: 1 | 2`, rather than assuming V1. Migration: consumers that access V1-only definition fields must first narrow `definition.schemaVersion === 1`, or annotate known V1 values as `EnvironmentDefinitionV1`; use `EnvironmentDefinitionV2` only when supplying `providerInstances`.
+
+#### Added
+
+- `runLocalAgent()` connects a fixed local TypeScript agent entry point to app-launched, versioned simulation jobs while preserving checkpoint recovery and the developer's existing process, debugger and provider orchestration.
+- `runLocalAgent()` and `runSimulation()` share one provider-aware world lifecycle: V2 manifest preflight runs once before target code, ready bundles remain memory-only, incomplete environments skip targets and scorers, and uncertain preparation is never reacquired or replayed.
+- Environment publication supports explicit V1 and V2 definitions, including immutable Gmail provider-instance bindings and canonical synthetic-principal UUID comparison.
+
 ### [0.2.2](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.2.2) - 2026-09-18
 
 #### Fixed

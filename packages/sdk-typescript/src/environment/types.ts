@@ -191,12 +191,44 @@ export interface EnvironmentDefinition {
   /** Caller-owned immutable metadata. */
   metadata?: Record<string, JsonValue>;
 }
+/** The extendable legacy name remains V1. Publication and runs select their
+ * explicit version; provider context is validated by the authoritative server. */
+export type EnvironmentDefinitionV1 = EnvironmentDefinition;
+/** One synthetic Gmail principal and its world-state collection bindings. */
+export interface GmailProviderInstance {
+  /** Stable instance key referenced by attempt provider selection. */
+  providerInstanceKey: string;
+  /** Provider discriminator for the V2 Gmail slice. */
+  providerId: "google.gmail";
+  /** Synthetic principal UUID, canonicalized to lowercase by Hue. */
+  syntheticPrincipalId: string;
+  /** Versioned mapping from Gmail concepts to authored-world collections. */
+  configuration: {
+    /** Gmail mailbox configuration discriminator. */
+    kind: "gmail_mailbox/v1";
+    /** Collection containing synthetic messages. */
+    messagesCollection: string;
+    /** Collection containing synthetic drafts. */
+    draftsCollection: string;
+    /** Synthetic mailbox address. */
+    mailboxAddress: string;
+  };
+}
+/** V2 authored world with immutable provider-instance bindings. */
+export interface EnvironmentDefinitionV2 extends Omit<EnvironmentDefinition, "schemaVersion"> {
+  /** Definition schema discriminator. */
+  schemaVersion: 2;
+  /** Provider instances available to a strict attempt profile. */
+  providerInstances: GmailProviderInstance[];
+}
+/** Definition accepted by immutable environment publication. */
+export type PublishableEnvironmentDefinition = EnvironmentDefinitionV1 | EnvironmentDefinitionV2;
 /** Full immutable environment version and its generated action catalog. */
 export interface EnvironmentVersion extends EnvironmentVersionSummary {
   /** Owning environment identity. */
   environmentId: string;
   /** Stored, defaulted authored definition. */
-  definition: EnvironmentDefinition;
+  definition: PublishableEnvironmentDefinition;
   /** Generated agent-visible actions. */
   actions: ActionDefinition[];
 }

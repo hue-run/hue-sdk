@@ -64,6 +64,14 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
+This source tree prepares the TypeScript `0.3.0` release candidate with the provider-aware
+`runLocalAgent()` worker and V2 environment definitions. Until registry acceptance, test it only
+from the exact reviewed `hue-run-sdk-0.3.0.tgz` archive; the registry-published TypeScript package
+remains `0.2.2`.
+Python remains at `0.2.2` and does not include a native local-worker API. Public package tests
+exercise local control-plane fixtures and do not call an issued provider facade or official
+provider data plane.
+
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 
 ## Send a trace
