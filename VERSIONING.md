@@ -28,7 +28,7 @@ A deprecated public API keeps working for at least two subsequent `0.MINOR` rele
 
 ## Platforms
 
-Linux is tested in CI. macOS is used for development and is supported. On Windows, the tracing, receipt and managed-target APIs are best-effort. The local evaluation runner (`runExperiment` / `runSimulation` / `rescore` and `run_experiment` / `rescore`) requires POSIX filesystem semantics for its checkpoint directory and is not supported natively on Windows; use WSL2 or a Linux runner for evaluations. `runSimulation` is currently TypeScript-only.
+Linux is tested in CI. macOS is used for development and is supported. On Windows, the tracing, receipt and managed-target APIs are best-effort. The local evaluation runner (`runExperiment` / `runSimulation` / `runLocalAgent` / `rescore` and `run_experiment` / `rescore`) requires POSIX filesystem semantics for its checkpoint directory and is not supported natively on Windows; use WSL2 or a Linux runner for evaluations. `runSimulation` and `runLocalAgent` are currently TypeScript-only.
 
 ## Wire contract
 

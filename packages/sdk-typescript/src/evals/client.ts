@@ -27,6 +27,9 @@ import type {
   ExperimentItem,
   Identity,
   JsonValue,
+  LocalAgentClaim,
+  LocalAgentRegistration,
+  RegisteredLocalAgent,
   JudgeBudget,
   JudgeJob,
   Page,
@@ -456,6 +459,37 @@ export class EvaluationClient {
   /** Reads the project's hosted judge budget and admission controls. */
   getJudgeBudget() {
     return this.request<JudgeBudget>("GET", "/judge-budget");
+  }
+  /** Register or refresh the fixed local agent key and revision. */
+  registerLocalAgent(input: LocalAgentRegistration) {
+    return this.request<RegisteredLocalAgent>("POST", "/local-agent-worker/register", input);
+  }
+  /** Claim a queued run for this agent and durable worker identity. */
+  claimLocalAgentRun(input: { agentId: string; workerId: string }) {
+    return this.request<LocalAgentClaim | null>("POST", "/local-agent-worker/claim", input);
+  }
+  /** Refresh the lease of a claimed local run. */
+  heartbeatLocalAgentRun(input: { runId: string; workerId: string }) {
+    return this.request<{
+      /** Queue-run identity. */
+      runId: string;
+      /** The worker claim remains active. */
+      active: true;
+    }>("POST", "/local-agent-worker/runs/heartbeat", input);
+  }
+  /** Report acknowledged completion or an execution requiring attention. */
+  completeLocalAgentRun(input: {
+    runId: string;
+    workerId: string;
+    state: "completed" | "attention";
+    failureType?: string;
+  }) {
+    return this.request<{
+      /** Queue-run identity. */
+      runId: string;
+      /** Acknowledged terminal queue state. */
+      state: "completed" | "attention";
+    }>("POST", "/local-agent-worker/runs/complete", input);
   }
   /** Creates the legacy execution-scoped generic MCP capability for one world. */
   createSimulationMcpCapability(input: { runId: string; executionId: string }) {

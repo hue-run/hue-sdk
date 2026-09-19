@@ -1,9 +1,10 @@
 # Simulated environments
 
-Install the optional evaluation runtime-contract peer with the SDK:
+This guide documents the TypeScript `0.3.0` release candidate. Until registry acceptance, use
+the exact reviewed archive rather than requesting `0.3.0` from npm:
 
 ```bash
-npm install @hue-run/sdk zod
+npm install /path/to/reviewed/hue-run-sdk-0.3.0.tgz zod
 ```
 
 Your agent runs in your process while a disposable simulated world runs in Hue. The world is
@@ -77,11 +78,12 @@ them to checkpoints or progress events, and it never mutates global `process.env
 world seal cannot be confirmed, the checkpoint remains uncertain and resume neither reacquires
 credentials nor invokes the callback again.
 
-This is currently a control-plane contract. Hue can issue provider endpoints under
-`/api/v1/provider-facades/{bindingId}/{grantId}`, but a provider data-plane facade call has not
-yet been proven by the released integration. The existing generic Hue MCP capability remains the
-runnable hosted-tool path; do not interpret preparation or local-tool tests as evidence of a
-hosted Gmail or Slack MCP call.
+The SDK consumes the versioned connection contract but does not itself establish provider
+fidelity. Public package acceptance exercises local control-plane responses and connection-bundle
+handling; it does not call the issued facade endpoint. Exact installed-registry-package to hosted-
+facade acceptance remains a post-publication Fern integration gate. No public SDK test calls the
+official Gmail service, and passing these tests is not evidence of universal Gmail or Slack
+parity. A matching Hue deployment and verified provider profile remain required.
 
 ## Repository-authored scenarios
 
@@ -96,6 +98,13 @@ JSON Schema, local code, manual and model-judge definitions. `runSimulation` app
 identity-affecting defaults as Hue before resolving versions and rejects unknown or server-only
 kinds. In particular, `document_verifier` is not part of this SDK contract and is rejected rather
 than published with a guessed digest.
+
+The extendable `EnvironmentDefinition` name remains the V1 contract and is also exported as
+`EnvironmentDefinitionV1`. Use `EnvironmentDefinitionV2` to add immutable Gmail
+`providerInstances`; `PublishableEnvironmentDefinition` is the publication/repository union.
+Hue canonicalizes valid synthetic-principal UUIDs to lowercase, and repository resolution does
+the same before comparing immutable digests, so casing-only UUID changes reuse the stored
+version without dropping provider bindings.
 
 ```ts
 const scenario = {
@@ -180,3 +189,13 @@ that cannot be confirmed stays uncertain and never causes the agent to be replay
 The hosted MCP connection exposes Hue's bounded native actions; it is not general Gmail or
 Slack HTTP parity and does not proxy arbitrary provider traffic. Forking, in-place reset and
 arbitrary-step diffs are outside this interface.
+
+## Candidate context migration
+
+This candidate-context restriction is part of the `@hue-run/sdk@0.3.0` release candidate.
+
+`runSimulation` now supplies `context.item` as `{ id, externalKey }`. Read candidate inputs
+from the callback's first argument. Expected outcomes, case metadata and environment-version
+pins are available to evaluation and scoring code, and are omitted from the candidate callback.
+Inputs and configuration are cloned before invocation so candidate mutations cannot change
+pinned grading data. The generic `runExperiment` evaluator interface is unchanged.

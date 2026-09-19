@@ -395,6 +395,20 @@ published. The chatbot README describes running that external installation.
 
 The optional `@hue-run/sdk/evals` entry point supports dataset/scorer registration, frozen-version experiments, local built-in/custom scoring, upload resume, and historical rescoring. See the [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) for the complete journey, content policy and checkpoint recovery contract.
 
+### App-launched local workers
+
+The TypeScript `0.3.0` release candidate adds `runLocalAgent()` for a fixed local callback that
+claims app-launched simulation work while keeping the agent, provider orchestration and debugger
+in the developer's process. Until registry acceptance, test it only from the exact reviewed
+`hue-run-sdk-0.3.0.tgz` archive rather than requesting `0.3.0` from npm. It shares
+`runSimulation()`'s provider-aware world lifecycle, keeps scoped credentials in callback memory,
+skips target/scorer execution for incomplete environments, and never reacquires or replays after
+an uncertain preparation. See the
+[outbound worker contract](EVALUATIONS.md#outbound-local-agent-worker) and
+[simulated environment guide](ENVIRONMENTS.md). Tests exercise local control-plane fixtures, not
+an issued facade endpoint or the official Gmail service, and do not claim universal provider
+parity.
+
 ## Managed targets
 
 Start a frozen dataset run in Hue while your agent stays in your application. Expose a

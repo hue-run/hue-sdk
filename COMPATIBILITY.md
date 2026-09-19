@@ -1,6 +1,6 @@
 # Compatibility
 
-This matrix describes the current releases, TypeScript `0.2.2` and Python `0.2.2`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This source tree is the TypeScript `0.3.0` release candidate; the current registry releases remain TypeScript `0.2.2` and Python `0.2.2` until registry acceptance completes. Test the candidate only from the exact reviewed `hue-run-sdk-0.3.0.tgz` archive, not by requesting `0.3.0` from npm. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -47,3 +47,14 @@ The TypeScript and Python managed target adapters use the same versioned HTTP co
 ## Failure isolation
 
 Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: false` / `enabled=False` for a local kill switch, and bounded safe lifecycle methods. See [production safety](https://docs.hue.run/guides/production-safety). Helper capture failures omit telemetry, preserve business results/errors and increment diagnostic counters. TypeScript defaults to an 8 MiB combined trace/log queue budget; Python defaults to 8 MiB per signal, including in-flight records. These are telemetry budgets, not process RSS ceilings. A process kill, arbitrary slow user hook, third-party instrumentation or out-of-memory condition remains outside an in-process SDK guarantee.
+
+## App-launched local agents
+
+The TypeScript `0.3.0` release candidate includes `runLocalAgent()` and the restricted
+`runSimulation()` candidate projection; generic evaluations remain compatible. Both paths share
+the same provider-aware world lifecycle and uncertainty rules. A matching Hue API deployment is
+required. Public package tests exercise local control-plane responses and connection-bundle
+handling; they do not call an issued provider facade. Exact installed-registry-package to hosted-
+facade acceptance remains a post-publication Fern integration gate. These tests do not call the
+official Gmail service or establish universal Gmail or Slack parity. Python remains at `0.2.2`
+and does not include a native local-worker implementation.
