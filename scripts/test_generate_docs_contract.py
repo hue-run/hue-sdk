@@ -37,6 +37,19 @@ class DocumentationContractTests(unittest.TestCase):
             "runLocalAgent",
             contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk/evals"]["publicExports"],
         )
+        self.assertEqual(contract["packages"]["typescript"]["bins"], {"hue": "./dist/setup/cli.js"})
+        self.assertIn(
+            "runSetup",
+            contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk/setup"][
+                "publicExports"
+            ],
+        )
+        self.assertEqual(
+            contract["packages"]["typescript"]["schemas"][
+                "@hue-run/sdk/setup-events.schema.json"
+            ]["contractVersion"],
+            1,
+        )
         for name in (
             "EnvironmentDefinitionV1",
             "EnvironmentDefinitionV2",

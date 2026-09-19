@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hue.run/schemas/setup-events-v1.json",
+  "title": "Hue setup-session installer event version 1",
+  "description": "Installer lifecycle events only. run.* events are setup-session invocations, not Hue Runs.",
+  "oneOf": [
+    { "$ref": "#/$defs/run.started" },
+    { "$ref": "#/$defs/project.detected" },
+    { "$ref": "#/$defs/plan.ready" },
+    { "$ref": "#/$defs/step.started" },
+    { "$ref": "#/$defs/step.completed" },
+    { "$ref": "#/$defs/file.changed" },
+    { "$ref": "#/$defs/diagnostic" },
+    { "$ref": "#/$defs/action.required" },
+    { "$ref": "#/$defs/trial.created" },
+    { "$ref": "#/$defs/receipt.verified" },
+    { "$ref": "#/$defs/claim.required" },
+    { "$ref": "#/$defs/claim.completed" },
+    { "$ref": "#/$defs/run.completed" },
+    { "$ref": "#/$defs/run.failed" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["contractVersion", "event", "runId", "sequence", "timestamp"],
+      "properties": {
+        "contractVersion": { "const": 1 },
+        "event": { "type": "string", "maxLength": 40 },
+        "runId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "timestamp": { "type": "string", "format": "date-time", "maxLength": 40 }
+      }
+    },
+    "step": { "enum": ["detect-project", "connect-account", "configure-telemetry", "verify-receipt", "attach-account"] },
+    "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps", "mutatesProject", "backendRequired"],
+      "properties": {
+        "steps": { "type": "array", "items": { "$ref": "#/$defs/step" }, "minItems": 1, "maxItems": 10, "uniqueItems": true },
+        "mutatesProject": { "type": "boolean" },
+        "backendRequired": { "type": "boolean" }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "fingerprint", "languages", "packageManagers", "frameworks", "hue", "openTelemetry"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "languages": { "type": "array", "items": { "enum": ["typescript", "python"] }, "maxItems": 2, "uniqueItems": true },
+        "packageManagers": { "type": "array", "items": { "enum": ["bun", "npm", "pnpm", "yarn", "uv", "poetry", "pip"] }, "maxItems": 7, "uniqueItems": true },
+        "frameworks": { "type": "array", "items": { "enum": ["nextjs", "nestjs", "express", "fastapi", "django", "flask", "vercel-ai-sdk"] }, "maxItems": 7, "uniqueItems": true },
+        "hue": { "enum": ["absent", "typescript", "python", "multiple"] },
+        "openTelemetry": { "enum": ["absent", "typescript", "python", "multiple"] }
+      }
+    },
+    "run.started": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["command", "mode", "resumed"], "properties": { "event": { "const": "run.started" }, "command": { "enum": ["setup", "resume", "status", "connect"] }, "mode": { "enum": ["human", "plain", "jsonl"] }, "resumed": { "type": "boolean" } } }],
+      "unevaluatedProperties": false
+    },
+    "project.detected": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["project"], "properties": { "event": { "const": "project.detected" }, "project": { "$ref": "#/$defs/project" } } }],
+      "unevaluatedProperties": false
+    },
+    "plan.ready": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["plan"], "properties": { "event": { "const": "plan.ready" }, "plan": { "$ref": "#/$defs/plan" } } }],
+      "unevaluatedProperties": false
+    },
+    "step.started": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["step"], "properties": { "event": { "const": "step.started" }, "step": { "$ref": "#/$defs/step" } } }],
+      "unevaluatedProperties": false
+    },
+    "step.completed": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["step", "outcome"], "properties": { "event": { "const": "step.completed" }, "step": { "$ref": "#/$defs/step" }, "outcome": { "enum": ["unchanged", "changed", "verified", "skipped"] } } }],
+      "unevaluatedProperties": false
+    },
+    "file.changed": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["path", "change"], "properties": { "event": { "const": "file.changed" }, "path": { "type": "string", "minLength": 1, "maxLength": 4096 }, "change": { "enum": ["created", "updated"] } } }],
+      "unevaluatedProperties": false
+    },
+    "diagnostic": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["level", "code", "message"], "properties": { "event": { "const": "diagnostic" }, "level": { "enum": ["info", "warning", "error"] }, "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,79}$" }, "message": { "$ref": "#/$defs/text" } } }],
+      "unevaluatedProperties": false
+    },
+    "action.required": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["action", "message"], "properties": { "event": { "const": "action.required" }, "action": { "enum": ["connect-account", "configure", "run-instrumented-request", "open-claim-url", "review-captured-trace"] }, "message": { "$ref": "#/$defs/text" }, "command": { "type": "string", "minLength": 1, "maxLength": 200 }, "url": { "type": "string", "format": "uri", "maxLength": 2048 } } }],
+      "unevaluatedProperties": false
+    },
+    "trial.created": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["trialId", "expiresAt"], "properties": { "event": { "const": "trial.created" }, "trialId": { "$ref": "#/$defs/identifier" }, "expiresAt": { "type": "string", "format": "date-time", "maxLength": 40 } } }],
+      "unevaluatedProperties": false
+    },
+    "receipt.verified": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["receiptId", "traceId"], "properties": { "event": { "const": "receipt.verified" }, "receiptId": { "$ref": "#/$defs/identifier" }, "traceId": { "type": "string", "pattern": "^[a-f0-9]{32}$" } } }],
+      "unevaluatedProperties": false
+    },
+    "claim.required": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["claimId", "url"], "properties": { "event": { "const": "claim.required" }, "claimId": { "$ref": "#/$defs/identifier" }, "url": { "type": "string", "format": "uri", "maxLength": 2048 } } }],
+      "unevaluatedProperties": false
+    },
+    "claim.completed": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["claimId"], "properties": { "event": { "const": "claim.completed" }, "claimId": { "$ref": "#/$defs/identifier" } } }],
+      "unevaluatedProperties": false
+    },
+    "run.completed": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["outcome", "checkpointed"], "properties": { "event": { "const": "run.completed" }, "outcome": { "enum": ["ready", "action_required", "unchanged"] }, "checkpointed": { "type": "boolean" } } }],
+      "unevaluatedProperties": false
+    },
+    "run.failed": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["code", "message", "resumable"], "properties": { "event": { "const": "run.failed" }, "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,79}$" }, "message": { "$ref": "#/$defs/text" }, "resumable": { "type": "boolean" } } }],
+      "unevaluatedProperties": false
+    }
+  }
+}

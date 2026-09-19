@@ -114,8 +114,10 @@ run(
   import { strict as assert } from "node:assert";
   await import("@hue-run/sdk");
   await import("@hue-run/sdk/managed");
+  const setup = await import("@hue-run/sdk/setup");
   const environment = await import("@hue-run/sdk/environment");
   assert.equal(typeof environment.createEnvironmentClient, "function");
+  assert.equal(typeof setup.transitionSetup, "function");
 `,
   ],
   minimal,
@@ -133,10 +135,14 @@ run(
   const sdk = require("@hue-run/sdk");
   const environment = require("@hue-run/sdk/environment");
   const managed = require("@hue-run/sdk/managed");
+  const setup = require("@hue-run/sdk/setup");
+  const setupSchema = require("@hue-run/sdk/setup-events.schema.json");
   assert.equal(typeof sdk.createHue, "function");
   assert.equal(typeof sdk.createHueSafe, "function");
   assert.equal(typeof environment.createEnvironmentClient, "function");
   assert.equal(typeof managed.createManagedTargetHandler, "function");
+  assert.equal(typeof setup.transitionSetup, "function");
+  assert.equal(setupSchema.$id, "https://hue.run/schemas/setup-events-v1.json");
   const hue = sdk.createHue({ enabled: false });
   hue
     .withSpan("require", () => 42)
@@ -153,6 +159,41 @@ run(
   ],
   minimal,
 );
+// Exercise the installed binary itself. Agent mode must stay noninteractive, ANSI-free,
+// secret-free, and terminate with exactly one terminal event without contacting a provider.
+const setupStateHome = join(destination, "setup-state-home");
+const cli = spawnSync(
+  join(minimal, "node_modules", ".bin", "hue"),
+  ["setup", "--agent", "--project", minimal],
+  {
+    cwd: minimal,
+    encoding: "utf8",
+    timeout: 5000,
+    env: {
+      ...process.env,
+      XDG_STATE_HOME: setupStateHome,
+      HUE_API_KEY: "secret-canary-package-key",
+      BROWSER: "secret-canary-package-browser",
+      NO_COLOR: "",
+    },
+  },
+);
+if (
+  cli.status !== 0 ||
+  cli.stderr ||
+  cli.stdout.includes("\u001b") ||
+  cli.stdout.includes("secret-canary")
+)
+  throw new Error("Installed hue setup --agent violated its noninteractive output contract");
+const cliEvents = cli.stdout
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+const terminalEvents = cliEvents.filter(
+  (event) => event.event === "run.completed" || event.event === "run.failed",
+);
+if (terminalEvents.length !== 1 || cliEvents.at(-1)?.event !== "run.completed")
+  throw new Error("Installed hue setup --agent did not emit exactly one final terminal event");
 // Evaluation/simulation users install the optional validation peer. Ajv remains separately
 // optional: without it the JSON Schema scorer reports a typed error instead of crashing.
 const evaluation = join(destination, "evaluation-consumer");

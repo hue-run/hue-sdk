@@ -10,7 +10,7 @@ This policy covers `@hue-run/sdk` (npm) and `hue-run` (PyPI). Both packages are 
 
 ## Public API
 
-- TypeScript: the runtime exports and exported types of `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/environment`, `@hue-run/sdk/evals` and `@hue-run/sdk/managed`.
+- TypeScript: the runtime exports and exported types of `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/environment`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` and `@hue-run/sdk/setup`; the `hue` binary; and `@hue-run/sdk/setup-events.schema.json`.
 - Python: the names listed in `hue_sdk.__all__`, `hue_sdk.evals.__all__` and `hue_sdk.managed.__all__`.
 
 Everything else is internal even when importable: Python submodules such as `hue_sdk.client`, `hue_sdk.transport`, `hue_sdk.receipts`, `hue_sdk.processors` and `hue_sdk.snapshots`, any `_`-prefixed module or name, and class members prefixed with `_`. Internal names may change in any release.
@@ -36,6 +36,10 @@ Linux is tested in CI. macOS is used for development and is supported. On Window
 - Conventions: Hue helpers emit OpenTelemetry GenAI semantic conventions (currently Development status upstream), including `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `user.id`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, and opt-in message content carried by the `gen_ai.client.inference.operation.details` log event, whose record attributes repeat `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.provider.name` and `gen_ai.conversation.id`. Generic spans use `input.value` and `output.value`. The third-party conventions recognized for metadata-only stripping are listed in COMPATIBILITY.md.
 - A change to an emitted attribute name, event name or endpoint path is a wire change and is announced as **Breaking**.
 - Managed-target requests carry `protocolVersion: 1` and evaluation checkpoints carry `format: 1`. A later 0.x release reads checkpoints written by an earlier 0.x release; a patch release never changes the checkpoint format.
+- Installer setup-session JSONL events carry `contractVersion: 1` independently of the package
+  version. Their `run.*` names describe command invocations, not Hue Runs. Setup checkpoints carry
+  `format: 1`; later 0.x setup implementations either read that format or fail explicitly without
+  mutating the project. New event versions use a new schema rather than silently changing version 1.
 
 ## Release cadence
 
