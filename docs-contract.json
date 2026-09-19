@@ -40,7 +40,7 @@
       "Failure isolation",
       "App-launched local agents"
     ],
-    "sha256": "sha256:9ab5f8ac010b1056f320daa18fbb870eb4445e9a30a3dd65f10fab8f01eee44a",
+    "sha256": "sha256:c6577d2871cb05a65b9594169e4ed5ef79908a0de21753d3d3b52040d7011422",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
