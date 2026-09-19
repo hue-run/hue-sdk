@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { CaptureSession } from "../src/capture.js";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { CaptureSession } from "../src/capture.js";
 import { canonicalCaptureJson as canonical } from "../src/capture.js";
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 import type { StateEvidence } from "../src/capture.js";
@@ -321,4 +322,185 @@ test("source descriptors use custom redaction and report omitted metadata", asyn
   } finally {
     r.close();
   }
+});
+
+const sourceBytes = Buffer.from("synthetic source bytes");
+const sourceDigest = createHash("sha256").update(sourceBytes).digest("hex");
+const artifactId = "22222222-2222-4222-8222-222222222222";
+async function uploadReceiver(
+  config: {
+    headers?: Record<string, string> | null;
+    omitHeaders?: boolean;
+    uploadUrl?: (baseUrl: string) => string;
+    disconnectUpload?: boolean;
+  } = {},
+) {
+  const requests: Array<{
+    method?: string;
+    path: string;
+    authorization?: string;
+    contentType?: string | string[];
+    access?: string | string[];
+    body: Buffer;
+  }> = [];
+  let uploaded: Buffer | undefined;
+  let baseUrl = "";
+  const server: Server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
+    const path = req.url!;
+    requests.push({
+      method: req.method,
+      path,
+      authorization: req.headers.authorization,
+      contentType: req.headers["content-type"],
+      access: req.headers["x-vercel-blob-access"],
+      body,
+    });
+    if (path === "/upload" || path.startsWith("/upload?")) {
+      if (config.disconnectUpload) {
+        req.socket.destroy();
+        return;
+      }
+      uploaded = body;
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    if (path === "/api/v1/captures") {
+      res.end(JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", captureRevision: 0 }));
+      return;
+    }
+    if (path.endsWith("/artifacts")) {
+      res.end(JSON.stringify({ id: artifactId }));
+      return;
+    }
+    if (path.endsWith("/upload")) {
+      const payload: Record<string, unknown> = {
+        uploadUrl: (config.uploadUrl ?? ((url) => `${url}/upload`))(baseUrl),
+        method: "PUT",
+      };
+      if (!config.omitHeaders)
+        payload.headers =
+          config.headers === undefined ? { "x-vercel-blob-access": "private" } : config.headers;
+      res.end(JSON.stringify(payload));
+      return;
+    }
+    if (path.endsWith("/complete")) {
+      res.writeHead(uploaded?.equals(sourceBytes) ? 200 : 409);
+      res.end("{}");
+      return;
+    }
+    res.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  return {
+    baseUrl,
+    requests,
+    close: () => {
+      server.closeAllConnections();
+      server.close();
+    },
+  };
+}
+
+describe("explicit capture source uploads", () => {
+  test("preserves signed query bytes and stores the original file", async () => {
+    const path = "/upload?signature=A%2fb+%2B&empty=&duplicate=x&duplicate=y";
+    const r = await uploadReceiver({ uploadUrl: (baseUrl) => `${baseUrl}${path}` });
+    try {
+      const capture = new CaptureSession(options(r.baseUrl));
+      expect(
+        await capture.uploadSource({
+          filename: "note.txt",
+          contentType: "text/plain",
+          bytes: sourceBytes,
+        }),
+      ).toEqual({
+        artifactId,
+        sha256: sourceDigest,
+        byteSize: sourceBytes.byteLength,
+        mimeType: "text/plain",
+      });
+      expect(r.requests.find((call) => call.path === path)).toMatchObject({
+        method: "PUT",
+        authorization: undefined,
+        access: "private",
+        contentType: "text/plain",
+        body: sourceBytes,
+      });
+      expect(r.requests.some((call) => call.path.endsWith("/complete"))).toBe(true);
+    } finally {
+      r.close();
+    }
+  });
+  test.each([undefined, null] as const)(
+    "%s upload headers default to the file content type",
+    async (headers) => {
+      const r = await uploadReceiver(
+        headers === undefined ? { omitHeaders: true } : { headers: null },
+      );
+      try {
+        const capture = new CaptureSession(options(r.baseUrl));
+        expect(
+          await capture.uploadSource({
+            filename: "note.txt",
+            contentType: "text/plain",
+            bytes: sourceBytes,
+          }),
+        ).toMatchObject({ artifactId });
+        expect(r.requests.find((call) => call.path === "/upload")).toMatchObject({
+          method: "PUT",
+          authorization: undefined,
+          contentType: "text/plain",
+          body: sourceBytes,
+        });
+      } finally {
+        r.close();
+      }
+    },
+  );
+  test("userinfo and hash capabilities are rejected without a PUT", async () => {
+    for (const uploadUrl of [
+      (baseUrl: string) => baseUrl.replace("http://", "http://user:pass@") + "/upload",
+      (baseUrl: string) => `${baseUrl}/upload#frag`,
+    ]) {
+      const r = await uploadReceiver({ uploadUrl });
+      try {
+        const capture = new CaptureSession(options(r.baseUrl));
+        expect(
+          await capture.uploadSource({
+            filename: "note.txt",
+            contentType: "text/plain",
+            bytes: sourceBytes,
+          }),
+        ).toBeNull();
+        expect(
+          r.requests.some((call) => call.path === "/upload" || call.path.startsWith("/upload?")),
+        ).toBe(false);
+      } finally {
+        r.close();
+      }
+    }
+  });
+  test("a lost PUT acknowledgement is never replayed", async () => {
+    const r = await uploadReceiver({ disconnectUpload: true });
+    try {
+      const capture = new CaptureSession(options(r.baseUrl));
+      expect(
+        await capture.uploadSource({
+          filename: "note.txt",
+          contentType: "text/plain",
+          bytes: sourceBytes,
+        }),
+      ).toBeNull();
+      expect(r.requests.filter((call) => call.path === "/upload")).toHaveLength(1);
+      expect(r.requests.some((call) => call.path.endsWith("/complete"))).toBe(false);
+    } finally {
+      r.close();
+    }
+  });
 });
