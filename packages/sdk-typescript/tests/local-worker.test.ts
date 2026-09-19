@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHue } from "../src/index.js";
@@ -8,6 +8,8 @@ import { createEnvironmentClient } from "../src/environment.js";
 import {
   createEvaluationClient,
   runLocalAgent,
+  TargetOutcomeUncertainError,
+  UncertainExecutionError,
   type Completion,
   type EnvironmentEvidence,
   type Execution,
@@ -19,7 +21,12 @@ const key = "synthetic-local-worker-key";
 const digest = "d".repeat(64);
 
 /** Synthetic control plane for one launched simulation: the queue, one pinned case, one world. */
-function fixture(options: { capabilityStatus: number }) {
+function fixture(options: {
+  capabilityStatus: number;
+  loseSealAcknowledgement?: boolean;
+  failWorldRead?: boolean;
+  failCompletionOnce?: boolean;
+}) {
   const projectId = randomUUID();
   const datasetVersionId = randomUUID();
   const environmentVersionId = randomUUID();
@@ -59,12 +66,15 @@ function fixture(options: { capabilityStatus: number }) {
   >();
   const calls = {
     capability: 0,
+    worldReads: 0,
     finishes: [] as { runId: string; idempotencyKey: string; status: string }[],
     completions: [] as { executionId: string; state: string; errorType?: string }[],
     localRun: [] as { state: string; failureType?: string }[],
     experimentFinished: 0,
   };
-  let claimed = false;
+  let queueState: "queued" | "claimed" | "completed" | "attention" = "queued";
+  let claimedWorkerId: string | undefined;
+  let completionFailures = options.failCompletionOnce ? 1 : 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -96,13 +106,20 @@ function fixture(options: { capabilityStatus: number }) {
           createdAt: new Date().toISOString(),
         });
       if (path === "/local-agent-worker/claim") {
-        if (claimed) return Response.json(null);
-        claimed = true;
+        if (
+          queueState === "completed" ||
+          queueState === "attention" ||
+          (queueState === "claimed" && claimedWorkerId !== body.workerId)
+        )
+          return Response.json(null);
+        queueState = "claimed";
+        claimedWorkerId = String(body.workerId);
         return Response.json({ runId: localRunId, experimentId: experiment.id });
       }
       if (path === "/local-agent-worker/runs/heartbeat")
         return Response.json({ runId: localRunId, active: true });
       if (path === "/local-agent-worker/runs/complete") {
+        queueState = body.state as "completed" | "attention";
         calls.localRun.push({
           state: String(body.state),
           ...(body.failureType ? { failureType: String(body.failureType) } : {}),
@@ -180,12 +197,36 @@ function fixture(options: { capabilityStatus: number }) {
           idempotencyKey: String(body.idempotencyKey),
           status: world.status,
         });
+        // Model an upstream/gateway response failure after the seal was committed.
+        if (options.loseSealAcknowledgement) return new Response(null, { status: 503 });
         return Response.json({
           id: finishMatch[1],
           status: world.status,
           stepCount: 0,
           stateDigest: digest,
           sealedAt: new Date().toISOString(),
+        });
+      }
+      const worldMatch = /^\/environment-runs\/([^/]+)$/.exec(path);
+      if (worldMatch && request.method === "GET") {
+        calls.worldReads++;
+        if (options.failWorldRead) return new Response(null, { status: 503 });
+        const world = worlds.get(worldMatch[1]!);
+        if (!world) return new Response(null, { status: 404 });
+        return Response.json({
+          id: worldMatch[1],
+          environmentVersionId,
+          executionId: world.executionId,
+          seed: "e".repeat(32),
+          status: world.status,
+          stepCount: 0,
+          maxSteps: 50,
+          clockNs: "0",
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          createdAt: new Date().toISOString(),
+          sealedAt: world.status === "open" ? null : new Date().toISOString(),
+          stateDigest: digest,
+          finalState: { collections: {} },
         });
       }
       const evidenceMatch = /^\/experiment-executions\/([^/]+)\/environment(\/steps)?$/.exec(path);
@@ -216,6 +257,10 @@ function fixture(options: { capabilityStatus: number }) {
         const execution = executions.get(executionMatch[1]!);
         if (!execution) return new Response(null, { status: 404 });
         if (!executionMatch[2]) return Response.json(execution);
+        if (completionFailures > 0) {
+          completionFailures--;
+          return new Response(null, { status: 503 });
+        }
         // Mirrors the server guard: completion refuses an open linked world.
         const linked = [...worlds.values()].find((world) => world.executionId === execution.id);
         if (linked?.status === "open") return new Response(null, { status: 409 });
@@ -237,7 +282,18 @@ function fixture(options: { capabilityStatus: number }) {
     },
   });
   const baseUrl = `http://127.0.0.1:${server.port}`;
-  return { server, baseUrl, calls, worlds, experiment, item };
+  return {
+    server,
+    baseUrl,
+    calls,
+    worlds,
+    experiment,
+    item,
+    reclaim: () => {
+      queueState = "queued";
+    },
+    queueState: () => queueState,
+  };
 }
 
 describe("local agent worker", () => {
@@ -325,5 +381,165 @@ test("local candidates receive only cloned inputs, configuration, identities and
   } finally {
     await hue.shutdown();
     f.server.stop(true);
+  }
+});
+
+test.each([false, true])(
+  "a committed seal with a lost acknowledgement preserves the candidate outcome (target error: %s)",
+  async (targetError) => {
+    const f = fixture({ capabilityStatus: 200, loseSealAcknowledgement: true });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "seal-recovery",
+      captureContent: false,
+    });
+    const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-seal-recovery-"));
+    let targets = 0;
+    const options = {
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        maxAttempts: 1,
+      }),
+      hue,
+      checkpointDirectory,
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      target() {
+        targets++;
+        if (targetError) throw new Error("Synthetic candidate failure");
+        return "reply saved";
+      },
+    };
+    try {
+      await runLocalAgent(options);
+      expect(targets).toBe(1);
+      expect(f.calls.worldReads).toBe(1);
+      expect(f.calls.finishes.map((finish) => finish.status)).toEqual([
+        targetError ? "abandoned" : "completed",
+      ]);
+      expect(f.calls.completions).toHaveLength(1);
+      expect(f.calls.completions[0]).toMatchObject({ state: targetError ? "error" : "succeeded" });
+      expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+      // Re-presenting the claimed run recovers its saved outcome without another callback or seal.
+      f.reclaim();
+      await runLocalAgent(options);
+      expect(targets).toBe(1);
+      expect(f.calls.finishes).toHaveLength(1);
+      expect(f.calls.completions).toHaveLength(1);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+      await rm(checkpointDirectory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([false, true])(
+  "an unresolved seal stays uncertain and resume never reinvokes the candidate (target error: %s)",
+  async (targetError) => {
+    const f = fixture({
+      capabilityStatus: 200,
+      loseSealAcknowledgement: true,
+      failWorldRead: true,
+    });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "seal-uncertain",
+      captureContent: false,
+    });
+    const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-seal-uncertain-"));
+    let targets = 0;
+    const options = {
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        maxAttempts: 1,
+      }),
+      hue,
+      checkpointDirectory,
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      target() {
+        targets++;
+        if (targetError) throw new Error("Synthetic candidate failure");
+        return "reply saved";
+      },
+    };
+    try {
+      await expect(runLocalAgent(options)).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+      expect(targets).toBe(1);
+      expect(f.calls.worldReads).toBe(1);
+      expect(f.calls.finishes.map((finish) => finish.status)).toEqual([
+        targetError ? "abandoned" : "completed",
+      ]);
+      expect(f.calls.completions).toEqual([]);
+      expect(f.calls.experimentFinished).toBe(0);
+      expect(f.calls.localRun).toEqual([
+        { state: "attention", failureType: "TargetOutcomeUncertainError" },
+      ]);
+      f.reclaim();
+      await expect(runLocalAgent(options)).rejects.toBeInstanceOf(UncertainExecutionError);
+      expect(targets).toBe(1);
+      expect(f.calls.finishes).toHaveLength(1);
+      expect(f.calls.completions).toEqual([]);
+      expect(f.calls.localRun[1]).toEqual({
+        state: "attention",
+        failureType: "UncertainExecutionError",
+      });
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+      await rm(checkpointDirectory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("a failed completion upload retains the worker claim and resumes without rerunning the candidate", async () => {
+  const f = fixture({ capabilityStatus: 200, failCompletionOnce: true });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "upload-recovery",
+    captureContent: false,
+  });
+  const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-worker-upload-"));
+  let targets = 0;
+  const options = {
+    client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+    environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+    hue,
+    checkpointDirectory,
+    agent: { key: "reference", name: "Reference", revision: "1" },
+    maxRuns: 1,
+    target() {
+      targets++;
+      return "reply saved";
+    },
+  };
+  try {
+    await expect(runLocalAgent(options)).rejects.toMatchObject({ status: 503 });
+    expect(targets).toBe(1);
+    expect(f.calls.finishes.map((finish) => finish.status)).toEqual(["completed"]);
+    expect(f.calls.completions).toEqual([]);
+    expect(f.calls.localRun).toEqual([]);
+    expect(f.queueState()).toBe("claimed");
+    // The queue returns the same claim to the durable worker identity on process restart.
+    // No operator reset or synthetic requeue is needed for a recoverable upload failure.
+    await runLocalAgent(options);
+    expect(targets).toBe(1);
+    expect(f.calls.finishes).toHaveLength(1);
+    expect(f.calls.completions).toHaveLength(1);
+    expect(f.calls.completions[0]).toMatchObject({ state: "succeeded" });
+    expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+    expect(f.queueState()).toBe("completed");
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
+    await rm(checkpointDirectory, { recursive: true, force: true });
   }
 });

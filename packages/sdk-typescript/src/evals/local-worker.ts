@@ -5,7 +5,13 @@ import type { EnvironmentClient } from "../environment/client.js";
 import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
 import type { EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
-import { runExperiment, type RunnerReport } from "./runner.js";
+import {
+  runExperiment,
+  OutcomeSerializationError,
+  TargetOutcomeUncertainError,
+  UncertainExecutionError,
+  type RunnerReport,
+} from "./runner.js";
 import type { ExperimentCase, JsonValue, LocalAgentRegistration, LocalScorer } from "./types.js";
 
 /** Candidate-visible context for one queued local agent execution. */
@@ -114,6 +120,25 @@ function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Confirm the authoritative seal after an uncertain acknowledgement without rerunning the agent. */
+async function sealLocalRun(
+  client: EnvironmentClient,
+  runId: string,
+  executionId: string,
+  status: "completed" | "abandoned",
+): Promise<void> {
+  try {
+    await client.finishRun(runId, {
+      idempotencyKey: `execution:${executionId}:${status === "completed" ? "complete" : "abandon"}`,
+      status,
+    });
+  } catch (error) {
+    const recovered = await client.getRun(runId).catch(() => undefined);
+    if (recovered?.status !== status)
+      throw new TargetOutcomeUncertainError(executionId, { cause: error });
+  }
+}
+
 /**
  * Starts an outbound-only worker for one fixed local agent entry point. Hue chooses
  * only the registered key/revision; no command or source is received from the cloud.
@@ -205,18 +230,23 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
                 tools,
                 localAgentTargetContext(context, mcp),
               );
-              await options.environmentClient.finishRun(run.id, {
-                idempotencyKey: `execution:${context.executionId}:complete`,
-                status: "completed",
-              });
+              await sealLocalRun(
+                options.environmentClient,
+                run.id,
+                context.executionId,
+                "completed",
+              );
               return output;
             } catch (error) {
-              await options.environmentClient
-                .finishRun(run.id, {
-                  idempotencyKey: `execution:${context.executionId}:abandon`,
-                  status: "abandoned",
-                })
-                .catch(() => undefined);
+              // An unconfirmed completion keeps the execution uncertain; attempting an
+              // abandonment here could misclassify a successfully completed candidate.
+              if (error instanceof TargetOutcomeUncertainError) throw error;
+              await sealLocalRun(
+                options.environmentClient,
+                run.id,
+                context.executionId,
+                "abandoned",
+              );
               throw error;
             }
           },
@@ -233,7 +263,16 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
         await options.onCompleted?.(report);
         completed++;
       } catch (error) {
-        if (!experimentFinished)
+        // A durable outcome can still need completion/result uploads. Leave operational
+        // failures claimed so the same worker can resume them through its checkpoints.
+        // Attention is terminal in the queue and is reserved for explicit unsafe-to-resume
+        // outcomes that require operator intervention.
+        if (
+          !experimentFinished &&
+          (error instanceof TargetOutcomeUncertainError ||
+            error instanceof UncertainExecutionError ||
+            error instanceof OutcomeSerializationError)
+        )
           await options.client
             .completeLocalAgentRun({
               runId: claim.runId,

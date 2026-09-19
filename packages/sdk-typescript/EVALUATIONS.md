@@ -199,6 +199,14 @@ presence does not redirect provider calls. Capabilities are not written to check
 `maxRuns` limits completed runs for one-shot workers, while `signal` stops polling. A stop signal
 does not forcibly cancel an already executing application callback.
 
+Completion or result-upload failures keep the run claimed by the durable worker identity.
+Restart with the same checkpoint directory to resume the saved uploads without invoking the
+candidate again. A lost world-seal acknowledgement is recovered by reading authoritative world
+state. If the seal or candidate outcome cannot be confirmed, or an outcome cannot be serialized,
+the worker reports `attention` and stops; operator investigation is required. Such runs are not
+automatically reclaimed, and presenting the same uncertain checkpoint again cannot replay the
+candidate.
+
 ## Conversion outcome scoring
 
 `createConversionOutcomeScorer()` returns a local scorer for reviewed Gmail or Slack draft
