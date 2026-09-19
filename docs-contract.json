@@ -362,7 +362,7 @@
         "@hue-run/sdk/setup-events.schema.json": {
           "contractVersion": 1,
           "id": "https://hue.run/schemas/setup-events-v1.json",
-          "sha256": "sha256:a34da4f8e30c2899109bee9e19d2157c04934711d74722b6483d9e2c289ee329",
+          "sha256": "sha256:bc0227b88fdea13e67bc2fc5bd58c9ce544715470f7c05270437ed3b3593cadc",
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },

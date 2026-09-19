@@ -30,7 +30,7 @@ function wrap(text: string, width: number, prefix: string): string {
 function summary(event: SetupEvent): string | undefined {
   switch (event.event) {
     case "run.started":
-      return `Hue setup session: ${event.command === "connect" ? "connect account" : event.command}${event.resumed ? " (resuming)" : ""}`;
+      return `Hue setup session: ${event.command}${event.resumed ? " (resuming)" : ""}`;
     case "project.detected": {
       const languages = event.project.languages.length
         ? event.project.languages.join(" + ")
@@ -55,7 +55,7 @@ function summary(event: SetupEvent): string | undefined {
     case "trial.created":
       return `Anonymous trial ${event.trialId} created; expires ${event.expiresAt}.`;
     case "receipt.verified":
-      return `Receipt ${event.receiptId} verified for trace ${event.traceId}.`;
+      return `Instrumentation receipt ${event.receiptId} verified for trace ${event.traceId}.`;
     case "claim.required":
       return `Claim ${event.claimId} is ready: ${event.url}`;
     case "claim.completed":

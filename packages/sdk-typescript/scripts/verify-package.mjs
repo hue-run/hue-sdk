@@ -27,6 +27,15 @@ function run(command, args, cwd) {
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
 }
 const pkg = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
+const aliasSource = resolve(source, "../aliases/npm-hue-run");
+const aliasPkg = JSON.parse(await readFile(join(aliasSource, "package.json"), "utf8"));
+if (aliasPkg.version !== pkg.version || aliasPkg.dependencies?.[pkg.name] !== pkg.version)
+  throw new Error("The hue-run alias version and dependency must match @hue-run/sdk");
+if (
+  (await readFile(join(aliasSource, "setup-events.schema.json"), "utf8")) !==
+  (await readFile(join(source, "setup-events.schema.json"), "utf8"))
+)
+  throw new Error("The hue-run alias must publish the same setup event schema");
 if (values["registry-version"] && values["registry-version"] !== pkg.version)
   throw new Error("Registry version must match this checkout's package version");
 const tarball = values.archive
@@ -92,6 +101,41 @@ if (!values.archive && !values["registry-version"]) {
   console.log(`pack inventory: ${npmFiles.size} files agree between npm pack and bun pm pack`);
 }
 const packageSpec = values["registry-version"] ?? `file:${tarball}`;
+if (!values.archive && !values["registry-version"]) {
+  const aliasTarball = join(destination, `hue-run-${aliasPkg.version}.tgz`);
+  run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], aliasSource);
+  const aliasConsumer = join(destination, "alias-consumer");
+  await mkdir(aliasConsumer);
+  await writeFile(
+    join(aliasConsumer, "package.json"),
+    JSON.stringify({
+      private: true,
+      type: "module",
+      dependencies: { "@hue-run/sdk": packageSpec, "hue-run": `file:${aliasTarball}` },
+    }),
+  );
+  run(
+    "npm",
+    ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"],
+    aliasConsumer,
+  );
+  run(
+    process.execPath,
+    [
+      "--input-type=commonjs",
+      "-e",
+      `
+  const assert = require("node:assert/strict");
+  assert.equal(typeof require("hue-run/setup").transitionSetup, "function");
+  assert.equal(
+    require("hue-run/setup-events.schema.json").$id,
+    "https://hue.run/schemas/setup-events-v1.json",
+  );
+`,
+    ],
+    aliasConsumer,
+  );
+}
 // Check the advertised install before adding any test or optional AI dependencies.
 // Development dependencies must not conceal missing runtime package metadata.
 const minimal = join(destination, "minimal-consumer");
@@ -194,6 +238,57 @@ const terminalEvents = cliEvents.filter(
 );
 if (terminalEvents.length !== 1 || cliEvents.at(-1)?.event !== "run.completed")
   throw new Error("Installed hue setup --agent did not emit exactly one final terminal event");
+const claimCli = spawnSync(
+  join(minimal, "node_modules", ".bin", "hue"),
+  ["claim", "--agent", "--project", minimal],
+  {
+    cwd: minimal,
+    encoding: "utf8",
+    timeout: 5000,
+    env: {
+      ...process.env,
+      XDG_STATE_HOME: setupStateHome,
+      HUE_API_KEY: "secret-canary-package-key",
+      BROWSER: "secret-canary-package-browser",
+    },
+  },
+);
+const claimEvents = claimCli.stdout
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+if (
+  claimCli.status !== 0 ||
+  claimCli.stderr ||
+  claimCli.stdout.includes("\u001b") ||
+  claimCli.stdout.includes("secret-canary") ||
+  claimEvents[0]?.command !== "claim" ||
+  claimEvents.filter((event) => event.event === "run.completed" || event.event === "run.failed")
+    .length !== 1 ||
+  claimEvents.at(-1)?.event !== "run.completed"
+)
+  throw new Error("Installed hue claim --agent violated its noninteractive output contract");
+const removedConnect = spawnSync(
+  join(minimal, "node_modules", ".bin", "hue"),
+  ["connect", "--agent"],
+  {
+    cwd: minimal,
+    encoding: "utf8",
+    timeout: 5000,
+    env: process.env,
+  },
+);
+const removedConnectEvents = removedConnect.stdout
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+if (
+  removedConnect.status !== 2 ||
+  removedConnect.stderr ||
+  removedConnectEvents.length !== 1 ||
+  removedConnectEvents[0]?.event !== "run.failed"
+)
+  throw new Error("Installed hue CLI still accepts the removed connect command");
 // Evaluation/simulation users install the optional validation peer. Ajv remains separately
 // optional: without it the JSON Schema scorer reports a typed error instead of crashing.
 const evaluation = join(destination, "evaluation-consumer");
@@ -380,6 +475,33 @@ for (const patch of [99, 100]) {
   const consumerTsconfig = JSON.parse(await readFile(join(source, "tsconfig.json"), "utf8"));
   consumerTsconfig.compilerOptions.lib = ["esnext"];
   await writeFile(join(consumer, "tsconfig.json"), JSON.stringify(consumerTsconfig, null, 2));
+  await writeFile(
+    join(consumer, "setup-contract.ts"),
+    `
+import {
+  SETUP_EVENT_CONTRACT_VERSION,
+  createInitialSetupState,
+  transitionSetup,
+  type SetupEvent,
+  type SetupRunOptions,
+} from "@hue-run/sdk/setup";
+
+const state = createInitialSetupState("setup_typecheck", "/project");
+const transition = transitionSetup(state, { type: "start" });
+const event: SetupEvent = {
+  contractVersion: SETUP_EVENT_CONTRACT_VERSION,
+  event: "run.started",
+  runId: state.runId,
+  sequence: 1,
+  timestamp: new Date().toISOString(),
+  command: "claim",
+  mode: "jsonl",
+  resumed: false,
+};
+declare const options: SetupRunOptions;
+void [transition, event, options];
+`,
+  );
   for (const name of installedPackageTests) {
     const testPath = join(consumer, "tests", name);
     await writeFile(

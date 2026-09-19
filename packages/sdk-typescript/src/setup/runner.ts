@@ -13,11 +13,11 @@ export interface SetupBackendTrial {
   /** ISO-8601 trial expiration. */
   expiresAt: string;
 }
-/** Receipt evidence returned by a future backend adapter. */
+/** Instrumentation-only receipt evidence returned by a future backend adapter. */
 export interface SetupBackendReceipt {
   /** Non-secret receipt identifier. */
   receiptId: string;
-  /** Verified lowercase OpenTelemetry trace identifier. */
+  /** Verified lowercase trace identifier; it does not establish content or Scenario suitability. */
   traceId: string;
 }
 /** @inline */
@@ -41,17 +41,20 @@ export type SetupBackendClaim = SetupBackendClaimRequired | SetupBackendClaimCom
 
 /** Installer-only network boundary for account attachment. It never creates a Scenario, worker, evaluation, or Hue Run. */
 export interface SetupBackendAdapter {
-  /** Creates or idempotently recovers an anonymous trial. */
+  /** Creates or idempotently recovers an anonymous trial hard-pinned to `trial_metadata_v1`. */
   createTrial(
     input: { runId: string; projectFingerprint: string; idempotencyKey: string },
     signal?: AbortSignal,
   ): Promise<SetupBackendTrial>;
-  /** Returns verified receipt evidence, or `undefined` while evidence is pending. */
+  /**
+   * Returns instrumentation-only receipt evidence, or `undefined` while pending.
+   * A receipt never authorizes content capture or Scenario publication.
+   */
   verifyReceipt(
     input: { trialId: string; idempotencyKey: string },
     signal?: AbortSignal,
   ): Promise<SetupBackendReceipt | undefined>;
-  /** Reads the current claim state without opening its URL. */
+  /** Reads account-claim state after receipt verification without opening the claim URL. */
   getClaim(
     input: { trialId: string; idempotencyKey: string },
     signal?: AbortSignal,
@@ -74,7 +77,7 @@ export interface SetupCheckpointAdapter {
 /** Options for one deterministic setup invocation. */
 export interface SetupRunOptions {
   /** CLI operation being orchestrated. */
-  command: "setup" | "resume" | "status" | "connect";
+  command: "setup" | "resume" | "status" | "claim";
   /** Renderer mode recorded in `run.started`. */
   mode: "human" | "plain" | "jsonl";
   /** Stable installer-session identifier, unrelated to Hue Runs. */
@@ -154,11 +157,12 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       });
       return { outcome: "unchanged", state };
     }
-    if (options.command === "connect") {
+    if (options.command === "claim") {
       await emit({
         event: "action.required",
-        action: "connect-account",
-        message: "Account attachment is not available in this build; no backend request was made.",
+        action: "claim-project",
+        message:
+          "Project claim is not available in this build; no backend request was made. A future adapter must require a verified anonymous telemetry receipt first.",
       });
       await emit({
         event: "run.completed",
@@ -173,14 +177,14 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       state = createInitialSetupState(options.runId, options.projectRoot);
       await options.checkpoints.save(state);
     }
-    if (state.phase === "awaiting-account") {
+    if (state.phase === "local-ready") {
       await emit({ event: "project.detected", project: state.project });
       await emit({ event: "plan.ready", plan: state.plan });
       await emit({
         event: "action.required",
-        action: "connect-account",
-        message: "Local inspection is complete. Account attachment is not available in this build.",
-        command: "hue connect",
+        action: "configure",
+        message:
+          "Local inspection is complete. Telemetry configuration is not available in this build; no project files were changed.",
       });
       await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
       return { outcome: "action_required", state };

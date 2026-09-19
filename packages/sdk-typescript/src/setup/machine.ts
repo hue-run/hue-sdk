@@ -5,7 +5,7 @@ interface SetupStateBase {
   /** Checkpoint format version. */
   format: 1;
   /** Current state-machine phase. */
-  phase: "created" | "detecting" | "awaiting-account";
+  phase: "created" | "detecting" | "local-ready";
   /** Stable installer-session identifier, unrelated to Hue Runs. */
   runId: string;
   /** Canonical project root. */
@@ -25,9 +25,9 @@ interface DetectingSetupState extends SetupStateBase {
 }
 
 /** @inline */
-interface AwaitingAccountSetupState extends SetupStateBase {
-  /** Local inspection is complete and account attachment is still required. */
-  phase: "awaiting-account";
+interface LocalReadySetupState extends SetupStateBase {
+  /** Local inspection is complete; a later integration may configure telemetry. */
+  phase: "local-ready";
   /** Saved bounded project facts. */
   project: SetupProjectDetection;
   /** Saved deterministic plan. */
@@ -35,7 +35,7 @@ interface AwaitingAccountSetupState extends SetupStateBase {
 }
 
 /** Persisted phase of the pure setup state machine. */
-export type SetupMachineState = CreatedSetupState | DetectingSetupState | AwaitingAccountSetupState;
+export type SetupMachineState = CreatedSetupState | DetectingSetupState | LocalReadySetupState;
 
 /** @inline */
 interface StartSetupInput {
@@ -97,15 +97,13 @@ interface PlanReadyTransitionEvent {
 }
 
 /** @inline */
-interface ConnectAccountRequiredTransitionEvent {
+interface ConfigureTelemetryRequiredTransitionEvent {
   /** Transition-event discriminator. */
   event: "action.required";
-  /** Backend action needed next. */
-  action: "connect-account";
+  /** Project action needed next. */
+  action: "configure";
   /** Secret-free explanation. */
   message: string;
-  /** Stable follow-up command. */
-  command: "hue connect";
 }
 
 /** @inline */
@@ -114,7 +112,7 @@ type SetupTransitionEvent =
   | ProjectDetectedTransitionEvent
   | CompleteStepTransitionEvent
   | PlanReadyTransitionEvent
-  | ConnectAccountRequiredTransitionEvent;
+  | ConfigureTelemetryRequiredTransitionEvent;
 
 /** Pure transition result. Events are templates completed by the runner. */
 export interface SetupTransition {
@@ -146,20 +144,14 @@ export function transitionSetup(
   }
   if (state.phase === "detecting" && input.type === "project.detected") {
     const plan: SetupPlan = {
-      steps: [
-        "detect-project",
-        "connect-account",
-        "configure-telemetry",
-        "verify-receipt",
-        "attach-account",
-      ],
+      steps: ["detect-project", "configure-telemetry", "verify-receipt", "claim-project"],
       mutatesProject: false,
       backendRequired: true,
     };
     return {
       state: {
         format: 1,
-        phase: "awaiting-account",
+        phase: "local-ready",
         runId: state.runId,
         projectRoot: state.projectRoot,
         project: input.project,
@@ -171,10 +163,9 @@ export function transitionSetup(
         { event: "plan.ready", plan },
         {
           event: "action.required",
-          action: "connect-account",
+          action: "configure",
           message:
-            "Local inspection is complete. Account attachment is not available in this build.",
-          command: "hue connect",
+            "Local inspection is complete. Telemetry configuration is not available in this build; no project files were changed.",
         },
       ],
     };

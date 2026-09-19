@@ -7,13 +7,7 @@ import type { SetupCheckpointAdapter } from "./runner.js";
 import type { SetupMachineState } from "./machine.js";
 
 const MAX_CHECKPOINT_BYTES = 256 * 1024;
-const STEPS = [
-  "detect-project",
-  "connect-account",
-  "configure-telemetry",
-  "verify-receipt",
-  "attach-account",
-] as const;
+const STEPS = ["detect-project", "configure-telemetry", "verify-receipt", "claim-project"] as const;
 
 function isInside(parent: string, child: string): boolean {
   const path = relative(parent, child);
@@ -47,7 +41,7 @@ function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
 function validDetection(
   value: unknown,
   projectRoot: string,
-): value is Extract<SetupMachineState, { phase: "awaiting-account" }>["project"] {
+): value is Extract<SetupMachineState, { phase: "local-ready" }>["project"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
   if (
@@ -95,7 +89,7 @@ function validState(
   if (state.phase === "created" || state.phase === "detecting")
     return hasExactKeys(state, ["format", "phase", "runId", "projectRoot"]);
   if (
-    state.phase !== "awaiting-account" ||
+    state.phase !== "local-ready" ||
     !hasExactKeys(state, ["format", "phase", "runId", "projectRoot", "project", "plan"]) ||
     !validDetection(state.project, projectRoot)
   )
@@ -113,7 +107,14 @@ function validState(
 }
 
 export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
-  constructor(readonly directory = defaultSetupStateDirectory()) {}
+  constructor(
+    readonly directory = defaultSetupStateDirectory(),
+    private readonly runtimePlatform: NodeJS.Platform = platform(),
+  ) {}
+
+  private get enforcesPosixPermissions(): boolean {
+    return this.runtimePlatform !== "win32";
+  }
 
   private async pathFor(runId: string, projectRoot: string): Promise<string> {
     if (!/^setup_[a-f0-9]{24}$/u.test(runId)) throw new Error("Invalid setup run identifier");
@@ -131,10 +132,12 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
     }
     if (!info.isDirectory() || info.isSymbolicLink())
       throw new Error("Setup checkpoint directory must be private (mode 0700, no symlink)");
-    await chmod(root, 0o700);
-    info = await lstat(root);
-    if ((info.mode & 0o077) !== 0)
-      throw new Error("Setup checkpoint directory must be private (mode 0700, no symlink)");
+    if (this.enforcesPosixPermissions) {
+      await chmod(root, 0o700);
+      info = await lstat(root);
+      if ((info.mode & 0o077) !== 0)
+        throw new Error("Setup checkpoint directory must be private (mode 0700, no symlink)");
+    }
     return join(root, `${runId}.json`);
   }
 
@@ -142,14 +145,23 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
     const path = await this.pathFor(runId, projectRoot);
     let handle;
     try {
-      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      if (this.runtimePlatform === "win32") {
+        const entry = await lstat(path);
+        if (entry.isSymbolicLink()) throw new Error("Unsafe setup checkpoint symlink");
+      }
+      const noFollow = this.runtimePlatform === "win32" ? 0 : constants.O_NOFOLLOW;
+      handle = await open(path, constants.O_RDONLY | noFollow);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
     try {
       const info = await handle.stat();
-      if (!info.isFile() || info.size > MAX_CHECKPOINT_BYTES || (info.mode & 0o077) !== 0)
+      if (
+        !info.isFile() ||
+        info.size > MAX_CHECKPOINT_BYTES ||
+        (this.enforcesPosixPermissions && (info.mode & 0o077) !== 0)
+      )
         throw new Error("Unsafe or oversized setup checkpoint");
       const envelope = JSON.parse(await handle.readFile("utf8")) as unknown;
       if (
@@ -184,11 +196,17 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
       await handle.close();
     }
     await rename(temporary, path);
-    const directory = await open(dirname(path), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
+    // Windows cannot open a directory as a file handle for fsync. The atomic rename and
+    // per-user state directory still provide resumability there; POSIX additionally fsyncs
+    // the containing directory so the rename survives a sudden interruption.
+    if (this.runtimePlatform !== "win32") {
+      await chmod(path, 0o600);
+      const directory = await open(dirname(path), "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
     }
   }
 }

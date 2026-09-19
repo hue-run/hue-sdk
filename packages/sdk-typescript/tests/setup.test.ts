@@ -58,7 +58,7 @@ describe("setup state machine", () => {
       type: "project.detected",
       project: detection("/project"),
     });
-    expect(second.state.phase).toBe("awaiting-account");
+    expect(second.state.phase).toBe("local-ready");
     expect(second.events.map((event) => event.event)).toEqual([
       "project.detected",
       "step.completed",
@@ -66,18 +66,11 @@ describe("setup state machine", () => {
       "action.required",
     ]);
     expect(
-      (second.state as Extract<SetupMachineState, { phase: "awaiting-account" }>).plan
-        .mutatesProject,
+      (second.state as Extract<SetupMachineState, { phase: "local-ready" }>).plan.mutatesProject,
     ).toBe(false);
     expect(
-      (second.state as Extract<SetupMachineState, { phase: "awaiting-account" }>).plan.steps,
-    ).toEqual([
-      "detect-project",
-      "connect-account",
-      "configure-telemetry",
-      "verify-receipt",
-      "attach-account",
-    ]);
+      (second.state as Extract<SetupMachineState, { phase: "local-ready" }>).plan.steps,
+    ).toEqual(["detect-project", "configure-telemetry", "verify-receipt", "claim-project"]);
   });
 
   test("rejects out-of-order inputs", () => {
@@ -218,11 +211,11 @@ describe("runner and checkpoints", () => {
     expect(resumed.at(-1)).toEqual(expect.objectContaining({ event: "run.completed" }));
   });
 
-  test("connect never invokes an injected backend in this slice", async () => {
+  test("claim never invokes an injected backend in this slice", async () => {
     const events: SetupEvent[] = [];
     const called: string[] = [];
     await runSetup({
-      command: "connect",
+      command: "claim",
       mode: "plain",
       runId: "setup_test",
       projectRoot: "/project",
@@ -320,6 +313,18 @@ describe("runner and checkpoints", () => {
       ),
     ).rejects.toThrow("outside");
   });
+
+  test("uses Windows-compatible permission and durability checks", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "hue-setup-checkpoint-win32-"));
+    const project = join(parent, "project");
+    const stateDirectory = join(parent, "state");
+    await mkdir(project);
+    const runId = setupRunId(project);
+    const state = createInitialSetupState(runId, project);
+    const adapter = new FileSetupCheckpointAdapter(stateDirectory, "win32");
+    await adapter.save(state);
+    expect(await adapter.load(runId, project)).toEqual(state);
+  });
 });
 
 describe("renderers and event contract", () => {
@@ -329,20 +334,21 @@ describe("renderers and event contract", () => {
     runId: "setup_test",
     sequence: 3,
     timestamp: "2026-09-19T12:00:00.000Z",
-    action: "connect-account",
-    message: "Local inspection is complete. Account attachment is not available in this build.",
-    command: "hue connect",
+    action: "claim-project",
+    message:
+      "Anonymous instrumentation receipt verified. Preserve this project and its trace history.",
+    command: "hue claim",
   };
 
   test("human snapshots are append-only at useful widths", () => {
     expect(renderHumanEvent(action, 44, false)).toMatchInlineSnapshot(`
-      "◆ Local inspection is complete. Account
-      ◆ attachment is not available in this build.
-      ◆ Next: hue connect."
+      "◆ Anonymous instrumentation receipt
+      ◆ verified. Preserve this project and its
+      ◆ trace history. Next: hue claim."
     `);
     expect(renderHumanEvent(action, 80, false)).toMatchInlineSnapshot(`
-      "◆ Local inspection is complete. Account attachment is not available in this
-      ◆ build. Next: hue connect."
+      "◆ Anonymous instrumentation receipt verified. Preserve this project and its
+      ◆ trace history. Next: hue claim."
     `);
   });
 
@@ -385,8 +391,16 @@ describe("renderers and event contract", () => {
       {
         ...base,
         event: "action.required",
-        action: "review-captured-trace",
-        message: "Open the captured trace in Hue; review and publish it as a Scenario.",
+        action: "capture-approved-content",
+        message:
+          "After claiming, explicitly approve and perform a content capture or rerun; the prepared tester is the first golden path.",
+      },
+      {
+        ...base,
+        event: "action.required",
+        action: "review-content-approved-trace",
+        message:
+          "Open the resulting content-approved trace in Hue for review and publication as a Scenario.",
       },
       {
         ...base,
@@ -408,6 +422,15 @@ describe("renderers and event contract", () => {
     ];
     for (const event of samples)
       expect(validate(event), JSON.stringify(validate.errors)).toBe(true);
+    expect(
+      validate({
+        ...base,
+        event: "run.started",
+        command: "connect",
+        mode: "jsonl",
+        resumed: false,
+      }),
+    ).toBe(false);
     expect(validate({ ...action, unexpected: "unbounded" })).toBe(false);
     expect(validate({ ...action, message: "x".repeat(1001) })).toBe(false);
   });
@@ -449,6 +472,37 @@ test("agent CLI is noninteractive JSONL with exactly one terminal event", async 
     events.filter((event) => event.event === "run.completed" || event.event === "run.failed"),
   ).toHaveLength(1);
   expect(events.at(-1)?.event).toBe("run.completed");
+  const claim = spawnSync(
+    process.execPath,
+    [join(import.meta.dir, "../src/setup/cli.ts"), "claim", "--agent", "--project", project],
+    {
+      encoding: "utf8",
+      timeout: 5000,
+      env: {
+        ...process.env,
+        XDG_STATE_HOME: join(parent, "claim-state-home"),
+        BROWSER: "secret-canary-browser",
+        HUE_API_KEY: "secret-canary-key",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const claimEvents = claim.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as SetupEvent);
+  expect(claim.status).toBe(0);
+  expect(claim.stderr).toBe("");
+  expect(claim.stdout).not.toContain("secret-canary");
+  expect(claimEvents.map((event) => event.event)).toEqual([
+    "run.started",
+    "action.required",
+    "run.completed",
+  ]);
+  expect(claimEvents[0]).toEqual(expect.objectContaining({ command: "claim", mode: "jsonl" }));
+  expect(
+    claimEvents.filter((event) => event.event === "run.completed" || event.event === "run.failed"),
+  ).toHaveLength(1);
   const help = spawnSync(
     process.execPath,
     [join(import.meta.dir, "../src/setup/cli.ts"), "--agent", "--help"],
@@ -460,4 +514,17 @@ test("agent CLI is noninteractive JSONL with exactly one terminal event", async 
     .map((line) => JSON.parse(line) as SetupEvent);
   expect(helpEvents).toHaveLength(1);
   expect(helpEvents[0]?.event).toBe("run.failed");
+  const removedConnect = spawnSync(
+    process.execPath,
+    [join(import.meta.dir, "../src/setup/cli.ts"), "connect", "--agent"],
+    { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const removedConnectEvents = removedConnect.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as SetupEvent);
+  expect(removedConnect.status).toBe(2);
+  expect(removedConnect.stderr).toBe("");
+  expect(removedConnectEvents).toHaveLength(1);
+  expect(removedConnectEvents[0]?.event).toBe("run.failed");
 });

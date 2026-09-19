@@ -34,7 +34,7 @@ interface EventBase<Name extends SetupEventName> {
 /** An installer setup-session command invocation began; this is not a Hue Run. */
 export interface RunStartedEvent extends EventBase<"run.started"> {
   /** Command being executed. */
-  command: "setup" | "resume" | "status" | "connect";
+  command: "setup" | "resume" | "status" | "claim";
   /** Renderer selected for this invocation. */
   mode: "human" | "plain" | "jsonl";
   /** Whether a checkpoint existed when the invocation began. */
@@ -70,13 +70,7 @@ export interface ProjectDetectedEvent extends EventBase<"project.detected"> {
 /** A bounded local setup plan. */
 export interface SetupPlan {
   /** Ordered setup step names. */
-  steps: Array<
-    | "detect-project"
-    | "connect-account"
-    | "configure-telemetry"
-    | "verify-receipt"
-    | "attach-account"
-  >;
+  steps: Array<"detect-project" | "configure-telemetry" | "verify-receipt" | "claim-project">;
   /** Whether this plan is permitted to change project files. */
   mutatesProject: boolean;
   /** Whether completion ultimately requires a backend adapter. */
@@ -125,11 +119,12 @@ export interface DiagnosticEvent extends EventBase<"diagnostic"> {
 export interface ActionRequiredEvent extends EventBase<"action.required"> {
   /** Kind of action needed to continue. */
   action:
-    | "connect-account"
+    | "claim-project"
     | "configure"
     | "run-instrumented-request"
     | "open-claim-url"
-    | "review-captured-trace";
+    | "capture-approved-content"
+    | "review-content-approved-trace";
   /** Secret-free explanation of the action. */
   message: string;
   /** Optional command the caller may run. */
@@ -146,11 +141,11 @@ export interface TrialCreatedEvent extends EventBase<"trial.created"> {
   expiresAt: string;
 }
 
-/** A backend adapter verified a stored trace receipt. */
+/** A backend adapter verified instrumentation-only receipt evidence. */
 export interface ReceiptVerifiedEvent extends EventBase<"receipt.verified"> {
   /** Non-secret receipt identifier. */
   receiptId: string;
-  /** Verified lowercase OpenTelemetry trace identifier. */
+  /** Verified lowercase OpenTelemetry trace identifier; this does not prove content approval. */
   traceId: string;
 }
 

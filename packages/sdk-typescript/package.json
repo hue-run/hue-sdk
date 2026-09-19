@@ -71,7 +71,7 @@
       "default": "./dist/managed.js"
     },
     "./setup": {
-      "types": "./dist/setup.js",
+      "types": "./dist/setup.d.ts",
       "import": "./dist/setup.js",
       "default": "./dist/setup.js"
     },
