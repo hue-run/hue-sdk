@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { trace, context } from "@opentelemetry/api";
 import { validateOptions } from "../config.js";
+import { safeUploadUrl, uploadHeaders, uploadOnce } from "../uploads.js";
 import { canonical, requestKey, sanitize, sha256 } from "./portable.js";
 import { captureRecord, copyCaptureRecord } from "./protocol.js";
 import type {
@@ -557,21 +558,19 @@ export class CaptureSession {
       );
       const upload = await this.request<{
         uploadUrl: string;
-        headers: Record<string, string>;
+        headers?: Record<string, string> | null;
         method: string;
       }>("POST", `/${this.id}/artifacts/${artifact.id}/upload`, {}, deadline);
-      const url = new URL(upload.uploadUrl);
-      if (url.protocol !== "https:" || url.username || url.password || upload.method !== "PUT")
-        throw new Error("Invalid upload capability");
-      const response = await fetch(url, {
-        method: "PUT",
-        headers: upload.headers,
-        body: bytes,
-        redirect: "error",
-        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
-      });
-      await response.body?.cancel();
-      if (!response.ok) throw new Error("Capture upload failed");
+      const url = safeUploadUrl(upload.uploadUrl);
+      if (upload.method !== "PUT") throw new Error("Invalid upload capability");
+      const headers = uploadHeaders(upload.headers, input.contentType);
+      // Signed writes run once. Authoritative completion verifies stored bytes even
+      // when the provider accepted the PUT but its acknowledgement was lost.
+      try {
+        await uploadOnce(url, bytes, headers, deadline);
+      } catch {
+        /* Verify below without replaying the signed write. */
+      }
       await this.request("POST", `/${this.id}/artifacts/${artifact.id}/complete`, {}, deadline);
       return {
         artifactId: artifact.id,

@@ -33,8 +33,12 @@ for (const [local, shared] of [
 }
 const destination = await mkdtemp(join(tmpdir(), "hue-sdk-package-"));
 const staging = join(destination, "package");
-function run(command, args, cwd) {
-  const result = spawnSync(command, args, { cwd, stdio: "inherit", env: process.env });
+function run(command, args, cwd, extraEnv = {}) {
+  const result = spawnSync(command, args, {
+    cwd,
+    stdio: "inherit",
+    env: { ...process.env, ...extraEnv },
+  });
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
 }
 const pkg = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
@@ -387,7 +391,10 @@ for (const patch of [99, 100]) {
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
   for (const runtime of [process.execPath, "bun"]) {
-    run(runtime, ["verify-capture-node.mjs"], consumer);
+    run(runtime, ["verify-capture-node.mjs"], consumer, {
+      // Trust only the synthetic loopback receiver in this isolated acceptance process.
+      NODE_EXTRA_CA_CERTS: join(consumer, "tests/fixtures/capture-localhost-cert.pem"),
+    });
   }
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
