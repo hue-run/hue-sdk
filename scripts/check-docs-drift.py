@@ -4,9 +4,10 @@ COMPATIBILITY.md and skills/hue/SKILL.md are maintained in this repository and m
 documentation site. The site adds frontmatter, an index banner and table padding; those are
 normalized away before comparing. Exit 1 when the prose differs so the mirror can be updated.
 
-When this tree is an unpublished candidate, compare the hosted pages to the latest registry
-release tag instead of the working tree so a scheduled check does not fail during release
-candidates.
+When this tree is an unpublished candidate, compare the hosted pages to hue-run/docs
+instead of the working tree or the last package tag. The skill and compatibility mirrors
+can move on the documentation site between SDK publishes, so a tag pin would fail a
+correctly updated hosted page.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 NPM_LATEST = "https://registry.npmjs.org/@hue-run%2Fsdk/latest"
-GITHUB_RAW = "https://raw.githubusercontent.com/hue-run/hue-sdk"
+DOCS_RAW = "https://raw.githubusercontent.com/hue-run/docs"
 
 
 def skill_metadata(text: str) -> dict[str, str]:
@@ -60,8 +61,34 @@ def npm_latest_version() -> str:
     return version
 
 
-def published_file(version: str, path: str) -> str:
-    return fetch(f"{GITHUB_RAW}/typescript-v{version}/{path}")
+def docs_file(path: str) -> str:
+    return fetch(f"{DOCS_RAW}/main/{path}")
+
+
+def source_labels(working: str, published: str) -> dict[str, str]:
+    if working == published:
+        return {
+            "compatibility": "COMPATIBILITY.md",
+            "skill": "skills/hue/SKILL.md",
+        }
+    return {
+        "compatibility": "hue-run/docs/sdks/compatibility.mdx",
+        "skill": "hue-run/docs/skill.md",
+    }
+
+
+def frontmatter_title(text: str) -> str | None:
+    if not text.startswith("---\n"):
+        return None
+    frontmatter = text.split("---", 2)[1]
+    match = re.search(r"^title:\s*[\"']?([^\"'\n]+)[\"']?\s*$", frontmatter, re.M)
+    return match.group(1).strip() if match else None
+
+
+def drop_page_title(lines: list[str], titles: set[str]) -> list[str]:
+    if lines and lines[0] in titles:
+        return lines[1:]
+    return lines
 
 
 def normalize(text: str) -> list[str]:
@@ -96,8 +123,9 @@ def compare(name: str, ours_text: str, ours_label: str, url: str) -> bool:
             f"repository metadata {skill_metadata(ours_text)}"
         )
         return False
-    ours = normalize(ours_text)
-    theirs = normalize(hosted_text)
+    titles = {title for title in (frontmatter_title(ours_text), frontmatter_title(hosted_text)) if title}
+    ours = drop_page_title(normalize(ours_text), titles)
+    theirs = drop_page_title(normalize(hosted_text), titles)
     diff = list(
         difflib.unified_diff(
             theirs,
@@ -120,21 +148,19 @@ def compare(name: str, ours_text: str, ours_label: str, url: str) -> bool:
 def document_sources() -> dict[str, tuple[str, str]]:
     published = npm_latest_version()
     working = typescript_version()
+    labels = source_labels(working, published)
     if working == published:
         return {
-            "compatibility": ((ROOT / "COMPATIBILITY.md").read_text(), "COMPATIBILITY.md"),
-            "skill": ((ROOT / "skills/hue/SKILL.md").read_text(), "skills/hue/SKILL.md"),
+            "compatibility": ((ROOT / "COMPATIBILITY.md").read_text(), labels["compatibility"]),
+            "skill": ((ROOT / "skills/hue/SKILL.md").read_text(), labels["skill"]),
         }
-    print(f"working tree is TypeScript {working}; comparing hosted docs to published typescript-v{published}")
+    print(
+        f"working tree is TypeScript {working}; "
+        f"comparing hosted docs to hue-run/docs (npm latest is {published})"
+    )
     return {
-        "compatibility": (
-            published_file(published, "COMPATIBILITY.md"),
-            f"typescript-v{published}/COMPATIBILITY.md",
-        ),
-        "skill": (
-            published_file(published, "skills/hue/SKILL.md"),
-            f"typescript-v{published}/skills/hue/SKILL.md",
-        ),
+        "compatibility": (docs_file("sdks/compatibility.mdx"), labels["compatibility"]),
+        "skill": (docs_file("skill.md"), labels["skill"]),
     }
 
 

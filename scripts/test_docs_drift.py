@@ -51,6 +51,42 @@ metadata:
             "0.2.2",
         )
 
+    def test_page_title_heading_matches_frontmatter_only_source(self):
+        hosted = """# Compatibility
+
+This matrix describes the current releases.
+"""
+        source = """---
+title: "Compatibility"
+description: "Tested runtimes."
+---
+
+This matrix describes the current releases.
+"""
+        titles = {drift.frontmatter_title(hosted), drift.frontmatter_title(source)} - {None}
+        self.assertEqual(
+            drift.drop_page_title(drift.normalize(hosted), titles),
+            drift.drop_page_title(drift.normalize(source), titles),
+        )
+
+    def test_unpublished_candidate_reads_hosted_mirrors_from_docs_repo(self):
+        self.assertEqual(
+            drift.source_labels("0.3.0", "0.2.2"),
+            {
+                "compatibility": "hue-run/docs/sdks/compatibility.mdx",
+                "skill": "hue-run/docs/skill.md",
+            },
+        )
+
+    def test_published_tree_reads_hosted_mirrors_from_this_repository(self):
+        self.assertEqual(
+            drift.source_labels("0.2.2", "0.2.2"),
+            {
+                "compatibility": "COMPATIBILITY.md",
+                "skill": "skills/hue/SKILL.md",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
