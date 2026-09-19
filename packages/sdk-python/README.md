@@ -174,10 +174,12 @@ Start a frozen dataset run in Hue while your existing agent stays in your applic
 import os
 from hue_sdk.managed import ManagedTargetHandler, ManagedTargetResult
 
+
 def target(invocation):
     # Your function consumes unchanged inputs and verified attachment bytes.
     result = run_agent_for_evaluation(invocation)
     return ManagedTargetResult(output=result)
+
 
 handler = ManagedTargetHandler(
     machine_credential=os.environ["HUE_MANAGED_TARGET_SECRET"],

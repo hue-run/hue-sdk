@@ -2,9 +2,20 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
 import type { EnvironmentClient } from "../environment/client.js";
-import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
+import type { EnvironmentTool } from "../environment/tools.js";
+import type {
+  ActualAgentManifestInputV2,
+  AttemptConnectionBundleV2,
+  RequestedAttemptProviderV2,
+} from "./attempt.js";
 import type { EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
+import {
+  pinRequestedAttemptV2,
+  requestedAttemptV2,
+  runEnvironmentTarget,
+  type EnvironmentTargetContext,
+} from "./environment-target.js";
 import {
   runExperiment,
   OutcomeSerializationError,
@@ -22,6 +33,8 @@ export interface LocalAgentTargetContext {
   item: Pick<ExperimentCase, "id" | "externalKey">;
   /** Identity of this target execution. */
   executionId: string;
+  /** Stable world identity for adapter control operations such as coverage reporting. */
+  environmentRunId: string;
   /** Trace identities without mutable span or grading data. */
   trace: {
     /** OpenTelemetry trace identifier. */
@@ -38,24 +51,27 @@ export interface LocalAgentTargetContext {
     /** Capability expiry as an ISO timestamp. */
     expiresAt: string;
   };
+  /** Credential-bearing provider connections for this callback only. Hue never
+   * checkpoints, logs or adds this response to parity digests. */
+  connectionBundle?: AttemptConnectionBundleV2;
 }
 
 /** Allowlist the candidate surface instead of forwarding the generic evaluation context. */
-export function localAgentTargetContext(
-  context: {
-    config: JsonValue;
-    item: ExperimentCase;
-    executionId: string;
-    span: { traceId: string; spanId: string };
-  },
-  mcp: LocalAgentTargetContext["mcp"],
-): LocalAgentTargetContext {
+function localAgentTargetContext(context: EnvironmentTargetContext): LocalAgentTargetContext {
   return {
     config: structuredClone(context.config),
     item: { id: context.item.id, externalKey: context.item.externalKey },
     executionId: context.executionId,
-    trace: { traceId: context.span.traceId, spanId: context.span.spanId },
-    mcp: { url: mcp.url, token: mcp.token, expiresAt: mcp.expiresAt },
+    environmentRunId: context.environmentRunId,
+    trace: { traceId: context.trace.traceId, spanId: context.trace.spanId },
+    mcp: {
+      url: context.mcp.url,
+      token: context.mcp.token,
+      expiresAt: context.mcp.expiresAt,
+    },
+    ...(context.connectionBundle
+      ? { connectionBundle: structuredClone(context.connectionBundle) }
+      : {}),
   };
 }
 
@@ -81,6 +97,27 @@ export interface RunLocalAgentOptions {
   signal?: AbortSignal;
   /** Useful for one-shot jobs and deterministic acceptance. Omit to keep polling. */
   maxRuns?: number;
+  /** Opt into the experiment's immutable V2 provider profile. These three values are
+   * validated together before the worker polls; no endpoint or credential is supplied here. */
+  actualAgentManifest?:
+    | ActualAgentManifestInputV2
+    | ((context: {
+        /** Frozen experiment configuration. */
+        config: JsonValue;
+        /** Full frozen case for resolving actual nonsecret evidence before candidate projection. */
+        item: ExperimentCase;
+        /** Cooperative worker stop signal. */
+        signal?: AbortSignal;
+      }) => ActualAgentManifestInputV2 | Promise<ActualAgentManifestInputV2>);
+  /** Exact provider instances and ordered surfaces asserted for strict preflight. */
+  requestedProviders?: RequestedAttemptProviderV2[];
+  /** Requested MCP surface projected to the backwards-compatible `context.mcp`. */
+  mcpSurface?: {
+    /** Provider instance selected from `requestedProviders`. */
+    providerInstanceKey: string;
+    /** Selected MCP surface. */
+    surfaceKey: "google.gmail/mcp" | "slack/mcp";
+  };
   /** Invokes the existing agent against isolated tools and candidate-safe context. */
   target(
     inputs: JsonValue,
@@ -132,34 +169,18 @@ function needsAttention(error: unknown, seen = new Set<unknown>()): boolean {
   return error.errors.some((nested: unknown) => needsAttention(nested, seen));
 }
 
-/** Confirm the authoritative seal after an uncertain acknowledgement without rerunning the agent. */
-async function sealLocalRun(
-  client: EnvironmentClient,
-  runId: string,
-  executionId: string,
-  status: "completed" | "abandoned",
-): Promise<void> {
-  try {
-    await client.finishRun(runId, {
-      idempotencyKey: `execution:${executionId}:${status === "completed" ? "complete" : "abandon"}`,
-      status,
-    });
-  } catch (error) {
-    const recovered = await client.getRun(runId).catch(() => undefined);
-    if (recovered?.status !== status)
-      throw new TargetOutcomeUncertainError(executionId, { cause: error });
-  }
-}
-
 /**
  * Starts an outbound-only worker for one fixed local agent entry point. Hue chooses
  * only the registered key/revision; no command or source is received from the cloud.
  */
 export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void> {
+  const requestedConfiguration = requestedAttemptV2(options);
   const interval = validInterval(options.pollIntervalMillis);
   const maxRuns = options.maxRuns ?? Number.POSITIVE_INFINITY;
   if (!(maxRuns === Number.POSITIVE_INFINITY || (Number.isInteger(maxRuns) && maxRuns > 0)))
     throw new RangeError("maxRuns must be a positive integer");
+  if (options.environmentClient.baseUrl !== options.client.baseUrl)
+    throw new Error("Environments and evaluations must use the same Hue origin");
   const directory = resolve(options.checkpointDirectory);
   const project = await options.client.checkConnection();
   const store = await CheckpointStore.acquire(directory, {
@@ -204,6 +225,12 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
       );
       let experimentFinished = false;
       try {
+        const requested = requestedConfiguration
+          ? pinRequestedAttemptV2(
+              requestedConfiguration,
+              (await options.client.getExperiment(claim.experimentId)).config,
+            )
+          : undefined;
         const report = await runExperiment({
           client: options.client,
           hue: options.hue,
@@ -214,54 +241,22 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           traceEvidence: { mode: "required" },
           scorers: options.scorers,
           concurrency: options.concurrency,
-          target: async (inputs, context) => {
-            const environmentVersionId = context.item.environmentVersionId;
-            if (!environmentVersionId)
-              throw new Error("The experiment case has no pinned environment version");
-            const run = await options.environmentClient.createRun({
-              idempotencyKey: `execution:${context.executionId}`,
-              environmentVersionId,
-              executionId: context.executionId,
-            });
-            const tools = bindEnvironmentTools({
+          target: (inputs, context) =>
+            runEnvironmentTarget({
+              client: options.client,
+              environmentClient: options.environmentClient,
               hue: options.hue,
-              client: options.environmentClient,
-              run,
-              parentContext: context.span.context,
-            });
-            // Every failure after the world exists must still seal it. Completion refuses an
-            // open linked world, and nothing else ever seals one, so an unsealed failure here
-            // would leave the execution impossible to complete without operator intervention.
-            try {
-              const mcp = await options.client.createSimulationMcpCapability({
-                runId: run.id,
-                executionId: context.executionId,
-              });
-              const output = await options.target(
-                structuredClone(inputs),
-                tools,
-                localAgentTargetContext(context, mcp),
-              );
-              await sealLocalRun(
-                options.environmentClient,
-                run.id,
-                context.executionId,
-                "completed",
-              );
-              return output;
-            } catch (error) {
-              // An unconfirmed completion keeps the execution uncertain; attempting an
-              // abandonment here could misclassify a successfully completed candidate.
-              if (error instanceof TargetOutcomeUncertainError) throw error;
-              await sealLocalRun(
-                options.environmentClient,
-                run.id,
-                context.executionId,
-                "abandoned",
-              );
-              throw error;
-            }
-          },
+              inputs,
+              context,
+              requested,
+              signal: options.signal,
+              target: (targetInputs, targetContext) =>
+                options.target(
+                  structuredClone(targetInputs),
+                  targetContext.tools,
+                  localAgentTargetContext(targetContext),
+                ),
+            }),
         });
         // From this point onward the experiment outcome is authoritative. If reporting the
         // queue completion fails, leave the claim intact for checkpointed recovery instead of

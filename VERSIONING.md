@@ -10,7 +10,7 @@ This policy covers `@hue-run/sdk` (npm) and `hue-run` (PyPI). Both packages are 
 
 ## Public API
 
-- TypeScript: the runtime exports and exported types of `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/environment`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` and the unreleased `@hue-run/sdk/capture` entry point.
+- TypeScript: the runtime exports and exported types of `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/environment`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` and `@hue-run/sdk/capture`.
 - Python: the names listed in `hue_sdk.__all__`, `hue_sdk.evals.__all__`, `hue_sdk.managed.__all__` and the unreleased `hue_sdk.capture.__all__`.
 
 Everything else is internal even when importable: Python submodules such as `hue_sdk.client`, `hue_sdk.transport`, `hue_sdk.receipts`, `hue_sdk.processors` and `hue_sdk.snapshots`, any `_`-prefixed module or name, and class members prefixed with `_`. Internal names may change in any release.
@@ -28,7 +28,7 @@ A deprecated public API keeps working for at least two subsequent `0.MINOR` rele
 
 ## Platforms
 
-Linux is tested in CI. macOS is used for development and is supported. On Windows, the tracing, receipt and managed-target APIs are best-effort. The local evaluation runner (`runExperiment` / `runSimulation` / `rescore` and `run_experiment` / `rescore`) requires POSIX filesystem semantics for its checkpoint directory and is not supported natively on Windows; use WSL2 or a Linux runner for evaluations. `runSimulation` is currently TypeScript-only.
+Linux is tested in CI. macOS is used for development and is supported. On Windows, the tracing, receipt and managed-target APIs are best-effort. The local evaluation runner (`runExperiment` / `runSimulation` / `runLocalAgent` / `rescore` and `run_experiment` / `rescore`) requires POSIX filesystem semantics for its checkpoint directory and is not supported natively on Windows; use WSL2 or a Linux runner for evaluations. `runSimulation` and `runLocalAgent` are currently TypeScript-only.
 
 ## Wire contract
 

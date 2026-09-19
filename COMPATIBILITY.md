@@ -1,6 +1,6 @@
 # Compatibility
 
-This matrix describes the current releases, TypeScript `0.2.2` and Python `0.2.2`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This matrix describes the current releases, TypeScript `0.3.0` and Python `0.2.2`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -48,16 +48,18 @@ The TypeScript and Python managed target adapters use the same versioned HTTP co
 
 Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: false` / `enabled=False` for a local kill switch, and bounded safe lifecycle methods. See [production safety](https://docs.hue.run/guides/production-safety). Helper capture failures omit telemetry, preserve business results/errors and increment diagnostic counters. TypeScript defaults to an 8 MiB combined trace/log queue budget; Python defaults to 8 MiB per signal, including in-flight records. These are telemetry budgets, not process RSS ceilings. A process kill, arbitrary slow user hook, third-party instrumentation or out-of-memory condition remains outside an in-process SDK guarantee.
 
-## Unreleased evidence capture and app-launched local agents
+## Evidence capture and app-launched local agents
 
-The new TypeScript capture entry point and Python capture submodule are source additions,
-not APIs in registry version `0.2.2`. They share the [portable v1 protocol](packages/capture-protocol/README.md)
-and canonical hash fixtures. Capture is a separate explicit opt-in and does not change
-tracing's `captureContent` / `capture_content` behavior. TypeScript capture requires the
-optional `ajv` peer; the tracing core still imports without evaluation/capture peers.
+TypeScript `0.3.0` includes the capture entry point; the Python capture submodule remains an
+unreleased source addition outside Python `0.2.2`. They share the
+[portable v1 protocol](packages/capture-protocol/README.md) and canonical hash fixtures.
+Capture is a separate explicit opt-in and does not change tracing's `captureContent` /
+`capture_content` behavior. TypeScript capture requires the optional `ajv` peer; the tracing
+core still imports without evaluation/capture peers.
 
-The TypeScript source adds `runLocalAgent()` and the portable conversion outcome scorer.
-`runSimulation()` candidates now receive a restricted case projection; this is a minor-release
-migration, while generic evaluations remain compatible. A matching Hue API deployment is
-required. Python agents can use the portable tool/process boundary or scoped MCP; Python's
-new capture submodule does not introduce a second local-worker implementation.
+TypeScript `0.3.0` includes `runLocalAgent()`, the portable conversion outcome scorer and the
+restricted `runSimulation()` candidate projection; generic evaluations remain compatible. A
+matching Hue API deployment is required. Provider-aware acceptance uses synthetic Hue worlds
+and facades; it does not call the official Gmail service or establish universal Gmail parity.
+Python agents can use the portable tool/process boundary or scoped MCP; Python's new capture
+submodule does not introduce a second local-worker implementation.

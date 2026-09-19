@@ -77,11 +77,10 @@ them to checkpoints or progress events, and it never mutates global `process.env
 world seal cannot be confirmed, the checkpoint remains uncertain and resume neither reacquires
 credentials nor invokes the callback again.
 
-This is currently a control-plane contract. Hue can issue provider endpoints under
-`/api/v1/provider-facades/{bindingId}/{grantId}`, but a provider data-plane facade call has not
-yet been proven by the released integration. The existing generic Hue MCP capability remains the
-runnable hosted-tool path; do not interpret preparation or local-tool tests as evidence of a
-hosted Gmail or Slack MCP call.
+The SDK consumes the versioned connection contract but does not itself establish provider
+fidelity. Its acceptance uses synthetic Hue worlds and facades, not the official Gmail service;
+passing those tests is evidence for the bounded tested profile, not universal Gmail or Slack
+parity. A matching Hue deployment and verified provider profile remain required.
 
 ## Repository-authored scenarios
 
@@ -96,6 +95,13 @@ JSON Schema, local code, manual and model-judge definitions. `runSimulation` app
 identity-affecting defaults as Hue before resolving versions and rejects unknown or server-only
 kinds. In particular, `document_verifier` is not part of this SDK contract and is rejected rather
 than published with a guessed digest.
+
+The extendable `EnvironmentDefinition` name remains the V1 contract and is also exported as
+`EnvironmentDefinitionV1`. Use `EnvironmentDefinitionV2` to add immutable Gmail
+`providerInstances`; `PublishableEnvironmentDefinition` is the publication/repository union.
+Hue canonicalizes valid synthetic-principal UUIDs to lowercase, and repository resolution does
+the same before comparing immutable digests, so casing-only UUID changes reuse the stored
+version without dropping provider bindings.
 
 ```ts
 const scenario = {
@@ -183,8 +189,7 @@ arbitrary-step diffs are outside this interface.
 
 ## Candidate context migration
 
-This section describes the unreleased source-tree change; published `@hue-run/sdk@0.2.2` does
-not yet include this candidate-context restriction.
+This candidate-context restriction is part of `@hue-run/sdk@0.3.0`.
 
 `runSimulation` now supplies `context.item` as `{ id, externalKey }`. Read candidate inputs
 from the callback's first argument. Expected outcomes, case metadata and environment-version

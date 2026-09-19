@@ -43,9 +43,9 @@
       "Evaluation coverage",
       "Hue-managed runs",
       "Failure isolation",
-      "Unreleased evidence capture and app-launched local agents"
+      "Evidence capture and app-launched local agents"
     ],
-    "sha256": "sha256:6866489d4ff841eef9a5f706cc9a03e88605e4a118e4acf4094b4b946bd36cbe",
+    "sha256": "sha256:97d712311c39e75cf87c7c38ef80920f37346c00c2f54714dac91d1660f03697",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -189,6 +189,8 @@
             "EnvironmentClientOptions",
             "EnvironmentCoverage",
             "EnvironmentDefinition",
+            "EnvironmentDefinitionV1",
+            "EnvironmentDefinitionV2",
             "EnvironmentIdentity",
             "EnvironmentPage",
             "EnvironmentPageOptions",
@@ -199,9 +201,11 @@
             "EnvironmentVersion",
             "EnvironmentVersionSummary",
             "FinishRunInput",
+            "GmailProviderInstance",
             "HueEnvironmentError",
             "JsonValue",
             "Observation",
+            "PublishableEnvironmentDefinition",
             "RunState",
             "SealedRun",
             "SemanticEntry",
@@ -340,7 +344,7 @@
         }
       },
       "name": "@hue-run/sdk",
-      "version": "0.2.2"
+      "version": "0.3.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",

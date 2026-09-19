@@ -1,11 +1,10 @@
 # Source capture
 
-This API is unreleased and is not included in the published `@hue-run/sdk@0.2.2`.
-Build from a checkout containing this change to try it. Capture requests require a Hue server
-that supports the capture protocol and a separately authorized capture key. The package
-manifest version alone does not establish API or hosted availability.
+This API is included in `@hue-run/sdk@0.3.0`. Capture requests require a Hue server that supports
+the capture protocol and a separately authorized capture key. The package version alone does
+not establish hosted availability.
 
-`@hue-run/sdk/capture` records portable source evidence for reviewed trace-to-case conversion. It is independent of telemetry's `captureContent`. This optional entry point requires the `ajv` peer; core tracing does not. Install the reviewed checkout archive with `npm install /path/to/hue-run-sdk-0.2.2.tgz ajv`; use the archive produced by `node packages/sdk-typescript/scripts/verify-package.mjs` from the repository root. Use a separate `capture_write` key; that key cannot send telemetry or access the general artifact API.
+`@hue-run/sdk/capture` records portable source evidence for reviewed trace-to-case conversion. It is independent of telemetry's `captureContent`. This optional entry point requires the `ajv` peer; core tracing does not. Install with `npm install @hue-run/sdk@0.3.0 ajv`; for prepublication verification use the exact archive produced by `node packages/sdk-typescript/scripts/verify-package.mjs` from the repository root. Use a separate `capture_write` key; that key cannot send telemetry or access the general artifact API.
 
 ```ts
 import { CaptureSession } from "@hue-run/sdk/capture";

@@ -156,13 +156,11 @@ The runner stops scheduling more cases after an operational failure and waits fo
 
 ## Outbound local agent worker
 
-`runLocalAgent` and the conversion scorer below are unreleased additions, absent from published
-`@hue-run/sdk@0.2.2`. Build from a checkout containing this change. Queue registration, claims,
-scoped MCP capabilities and sealed evidence require a supporting Hue server and project access;
-the package manifest version does not establish hosted availability. Run
-`node packages/sdk-typescript/scripts/verify-package.mjs` from the repository root, then install
-the archive it reports with `npm install /path/to/hue-run-sdk-0.2.2.tgz zod`. Use the archive from
-the reviewed revision; a registry install of `0.2.2` cannot run these examples.
+`runLocalAgent` and the conversion scorer below are included in `@hue-run/sdk@0.3.0`. Queue
+registration, claims, scoped MCP capabilities and sealed evidence require a supporting Hue server
+and project access; the package version alone does not establish hosted availability. Install
+`@hue-run/sdk@0.3.0` with the optional `zod` peer, or use the exact archive produced by
+`node packages/sdk-typescript/scripts/verify-package.mjs` for prepublication verification.
 
 `runLocalAgent` registers one fixed application callback and polls for queued runs. Hue selects
 the registered key/revision; it does not send executable code or shell commands. Keep the
@@ -192,12 +190,22 @@ try {
 ```
 
 The callback receives cloned inputs, local tools, and an allowlisted context containing
-`config`, `item: {id, externalKey}`, `executionId`, `trace: {traceId, spanId}` and a short-lived
-`mcp` capability. Expected outcomes, case metadata and original source pins remain private to
-grading. Pass the tools or scoped MCP capability into the agent's actual tool boundary; their
-presence does not redirect provider calls. Capabilities are not written to checkpoints.
+`config`, `item: {id, externalKey}`, `executionId`, `environmentRunId`,
+`trace: {traceId,spanId}` and a short-lived `mcp` capability. Expected outcomes, case metadata
+and original source pins remain private to grading. Pass the tools or scoped MCP capability into
+the agent's actual tool boundary; their presence does not redirect provider calls. Capabilities
+are not written to checkpoints.
 `maxRuns` limits completed runs for one-shot workers, while `signal` stops polling. A stop signal
 does not forcibly cancel an already executing application callback.
+
+For an experiment with an immutable V2 attempt baseline, also supply `actualAgentManifest`,
+the exact ordered `requestedProviders`, and an `mcpSurface` selected from that request. The
+worker creates the world and prepares once before target code. A ready response exposes the
+memory-only `connectionBundle` and keeps `context.mcp` as its selected MCP projection; it never
+mints the legacy generic capability for that attempt. An incomplete response seals the world as
+completed without invoking the target or scorers. A lost preparation acknowledgement remains
+uncertain and is never recovered through binding reads, credential refresh or target replay.
+The synthetic acceptance does not contact official Gmail or claim universal provider parity.
 
 Completion or result-upload failures keep the run claimed by the durable worker identity.
 Restart with the same checkpoint directory to resume the saved uploads without invoking the

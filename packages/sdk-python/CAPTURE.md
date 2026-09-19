@@ -13,14 +13,27 @@ capture = CaptureSession(
     source_content=True,
     api_key=capture_key,
     external_trace_id=trace_id,
-    bindings=[{
-        "id": "mail", "kind": "tool", "contractVersion": "1",
-        "operations": [{"name": "read_message", "inputSchema": {
-            "type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"],
-        }}],
-    }],
+    bindings=[
+        {
+            "id": "mail",
+            "kind": "tool",
+            "contractVersion": "1",
+            "operations": [
+                {
+                    "name": "read_message",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string"}},
+                        "required": ["id"],
+                    },
+                }
+            ],
+        }
+    ],
 )
-message = capture.observe("mail", "read_message", {"id": message_id}, lambda: read_message(message_id))
+message = capture.observe(
+    "mail", "read_message", {"id": message_id}, lambda: read_message(message_id)
+)
 report = capture.finalize()
 ```
 

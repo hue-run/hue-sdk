@@ -66,17 +66,17 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 
-## Unreleased capture and local-agent additions
+## Capture and local-agent availability
 
 The generated `docs-contract.json` describes this source tree. Its package versions
 are manifest metadata, not a guarantee that every listed API is published; use the
 [changelog](./CHANGELOG.md) to distinguish unreleased additions from tagged releases.
 
-The source tree adds opt-in evidence capture through `@hue-run/sdk/capture` and
-`hue_sdk.capture`, plus TypeScript's `runLocalAgent()` and
-`createConversionOutcomeScorer()`. These APIs are not in the current `0.2.2` registry
-packages. Build and install a reviewed tarball or wheel from this checkout until a
-release containing the additions is available; a matching Hue API deployment is also required.
+TypeScript `0.3.0` includes opt-in evidence capture through `@hue-run/sdk/capture`,
+`runLocalAgent()` and `createConversionOutcomeScorer()`. Python `0.2.2` does not include
+the source-tree `hue_sdk.capture` addition; build a reviewed wheel from this checkout to
+try that Python API. Capture and provider-aware local workers also require a matching Hue
+API deployment.
 
 Capture records tool observations, verified sources, state evidence and known omissions.
 It is independent of tracing's content policy and requires its own explicit source-content

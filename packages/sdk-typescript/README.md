@@ -439,11 +439,10 @@ Queued records snapshot supported telemetry values when a span ends or a log is 
 
 ## Source capture and local workers
 
-These APIs are unreleased and absent from published `@hue-run/sdk@0.2.2`. Use a build from this
-checkout with a Hue server that supports the corresponding capture and local-worker endpoints.
-The package verification command above prints the reviewed tarball path. Install that archive
-with `npm install /path/to/hue-run-sdk-0.2.2.tgz ajv zod` for the examples below; the retained
-manifest version does not identify the new APIs or prove server availability.
+These APIs are included in `@hue-run/sdk@0.3.0` and require a Hue server that supports the
+corresponding capture and local-worker endpoints. The package verification command above also
+prints a reviewed tarball path for prepublication checks. Install the registry release with
+`npm install @hue-run/sdk@0.3.0 ajv zod` or install that exact reviewed archive.
 
 The optional [`@hue-run/sdk/capture`](CAPTURE.md) entry point records selected tool calls and
 explicit pre-execution source evidence. It requires `ajv`, an explicit `sourceContent` choice,

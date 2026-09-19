@@ -2,30 +2,27 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { HueClient } from "../client.js";
 import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
-import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
-import type { EnvironmentDefinition, EnvironmentIdentity } from "../environment/types.js";
+import type { EnvironmentTool } from "../environment/tools.js";
+import type {
+  EnvironmentIdentity,
+  PublishableEnvironmentDefinition,
+} from "../environment/types.js";
 import { HueApiError, type EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";
 import { aggregateBounds, digest, json } from "./json.js";
 import { normalizeScorerDefinitionForPublication } from "./scorer-publication.js";
-import {
-  actualAgentManifestV2,
-  attemptBaselineV2,
-  projectMcpConnectionV2,
-  requestedAttemptProvidersV2,
-  validateAttemptConnectionBundleV2,
-  type ActualAgentManifestInputV2,
-  type AttemptBaselineV2,
-  type AttemptConnectionBundleV2,
-  type RequestedAttemptProviderV2,
+import type {
+  ActualAgentManifestInputV2,
+  AttemptConnectionBundleV2,
+  RequestedAttemptProviderV2,
 } from "./attempt.js";
 import {
-  runExperiment,
-  TargetCancelledError,
-  TargetOutcomeUncertainError,
-  type RunnerReport,
-} from "./runner.js";
+  pinRequestedAttemptV2,
+  requestedAttemptV2,
+  runEnvironmentTarget,
+} from "./environment-target.js";
+import { runExperiment, type RunnerReport } from "./runner.js";
 import type {
   CaseWrite,
   DatasetCase,
@@ -73,7 +70,7 @@ export type SimulationScenario =
       /** Environment identity and authored world definition. */
       environment: EnvironmentIdentity & {
         /** Definition normalized and published as an immutable version. */
-        definition: EnvironmentDefinition;
+        definition: PublishableEnvironmentDefinition;
       };
       /** Cases published into one frozen dataset version. */
       cases: RepositorySimulationCase[];
@@ -146,14 +143,6 @@ export interface SimulationTargetContext {
   /** Cancellation is cooperative: pass this signal into the real agent/provider call. */
   signal?: AbortSignal;
 }
-
-type ActualAgentManifestResolverV2 =
-  | ActualAgentManifestInputV2
-  | ((context: {
-      config: JsonValue;
-      item: ExperimentCase;
-      signal?: AbortSignal;
-    }) => ActualAgentManifestInputV2 | Promise<ActualAgentManifestInputV2>);
 
 /** Options for {@link runSimulation}. */
 export interface RunSimulationOptions {
@@ -245,61 +234,18 @@ type Attempt = {
 const scorerDefinition = (entry: RepositorySimulationScorer) =>
   "definition" in entry.scorer ? entry.scorer.definition : entry.scorer;
 
-type AttemptPreparationV2 = {
-  actualAgentManifest: ActualAgentManifestResolverV2;
-  requestedProviders: RequestedAttemptProviderV2[];
-  mcpSurface: NonNullable<RunSimulationOptions["mcpSurface"]>;
-};
-
-function requestedAttempt(options: RunSimulationOptions): AttemptPreparationV2 | undefined {
-  const requested = options.requestedProviders !== undefined;
-  const selected = options.mcpSurface !== undefined;
-  if (!requested && !selected) {
-    if (options.actualAgentManifest !== undefined)
-      throw new TypeError("actualAgentManifest requires requestedProviders and mcpSurface");
-    return undefined;
-  }
-  if (!requested || !selected)
-    throw new TypeError("requestedProviders and mcpSurface must be supplied together");
-  const requestedProviders = requestedAttemptProvidersV2.parse(options.requestedProviders);
-  const mcpSurface = options.mcpSurface!;
-  const provider = requestedProviders.find(
-    (candidate) => candidate.providerInstanceKey === mcpSurface.providerInstanceKey,
-  );
-  if (!provider?.surfaceKeys.includes(mcpSurface.surfaceKey))
-    throw new TypeError("mcpSurface must identify an exactly requested MCP surface");
-  const actualAgentManifest =
-    typeof options.actualAgentManifest === "function"
-      ? options.actualAgentManifest
-      : actualAgentManifestV2.parse(options.actualAgentManifest);
-  return {
-    actualAgentManifest,
-    requestedProviders,
-    mcpSurface: { ...mcpSurface },
-  };
-}
-
-function expectedManifestDigest(
-  config: JsonValue,
-): AttemptBaselineV2["expectedAgentManifestDigest"] {
-  if (!config || typeof config !== "object" || Array.isArray(config))
-    throw new TypeError("Provider-profile simulations require an immutable V2 attempt baseline");
-  const source = config as Record<string, JsonValue>;
-  const baseline = attemptBaselineV2.safeParse(source.attemptBaselineV2);
-  if (!baseline.success) {
-    if (source.attemptBaselineV2 === undefined && source.attemptBaselineV1 !== undefined)
-      throw new TypeError("Legacy V1 attempts require a fresh experiment with a V2 baseline");
-    if (source.attemptBaselineV2 !== undefined)
-      throw new TypeError("The immutable V2 attempt baseline is invalid");
-    throw new TypeError("Provider-profile simulations require an immutable V2 attempt baseline");
-  }
-  return baseline.data.expectedAgentManifestDigest;
-}
-
-function normalizedEnvironmentDefinition(definition: EnvironmentDefinition): JsonValue {
+function normalizedEnvironmentDefinition(definition: PublishableEnvironmentDefinition): JsonValue {
   return json(
     {
       ...definition,
+      ...(definition.schemaVersion === 2
+        ? {
+            providerInstances: definition.providerInstances.map((instance) => ({
+              ...instance,
+              syntheticPrincipalId: instance.syntheticPrincipalId.toLowerCase(),
+            })),
+          }
+        : {}),
       determinism: {
         clock: {
           startNs: definition.determinism?.clock?.startNs ?? "0",
@@ -681,28 +627,11 @@ async function resolveExperiment(
   };
 }
 
-async function seal(
-  client: EnvironmentClient,
-  runId: string,
-  executionId: string,
-  status: "completed" | "abandoned",
-) {
-  try {
-    await client.finishRun(runId, {
-      idempotencyKey: `execution:${executionId}:${status}`,
-      status,
-    });
-  } catch (error) {
-    const recovered = await client.getRun(runId).catch(() => undefined);
-    if (recovered?.status !== status) throw error;
-  }
-}
-
 /** Run an existing agent callback against one fresh hosted world per case. The helper
  * owns immutable resolution, execution linkage, finalization, scoring and resumable uploads.
  */
 export async function runSimulation(options: RunSimulationOptions): Promise<SimulationReport> {
-  const requestedConfiguration = requestedAttempt(options);
+  const requestedConfiguration = requestedAttemptV2(options);
   if (
     options.maxSteps !== undefined &&
     (!Number.isInteger(options.maxSteps) ||
@@ -755,12 +684,10 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
     const runUrl = new URL(`/experiments/${experimentId}`, options.client.baseUrl).toString();
     await options.onProgress?.({ type: "run_created", experimentId, runUrl });
     const requested = requestedConfiguration
-      ? {
-          ...requestedConfiguration,
-          expectedAgentManifestDigest: expectedManifestDigest(
-            (await options.client.getExperiment(experimentId)).config,
-          ),
-        }
+      ? pinRequestedAttemptV2(
+          requestedConfiguration,
+          (await options.client.getExperiment(experimentId)).config,
+        )
       : undefined;
     const report = await runExperiment({
       client: options.client,
@@ -773,167 +700,45 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       scorers: bindings,
       concurrency: options.concurrency,
       schemaTimeoutMillis: options.schemaTimeoutMillis,
-      target: async (inputs, context) => {
-        const environmentVersionId = context.item.environmentVersionId;
-        if (!environmentVersionId)
-          throw new Error("The simulation case has no pinned environment version");
-        const run = await options.environmentClient.createRun({
-          idempotencyKey: `execution:${context.executionId}`,
-          environmentVersionId,
-          executionId: context.executionId,
+      target: (inputs, context) =>
+        runEnvironmentTarget({
+          client: options.client,
+          environmentClient: options.environmentClient,
+          hue: options.hue,
+          inputs,
+          context,
+          requested,
           maxSteps: options.maxSteps,
           ttlSeconds: options.ttlSeconds,
-        });
-        const progress = (type: "world_created" | "target_started" | "world_sealed") =>
-          options.onProgress?.({
-            type,
-            experimentId,
-            executionId: context.executionId,
-            caseId: context.item.id,
-            environmentRunId: run.id,
-          });
-        let finalized = false;
-        try {
-          await progress("world_created");
-          if (options.signal?.aborted) throw new TargetCancelledError();
-          const tools = bindEnvironmentTools({
-            hue: options.hue,
-            client: options.environmentClient,
-            run,
-            parentContext: context.span.context,
-          });
-          let connectionBundle: AttemptConnectionBundleV2 | undefined;
-          let mcp: SimulationMcpCapability;
-          if (requested) {
-            const actualManifest = actualAgentManifestV2.parse(
-              typeof requested.actualAgentManifest === "function"
-                ? await requested.actualAgentManifest({
-                    config: context.config,
-                    item: structuredClone(context.item),
-                    signal: options.signal,
-                  })
-                : requested.actualAgentManifest,
-            );
-            let prepared;
-            try {
-              prepared = await options.client.prepareAttempt({
-                schemaVersion: 2,
-                idempotencyKey: randomUUID(),
-                executionId: context.executionId,
-                environmentRunId: run.id,
-                expectedAgentManifestDigest: requested.expectedAgentManifestDigest,
-                actualManifest,
-                requestedProviders: requested.requestedProviders,
-              });
-            } catch (error) {
-              // A transport failure or malformed credential-bearing response may
-              // follow a committed decision. Preserve the running checkpoint and
-              // never reacquire credentials or replay the target on resume.
-              throw new TargetOutcomeUncertainError(context.executionId, { cause: error });
-            }
-            await options.onProgress?.({
-              type: "attempt_prepared",
+          signal: options.signal,
+          onProgress: (event) =>
+            options.onProgress?.({
+              ...event,
               experimentId,
               executionId: context.executionId,
               caseId: context.item.id,
-              environmentRunId: run.id,
-              bindingId:
-                prepared.status === "ready" ? prepared.bundle.bindingId : prepared.bindingId,
-              status: prepared.status,
-              findingCodes: prepared.preflightReport.findings.map((finding) => finding.code),
-              ...(prepared.status === "ready"
-                ? {
-                    executionManifestDigest: prepared.bundle.parity.executionManifestDigest,
-                  }
+            }),
+          target: (targetInputs, targetContext) =>
+            options.target(structuredClone(targetInputs), {
+              config: structuredClone(targetContext.config),
+              item: {
+                id: targetContext.item.id,
+                externalKey: targetContext.item.externalKey,
+              },
+              executionId: targetContext.executionId,
+              environmentRunId: targetContext.environmentRunId,
+              tools: targetContext.tools,
+              mcp: {
+                url: targetContext.mcp.url,
+                token: targetContext.mcp.token,
+                expiresAt: targetContext.mcp.expiresAt,
+              },
+              ...(targetContext.connectionBundle
+                ? { connectionBundle: structuredClone(targetContext.connectionBundle) }
                 : {}),
-            });
-            if (prepared.status === "environment_incomplete") {
-              try {
-                await seal(options.environmentClient, run.id, context.executionId, "completed");
-              } catch (error) {
-                throw new TargetOutcomeUncertainError(context.executionId, { cause: error });
-              }
-              finalized = true;
-              await Promise.resolve(progress("world_sealed")).catch(() => undefined);
-              return undefined;
-            }
-            connectionBundle = validateAttemptConnectionBundleV2(prepared.bundle, {
-              requireFresh: true,
-            });
-            const projected = projectMcpConnectionV2(
-              connectionBundle,
-              requested.mcpSurface.providerInstanceKey,
-            );
-            if (!projected) throw new TypeError("The prepared attempt has no selected MCP surface");
-            mcp = projected;
-          } else {
-            mcp = await options.client.createSimulationMcpCapability({
-              runId: run.id,
-              executionId: context.executionId,
-            });
-          }
-          if (options.signal?.aborted) throw new TargetCancelledError();
-          await progress("target_started");
-          const output = await options.target(structuredClone(inputs), {
-            config: structuredClone(context.config),
-            item: { id: context.item.id, externalKey: context.item.externalKey },
-            executionId: context.executionId,
-            environmentRunId: run.id,
-            tools,
-            mcp: { url: mcp.url, token: mcp.token, expiresAt: mcp.expiresAt },
-            ...(connectionBundle ? { connectionBundle } : {}),
-            signal: options.signal,
-          });
-          try {
-            await seal(options.environmentClient, run.id, context.executionId, "completed");
-          } catch (error) {
-            throw new TargetOutcomeUncertainError(context.executionId, { cause: error });
-          }
-          finalized = true;
-          await Promise.resolve(progress("world_sealed")).catch(() => undefined);
-          return output;
-        } catch (error) {
-          if (error instanceof TargetOutcomeUncertainError || finalized) throw error;
-          let environmentIncomplete: boolean;
-          try {
-            environmentIncomplete =
-              (await options.environmentClient.getRun(run.id)).validity ===
-              "environment_incomplete";
-          } catch (inspectionError) {
-            // A target error can be the adapter surfacing a coverage gap. If the
-            // authoritative run cannot be read, do not guess that it was an agent
-            // failure or replay the target on resume.
-            throw new TargetOutcomeUncertainError(context.executionId, {
-              cause: new AggregateError([error, inspectionError]),
-            });
-          }
-          // A durable coverage gap invalidates parity independently of caller timing;
-          // do not let a racing local abort hide it as an ordinary cancellation.
-          if (environmentIncomplete) {
-            try {
-              await seal(options.environmentClient, run.id, context.executionId, "completed");
-            } catch (finalizationError) {
-              throw new TargetOutcomeUncertainError(context.executionId, {
-                cause: new AggregateError([error, finalizationError]),
-              });
-            }
-            finalized = true;
-            await Promise.resolve(progress("world_sealed")).catch(() => undefined);
-            return undefined;
-          }
-          try {
-            await seal(options.environmentClient, run.id, context.executionId, "abandoned");
-          } catch (finalizationError) {
-            throw new TargetOutcomeUncertainError(context.executionId, {
-              cause: new AggregateError([error, finalizationError]),
-            });
-          }
-          await Promise.resolve(progress("world_sealed")).catch(() => undefined);
-          if (options.signal?.aborted && !(error instanceof TargetCancelledError))
-            throw new TargetCancelledError();
-          throw error;
-        }
-      },
+              signal: targetContext.signal,
+            }),
+        }),
     });
     const complete: SimulationReport = { ...report, experimentId, runUrl };
     attempt.stage = "completed";

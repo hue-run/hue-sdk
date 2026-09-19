@@ -4,7 +4,9 @@ Capture records preserve source evidence for trace-to-case authoring. OpenTeleme
 
 This protocol is an opt-in companion to OpenTelemetry. `schema.json` defines the portable records and `fixtures.json` contains shared canonical-JSON/hash examples exercised by both SDK packages. Capture records provide evidence for review; they do not implement recorded-response playback or automatically certify a complete simulated world.
 
-These APIs are unreleased source additions and require a Hue deployment that supports the capture endpoints. Build and install a reviewed package from this checkout until a release containing these APIs is available.
+The TypeScript API is released in `@hue-run/sdk@0.3.0`; the Python API remains an unreleased
+source addition outside Python `0.2.2`. Both require a Hue deployment that supports the capture
+endpoints. Use a reviewed checkout package when testing unreleased source behavior.
 
 ## Records and boundaries
 

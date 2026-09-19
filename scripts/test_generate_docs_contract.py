@@ -25,7 +25,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertEqual(contract["schemaVersion"], 1)
         self.assertEqual(contract["availability"]["scope"], "source-tree")
         self.assertFalse(contract["availability"]["packageVersionsAreReleaseGuarantees"])
-        self.assertEqual(contract["packages"]["typescript"]["version"], "0.2.2")
+        self.assertEqual(contract["packages"]["typescript"]["version"], "0.3.0")
         self.assertEqual(contract["packages"]["python"]["version"], "0.2.2")
         self.assertIn(
             "createHue",
