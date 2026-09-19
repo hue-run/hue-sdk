@@ -8,7 +8,9 @@
     "format:check": "prettier --check \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\"",
     "format": "prettier --write \"packages/sdk-typescript/{src,tests,scripts}/**/*.{ts,mjs}\" \"examples/reference-chatbot/{src,scripts}/**/*.{ts,mjs}\"",
     "docs:typescript": "typedoc --emit none",
-    "docs:typescript:html": "typedoc"
+    "docs:typescript:html": "typedoc",
+    "docs:contract": "python3 scripts/generate-docs-contract.py",
+    "docs:contract:check": "python3 scripts/generate-docs-contract.py --check"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

@@ -13,12 +13,13 @@ Use Node 24, Bun 1.4.2 and uv 0.12.5 (`.tool-versions` and `.bun-version` record
 - TypeScript: run `node packages/sdk-typescript/scripts/verify-package.mjs` from the root. It validates public imports from installed packages with both tested AI SDK patch pairs.
 - Python: use the commands in [README.md](README.md), then repeat pytest on Python 3.10 for compatibility changes.
 - Release tooling: run `python3 -m unittest discover -s scripts -p 'test_*.py'`.
+- Documentation contract: after changing package versions, public exports, `COMPATIBILITY.md`, or `skills/hue/SKILL.md`, run `bun run docs:contract` and commit the resulting `docs-contract.json`. `bun run docs:contract:check` is the non-mutating CI gate; do not hand-edit the generated contract.
 - Lint and format: `bun install --frozen-lockfile` once at the repository root, then `bun run lint` (type-checked eslint over the TypeScript SDK) and `bun run format:check` (prettier). Python runs `ruff check`, `ruff format --check` and `mypy` inside `packages/sdk-python`. `pre-commit install` wires the same checks into Git hooks.
 - Examples: they import only the published packages. Synthetic mode must be explicit; provider errors must not silently fall back to synthetic success.
 
 ## Review expectations
 
-Add behavioral regression coverage for changed delivery, privacy, concurrency or retry behavior. Documentation-only changes need accurate, runnable snippets and working links, not a repeated application test suite. The docs.hue.run site has its own public repository, [hue-run/docs](https://github.com/hue-run/docs); the compatibility matrix and the coding-agent skill are mirrored there from this repository. Explain any remaining live integration limit.
+Add behavioral regression coverage for changed delivery, privacy, concurrency or retry behavior. Documentation-only changes need accurate, runnable snippets and working links, not a repeated application test suite. The docs.hue.run site has its own public repository, [hue-run/docs](https://github.com/hue-run/docs); the compatibility matrix, coding-agent skill, and public API inventory are mirrored there from this repository through `docs-contract.json`. Pull-request CI blocks on deterministic source checks. The separate **Hosted documentation drift** workflow checks the ordinary unversioned site after deployment, so a stale or unavailable live mirror remains visible without making source validation depend on the network. Explain any remaining live integration limit.
 
 Never include real credentials, customer prompts or files in fixtures, logs or screenshots. Pull request descriptions and commit messages are public; do not link internal systems or paste unreleased platform details. Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md) rather than in a public issue.
 
