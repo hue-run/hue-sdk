@@ -1,0 +1,318 @@
+{
+  "compatibility": {
+    "matrix": [
+      {
+        "boundary": "`engines.node >= 22.12`. ESM build only; CommonJS applications load it through Node's `require(esm)`. Resource-bound checks (heap flags, worker memory limits, export-deadline socket close) are verified on Node; Bun does not enforce worker `resourceLimits`.",
+        "path": "TypeScript core and evaluations",
+        "verifiedSupport": "Node.js 22 and 24 (CI also runs 26); Bun 1.4.2 runs the installed-package suite and the reference chatbot; compiled ESM and type declarations"
+      },
+      {
+        "boundary": "Install both adapter peers; preserve an existing global integration.",
+        "path": "Vercel AI SDK adapter",
+        "verifiedSupport": "AI SDK / OTel pairs `7.0.99 / 1.0.99` and `7.0.100 / 1.0.100`"
+      },
+      {
+        "boundary": "Core-only installation supports AI SDK 6; the Hue AI SDK adapter requires version 7.",
+        "path": "Existing JavaScript OTel provider",
+        "verifiedSupport": "Hue transport attached to an application's provider; other exporters remain usable"
+      },
+      {
+        "boundary": "`opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as `>=1.40,<2`; other releases inside the range are accepted by the resolver but not individually certified; new 1.x releases are adopted through a `uv.lock` bump once the frozen CI jobs pass. Local evaluation checkpoints require POSIX filesystem behavior.",
+        "path": "Python tracing and evaluations",
+        "verifiedSupport": "Python 3.10 and 3.14 with OpenTelemetry 1.44.0, the certified combination recorded in `uv.lock`; Python 3.10 and 3.12 with OpenTelemetry 1.40.0, the declared floor"
+      },
+      {
+        "boundary": "Configure the instrumentor's own content controls. This does not certify every provider API.",
+        "path": "Python OpenAI instrumentation",
+        "verifiedSupport": "OpenAI 3.14.0 and OpenInference OpenAI 0.1.60, using a synthetic HTTP streaming provider"
+      },
+      {
+        "boundary": "No Hue package or model wrapper required; metrics and OTLP gRPC ingestion are not supported.",
+        "path": "Direct OpenTelemetry export",
+        "verifiedSupport": "OTLP HTTP protobuf/JSON traces and correlated logs, including gzip"
+      }
+    ],
+    "sections": [
+      "Existing dependencies",
+      "Content and delivery",
+      "Evaluation coverage",
+      "Hue-managed runs",
+      "Failure isolation"
+    ],
+    "sha256": "sha256:f20117ede1dc9d9b93b84127a6b1bba4b2ce11b54be2e632139204e50ac85589",
+    "source": "COMPATIBILITY.md"
+  },
+  "packages": {
+    "python": {
+      "modules": {
+        "hue_sdk": {
+          "publicExports": [
+            "ExportStatus",
+            "Hue",
+            "HueSpan",
+            "Project",
+            "ProjectValidationError",
+            "Redactor",
+            "TraceReceipt",
+            "TraceReceiptField",
+            "TraceReceiptFields",
+            "TraceVerificationError",
+            "TraceVerificationResult",
+            "create_hue_safe"
+          ]
+        },
+        "hue_sdk.evals": {
+          "publicExports": [
+            "EvaluationClient",
+            "HueApiError",
+            "LocalScorer",
+            "MISSING",
+            "OutcomeSerializationError",
+            "RunnerReport",
+            "Score",
+            "ScoreContext",
+            "TargetContext",
+            "TelemetryExportError",
+            "TraceEvidence",
+            "UncertainExecutionError",
+            "builtin_scorers",
+            "builtins",
+            "define_local_scorer",
+            "rescore",
+            "run_experiment",
+            "score_locally"
+          ]
+        },
+        "hue_sdk.managed": {
+          "publicExports": [
+            "ManagedInputFile",
+            "ManagedOutputFile",
+            "ManagedResponse",
+            "ManagedTargetContext",
+            "ManagedTargetHandler",
+            "ManagedTargetResult"
+          ]
+        }
+      },
+      "name": "hue-run",
+      "version": "0.2.2"
+    },
+    "typescript": {
+      "entrypoints": {
+        "@hue-run/sdk": {
+          "publicExports": [
+            "ExistingHueProviders",
+            "ExperimentalTelemetrySettings",
+            "ExportIssue",
+            "ExportReport",
+            "FlushableLoggerProvider",
+            "FlushableTracerProvider",
+            "HueClient",
+            "HueConnectionError",
+            "HueExportError",
+            "HueOptions",
+            "HueSpan",
+            "HueTraceVerificationError",
+            "HueTransport",
+            "JsonValue",
+            "ModelOptions",
+            "ProjectConnection",
+            "RecordValue",
+            "SafeLifecycleOptions",
+            "SafeLifecycleResult",
+            "SharedHueOptions",
+            "Signal",
+            "SpanOptions",
+            "TokenUsage",
+            "TraceReceipt",
+            "TraceReceiptField",
+            "TraceVerification",
+            "VerifyTraceOptions",
+            "contentPrefixes",
+            "createHue",
+            "createHueSafe",
+            "createHueTransport",
+            "hueExperimentalTelemetry"
+          ]
+        },
+        "@hue-run/sdk/ai-sdk": {
+          "publicExports": [
+            "hueTelemetry"
+          ]
+        },
+        "@hue-run/sdk/environment": {
+          "publicExports": [
+            "ActionDefinition",
+            "ActionInput",
+            "ActionResult",
+            "ActionSchema",
+            "BindEnvironmentToolsOptions",
+            "CoverageGap",
+            "CoverageGapInput",
+            "CoverageGapResult",
+            "CreateRunInput",
+            "Effect",
+            "Environment",
+            "EnvironmentActionDeclaration",
+            "EnvironmentActionParameter",
+            "EnvironmentClient",
+            "EnvironmentClientOptions",
+            "EnvironmentCoverage",
+            "EnvironmentDefinition",
+            "EnvironmentIdentity",
+            "EnvironmentPage",
+            "EnvironmentPageOptions",
+            "EnvironmentRun",
+            "EnvironmentSemanticConfig",
+            "EnvironmentSummary",
+            "EnvironmentTool",
+            "EnvironmentVersion",
+            "EnvironmentVersionSummary",
+            "FinishRunInput",
+            "HueEnvironmentError",
+            "JsonValue",
+            "Observation",
+            "RunState",
+            "SealedRun",
+            "SemanticEntry",
+            "Step",
+            "StepPage",
+            "StepPageOptions",
+            "bindEnvironmentTools",
+            "createEnvironmentClient"
+          ]
+        },
+        "@hue-run/sdk/evals": {
+          "publicExports": [
+            "ActualAgentManifestInputV2",
+            "ActualAgentManifestV2",
+            "AttemptBaselineV2",
+            "AttemptBindingRead",
+            "AttemptConnectionBundleV2",
+            "AttemptIdentityV2",
+            "CaseWrite",
+            "CompleteExecution",
+            "Completion",
+            "Dataset",
+            "DatasetCase",
+            "DatasetVersion",
+            "DependencyManifestV2",
+            "DependencyProviderV2",
+            "EnvironmentEvidence",
+            "EnvironmentEvidenceSnapshot",
+            "EvaluationClient",
+            "EvaluationClientOptions",
+            "EvaluationItem",
+            "EvaluationRun",
+            "Execution",
+            "ExpectedAgentManifestV2",
+            "Experiment",
+            "ExperimentCase",
+            "ExperimentItem",
+            "HueApiError",
+            "Identity",
+            "JsonValue",
+            "JudgeBudget",
+            "JudgeConfig",
+            "JudgeJob",
+            "LocalScorer",
+            "Metric",
+            "MetricDefinition",
+            "OutcomeSerializationError",
+            "Page",
+            "PageOptions",
+            "ParityEvidenceV2",
+            "PreflightFindingV2",
+            "PreflightReportV2",
+            "PrepareAttemptIncompleteV2",
+            "PrepareAttemptInputV2",
+            "PrepareAttemptReadyV2",
+            "PrepareAttemptRequestV2",
+            "PrepareAttemptResultV2",
+            "RefreshAttemptResultV2",
+            "RegistryPageOptions",
+            "RepositorySimulationCase",
+            "RepositorySimulationScorer",
+            "RequestedAttemptProviderV2",
+            "RescoreOptions",
+            "Result",
+            "ResultSummary",
+            "RevokeAttemptResult",
+            "RunExperimentOptions",
+            "RunSimulationOptions",
+            "RunnerReport",
+            "Score",
+            "ScoreContext",
+            "Scorer",
+            "ScorerDefinition",
+            "ScorerVersion",
+            "SimulationMcpCapability",
+            "SimulationProgress",
+            "SimulationReport",
+            "SimulationScenario",
+            "SimulationTargetContext",
+            "StartExecution",
+            "StoredResult",
+            "Subject",
+            "SurfaceBindingV2",
+            "TargetCancelledError",
+            "TargetOutcomeUncertainError",
+            "TerminalState",
+            "TypedError",
+            "UncertainExecutionError",
+            "actualAgentManifestV2",
+            "agentManifestDigestV2",
+            "attemptBaselineV2",
+            "attemptBindingRead",
+            "attemptConnectionBundleV2",
+            "attemptIdentityV2",
+            "builtins",
+            "createEvaluationClient",
+            "defineLocalScorer",
+            "dependencyManifestV2",
+            "dependencyProviderV2",
+            "executionManifestDigestV2",
+            "expectedAgentManifestV2",
+            "parityEvidenceV2",
+            "preflightFindingV2",
+            "preflightReportV2",
+            "prepareAttemptInputV2",
+            "projectMcpConnectionV2",
+            "rescore",
+            "runExperiment",
+            "runSimulation",
+            "scoreLocally",
+            "secretFreeBindingV2",
+            "sourceDigest",
+            "surfaceBindingV2"
+          ]
+        },
+        "@hue-run/sdk/managed": {
+          "publicExports": [
+            "ManagedInputFile",
+            "ManagedInvocation",
+            "ManagedOutputFile",
+            "ManagedTargetContext",
+            "ManagedTargetOptions",
+            "ManagedTargetResult",
+            "createManagedTargetHandler"
+          ]
+        }
+      },
+      "name": "@hue-run/sdk",
+      "version": "0.2.2"
+    }
+  },
+  "repository": "https://github.com/hue-run/hue-sdk",
+  "schemaVersion": 1,
+  "skill": {
+    "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
+    "metadata": {
+      "author": "hue-run",
+      "version": "0.2.3"
+    },
+    "name": "hue",
+    "sha256": "sha256:4c65166dc2706a92abcccb817afd2e3efd0de8cc6338bd7975ac422370ab95d5",
+    "source": "skills/hue/SKILL.md"
+  }
+}

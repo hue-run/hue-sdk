@@ -120,19 +120,19 @@ jobs:
           uv run --frozen --all-groups pdoc hue_sdk -o ../../docs/reference/python
       - name: Tracked Markdown names only current package versions
         run: python3 scripts/check-doc-versions.py
-      - name: Markdown links resolve (advisory)
-        continue-on-error: true
+      - name: Generated documentation contract is current
+        run: python3 scripts/generate-docs-contract.py --check
+      - name: Markdown links resolve
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --no-progress --include-fragments --exclude-path node_modules --exclude-path docs/reference "./**/*.md"
+          # npmjs.com rejects automated link-check requests with 403. Package/version freshness is
+          # checked from the registry by Fern's ecosystem audit; keep only that known UI excluded.
+          args: >-
+            --no-progress --include-fragments
+            --exclude-path node_modules --exclude-path docs/reference
+            --exclude '^https://www\.npmjs\.com/package/@hue-run/sdk/?$'
+            "./**/*.md"
           fail: true
-      # The hosted docs mirror COMPATIBILITY.md, the skill and the public API surface. These
-      # checks compare against the live site and stay advisory until the site is aligned.
-      - name: Docs site mirrors the repository (advisory)
-        continue-on-error: true
-        run: |
-          python3 scripts/check-docs-drift.py
-          python3 scripts/check-reference-coverage.py
   python:
     name: Python ${{ matrix.python }} source and installed wheel
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}

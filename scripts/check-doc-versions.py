@@ -20,7 +20,7 @@ ALLOWED_FILES = {"CHANGELOG.md", "RELEASING.md"}
 # Sentences that legitimately name the release a feature first appeared in.
 ALLOWED_CONTEXT = re.compile(
     r"(requires?|available in|since|added in|older|shipped in|0\.1\.0\.dev0|pilot"
-    r"|OpenInference|instrumentation|unreleased|next releases?|published|^\s*version:)",
+    r"|OpenInference|instrumentation|dependency from|for example|unreleased|next releases?|published|^\s*version:)",
     re.I,
 )
 
@@ -39,7 +39,7 @@ def main() -> int:
         if Path(name).name in ALLOWED_FILES:
             continue
         for number, line in enumerate((ROOT / name).read_text().splitlines(), start=1):
-            for match in re.finditer(r"\b0\.1\.\d+\b", line):
+            for match in re.finditer(r"\b0\.(?:1|2)\.\d+\b", line):
                 value = match.group(0)
                 if value in versions.values() or ALLOWED_CONTEXT.search(line):
                     continue
