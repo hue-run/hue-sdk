@@ -203,6 +203,14 @@ the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-
 and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider
 flush callbacks and recovery. Local/CI runners remain available.
 
+## Source capture
+
+`hue_sdk.capture.CaptureSession` explicitly records source evidence from synchronous or async
+tool calls, with bounded queues, credential filtering and retryable acknowledgements.
+Choose `source_content` separately from telemetry `capture_content`; disabling source capture
+makes no capture requests. Use a project key with `capture_write` scope. See the
+[source capture guide](./CAPTURE.md) for setup, finalization, state evidence and explicit uploads.
+
 ## Serving safely
 
 Use `create_hue_safe` for best-effort startup and `enabled=False` for a local kill switch. The safe constructor returns a disabled client and records an instrumentation failure if initialization fails. Disabled helpers execute application work without exporting. Initialize after fork, once per serving process. `force_flush_safe(timeout_millis=1000)` and `shutdown_safe(timeout_millis=1000)` return booleans without raising; monitor those results and `export_status`. Keep strict project validation and receipt/delivery checks out of customer request paths. Never rerun application work to recover telemetry.

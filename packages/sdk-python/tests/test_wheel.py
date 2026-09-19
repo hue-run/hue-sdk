@@ -55,7 +55,10 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
         [
             str(python),
             "-c",
-            "import hue_sdk; from importlib.metadata import version; "
+            "import hue_sdk; import hue_sdk.capture as capture; "
+            "from importlib.metadata import version; "
+            'assert capture.__all__ == ["CaptureSession"]; '
+            "assert callable(capture.CaptureSession); "
             "assert version('hue-run') == hue_sdk.__version__; print(hue_sdk.__file__)",
         ],
         env=environment,
@@ -165,8 +168,18 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
     )
     receipt_tests = tmp_path / "receipt-tests"
     receipt_tests.mkdir()
-    for name in ("conftest.py", "test_receipts.py", "test_isolation.py"):
+    for name in (
+        "conftest.py",
+        "test_receipts.py",
+        "test_isolation.py",
+        "capture_api.py",
+        "test_capture.py",
+    ):
         shutil.copyfile(package / "tests" / name, receipt_tests / name)
+    (receipt_tests / "fixtures").mkdir()
+    shutil.copyfile(
+        package / "tests/fixtures/capture-v1.json", receipt_tests / "fixtures/capture-v1.json"
+    )
     subprocess.run(
         [str(python), "-m", "pytest", "-q", str(receipt_tests)],
         env=environment,
