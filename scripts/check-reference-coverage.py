@@ -9,6 +9,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+NPM_LATEST = "https://registry.npmjs.org/@hue-run%2Fsdk/latest"
+PUBLISHED_CONTRACT = "https://raw.githubusercontent.com/hue-run/docs/main/contracts/sdk-docs.json"
 
 
 def fetch(url: str) -> str:
@@ -17,8 +19,27 @@ def fetch(url: str) -> str:
         return response.read().decode("utf-8")
 
 
+def published_contract() -> dict:
+    local = json.loads((ROOT / "docs-contract.json").read_text())
+    local_version = local["packages"]["typescript"]["version"]
+    npm_version = json.loads(fetch(NPM_LATEST))["version"]
+    if local_version == npm_version:
+        return local
+    print(
+        f"working tree is TypeScript {local_version}; "
+        f"checking hosted reference against published {npm_version}"
+    )
+    published = json.loads(fetch(PUBLISHED_CONTRACT))
+    published_version = published["packages"]["typescript"]["version"]
+    if published_version != npm_version:
+        raise RuntimeError(
+            f"docs SDK snapshot is TypeScript {published_version}, npm latest is {npm_version}"
+        )
+    return published
+
+
 def main() -> int:
-    contract = json.loads((ROOT / "docs-contract.json").read_text())
+    contract = published_contract()
     if contract.get("schemaVersion") != 1:
         print("docs-contract.json: unsupported schemaVersion")
         return 1
