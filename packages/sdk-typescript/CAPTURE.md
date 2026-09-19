@@ -46,4 +46,4 @@ Call `stateEvidence(record)` with an actual snapshot captured before execution. 
 
 The local queue defaults to 8 MiB and 2,048 records; options can lower either, with a 4,000-record maximum. Uploads are limited to two concurrently and 25 MiB each. Export uses a bounded request deadline, no redirects and sanitized reports; failures do not throw into `observe`. `sourceContent:false` disables recording and all capture network calls.
 
-Bindings and capture records follow the language-neutral [protocol](https://github.com/hue-run/hue-sdk/blob/main/packages/capture-protocol/README.md). `canonicalCaptureJson` and `captureRequestKey` expose its stable canonicalization for independent producers. Ordinary OTel telemetry remains usable without this optional package entrypoint.
+Bindings and capture records follow the language-neutral [protocol](../capture-protocol/README.md). `canonicalCaptureJson` and `captureRequestKey` expose its stable canonicalization for independent producers. Ordinary OTel telemetry remains usable without this optional package entrypoint.
