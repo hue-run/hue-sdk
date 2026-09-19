@@ -43,6 +43,14 @@ metadata:
         stale = current.replace('version: "0.2.3"', 'version: "0.2.2"')
         self.assertNotEqual(drift.skill_metadata(current), drift.skill_metadata(stale))
 
+    def test_typescript_version_reads_the_contract_package(self):
+        self.assertEqual(
+            drift.typescript_version(
+                '{"packages":{"typescript":{"version":"0.2.2"},"python":{"version":"0.2.2"}}}'
+            ),
+            "0.2.2",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
