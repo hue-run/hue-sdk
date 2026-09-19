@@ -1,6 +1,6 @@
 # Compatibility
 
-This source tree is the TypeScript `0.3.0` release candidate; the current registry releases remain TypeScript `0.2.2` and Python `0.2.2` until registry acceptance completes. Test the candidate only from the exact reviewed `hue-run-sdk-0.3.0.tgz` archive, not by requesting `0.3.0` from npm. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This matrix describes the current releases, TypeScript `0.3.0` and Python `0.2.2`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -50,11 +50,10 @@ Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: f
 
 ## App-launched local agents
 
-The TypeScript `0.3.0` release candidate includes `runLocalAgent()` and the restricted
+The TypeScript `0.3.0` release includes `runLocalAgent()` and the restricted
 `runSimulation()` candidate projection; generic evaluations remain compatible. Both paths share
 the same provider-aware world lifecycle and uncertainty rules. A matching Hue API deployment is
 required. Public package tests exercise local control-plane responses and connection-bundle
-handling; they do not call an issued provider facade. Exact installed-registry-package to hosted-
-facade acceptance remains a post-publication Fern integration gate. These tests do not call the
-official Gmail service or establish universal Gmail or Slack parity. Python remains at `0.2.2`
-and does not include a native local-worker implementation.
+handling; they do not call an issued provider facade. These tests do not call the official Gmail
+service or establish universal Gmail or Slack parity. Python remains at `0.2.2` and does not
+include a native local-worker implementation.
