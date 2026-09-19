@@ -130,8 +130,8 @@ export type SimulationProgress =
 export interface SimulationTargetContext {
   /** Frozen experiment configuration. */
   config: JsonValue;
-  /** Frozen case including its immutable environment-version pin. */
-  item: ExperimentCase;
+  /** Candidate-visible identity. References, metadata and source pins stay with grading. */
+  item: Pick<ExperimentCase, "id" | "externalKey">;
   /** Target execution identity. */
   executionId: string;
   /** Stable world identity for adapter control operations such as coverage reporting. */
@@ -874,13 +874,13 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
           }
           if (options.signal?.aborted) throw new TargetCancelledError();
           await progress("target_started");
-          const output = await options.target(inputs, {
-            config: context.config,
-            item: context.item,
+          const output = await options.target(structuredClone(inputs), {
+            config: structuredClone(context.config),
+            item: { id: context.item.id, externalKey: context.item.externalKey },
             executionId: context.executionId,
             environmentRunId: run.id,
             tools,
-            mcp,
+            mcp: { url: mcp.url, token: mcp.token, expiresAt: mcp.expiresAt },
             ...(connectionBundle ? { connectionBundle } : {}),
             signal: options.signal,
           });

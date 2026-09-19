@@ -33,6 +33,7 @@
     "EVALUATIONS.md",
     "ENVIRONMENTS.md",
     "MANAGED_TARGETS.md",
+    "CAPTURE.md",
     "LICENSE"
   ],
   "type": "module",
@@ -65,10 +66,15 @@
       "import": "./dist/managed.js",
       "default": "./dist/managed.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./capture": {
+      "types": "./dist/capture.d.ts",
+      "import": "./dist/capture.js",
+      "default": "./dist/capture.js"
+    }
   },
   "scripts": {
-    "build": "node scripts/write-version.mjs && tsc -p tsconfig.build.json",
+    "build": "node scripts/write-version.mjs && tsc -p tsconfig.build.json && node scripts/copy-portable-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test tests"
   },

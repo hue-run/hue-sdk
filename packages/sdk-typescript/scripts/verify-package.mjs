@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { strict as assert } from "node:assert";
 import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -20,6 +21,16 @@ if (values["registry-version"] && values["artifacts-dir"])
 
 // Work entirely outside the monorepo: no workspace symlinks or private Hue imports.
 const source = fileURLToPath(new URL("../", import.meta.url));
+// Prevent language SDK copies from silently diverging from the portable protocol.
+for (const [local, shared] of [
+  ["src/capture/schema.json", "schema.json"],
+  ["tests/fixtures/capture-v1.json", "fixtures.json"],
+]) {
+  assert.deepEqual(
+    await readFile(join(source, local)),
+    await readFile(resolve(source, "../capture-protocol", shared)),
+  );
+}
 const destination = await mkdtemp(join(tmpdir(), "hue-sdk-package-"));
 const staging = join(destination, "package");
 function run(command, args, cwd) {
@@ -100,6 +111,11 @@ run(
     "-e",
     `
   import { strict as assert } from "node:assert";
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  for (const peer of ["ajv", "zod", "ai", "@ai-sdk/otel"]) {
+    assert.throws(() => require.resolve(peer), { code: "MODULE_NOT_FOUND" });
+  }
   await import("@hue-run/sdk");
   await import("@hue-run/sdk/managed");
   const environment = await import("@hue-run/sdk/environment");
@@ -290,6 +306,9 @@ const installedPackageTests = [
   "coverage-gap.test.ts",
   "receipt.test.ts",
   "managed.test.ts",
+  "capture.test.ts",
+  "conversion-outcomes.test.ts",
+  "local-worker.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -336,9 +355,26 @@ for (const patch of [99, 100]) {
         .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"')
         .replaceAll('"../src/environment.js"', '"@hue-run/sdk/environment"')
         .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
-        .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"'),
+        .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"')
+        .replaceAll('"../src/capture.js"', '"@hue-run/sdk/capture"')
+        .replaceAll(
+          '"../src/evals/conversion-outcome-core.mjs"',
+          '"../node_modules/@hue-run/sdk/dist/evals/conversion-outcome-core.mjs"',
+        ),
     );
   }
+  const evidenceFixture = join(consumer, "tests/fixtures/environment-evidence.ts");
+  await writeFile(
+    evidenceFixture,
+    (await readFile(evidenceFixture, "utf8")).replaceAll(
+      '"../../src/evals.js"',
+      '"@hue-run/sdk/evals"',
+    ),
+  );
+  await cp(
+    join(source, "scripts/verify-capture-node.mjs"),
+    join(consumer, "verify-capture-node.mjs"),
+  );
   // npm enforces peer compatibility; no --force or legacy peer resolution.
   run(
     "npm",
@@ -350,6 +386,9 @@ for (const patch of [99, 100]) {
   );
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
+  for (const runtime of [process.execPath, "bun"]) {
+    run(runtime, ["verify-capture-node.mjs"], consumer);
+  }
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
   // HUE_JUNIT_DIR (set by CI) collects a JUnit report per AI SDK pair for the workflow summary.

@@ -1258,3 +1258,48 @@ describe("one-shot simulation workflow", () => {
     }
   });
 });
+
+test("simulation candidates cannot read grading references or mutate pinned case data", async () => {
+  const fixture = harness({
+    evidenceFailures: 0,
+    loseCompletionAcknowledgement: false,
+    loseSealAcknowledgement: false,
+  });
+  const directory = await mkdtemp(join(tmpdir(), "hue-candidate-boundary-"));
+  const privateScenario = {
+    ...scenario,
+    config: { settings: { temperature: 0 } },
+    cases: [
+      {
+        externalKey: "one",
+        inputs: { task: "save" },
+        expected: "saved",
+        metadata: { rubric: "evaluator-private" },
+      },
+    ],
+  };
+  try {
+    const report = await runSimulation({
+      ...fixture,
+      checkpointDirectory: directory,
+      scenario: privateScenario,
+      persistResultContent: false,
+      traceEvidence: { mode: "required" },
+      target: async (inputs, context) => {
+        expect(Object.keys(context.item).sort()).toEqual(["externalKey", "id"]);
+        expect(Object.keys(context.mcp).sort()).toEqual(["expiresAt", "token", "url"]);
+        expect(JSON.stringify(context)).not.toContain("evaluator-private");
+        (inputs as { task: string }).task = "changed";
+        (context.config as { settings: { temperature: number } }).settings.temperature = 1;
+        await context.tools.save!.execute({});
+        return "saved";
+      },
+    });
+    const stored = fixture.experiments.get(report.experimentId);
+    expect(stored.cases[0].inputs).toEqual({ task: "save" });
+    expect(stored.config).toEqual({ settings: { temperature: 0 } });
+    expect([...fixture.results.values()].length).toBeGreaterThan(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

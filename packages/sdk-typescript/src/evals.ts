@@ -64,3 +64,12 @@ export type {
 export { builtins, defineLocalScorer, scoreLocally } from "./evals/scorers.js";
 export { sourceDigest } from "./evals/json.js";
 export type * from "./evals/types.js";
+
+export { runLocalAgent } from "./evals/local-worker.js";
+export type { LocalAgentTargetContext, RunLocalAgentOptions } from "./evals/local-worker.js";
+export {
+  conversionOutcomeMetrics,
+  conversionOutcomeScorerDefinition,
+  scoreConversionOutcome,
+  createConversionOutcomeScorer,
+} from "./evals/conversion-outcomes.js";

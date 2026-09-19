@@ -153,3 +153,55 @@ The runner stops scheduling more cases after an operational failure and waits fo
 ## Verification boundaries
 
 `scripts/verify-package.mjs` installs a real packed tarball outside the monorepo and runs HTTP contract tests against a synthetic service plus actual OpenTelemetry exporters. It checks two configurations, rescoring without target invocation, absent/null output, upload resume, uncertain execution, exclusive checkpoints, source/metric contracts, content policy and terminating schema workers. `scripts/verify-evaluation-api.mjs` is a separate opt-in acceptance against a real Hue receiver/API; it creates synthetic datasets/scorers/experiments in the project associated with the supplied development key.
+
+## Outbound local agent worker
+
+`runLocalAgent` registers one fixed application callback and polls for queued runs. Hue selects
+the registered key/revision; it does not send executable code or shell commands. Keep the
+checkpoint directory private and durable. The worker persists result content and requires
+acknowledged trace and sealed environment evidence.
+
+```ts
+import { createHue } from "@hue-run/sdk";
+import { createEnvironmentClient } from "@hue-run/sdk/environment";
+import { createEvaluationClient, runLocalAgent } from "@hue-run/sdk/evals";
+import { runMyAgent } from "./agent.js"; // Your existing application entry point.
+
+const connection = { apiKey: process.env.HUE_API_KEY! };
+const hue = createHue({ ...connection, serviceName: "local-worker", captureContent: false });
+try {
+  await runLocalAgent({
+    client: createEvaluationClient(connection),
+    environmentClient: createEnvironmentClient(connection),
+    hue,
+    agent: { key: "support-agent", name: "Support agent", revision: "1" },
+    checkpointDirectory: ".hue-checkpoints/support-agent",
+    target: (inputs, tools, context) => runMyAgent({ inputs, tools, config: context.config }),
+  });
+} finally {
+  await hue.shutdownSafe();
+}
+```
+
+The callback receives cloned inputs, local tools, and an allowlisted context containing
+`config`, `item: {id, externalKey}`, `executionId`, `trace: {traceId, spanId}` and a short-lived
+`mcp` capability. Expected outcomes, case metadata and original source pins remain private to
+grading. Pass the tools or scoped MCP capability into the agent's actual tool boundary; their
+presence does not redirect provider calls. Capabilities are not written to checkpoints.
+`maxRuns` limits completed runs for one-shot workers, while `signal` stops polling. A stop signal
+does not forcibly cancel an already executing application callback.
+
+## Conversion outcome scoring
+
+`createConversionOutcomeScorer()` returns a local scorer for reviewed Gmail or Slack draft
+outcomes. Register its `definition` and pass the same binding in `scorers` to `runLocalAgent`,
+`runExperiment` or `rescore`. The definition pins the exact shipped executable source bytes;
+`scoreConversionOutcome(context)` exposes that same scorer directly.
+
+It grades sealed initial/final state and the complete action journal against an explicit
+`conversion_outcome_v1` reference rubric. The seven boolean metrics report run completion,
+saved draft, destination, literal content, unrelated-state preservation, explicit process
+constraints and overall success. Missing or malformed evidence is an error; authoritative
+coverage gaps are skipped. Read order and repair writes do not fail an outcome unless the
+reviewed rubric requires them. Literal content checks do not establish semantic quality.
+Historical rescoring uses saved evidence and never invokes the candidate.

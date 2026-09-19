@@ -180,3 +180,11 @@ that cannot be confirmed stays uncertain and never causes the agent to be replay
 The hosted MCP connection exposes Hue's bounded native actions; it is not general Gmail or
 Slack HTTP parity and does not proxy arbitrary provider traffic. Forking, in-place reset and
 arbitrary-step diffs are outside this interface.
+
+## Candidate context migration
+
+`runSimulation` now supplies `context.item` as `{ id, externalKey }`. Read candidate inputs
+from the callback's first argument. Expected outcomes, case metadata and environment-version
+pins are available to evaluation and scoring code, and are omitted from the candidate callback.
+Inputs and configuration are cloned before invocation so candidate mutations cannot change
+pinned grading data. The generic `runExperiment` evaluator interface is unchanged.
