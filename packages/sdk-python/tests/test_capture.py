@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import io
 import json
 import time
 from pathlib import Path
 
 import pytest
+import requests
 from capture_api import capture_api
 
 from hue_sdk.capture import CaptureSession
@@ -274,3 +277,181 @@ def test_source_descriptors_apply_custom_redaction_and_report_omissions():
         omitted = CaptureSession(**options(url), redact=broken)
         omitted.source(source)
         assert omitted.flush()["dropped"] == 1
+
+
+@pytest.fixture
+def upload_transport(monkeypatch):
+    """Inspect prepared HTTPS requests after Requests applies auth/proxy settings."""
+    attempts = []
+    reply = {"status": 200}
+    original = requests.adapters.HTTPAdapter.send
+
+    def send(adapter, request, **kwargs):
+        if request.url.startswith("https://capture-upload.invalid/"):
+            attempts.append((request, kwargs))
+            if "error" in reply:
+                raise reply["error"]
+            response = requests.Response()
+            response.status_code = reply["status"]
+            response.request = request
+            response.url = request.url
+            response.raw = io.BytesIO(b"")
+            response._content = b""
+            response.headers["Location"] = "https://capture-upload.invalid/redirected"
+            return response
+        return original(adapter, request, **kwargs)
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+    return attempts, reply
+
+
+@pytest.mark.parametrize("headers", ["missing", None, {}, {"X-Vercel-Blob-Access": "private"}])
+def test_upload_uses_only_capability_authority_and_preserves_bytes(
+    headers, upload_transport, monkeypatch, tmp_path
+):
+    netrc = tmp_path / "synthetic.netrc"
+    netrc.write_text("machine capture-upload.invalid login ambient-user password ambient-secret\n")
+    netrc.chmod(0o600)
+    monkeypatch.setenv("NETRC", str(netrc))
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, "http://ambient-proxy.invalid:8080")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "127.0.0.1")
+    attempts, _reply = upload_transport
+    data = gzip.compress(b"\x00source bytes\xff")
+    with capture_api() as (url, calls, state):
+        if headers != "missing":
+            state["upload_headers"] = headers
+        capture = CaptureSession(**options(url))
+        result = capture.upload_source(
+            filename="source.bin", content_type="application/octet-stream", data=data
+        )
+        assert result == {
+            "artifactId": "22222222-2222-4222-8222-222222222222",
+            "sha256": sha256(data),
+            "byteSize": len(data),
+            "mimeType": "application/octet-stream",
+        }
+        assert len(attempts) == 1
+        request, settings = attempts[0]
+        assert request.method == "PUT"
+        assert request.body == data
+        assert request.headers["Content-Type"] == "application/octet-stream"
+        assert request.headers["Content-Length"] == str(len(data))
+        assert "Authorization" not in request.headers
+        assert "Proxy-Authorization" not in request.headers
+        assert "Content-Encoding" not in request.headers
+        assert settings["proxies"] == {}
+        assert all(call["authorization"] == "Bearer synthetic-key" for call in calls)
+        assert len([call for call in calls if call["path"].endswith("/complete")]) == 1
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"authorization": "must-not-forward"},
+        {"cookie": "must-not-forward"},
+        {"content-type": "text/plain"},
+        {"x-vercel-blob-access": "public"},
+        {"x-vercel-blob-access": "private\r\nX-Injected: value"},
+        {"content-type": None},
+        [],
+    ],
+)
+def test_upload_rejects_unsafe_capability_headers(headers, upload_transport):
+    attempts, _reply = upload_transport
+    with capture_api() as (url, calls, state):
+        state["upload_headers"] = headers
+        capture = CaptureSession(**options(url))
+        assert (
+            capture.upload_source(
+                filename="source.bin", content_type="application/octet-stream", data=b"source"
+            )
+            is None
+        )
+        assert attempts == []
+        assert capture.flush()["dropped"] == 1
+        assert not any(call["path"].endswith("/complete") for call in calls)
+
+
+@pytest.mark.parametrize("status", [307, 503])
+def test_upload_never_retries_or_follows_redirects(status, upload_transport):
+    attempts, reply = upload_transport
+    reply["status"] = status
+    with capture_api() as (url, calls, state):
+        state["complete_status"] = 503
+        capture = CaptureSession(**options(url))
+        assert (
+            capture.upload_source(
+                filename="source.bin", content_type="application/octet-stream", data=b"source"
+            )
+            is None
+        )
+        assert len(attempts) == 1
+        assert attempts[0][0].url == "https://capture-upload.invalid/source"
+        assert capture.flush()["dropped"] == 1
+        assert len([call for call in calls if call["path"].endswith("/complete")]) == 1
+
+
+@pytest.mark.parametrize(
+    "upload_url",
+    [
+        None,
+        "https://capture-upload.invalid/" + "x" * 8192,
+        "https://capture-upload.invalid/source\n",
+        "https://capture-upload.invalid/source\x7f",
+        "http://capture-upload.invalid/source",
+        "https:///source",
+        "https://user:password@capture-upload.invalid/source",
+        "https://capture-upload.invalid:bad/source",
+        "https://capture-upload.invalid/source#fragment",
+    ],
+)
+def test_upload_rejects_invalid_capabilities_before_upload_or_completion(
+    upload_url, upload_transport
+):
+    attempts, _reply = upload_transport
+    with capture_api() as (url, calls, state):
+        state["upload_url"] = upload_url
+        capture = CaptureSession(**options(url))
+        assert (
+            capture.upload_source(
+                filename="source.bin", content_type="application/octet-stream", data=b"source"
+            )
+            is None
+        )
+        assert attempts == []
+        assert capture.flush()["dropped"] == 1
+        assert not any(call["path"].endswith("/complete") for call in calls)
+
+
+@pytest.mark.parametrize("failure", ["transport", "response"])
+@pytest.mark.parametrize("verified", [False, True])
+def test_upload_completion_resolves_uncertain_write_without_replay(
+    failure, verified, upload_transport
+):
+    attempts, reply = upload_transport
+    if failure == "transport":
+        reply["error"] = requests.ConnectionError("Synthetic lost upload acknowledgement")
+    else:
+        reply["status"] = 503
+    with capture_api() as (url, calls, state):
+        state["complete_status"] = 200 if verified else 409
+        capture = CaptureSession(**options(url))
+        data = b"source bytes"
+        result = capture.upload_source(
+            filename="source.bin", content_type="application/octet-stream", data=data
+        )
+        assert len(attempts) == 1
+        assert attempts[0][0].body == data
+        assert len([call for call in calls if call["path"].endswith("/complete")]) == 1
+        if verified:
+            assert result == {
+                "artifactId": "22222222-2222-4222-8222-222222222222",
+                "sha256": sha256(data),
+                "byteSize": len(data),
+                "mimeType": "application/octet-stream",
+            }
+        else:
+            assert result is None
+        assert capture.flush()["dropped"] == (0 if verified else 1)

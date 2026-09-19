@@ -62,6 +62,33 @@ def _copy(value: Any, limit: int = 300 * 1024) -> Any:
     return json.loads(result)
 
 
+def _upload_headers(value: Any, content_type: str) -> dict[str, str]:
+    def text(item: Any) -> str:
+        if (
+            type(item) is not str
+            or not item
+            or len(item) > 255
+            or any(ord(char) < 32 or ord(char) == 127 for char in item)
+        ):
+            raise ValueError("Invalid upload header")
+        return item
+
+    headers = {"content-type": text(content_type)}
+    if value is None:
+        return headers
+    if type(value) is not dict:
+        raise ValueError("Invalid upload headers")
+    for name, raw in value.items():
+        lower, field = text(name).lower(), text(raw)
+        if lower == "content-type" and field == content_type:
+            headers[lower] = field
+        elif lower == "x-vercel-blob-access" and field == "private":
+            headers[lower] = field
+        else:
+            raise ValueError("Unsupported upload header")
+    return headers
+
+
 class CaptureSession:
     """Explicit async/sync tool wrappers preserve live results and exceptions.
 
@@ -506,19 +533,44 @@ class CaptureSession:
             upload = self._request(
                 "POST", f"/{self._id}/artifacts/{artifact['id']}/upload", {}, deadline
             )
-            url = urlsplit(upload["uploadUrl"])
-            if url.scheme != "https" or url.username or url.password or upload["method"] != "PUT":
+            upload_url = upload["uploadUrl"]
+            if (
+                type(upload_url) is not str
+                or len(upload_url) > 8192
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in upload_url)
+            ):
                 raise ValueError("Invalid upload capability")
-            with requests.put(
-                upload["uploadUrl"],
-                data=data,
-                headers=upload["headers"],
-                timeout=max(0.001, deadline - time.monotonic()),
-                allow_redirects=False,
-                stream=True,
-            ) as response:
-                if not 200 <= response.status_code < 300:
-                    raise RuntimeError("Capture upload failed")
+            url = urlsplit(upload_url)
+            if (
+                url.scheme != "https"
+                or not url.hostname
+                or url.username is not None
+                or url.password is not None
+                or url.fragment
+                or upload["method"] != "PUT"
+            ):
+                raise ValueError("Invalid upload capability")
+            _ = url.port  # Validate the port before treating a failure as an uncertain write.
+            headers = _upload_headers(upload.get("headers"), content_type)
+            # The upload capability is the only authority: do not add netrc credentials,
+            # environment proxies, automatic retries or redirected uploads.
+            try:
+                with requests.Session() as session:
+                    session.trust_env = False
+                    with session.put(
+                        upload_url,
+                        data=data,
+                        headers=headers,
+                        timeout=max(0.001, deadline - time.monotonic()),
+                        allow_redirects=False,
+                        stream=True,
+                    ) as response:
+                        if not 200 <= response.status_code < 300:
+                            raise RuntimeError("Capture upload failed")
+            except Exception:
+                # A failed acknowledgement does not establish that the write failed.
+                # Never replay the PUT; completion verifies the stored length and hash.
+                pass
             self._request("POST", f"/{self._id}/artifacts/{artifact['id']}/complete", {}, deadline)
             return {
                 "artifactId": artifact["id"],

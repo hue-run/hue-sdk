@@ -44,6 +44,18 @@ def capture_api():
                     "id": "11111111-1111-4111-8111-111111111111",
                     "captureRevision": state["revision"],
                 }
+            elif self.path.endswith("/artifacts"):
+                result = {"id": "22222222-2222-4222-8222-222222222222"}
+            elif self.path.endswith("/upload"):
+                result = {
+                    "uploadUrl": state.get("upload_url", "https://capture-upload.invalid/source"),
+                    "method": "PUT",
+                }
+                if "upload_headers" in state:
+                    result["headers"] = state["upload_headers"]
+            elif self.path.endswith("/complete"):
+                status = state.get("complete_status", 200)
+                result = {"state": "ready"}
             elif self.path.endswith("/append"):
                 if body["idempotencyKey"] not in state["receipts"]:
                     state["revision"] += 1
