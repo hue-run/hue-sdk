@@ -156,6 +156,14 @@ The runner stops scheduling more cases after an operational failure and waits fo
 
 ## Outbound local agent worker
 
+`runLocalAgent` and the conversion scorer below are unreleased additions, absent from published
+`@hue-run/sdk@0.2.2`. Build from a checkout containing this change. Queue registration, claims,
+scoped MCP capabilities and sealed evidence require a supporting Hue server and project access;
+the package manifest version does not establish hosted availability. Run
+`node packages/sdk-typescript/scripts/verify-package.mjs` from the repository root, then install
+the archive it reports with `npm install /path/to/hue-run-sdk-0.2.2.tgz zod`. Use the archive from
+the reviewed revision; a registry install of `0.2.2` cannot run these examples.
+
 `runLocalAgent` registers one fixed application callback and polls for queued runs. Hue selects
 the registered key/revision; it does not send executable code or shell commands. Keep the
 checkpoint directory private and durable. The worker persists result content and requires

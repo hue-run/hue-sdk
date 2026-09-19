@@ -183,6 +183,9 @@ arbitrary-step diffs are outside this interface.
 
 ## Candidate context migration
 
+This section describes the unreleased source-tree change; published `@hue-run/sdk@0.2.2` does
+not yet include this candidate-context restriction.
+
 `runSimulation` now supplies `context.item` as `{ id, externalKey }`. Read candidate inputs
 from the callback's first argument. Expected outcomes, case metadata and environment-version
 pins are available to evaluation and scoring code, and are omitted from the candidate callback.
