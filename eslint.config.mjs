@@ -59,7 +59,11 @@ export default tseslint.config(
     },
   },
   {
-    files: ["packages/sdk-typescript/scripts/**/*.mjs", "scripts/**/*.mjs"],
+    files: [
+      "packages/sdk-typescript/src/**/*.mjs",
+      "packages/sdk-typescript/scripts/**/*.mjs",
+      "scripts/**/*.mjs",
+    ],
     languageOptions: { globals: globals.node },
     rules: {
       "no-empty": ["error", { allowEmptyCatch: true }],

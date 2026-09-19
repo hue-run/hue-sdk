@@ -1,7 +1,7 @@
 """Generate the public, deterministic SDK documentation contract.
 
 The contract is intentionally limited to public repository state that downstream
-documentation can mirror: released package identities, declared public exports,
+documentation can mirror: source-tree package identities, declared public exports,
 the compatibility matrix, and the portable skill's public metadata. It contains
 no build timestamps, commit identities, internal links, or deployment details.
 """
@@ -203,6 +203,7 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
         "./environment": "environment.ts",
         "./evals": "evals.ts",
         "./managed": "managed.ts",
+        "./capture": "capture.ts",
     }
     declared_entrypoints = set(ts_manifest["exports"]) - {"./package.json"}
     if declared_entrypoints != set(ts_entry_files):
@@ -221,6 +222,7 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
         "hue_sdk": py_source / "__init__.py",
         "hue_sdk.evals": py_source / "evals/__init__.py",
         "hue_sdk.managed": py_source / "managed.py",
+        "hue_sdk.capture": py_source / "capture/__init__.py",
     }
     skill = skill_frontmatter(skill_path)
     skill.update({"source": str(skill_path.relative_to(root)), "sha256": sha256(skill_path)})
@@ -228,6 +230,11 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
         "repository": "https://github.com/hue-run/hue-sdk",
+        "availability": {
+            "scope": "source-tree",
+            "packageVersionsAreReleaseGuarantees": False,
+            "releaseNotes": "CHANGELOG.md",
+        },
         "packages": {
             "typescript": {
                 "name": ts_manifest["name"],

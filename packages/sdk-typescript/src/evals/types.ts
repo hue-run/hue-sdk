@@ -614,3 +614,35 @@ export interface SimulationMcpCapability {
   /** Credential expiry timestamp. */
   expiresAt: string;
 }
+
+/** Identity and capabilities of one fixed local agent entry point. */
+export interface LocalAgentRegistration {
+  /** Stable application-selected agent key. */
+  key: string;
+  /** Display name. */
+  name: string;
+  /** Application-selected revision of the agent configuration. */
+  revision: string;
+  /** Supported execution contracts; defaults to environment:v1 in the worker. */
+  capabilities?: string[];
+  /** Local scorer source digests available in this process. */
+  scorerDigests?: string[];
+}
+/** Server registration and heartbeat timestamps for a local agent. */
+export interface RegisteredLocalAgent extends Required<LocalAgentRegistration> {
+  /** Registered agent identity. */
+  id: string;
+  /** Whether Hue permits this registration to receive runs. */
+  enabled: boolean;
+  /** Latest registration heartbeat, as an ISO timestamp. */
+  lastSeenAt: string;
+  /** Registration creation timestamp. */
+  createdAt: string;
+}
+/** Queue claim connecting a local run to a pinned experiment. */
+export interface LocalAgentClaim {
+  /** Claimed queue-run identity. */
+  runId: string;
+  /** Pinned experiment to execute. */
+  experimentId: string;
+}

@@ -7,6 +7,7 @@ and OpenTelemetry providers. The helper never installs or replaces global provid
 ```python
 from hue_sdk.managed import ManagedTargetHandler, ManagedTargetResult, ManagedOutputFile
 
+
 def target(invocation):
     result = existing_agent(
         invocation.input,
@@ -17,11 +18,17 @@ def target(invocation):
     )
     return ManagedTargetResult(
         output={"text": result.text},
-        files=tuple(ManagedOutputFile(
-            filename=file.name, content_type=file.content_type,
-            data=file.bytes, primary=file.is_primary,
-        ) for file in result.files),
+        files=tuple(
+            ManagedOutputFile(
+                filename=file.name,
+                content_type=file.content_type,
+                data=file.bytes,
+                primary=file.is_primary,
+            )
+            for file in result.files
+        ),
     )
+
 
 handler = ManagedTargetHandler(
     machine_credential=server_secret,

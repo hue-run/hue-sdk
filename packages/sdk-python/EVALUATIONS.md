@@ -11,15 +11,20 @@ from hue_sdk.evals import EvaluationClient, TraceEvidence, run_experiment
 
 client = EvaluationClient(api_key=os.environ["HUE_API_KEY"])
 
+
 def target(inputs, context):
     # Call your application here. context.config is the frozen experiment config;
     # context.item contains the frozen case and context.span is an ordinary Hue span helper.
     return inputs["question"].upper()
 
+
 with Hue(api_key=os.environ["HUE_API_KEY"], capture_content=False) as hue:
     report = run_experiment(
-        client=client, hue=hue, experiment_id=os.environ["HUE_EXPERIMENT_ID"],
-        target=target, checkpoint_directory=".local/my-evaluation",
+        client=client,
+        hue=hue,
+        experiment_id=os.environ["HUE_EXPERIMENT_ID"],
+        target=target,
+        checkpoint_directory=".local/my-evaluation",
         persist_result_content=True,
         trace_evidence=TraceEvidence("required"),
     )

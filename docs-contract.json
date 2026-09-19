@@ -1,4 +1,9 @@
 {
+  "availability": {
+    "packageVersionsAreReleaseGuarantees": false,
+    "releaseNotes": "CHANGELOG.md",
+    "scope": "source-tree"
+  },
   "compatibility": {
     "matrix": [
       {
@@ -37,9 +42,10 @@
       "Content and delivery",
       "Evaluation coverage",
       "Hue-managed runs",
-      "Failure isolation"
+      "Failure isolation",
+      "Evidence capture and app-launched local agents"
     ],
-    "sha256": "sha256:f20117ede1dc9d9b93b84127a6b1bba4b2ce11b54be2e632139204e50ac85589",
+    "sha256": "sha256:97d712311c39e75cf87c7c38ef80920f37346c00c2f54714dac91d1660f03697",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -59,6 +65,11 @@
             "TraceVerificationError",
             "TraceVerificationResult",
             "create_hue_safe"
+          ]
+        },
+        "hue_sdk.capture": {
+          "publicExports": [
+            "CaptureSession"
           ]
         },
         "hue_sdk.evals": {
@@ -140,6 +151,25 @@
             "hueTelemetry"
           ]
         },
+        "@hue-run/sdk/capture": {
+          "publicExports": [
+            "Binding",
+            "BlobRef",
+            "CaptureOptions",
+            "CaptureReport",
+            "CaptureSession",
+            "JsonValue",
+            "Manifest",
+            "Observation",
+            "Omission",
+            "Payload",
+            "Producer",
+            "Source",
+            "StateEvidence",
+            "canonicalCaptureJson",
+            "captureRequestKey"
+          ]
+        },
         "@hue-run/sdk/environment": {
           "publicExports": [
             "ActionDefinition",
@@ -159,6 +189,8 @@
             "EnvironmentClientOptions",
             "EnvironmentCoverage",
             "EnvironmentDefinition",
+            "EnvironmentDefinitionV1",
+            "EnvironmentDefinitionV2",
             "EnvironmentIdentity",
             "EnvironmentPage",
             "EnvironmentPageOptions",
@@ -169,9 +201,11 @@
             "EnvironmentVersion",
             "EnvironmentVersionSummary",
             "FinishRunInput",
+            "GmailProviderInstance",
             "HueEnvironmentError",
             "JsonValue",
             "Observation",
+            "PublishableEnvironmentDefinition",
             "RunState",
             "SealedRun",
             "SemanticEntry",
@@ -215,6 +249,9 @@
             "JudgeBudget",
             "JudgeConfig",
             "JudgeJob",
+            "LocalAgentClaim",
+            "LocalAgentRegistration",
+            "LocalAgentTargetContext",
             "LocalScorer",
             "Metric",
             "MetricDefinition",
@@ -230,6 +267,7 @@
             "PrepareAttemptRequestV2",
             "PrepareAttemptResultV2",
             "RefreshAttemptResultV2",
+            "RegisteredLocalAgent",
             "RegistryPageOptions",
             "RepositorySimulationCase",
             "RepositorySimulationScorer",
@@ -239,6 +277,7 @@
             "ResultSummary",
             "RevokeAttemptResult",
             "RunExperimentOptions",
+            "RunLocalAgentOptions",
             "RunSimulationOptions",
             "RunnerReport",
             "Score",
@@ -267,6 +306,9 @@
             "attemptConnectionBundleV2",
             "attemptIdentityV2",
             "builtins",
+            "conversionOutcomeMetrics",
+            "conversionOutcomeScorerDefinition",
+            "createConversionOutcomeScorer",
             "createEvaluationClient",
             "defineLocalScorer",
             "dependencyManifestV2",
@@ -280,7 +322,9 @@
             "projectMcpConnectionV2",
             "rescore",
             "runExperiment",
+            "runLocalAgent",
             "runSimulation",
+            "scoreConversionOutcome",
             "scoreLocally",
             "secretFreeBindingV2",
             "sourceDigest",
@@ -300,7 +344,7 @@
         }
       },
       "name": "@hue-run/sdk",
-      "version": "0.2.2"
+      "version": "0.3.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",

@@ -15,7 +15,13 @@ class _Missing:
 MISSING = _Missing()
 
 
-def json_value(value: Any, max_bytes: int = 200_000) -> Any:
+def json_value(
+    value: Any,
+    max_bytes: int = 200_000,
+    *,
+    max_nodes: int = 20_000,
+    max_depth: int = 32,
+) -> Any:
     """Validate before serialization; never coerce keys, NaN, dates or large Python integers."""
     pending = [(value, 0, False)]
     ancestors: set[int] = set()
@@ -26,7 +32,7 @@ def json_value(value: Any, max_bytes: int = 200_000) -> Any:
             ancestors.remove(id(item))
             continue
         nodes += 1
-        if nodes > 20_000 or depth > 32:
+        if nodes > max_nodes or depth > max_depth:
             raise ValueError("JSON exceeds depth or node limits.")
         if item is None or type(item) is bool:
             continue

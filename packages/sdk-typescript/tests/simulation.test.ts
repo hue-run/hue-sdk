@@ -9,6 +9,8 @@ import {
   createEnvironmentClient,
   type EnvironmentClient,
   type EnvironmentDefinition,
+  type EnvironmentDefinitionV2,
+  type PublishableEnvironmentDefinition,
 } from "../src/environment.js";
 import {
   actualAgentManifestV2,
@@ -633,7 +635,24 @@ describe("one-shot simulation workflow", () => {
       loseCompletionAcknowledgement: false,
       loseSealAcknowledgement: false,
     });
-    const definition = nodeHeavyEnvironmentDefinition();
+    const legacyDefinition = nodeHeavyEnvironmentDefinition();
+    const definition: EnvironmentDefinitionV2 = {
+      ...legacyDefinition,
+      schemaVersion: 2,
+      providerInstances: [
+        {
+          providerInstanceKey: "gmail-primary",
+          providerId: "google.gmail",
+          syntheticPrincipalId: "ABCDEFAB-1234-4ABC-8DEF-ABCDEFABCDEF",
+          configuration: {
+            kind: "gmail_mailbox/v1",
+            messagesCollection: "records",
+            draftsCollection: "records",
+            mailboxAddress: "owner@example.test",
+          },
+        },
+      ],
+    };
     const definitionBytes = Buffer.byteLength(JSON.stringify(definition));
     const stateBytes = Buffer.byteLength(JSON.stringify(definition.state));
     const entities = Object.values(definition.state.collections.records!);
@@ -652,7 +671,7 @@ describe("one-shot simulation workflow", () => {
 
     const publications: Array<{
       path: string;
-      definition: EnvironmentDefinition;
+      definition: PublishableEnvironmentDefinition;
       contentDigest: string;
     }> = [];
     const server = Bun.serve({
@@ -663,8 +682,16 @@ describe("one-shot simulation workflow", () => {
         const path = new URL(request.url).pathname;
         expect(request.method).toBe("POST");
         expect(path).toMatch(/^\/api\/v1\/environments\/[0-9a-f-]+\/versions$/);
-        const body = (await request.json()) as { definition: EnvironmentDefinition };
-        const contentDigest = canonicalDigest(body.definition).slice("sha256:".length);
+        const body = (await request.json()) as { definition: PublishableEnvironmentDefinition };
+        const canonicalDefinition = structuredClone(body.definition);
+        if (canonicalDefinition.schemaVersion === 2)
+          canonicalDefinition.providerInstances = canonicalDefinition.providerInstances.map(
+            (instance) => ({
+              ...instance,
+              syntheticPrincipalId: instance.syntheticPrincipalId.toLowerCase(),
+            }),
+          );
+        const contentDigest = canonicalDigest(canonicalDefinition).slice("sha256:".length);
         publications.push({ path, definition: body.definition, contentDigest });
         return Response.json(
           {
@@ -695,7 +722,10 @@ describe("one-shot simulation workflow", () => {
         identity = await originalEnvironmentClient.createEnvironment(input);
         return identity;
       },
-      publishVersion: async (environmentId: string, submitted: EnvironmentDefinition) => {
+      publishVersion: async (
+        environmentId: string,
+        submitted: PublishableEnvironmentDefinition,
+      ) => {
         const version = await publishedClient.publishVersion(environmentId, submitted);
         (await originalEnvironmentClient.getEnvironment(environmentId)).versions.push(version);
         return version;
@@ -731,8 +761,19 @@ describe("one-shot simulation workflow", () => {
       expect(publications).toHaveLength(1);
       expect(jsonNodeCount(publications[0]!.definition)).toBeGreaterThan(20_000);
       expect(jsonDepth({ definition: publications[0]!.definition })).toBe(37);
+      expect(publications[0]!.definition).toMatchObject({
+        schemaVersion: 2,
+        providerInstances: [
+          {
+            providerInstanceKey: "gmail-primary",
+            syntheticPrincipalId: "ABCDEFAB-1234-4ABC-8DEF-ABCDEFABCDEF",
+          },
+        ],
+      });
 
       await runSimulation(options);
+      // Server readback canonicalizes UUIDs to lowercase. The repository digest does
+      // the same, so a casing-only input difference reuses this immutable version.
       expect(publications).toHaveLength(1);
 
       const changed = structuredClone(definition);
@@ -1257,4 +1298,49 @@ describe("one-shot simulation workflow", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+test("simulation candidates cannot read grading references or mutate pinned case data", async () => {
+  const fixture = harness({
+    evidenceFailures: 0,
+    loseCompletionAcknowledgement: false,
+    loseSealAcknowledgement: false,
+  });
+  const directory = await mkdtemp(join(tmpdir(), "hue-candidate-boundary-"));
+  const privateScenario = {
+    ...scenario,
+    config: { settings: { temperature: 0 } },
+    cases: [
+      {
+        externalKey: "one",
+        inputs: { task: "save" },
+        expected: "saved",
+        metadata: { rubric: "evaluator-private" },
+      },
+    ],
+  };
+  try {
+    const report = await runSimulation({
+      ...fixture,
+      checkpointDirectory: directory,
+      scenario: privateScenario,
+      persistResultContent: false,
+      traceEvidence: { mode: "required" },
+      target: async (inputs, context) => {
+        expect(Object.keys(context.item).sort()).toEqual(["externalKey", "id"]);
+        expect(Object.keys(context.mcp).sort()).toEqual(["expiresAt", "token", "url"]);
+        expect(JSON.stringify(context)).not.toContain("evaluator-private");
+        (inputs as { task: string }).task = "changed";
+        (context.config as { settings: { temperature: number } }).settings.temperature = 1;
+        await context.tools.save!.execute({});
+        return "saved";
+      },
+    });
+    const stored = fixture.experiments.get(report.experimentId);
+    expect(stored.cases[0].inputs).toEqual({ task: "save" });
+    expect(stored.config).toEqual({ settings: { temperature: 0 } });
+    expect([...fixture.results.values()].length).toBeGreaterThan(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

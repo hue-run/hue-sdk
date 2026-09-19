@@ -6,7 +6,8 @@
     "packages/sdk-typescript/src/ai-sdk.ts",
     "packages/sdk-typescript/src/environment.ts",
     "packages/sdk-typescript/src/evals.ts",
-    "packages/sdk-typescript/src/managed.ts"
+    "packages/sdk-typescript/src/managed.ts",
+    "packages/sdk-typescript/src/capture.ts"
   ],
   "tsconfig": "packages/sdk-typescript/tsconfig.build.json",
   "out": "docs/reference/typescript",

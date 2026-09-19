@@ -174,10 +174,12 @@ Start a frozen dataset run in Hue while your existing agent stays in your applic
 import os
 from hue_sdk.managed import ManagedTargetHandler, ManagedTargetResult
 
+
 def target(invocation):
     # Your function consumes unchanged inputs and verified attachment bytes.
     result = run_agent_for_evaluation(invocation)
     return ManagedTargetResult(output=result)
+
 
 handler = ManagedTargetHandler(
     machine_credential=os.environ["HUE_MANAGED_TARGET_SECRET"],
@@ -202,6 +204,17 @@ invocation, verifies files and saves the outcome without automatically rerunning
 the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs)
 and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider
 flush callbacks and recovery. Local/CI runners remain available.
+
+## Source capture (unreleased)
+
+The capture API is not included in the `hue-run` `0.2.2` registry package. Build and
+install a reviewed wheel from this checkout; a matching Hue API deployment is required.
+
+`hue_sdk.capture.CaptureSession` explicitly records source evidence from synchronous or async
+tool calls, with bounded queues, credential filtering and retryable acknowledgements.
+Choose `source_content` separately from telemetry `capture_content`; disabling source capture
+makes no capture requests. Use a project key with `capture_write` scope. See the
+[source capture guide](./CAPTURE.md) for setup, finalization, state evidence and explicit uploads.
 
 ## Serving safely
 

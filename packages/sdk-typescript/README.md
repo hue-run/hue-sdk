@@ -436,3 +436,18 @@ Use `createHueSafe(options)` for best-effort startup. Invalid initialization ret
 Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production safety](https://docs.hue.run/guides/production-safety).
 
 Queued records snapshot supported telemetry values when a span ends or a log is emitted; later caller mutations cannot change queued data. Resource attributes still awaiting detection are omitted with a sanitized warning. Later records include them after detection finishes; await resource detection before instrumentation when those attributes are required.
+
+## Source capture and local workers
+
+These APIs are included in `@hue-run/sdk@0.3.0` and require a Hue server that supports the
+corresponding capture and local-worker endpoints. The package verification command above also
+prints a reviewed tarball path for prepublication checks. Install the registry release with
+`npm install @hue-run/sdk@0.3.0 ajv zod` or install that exact reviewed archive.
+
+The optional [`@hue-run/sdk/capture`](CAPTURE.md) entry point records selected tool calls and
+explicit pre-execution source evidence. It requires `ajv`, an explicit `sourceContent` choice,
+and a separate capture key. It never discovers or replays application tools automatically.
+
+[`runLocalAgent`](EVALUATIONS.md#outbound-local-agent-worker) runs a registered local callback
+against queued evaluation cases. Its candidate context exposes identities, configuration and
+scoped tools; grading references and original capture metadata stay outside the callback.

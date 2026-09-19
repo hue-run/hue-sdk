@@ -10,6 +10,21 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.3.0] - 2026-09-19
+
+#### Breaking
+
+- `runSimulation()` now gives candidate callbacks only case identity and cloned task inputs, excluding expected criteria, case metadata and environment pins. Migration: move candidate-visible metadata into task inputs or candidate configuration. Scorers retain their evaluation context; generic `runExperiment()` callbacks are unchanged.
+
+#### Added
+
+- `runLocalAgent()` connects a local TypeScript agent to app-launched, versioned simulation jobs with fresh worlds, bounded tools or scoped MCP, durable result recovery, and evidence-aware scoring.
+- `runLocalAgent()` and `runSimulation()` share one provider-aware world lifecycle: V2 manifest preflight runs once before target code, ready bundles remain memory-only, incomplete environments skip targets and scorers, and uncertain preparation is never reacquired or replayed.
+- Environment publication supports explicit V1 and V2 definitions, including immutable Gmail provider-instance bindings and canonical synthetic-principal UUID comparison.
+- `createConversionOutcomeScorer()` grades bounded Gmail and Slack saved-draft outcomes from sealed evidence, allowing different valid tool trajectories and historical rescoring. Coverage gaps remain distinct from agent-quality failures.
+- Opt-in `@hue-run/sdk/capture` records portable tool/source/state evidence, producer watermarks and omissions through a separately scoped capture API. Export failures preserve application return values and exceptions; capture does not certify a complete production world.
+
+
 ### [0.2.2](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.2.2) - 2026-09-18
 
 #### Fixed
@@ -117,6 +132,11 @@ refuses to publish a version without a matching entry below.
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- Opt-in `hue_sdk.capture.CaptureSession` records the shared portable capture contract with synchronous/asynchronous wrappers, source uploads, state evidence, bounded exports and truthful omission reporting. Capture failure preserves the wrapped application's behavior. Python candidate processes can use the TypeScript local-agent boundary; no Python local-agent runner is introduced.
+
 
 ### [0.2.2](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.2.2) - 2026-09-18
 

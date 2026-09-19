@@ -2,7 +2,8 @@
 
 The current versions come from package.json and pyproject.toml. Historical mentions are
 allowed in CHANGELOG.md and in "requires/available in" notes that name the release a feature
-first shipped in; everything else must match the current versions or use a placeholder.
+first shipped in; everything else must match the relevant package's current version or use a
+placeholder. TypeScript and Python versions are checked independently once they diverge.
 """
 
 from __future__ import annotations
@@ -31,6 +32,38 @@ def current_versions() -> dict[str, str]:
     return {"typescript": ts, "python": py}
 
 
+def languages_for(name: str, line: str) -> set[str]:
+    """Return the package languages a Markdown line is describing."""
+
+    if name.startswith(("packages/sdk-typescript/", "packages/aliases/npm-hue-run/")):
+        return {"typescript"}
+    if name.startswith(("packages/sdk-python/", "packages/aliases/pypi-hue-sdk/")):
+        return {"python"}
+    languages: set[str] = set()
+    if re.search(r"TypeScript|@hue-run/sdk|\bnpm\b|runLocalAgent", line, re.I):
+        languages.add("typescript")
+    if re.search(r"Python|hue_sdk|\bPyPI\b|`hue-run`", line, re.I):
+        languages.add("python")
+    return languages
+
+
+def stale_mentions(name: str, text: str, versions: dict[str, str]) -> list[str]:
+    """Return stale-version diagnostics for one tracked Markdown document."""
+
+    problems: list[str] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        languages = languages_for(name, line)
+        expected = {versions[language] for language in languages} or set(versions.values())
+        # Hue is pre-1.0 and currently uses one-digit minor lines. Excluding 0.0.x
+        # and multi-digit minors avoids mistaking fixture/tool versions for SDKs.
+        for match in re.finditer(r"\b0\.[1-9]\.\d+\b", line):
+            value = match.group(0)
+            if value in expected or ALLOWED_CONTEXT.search(line):
+                continue
+            problems.append(f"{name}:{number}: stale version {value}: {line.strip()[:100]}")
+    return problems
+
+
 def main() -> int:
     versions = current_versions()
     files = subprocess.check_output(["git", "ls-files", "*.md", "**/*.md"], cwd=ROOT, text=True).split()
@@ -38,12 +71,7 @@ def main() -> int:
     for name in sorted(set(files)):
         if Path(name).name in ALLOWED_FILES:
             continue
-        for number, line in enumerate((ROOT / name).read_text().splitlines(), start=1):
-            for match in re.finditer(r"\b0\.(?:1|2)\.\d+\b", line):
-                value = match.group(0)
-                if value in versions.values() or ALLOWED_CONTEXT.search(line):
-                    continue
-                problems.append(f"{name}:{number}: stale version {value}: {line.strip()[:100]}")
+        problems.extend(stale_mentions(name, (ROOT / name).read_text(), versions))
     for problem in problems:
         print(problem)
     print(f"current versions: {versions}; {len(problems)} stale mention(s)")

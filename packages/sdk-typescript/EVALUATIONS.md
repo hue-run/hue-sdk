@@ -153,3 +153,79 @@ The runner stops scheduling more cases after an operational failure and waits fo
 ## Verification boundaries
 
 `scripts/verify-package.mjs` installs a real packed tarball outside the monorepo and runs HTTP contract tests against a synthetic service plus actual OpenTelemetry exporters. It checks two configurations, rescoring without target invocation, absent/null output, upload resume, uncertain execution, exclusive checkpoints, source/metric contracts, content policy and terminating schema workers. `scripts/verify-evaluation-api.mjs` is a separate opt-in acceptance against a real Hue receiver/API; it creates synthetic datasets/scorers/experiments in the project associated with the supplied development key.
+
+## Outbound local agent worker
+
+`runLocalAgent` and the conversion scorer below are included in `@hue-run/sdk@0.3.0`. Queue
+registration, claims, scoped MCP capabilities and sealed evidence require a supporting Hue server
+and project access; the package version alone does not establish hosted availability. Install
+`@hue-run/sdk@0.3.0` with the optional `zod` peer, or use the exact archive produced by
+`node packages/sdk-typescript/scripts/verify-package.mjs` for prepublication verification.
+
+`runLocalAgent` registers one fixed application callback and polls for queued runs. Hue selects
+the registered key/revision; it does not send executable code or shell commands. Keep the
+checkpoint directory private and durable. The worker persists result content and requires
+acknowledged trace and sealed environment evidence.
+
+```ts
+import { createHue } from "@hue-run/sdk";
+import { createEnvironmentClient } from "@hue-run/sdk/environment";
+import { createEvaluationClient, runLocalAgent } from "@hue-run/sdk/evals";
+import { runMyAgent } from "./agent.js"; // Your existing application entry point.
+
+const connection = { apiKey: process.env.HUE_API_KEY! };
+const hue = createHue({ ...connection, serviceName: "local-worker", captureContent: false });
+try {
+  await runLocalAgent({
+    client: createEvaluationClient(connection),
+    environmentClient: createEnvironmentClient(connection),
+    hue,
+    agent: { key: "support-agent", name: "Support agent", revision: "1" },
+    checkpointDirectory: ".hue-checkpoints/support-agent",
+    target: (inputs, tools, context) => runMyAgent({ inputs, tools, config: context.config }),
+  });
+} finally {
+  await hue.shutdownSafe();
+}
+```
+
+The callback receives cloned inputs, local tools, and an allowlisted context containing
+`config`, `item: {id, externalKey}`, `executionId`, `environmentRunId`,
+`trace: {traceId,spanId}` and a short-lived `mcp` capability. Expected outcomes, case metadata
+and original source pins remain private to grading. Pass the tools or scoped MCP capability into
+the agent's actual tool boundary; their presence does not redirect provider calls. Capabilities
+are not written to checkpoints.
+`maxRuns` limits completed runs for one-shot workers, while `signal` stops polling. A stop signal
+does not forcibly cancel an already executing application callback.
+
+For an experiment with an immutable V2 attempt baseline, also supply `actualAgentManifest`,
+the exact ordered `requestedProviders`, and an `mcpSurface` selected from that request. The
+worker creates the world and prepares once before target code. A ready response exposes the
+memory-only `connectionBundle` and keeps `context.mcp` as its selected MCP projection; it never
+mints the legacy generic capability for that attempt. An incomplete response seals the world as
+completed without invoking the target or scorers. A lost preparation acknowledgement remains
+uncertain and is never recovered through binding reads, credential refresh or target replay.
+The synthetic acceptance does not contact official Gmail or claim universal provider parity.
+
+Completion or result-upload failures keep the run claimed by the durable worker identity.
+Restart with the same checkpoint directory to resume the saved uploads without invoking the
+candidate again. A lost world-seal acknowledgement is recovered by reading authoritative world
+state. If the seal or candidate outcome cannot be confirmed, or an outcome cannot be serialized,
+the worker reports `attention` and stops; operator investigation is required. Such runs are not
+automatically reclaimed, and presenting the same uncertain checkpoint again cannot replay the
+candidate.
+
+## Conversion outcome scoring
+
+`createConversionOutcomeScorer()` returns a local scorer for reviewed Gmail or Slack draft
+outcomes. Register its `definition` and pass the same binding in `scorers` to `runLocalAgent`,
+`runExperiment` or `rescore`. The definition pins the exact shipped executable source bytes;
+`scoreConversionOutcome(context)` exposes that same scorer directly.
+
+It grades sealed initial/final state and the complete action journal against an explicit
+`conversion_outcome_v1` reference rubric. The seven boolean metrics report run completion,
+saved draft, destination, literal content, unrelated-state preservation, explicit process
+constraints and overall success. Missing or malformed evidence is an error; authoritative
+coverage gaps are skipped. Read order and repair writes do not fail an outcome unless the
+reviewed rubric requires them. Literal content checks do not establish semantic quality.
+Historical rescoring uses saved evidence and never invokes the candidate.

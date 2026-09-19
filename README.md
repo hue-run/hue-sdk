@@ -66,6 +66,33 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 
+## Capture and local-agent availability
+
+The generated `docs-contract.json` describes this source tree. Its package versions
+are manifest metadata, not a guarantee that every listed API is published; use the
+[changelog](./CHANGELOG.md) to distinguish unreleased additions from tagged releases.
+
+TypeScript `0.3.0` includes opt-in evidence capture through `@hue-run/sdk/capture`,
+`runLocalAgent()` and `createConversionOutcomeScorer()`. Python `0.2.2` does not include
+the source-tree `hue_sdk.capture` addition; build a reviewed wheel from this checkout to
+try that Python API. Capture and provider-aware local workers also require a matching Hue
+API deployment.
+
+Capture records tool observations, verified sources, state evidence and known omissions.
+It is independent of tracing's content policy and requires its own explicit source-content
+opt-in. Ordinary OpenTelemetry instrumentation remains sufficient for trace analysis and
+manual case authoring. See the [language-neutral protocol](./packages/capture-protocol/README.md),
+[TypeScript capture guide](./packages/sdk-typescript/CAPTURE.md),
+[Python capture guide](./packages/sdk-python/CAPTURE.md) and
+[local execution guide](./packages/sdk-typescript/EVALUATIONS.md).
+
+The local agent receives task inputs, candidate configuration, callable tools and safe
+execution identity. Criteria and case metadata remain with the evaluator. Each attempt
+uses a fresh world; grading uses sealed evidence and can be repeated without rerunning
+the agent. Existing generic evaluation callbacks retain their interface. The tightened
+`runSimulation()` candidate context is a breaking source change described in the
+[changelog](./CHANGELOG.md).
+
 ## Send a trace
 
 After installing the TypeScript SDK above, set `HUE_API_KEY` to a project service key in your server environment. Save the following as `first-trace.mjs` and run `node first-trace.mjs`; the [quickstart](https://docs.hue.run/quickstart) walks through the same steps in more detail. Choose content capture explicitly:
@@ -175,7 +202,7 @@ Hue's SDKs are deliberately small. The following are design choices, not missing
 
 - No bundled provider auto-instrumentation and no per-framework adapters beyond the AI SDK 7 helper. Use the provider's or framework's own OpenTelemetry export (OpenInference, OpenLLMetry, native OTel) and configure its content controls; Hue recognizes those conventions.
 - No native SDKs beyond TypeScript and Python. Other languages use the official OpenTelemetry SDK pointed at Hue's OTLP endpoints.
-- No proprietary event protocol, live token streaming, attachments or feature-flag API. Spans are exported when they complete; use standard attributes and span events.
+- Traces use standard OTLP attributes and span events; spans are exported when they complete. The separate, optional [capture protocol](./packages/capture-protocol/README.md) records evidence and source artifacts for reviewed scenarios. There is no live token streaming or feature-flag API.
 - No browser or edge builds: the project service key is a server-side credential. There is no separate CommonJS build; Node.js 22.12 or later loads the ESM build from `require()`.
 - Constructors never read Hue settings (key, endpoint, capture policy, budgets) from environment variables, and the TypeScript SDK does not read `OTEL_RESOURCE_ATTRIBUTES` either. No token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
 - Project service keys are preset-scoped. **Tracing only** sends telemetry and reads delivery receipts; **Tracing and evaluations** also authorizes the evaluation, artifact and simulation APIs used by the optional clients. Neither preset grants general trace browsing: use the Hue app, or the [Hue MCP server](https://docs.hue.run/agents/mcp-server) with a separate **Coding agent (read-only)** key. These SDKs do not attach feedback or scores to stored traces. TypeScript's explicit `runSimulation()` helper orchestrates versioned simulation resources; it does not grant general read access or hide provider execution.
