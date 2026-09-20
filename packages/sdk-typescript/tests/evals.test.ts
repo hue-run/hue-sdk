@@ -7,6 +7,7 @@ import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { createHue, HueExportError } from "../src/index.js";
+import { CheckpointStore } from "../src/evals/checkpoint.js";
 import {
   builtins,
   createEvaluationClient,
@@ -495,7 +496,7 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
-  test("hosted/manual pins stay pending without local result submissions", async () => {
+  test("every non-local and unknown scorer pin is deferred without uploading placeholders", async () => {
     const f = fixture();
     const hosted = version({
       kind: "llm_judge",
@@ -510,7 +511,18 @@ describe("installed evaluation API and runner contract", () => {
       metrics: [{ name: "quality", type: "boolean" }],
     });
     const manual = version({ kind: "manual", metrics: [{ name: "quality", type: "boolean" }] });
-    f.versions.push(hosted, manual);
+    const world = version({
+      kind: "world_outcome",
+      entry: "hue.conversion_outcome.v1",
+      metrics: [],
+    });
+    const unknown = version(JSON.parse('{"kind":"future_kind"}'));
+    const unknownBuiltin = version(
+      JSON.parse('{"kind":"builtin","entry":"hue.future.v1","config":{}}'),
+    );
+    const deferred = [hosted, manual, world, unknown, unknownBuiltin];
+    const deferredIds = deferred.map((pin) => pin.id);
+    f.versions.push(...deferred);
     const exp = f.create();
     const hue = createHue({
       apiKey: key,
@@ -528,16 +540,14 @@ describe("installed evaluation API and runner contract", () => {
         traceEvidence: { mode: "required" },
         target: () => "answer",
       });
-      expect(report.deferredScorerVersionIds).toEqual([hosted.id, manual.id]);
+      expect(report.deferredScorerVersionIds).toEqual(deferredIds);
       expect(f.results).toHaveLength(4);
-      expect(
-        f.results.every((result) => ![hosted.id, manual.id].includes(result.scorerVersionId)),
-      ).toBe(true);
+      expect(f.results.every((result) => !deferredIds.includes(result.scorerVersionId))).toBe(true);
       const run = await f.client.createEvaluationRun({
         idempotencyKey: randomUUID(),
         name: "Deferred",
         subjectIds: report.subjectIds,
-        scorerVersionIds: [hosted.id, manual.id],
+        scorerVersionIds: deferredIds,
       });
       const rescored = await rescore({
         client: f.client,
@@ -546,8 +556,13 @@ describe("installed evaluation API and runner contract", () => {
         persistResultContent: false,
       });
       expect(rescored.resultIds).toEqual([]);
-      expect(rescored.deferredScorerVersionIds).toEqual([hosted.id, manual.id]);
-      await expect(scoreLocally(hosted, context("answer"))).rejects.toThrow("Hosted judge pins");
+      expect(rescored.deferredScorerVersionIds).toEqual(deferredIds);
+      for (const pin of deferred) {
+        await expect(scoreLocally(pin, context("answer"))).rejects.toThrow("deferred");
+        await expect(scoreLocally(pin, { ...context("answer"), hasOutput: false })).rejects.toThrow(
+          "deferred",
+        );
+      }
     } finally {
       await hue.shutdown();
       f.server.stop(true);
@@ -804,6 +819,105 @@ describe("installed evaluation API and runner contract", () => {
       expect(
         [...f.subjects.values()].filter((subject) => subject.output === null && subject.hasOutput),
       ).toHaveLength(2);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("resume defers old checkpoint placeholders for both experiments and rescores without rerunning targets", async () => {
+    const f = fixture();
+    const deferred = version({
+      kind: "world_outcome",
+      entry: "hue.conversion_outcome.v1",
+      metrics: [],
+    });
+    f.versions.push(deferred);
+    const exp = f.create();
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "upgrade-resume",
+      captureContent: false,
+    });
+    let calls = 0;
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory: await directory(),
+      persistResultContent: true,
+      traceEvidence: { mode: "required" as const },
+      target: () => {
+        calls++;
+        return "answer";
+      },
+    };
+    async function seedOldPlaceholder(dir: string, prefix: string) {
+      const manifest = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8"));
+      const store = await CheckpointStore.acquire(dir, manifest.value.identity);
+      try {
+        const name = (await readdir(dir))
+          .find((name) => name.startsWith(prefix) && name.endsWith(".json"))!
+          .slice(0, -5);
+        const saved = (await store.read<{
+          scores: {
+            key: string;
+            payload: {
+              scorerVersionId: string;
+              evaluationItemId?: string;
+              state: string;
+              explanation: string;
+            };
+          }[];
+        }>(name))!;
+        saved.scores.push({
+          key: randomUUID(),
+          payload: {
+            scorerVersionId: deferred.id,
+            evaluationItemId: saved.scores[0]!.payload.evaluationItemId,
+            state: "skipped",
+            explanation: "Old SDK placeholder",
+          },
+        });
+        await store.write(name, saved);
+      } finally {
+        await store.release();
+      }
+    }
+    try {
+      f.failResult();
+      await expect(runExperiment(options)).rejects.toBeInstanceOf(HueApiError);
+      expect(calls).toBe(1);
+      await seedOldPlaceholder(options.checkpointDirectory, "case-");
+      const report = await runExperiment(options);
+      expect(calls).toBe(2);
+      expect(report.deferredScorerVersionIds).toEqual([deferred.id]);
+      expect(report.resultIds).toHaveLength(4);
+      await runExperiment(options);
+      expect(calls).toBe(2);
+      const run = await f.client.createEvaluationRun({
+        idempotencyKey: randomUUID(),
+        name: "Resume",
+        subjectIds: report.subjectIds,
+        scorerVersionIds: f.versions.map((pin) => pin.id),
+      });
+      const rescoring = {
+        client: f.client,
+        runId: run.id,
+        checkpointDirectory: await directory(),
+        persistResultContent: true,
+      };
+      f.failResult();
+      await expect(rescore(rescoring)).rejects.toBeInstanceOf(HueApiError);
+      await seedOldPlaceholder(rescoring.checkpointDirectory, "item-");
+      const rescored = await rescore(rescoring);
+      expect(rescored.deferredScorerVersionIds).toEqual([deferred.id]);
+      expect(rescored.resultIds).toHaveLength(4);
+      expect(calls).toBe(2);
+      const uploaded = f.requests
+        .filter((request) => request.path.endsWith("/results") && request.body)
+        .flatMap((request) => (request.body as { results: Result[] }).results);
+      expect(uploaded.every((score) => score.scorerVersionId !== deferred.id)).toBe(true);
     } finally {
       await hue.shutdown();
       f.server.stop(true);

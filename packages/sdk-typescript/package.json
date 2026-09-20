@@ -76,15 +76,10 @@
       "default": "./dist/setup.js"
     },
     "./setup-events.schema.json": "./setup-events.schema.json",
-    "./package.json": "./package.json",
-    "./evals/conversion-outcome-core.mjs": {
-      "types": "./dist/evals/conversion-outcome-core.d.mts",
-      "import": "./dist/evals/conversion-outcome-core.mjs",
-      "default": "./dist/evals/conversion-outcome-core.mjs"
-    }
+    "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "node scripts/write-version.mjs && tsc -p tsconfig.build.json && node scripts/copy-portable-assets.mjs",
+    "build": "node scripts/write-version.mjs && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test tests"
   },

@@ -15,7 +15,5 @@ import { createHue } from "hue-run"; // same as "@hue-run/sdk"
 Install `@hue-run/sdk` directly in new code. The alias tracks the scoped package version and is
 maintained in the [Hue SDK repository](https://github.com/hue-run/hue-sdk).
 
-The prepared alias includes setup and the canonical scorer exports. To read and hash the
-scorer's executable source, resolve `@hue-run/sdk/evals/conversion-outcome-core.mjs`; the alias file
-only forwards exports and is not the executable whose digest is registered. The `hue` binary is
-provided by the canonical dependency. Alias packaging tests do not imply alias publication.
+The prepared alias includes setup. The `hue` binary is provided by the canonical dependency.
+Alias packaging tests do not imply alias publication.

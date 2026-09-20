@@ -98,12 +98,11 @@ if (!values.archive && !values["registry-version"]) {
     throw new Error(
       `Portable capture assets are outside this release: ${JSON.stringify(forbiddenCaptureFiles)}`,
     );
-  for (const file of [
-    "dist/evals/conversion-outcome-core.mjs",
-    "dist/evals/conversion-outcome-core.d.mts",
-  ]) {
-    if (!npmFiles.has(file)) throw new Error(`Missing canonical scorer asset: ${file}`);
-  }
+  if (
+    Object.hasOwn(pkg.exports, "./evals/conversion-outcome-core.mjs") ||
+    [...npmFiles].some((file) => /conversion-outcome/u.test(file))
+  )
+    throw new Error("Outcome evaluator implementation assets are outside this release");
   console.log(`pack inventory: ${npmFiles.size} files agree between npm pack and bun pm pack`);
 }
 const packageSpec = values["registry-version"] ?? `file:${tarball}`;
@@ -117,11 +116,7 @@ if (!values.archive && !values["registry-version"]) {
     JSON.stringify({
       private: true,
       type: "module",
-      dependencies: {
-        "@hue-run/sdk": packageSpec,
-        "hue-run": `file:${aliasTarball}`,
-        zod: pkg.devDependencies.zod,
-      },
+      dependencies: { "@hue-run/sdk": packageSpec, "hue-run": `file:${aliasTarball}` },
     }),
   );
   run(
@@ -137,8 +132,6 @@ if (!values.archive && !values["registry-version"]) {
       `
   const assert = require("node:assert/strict");
   assert.equal(typeof require("hue-run/setup").transitionSetup, "function");
-  assert.equal(require("hue-run/evals").createConversionOutcomeScorer, require("@hue-run/sdk/evals").createConversionOutcomeScorer);
-  assert.equal(require("hue-run/evals/conversion-outcome-core.mjs").scoreConversionOutcome, require("@hue-run/sdk/evals").scoreConversionOutcome);
   assert.equal(
     require("hue-run/setup-events.schema.json").$id,
     "https://hue.run/schemas/setup-events-v1.json",
@@ -444,6 +437,7 @@ run(
 const installedPackageTests = [
   "sdk.test.ts",
   "evals.test.ts",
+  "scorer-publication.test.ts",
   "attempt.test.ts",
   "environment.test.ts",
   "simulation.test.ts",
@@ -451,7 +445,6 @@ const installedPackageTests = [
   "coverage-gap.test.ts",
   "receipt.test.ts",
   "managed.test.ts",
-  "conversion-outcomes.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -527,21 +520,14 @@ void [transition, event, options];
         .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"')
         .replaceAll(
-          'new URL("../src/evals/conversion-outcome-core.mjs", import.meta.url)',
-          'new URL(import.meta.resolve("@hue-run/sdk/evals/conversion-outcome-core.mjs"))',
+          '"../src/evals/checkpoint.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/checkpoint.js"',
+        )
+        .replaceAll(
+          '"../src/evals/scorer-publication.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/scorer-publication.js"',
         ),
     );
-  }
-  const evidenceFixture = join(consumer, "tests/fixtures/environment-evidence.ts");
-  await writeFile(
-    evidenceFixture,
-    (await readFile(evidenceFixture, "utf8")).replaceAll(
-      '"../../src/evals.js"',
-      '"@hue-run/sdk/evals"',
-    ),
-  );
-  for (const script of ["verify-scenario-node.mjs"]) {
-    await cp(join(source, "scripts", script), join(consumer, script));
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
   run(
@@ -554,9 +540,8 @@ void [transition, event, options];
   );
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
-  for (const runtime of [process.execPath, "bun"]) {
-    run(runtime, ["verify-scenario-node.mjs"], consumer);
-  }
+  for (const runtime of [process.execPath, "bun"])
+    run(runtime, [join(source, "scripts/verify-scorer-deferral.mjs"), consumer], destination);
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
   // HUE_JUNIT_DIR (set by CI) collects a JUnit report per AI SDK pair for the workflow summary.

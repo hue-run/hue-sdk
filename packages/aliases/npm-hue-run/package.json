@@ -26,8 +26,7 @@
     "setup.js",
     "setup-events.schema.json",
     "README.md",
-    "LICENSE",
-    "conversion-outcome-core.mjs"
+    "LICENSE"
   ],
   "exports": {
     ".": "./index.js",
@@ -36,8 +35,7 @@
     "./managed": "./managed.js",
     "./environment": "./environment.js",
     "./setup": "./setup.js",
-    "./setup-events.schema.json": "./setup-events.schema.json",
-    "./evals/conversion-outcome-core.mjs": "./conversion-outcome-core.mjs"
+    "./setup-events.schema.json": "./setup-events.schema.json"
   },
   "dependencies": {
     "@hue-run/sdk": "0.3.1"

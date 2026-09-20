@@ -58,13 +58,11 @@ handling; they do not call an issued provider facade. These tests do not call th
 service or establish universal Gmail or Slack parity. Python remains at `0.2.2` and does not
 include a native local-worker implementation.
 
-## Exact Scenario evaluators
+## Scorer forward compatibility
 
-Unreleased TypeScript `0.3.1` adds the canonical Scenario evaluator.
-
-`createConversionOutcomeScorer()` from `@hue-run/sdk/evals` binds a local callback to the exact
-canonical source and metrics. The public `@hue-run/sdk/evals/conversion-outcome-core.mjs` subpath
-ships executable bytes unchanged; installed checks verify its digest and grading under Node and
-Bun. A server scorer with different source or metrics requires a matching reviewed SDK version.
+Unreleased TypeScript `0.3.1` executes only known `builtin` entries and bound `local_code` scorers locally.
+Every other kind is reported in `deferredScorerVersionIds` without a local result upload,
+including unknown kinds and built-in entries returned by a newer server. The responsible server or human executor
+must complete those scores. Legacy local-code pins still require their exact callback binding.
 The V2 connection bundle, provider transport, worker recovery and OpenTelemetry ownership remain
-unchanged from the published worker. Setup is a separate local inspection CLI, not a Scenario launcher.
+unchanged. Setup is a separate local inspection CLI, not a Scenario launcher.

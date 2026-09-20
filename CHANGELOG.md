@@ -14,11 +14,8 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
-- `createConversionOutcomeScorer()`, `conversionOutcomeScorerDefinition`, `conversionOutcomeMetrics`
-  and `scoreConversionOutcome` are public evaluation exports. The canonical executable is also
-  available at `@hue-run/sdk/evals/conversion-outcome-core.mjs`; its exact SHA-256 is
-  `27d096eedc80fbfb747b849c891762f76165ef76429727b0a93ec7dbebaf7b05`. It grades reviewed
-  reply/standalone drafts, destination, literal content, preservation and explicit process constraints.
+- The `ScorerDefinition` union and publication validator accept Hue-executed `world_outcome`
+  pins with their fixed entry and metrics. They require no local scorer registration.
 - A dependency-free `hue` setup-session CLI and `@hue-run/sdk/setup` installer contract provide
   deterministic local project detection, private resumable checkpoints, append-only human/plain
   renderers and versioned JSONL agent events. This first slice does not change project files, contact
@@ -28,6 +25,10 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
+- Local evaluation runners execute only known `builtin` entries and bound `local_code` scorers. Other kinds
+  remain pending and appear in `deferredScorerVersionIds`, including kinds introduced by a newer
+  server. Unknown built-in entries are deferred too. The SDK does not upload placeholder results
+  for deferred scorers, including placeholders saved by an older SDK before an interrupted upload.
 - Availability documentation now records the already-published worker correctly. The setup CLI core
   was merged after publication and first belongs to this new release, not the existing 0.3.0 archive.
 

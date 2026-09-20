@@ -7,7 +7,12 @@ import { EvaluationClient } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { json, uuid } from "./json.js";
-import { persistedScore, scoreLocally, validateScorerBindings } from "./scorers.js";
+import {
+  persistedScore,
+  scoreLocally,
+  validateScorerBindings,
+  isLocallyExecutable,
+} from "./scorers.js";
 import type {
   CompleteExecution,
   Completion,
@@ -123,7 +128,7 @@ export interface RunnerReport {
   subjectIds: string[];
   /** Result IDs uploaded by this call. */
   resultIds: string[];
-  /** `llm_judge` and `manual` pins left pending for hosted or human scoring. */
+  /** Pins without a local implementation, left pending for their authorized executor. */
   deferredScorerVersionIds: string[];
 }
 type SavedResult = {
@@ -208,7 +213,10 @@ async function scoresFor(
 ): Promise<SavedResult[]> {
   const scores: SavedResult[] = [];
   let environmentUnavailable = false;
-  if (options.environmentEvidence === "required") {
+  if (
+    options.environmentEvidence === "required" &&
+    versions.some((version) => isLocallyExecutable(version.definition))
+  ) {
     try {
       context = {
         ...context,
@@ -219,8 +227,8 @@ async function scoresFor(
     }
   }
   for (const version of versions) {
-    // Hosted/manual pins remain pending for their authorized executor.
-    if (version.definition.kind === "llm_judge" || version.definition.kind === "manual") continue;
+    // Every pin without a local implementation belongs to another executor.
+    if (!isLocallyExecutable(version.definition)) continue;
     const score = persistedScore(
       environmentUnavailable && version.definition.kind === "local_code"
         ? { state: "error", error: { type: "EnvironmentEvidenceUnavailable" } }
@@ -245,8 +253,16 @@ async function uploadScores(
   runId: string,
   scores: SavedResult[],
   save: () => Promise<void>,
-): Promise<void> {
-  for (const score of scores) {
+  versions: ScorerVersion[],
+): Promise<string[]> {
+  // A previous SDK may have checkpointed a placeholder for an unknown kind.
+  // Keep its evidence intact, but never upload or report it as a local result.
+  const local = scores.filter((score) => {
+    const pin = versions.find((version) => version.id === score.payload.scorerVersionId);
+    if (!pin) throw new Error("Saved result references an unpinned scorer version");
+    return isLocallyExecutable(pin.definition);
+  });
+  for (const score of local) {
     if (score.receipt) continue;
     if (!score.payload.evaluationItemId)
       throw new Error("Scoring requires the acknowledged evaluation item identity");
@@ -257,6 +273,7 @@ async function uploadScores(
     score.receipt = result.ids;
     await save();
   }
+  return local.flatMap((score) => score.receipt ?? []);
 }
 
 /**
@@ -317,7 +334,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     subjectIds: [],
     resultIds: [],
     deferredScorerVersionIds: versions
-      .filter((version) => ["llm_judge", "manual"].includes(version.definition.kind))
+      .filter((version) => !isLocallyExecutable(version.definition))
       .map((version) => version.id),
   };
   try {
@@ -478,9 +495,15 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           score.payload.evaluationItemId = prepared.completion.evaluationItemId;
         await save();
       }
-      await uploadScores(options, experiment.evaluation.id, prepared.scores, save);
+      const results = await uploadScores(
+        options,
+        experiment.evaluation.id,
+        prepared.scores,
+        save,
+        versions,
+      );
       report.subjectIds.push(prepared.completion.subjectId);
-      report.resultIds.push(...prepared.scores.flatMap((score) => score.receipt ?? []));
+      report.resultIds.push(...results);
     });
     let finish = await store.read<{ key: string }>("finish");
     if (!finish) {
@@ -521,7 +544,7 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
     subjectIds: [],
     resultIds: [],
     deferredScorerVersionIds: run.scorerVersions
-      .filter((version) => ["llm_judge", "manual"].includes(version.definition.kind))
+      .filter((version) => !isLocallyExecutable(version.definition))
       .map((version) => version.id),
   };
   try {
@@ -549,9 +572,15 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
         await store.write(file, saved);
       }
       const current = saved;
-      await uploadScores(options, run.id, current.scores, () => store.write(file, current));
+      const results = await uploadScores(
+        options,
+        run.id,
+        current.scores,
+        () => store.write(file, current),
+        run.scorerVersions,
+      );
       report.subjectIds.push(item.subjectId);
-      report.resultIds.push(...current.scores.flatMap((score) => score.receipt ?? []));
+      report.resultIds.push(...results);
     });
     return report;
   } finally {

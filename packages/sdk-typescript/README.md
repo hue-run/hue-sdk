@@ -408,12 +408,9 @@ an uncertain preparation. See the
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
 
-### Reviewed Scenarios
-
-Unreleased TypeScript `0.3.1` adds `createConversionOutcomeScorer()`. It pins the canonical executable
-bytes used by reviewed conversion outcomes, including standalone drafts. See
-[reviewed Scenarios](EVALUATIONS.md#reviewed-scenario-evaluator). Source capture is deferred and is
-not exported by this release; ordinary tracing keeps its existing content policy.
+Unreleased TypeScript `0.3.1` defers all scorers the SDK does not execute locally. Only built-ins
+and bound `local_code` callbacks run here; other pins remain pending for their authorized executor.
+See [scorer execution](EVALUATIONS.md#hosted-and-manual-scorer-pins).
 
 The [setup CLI](CLI.md) is a resumable local inspection core. Existing customers connect their
 agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.

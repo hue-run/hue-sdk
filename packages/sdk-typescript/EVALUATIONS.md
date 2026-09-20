@@ -120,7 +120,11 @@ All declared metrics must appear exactly once and satisfy pinned types, bounds a
 
 ### Hosted and manual scorer pins
 
-The local runner leaves `llm_judge` and `manual` pins pending and reports their IDs in `deferredScorerVersionIds`. It does not upload a synthetic skipped result that would occupy their immutable result slot. Manual results require a human session. Hosted dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
+In TypeScript `0.3.1` (unreleased), the local runner executes only the three known built-in entries and bound `local_code` scorers. It leaves every other pin pending and reports its ID in `deferredScorerVersionIds`, including kinds and built-in entries introduced by a newer server. It never uploads a placeholder result that would occupy the immutable result slot, including placeholders already saved in an older SDK's checkpoint. Direct `scoreLocally()` calls reject pins that require another executor.
+
+`world_outcome` pins run inside Hue and need no local callback or executable source digest. A supporting server owns their execution from saved world evidence. Legacy `local_code` pins still require the exact registered callback; changing the worker cannot convert those immutable pins into hosted ones.
+
+Manual results require a human session. Hosted model-judge dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
 
 When present, the budget's `authentication` reports credential resolution only. An
 `available` status or `configured: true` does not prove that a provider accepted the
@@ -181,6 +185,7 @@ try {
     hue,
     agent: { key: "support-agent", name: "Support agent", revision: "1" },
     checkpointDirectory: ".hue-checkpoints/support-agent",
+    scorers: [], // Hue-executed scorers require no local callback registration.
     target: (inputs, tools, context) => runMyAgent({ inputs, tools, config: context.config }),
   });
 } finally {
@@ -213,45 +218,3 @@ the worker reports `attention` and stops; operator investigation is required. Su
 automatically reclaimed, and presenting the same uncertain checkpoint again cannot replay the
 candidate. Public package acceptance proves this lifecycle against local fixtures; exact
 installed-registry-package to hosted-facade acceptance remains a post-publication Fern gate.
-
-## Reviewed Scenario evaluator
-
-Unreleased TypeScript `0.3.1` adds the canonical conversion evaluator. After registry acceptance,
-install `npm install @hue-run/sdk@0.3.1 zod`. Prepublication checks use
-an exact locally packed candidate; applications must wait for the public release before replacing
-it with a registry dependency.
-
-For an existing signed-in project's local worker, preserve its reviewed V2 baseline, ordered
-provider request, manifest observation and existing tracing. Supply the canonical scorer:
-
-```ts
-import {
-  createConversionOutcomeScorer,
-  runLocalAgent,
-  type RunLocalAgentOptions,
-} from "@hue-run/sdk/evals";
-
-export function runReviewedScenarios(options: Omit<RunLocalAgentOptions, "scorers">) {
-  return runLocalAgent({ ...options, scorers: [createConversionOutcomeScorer()] });
-}
-```
-
-The scorer's `definition` is suitable for `local_code` registration: `language: "typescript"`,
-`entrypoint: "scoreConversionOutcome"`, ordered boolean metrics and source SHA-256
-`27d096eedc80fbfb747b849c891762f76165ef76429727b0a93ec7dbebaf7b05`. This is the complete executable,
-including its sealed-evidence coverage gate. It is copied unchanged by the build. To verify
-installed bytes, resolve `@hue-run/sdk/evals/conversion-outcome-core.mjs` with `import.meta.resolve`,
-read that file, and compare `sourceDigest(bytes)` to the definition. Do not hash the TypeScript
-wrapper, a function's `toString()`, or an alias forwarding module.
-
-A reviewed Scenario pins the full scorer definition. Different source, entrypoint, language or
-metrics fail local binding before target execution; never substitute a convenient scorer. Expected
-outcomes stay private to grading. The evaluator checks saved effects, destination, explicit literal
-content, unrelated-state preservation and any reviewed process constraints. Literal text checks are
-not semantic quality judgments. The current joined workflow is a synthetic standalone Gmail draft;
-the evaluator's ability to grade other rubrics does not activate those provider operations.
-
-Source capture is not required or included in this release. Use a reviewed authored environment
-with a trusted provider profile, or an authorized previous simulation's pinned starting world.
-Missing facts require explicit authorship and review; trace text is not proof of an empty world.
-Setup/claim commands do not approve a baseline, register this worker or launch a Scenario.

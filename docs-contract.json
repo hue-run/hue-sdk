@@ -39,9 +39,9 @@
       "Hue-managed runs",
       "Failure isolation",
       "App-launched local agents",
-      "Exact Scenario evaluators"
+      "Scorer forward compatibility"
     ],
-    "sha256": "sha256:0ba43eb8533389f80382edf851f7071fbea69877fd7440b3fb460b7733298446",
+    "sha256": "sha256:c4c625029a71da59b454a4c153ff0c443fb524d61ec25bc4c9c800fb19e2b444",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -281,9 +281,6 @@
             "attemptConnectionBundleV2",
             "attemptIdentityV2",
             "builtins",
-            "conversionOutcomeMetrics",
-            "conversionOutcomeScorerDefinition",
-            "createConversionOutcomeScorer",
             "createEvaluationClient",
             "defineLocalScorer",
             "dependencyManifestV2",
@@ -299,17 +296,10 @@
             "runExperiment",
             "runLocalAgent",
             "runSimulation",
-            "scoreConversionOutcome",
             "scoreLocally",
             "secretFreeBindingV2",
             "sourceDigest",
             "surfaceBindingV2"
-          ]
-        },
-        "@hue-run/sdk/evals/conversion-outcome-core.mjs": {
-          "publicExports": [
-            "conversionOutcomeMetrics",
-            "scoreConversionOutcome"
           ]
         },
         "@hue-run/sdk/managed": {
