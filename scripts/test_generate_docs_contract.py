@@ -48,7 +48,7 @@ class DocumentationContractTests(unittest.TestCase):
             contract["packages"]["typescript"]["schemas"][
                 "@hue-run/sdk/setup-events.schema.json"
             ]["contractVersion"],
-            1,
+            2,
         )
         for name in (
             "EnvironmentDefinitionV1",

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hue.run/schemas/setup-events-v1.json",
-  "title": "Hue setup-session installer event version 1",
+  "$id": "https://hue.run/schemas/setup-events-v2.json",
+  "title": "Hue setup-session installer event version 2",
   "description": "Installer lifecycle events only. run.* events are setup-session invocations, not Hue Runs.",
   "oneOf": [
     { "$ref": "#/$defs/run.started" },
@@ -11,6 +11,7 @@
     { "$ref": "#/$defs/step.completed" },
     { "$ref": "#/$defs/file.changed" },
     { "$ref": "#/$defs/diagnostic" },
+    { "$ref": "#/$defs/privacy.notice" },
     { "$ref": "#/$defs/action.required" },
     { "$ref": "#/$defs/trial.created" },
     { "$ref": "#/$defs/receipt.verified" },
@@ -24,7 +25,7 @@
       "type": "object",
       "required": ["contractVersion", "event", "runId", "sequence", "timestamp"],
       "properties": {
-        "contractVersion": { "const": 1 },
+        "contractVersion": { "const": 2 },
         "event": { "type": "string", "maxLength": 40 },
         "runId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$" },
         "sequence": { "type": "integer", "minimum": 1, "maximum": 10000 },
@@ -93,6 +94,12 @@
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["level", "code", "message"], "properties": { "event": { "const": "diagnostic" }, "level": { "enum": ["info", "warning", "error"] }, "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,79}$" }, "message": { "$ref": "#/$defs/text" } } }],
       "unevaluatedProperties": false
     },
+    "privacy.notice": {
+      "type": "object",
+      "description": "Published privacy and security disclosure presented before telemetry; no acknowledgement or consent is inferred.",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["privacyUrl", "effectiveDate", "securityUrl"], "properties": { "event": { "const": "privacy.notice" }, "privacyUrl": { "const": "https://hue.run/privacy" }, "effectiveDate": { "const": "2026-08-24" }, "securityUrl": { "const": "https://trust.hue.run/" } } }],
+      "unevaluatedProperties": false
+    },
     "action.required": {
       "type": "object",
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["action", "message"], "properties": { "event": { "const": "action.required" }, "action": { "enum": ["claim-project", "configure", "select-project", "integrate-application", "run-instrumented-request", "open-claim-handoff", "restart-claim-handoff"] }, "message": { "$ref": "#/$defs/text" }, "command": { "type": "string", "minLength": 1, "maxLength": 200 } } }],
@@ -100,13 +107,13 @@
     },
     "trial.created": {
       "type": "object",
-      "description": "An anonymous setup trial hard-pinned to trial_metadata_v1.",
+      "description": "An anonymous setup trial restricted to metadata-only-v1.",
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["trialId", "expiresAt"], "properties": { "event": { "const": "trial.created" }, "trialId": { "$ref": "#/$defs/identifier" }, "expiresAt": { "type": "string", "format": "date-time", "maxLength": 40 } } }],
       "unevaluatedProperties": false
     },
     "receipt.verified": {
       "type": "object",
-      "description": "Instrumentation-only proof for an anonymous trace; not evidence of content approval or Scenario suitability.",
+      "description": "Exact stored trace/span evidence from the exercised repository HTTP boundary; does not establish that every application operation is instrumented.",
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["receiptId", "traceId", "source"], "properties": { "event": { "const": "receipt.verified" }, "receiptId": { "$ref": "#/$defs/identifier" }, "traceId": { "type": "string", "pattern": "^[a-f0-9]{32}$" }, "source": { "const": "repository-http-boundary" } } }],
       "unevaluatedProperties": false
     },

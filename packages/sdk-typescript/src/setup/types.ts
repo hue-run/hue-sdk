@@ -1,5 +1,5 @@
 /** Version carried by every setup JSONL event. */
-export const SETUP_EVENT_CONTRACT_VERSION = 1 as const;
+export const SETUP_EVENT_CONTRACT_VERSION = 2 as const;
 
 /** Names in the version 1 setup event contract. */
 export type SetupEventName =

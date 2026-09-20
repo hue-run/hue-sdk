@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, realpath, rename } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { SetupCheckpointAdapter } from "./runner.js";
@@ -24,6 +24,67 @@ const LEGACY_STEPS = [
 function isInside(parent: string, child: string): boolean {
   const path = relative(parent, child);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+}
+
+async function cleanupCheckpointTemporary(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function privateDirectory(
+  root: string,
+  project: string,
+  enforcePermissions: boolean,
+): Promise<void> {
+  const ancestors: string[] = [];
+  let current = root;
+  for (;;) {
+    ancestors.unshift(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  for (const path of ancestors) {
+    let info;
+    try {
+      info = await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Earlier ancestors have all been inspected. Never recursively follow an
+      // unchecked ancestor into the project or a different owner's directory.
+      await mkdir(path, { mode: 0o700 });
+      info = await lstat(path);
+    }
+    if (info.isSymbolicLink() || !info.isDirectory())
+      throw new Error("Setup checkpoint ancestors must be directories without symlinks");
+  }
+  const actual = await realpath(root);
+  if (actual !== root || isInside(project, actual))
+    throw new Error("Setup checkpoints must be outside the project repository");
+  if (enforcePermissions) {
+    const handle = await open(
+      root,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      await handle.chmod(0o700);
+      const opened = await handle.stat();
+      const current = await lstat(root);
+      if (
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        current.dev !== opened.dev ||
+        current.ino !== opened.ino ||
+        (opened.mode & 0o077) !== 0
+      )
+        throw new Error("Setup checkpoint directory changed during inspection");
+    } finally {
+      await handle.close();
+    }
+  }
 }
 
 export function defaultSetupStateDirectory(env: NodeJS.ProcessEnv = process.env): string {
@@ -136,22 +197,7 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
     const project = await realpath(projectRoot);
     if (isInside(project, root))
       throw new Error("Setup checkpoints must be outside the project repository");
-    let info;
-    try {
-      info = await lstat(root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await mkdir(root, { recursive: true, mode: 0o700 });
-      info = await lstat(root);
-    }
-    if (!info.isDirectory() || info.isSymbolicLink())
-      throw new Error("Setup checkpoint directory must be private (mode 0700, no symlink)");
-    if (this.enforcesPosixPermissions) {
-      await chmod(root, 0o700);
-      info = await lstat(root);
-      if ((info.mode & 0o077) !== 0)
-        throw new Error("Setup checkpoint directory must be private (mode 0700, no symlink)");
-    }
+    await privateDirectory(root, project, this.enforcesPosixPermissions);
     return join(root, `${runId}.json`);
   }
 
@@ -164,7 +210,7 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
         if (entry.isSymbolicLink()) throw new Error("Unsafe setup checkpoint symlink");
       }
       const noFollow = this.runtimePlatform === "win32" ? 0 : constants.O_NOFOLLOW;
-      handle = await open(path, constants.O_RDONLY | noFollow);
+      handle = await open(path, constants.O_RDONLY | noFollow | constants.O_NONBLOCK);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
@@ -202,32 +248,45 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
   }
 
   async save(state: SetupMachineState): Promise<void> {
+    if (!validState(state, state.runId, await realpath(state.projectRoot)))
+      throw new Error("Invalid setup checkpoint state");
     const path = await this.pathFor(state.runId, state.projectRoot);
     const encoded = `${JSON.stringify({ state, digest: digest(state) })}\n`;
     if (Buffer.byteLength(encoded) > MAX_CHECKPOINT_BYTES)
       throw new Error("Setup checkpoint exceeds 256 KiB");
     const temporary = join(dirname(path), `.${state.runId}.${randomUUID()}.tmp`);
-    const handle = await open(temporary, "wx", 0o600);
+    const handle = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
     try {
-      await handle.writeFile(encoded);
-      await handle.sync();
+      try {
+        await handle.writeFile(encoded);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await this.pathFor(state.runId, state.projectRoot);
+      try {
+        const existing = await lstat(path);
+        if (existing.isSymbolicLink() || !existing.isFile())
+          throw new Error("Unsafe setup checkpoint target");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      await rename(temporary, path);
     } finally {
-      await handle.close();
+      await cleanupCheckpointTemporary(temporary);
     }
-    try {
-      const existing = await lstat(path);
-      if (existing.isSymbolicLink() || !existing.isFile())
-        throw new Error("Unsafe setup checkpoint target");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    await rename(temporary, path);
     // Windows cannot open a directory as a file handle for fsync. The atomic rename and
     // per-user state directory still provide resumability there; POSIX additionally fsyncs
     // the containing directory so the rename survives a sudden interruption.
     if (this.runtimePlatform !== "win32") {
-      await chmod(path, 0o600);
-      const directory = await open(dirname(path), "r");
+      const directory = await open(
+        dirname(path),
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
       try {
         await directory.sync();
       } finally {

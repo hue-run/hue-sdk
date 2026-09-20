@@ -1,6 +1,6 @@
-import { constants } from "node:fs";
-import { lstat, open, readFile, readdir, rename, unlink } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { constants, type Stats } from "node:fs";
+import { link, lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { SetupProjectDetection } from "./types.js";
 import {
@@ -29,6 +29,71 @@ async function cleanupTemporary(path: string): Promise<void> {
 function inside(parent: string, child: string): boolean {
   const path = relative(parent, child);
   return path === "" || (!path.startsWith("..") && !path.startsWith("/"));
+}
+
+async function safeDirectory(path: string): Promise<void> {
+  const paths: string[] = [];
+  let current = resolve(path);
+  for (;;) {
+    paths.unshift(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  for (const entry of paths) {
+    const info = await lstat(entry);
+    if (info.isSymbolicLink() || !info.isDirectory())
+      throw new Error("Refusing a setup configuration path with a symlink ancestor");
+  }
+  if ((await realpath(path)) !== resolve(path))
+    throw new Error("Refusing a setup configuration path outside its actual directory");
+}
+
+interface ManagedSnapshot {
+  contents: string;
+  info: Stats;
+}
+
+async function readManaged(path: string): Promise<ManagedSnapshot | undefined> {
+  await safeDirectory(dirname(path));
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error("Refusing unsafe setup configuration");
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 1024 * 1024 || (info.mode & 0o7000) !== 0)
+      throw new Error("Refusing unsafe setup configuration");
+    const contents = await handle.readFile("utf8");
+    const after = await handle.stat();
+    if (
+      info.mtimeMs !== after.mtimeMs ||
+      info.ctimeMs !== after.ctimeMs ||
+      info.size !== after.size
+    )
+      throw new Error("Refusing setup configuration changed while reading");
+    return { contents, info };
+  } finally {
+    await handle.close();
+  }
+}
+
+function sameSnapshot(
+  left: ManagedSnapshot | undefined,
+  right: ManagedSnapshot | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.contents === right.contents &&
+    left.info.dev === right.info.dev &&
+    left.info.ino === right.info.ino &&
+    left.info.mode === right.info.mode &&
+    left.info.mtimeMs === right.info.mtimeMs &&
+    left.info.ctimeMs === right.info.ctimeMs
+  );
 }
 
 function serviceName(root: string): string {
@@ -149,44 +214,58 @@ def install_hue_flask(app):
 
     @app.before_request
     def _hue_setup_before_request():
-        context = hue.span("hue.metadata")
-        span = context.__enter__()
-        g._hue_setup_context = context
-        g._hue_setup_ids = {"traceId": span.trace_id, "spanId": span.span_id}
+        try:
+            context = hue.span("hue.metadata")
+            span = context.__enter__()
+            g._hue_setup_context = context
+            g._hue_setup_ids = {"traceId": span.trace_id, "spanId": span.span_id}
+        except Exception:
+            pass
 
     @app.after_request
     def _hue_setup_after_request(response):
-        context = getattr(g, "_hue_setup_context", None)
-        ids = getattr(g, "_hue_setup_ids", None)
-        if context is not None:
-            context.__exit__(None, None, None)
-        if ids is not None and hue.force_flush():
-            _save_evidence({**ids, "credentialVersion": _installation["credential"]["version"], "source": "existing-application-request"})
+        try:
+            context = getattr(g, "_hue_setup_context", None)
+            ids = getattr(g, "_hue_setup_ids", None)
+            g._hue_setup_context = None
+            g._hue_setup_ids = None
+            if context is not None:
+                context.__exit__(None, None, None)
+            if ids is not None and os.environ.get("HUE_SETUP_EVIDENCE_FILE") == str(_evidence_path) and hue.force_flush():
+                _save_evidence({**ids, "credentialVersion": _installation["credential"]["version"], "source": "existing-application-request"})
+        except Exception:
+            pass
         return response
 `;
 }
 
-async function atomicManagedWrite(path: string, contents: string): Promise<void> {
+async function atomicManagedWrite(
+  path: string,
+  contents: string,
+  previous: ManagedSnapshot | undefined,
+): Promise<void> {
+  await safeDirectory(dirname(path));
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   let handle;
   try {
     handle = await open(
       temporary,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o644,
+      previous ? previous.info.mode & 0o777 : 0o644,
     );
+    await handle.chmod(previous ? previous.info.mode & 0o777 : 0o644);
     await handle.writeFile(contents, "utf8");
     await handle.sync();
     await handle.close();
     handle = undefined;
-    try {
-      const existing = await lstat(path);
-      if (existing.isSymbolicLink() || !existing.isFile())
-        throw new Error(`Refusing unsafe setup configuration at ${basename(path)}`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!sameSnapshot(previous, await readManaged(path)))
+      throw new Error("Refusing setup configuration changed before replacement");
+    if (previous) await rename(temporary, path);
+    else {
+      // link is an atomic create-if-absent: never replace a file created after validation.
+      await link(temporary, path);
+      await unlink(temporary);
     }
-    await rename(temporary, path);
   } finally {
     await handle?.close();
     await cleanupTemporary(temporary);
@@ -202,18 +281,8 @@ async function writeManaged(
   const path = join(store.projectRoot, relativePath);
   if (!inside(store.projectRoot, path)) throw new Error("Unsafe setup configuration path");
   const expected = setupManagedDigest(contents);
-  let previous: string | undefined;
-  let exists = false;
-  try {
-    const info = await lstat(path);
-    if (info.isSymbolicLink() || !info.isFile() || info.size > 1024 * 1024)
-      throw new Error(`Refusing unsafe setup configuration at ${relativePath}`);
-    previous = await readFile(path, "utf8");
-    exists = true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  if (previous !== undefined && setupManagedDigest(previous) === expected) {
+  const previous = await readManaged(path);
+  if (previous !== undefined && setupManagedDigest(previous.contents) === expected) {
     if (record.managedFiles[relativePath] !== expected) {
       record.managedFiles[relativePath] = expected;
       await store.save(record);
@@ -221,17 +290,18 @@ async function writeManaged(
     return undefined;
   }
   const savedDigest = record.managedFiles[relativePath];
-  if (exists && (!savedDigest || setupManagedDigest(previous!) !== savedDigest))
+  if (previous && (!savedDigest || setupManagedDigest(previous.contents) !== savedDigest))
     throw new Error(
       `Refusing to overwrite custom or unexpectedly edited configuration at ${relativePath}`,
     );
-  await atomicManagedWrite(path, contents);
+  await atomicManagedWrite(path, contents, previous);
   record.managedFiles[relativePath] = expected;
   await store.save(record);
-  return { path: relativePath, change: exists ? "updated" : "created" };
+  return { path: relativePath, change: previous ? "updated" : "created" };
 }
 
 async function rejectCustomEnvironment(projectRoot: string): Promise<void> {
+  await safeDirectory(projectRoot);
   if (process.env.HUE_API_KEY)
     throw new Error("Refusing to replace an existing custom Hue credential from HUE_API_KEY");
   const entries = await readdir(projectRoot, { withFileTypes: true });
@@ -241,16 +311,8 @@ async function rejectCustomEnvironment(projectRoot: string): Promise<void> {
     if (entry.isSymbolicLink()) throw new Error(`Refusing unsafe credential file at ${entry.name}`);
     if (!entry.isFile()) continue;
     const path = join(projectRoot, entry.name);
-    const info = await lstat(path);
-    if (info.size > 1024 * 1024)
-      throw new Error(`Refusing oversized credential file at ${entry.name}`);
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let source: string;
-    try {
-      source = await handle.readFile("utf8");
-    } finally {
-      await handle.close();
-    }
+    const source = (await readManaged(path))?.contents;
+    if (source === undefined) throw new Error("Refusing credential file changed during inspection");
     if (/^\s*(?:export\s+)?HUE_API_KEY\s*=/mu.test(source))
       throw new Error(`Refusing to replace an existing custom Hue credential in ${entry.name}`);
   }
@@ -272,18 +334,13 @@ export async function validateSetupConfiguration(
   if (project.languages.includes("python")) candidates.push(["hue_setup.py", pythonConfig(store)]);
   for (const [relativePath, expected] of candidates) {
     const path = join(store.projectRoot, relativePath);
-    try {
-      const info = await lstat(path);
-      if (info.isSymbolicLink() || !info.isFile() || info.size > 1024 * 1024)
-        throw new Error(`Refusing unsafe setup configuration at ${relativePath}`);
-      const source = await readFile(path, "utf8");
-      const digest = setupManagedDigest(source);
+    const previous = await readManaged(path);
+    if (previous) {
+      const digest = setupManagedDigest(previous.contents);
       if (digest !== setupManagedDigest(expected) && digest !== record?.managedFiles[relativePath])
         throw new Error(
           `Refusing to overwrite custom or unexpectedly edited configuration at ${relativePath}`,
         );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 }

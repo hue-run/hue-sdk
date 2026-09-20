@@ -5,6 +5,7 @@ import type {
 } from "./backend.js";
 import { SetupBackendError } from "./backend.js";
 import { SetupApplicationActionRequired } from "./application.js";
+import { acquireSetupCommandLock } from "./lock.js";
 import type { SetupMachineState } from "./machine.js";
 import { createInitialSetupState, transitionSetup } from "./machine.js";
 import { redactSetupTranscriptText } from "./render.js";
@@ -32,6 +33,7 @@ export interface SetupCheckpointAdapter {
 export type SetupBackendOperations = Pick<
   SetupBackendAdapter,
   | "prepare"
+  | "resetLocalCache"
   | "preflight"
   | "localInstallation"
   | "provision"
@@ -114,7 +116,14 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
     await options.emit(event);
   };
   let state: SetupMachineState | undefined;
+  let releaseLock: (() => Promise<void>) | undefined;
   try {
+    if (options.backend) {
+      releaseLock = await acquireSetupCommandLock(options.projectRoot);
+      options.backend.resetLocalCache();
+    }
+    if (options.claimRestart && (options.command !== "claim" || options.mode !== "human"))
+      throw new Error("Refusing non-human browser handoff restart");
     state = await options.checkpoints.load(options.runId, options.projectRoot);
     await emit({
       event: "run.started",
@@ -158,7 +167,9 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       state = createInitialSetupState(options.runId, options.projectRoot);
       await options.checkpoints.save(state);
     }
-    if (state.phase !== "local-ready") {
+    // A checkpoint is progress, never authority for current manifests or ownership.
+    {
+      state = createInitialSetupState(options.runId, options.projectRoot);
       const first = transitionSetup(state, { type: "start" });
       state = first.state;
       await options.checkpoints.save(state);
@@ -170,9 +181,6 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       state = second.state;
       await options.checkpoints.save(state);
       for (const event of second.events) await emit(event);
-    } else {
-      await emit({ event: "project.detected", project: state.project });
-      await emit({ event: "plan.ready", plan: state.plan });
     }
     if (state.phase !== "local-ready") throw new Error("Setup project detection did not complete");
 
@@ -215,7 +223,8 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
           event: "diagnostic",
           level: "warning",
           code: "setup.inactive",
-          message: "Hue anonymous setup is currently inactive; no project or installation files were changed.",
+          message:
+            "Hue anonymous setup is currently inactive; no project or installation files were changed.",
         });
         await emit({
           event: "action.required",
@@ -254,7 +263,10 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
         outcome: installed ? "changed" : "unchanged",
       });
       await options.backend.prepare();
-      status = await options.backend.provision(options.signal);
+      // Once a credential exists, status is recovery and spends no provisioning admission.
+      status = local?.credential
+        ? await options.backend.status(options.signal)
+        : await options.backend.provision(options.signal);
       rejectTerminal(status);
       if (status.state === "active")
         await emit({
@@ -396,7 +408,7 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
         event: "action.required",
         action: "run-instrumented-request",
         message:
-          "Run hue resume to retry the existing application request and exact receipt verification.",
+          "Run hue resume to retry only exact receipt verification; the business request will not be replayed.",
         command: "hue resume",
       });
       await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
@@ -437,6 +449,11 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
 
     if (oldCredential)
       await options.backend.verifyRevokedCredential(oldCredential, evidence, options.signal);
+    if (!(await options.backend.prepare()).anonymousKeyRevoked)
+      throw new SetupBackendError(
+        "unverified",
+        "The original anonymous credential is unavailable for revocation verification; claim reconciliation is unverified.",
+      );
     await emit({ event: "claim.completed", claimId: status.installationId });
     await emit({
       event: "diagnostic",
@@ -478,5 +495,7 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       });
     }
     throw error;
+  } finally {
+    await releaseLock?.();
   }
 }

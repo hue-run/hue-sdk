@@ -322,6 +322,7 @@
             "FileChangedEvent",
             "FileSetupInstallationStore",
             "PlanReadyEvent",
+            "PrivacyNoticeEvent",
             "ProjectDetectedEvent",
             "ReceiptVerifiedEvent",
             "RunCompletedEvent",
@@ -339,6 +340,7 @@
             "SetupBackendReceipt",
             "SetupBackendTrial",
             "SetupCheckpointAdapter",
+            "SetupClaimHandoff",
             "SetupCommand",
             "SetupCommandRunner",
             "SetupCredentialResult",
@@ -348,11 +350,11 @@
             "SetupFileChange",
             "SetupInstallationRecord",
             "SetupInstallationStatus",
-            "SetupLegalActionRequired",
             "SetupMachineInput",
             "SetupMachineState",
             "SetupOutputMode",
             "SetupPlan",
+            "SetupPreflightStatus",
             "SetupProbeEvidence",
             "SetupProjectAdapter",
             "SetupProjectDetection",
@@ -360,6 +362,7 @@
             "SetupRunResult",
             "SetupStoredApplicationAttempt",
             "SetupStoredApplicationEvidence",
+            "SetupStoredClaimHandoff",
             "SetupStoredCredential",
             "SetupStoredProbe",
             "SetupTransition",
@@ -384,9 +387,9 @@
       "name": "@hue-run/sdk",
       "schemas": {
         "@hue-run/sdk/setup-events.schema.json": {
-          "contractVersion": 1,
-          "id": "https://hue.run/schemas/setup-events-v1.json",
-          "sha256": "sha256:bd0d7110d949160d8e2723480835f65e0bf9da766582d22c41d94412de55f7b9",
+          "contractVersion": 2,
+          "id": "https://hue.run/schemas/setup-events-v2.json",
+          "sha256": "sha256:ed42887a22cac3d0008d71be768041995a624c50e1d2f604260fb0d4e3aed9a1",
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
@@ -399,10 +402,10 @@
     "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.3.0"
+      "version": "0.4.0"
     },
     "name": "hue",
-    "sha256": "sha256:b983a24c043f5054047d7bee24b0cba4a9bcec781afc60d379496094b44522dd",
+    "sha256": "sha256:9b794f2061aebb64b7ac8257b4f19a4f162484809fa46373bf60df96ddb1ab4b",
     "source": "skills/hue/SKILL.md"
   }
 }

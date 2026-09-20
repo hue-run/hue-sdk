@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from email.parser import BytesParser
 import hashlib
 import json
@@ -47,13 +48,16 @@ def inspect(path: Path, language: str, version: str) -> None:
         parts = PurePosixPath(name).parts
         assert not name.startswith("/") and ".." not in parts, "Unsafe archive path"
         assert not any(
-            part in {".git", ".npmrc", ".pypirc", "node_modules", ".venv"}
+            part in {".git", ".hue", ".npmrc", ".pypirc", "node_modules", ".venv"}
             or part.startswith(".env")
             for part in parts
         ), "Private file in archive"
         assert not re.search(
-            rb"hue_sk_live_[A-Za-z0-9_-]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+            rb"hue_(?:sk_(?:live|test)|setup_(?:live|test)|install|claim)_[A-Za-z0-9_-]+"
+            rb"|/setup/claim#[A-Za-z0-9_-]+"
+            rb"|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
             data,
+            re.IGNORECASE,
         ), "Credential-like content in archive"
     assert any(PurePosixPath(name).name.startswith("LICENSE") for name in files), (
         "Missing license file"
@@ -133,6 +137,7 @@ def main() -> None:
                 {
                     "filename": path.name,
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "integrity": "sha512-" + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode("ascii"),
                 }
             )
         commit = subprocess.check_output(

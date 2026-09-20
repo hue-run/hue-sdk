@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Hue tracing
@@ -25,17 +25,20 @@ Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed
 
 ## One-command onboarding
 
-When the user specifically asks for Hue onboarding, first inspect the repository and then run:
+When the user specifically asks for Hue onboarding, first inspect the repository and verify that
+`latest` is the accepted 0.4 release (the candidate is not a public activation promise), then run:
 
 ```sh
 npx --yes @hue-run/sdk@latest setup --agent
 ```
 
 Treat each JSONL `action.required` as a real stop, make only the requested repository change, and
-rerun `hue resume --agent`. Do not infer success from file creation, a connection check or a setup
-probe. Ready means the CLI exercised an existing application request path, flushed its exporter and
-verified that request's exact receipt. Report the exact supported shape; do not claim every agent or
-repository works.
+rerun `npx --yes @hue-run/sdk@latest resume --agent`. Event contract v2 is the machine-readable
+interface. `receipt.verified` must have `source: "repository-http-boundary"`: the CLI exercised one
+existing application request, flushed its exporter and verified the exact trace/span receipt.
+File creation, a connection check or a synthetic setup probe cannot establish that result. An
+`action_required` terminal outcome can still have verified application evidence while account
+linkage is deferred. Report both separately; do not claim every agent or repository works.
 
 Automatic setup is intentionally limited to one selected npm/Bun Express package or one uv Flask
 package with an unambiguous existing server entrypoint, literal GET route and environment-selected
@@ -44,19 +47,33 @@ unfamiliar framework, use the structured action to select a package with `--proj
 into an existing request. Never choose a monorepo project heuristically, add placeholder “real app”
 comments, simulate business behavior or rewrite an existing route.
 
-The active Terms/Privacy notice belongs to the human. Agent mode must surface its canonical URLs and
-version when the backend provides them, then stop. Ask the user to approve that exact version outside
-the model transcript and rerun using the documented acknowledgement mechanism; never accept, invent
-or derive a legal version. If no approved notice is available, onboarding is blocked before package,
-project, secret, provisioning or telemetry side effects.
+Technical preflight presents the published privacy notice before telemetry; it does not request legal
+acceptance. Never invent legal metadata. Capture remains off. Trial credentials cannot enable content
+capture even after claim; that requires explicit opt-in and a separately account-managed normal key.
+
+For `select-project`, select the user's intended package with `--project`, never guess at a workspace
+root. For `integrate-application` or `configure`, inspect the concrete conflict and preserve custom
+configuration and existing telemetry ownership; do not overwrite edits or change business behavior.
+For `run-instrumented-request`, inspect the recorded failure. Resume only retries receipt verification
+when a request was already attempted; never delete the attempt marker or replay business work to fix
+telemetry. A new application request requires an explicit owner decision. Unsupported integrations
+stay action-required until supported evidence is actually available; do not forge a checkpoint.
 
 Account linkage is also deferred to the human. Never request, print, summarize or copy a claim URL,
 fragment, cookie, verification URL, installation proof or telemetry key. In an interactive owner
 terminal, `hue claim` opens an ignored mode-`0600` local handoff without placing its capability in a
 process argument or terminal output. In agent mode report only the generic owner action. After the
-owner finishes, rerun status/claim and require replacement-key application evidence plus old-key
-refusal. This protects logs and model transcripts; it does not hide repository files from a malicious
-local process.
+owner finishes, rerun status/claim. Require the replacement key to verify the SAME original request's
+trace/span receipt and the anonymous key to return 401 on the dedicated setup receipt route. Do not
+run a second business request after claim. `claim.completed` reports verified reconciliation. A
+consumed browser session is resumed in that browser; only the owner may explicitly use
+`hue claim --restart` for a lost/expired handoff. This protects logs and model transcripts; it does not
+hide repository files from a malicious local process.
+
+Setup-managed credentials use a separate token namespace and only `setup_telemetry_write` in both
+generations. They cannot use normal project APIs or the SDK's generic receipt helper. The setup CLI
+uses `/api/v1/setup/traces/{traceId}/receipt`; a 401 from the generic receipt is NOT revocation proof.
+Do not read or print ignored installation/handoff files to recover a key or browser URL.
 
 **Existing AI SDK 6:** Hue core coexists with AI SDK 6. Pass `hueExperimentalTelemetry(hue)` from `@hue-run/sdk` as `experimental_telemetry` (requires TypeScript 0.2.0); `hueTelemetry` remains AI SDK 7 only. Alternatively keep the existing instrumentation/provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade the app merely to add tracing.
 

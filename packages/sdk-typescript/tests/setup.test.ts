@@ -37,6 +37,14 @@ import {
 } from "../src/setup/types.js";
 import otlpSchema from "./fixtures/otlp-schema.json" with { type: "json" };
 
+const syntheticCredential = (version: 0 | 1 = 0) => ({
+  apiKey: `hue_setup_test_setup-${String(version + 1).repeat(24)}_${"s".repeat(43)}`,
+  keyId: `setup-${String(version + 1).repeat(24)}`,
+  version,
+  kind: "anonymous_trial" as const,
+  capabilities: ["setup_telemetry_write"] as ["setup_telemetry_write"],
+});
+
 const instant = () => new Date("2026-09-19T12:00:00.000Z");
 const detection = (root: string): SetupProjectDetection => ({
   root,
@@ -241,7 +249,7 @@ describe("supported application matrix", () => {
         ],
       }),
     ]);
-    expect(await installSetupRuntime(project, plan, async () => {})).toBe(false);
+    expect(await installSetupRuntime(project, plan, async () => {})).toBe(true);
     const custom = JSON.parse(await readFile(manifestPath, "utf8"));
     custom.dependencies["@hue-run/sdk"] = "0.3.2";
     await writeFile(manifestPath, JSON.stringify(custom));
@@ -295,7 +303,7 @@ describe("supported application matrix", () => {
     });
     expect(uvCommand).toMatchObject({
       command: "uv",
-      args: ["add", "hue-run==0.2.2"],
+      args: ["sync", "--locked", "--no-build", "--no-install-project", "--no-default-groups"],
     });
   });
 
@@ -311,7 +319,7 @@ describe("supported application matrix", () => {
     const project = await detectSetupProject(root);
     const plan = await planSetupApplication(project);
     expect(plan).toMatchObject({ language: "python", manager: "uv", framework: "flask" });
-    expect(await installSetupRuntime(project, plan, async () => {})).toBe(false);
+    expect(await installSetupRuntime(project, plan, async () => {})).toBe(true);
     const store = new FileSetupInstallationStore(root, "https://example.test");
     const record = await store.loadOrCreate();
     await chmod(join(root, "app.py"), 0o750);
@@ -369,7 +377,7 @@ describe("supported application matrix", () => {
     );
     const store = new FileSetupInstallationStore(root, "https://example.test");
     const record = await store.loadOrCreate();
-    record.credential = { apiKey: "synthetic", keyId: "key", version: 0 };
+    record.credential = syntheticCredential();
     await store.save(record);
     const plan = {
       language: "typescript" as const,
@@ -426,10 +434,12 @@ describe("runner and checkpoints", () => {
     expect(events.at(-1)).toMatchObject({ event: "run.completed", outcome: "action_required" });
     events.length = 0;
     await runSetup({ ...options, command: "resume" });
-    expect(detections).toBe(1);
+    expect(detections).toBe(2);
     expect(events.map((event) => event.event)).toEqual([
       "run.started",
+      "step.started",
       "project.detected",
+      "step.completed",
       "plan.ready",
       "action.required",
       "run.completed",
@@ -620,7 +630,7 @@ describe("real setup HTTP adapter", () => {
     const backend = new SetupBackendAdapter({
       projectRoot,
       origin: "https://example.test",
-      fetch: (async (_input, init) => {
+      fetch: (async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
         network += 1;
         expect(new Headers(init?.headers).has("authorization")).toBe(false);
         return Response.json(
@@ -630,6 +640,8 @@ describe("real setup HTTP adapter", () => {
             capturePolicy: "metadata-only-v1",
             limits: { traces: 100, spans: 1000, bytes: 2097152 },
             lifetime: { expiresAfterSeconds: 86400, purgeAfterSeconds: 691200 },
+            privacyNotice: { url: "https://hue.run/privacy", effectiveDate: "2026-08-24" },
+            securityUrl: "https://trust.hue.run/",
           },
           { headers: { "Cache-Control": "no-store" } },
         );
@@ -689,7 +701,7 @@ describe("real setup HTTP adapter", () => {
       ".hue/.installation-*.tmp",
     );
     expect((await lstat(join(projectRoot, ".hue"))).mode & 0o777).toBe(0o700);
-    installation.credential = { apiKey: "synthetic-key", keyId: "key_0", version: 0 };
+    installation.credential = syntheticCredential();
     await store.save(installation);
     await writeFile(join(projectRoot, "hue.setup.mjs"), "// custom\n");
     await expect(
@@ -818,12 +830,13 @@ describe("real setup HTTP adapter", () => {
             claimHandoff: null,
             endpoints: {
               otlp: "/api/v1/otlp/v1/traces",
-              receipt: "/api/v1/traces/{traceId}/receipt",
+              receipt: "/api/v1/setup/traces/{traceId}/receipt",
             },
             credential: {
-              apiKey: "same-recovered-key",
-              keyId: "key_0",
-              capabilities: ["telemetry_write"],
+              kind: "anonymous_trial",
+              apiKey: syntheticCredential().apiKey,
+              keyId: syntheticCredential().keyId,
+              capabilities: ["setup_telemetry_write"],
               version: 0,
             },
           },
@@ -834,8 +847,10 @@ describe("real setup HTTP adapter", () => {
     });
     const result = await backend.credentials(0);
     expect(calls).toBe(2);
-    expect(result.credential.apiKey).toBe("same-recovered-key");
-    expect((await backend.localInstallation())?.credential?.apiKey).toBe("same-recovered-key");
+    expect(result.credential.apiKey).toBe(syntheticCredential().apiKey);
+    expect((await backend.localInstallation())?.credential?.apiKey).toBe(
+      syntheticCredential().apiKey,
+    );
   });
 
   test("treats a durable revoked lineage as terminal without minting or retrying", async () => {
@@ -873,7 +888,7 @@ describe("real setup HTTP adapter", () => {
             claimHandoff: null,
             endpoints: {
               otlp: "/api/v1/otlp/v1/traces",
-              receipt: "/api/v1/traces/{traceId}/receipt",
+              receipt: "/api/v1/setup/traces/{traceId}/receipt",
             },
           },
           { headers: { "Cache-Control": "no-store" } },
@@ -881,11 +896,7 @@ describe("real setup HTTP adapter", () => {
       }) as typeof fetch,
     });
     const installation = await backend.prepare();
-    installation.credential = {
-      apiKey: "synthetic-revoked-v0",
-      keyId: "key_v0",
-      version: 0,
-    };
+    installation.credential = syntheticCredential();
     await backend.store.save(installation);
     const checkpoints = new MemoryCheckpoints();
     await runSetup({
@@ -913,7 +924,7 @@ describe("real setup HTTP adapter", () => {
     expect(result.outcome).toBe("action_required");
     expect(credentialCalls).toBe(1);
     expect((await backend.localInstallation())?.credential).toEqual(
-      expect.objectContaining({ apiKey: "synthetic-revoked-v0", version: 0 }),
+      expect.objectContaining({ apiKey: syntheticCredential().apiKey, version: 0 }),
     );
     expect((await backend.localInstallation())?.revocationCredential).toBeUndefined();
     expect(events).toContainEqual(
@@ -946,7 +957,7 @@ describe("real setup HTTP adapter", () => {
             claimHandoff: null,
             endpoints: {
               otlp: "/api/v1/otlp/v1/traces",
-              receipt: "/api/v1/traces/{traceId}/receipt",
+              receipt: "/api/v1/setup/traces/{traceId}/receipt",
             },
             unexpected: "field",
           },
@@ -983,7 +994,7 @@ describe("real setup HTTP adapter", () => {
       const backend = new SetupBackendAdapter({
         projectRoot,
         origin,
-        fetch: (async (input) => {
+        fetch: (async (input: Parameters<typeof fetch>[0]) => {
           const installation = await backend.prepare();
           const url = new URL(input instanceof Request ? input.url : input.toString());
           if (url.pathname.endsWith("/claim-handoff"))
@@ -1020,7 +1031,7 @@ describe("real setup HTTP adapter", () => {
               },
               endpoints: {
                 otlp: "/api/v1/otlp/v1/traces",
-                receipt: "/api/v1/traces/{traceId}/receipt",
+                receipt: "/api/v1/setup/traces/{traceId}/receipt",
               },
             },
             { headers: { "Cache-Control": "no-store" } },
@@ -1095,8 +1106,8 @@ describe("real setup HTTP adapter", () => {
     let failRevocationOnce = true;
     let receiptMissing = true;
     let handoffIssued = false;
-    const key0 = "synthetic-setup-key-v0";
-    const key1 = "synthetic-setup-key-v1";
+    const key0 = syntheticCredential(0).apiKey;
+    const key1 = syntheticCredential(1).apiKey;
     const claimCapability = "c".repeat(43);
     let handoffId = "";
     const server = Bun.serve({
@@ -1109,7 +1120,12 @@ describe("real setup HTTP adapter", () => {
           protocolVersion: 1,
           installationId,
           state: claimed ? "claimed" : "active",
-          project: { id: "project_test", organizationId: claimed ? "org_owner" : "org_trial" },
+          project: {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            organizationId: claimed
+              ? "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+              : "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          },
           credentialVersion: claimed ? 1 : 0,
           capturePolicy: "metadata-only-v1",
           expiresAt: claimed ? null : "2026-09-21T12:00:00.000Z",
@@ -1126,7 +1142,7 @@ describe("real setup HTTP adapter", () => {
                 },
           endpoints: {
             otlp: "/api/v1/otlp/v1/traces",
-            receipt: "/api/v1/traces/{traceId}/receipt",
+            receipt: "/api/v1/setup/traces/{traceId}/receipt",
           },
         });
         if (url.pathname === "/api/v1/setup/preflight") {
@@ -1138,6 +1154,8 @@ describe("real setup HTTP adapter", () => {
               capturePolicy: "metadata-only-v1",
               limits: { traces: 100, spans: 1000, bytes: 2097152 },
               lifetime: { expiresAfterSeconds: 86400, purgeAfterSeconds: 691200 },
+              privacyNotice: { url: "https://hue.run/privacy", effectiveDate: "2026-08-24" },
+              securityUrl: "https://trust.hue.run/",
             },
             { headers: noStore },
           );
@@ -1195,9 +1213,10 @@ describe("real setup HTTP adapter", () => {
               {
                 ...status(),
                 credential: {
+                  kind: "anonymous_trial",
                   apiKey: claimed ? key1 : key0,
-                  keyId: claimed ? "key_v1" : "key_v0",
-                  capabilities: ["telemetry_write"],
+                  keyId: syntheticCredential(claimed ? 1 : 0).keyId,
+                  capabilities: ["setup_telemetry_write"],
                   version: claimed ? 1 : 0,
                 },
               },
@@ -1219,7 +1238,7 @@ describe("real setup HTTP adapter", () => {
             headers: { "Content-Type": "application/x-protobuf" },
           });
         }
-        const match = /^\/api\/v1\/traces\/([a-f0-9]{32})\/receipt$/u.exec(url.pathname);
+        const match = /^\/api\/v1\/setup\/traces\/([a-f0-9]{32})\/receipt$/u.exec(url.pathname);
         if (match) {
           const authorization = request.headers.get("authorization");
           if (claimed && authorization === `Bearer ${key0}`) {
@@ -1245,7 +1264,7 @@ describe("real setup HTTP adapter", () => {
             fields: { input: false, output: false, model: false, usage: false, session: false },
             matchedSpanIds: [spanId],
             missingSpanIds: [],
-            traceUrl: `${url.origin}/traces/${traceId}`,
+            traceUrl: `${url.origin}/traces/dddddddd-dddd-4ddd-8ddd-dddddddddddd?projectId=${status().project.id}&organizationId=${status().project.organizationId}`,
           });
         }
         return new Response(null, { status: 404 });
@@ -1373,7 +1392,7 @@ describe("real setup HTTP adapter", () => {
 
 describe("renderers and event contract", () => {
   const action: SetupEvent = {
-    contractVersion: 1,
+    contractVersion: SETUP_EVENT_CONTRACT_VERSION,
     event: "action.required",
     runId: "setup_test",
     sequence: 3,

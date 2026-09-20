@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { validSetupCredentialIdentity } from "./credential.js";
 
 const MAX_FILE_BYTES = 32 * 1024;
 const IGNORE_RULES = [
@@ -23,6 +24,10 @@ const LOCAL_IGNORE_RULES = [
 
 /** Telemetry credential saved only in an ignored owner-only installation file. */
 export interface SetupStoredCredential {
+  /** Fixed setup-only key family; never an ordinary account-managed key. */
+  kind: "anonymous_trial";
+  /** Setup credentials have exactly one metadata-only permission in both generations. */
+  capabilities: ["setup_telemetry_write"];
   /** Bearer credential used solely for telemetry export and receipt verification. */
   apiKey: string;
   /** Server identifier for the credential generation. */
@@ -85,6 +90,8 @@ export interface SetupInstallationRecord {
   credential?: SetupStoredCredential;
   /** Superseded anonymous credential retained only until its revocation is verified. */
   revocationCredential?: SetupStoredCredential;
+  /** Durable positive verification of the superseded key on the dedicated receipt route. */
+  anonymousKeyRevoked?: true;
   /** Latest probe awaiting or carrying exact receipt evidence. */
   probe?: SetupStoredProbe;
   /** Latest existing-application request awaiting or carrying exact receipt evidence. */
@@ -122,7 +129,12 @@ async function cleanupTemporary(path: string): Promise<void> {
   }
 }
 
-async function atomicWrite(path: string, contents: string, mode: number): Promise<void> {
+async function atomicWrite(
+  path: string,
+  contents: string,
+  mode: number,
+  guard?: () => Promise<void>,
+): Promise<void> {
   await rejectSymlink(path, true);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   let handle;
@@ -138,6 +150,7 @@ async function atomicWrite(path: string, contents: string, mode: number): Promis
     handle = undefined;
     await chmod(temporary, mode);
     await rejectSymlink(path, true);
+    await guard?.();
     await rename(temporary, path);
     if (process.platform !== "win32") {
       const directory = await open(dirname(path), constants.O_RDONLY);
@@ -161,14 +174,12 @@ function validCredential(value: unknown): value is SetupStoredCredential {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
   return (
-    exactKeys(item, ["apiKey", "keyId", "version"]) &&
-    typeof item.apiKey === "string" &&
-    item.apiKey.length > 0 &&
-    item.apiKey.length <= 4096 &&
-    !/\s/u.test(item.apiKey) &&
-    typeof item.keyId === "string" &&
-    item.keyId.length > 0 &&
-    item.keyId.length <= 256 &&
+    exactKeys(item, ["apiKey", "keyId", "version", "kind", "capabilities"]) &&
+    item.kind === "anonymous_trial" &&
+    Array.isArray(item.capabilities) &&
+    item.capabilities.length === 1 &&
+    item.capabilities[0] === "setup_telemetry_write" &&
+    validSetupCredentialIdentity(item.apiKey, item.keyId) &&
     (item.version === 0 || item.version === 1)
   );
 }
@@ -266,6 +277,7 @@ function parseRecord(value: unknown, origin: string): SetupInstallationRecord {
     "managedFiles",
     ...(item.credential === undefined ? [] : ["credential"]),
     ...(item.revocationCredential === undefined ? [] : ["revocationCredential"]),
+    ...(item.anonymousKeyRevoked === undefined ? [] : ["anonymousKeyRevoked"]),
     ...(item.probe === undefined ? [] : ["probe"]),
     ...(item.applicationEvidence === undefined ? [] : ["applicationEvidence"]),
     ...(item.applicationAttempt === undefined ? [] : ["applicationAttempt"]),
@@ -288,6 +300,11 @@ function parseRecord(value: unknown, origin: string): SetupInstallationRecord {
         typeof entry !== "string" || entry.length > 40 || !Number.isFinite(Date.parse(entry)),
     ) ||
     (item.credential !== undefined && !validCredential(item.credential)) ||
+    (item.anonymousKeyRevoked !== undefined &&
+      (item.anonymousKeyRevoked !== true ||
+        !validCredential(item.credential) ||
+        item.credential.version !== 1 ||
+        item.revocationCredential !== undefined)) ||
     (item.revocationCredential !== undefined &&
       (!validCredential(item.revocationCredential) ||
         item.revocationCredential.version !== 0 ||
@@ -319,6 +336,7 @@ function parseRecord(value: unknown, origin: string): SetupInstallationRecord {
 
 /** Owner-only, project/origin-scoped storage for installation proof and telemetry credentials. */
 export class FileSetupInstallationStore {
+  private lastSnapshot?: { contents: string; info: Stats };
   /** Resolved project directory containing the installation state. */
   readonly projectRoot: string;
   /** Exact normalized Hue origin scoped to this store. */
@@ -348,9 +366,45 @@ export class FileSetupInstallationStore {
   }
 
   private async rejectUnsafeProjectRoot(): Promise<void> {
-    const info = await lstat(this.projectRoot);
-    if (!info.isDirectory() || info.isSymbolicLink())
-      throw new Error("Unsafe setup project root symlink");
+    let path = this.projectRoot;
+    for (;;) {
+      const info = await lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new Error("Unsafe setup project root symlink");
+      const parent = dirname(path);
+      if (parent === path) break;
+      path = parent;
+    }
+  }
+
+  private async snapshot(): Promise<{ contents: string; info: Stats }> {
+    await this.rejectUnsafeProjectRoot();
+    await rejectSymlink(this.directory);
+    const handle = await open(
+      this.path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      const info = await handle.stat();
+      if (
+        !info.isFile() ||
+        info.size > MAX_FILE_BYTES ||
+        (process.platform !== "win32" &&
+          ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))
+      )
+        throw new Error("Unsafe setup installation record; owner-only mode 0600 is required");
+      const contents = await handle.readFile("utf8");
+      const after = await handle.stat();
+      if (
+        info.mtimeMs !== after.mtimeMs ||
+        info.ctimeMs !== after.ctimeMs ||
+        info.size !== after.size
+      )
+        throw new Error("Refusing changed setup installation record");
+      return { contents, info };
+    } finally {
+      await handle.close();
+    }
   }
 
   private async ensureIgnoreFile(ignorePath: string, rule: string): Promise<void> {
@@ -393,12 +447,10 @@ export class FileSetupInstallationStore {
     await rejectSymlink(this.directory, true);
     await rejectSymlink(this.path, true);
     try {
-      const info = await lstat(this.path);
-      if (!info.isFile() || info.size > MAX_FILE_BYTES)
-        throw new Error("Unsafe setup installation record");
-      if (process.platform !== "win32" && (info.mode & 0o077) !== 0)
-        throw new Error("Setup installation record must use mode 0600");
-      return parseRecord(JSON.parse(await readFile(this.path, "utf8")), this.origin);
+      const current = await this.snapshot();
+      const record = parseRecord(JSON.parse(current.contents), this.origin);
+      this.lastSnapshot = current;
+      return record;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
@@ -450,6 +502,7 @@ export class FileSetupInstallationStore {
           await directory.close();
         }
       }
+      this.lastSnapshot = await this.snapshot();
       return record;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
@@ -464,7 +517,24 @@ export class FileSetupInstallationStore {
   async save(record: SetupInstallationRecord): Promise<void> {
     parseRecord(record, this.origin);
     await rejectSymlink(this.directory);
-    await atomicWrite(this.path, `${JSON.stringify(record)}\n`, 0o600);
+    const expected = this.lastSnapshot;
+    if (!expected)
+      throw new Error("Refusing to save an installation without loading its current state");
+    await atomicWrite(this.path, `${JSON.stringify(record)}\n`, 0o600, async () => {
+      const current = await this.snapshot();
+      if (
+        current.contents !== expected.contents ||
+        current.info.dev !== expected.info.dev ||
+        current.info.ino !== expected.info.ino ||
+        current.info.mode !== expected.info.mode ||
+        current.info.mtimeMs !== expected.info.mtimeMs ||
+        current.info.ctimeMs !== expected.info.ctimeMs
+      )
+        throw new Error(
+          "Refusing concurrently changed setup installation state; rerun after the other command finishes",
+        );
+    });
+    this.lastSnapshot = await this.snapshot();
   }
 
   /** Saves a private browser redirect without putting its capability in a process argument. */

@@ -58,15 +58,18 @@ The reviewed `0.4.0` candidate is preparing a deliberately narrow one-command on
 npx --yes @hue-run/sdk@latest setup --agent
 ```
 
-It is not public yet. Automatic setup is limited to one unambiguous npm/Bun Express server or one uv
-Flask server with a statically recognizable entrypoint, existing GET route and environment-selected
-port. It installs the exact runtime through that project's manager, adds owned middleware wiring,
-exercises the existing route and verifies those exact trace/span IDs. Monorepos, mixed managers and
-unfamiliar entrypoints stop with a structured action instead of guessing. Anonymous setup also
-requires a canonical versioned Terms/Privacy notice and explicit human acceptance; no approved
-notice currently exists, so this checkout fails closed before dependency, project, secret or network
-side effects. Setup never captures content or creates a Scenario, Hue Run, evaluation, source
-capture or remote execution. See the [CLI contract](./packages/sdk-typescript/CLI.md).
+It is not public yet. Automatic setup supports Express with npm, Express with Bun, and Flask with uv
+in one unambiguous application package with a recognizable entrypoint, existing GET route and
+environment-selected port. It installs the exact runtime through that project's manager, wires the
+application, makes one request to that route and verifies its exact trace/span receipt. Monorepos,
+mixed managers and unfamiliar entrypoints stop with a structured action. Technical preflight checks
+availability and presents the published [privacy notice](https://hue.run/privacy) and
+[security information](https://trust.hue.run/) before telemetry. An anonymous trial lasts 24 hours
+with limits of 100 traces, 1,000 spans and 2 MiB. A private local browser handoff lets the owner link
+an account while preserving the project and original request evidence; reconciliation refuses the
+old anonymous key and does not replay business work. Setup never enables content capture or creates
+a Scenario, Hue Run, evaluation, source capture or remote execution. See the
+[CLI contract](./packages/sdk-typescript/CLI.md).
 
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
 

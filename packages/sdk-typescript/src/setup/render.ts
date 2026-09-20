@@ -1,4 +1,4 @@
-import type { SetupEvent } from "./types.js";
+import { SETUP_EVENT_CONTRACT_VERSION, type SetupEvent } from "./types.js";
 
 /** Supported setup transcript formats. */
 export type SetupOutputMode = "human" | "plain" | "jsonl";
@@ -14,7 +14,20 @@ const ansi = {
 
 /** Removes capability-shaped fragments and bounds text before it reaches a public transcript. */
 export function redactSetupTranscriptText(value: string): string {
-  const withoutUrls = value.replace(/https?:\/\/[^\s"'<>]+/giu, (candidate) => {
+  if (typeof value !== "string") return "[invalid text]";
+  // Normalize encoded/separated spellings before matching, and redact before truncating.
+  let normalized = value;
+  for (let pass = 0; pass < 3; pass++)
+    normalized = normalized
+      .replace(/%([a-f0-9]{2})/giu, (_, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)),
+      )
+      .replace(/\\u([a-f0-9]{4})/giu, (_, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)),
+      )
+      .replaceAll("\\/", "/");
+  normalized = normalized.replace(/[\p{Cc}\p{Cf}]/gu, "");
+  const withoutUrls = normalized.replace(/https?:\/\/[^\s"'<>]+/giu, (candidate) => {
     try {
       const url = new URL(candidate);
       return url.hash || url.pathname.includes("/setup/claim")
@@ -25,72 +38,142 @@ export function redactSetupTranscriptText(value: string): string {
     }
   });
   const redacted = withoutUrls
-    .replace(/#[A-Za-z0-9_-]{20,}/gu, "#[redacted]")
+    // Deliberately recognize incomplete and unknown namespace suffixes too. A
+    // transport exception may contain only a truncated credential.
+    .replace(/hue_(?:sk|setup|install|claim)_[A-Za-z0-9_-]*/giu, "[private credential]")
+    .replace(/#[A-Za-z0-9_-]+/gu, "#[redacted]")
     .replace(
-      /\b(claim[_-]?(?:secret|token)|hue_claim_)(\s*[:=]\s*)[A-Za-z0-9_-]{16,}/giu,
+      /\b(claim[_-]?(?:secret|token))(["']?\s*[:=]\s*["']?)[A-Za-z0-9_-]+/giu,
       "$1$2[redacted]",
-    );
-  let printable = "";
-  for (const character of redacted) {
-    const code = character.codePointAt(0)!;
-    if ((code >= 32 && code !== 127) || character === "\n" || character === "\t")
-      printable += character;
-  }
-  return printable.slice(0, 1000);
+    )
+    .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/gu, "[private capability]");
+  return redacted.slice(0, 1000);
 }
+
+function choice<T extends string>(value: T, allowed: readonly T[]): T {
+  return allowed.includes(value) ? value : allowed[0]!;
+}
+
+function choices<T extends string>(values: T[], allowed: readonly T[]): T[] {
+  return Array.isArray(values)
+    ? [...new Set(values.filter((value) => allowed.includes(value)))]
+    : [];
+}
+
+const steps = [
+  "detect-project",
+  "install-runtime",
+  "configure-telemetry",
+  "verify-application-receipt",
+  "claim-project",
+] as const;
 
 function publicEvent(event: SetupEvent): SetupEvent {
   const base = {
-    contractVersion: event.contractVersion,
+    contractVersion: SETUP_EVENT_CONTRACT_VERSION,
     runId: redactSetupTranscriptText(event.runId),
-    sequence: event.sequence,
-    timestamp: event.timestamp,
+    sequence: Number.isSafeInteger(event.sequence) ? event.sequence : 1,
+    timestamp: redactSetupTranscriptText(event.timestamp),
   };
   switch (event.event) {
     case "run.started":
       return {
         ...base,
         event: "run.started",
-        command: event.command,
-        mode: event.mode,
-        resumed: event.resumed,
+        command: choice(event.command, ["setup", "resume", "status", "claim"]),
+        mode: choice(event.mode, ["human", "plain", "jsonl"]),
+        resumed: event.resumed === true,
       };
     case "project.detected":
-      return { ...base, event: "project.detected", project: event.project };
+      return {
+        ...base,
+        event: "project.detected",
+        project: {
+          root: redactSetupTranscriptText(event.project.root),
+          fingerprint: redactSetupTranscriptText(event.project.fingerprint),
+          languages: choices(event.project.languages, ["typescript", "python"]),
+          packageManagers: choices(event.project.packageManagers, [
+            "bun",
+            "npm",
+            "pnpm",
+            "yarn",
+            "uv",
+            "poetry",
+            "pip",
+          ]),
+          frameworks: choices(event.project.frameworks, [
+            "nextjs",
+            "nestjs",
+            "express",
+            "fastapi",
+            "django",
+            "flask",
+            "vercel-ai-sdk",
+          ]),
+          hue: choice(event.project.hue, ["absent", "typescript", "python", "multiple"]),
+          openTelemetry: choice(event.project.openTelemetry, [
+            "absent",
+            "typescript",
+            "python",
+            "multiple",
+          ]),
+        },
+      };
     case "plan.ready":
-      return { ...base, event: "plan.ready", plan: event.plan };
+      return {
+        ...base,
+        event: "plan.ready",
+        plan: {
+          steps: choices(event.plan.steps, steps),
+          mutatesProject: event.plan.mutatesProject === true,
+          backendRequired: event.plan.backendRequired === true,
+        },
+      };
     case "step.started":
-      return { ...base, event: "step.started", step: event.step };
+      return { ...base, event: "step.started", step: choice(event.step, steps) };
     case "step.completed":
-      return { ...base, event: "step.completed", step: event.step, outcome: event.outcome };
+      return {
+        ...base,
+        event: "step.completed",
+        step: choice(event.step, steps),
+        outcome: choice(event.outcome, ["unchanged", "changed", "verified", "skipped"]),
+      };
     case "file.changed":
       return {
         ...base,
         event: "file.changed",
         path: redactSetupTranscriptText(event.path),
-        change: event.change,
+        change: choice(event.change, ["created", "updated"]),
       };
     case "diagnostic":
       return {
         ...base,
         event: "diagnostic",
-        level: event.level,
-        code: event.code,
+        level: choice(event.level, ["info", "warning", "error"]),
+        code: redactSetupTranscriptText(event.code),
         message: redactSetupTranscriptText(event.message),
       };
     case "privacy.notice":
       return {
         ...base,
         event: "privacy.notice",
-        privacyUrl: event.privacyUrl,
-        effectiveDate: event.effectiveDate,
-        securityUrl: event.securityUrl,
+        privacyUrl: "https://hue.run/privacy",
+        effectiveDate: "2026-08-24",
+        securityUrl: "https://trust.hue.run/",
       };
     case "action.required":
       return {
         ...base,
         event: "action.required",
-        action: event.action,
+        action: choice(event.action, [
+          "claim-project",
+          "configure",
+          "select-project",
+          "integrate-application",
+          "run-instrumented-request",
+          "open-claim-handoff",
+          "restart-claim-handoff",
+        ]),
         message: redactSetupTranscriptText(event.message),
         ...(event.command ? { command: redactSetupTranscriptText(event.command) } : {}),
       };
@@ -98,35 +181,43 @@ function publicEvent(event: SetupEvent): SetupEvent {
       return {
         ...base,
         event: "trial.created",
-        trialId: event.trialId,
-        expiresAt: event.expiresAt,
+        trialId: redactSetupTranscriptText(event.trialId),
+        expiresAt: redactSetupTranscriptText(event.expiresAt),
       };
     case "receipt.verified":
       return {
         ...base,
         event: "receipt.verified",
-        receiptId: event.receiptId,
-        traceId: event.traceId,
-        source: event.source,
+        receiptId: redactSetupTranscriptText(event.receiptId),
+        traceId: redactSetupTranscriptText(event.traceId),
+        source: "repository-http-boundary",
       };
     case "claim.required":
-      return { ...base, event: "claim.required", claimId: event.claimId };
+      return {
+        ...base,
+        event: "claim.required",
+        claimId: redactSetupTranscriptText(event.claimId),
+      };
     case "claim.completed":
-      return { ...base, event: "claim.completed", claimId: event.claimId };
+      return {
+        ...base,
+        event: "claim.completed",
+        claimId: redactSetupTranscriptText(event.claimId),
+      };
     case "run.completed":
       return {
         ...base,
         event: "run.completed",
-        outcome: event.outcome,
-        checkpointed: event.checkpointed,
+        outcome: choice(event.outcome, ["ready", "action_required", "unchanged"]),
+        checkpointed: event.checkpointed === true,
       };
     case "run.failed":
       return {
         ...base,
         event: "run.failed",
-        code: event.code,
+        code: redactSetupTranscriptText(event.code),
         message: redactSetupTranscriptText(event.message),
-        resumable: event.resumable,
+        resumable: event.resumable === true,
       };
   }
 }

@@ -66,14 +66,16 @@ HTTPS is required except for loopback HTTP or the explicit
 project checks and exports.
 
 TypeScript `0.4.0` also prepares the `hue` executable. The unreleased
-`npx --yes @hue-run/sdk@latest setup --agent` path targets a narrow supported matrix: one npm/Bun
-Express server or one uv Flask server with an unambiguous existing entrypoint and GET route. It will
-verify a request through that existing route, not a generated probe. Unsupported or ambiguous
-repositories receive a structured action instead of guessed edits. Anonymous onboarding also
-requires an approved versioned Terms/Privacy notice and explicit human acceptance. Because no
-approved notice is currently configured, this checkout stops before dependency, project, secret or
-network side effects. Setup never enables content capture or creates a Scenario, Hue Run, evaluation,
-source capture or remote execution. See the [setup CLI contract](./CLI.md) for the held release gates.
+`npx --yes @hue-run/sdk@latest setup --agent` path supports Express with npm, Express with Bun, and
+Flask with uv in one application package with an unambiguous entrypoint and existing GET route. It
+installs the runtime, wires the application, makes one request and verifies that request's exact
+trace/span receipt. Unsupported or ambiguous repositories receive a structured action. Technical
+preflight checks availability and presents the published [privacy notice](https://hue.run/privacy)
+and [security information](https://trust.hue.run/) before telemetry. Anonymous trials last 24 hours
+and are limited to 100 traces, 1,000 spans and 2 MiB. A private owner-only browser handoff supports
+account linkage; the original request evidence is retained and business work is never replayed on
+claim. Setup never enables content capture or creates a Scenario, Hue Run, evaluation, source capture
+or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
 `checkConnection()` rejects with `HueConnectionError`: its fixed message is safe to log, `status`
 carries the HTTP status when Hue answered, and `cause` carries the underlying network, timeout or
@@ -422,8 +424,9 @@ Scorer deferral shipped in TypeScript `0.3.1`. Only built-ins
 and bound `local_code` callbacks run here; other pins remain pending for their authorized executor.
 See [scorer execution](EVALUATIONS.md#hosted-and-manual-scorer-pins).
 
-The [setup CLI](CLI.md) is a resumable local inspection core. Existing customers connect their
-agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.
+The published [setup CLI](CLI.md) is a resumable local inspection core; the unreleased `0.4.0`
+candidate adds the bounded application onboarding flow described above. Existing customers connect
+their agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.
 
 ## Managed targets
 

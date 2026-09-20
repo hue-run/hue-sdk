@@ -71,6 +71,7 @@ class ArchiveGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             for change in (
                 {"package/.env.local": b"SYNTHETIC=1"},
+                {"package/.hue/installation.json": b"{}"},
                 {"package/../../outside": b"x"},
                 {"package/dist/index.js": None},
                 {"package/LICENSE": None},
@@ -96,6 +97,34 @@ class ArchiveGateTests(unittest.TestCase):
                     AssertionError, "Unexpected artifact inventory"
                 ):
                     release.main()
+
+    def test_rejects_every_credential_namespace_and_truncated_claims(self):
+        # Generated synthetic values never enter assertion output or retained artifacts.
+        values = [
+            b"_".join((b"hue", b"sk", environment, b"s" * 32))
+            for environment in (b"live", b"test")
+        ] + [
+            b"_".join((b"hue", b"setup", environment, b"setup-" + b"a" * 24, b"s" * 43))
+            for environment in (b"live", b"test")
+        ]
+        values.extend(
+            [
+                b"_".join((b"hue", b"install", b"s" * 43)),
+                b"_".join((b"hue", b"claim", b"s" * 43)),
+                b"https://example.invalid/setup/claim#" + b"s" * 43,
+                b"https://example.invalid/setup/claim#" + b"s" * 7,
+            ]
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            for index, value in enumerate(values):
+                with self.subTest(case=index), self.assertRaisesRegex(
+                    AssertionError, "Credential-like content"
+                ):
+                    release.inspect(
+                        self.archive(folder, {"package/dist/leaked.js": value}),
+                        "typescript",
+                        "1.2.3",
+                    )
 
     def test_rejects_registry_bytes_different_from_tested_archive(self):
         with tempfile.TemporaryDirectory() as folder:
