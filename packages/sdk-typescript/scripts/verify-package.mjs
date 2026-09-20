@@ -256,7 +256,7 @@ await writeFile(
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const [cli, destination, stateHome, sourceMode] = process.argv.slice(2);
@@ -299,22 +299,22 @@ const server = createServer(async (request, response) => {
 const status = (id, url) => ({ protocolVersion: 1, installationId: id, state: "active", project: { id: "project_test", organizationId: "org_trial" }, credentialVersion: 0, capturePolicy: "metadata-only-v1", expiresAt: "2026-09-21T12:00:00.000Z", limits: { traces: 100, spans: 1000, bytes: 2097152 }, usage: { traces: 1, spans: 1, bytes: 100 }, claimUrl: origin + "/setup/claim#" + "c".repeat(43), endpoints: { otlp: "/api/v1/otlp/v1/traces", receipt: "/api/v1/traces/{traceId}/receipt" } });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const origin = "http://127.0.0.1:" + server.address().port;
-const run = (command, args, environment = process.env) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { env: { ...environment, XDG_STATE_HOME: stateHome, HUE_SECRET_CANARY: "secret-canary-package-value", BROWSER: "secret-canary-package-browser" } });
+const run = (command, args, environment = process.env, cwd = destination) => new Promise((resolve, reject) => {
+  const child = spawn(command, args, { cwd, env: { ...environment, XDG_STATE_HOME: stateHome, HUE_SECRET_CANARY: "secret-canary-package-value", BROWSER: "secret-canary-package-browser" } });
   let stdout = "", stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.on("error", reject);
   child.on("close", (code) => resolve({ code, stdout, stderr }));
 });
+const typescript = join(destination, "setup-typescript");
+const python = join(destination, "setup-python");
 try {
-  const typescript = join(destination, "setup-typescript");
-  const python = join(destination, "setup-python");
   await mkdir(typescript); await mkdir(python);
   await writeFile(join(typescript, "package.json"), JSON.stringify({ private: true, devDependencies: { typescript: "7.0.2" } }));
-  await writeFile(join(python, "pyproject.toml"), "[project]\\nname = \\\"setup-test\\\"\\n");
+  await writeFile(join(python, "pyproject.toml"), "[project]\\nname = 'setup-test'\\n");
   const agent = sourceMode === "registry-latest"
-    ? await run("npx", ["--yes", "@hue-run/sdk@latest", "setup", "--agent", "--project", typescript, "--origin", origin])
+    ? await run("npx", ["--yes", "@hue-run/sdk@latest", "setup", "--agent"], process.env, typescript)
     : await run(cli, ["setup", "--agent", "--project", typescript, "--origin", origin]);
   assert.equal(agent.code, 0); assert.equal(agent.stderr, "");
   assert.ok(!agent.stdout.includes("\\u001b") && !agent.stdout.includes("secret-canary"));
@@ -324,11 +324,11 @@ try {
   assert.ok(events.some((event) => event.event === "receipt.verified"));
   const shellQuote = (value) => "'" + value.replaceAll("'", "'\\"'\\"'") + "'";
   const terminalCommand = sourceMode === "registry-latest"
-    ? ["npx", "@hue-run/sdk@latest", "setup", "--project", python, "--origin", origin].map(shellQuote).join(" ")
+    ? "npx @hue-run/sdk@latest setup"
     : [cli, "setup", "--project", python, "--origin", origin].map(shellQuote).join(" ");
   const terminalEnvironment = { ...process.env, TERM: "xterm-256color" };
   delete terminalEnvironment.CI; delete terminalEnvironment.NO_COLOR;
-  const human = await run("script", ["-qec", terminalCommand, "/dev/null"], terminalEnvironment);
+  const human = await run("script", ["-qec", terminalCommand, "/dev/null"], terminalEnvironment, sourceMode === "registry-latest" ? python : destination);
   assert.equal(human.code, 0); assert.equal(human.stderr, "");
   assert.ok(
     human.stdout.includes("\\u001b[") &&
@@ -351,7 +351,15 @@ try {
     assert.equal((await stat(installation)).mode & 0o777, 0o600);
     assert.ok(!(await readFile(join(project, project === typescript ? "hue.setup.mjs" : "hue_setup.py"), "utf8")).includes("synthetic-installed-key"));
   }
-} finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
+} finally {
+  await Promise.all([
+    rm(join(typescript, ".hue"), { recursive: true, force: true }),
+    rm(join(python, ".hue"), { recursive: true, force: true }),
+    rm(stateHome, { recursive: true, force: true }),
+  ]);
+  server.closeAllConnections();
+  await new Promise((resolve) => server.close(resolve));
+}
 `,
 );
 run(

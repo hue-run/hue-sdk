@@ -4,8 +4,8 @@ import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/pro
 import { basename, dirname, join, relative, resolve } from "node:path";
 
 const MAX_FILE_BYTES = 32 * 1024;
-const IGNORE_RULE = ".hue/installation-*.json";
-const LOCAL_IGNORE_RULE = "installation-*.json";
+const IGNORE_RULES = [".hue/installation-*.json", ".hue/.installation-*.tmp"] as const;
+const LOCAL_IGNORE_RULES = ["installation-*.json", ".installation-*.tmp"] as const;
 
 export interface SetupStoredCredential {
   apiKey: string;
@@ -46,6 +46,15 @@ async function rejectSymlink(path: string, missing = false): Promise<void> {
   }
 }
 
+async function cleanupTemporary(path: string): Promise<void> {
+  try {
+    const info = await lstat(path);
+    if (info.isFile()) await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 async function atomicWrite(path: string, contents: string, mode: number): Promise<void> {
   await rejectSymlink(path, true);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
@@ -73,12 +82,7 @@ async function atomicWrite(path: string, contents: string, mode: number): Promis
     }
   } finally {
     await handle?.close();
-    try {
-      const temporaryInfo = await lstat(temporary);
-      if (temporaryInfo.isFile()) await unlink(temporary);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    await cleanupTemporary(temporary);
   }
 }
 
@@ -199,7 +203,8 @@ export class FileSetupInstallationStore {
   }
 
   private async ensureIgnored(): Promise<void> {
-    await this.ensureIgnoreFile(join(this.projectRoot, ".gitignore"), IGNORE_RULE);
+    for (const rule of IGNORE_RULES)
+      await this.ensureIgnoreFile(join(this.projectRoot, ".gitignore"), rule);
   }
 
   async load(): Promise<SetupInstallationRecord | undefined> {
@@ -229,7 +234,8 @@ export class FileSetupInstallationStore {
     });
     await rejectSymlink(this.directory);
     if (process.platform !== "win32") await chmod(this.directory, 0o700);
-    await this.ensureIgnoreFile(join(this.directory, ".gitignore"), LOCAL_IGNORE_RULE);
+    for (const rule of LOCAL_IGNORE_RULES)
+      await this.ensureIgnoreFile(join(this.directory, ".gitignore"), rule);
     const record: SetupInstallationRecord = {
       format: 1,
       origin: this.origin,

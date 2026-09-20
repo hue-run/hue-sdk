@@ -14,6 +14,15 @@ export interface SetupFileChange {
   change: "created" | "updated";
 }
 
+async function cleanupTemporary(path: string): Promise<void> {
+  try {
+    const info = await lstat(path);
+    if (info.isFile()) await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 function inside(parent: string, child: string): boolean {
   const path = relative(parent, child);
   return path === "" || (!path.startsWith("..") && !path.startsWith("/"));
@@ -92,12 +101,7 @@ async function atomicManagedWrite(path: string, contents: string): Promise<void>
     await rename(temporary, path);
   } finally {
     await handle?.close();
-    try {
-      const info = await lstat(temporary);
-      if (info.isFile()) await unlink(temporary);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    await cleanupTemporary(temporary);
   }
 }
 

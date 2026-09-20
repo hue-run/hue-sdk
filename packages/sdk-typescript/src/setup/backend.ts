@@ -281,7 +281,7 @@ async function pause(milliseconds: number, signal?: AbortSignal): Promise<void> 
       "abort",
       () => {
         clearTimeout(timer);
-        reject(signal.reason);
+        reject(signal.reason instanceof Error ? signal.reason : new Error("Setup interrupted"));
       },
       { once: true },
     );
@@ -539,6 +539,7 @@ export class SetupBackendAdapter {
   }
 
   private async verifyStoredProbe(signal?: AbortSignal): Promise<SetupProbeEvidence | undefined> {
+    if (signal?.aborted) throw signal.reason;
     const installation = await this.prepare();
     const credential = installation.credential;
     const probe = installation.probe;
@@ -555,6 +556,7 @@ export class SetupBackendAdapter {
         expectedSpanIds: [probe.spanId],
         timeoutMillis: this.receiptTimeoutMillis,
       });
+      if (signal?.aborted) throw signal.reason;
       if (!verification.verified || !verification.receipt) return undefined;
       const receipt = verification.receipt;
       if (
