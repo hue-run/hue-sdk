@@ -58,13 +58,9 @@ handling; they do not call an issued provider facade. These tests do not call th
 service or establish universal Gmail or Slack parity. Python remains at `0.2.2` and does not
 include a native local-worker implementation.
 
-## Portable source capture and exact evaluators
+## Exact Scenario evaluators
 
-Unreleased TypeScript `0.3.1` adds the optional `@hue-run/sdk/capture` entry point (`ajv` required),
-independent of ordinary telemetry's content policy. The language-neutral capture v1 schema covers
-selected function/MCP/HTTP contracts, explicit pre-execution state, provider interfaces and
-post-execution journals. No automatic interception, provider activation, or complete-world inference
-is included. Python capture remains unavailable in its published package.
+Unreleased TypeScript `0.3.1` adds the canonical Scenario evaluator.
 
 `createConversionOutcomeScorer()` from `@hue-run/sdk/evals` binds a local callback to the exact
 canonical source and metrics. The public `@hue-run/sdk/evals/conversion-outcome-core.mjs` subpath

@@ -30,7 +30,7 @@ Hue Cloud is currently invite-only; to request access, email [team@hue.run](mail
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed`, `@hue-run/sdk/capture`, `@hue-run/sdk/setup` | Node.js 22 or 24 (26 in CI); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated environments](./packages/sdk-typescript/ENVIRONMENTS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed`, `@hue-run/sdk/setup` | Node.js 22 or 24 (26 in CI); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated environments](./packages/sdk-typescript/ENVIRONMENTS.md) |
 | Python | `hue-run`; `hue_sdk`, `hue_sdk.evals`, `hue_sdk.managed` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 | Any other language | The official OpenTelemetry SDK with an OTLP/HTTP exporter | Go, Java, .NET, Rust, Ruby and others | [Existing OpenTelemetry](https://docs.hue.run/integrations/opentelemetry) |
 
@@ -66,10 +66,10 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 
 The published TypeScript package is `0.3.0`, including `runLocalAgent()` and V2 environments.
 This checkout prepares unreleased TypeScript `0.3.1`: the canonical conversion outcome scorer,
-explicit [source capture](./packages/sdk-typescript/CAPTURE.md), and the local
+and the local
 [setup CLI core](./packages/sdk-typescript/CLI.md). Those additions require the new public release
 before applications can install them by version. Python remains published at `0.2.2` and has no
-native local worker or portable capture API. Package checks use synthetic local services.
+native local worker API. Package checks use synthetic local services.
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 

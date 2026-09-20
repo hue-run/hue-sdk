@@ -35,8 +35,7 @@
     "EVALUATIONS.md",
     "ENVIRONMENTS.md",
     "MANAGED_TARGETS.md",
-    "LICENSE",
-    "CAPTURE.md"
+    "LICENSE"
   ],
   "type": "module",
   "bin": {
@@ -78,11 +77,6 @@
     },
     "./setup-events.schema.json": "./setup-events.schema.json",
     "./package.json": "./package.json",
-    "./capture": {
-      "types": "./dist/capture.d.ts",
-      "import": "./dist/capture.js",
-      "default": "./dist/capture.js"
-    },
     "./evals/conversion-outcome-core.mjs": {
       "types": "./dist/evals/conversion-outcome-core.d.mts",
       "import": "./dist/evals/conversion-outcome-core.mjs",

@@ -217,7 +217,7 @@ installed-registry-package to hosted-facade acceptance remains a post-publicatio
 ## Reviewed Scenario evaluator
 
 Unreleased TypeScript `0.3.1` adds the canonical conversion evaluator. After registry acceptance,
-install `npm install @hue-run/sdk@0.3.1 zod` (also `ajv` for source capture). Prepublication checks use
+install `npm install @hue-run/sdk@0.3.1 zod`. Prepublication checks use
 an exact locally packed candidate; applications must wait for the public release before replacing
 it with a registry dependency.
 
@@ -251,7 +251,7 @@ content, unrelated-state preservation and any reviewed process constraints. Lite
 not semantic quality judgments. The current joined workflow is a synthetic standalone Gmail draft;
 the evaluator's ability to grade other rubrics does not activate those provider operations.
 
-Capture is separately opt-in: record and acknowledge the initial provider state before the real
-agent executes, then append the acknowledged sealed journal and provider inventory and finalize
-against that request's trace. See [provider source capture](CAPTURE.md#provider-source-capture).
+Source capture is not required or included in this release. Use a reviewed authored environment
+with a trusted provider profile, or an authorized previous simulation's pinned starting world.
+Missing facts require explicit authorship and review; trace text is not proof of an empty world.
 Setup/claim commands do not approve a baseline, register this worker or launch a Scenario.

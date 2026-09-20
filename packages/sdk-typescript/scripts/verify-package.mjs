@@ -22,12 +22,8 @@ if (values["registry-version"] && values["artifacts-dir"])
 const source = fileURLToPath(new URL("../", import.meta.url));
 const destination = await mkdtemp(join(tmpdir(), "hue-sdk-package-"));
 const staging = join(destination, "package");
-function run(command, args, cwd, env = {}) {
-  const result = spawnSync(command, args, {
-    cwd,
-    stdio: "inherit",
-    env: { ...process.env, ...env },
-  });
+function run(command, args, cwd) {
+  const result = spawnSync(command, args, { cwd, stdio: "inherit", env: process.env });
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
 }
 const pkg = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
@@ -90,15 +86,23 @@ if (!values.archive && !values["registry-version"]) {
     throw new Error(
       `npm pack and bun pm pack disagree on package contents: npm-only ${JSON.stringify(onlyNpm)}, bun-only ${JSON.stringify(onlyBun)}`,
     );
+  const forbiddenCaptureFiles = [...npmFiles].filter(
+    (file) =>
+      file === "CAPTURE.md" ||
+      file === "dist/capture.js" ||
+      file.startsWith("dist/capture/") ||
+      file === "dist/uploads.js" ||
+      file.startsWith("dist/uploads/"),
+  );
+  if (Object.hasOwn(pkg.exports, "./capture") || forbiddenCaptureFiles.length)
+    throw new Error(
+      `Portable capture assets are outside this release: ${JSON.stringify(forbiddenCaptureFiles)}`,
+    );
   for (const file of [
-    "CAPTURE.md",
-    "dist/capture.js",
-    "dist/capture.d.ts",
-    "dist/capture/schema.json",
     "dist/evals/conversion-outcome-core.mjs",
     "dist/evals/conversion-outcome-core.d.mts",
   ]) {
-    if (!npmFiles.has(file)) throw new Error(`Missing portable package asset: ${file}`);
+    if (!npmFiles.has(file)) throw new Error(`Missing canonical scorer asset: ${file}`);
   }
   console.log(`pack inventory: ${npmFiles.size} files agree between npm pack and bun pm pack`);
 }
@@ -116,7 +120,6 @@ if (!values.archive && !values["registry-version"]) {
       dependencies: {
         "@hue-run/sdk": packageSpec,
         "hue-run": `file:${aliasTarball}`,
-        ajv: pkg.devDependencies.ajv,
         zod: pkg.devDependencies.zod,
       },
     }),
@@ -134,7 +137,6 @@ if (!values.archive && !values["registry-version"]) {
       `
   const assert = require("node:assert/strict");
   assert.equal(typeof require("hue-run/setup").transitionSetup, "function");
-  assert.equal(require("hue-run/capture").CaptureSession, require("@hue-run/sdk/capture").CaptureSession);
   assert.equal(require("hue-run/evals").createConversionOutcomeScorer, require("@hue-run/sdk/evals").createConversionOutcomeScorer);
   assert.equal(require("hue-run/evals/conversion-outcome-core.mjs").scoreConversionOutcome, require("@hue-run/sdk/evals").scoreConversionOutcome);
   assert.equal(
@@ -449,7 +451,6 @@ const installedPackageTests = [
   "coverage-gap.test.ts",
   "receipt.test.ts",
   "managed.test.ts",
-  "capture.test.ts",
   "conversion-outcomes.test.ts",
 ];
 for (const patch of [99, 100]) {
@@ -525,7 +526,6 @@ void [transition, event, options];
         .replaceAll('"../src/environment.js"', '"@hue-run/sdk/environment"')
         .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"')
-        .replaceAll('"../src/capture.js"', '"@hue-run/sdk/capture"')
         .replaceAll(
           'new URL("../src/evals/conversion-outcome-core.mjs", import.meta.url)',
           'new URL(import.meta.resolve("@hue-run/sdk/evals/conversion-outcome-core.mjs"))',
@@ -540,7 +540,7 @@ void [transition, event, options];
       '"@hue-run/sdk/evals"',
     ),
   );
-  for (const script of ["verify-capture-node.mjs", "verify-scenario-node.mjs"]) {
+  for (const script of ["verify-scenario-node.mjs"]) {
     await cp(join(source, "scripts", script), join(consumer, script));
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
@@ -555,9 +555,6 @@ void [transition, event, options];
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
   for (const runtime of [process.execPath, "bun"]) {
-    run(runtime, ["verify-capture-node.mjs"], consumer, {
-      NODE_EXTRA_CA_CERTS: join(consumer, "tests/fixtures/capture-localhost-cert.pem"),
-    });
     run(runtime, ["verify-scenario-node.mjs"], consumer);
   }
   // Check consumers against the packed declarations, not only source types.

@@ -408,13 +408,12 @@ an uncertain preparation. See the
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
 
-### Reviewed Scenarios and source capture
+### Reviewed Scenarios
 
-Unreleased TypeScript `0.3.1` adds `createConversionOutcomeScorer()` and `@hue-run/sdk/capture`.
-The scorer pins the canonical executable bytes used by reviewed conversion outcomes, including
-standalone drafts. Capture requires its own explicit `sourceContent` policy; enabling telemetry
-content does not enable source capture. See [reviewed Scenarios](EVALUATIONS.md#reviewed-scenario-evaluator)
-and [source capture](CAPTURE.md). Python has no equivalent capture API in its published package.
+Unreleased TypeScript `0.3.1` adds `createConversionOutcomeScorer()`. It pins the canonical executable
+bytes used by reviewed conversion outcomes, including standalone drafts. See
+[reviewed Scenarios](EVALUATIONS.md#reviewed-scenario-evaluator). Source capture is deferred and is
+not exported by this release; ordinary tracing keeps its existing content policy.
 
 The [setup CLI](CLI.md) is a resumable local inspection core. Existing customers connect their
 agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.

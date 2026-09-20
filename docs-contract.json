@@ -39,9 +39,9 @@
       "Hue-managed runs",
       "Failure isolation",
       "App-launched local agents",
-      "Portable source capture and exact evaluators"
+      "Exact Scenario evaluators"
     ],
-    "sha256": "sha256:f4720e6db1fc3b192f3ca77f9cff44a24e48937d4a9dfe7f11f75f9590531f84",
+    "sha256": "sha256:0ba43eb8533389f80382edf851f7071fbea69877fd7440b3fb460b7733298446",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -143,28 +143,6 @@
         "@hue-run/sdk/ai-sdk": {
           "publicExports": [
             "hueTelemetry"
-          ]
-        },
-        "@hue-run/sdk/capture": {
-          "publicExports": [
-            "Binding",
-            "BlobRef",
-            "CaptureOperation",
-            "CaptureOptions",
-            "CaptureReport",
-            "CaptureSession",
-            "ExecutionJournalEvidence",
-            "JsonValue",
-            "Manifest",
-            "Observation",
-            "Omission",
-            "Payload",
-            "Producer",
-            "ProviderInterfaceEvidence",
-            "Source",
-            "StateEvidence",
-            "canonicalCaptureJson",
-            "captureRequestKey"
           ]
         },
         "@hue-run/sdk/environment": {

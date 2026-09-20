@@ -19,9 +19,6 @@ refuses to publish a version without a matching entry below.
   available at `@hue-run/sdk/evals/conversion-outcome-core.mjs`; its exact SHA-256 is
   `27d096eedc80fbfb747b849c891762f76165ef76429727b0a93ec7dbebaf7b05`. It grades reviewed
   reply/standalone drafts, destination, literal content, preservation and explicit process constraints.
-- Opt-in `@hue-run/sdk/capture` adds bounded source capture, immutable finalization, omission reports,
-  selected operation schemas, provider initial snapshots and execution journals. Capture uses a
-  separate source-content choice and authorization; ordinary telemetry capture is unchanged.
 - A dependency-free `hue` setup-session CLI and `@hue-run/sdk/setup` installer contract provide
   deterministic local project detection, private resumable checkpoints, append-only human/plain
   renderers and versioned JSONL agent events. This first slice does not change project files, contact

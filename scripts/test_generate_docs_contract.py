@@ -39,10 +39,6 @@ class DocumentationContractTests(unittest.TestCase):
         )
         self.assertEqual(contract["packages"]["typescript"]["bins"], {"hue": "./dist/setup/cli.js"})
         self.assertIn(
-            "CaptureSession",
-            contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk/capture"]["publicExports"],
-        )
-        self.assertIn(
             "createConversionOutcomeScorer",
             contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk/evals"]["publicExports"],
         )

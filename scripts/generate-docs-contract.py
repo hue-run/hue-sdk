@@ -204,7 +204,6 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
         "./evals": "evals.ts",
         "./managed": "managed.ts",
         "./setup": "setup.ts",
-        "./capture": "capture.ts",
         "./evals/conversion-outcome-core.mjs": "evals/conversion-outcome-core.d.mts",
     }
     ts_schema_exports = {"./setup-events.schema.json"}

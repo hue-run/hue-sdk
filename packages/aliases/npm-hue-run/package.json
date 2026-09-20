@@ -27,7 +27,6 @@
     "setup-events.schema.json",
     "README.md",
     "LICENSE",
-    "capture.js",
     "conversion-outcome-core.mjs"
   ],
   "exports": {
@@ -38,7 +37,6 @@
     "./environment": "./environment.js",
     "./setup": "./setup.js",
     "./setup-events.schema.json": "./setup-events.schema.json",
-    "./capture": "./capture.js",
     "./evals/conversion-outcome-core.mjs": "./conversion-outcome-core.mjs"
   },
   "dependencies": {
