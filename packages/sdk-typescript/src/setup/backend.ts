@@ -317,6 +317,7 @@ export class SetupBackendAdapter {
   /** Persists installation UUID and proof before returning control to any network operation. */
   async prepare(): Promise<SetupInstallationRecord> {
     this.installation ??= await this.store.loadOrCreate();
+    await this.store.ensureIgnored();
     return this.installation;
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -317,6 +317,17 @@ describe("real setup HTTP adapter", () => {
     ).toThrow("HTTPS origin");
     const store = new FileSetupInstallationStore(projectRoot, "https://example.test");
     const installation = await store.loadOrCreate();
+    await writeFile(join(projectRoot, ".gitignore"), "");
+    await writeFile(join(projectRoot, ".hue", ".gitignore"), "");
+    await chmod(join(projectRoot, ".hue"), 0o755);
+    await store.ensureIgnored();
+    expect(await readFile(join(projectRoot, ".gitignore"), "utf8")).toContain(
+      ".hue/installation-*.json",
+    );
+    expect(await readFile(join(projectRoot, ".gitignore"), "utf8")).toContain(
+      ".hue/.installation-*.tmp",
+    );
+    expect((await lstat(join(projectRoot, ".hue"))).mode & 0o777).toBe(0o700);
     installation.credential = { apiKey: "synthetic-key", keyId: "key_0", version: 0 };
     await store.save(installation);
     await writeFile(join(projectRoot, "hue.setup.mjs"), "// custom\n");

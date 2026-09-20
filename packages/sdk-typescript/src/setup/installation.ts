@@ -185,6 +185,12 @@ export class FileSetupInstallationStore {
     if (!inside(this.projectRoot, this.path)) throw new Error("Unsafe setup installation path");
   }
 
+  private async rejectUnsafeProjectRoot(): Promise<void> {
+    const info = await lstat(this.projectRoot);
+    if (!info.isDirectory() || info.isSymbolicLink())
+      throw new Error("Unsafe setup project root symlink");
+  }
+
   private async ensureIgnoreFile(ignorePath: string, rule: string): Promise<void> {
     await rejectSymlink(ignorePath, true);
     let source = "";
@@ -202,12 +208,25 @@ export class FileSetupInstallationStore {
     await atomicWrite(ignorePath, `${source}${separator}${rule}\n`, mode);
   }
 
-  private async ensureIgnored(): Promise<void> {
+  private async ensureRootIgnored(): Promise<void> {
     for (const rule of IGNORE_RULES)
       await this.ensureIgnoreFile(join(this.projectRoot, ".gitignore"), rule);
   }
 
+  /** Revalidates owner-only storage and ignore rules before an existing proof is used for I/O. */
+  async ensureIgnored(): Promise<void> {
+    await this.rejectUnsafeProjectRoot();
+    await this.ensureRootIgnored();
+    await rejectSymlink(this.directory);
+    const info = await lstat(this.directory);
+    if (!info.isDirectory()) throw new Error("Unsafe setup installation directory");
+    if (process.platform !== "win32") await chmod(this.directory, 0o700);
+    for (const rule of LOCAL_IGNORE_RULES)
+      await this.ensureIgnoreFile(join(this.directory, ".gitignore"), rule);
+  }
+
   async load(): Promise<SetupInstallationRecord | undefined> {
+    await this.rejectUnsafeProjectRoot();
     await rejectSymlink(this.directory, true);
     await rejectSymlink(this.path, true);
     try {
@@ -226,8 +245,11 @@ export class FileSetupInstallationStore {
   /** Creates and durably saves the installation proof before any caller may perform network I/O. */
   async loadOrCreate(): Promise<SetupInstallationRecord> {
     const existing = await this.load();
-    if (existing) return existing;
-    await this.ensureIgnored();
+    if (existing) {
+      await this.ensureIgnored();
+      return existing;
+    }
+    await this.ensureRootIgnored();
     await rejectSymlink(this.directory, true);
     await mkdir(this.directory, { recursive: false, mode: 0o700 }).catch((error) => {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
