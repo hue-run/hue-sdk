@@ -52,6 +52,19 @@ npm install @hue-run/sdk
 bun add @hue-run/sdk
 ```
 
+After `0.4.0` is published, a clean TypeScript or Python server project can start metadata-only
+onboarding with one command:
+
+```sh
+npx --yes @hue-run/sdk@0.4.0 setup
+```
+
+It saves a project/origin installation proof in an ignored owner-only file before contacting Hue,
+configures a secret-free metadata-only integration module, exports a real setup probe and verifies
+that probe's exact receipt. Probe verification is not proof that the application itself is
+instrumented. Setup never captures content or creates a Scenario, Hue Run, evaluation or remote
+execution. See the [CLI contract and claim/resume instructions](./packages/sdk-typescript/CLI.md).
+
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
 
 ## What you can do
@@ -67,8 +80,10 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 The published TypeScript package is [`0.3.2`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2), including `runLocalAgent()`, V2 environments,
 forward-compatible scorer deferral and the local [setup CLI core](./packages/sdk-typescript/CLI.md).
 Finalization accepts server-confirmed expired worlds as sealed while preserving target errors
-and avoiding target replay. Python remains published at `0.2.2` and has no native local worker
-API. Package checks use synthetic local services.
+and avoiding target replay. This checkout prepares the breaking TypeScript `0.4.0` release with the
+real [one-command setup CLI](./packages/sdk-typescript/CLI.md). The setup additions require the
+new public release before applications can install them by version. Python remains published at
+`0.2.2` and has no native local worker API. Package checks use synthetic local services.
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 

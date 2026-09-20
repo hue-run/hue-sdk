@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { gunzipSync } from "node:zlib";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import protobuf from "protobufjs/light.js";
+import { SetupBackendAdapter } from "../src/setup/backend.js";
+import { configureSetupProject } from "../src/setup/configure.js";
+import { FileSetupInstallationStore } from "../src/setup/installation.js";
 import { FileSetupCheckpointAdapter, setupRunId } from "../src/setup/checkpoint.js";
 import { detectSetupProject } from "../src/setup/detect.js";
 import {
@@ -23,6 +28,7 @@ import {
   type SetupEvent,
   type SetupProjectDetection,
 } from "../src/setup/types.js";
+import otlpSchema from "./fixtures/otlp-schema.json" with { type: "json" };
 
 const instant = () => new Date("2026-09-19T12:00:00.000Z");
 const detection = (root: string): SetupProjectDetection => ({
@@ -63,11 +69,10 @@ describe("setup state machine", () => {
       "project.detected",
       "step.completed",
       "plan.ready",
-      "action.required",
     ]);
     expect(
       (second.state as Extract<SetupMachineState, { phase: "local-ready" }>).plan.mutatesProject,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       (second.state as Extract<SetupMachineState, { phase: "local-ready" }>).plan.steps,
     ).toEqual(["detect-project", "configure-telemetry", "verify-receipt", "claim-project"]);
@@ -211,43 +216,6 @@ describe("runner and checkpoints", () => {
     expect(resumed.at(-1)).toEqual(expect.objectContaining({ event: "run.completed" }));
   });
 
-  test("claim never invokes an injected backend in this slice", async () => {
-    const events: SetupEvent[] = [];
-    const called: string[] = [];
-    await runSetup({
-      command: "claim",
-      mode: "plain",
-      runId: "setup_test",
-      projectRoot: "/project",
-      checkpoints: new MemoryCheckpoints(),
-      project: { detect: async () => detection("/project") },
-      backend: {
-        createTrial: async () => {
-          called.push("create");
-          throw new Error();
-        },
-        verifyReceipt: async () => {
-          called.push("verify");
-          return undefined;
-        },
-        getClaim: async () => {
-          called.push("claim");
-          throw new Error();
-        },
-      },
-      now: instant,
-      emit: (event) => {
-        events.push(event);
-      },
-    });
-    expect(called).toEqual([]);
-    expect(events.map((event) => event.event)).toEqual([
-      "run.started",
-      "action.required",
-      "run.completed",
-    ]);
-  });
-
   test("status is read-only and missing resume fails with one terminal event", async () => {
     const checkpoints = new MemoryCheckpoints();
     const status: SetupEvent[] = [];
@@ -307,6 +275,15 @@ describe("runner and checkpoints", () => {
     expect(encoded).not.toContain("HUE_API_KEY");
     expect(encoded).not.toContain("secret-canary");
     expect(await adapter.load(runId, project)).toEqual(createInitialSetupState(runId, project));
+    const detecting = transitionSetup(createInitialSetupState(runId, project), {
+      type: "start",
+    }).state;
+    const localReady = transitionSetup(detecting, {
+      type: "project.detected",
+      project: detection(project),
+    }).state;
+    await adapter.save(localReady);
+    expect(await adapter.load(runId, project)).toEqual(localReady);
     await expect(
       new FileSetupCheckpointAdapter(join(project, ".state")).save(
         createInitialSetupState(runId, project),
@@ -324,6 +301,349 @@ describe("runner and checkpoints", () => {
     const adapter = new FileSetupCheckpointAdapter(stateDirectory, "win32");
     await adapter.save(state);
     expect(await adapter.load(runId, project)).toEqual(state);
+  });
+});
+
+describe("real setup HTTP adapter", () => {
+  test("refuses insecure origins, custom config conflicts, and symlink targets", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-security-"));
+    await writeFile(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
+    );
+    expect(
+      () =>
+        new SetupBackendAdapter({ projectRoot, origin: "https://user:secret@example.test/path" }),
+    ).toThrow("HTTPS origin");
+    const store = new FileSetupInstallationStore(projectRoot, "https://example.test");
+    const installation = await store.loadOrCreate();
+    installation.credential = { apiKey: "synthetic-key", keyId: "key_0", version: 0 };
+    await store.save(installation);
+    await writeFile(join(projectRoot, "hue.setup.mjs"), "// custom\n");
+    await expect(
+      configureSetupProject(store, installation, await detectSetupProject(projectRoot)),
+    ).rejects.toThrow("Refusing to overwrite custom");
+    const credentialRoot = await mkdtemp(join(tmpdir(), "hue-setup-credential-conflict-"));
+    await writeFile(
+      join(credentialRoot, "package.json"),
+      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
+    );
+    await writeFile(join(credentialRoot, ".env.local"), "HUE_API_KEY=secret-canary-value\n");
+    const credentialStore = new FileSetupInstallationStore(credentialRoot, "https://example.test");
+    const credentialInstallation = await credentialStore.loadOrCreate();
+    await expect(
+      configureSetupProject(
+        credentialStore,
+        credentialInstallation,
+        await detectSetupProject(credentialRoot),
+      ),
+    ).rejects.toThrow("existing custom Hue credential");
+    const pythonRoot = await mkdtemp(join(tmpdir(), "hue-setup-symlink-"));
+    await writeFile(join(pythonRoot, "pyproject.toml"), '[project]\nname = "test"\n');
+    await symlink(projectRoot, join(pythonRoot, ".hue"));
+    const unsafe = new FileSetupInstallationStore(pythonRoot, "https://example.test");
+    await expect(unsafe.loadOrCreate()).rejects.toThrow("symlink");
+  });
+
+  test("recovers a lost credential response with the same generation and proof", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-response-loss-"));
+    await writeFile(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
+    );
+    const origin = "https://example.test";
+    let calls = 0;
+    let authorization = "";
+    let requestBody = "";
+    const backend = new SetupBackendAdapter({
+      projectRoot,
+      origin,
+      fetch: (async (_input, init) => {
+        calls += 1;
+        const headers = new Headers(init?.headers);
+        const nextAuthorization = headers.get("authorization")!;
+        const nextBody = String(init?.body);
+        if (!authorization) {
+          authorization = nextAuthorization;
+          requestBody = nextBody;
+        } else {
+          expect(nextAuthorization).toBe(authorization);
+          expect(nextBody).toBe(requestBody);
+        }
+        if (calls === 1) throw new TypeError("synthetic response loss with secret-canary");
+        const installation = await backend.prepare();
+        return Response.json(
+          {
+            protocolVersion: 1,
+            installationId: installation.installationId,
+            state: "active",
+            project: { id: "project_test", organizationId: "org_trial" },
+            credentialVersion: 0,
+            capturePolicy: "metadata-only-v1",
+            expiresAt: "2026-09-21T12:00:00.000Z",
+            limits: { traces: 100, spans: 1000, bytes: 2097152 },
+            usage: { traces: 0, spans: 0, bytes: 0 },
+            claimUrl: `${origin}/setup/claim#${"c".repeat(43)}`,
+            endpoints: {
+              otlp: "/api/v1/otlp/v1/traces",
+              receipt: "/api/v1/traces/{traceId}/receipt",
+            },
+            credential: {
+              apiKey: "same-recovered-key",
+              keyId: "key_0",
+              capabilities: ["telemetry_write"],
+              version: 0,
+            },
+          },
+          { headers: { "Cache-Control": "no-store" } },
+        );
+      }) as typeof fetch,
+      requestTimeoutMillis: 1000,
+    });
+    const result = await backend.credentials(0);
+    expect(calls).toBe(2);
+    expect(result.credential.apiKey).toBe("same-recovered-key");
+    expect((await backend.localInstallation())?.credential?.apiKey).toBe("same-recovered-key");
+  });
+
+  test("rejects response fields outside the frozen v1 shapes", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-exact-response-"));
+    const origin = "https://example.test";
+    const backend = new SetupBackendAdapter({
+      projectRoot,
+      origin,
+      fetch: (async (_input, _init) => {
+        const installation = await backend.prepare();
+        return Response.json(
+          {
+            protocolVersion: 1,
+            installationId: installation.installationId,
+            state: "active",
+            project: { id: "project_test", organizationId: "org_trial" },
+            credentialVersion: 0,
+            capturePolicy: "metadata-only-v1",
+            expiresAt: "2026-09-21T12:00:00.000Z",
+            limits: { traces: 100, spans: 1000, bytes: 2097152 },
+            usage: { traces: 0, spans: 0, bytes: 0 },
+            claimUrl: `${origin}/setup/claim#${"c".repeat(43)}`,
+            endpoints: {
+              otlp: "/api/v1/otlp/v1/traces",
+              receipt: "/api/v1/traces/{traceId}/receipt",
+            },
+            unexpected: "field",
+          },
+          { headers: { "Cache-Control": "no-store" } },
+        );
+      }) as typeof fetch,
+      requestTimeoutMillis: 1000,
+    });
+    await expect(backend.provision()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  test("refuses redirects without forwarding installation proof", async () => {
+    let destinationHits = 0;
+    const destination = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        destinationHits += 1;
+        expect(request.headers.get("authorization")).toBeNull();
+        return Response.json({}, { headers: { "Cache-Control": "no-store" } });
+      },
+    });
+    const redirect = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return new Response(null, {
+          status: 307,
+          headers: { Location: `http://127.0.0.1:${destination.port}/stolen` },
+        });
+      },
+    });
+    try {
+      const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-redirect-"));
+      const backend = new SetupBackendAdapter({
+        projectRoot,
+        origin: `http://127.0.0.1:${redirect.port}`,
+        requestTimeoutMillis: 1000,
+      });
+      await expect(backend.provision()).rejects.toThrow("redirect");
+      expect(destinationHits).toBe(0);
+    } finally {
+      redirect.stop(true);
+      destination.stop(true);
+    }
+  });
+
+  test("persists proof first, configures both languages, verifies exact probes, and reconciles claim", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "hue-setup-http-"));
+    const projectRoot = join(parent, "project");
+    await mkdir(projectRoot);
+    await writeFile(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ dependencies: { typescript: "7.0.2" } }),
+    );
+    await writeFile(join(projectRoot, "pyproject.toml"), '[project]\nname = "setup-test"\n');
+    const traceType = protobuf.Root.fromJSON(otlpSchema).lookupType(
+      "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
+    );
+    let installationId = "";
+    let claimed = false;
+    let traceId = "";
+    let spanId = "";
+    let oldKeyRejected = 0;
+    const key0 = "synthetic-setup-key-v0";
+    const key1 = "synthetic-setup-key-v1";
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        const noStore = { "Cache-Control": "no-store" };
+        const status = () => ({
+          protocolVersion: 1,
+          installationId,
+          state: claimed ? "claimed" : "active",
+          project: { id: "project_test", organizationId: claimed ? "org_owner" : "org_trial" },
+          credentialVersion: claimed ? 1 : 0,
+          capturePolicy: "metadata-only-v1",
+          expiresAt: claimed ? null : "2026-09-21T12:00:00.000Z",
+          limits: { traces: 100, spans: 1000, bytes: 2097152 },
+          usage: { traces: traceId ? 1 : 0, spans: traceId ? 1 : 0, bytes: traceId ? 100 : 0 },
+          claimUrl: claimed ? null : `${url.origin}/setup/claim#${"c".repeat(43)}`,
+          endpoints: {
+            otlp: "/api/v1/otlp/v1/traces",
+            receipt: "/api/v1/traces/{traceId}/receipt",
+          },
+        });
+        if (url.pathname.startsWith("/api/v1/setup/installations")) {
+          expect(request.headers.get("authorization")).toMatch(
+            /^Bearer hue_install_[A-Za-z0-9_-]{43}$/u,
+          );
+          if (request.method === "POST" && url.pathname === "/api/v1/setup/installations") {
+            expect(request.headers.get("content-type")).toBe("application/json");
+            const body = await request.json();
+            expect(Object.keys(body as object).sort()).toEqual([
+              "installationId",
+              "protocolVersion",
+            ]);
+            installationId = (body as { installationId: string }).installationId;
+            const files = await lstat(
+              join(projectRoot, ".hue", `installation-${"placeholder"}.json`),
+            ).catch(() => undefined);
+            expect(files).toBeUndefined();
+            const hueFiles = await import("node:fs/promises").then(({ readdir }) =>
+              readdir(join(projectRoot, ".hue")),
+            );
+            expect(hueFiles.some((name) => name.startsWith("installation-"))).toBe(true);
+            return Response.json(status(), { headers: noStore });
+          }
+          if (request.method === "GET") return Response.json(status(), { headers: noStore });
+          if (url.pathname.endsWith("/credentials")) {
+            const body = (await request.json()) as { credentialVersion: number };
+            expect(body.credentialVersion).toBe(claimed ? 1 : 0);
+            return Response.json(
+              {
+                ...status(),
+                credential: {
+                  apiKey: claimed ? key1 : key0,
+                  keyId: claimed ? "key_v1" : "key_v0",
+                  capabilities: ["telemetry_write"],
+                  version: claimed ? 1 : 0,
+                },
+              },
+              { headers: noStore },
+            );
+          }
+        }
+        if (url.pathname === "/api/v1/otlp/v1/traces") {
+          expect(request.headers.get("authorization")).toBe(`Bearer ${claimed ? key1 : key0}`);
+          let bytes = Buffer.from(await request.arrayBuffer());
+          if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
+          const decoded = traceType.toObject(traceType.decode(bytes), { bytes: String });
+          const span = decoded.resourceSpans[0].scopeSpans[0].spans[0];
+          traceId = Buffer.from(span.traceId, "base64").toString("hex");
+          spanId = Buffer.from(span.spanId, "base64").toString("hex");
+          expect(JSON.stringify(decoded)).not.toContain("input.value");
+          expect(JSON.stringify(decoded)).not.toContain("output.value");
+          return new Response(new Uint8Array(), {
+            headers: { "Content-Type": "application/x-protobuf" },
+          });
+        }
+        const match = /^\/api\/v1\/traces\/([a-f0-9]{32})\/receipt$/u.exec(url.pathname);
+        if (match) {
+          const authorization = request.headers.get("authorization");
+          if (claimed && authorization === `Bearer ${key0}`) {
+            oldKeyRejected += 1;
+            return new Response(null, { status: 401 });
+          }
+          expect(authorization).toBe(`Bearer ${claimed ? key1 : key0}`);
+          expect(match[1]).toBe(traceId);
+          expect(url.searchParams.getAll("expectedSpanId")).toEqual([spanId]);
+          return Response.json({
+            traceId,
+            spanCount: 1,
+            revision: 1,
+            fields: { input: false, output: false, model: false, usage: false, session: false },
+            matchedSpanIds: [spanId],
+            missingSpanIds: [],
+            traceUrl: `${url.origin}/traces/${traceId}`,
+          });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+    try {
+      const origin = `http://127.0.0.1:${server.port}`;
+      const backend = new SetupBackendAdapter({
+        projectRoot,
+        origin,
+        requestTimeoutMillis: 2000,
+        receiptTimeoutMillis: 2000,
+      });
+      const checkpoints = new MemoryCheckpoints();
+      const events: SetupEvent[] = [];
+      const options = {
+        mode: "jsonl" as const,
+        runId: "setup_http",
+        projectRoot,
+        checkpoints,
+        backend,
+        project: { detect: detectSetupProject },
+        emit: (event: SetupEvent) => {
+          events.push(event);
+        },
+      };
+      expect((await runSetup({ ...options, command: "setup" })).outcome).toBe("action_required");
+      expect(events.some((event) => event.event === "receipt.verified")).toBe(true);
+      const installation = await backend.localInstallation();
+      expect(installation?.credential?.version).toBe(0);
+      expect((await lstat(backend.store.path)).mode & 0o777).toBe(0o600);
+      expect(await readFile(join(projectRoot, ".gitignore"), "utf8")).toContain(
+        ".hue/installation-*.json",
+      );
+      expect(await readFile(join(projectRoot, ".hue", ".gitignore"), "utf8")).toContain(
+        "installation-*.json",
+      );
+      for (const name of ["hue.setup.mjs", "hue_setup.py"]) {
+        const config = await readFile(join(projectRoot, name), "utf8");
+        expect(config).not.toContain(key0);
+        expect(config).toContain(
+          name.endsWith("mjs") ? "captureContent: false" : "capture_content=False",
+        );
+      }
+      claimed = true;
+      events.length = 0;
+      expect((await runSetup({ ...options, command: "claim" })).outcome).toBe("ready");
+      expect((await backend.localInstallation())?.credential?.version).toBe(1);
+      expect(oldKeyRejected).toBe(1);
+      expect(events.at(-1)).toEqual(
+        expect.objectContaining({ event: "run.completed", outcome: "ready" }),
+      );
+    } finally {
+      server.stop(true);
+    }
   });
 });
 
@@ -436,7 +756,7 @@ describe("renderers and event contract", () => {
   });
 });
 
-test("agent CLI is noninteractive JSONL with exactly one terminal event", async () => {
+test("agent status CLI is noninteractive JSONL with exactly one terminal event", async () => {
   const parent = await mkdtemp(join(tmpdir(), "hue-setup-cli-"));
   const project = join(parent, "project");
   await mkdir(project);
@@ -446,7 +766,7 @@ test("agent CLI is noninteractive JSONL with exactly one terminal event", async 
   );
   const result = spawnSync(
     process.execPath,
-    [join(import.meta.dir, "../src/setup/cli.ts"), "setup", "--agent", "--project", project],
+    [join(import.meta.dir, "../src/setup/cli.ts"), "status", "--agent", "--project", project],
     {
       encoding: "utf8",
       timeout: 5000,
@@ -472,37 +792,6 @@ test("agent CLI is noninteractive JSONL with exactly one terminal event", async 
     events.filter((event) => event.event === "run.completed" || event.event === "run.failed"),
   ).toHaveLength(1);
   expect(events.at(-1)?.event).toBe("run.completed");
-  const claim = spawnSync(
-    process.execPath,
-    [join(import.meta.dir, "../src/setup/cli.ts"), "claim", "--agent", "--project", project],
-    {
-      encoding: "utf8",
-      timeout: 5000,
-      env: {
-        ...process.env,
-        XDG_STATE_HOME: join(parent, "claim-state-home"),
-        BROWSER: "secret-canary-browser",
-        HUE_API_KEY: "secret-canary-key",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  const claimEvents = claim.stdout
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as SetupEvent);
-  expect(claim.status).toBe(0);
-  expect(claim.stderr).toBe("");
-  expect(claim.stdout).not.toContain("secret-canary");
-  expect(claimEvents.map((event) => event.event)).toEqual([
-    "run.started",
-    "action.required",
-    "run.completed",
-  ]);
-  expect(claimEvents[0]).toEqual(expect.objectContaining({ command: "claim", mode: "jsonl" }));
-  expect(
-    claimEvents.filter((event) => event.event === "run.completed" || event.event === "run.failed"),
-  ).toHaveLength(1);
   const help = spawnSync(
     process.execPath,
     [join(import.meta.dir, "../src/setup/cli.ts"), "--agent", "--help"],

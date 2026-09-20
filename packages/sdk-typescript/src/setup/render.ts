@@ -114,7 +114,7 @@ export function selectSetupOutputMode(input: {
   env?: NodeJS.ProcessEnv;
 }): SetupOutputMode {
   if (input.agent) return "jsonl";
-  if (input.explicit === "jsonl" || input.explicit === "plain") return input.explicit;
+  if (input.explicit) return input.explicit;
   const env = input.env ?? process.env;
   if (!input.isTTY || env.NO_COLOR !== undefined || env.TERM === "dumb" || env.CI !== undefined)
     return "plain";

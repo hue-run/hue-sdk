@@ -10,7 +10,39 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
-### [0.3.2] - 2026-09-20
+### [0.4.0] - 2026-09-20
+
+#### Breaking
+
+- The unreleased setup-session placeholder is replaced by Setup HTTP protocol v1. The exported
+  `SetupBackendAdapter` is now a concrete installation/status/credential/OTLP-receipt adapter rather
+  than the historical `createTrial`/`verifyReceipt`/`getClaim` stub boundary. Migration: construct it
+  with `{ projectRoot, origin? }` and pass it to `runSetup`, or use the `hue` executable. Existing
+  `createHue`, exporter, evaluation and environment APIs are unchanged.
+
+#### Added
+
+- The `hue` executable now implements the frozen Setup HTTP protocol v1: per-project/per-origin
+  installation proof is persisted before network writes, provisioning and credential recovery are
+  idempotent, and account claim reconciles generation 1 while checking generation 0 revocation.
+- Clean TypeScript and Python projects receive secret-free metadata-only integration modules. Managed
+  credentials stay in ignored atomic `0600` files; custom conflicts, symlinks, unsafe paths, insecure
+  hosted origins, redirects and unexpected edits fail closed without executing project commands.
+- Setup exports and flushes a real metadata-only OTLP span and verifies its exact trace/span receipt.
+  It distinguishes that probe evidence from customer application instrumentation and creates no
+  Scenario, Hue Run, evaluation, source capture, worker or remote execution.
+- Human terminal and noninteractive version-1 JSONL agent modes support interruption/resume, private
+  browser claim handoff, post-claim status reconciliation and bounded retries. Installed-tarball
+  checks cover both modes and both project languages against a loopback protocol service; a separate
+  staging/live runner records only secret-free evidence.
+- The unpublished `hue-run` npm alias tracks `0.4.0`, pins `@hue-run/sdk@0.4.0`, mirrors setup exports
+  and includes its own `hue` executable wrapper. Alias publication remains a separate release gate.
+
+The existing `runLocalAgent` API, V2 connection bundle, provider transport, environment lifecycle,
+checkpoint formats, telemetry ownership and capture defaults are unchanged. Python remains at 0.2.2.
+No registry release is claimed until publication and registry acceptance complete.
+
+### [0.3.2](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2) - 2026-09-20
 
 #### Fixed
 
@@ -20,9 +52,9 @@ refuses to publish a version without a matching entry below.
 - Availability documentation records TypeScript `0.3.1` as published, including scorer deferral
   and the local setup CLI core.
 
-The [release artifacts](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2) are published and passed registry acceptance.
+The release artifacts are published and passed registry acceptance.
 
-### [0.3.1] - 2026-09-20
+### [0.3.1](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.1) - 2026-09-20
 
 #### Added
 
@@ -43,10 +75,6 @@ The [release artifacts](https://github.com/hue-run/hue-sdk/releases/tag/typescri
   for deferred scorers, including placeholders saved by an older SDK before an interrupted upload.
 - Availability documentation now records the already-published worker correctly. The setup CLI core
   was merged after publication and first belongs to this new release, not the existing 0.3.0 archive.
-
-The existing `runLocalAgent` API, V2 connection bundle, provider transport, environment lifecycle,
-checkpoint formats, telemetry ownership and capture defaults are unchanged. Python remains at 0.2.2.
-No registry release is claimed until publication and registry acceptance complete.
 
 ### [0.3.0](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.0) - 2026-09-19
 

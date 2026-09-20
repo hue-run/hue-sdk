@@ -30,15 +30,29 @@ export {
 } from "./setup/machine.js";
 export {
   runSetup,
-  type SetupBackendAdapter,
-  type SetupBackendClaim,
-  type SetupBackendReceipt,
-  type SetupBackendTrial,
+  type SetupBackendOperations,
   type SetupCheckpointAdapter,
   type SetupProjectAdapter,
   type SetupRunOptions,
   type SetupRunResult,
 } from "./setup/runner.js";
+export {
+  SetupBackendAdapter,
+  SetupBackendError,
+  type SetupBackendAdapterOptions,
+  type SetupBackendClaim,
+  type SetupBackendReceipt,
+  type SetupBackendTrial,
+  type SetupCredentialResult,
+  type SetupInstallationStatus,
+  type SetupProbeEvidence,
+} from "./setup/backend.js";
+export {
+  FileSetupInstallationStore,
+  type SetupInstallationRecord,
+  type SetupStoredCredential,
+  type SetupStoredProbe,
+} from "./setup/installation.js";
 export { detectSetupProject } from "./setup/detect.js";
 export {
   renderHumanEvent,

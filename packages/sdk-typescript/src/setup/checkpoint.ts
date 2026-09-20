@@ -101,7 +101,7 @@ function validState(
     !Array.isArray(plan) &&
     hasExactKeys(plan as Record<string, unknown>, ["steps", "mutatesProject", "backendRequired"]) &&
     JSON.stringify((plan as Record<string, unknown>).steps) === JSON.stringify(STEPS) &&
-    (plan as Record<string, unknown>).mutatesProject === false &&
+    (plan as Record<string, unknown>).mutatesProject === true &&
     (plan as Record<string, unknown>).backendRequired === true
   );
 }
@@ -194,6 +194,13 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
       await handle.sync();
     } finally {
       await handle.close();
+    }
+    try {
+      const existing = await lstat(path);
+      if (existing.isSymbolicLink() || !existing.isFile())
+        throw new Error("Unsafe setup checkpoint target");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     await rename(temporary, path);
     // Windows cannot open a directory as a file handle for fsync. The atomic rename and

@@ -97,22 +97,11 @@ interface PlanReadyTransitionEvent {
 }
 
 /** @inline */
-interface ConfigureTelemetryRequiredTransitionEvent {
-  /** Transition-event discriminator. */
-  event: "action.required";
-  /** Project action needed next. */
-  action: "configure";
-  /** Secret-free explanation. */
-  message: string;
-}
-
-/** @inline */
 type SetupTransitionEvent =
   | StartStepTransitionEvent
   | ProjectDetectedTransitionEvent
   | CompleteStepTransitionEvent
-  | PlanReadyTransitionEvent
-  | ConfigureTelemetryRequiredTransitionEvent;
+  | PlanReadyTransitionEvent;
 
 /** Pure transition result. Events are templates completed by the runner. */
 export interface SetupTransition {
@@ -145,7 +134,7 @@ export function transitionSetup(
   if (state.phase === "detecting" && input.type === "project.detected") {
     const plan: SetupPlan = {
       steps: ["detect-project", "configure-telemetry", "verify-receipt", "claim-project"],
-      mutatesProject: false,
+      mutatesProject: true,
       backendRequired: true,
     };
     return {
@@ -161,12 +150,6 @@ export function transitionSetup(
         { event: "project.detected", project: input.project },
         { event: "step.completed", step: "detect-project", outcome: "unchanged" },
         { event: "plan.ready", plan },
-        {
-          event: "action.required",
-          action: "configure",
-          message:
-            "Local inspection is complete. Telemetry configuration is not available in this build; no project files were changed.",
-        },
       ],
     };
   }

@@ -11,12 +11,15 @@ const { values } = parseArgs({
     archive: { type: "string" },
     "registry-version": { type: "string" },
     "artifacts-dir": { type: "string" },
+    "landing-latest": { type: "boolean", default: false },
   },
 });
 if (values.archive && values["registry-version"])
   throw new Error("Choose an archive or registry version");
 if (values["registry-version"] && values["artifacts-dir"])
   throw new Error("Registry verification does not produce a release archive");
+if (values["landing-latest"] && !values["registry-version"])
+  throw new Error("--landing-latest requires --registry-version");
 
 // Work entirely outside the monorepo: no workspace symlinks or private Hue imports.
 const source = fileURLToPath(new URL("../", import.meta.url));
@@ -31,6 +34,8 @@ const aliasSource = resolve(source, "../aliases/npm-hue-run");
 const aliasPkg = JSON.parse(await readFile(join(aliasSource, "package.json"), "utf8"));
 if (aliasPkg.version !== pkg.version || aliasPkg.dependencies?.[pkg.name] !== pkg.version)
   throw new Error("The hue-run alias version and dependency must match @hue-run/sdk");
+if (pkg.bin?.hue !== "./dist/setup/cli.js" || aliasPkg.bin?.hue !== "./bin/hue.mjs")
+  throw new Error("The canonical and alias packages must both expose the hue executable");
 if (
   (await readFile(join(aliasSource, "setup-events.schema.json"), "utf8")) !==
   (await readFile(join(source, "setup-events.schema.json"), "utf8"))
@@ -140,6 +145,28 @@ if (!values.archive && !values["registry-version"]) {
     ],
     aliasConsumer,
   );
+  const aliasCli = spawnSync(
+    process.execPath,
+    [join(aliasConsumer, "node_modules", "hue-run", "bin", "hue.mjs"), "status", "--agent"],
+    {
+      cwd: aliasConsumer,
+      encoding: "utf8",
+      timeout: 5000,
+      env: { ...process.env, XDG_STATE_HOME: join(destination, "alias-setup-state") },
+    },
+  );
+  const aliasEvents = aliasCli.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  if (
+    aliasCli.status !== 0 ||
+    aliasCli.stderr ||
+    aliasEvents.at(-1)?.event !== "run.completed" ||
+    aliasEvents.filter((event) => event.event === "run.completed" || event.event === "run.failed")
+      .length !== 1
+  )
+    throw new Error("Installed hue-run alias executable did not dispatch to its pinned SDK");
 }
 // Check the advertised install before adding any test or optional AI dependencies.
 // Development dependencies must not conceal missing runtime package metadata.
@@ -208,71 +235,136 @@ run(
   ],
   minimal,
 );
-// Exercise the installed binary itself. Agent mode must stay noninteractive, ANSI-free,
-// secret-free, and terminate with exactly one terminal event without contacting a provider.
+// Exercise the installed binary against a real loopback HTTP server. The child keeps its server
+// responsive while launching the installed CLI in agent mode and through a real PTY with default
+// terminal-mode selection, using separate clean TypeScript and Python targets. Registry acceptance
+// additionally runs the literal public @latest landing commands.
 const setupStateHome = join(destination, "setup-state-home");
-const cli = spawnSync(
-  join(minimal, "node_modules", ".bin", "hue"),
-  ["setup", "--agent", "--project", minimal],
-  {
-    cwd: minimal,
-    encoding: "utf8",
-    timeout: 5000,
-    env: {
-      ...process.env,
-      XDG_STATE_HOME: setupStateHome,
-      HUE_API_KEY: "secret-canary-package-key",
-      BROWSER: "secret-canary-package-browser",
-      NO_COLOR: "",
-    },
-  },
+if (values["landing-latest"]) {
+  const latest = spawnSync(
+    "npm",
+    ["view", "@hue-run/sdk@latest", "version", "--registry=https://registry.npmjs.org"],
+    { encoding: "utf8", env: process.env },
+  );
+  if (latest.status !== 0 || latest.stdout.trim() !== pkg.version)
+    throw new Error(`npm latest must resolve to the accepted version ${pkg.version}`);
+}
+const setupHarness = join(destination, "installed-setup-harness.mjs");
+await writeFile(
+  setupHarness,
+  `
+import { strict as assert } from "node:assert";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const [cli, destination, stateHome, sourceMode] = process.argv.slice(2);
+const installations = new Map();
+const server = createServer(async (request, response) => {
+  const url = new URL(request.url, "http://127.0.0.1");
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const body = Buffer.concat(chunks);
+  const json = (status, value, headers = {}) => {
+    response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
+    response.end(JSON.stringify(value));
+  };
+  if (url.pathname === "/api/v1/setup/installations" && request.method === "POST") {
+    const value = JSON.parse(body.toString("utf8"));
+    installations.set(value.installationId, { trace: false });
+    return json(200, status(value.installationId, url));
+  }
+  const setup = /^\\/api\\/v1\\/setup\\/installations\\/([^/]+)(?:\\/credentials)?$/.exec(url.pathname);
+  if (setup) {
+    const id = setup[1];
+    if (url.pathname.endsWith("/credentials"))
+      return json(200, { ...status(id, url), credential: { apiKey: "synthetic-installed-key", keyId: "key_0", capabilities: ["telemetry_write"], version: 0 } });
+    return json(200, status(id, url));
+  }
+  if (url.pathname === "/api/v1/otlp/v1/traces") {
+    assert.equal(request.headers.authorization, "Bearer synthetic-installed-key");
+    assert.ok(body.byteLength > 0);
+    response.writeHead(200, { "content-type": "application/x-protobuf" });
+    return response.end(Buffer.alloc(0));
+  }
+  const receipt = /^\\/api\\/v1\\/traces\\/([a-f0-9]{32})\\/receipt$/.exec(url.pathname);
+  if (receipt) {
+    const spanId = url.searchParams.get("expectedSpanId");
+    assert.match(spanId, /^[a-f0-9]{16}$/);
+    return json(200, { traceId: receipt[1], spanCount: 1, revision: 1, fields: { input: false, output: false, model: false, usage: false, session: false }, matchedSpanIds: [spanId], missingSpanIds: [], traceUrl: origin + "/traces/" + receipt[1] });
+  }
+  response.writeHead(404); response.end();
+});
+const status = (id, url) => ({ protocolVersion: 1, installationId: id, state: "active", project: { id: "project_test", organizationId: "org_trial" }, credentialVersion: 0, capturePolicy: "metadata-only-v1", expiresAt: "2026-09-21T12:00:00.000Z", limits: { traces: 100, spans: 1000, bytes: 2097152 }, usage: { traces: 1, spans: 1, bytes: 100 }, claimUrl: origin + "/setup/claim#" + "c".repeat(43), endpoints: { otlp: "/api/v1/otlp/v1/traces", receipt: "/api/v1/traces/{traceId}/receipt" } });
+await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+const origin = "http://127.0.0.1:" + server.address().port;
+const run = (command, args, environment = process.env) => new Promise((resolve, reject) => {
+  const child = spawn(command, args, { env: { ...environment, XDG_STATE_HOME: stateHome, HUE_SECRET_CANARY: "secret-canary-package-value", BROWSER: "secret-canary-package-browser" } });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.on("error", reject);
+  child.on("close", (code) => resolve({ code, stdout, stderr }));
+});
+try {
+  const typescript = join(destination, "setup-typescript");
+  const python = join(destination, "setup-python");
+  await mkdir(typescript); await mkdir(python);
+  await writeFile(join(typescript, "package.json"), JSON.stringify({ private: true, devDependencies: { typescript: "7.0.2" } }));
+  await writeFile(join(python, "pyproject.toml"), "[project]\\nname = \\\"setup-test\\\"\\n");
+  const agent = sourceMode === "registry-latest"
+    ? await run("npx", ["--yes", "@hue-run/sdk@latest", "setup", "--agent", "--project", typescript, "--origin", origin])
+    : await run(cli, ["setup", "--agent", "--project", typescript, "--origin", origin]);
+  assert.equal(agent.code, 0); assert.equal(agent.stderr, "");
+  assert.ok(!agent.stdout.includes("\\u001b") && !agent.stdout.includes("secret-canary"));
+  const events = agent.stdout.trim().split("\\n").map(JSON.parse);
+  assert.equal(events.filter((event) => event.event === "run.completed" || event.event === "run.failed").length, 1);
+  assert.equal(events.at(-1).event, "run.completed");
+  assert.ok(events.some((event) => event.event === "receipt.verified"));
+  const shellQuote = (value) => "'" + value.replaceAll("'", "'\\"'\\"'") + "'";
+  const terminalCommand = sourceMode === "registry-latest"
+    ? ["npx", "@hue-run/sdk@latest", "setup", "--project", python, "--origin", origin].map(shellQuote).join(" ")
+    : [cli, "setup", "--project", python, "--origin", origin].map(shellQuote).join(" ");
+  const terminalEnvironment = { ...process.env, TERM: "xterm-256color" };
+  delete terminalEnvironment.CI; delete terminalEnvironment.NO_COLOR;
+  const human = await run("script", ["-qec", terminalCommand, "/dev/null"], terminalEnvironment);
+  assert.equal(human.code, 0); assert.equal(human.stderr, "");
+  assert.ok(
+    human.stdout.includes("\\u001b[") &&
+      human.stdout.includes("receipt") &&
+      human.stdout.includes("verified"),
+    JSON.stringify({
+      ansi: human.stdout.includes("\\u001b["),
+      receipt: human.stdout.includes("receipt") && human.stdout.includes("verified"),
+      bytes: Buffer.byteLength(human.stdout),
+    }),
+  );
+  assert.ok(!human.stdout.includes("secret-canary"));
+  assert.ok((await readFile(join(typescript, "hue.setup.mjs"), "utf8")).includes("captureContent: false"));
+  assert.ok((await readFile(join(python, "hue_setup.py"), "utf8")).includes("capture_content=False"));
+  assert.equal((await run(process.execPath, ["--check", join(typescript, "hue.setup.mjs")])).code, 0);
+  assert.equal((await run("python3", ["-m", "py_compile", join(python, "hue_setup.py")])).code, 0);
+  for (const project of [typescript, python]) {
+    const name = (await readdir(project + "/.hue")).find((item) => item.startsWith("installation-"));
+    const installation = join(project, ".hue", name);
+    assert.equal((await stat(installation)).mode & 0o777, 0o600);
+    assert.ok(!(await readFile(join(project, project === typescript ? "hue.setup.mjs" : "hue_setup.py"), "utf8")).includes("synthetic-installed-key"));
+  }
+} finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
+`,
 );
-if (
-  cli.status !== 0 ||
-  cli.stderr ||
-  cli.stdout.includes("\u001b") ||
-  cli.stdout.includes("secret-canary")
-)
-  throw new Error("Installed hue setup --agent violated its noninteractive output contract");
-const cliEvents = cli.stdout
-  .trim()
-  .split("\n")
-  .map((line) => JSON.parse(line));
-const terminalEvents = cliEvents.filter(
-  (event) => event.event === "run.completed" || event.event === "run.failed",
+run(
+  process.execPath,
+  [
+    setupHarness,
+    join(minimal, "node_modules", ".bin", "hue"),
+    destination,
+    setupStateHome,
+    values["landing-latest"] ? "registry-latest" : "installed-exact",
+  ],
+  destination,
 );
-if (terminalEvents.length !== 1 || cliEvents.at(-1)?.event !== "run.completed")
-  throw new Error("Installed hue setup --agent did not emit exactly one final terminal event");
-const claimCli = spawnSync(
-  join(minimal, "node_modules", ".bin", "hue"),
-  ["claim", "--agent", "--project", minimal],
-  {
-    cwd: minimal,
-    encoding: "utf8",
-    timeout: 5000,
-    env: {
-      ...process.env,
-      XDG_STATE_HOME: setupStateHome,
-      HUE_API_KEY: "secret-canary-package-key",
-      BROWSER: "secret-canary-package-browser",
-    },
-  },
-);
-const claimEvents = claimCli.stdout
-  .trim()
-  .split("\n")
-  .map((line) => JSON.parse(line));
-if (
-  claimCli.status !== 0 ||
-  claimCli.stderr ||
-  claimCli.stdout.includes("\u001b") ||
-  claimCli.stdout.includes("secret-canary") ||
-  claimEvents[0]?.command !== "claim" ||
-  claimEvents.filter((event) => event.event === "run.completed" || event.event === "run.failed")
-    .length !== 1 ||
-  claimEvents.at(-1)?.event !== "run.completed"
-)
-  throw new Error("Installed hue claim --agent violated its noninteractive output contract");
 const removedConnect = spawnSync(
   join(minimal, "node_modules", ".bin", "hue"),
   ["connect", "--agent"],

@@ -2,6 +2,7 @@
 import { realpath } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { FileSetupCheckpointAdapter, setupRunId } from "./checkpoint.js";
+import { SetupBackendAdapter } from "./backend.js";
 import { detectSetupProject } from "./detect.js";
 import {
   renderHumanEvent,
@@ -37,13 +38,14 @@ async function main(): Promise<number> {
         agent: { type: "boolean", default: false },
         format: { type: "string" },
         project: { type: "string" },
+        origin: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
   } catch {
     if (!agentRequested) {
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format plain|jsonl] [--project PATH]\n",
+        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL]\n",
       );
       return 2;
     }
@@ -76,7 +78,7 @@ async function main(): Promise<number> {
       return 2;
     }
     process.stdout.write(
-      "Usage: hue <setup|resume|status|claim> [--agent|--format plain|jsonl] [--project PATH]\n",
+      "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL]\n",
     );
     return 0;
   }
@@ -105,7 +107,7 @@ async function main(): Promise<number> {
       process.stdout.write(`${renderJsonlEvent(event)}\n`);
     } else
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format plain|jsonl] [--project PATH]\n",
+        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL]\n",
       );
     return 2;
   }
@@ -123,6 +125,10 @@ async function main(): Promise<number> {
   process.once("SIGTERM", interrupt);
   try {
     const root = await realpath(parsed.values.project ?? process.cwd());
+    const backend = new SetupBackendAdapter({
+      projectRoot: root,
+      ...(parsed.values.origin ? { origin: parsed.values.origin } : {}),
+    });
     await runSetup({
       command: command as "setup" | "resume" | "status" | "claim",
       mode,
@@ -130,6 +136,7 @@ async function main(): Promise<number> {
       projectRoot: root,
       project: { detect: detectSetupProject },
       checkpoints: new FileSetupCheckpointAdapter(),
+      backend,
       signal: controller.signal,
       emit: (event) => {
         if (event.event === "run.completed" || event.event === "run.failed") terminalEmitted = true;

@@ -65,6 +65,14 @@ HTTPS is required except for loopback HTTP or the explicit
 [`allowInsecureHttp`](#local-development-without-a-hue-account) opt-in. Redirects are refused for both
 project checks and exports.
 
+TypeScript `0.4.0` also provides the `hue` executable. After publication, run
+`npx --yes @hue-run/sdk@0.4.0 setup` from a clean TypeScript or Python server project to provision a
+metadata-only installation, create a secret-free integration module and verify one real setup
+probe. The installation proof and telemetry key stay in an ignored owner-only file. Probe evidence
+does not prove that the application itself is instrumented, and setup never enables content capture
+or creates a Scenario, Hue Run, evaluation or remote execution. See the [setup CLI contract](./CLI.md)
+for claim, resume, conflict and staging-test behavior.
+
 `checkConnection()` rejects with `HueConnectionError`: its fixed message is safe to log, `status`
 carries the HTTP status when Hue answered, and `cause` carries the underlying network, timeout or
 parsing error. `serviceVersion` and `resourceAttributes` (for example

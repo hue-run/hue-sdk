@@ -1,52 +1,103 @@
-# Hue setup-session CLI contract
+# Hue setup CLI
 
-The local setup-session CLI core shipped in TypeScript `0.3.1` and is available from npm:
+The local setup-session CLI core shipped in TypeScript `0.3.1`. TypeScript `0.4.0` prepares the
+real one-command setup flow:
 
 ```sh
-hue setup
-hue setup --agent
-hue resume
-hue status
-hue claim # reports account attachment unavailable in this local core
+npx --yes @hue-run/sdk@0.4.0 setup
+# The npm alias exposes the same executable once that separately gated alias is published:
+npx --yes hue-run@0.4.0 setup
 ```
 
-These commands belong only to an installer setup session. They do not create or launch a Hue Run,
-Scenario, evaluation, or worker. `claim` only means attaching the anonymous setup project to an
-account; there is no generic `connect` command or local-agent connection in this CLI.
+Run it from a clean TypeScript or Python project. The command detects manifests without importing
+or executing project code, provisions a metadata-only installation, writes a secret-free integration
+module, exports and flushes one real OpenTelemetry probe, and verifies that probe's exact trace and
+span IDs through Hue's receipt endpoint. A verified probe proves only that the setup probe was
+stored. It does not prove the application's own instrumentation ran.
 
-`setup` only inspects bounded manifest and lockfile metadata. It does not execute repository code,
-change project files, open a browser, ask a question, create a trial, or contact Hue. `claim` also
-makes no network request in this build and reports that account attachment is unavailable. `resume`
-deterministically continues the same setup-session checkpoint; `status` reads it without changing
-it.
+The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
+`capture_content=False`. Import it from the application's server-side instrumentation entry point
+after adding the matching SDK as an application dependency. Content capture is never enabled by
+setup; it requires an ordinary account-managed key and a later explicit application decision.
 
-Checkpoints are secret-free JSON files outside the project, under the operating system's user state
-directory. On POSIX, directories use mode `0700` and files use mode `0600`; Windows uses its
-per-user local state directory without interpreting POSIX mode bits. Writes are atomic, and a
-configured state location inside the project is rejected. Checkpoints contain project categories
-and hashes, never environment values, credentials, source contents, or claim URLs.
+Setup creates no Scenario, Hue Run, evaluation, source capture, worker or remote execution. It does
+not run a package manager, application command, lifecycle script or provider request.
 
-`--agent` is explicitly noninteractive JSONL. It never uses ANSI, stdin, or a browser, and each
-invocation emits exactly one terminal `run.completed` or `run.failed` installer event. Those names
-describe the setup-session lifecycle, not a Hue Run. Human output is an append-only inline
-transcript. Plain and JSONL output contain no ANSI; `NO_COLOR`, `TERM=dumb`, CI, and non-TTY output
-select plain mode automatically.
+## Commands and modes
 
-Every JSONL record carries `contractVersion: 1`. The TypeScript union is exported from
-`@hue-run/sdk/setup`; the JSON Schema is exported as
-`@hue-run/sdk/setup-events.schema.json`. Consumers must ignore neither unknown versions nor terminal
-failures.
+```sh
+hue setup                 # provision/configure/verify, then show the private claim link
+hue resume                # continue the same project/origin installation
+hue status                # read status; after claim, reconcile generation 1 if necessary
+hue claim                 # show the link, or reconcile after the browser completes claim
+hue setup --agent         # noninteractive version-1 JSONL events
+hue setup --format human  # explicit append-only terminal rendering
+hue setup --origin http://127.0.0.1:PORT # isolated loopback tests only
+```
 
-The future Fern implementation plugs into `SetupBackendAdapter`. Its three installer operations
-create an anonymous setup trial hard-pinned to `trial_metadata_v1`, verify instrumentation-only
-receipt evidence, and read account-claim state. Inputs carry deterministic idempotency keys and an
-optional abort signal. Adapter results must use bounded, non-secret IDs; claim URLs may be sensitive
-and therefore must never be checkpointed. Receipt verification does not prove that task or
-environment content was captured and must never authorize Scenario publication. The adapter must
-not create a Scenario, evaluation, worker, or Hue Run. No live implementation ships in this slice.
+Hosted setup accepts HTTPS origins only. HTTP is accepted solely for `localhost`, `127.0.0.1` and
+`[::1]` test origins. Origins with credentials, paths, queries or fragments are refused, and
+redirects are never followed.
 
-The V1 handoff is deliberately staged: setup verifies the anonymous instrumentation trace; `hue claim`
-preserves the project and trace history; then the user performs an explicit content-approved capture
-or rerun, with a prepared tester as the first golden path. Only that content-approved trace passes to
-the separate review/publication flow for a Scenario. The actual URL and that handoff contract remain
-deferred. Setup itself does not capture content, create, publish, or run a Scenario.
+`--agent` never reads stdin or opens a browser. It emits exactly one terminal `run.completed` or
+`run.failed` event. Human mode prints the claim link intentionally; the complete URL is a private
+bearer capability because its fragment contains the claim secret. Do not put it in screenshots,
+logs, issue reports or analytics. The browser owns the claim cookie; the CLI never reads it. After
+claim completes, rerun `hue claim` or `hue status` to fetch credential generation 1, atomically
+replace the locally managed key, verify a new metadata probe, and—when generation 0 is still in
+memory—confirm the old key receives `401`.
+
+## Local state and conflicts
+
+Before its first network write, setup creates a lowercase UUIDv4 and a 32-byte random installation
+secret. They live with the current telemetry credential in `.hue/installation-<origin-hash>.json`.
+The file is added to `.gitignore`, written atomically with mode `0600`, and scoped to this exact
+project and Hue origin. `.hue` uses mode `0700`. Setup rejects symlinks, unsafe paths, oversized or
+invalid state, custom files at its managed config paths, and unexpected edits to files it previously
+managed. It preserves unrelated `.gitignore`, manifests, lockfiles and project files.
+
+Secret-free checkpoints remain in the operating system's per-user state directory and support
+interruption/resume. Claim URLs are never checkpointed. Credential retries are idempotent; a lost
+credential response is recovered by asking for the same generation. `SETUP_CHANGED` triggers one
+status refresh. `SETUP_REVOKED`, expired/purged installations, custom credential conflicts and
+exhausted lifetime quota fail closed instead of silently replacing an installation or key.
+
+Each command uses bounded timeouts and retries. Provisioning records at most five attempts per local
+installation in an hour and makes at most two attempts in one invocation; the live service's stricter
+per-network admission remains authoritative. Receipt polling honors the SDK's bounded deadline and
+`Retry-After`. A missing or late receipt is reported as resumable and unverified, never as success.
+
+The TypeScript event union is exported from `@hue-run/sdk/setup`; its JSON Schema is exported as
+`@hue-run/sdk/setup-events.schema.json`. Event `run.*` names describe only CLI invocations, not Hue
+Runs.
+
+## Staging/live acceptance runner
+
+Build and retain the exact tested tarball, then use an empty temporary project outside the repository:
+
+```sh
+node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifacts/typescript
+project="$(mktemp -d)"
+node packages/sdk-typescript/scripts/verify-setup-live.mjs \
+  --archive .artifacts/typescript/hue-run-sdk-0.4.0.tgz \
+  --origin https://STAGING_ORIGIN \
+  --project "$project" --language typescript --command setup \
+  --evidence .context/setup-staging-before-claim.json
+```
+
+Open the private link printed only to the terminal, finish the real browser claim, then reconcile the
+same project:
+
+```sh
+node packages/sdk-typescript/scripts/verify-setup-live.mjs \
+  --archive .artifacts/typescript/hue-run-sdk-0.4.0.tgz \
+  --origin https://STAGING_ORIGIN \
+  --project "$project" --command claim \
+  --evidence .context/setup-staging-after-claim.json
+```
+
+Repeat from another empty directory with `--language python`. Evidence files contain the archive
+hash, event names and terminal outcome only—never the claim link, installation proof, telemetry key,
+project path or trace/span IDs. Do not redirect the terminal line containing the private claim link
+into an artifact. The runner installs and executes the exact tarball; it does not establish registry
+publication or authorize production activation.
