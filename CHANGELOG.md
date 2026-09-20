@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Fixed
+
+- `runSimulation()` and `runLocalAgent()` accept an authoritative `expired` world after a failed
+  finish request, allowing execution and experiment finalization while preserving the target
+  outcome and expired evidence. Unconfirmed seals still remain uncertain without replaying the agent.
+
 ### [0.3.1] - 2026-09-20
 
 #### Added

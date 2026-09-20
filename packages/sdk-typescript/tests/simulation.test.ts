@@ -272,6 +272,7 @@ function harness(
     runInspectionFailures?: number;
     loseCompletionAcknowledgement?: boolean;
     loseSealAcknowledgement?: boolean;
+    recoveredSealStatus?: string;
   } = {},
 ) {
   const datasets = new Map<string, any>();
@@ -582,6 +583,8 @@ function harness(
       };
       if (loseSealAcknowledgement) {
         loseSealAcknowledgement = false;
+        if (options.recoveredSealStatus !== undefined)
+          worlds.get(runId).status = options.recoveredSealStatus;
         throw new Error("lost seal acknowledgement");
       }
       return sealed;
@@ -1133,6 +1136,100 @@ describe("one-shot simulation workflow", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  test.each([
+    [false, "completed"],
+    [true, "abandoned"],
+    [false, "expired"],
+    [true, "expired"],
+  ] as const)(
+    "a confirmed seal preserves finalization (target error: %s, recovered status: %s)",
+    async (targetError, recoveredSealStatus) => {
+      const fixture = harness({
+        evidenceFailures: 0,
+        loseCompletionAcknowledgement: false,
+        recoveredSealStatus,
+      });
+      const directory = await mkdtemp(join(tmpdir(), "hue-simulation-sealed-"));
+      const progress: SimulationProgress[] = [];
+      let targetCalls = 0;
+      try {
+        const report = await runSimulation({
+          ...fixture,
+          checkpointDirectory: directory,
+          scenario,
+          persistResultContent: false,
+          traceEvidence: { mode: "required" },
+          target() {
+            targetCalls++;
+            if (targetError) throw new Error("Synthetic target failure");
+            return "saved";
+          },
+          onProgress(event) {
+            progress.push(event);
+          },
+        });
+        expect(targetCalls).toBe(1);
+        expect(fixture.finishes.map((finish) => finish.status)).toEqual([
+          targetError ? "abandoned" : "completed",
+        ]);
+        expect([...fixture.worlds.values()].map((world) => world.status)).toEqual([
+          recoveredSealStatus,
+        ]);
+        expect(progress.filter((event) => event.type === "world_sealed")).toHaveLength(1);
+        expect(fixture.experiments.get(report.experimentId).finishedAt).toBeTruthy();
+        const [item] = (await fixture.client.listExperimentItems(report.experimentId)).items;
+        expect(item?.execution?.state).toBe(targetError ? "error" : "succeeded");
+        expect(report.subjectIds).toHaveLength(1);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    [false, "open"],
+    [true, "open"],
+    [false, "unrecognized"],
+    [true, "unrecognized"],
+    [false, "abandoned"],
+    [true, "completed"],
+  ] as const)(
+    "an unconfirmed seal stays uncertain (target error: %s, recovered status: %s)",
+    async (targetError, recoveredSealStatus) => {
+      const fixture = harness({
+        evidenceFailures: 0,
+        loseCompletionAcknowledgement: false,
+        recoveredSealStatus,
+      });
+      const directory = await mkdtemp(join(tmpdir(), "hue-simulation-recovery-uncertain-"));
+      let targetCalls = 0;
+      const options = {
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario,
+        persistResultContent: false,
+        traceEvidence: { mode: "required" as const },
+        target() {
+          targetCalls++;
+          if (targetError) throw new Error("Synthetic target failure");
+          return "saved";
+        },
+      };
+      try {
+        await expect(runSimulation(options)).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+        await expect(runSimulation(options)).rejects.toBeInstanceOf(UncertainExecutionError);
+        expect(targetCalls).toBe(1);
+        expect(fixture.finishes).toHaveLength(1);
+        expect([...fixture.experiments.values()].every((item) => item.finishedAt === null)).toBe(
+          true,
+        );
+        expect(fixture.results).toEqual([]);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("an unconfirmed world seal stays uncertain and never reruns the target", async () => {
     const fixture = harness({ uncertainSeal: true });
