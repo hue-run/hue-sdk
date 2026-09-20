@@ -117,17 +117,32 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
     });
     if (options.signal?.aborted) throw new Error("Setup interrupted");
 
-    if (options.command === "status" && !options.backend) {
-      await emit({
-        event: "diagnostic",
-        level: "info",
-        code: state ? `checkpoint.${state.phase}` : "checkpoint.absent",
-        message: state
-          ? `Checkpoint phase: ${state.phase}.`
-          : "No setup checkpoint exists for this project.",
-      });
-      await emit({ event: "run.completed", outcome: "unchanged", checkpointed: !!state });
-      return { outcome: "unchanged", state };
+    if (options.command === "status") {
+      if (!options.backend) {
+        await emit({
+          event: "diagnostic",
+          level: "info",
+          code: state ? `checkpoint.${state.phase}` : "checkpoint.absent",
+          message: state
+            ? `Checkpoint phase: ${state.phase}.`
+            : "No setup checkpoint exists for this project.",
+        });
+        await emit({ event: "run.completed", outcome: "unchanged", checkpointed: !!state });
+        return { outcome: "unchanged", state };
+      }
+      if (!state) {
+        const local = await options.backend.localInstallation();
+        if (!local) {
+          await emit({
+            event: "diagnostic",
+            level: "info",
+            code: "installation.absent",
+            message: "No Hue setup installation exists for this project and origin.",
+          });
+          await emit({ event: "run.completed", outcome: "unchanged", checkpointed: false });
+          return { outcome: "unchanged" };
+        }
+      }
     }
 
     if (!state) {
@@ -177,9 +192,11 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       await emit({ event: "run.completed", outcome: "unchanged", checkpointed: true });
       return { outcome: "unchanged", state };
     }
+    if (options.command === "claim" && !local)
+      throw new Error("No Hue setup installation exists for this project and origin");
     if (options.command === "setup" || options.command === "resume") {
-      await options.backend.prepare();
       await options.backend.preflight(project);
+      await options.backend.prepare();
       status = await options.backend.provision(options.signal);
       rejectTerminal(status);
       if (status.state === "active")
@@ -233,7 +250,9 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
     let oldCredential =
       status.state === "claimed" && before.credential?.version === 0
         ? before.credential.apiKey
-        : undefined;
+        : status.state === "claimed"
+          ? before.revocationCredential?.apiKey
+          : undefined;
     let refreshed = false;
     for (;;) {
       try {
@@ -246,6 +265,8 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
           rejectTerminal(status);
           if (status.state === "claimed" && before.credential?.version === 0)
             oldCredential = before.credential.apiKey;
+          else if (status.state === "claimed" && before.revocationCredential)
+            oldCredential = before.revocationCredential.apiKey;
           continue;
         }
         if (error instanceof SetupBackendError && error.code === "SETUP_REVOKED") {
@@ -336,7 +357,10 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
         options.signal?.aborted ||
         (error instanceof Error && error.message === "Setup interrupted");
       const backendCode = error instanceof SetupBackendError ? error.code.toLowerCase() : undefined;
-      const missing = error instanceof Error && error.message.startsWith("No setup checkpoint");
+      const missing =
+        error instanceof Error &&
+        (error.message.startsWith("No setup checkpoint") ||
+          error.message.startsWith("No Hue setup installation"));
       const conflict = error instanceof Error && error.message.startsWith("Refusing");
       await emit({
         event: "run.failed",

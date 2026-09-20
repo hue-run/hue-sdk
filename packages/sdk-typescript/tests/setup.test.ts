@@ -237,6 +237,48 @@ describe("runner and checkpoints", () => {
       "run.completed",
     ]);
     expect(checkpoints.state).toBeUndefined();
+
+    const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-empty-status-"));
+    await writeFile(join(projectRoot, "package.json"), JSON.stringify({ private: true }));
+    let statusNetworkCalls = 0;
+    let statusDetections = 0;
+    const realBackend = new SetupBackendAdapter({
+      projectRoot,
+      origin: "https://example.test",
+      fetch: (async () => {
+        statusNetworkCalls += 1;
+        throw new Error("status must not use the network without a local installation");
+      }) as typeof fetch,
+    });
+    const backendStatus: SetupEvent[] = [];
+    await runSetup({
+      command: "status",
+      mode: "jsonl",
+      runId: "setup_empty_status",
+      projectRoot,
+      checkpoints,
+      backend: realBackend,
+      project: {
+        detect: async () => {
+          statusDetections += 1;
+          return detection(projectRoot);
+        },
+      },
+      now: instant,
+      emit: (event) => {
+        backendStatus.push(event);
+      },
+    });
+    expect(backendStatus.map((event) => event.event)).toEqual([
+      "run.started",
+      "diagnostic",
+      "run.completed",
+    ]);
+    expect(statusNetworkCalls).toBe(0);
+    expect(statusDetections).toBe(0);
+    expect(checkpoints.state).toBeUndefined();
+    expect(await lstat(join(projectRoot, ".hue")).catch(() => undefined)).toBeUndefined();
+
     const resume: SetupEvent[] = [];
     await expect(
       runSetup({
@@ -354,6 +396,69 @@ describe("real setup HTTP adapter", () => {
     await symlink(projectRoot, join(pythonRoot, ".hue"));
     const unsafe = new FileSetupInstallationStore(pythonRoot, "https://example.test");
     await expect(unsafe.loadOrCreate()).rejects.toThrow("symlink");
+
+    const preflightRoot = await mkdtemp(join(tmpdir(), "hue-setup-preflight-conflict-"));
+    await writeFile(
+      join(preflightRoot, "package.json"),
+      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
+    );
+    await writeFile(join(preflightRoot, "hue.setup.mjs"), "// existing custom setup\n");
+    const preflight = new SetupBackendAdapter({
+      projectRoot: preflightRoot,
+      origin: "https://example.test",
+    });
+    await expect(preflight.preflight(await detectSetupProject(preflightRoot))).rejects.toThrow(
+      "Refusing to overwrite custom",
+    );
+    expect(await lstat(join(preflightRoot, ".hue")).catch(() => undefined)).toBeUndefined();
+    expect(await lstat(join(preflightRoot, ".gitignore")).catch(() => undefined)).toBeUndefined();
+  });
+
+  test("claim refuses to create a replacement identity when local proof is missing", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-missing-claim-"));
+    await writeFile(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
+    );
+    const checkpoints = new MemoryCheckpoints();
+    await runSetup({
+      command: "setup",
+      mode: "jsonl",
+      runId: "setup_missing_claim",
+      projectRoot,
+      checkpoints,
+      project: { detect: detectSetupProject },
+      emit: () => {},
+    });
+    let networkCalls = 0;
+    const backend = new SetupBackendAdapter({
+      projectRoot,
+      origin: "https://example.test",
+      fetch: (async () => {
+        networkCalls += 1;
+        throw new Error("claim must not use the network without the original proof");
+      }) as typeof fetch,
+    });
+    const events: SetupEvent[] = [];
+    await expect(
+      runSetup({
+        command: "claim",
+        mode: "jsonl",
+        runId: "setup_missing_claim",
+        projectRoot,
+        checkpoints,
+        backend,
+        project: { detect: detectSetupProject },
+        emit: (event) => {
+          events.push(event);
+        },
+      }),
+    ).rejects.toThrow("No Hue setup installation");
+    expect(networkCalls).toBe(0);
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({ event: "run.failed", resumable: false }),
+    );
+    expect(await lstat(join(projectRoot, ".hue")).catch(() => undefined)).toBeUndefined();
   });
 
   test("recovers a lost credential response with the same generation and proof", async () => {
@@ -517,6 +622,7 @@ describe("real setup HTTP adapter", () => {
     let traceId = "";
     let spanId = "";
     let oldKeyRejected = 0;
+    let failRevocationOnce = true;
     const key0 = "synthetic-setup-key-v0";
     const key1 = "synthetic-setup-key-v1";
     const server = Bun.serve({
@@ -600,6 +706,10 @@ describe("real setup HTTP adapter", () => {
           const authorization = request.headers.get("authorization");
           if (claimed && authorization === `Bearer ${key0}`) {
             oldKeyRejected += 1;
+            if (failRevocationOnce) {
+              failRevocationOnce = false;
+              return new Response(null, { status: 503 });
+            }
             return new Response(null, { status: 401 });
           }
           expect(authorization).toBe(`Bearer ${claimed ? key1 : key0}`);
@@ -659,9 +769,25 @@ describe("real setup HTTP adapter", () => {
       }
       claimed = true;
       events.length = 0;
-      expect((await runSetup({ ...options, command: "claim" })).outcome).toBe("ready");
-      expect((await backend.localInstallation())?.credential?.version).toBe(1);
-      expect(oldKeyRejected).toBe(1);
+      await expect(runSetup({ ...options, command: "claim" })).rejects.toThrow(
+        "superseded anonymous key",
+      );
+      const interruptedClaim = await backend.localInstallation();
+      expect(interruptedClaim?.credential?.version).toBe(1);
+      expect(interruptedClaim?.revocationCredential?.version).toBe(0);
+      events.length = 0;
+      const resumedBackend = new SetupBackendAdapter({
+        projectRoot,
+        origin,
+        requestTimeoutMillis: 2000,
+        receiptTimeoutMillis: 2000,
+      });
+      expect(
+        (await runSetup({ ...options, backend: resumedBackend, command: "claim" })).outcome,
+      ).toBe("ready");
+      expect((await resumedBackend.localInstallation())?.credential?.version).toBe(1);
+      expect((await resumedBackend.localInstallation())?.revocationCredential).toBeUndefined();
+      expect(oldKeyRejected).toBe(2);
       expect(events.at(-1)).toEqual(
         expect.objectContaining({ event: "run.completed", outcome: "ready" }),
       );

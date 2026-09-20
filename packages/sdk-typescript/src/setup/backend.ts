@@ -603,6 +603,13 @@ export class SetupBackendAdapter {
         "invalid_response",
         "Hue returned a credential generation different from the requested generation.",
       );
+    if (
+      credentialVersion === 1 &&
+      installation.credential?.version === 0 &&
+      !installation.revocationCredential
+    )
+      installation.revocationCredential = installation.credential;
+    if (credentialVersion === 0) delete installation.revocationCredential;
     installation.credential = {
       apiKey: result.credential.apiKey,
       keyId: result.credential.keyId,
@@ -622,7 +629,7 @@ export class SetupBackendAdapter {
 
   /** Fails before provisioning when credentials or managed configuration conflict. */
   async preflight(project: SetupProjectDetection): Promise<void> {
-    const installation = await this.prepare();
+    const installation = await this.localInstallation();
     await validateSetupConfiguration(this.store, installation, project);
   }
 
@@ -726,5 +733,10 @@ export class SetupBackendAdapter {
         "unverified",
         "The superseded anonymous key was not confirmed revoked.",
       );
+    const installation = await this.prepare();
+    if (installation.revocationCredential?.apiKey === oldApiKey) {
+      delete installation.revocationCredential;
+      await this.store.save(installation);
+    }
   }
 }

@@ -176,9 +176,12 @@ async function rejectCustomEnvironment(projectRoot: string): Promise<void> {
 /** Refuses credential/config conflicts before setup makes a provisioning request. */
 export async function validateSetupConfiguration(
   store: FileSetupInstallationStore,
-  record: SetupInstallationRecord,
+  record: Pick<SetupInstallationRecord, "managedFiles"> | undefined,
   project: SetupProjectDetection,
 ): Promise<void> {
+  if (project.root !== store.projectRoot) throw new Error("Setup project identity changed");
+  if (project.languages.length === 0)
+    throw new Error("No supported TypeScript or Python project was detected");
   await rejectCustomEnvironment(store.projectRoot);
   const candidates: Array<[string, string]> = [];
   if (project.languages.includes("typescript"))
@@ -192,7 +195,7 @@ export async function validateSetupConfiguration(
         throw new Error(`Refusing unsafe setup configuration at ${relativePath}`);
       const source = await readFile(path, "utf8");
       const digest = setupManagedDigest(source);
-      if (digest !== setupManagedDigest(expected) && digest !== record.managedFiles[relativePath])
+      if (digest !== setupManagedDigest(expected) && digest !== record?.managedFiles[relativePath])
         throw new Error(
           `Refusing to overwrite custom or unexpectedly edited configuration at ${relativePath}`,
         );
@@ -208,9 +211,6 @@ export async function configureSetupProject(
   record: SetupInstallationRecord,
   project: SetupProjectDetection,
 ): Promise<SetupFileChange[]> {
-  if (project.root !== store.projectRoot) throw new Error("Setup project identity changed");
-  if (project.languages.length === 0)
-    throw new Error("No supported TypeScript or Python project was detected");
   await validateSetupConfiguration(store, record, project);
   const changes: SetupFileChange[] = [];
   if (project.languages.includes("typescript")) {

@@ -41,6 +41,8 @@ export interface SetupInstallationRecord {
   installationSecret: string;
   /** Latest locally managed telemetry credential. */
   credential?: SetupStoredCredential;
+  /** Superseded anonymous credential retained only until its revocation is verified. */
+  revocationCredential?: SetupStoredCredential;
   /** Latest probe awaiting or carrying exact receipt evidence. */
   probe?: SetupStoredProbe;
   /** Provision request timestamps used to enforce the local hourly bound. */
@@ -151,6 +153,7 @@ function parseRecord(value: unknown, origin: string): SetupInstallationRecord {
     "provisionAttempts",
     "managedFiles",
     ...(item.credential === undefined ? [] : ["credential"]),
+    ...(item.revocationCredential === undefined ? [] : ["revocationCredential"]),
     ...(item.probe === undefined ? [] : ["probe"]),
   ];
   if (
@@ -170,6 +173,11 @@ function parseRecord(value: unknown, origin: string): SetupInstallationRecord {
         typeof entry !== "string" || entry.length > 40 || !Number.isFinite(Date.parse(entry)),
     ) ||
     (item.credential !== undefined && !validCredential(item.credential)) ||
+    (item.revocationCredential !== undefined &&
+      (!validCredential(item.revocationCredential) ||
+        item.revocationCredential.version !== 0 ||
+        !validCredential(item.credential) ||
+        item.credential.version !== 1)) ||
     (item.probe !== undefined && !validProbe(item.probe)) ||
     !item.managedFiles ||
     typeof item.managedFiles !== "object" ||
