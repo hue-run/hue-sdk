@@ -38,11 +38,9 @@ refuses to publish a version without a matching entry below.
 - The unpublished `hue-run` npm alias tracks `0.4.0`, pins `@hue-run/sdk@0.4.0`, mirrors setup exports
   and includes its own `hue` executable wrapper. Alias publication remains a separate release gate.
 
-The existing `runLocalAgent` API, V2 connection bundle, provider transport, environment lifecycle,
-checkpoint formats, telemetry ownership and capture defaults are unchanged. Python remains at 0.2.2.
 No registry release is claimed until publication and registry acceptance complete.
 
-### [0.3.2](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2) - 2026-09-20
+### [0.3.2] - 2026-09-20
 
 #### Fixed
 
@@ -52,9 +50,9 @@ No registry release is claimed until publication and registry acceptance complet
 - Availability documentation records TypeScript `0.3.1` as published, including scorer deferral
   and the local setup CLI core.
 
-The release artifacts are published and passed registry acceptance.
+The [release artifacts](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2) are published and passed registry acceptance.
 
-### [0.3.1](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.1) - 2026-09-20
+### [0.3.1] - 2026-09-20
 
 #### Added
 
@@ -75,6 +73,10 @@ The release artifacts are published and passed registry acceptance.
   for deferred scorers, including placeholders saved by an older SDK before an interrupted upload.
 - Availability documentation now records the already-published worker correctly. The setup CLI core
   was merged after publication and first belongs to this new release, not the existing 0.3.0 archive.
+
+The existing `runLocalAgent` API, V2 connection bundle, provider transport, environment lifecycle,
+checkpoint formats, telemetry ownership and capture defaults are unchanged. Python remains at 0.2.2.
+No registry release is claimed until publication and registry acceptance complete.
 
 ### [0.3.0](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.0) - 2026-09-19
 
