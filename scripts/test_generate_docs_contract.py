@@ -23,7 +23,7 @@ class DocumentationContractTests(unittest.TestCase):
     def test_contract_contains_only_public_package_surfaces(self):
         contract = generator.build_contract(ROOT)
         self.assertEqual(contract["schemaVersion"], 1)
-        self.assertEqual(contract["packages"]["typescript"]["version"], "0.3.1")
+        self.assertEqual(contract["packages"]["typescript"]["version"], "0.3.2")
         self.assertEqual(contract["packages"]["python"]["version"], "0.2.2")
         self.assertIn(
             "createHue",

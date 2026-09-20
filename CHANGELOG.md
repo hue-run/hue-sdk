@@ -10,11 +10,17 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.3.2] - 2026-09-20
+
 #### Fixed
 
 - `runSimulation()` and `runLocalAgent()` accept an authoritative `expired` world after a failed
   finish request, allowing execution and experiment finalization while preserving the target
   outcome and expired evidence. Unconfirmed seals still remain uncertain without replaying the agent.
+- Availability documentation records TypeScript `0.3.1` as published, including scorer deferral
+  and the local setup CLI core.
+
+No registry release is claimed until publication and registry acceptance complete.
 
 ### [0.3.1] - 2026-09-20
 
