@@ -522,6 +522,95 @@ describe("real setup HTTP adapter", () => {
     expect((await backend.localInstallation())?.credential?.apiKey).toBe("same-recovered-key");
   });
 
+  test("treats a durable revoked lineage as terminal without minting or retrying", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-revoked-lineage-"));
+    await writeFile(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
+    );
+    const origin = "https://example.test";
+    let credentialCalls = 0;
+    const backend = new SetupBackendAdapter({
+      projectRoot,
+      origin,
+      fetch: (async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : input.toString());
+        const installation = await backend.localInstallation();
+        expect(installation).toBeDefined();
+        if (url.pathname.endsWith("/credentials")) {
+          credentialCalls += 1;
+          expect(init?.method).toBe("POST");
+          return Response.json(
+            { protocolVersion: 1, code: "SETUP_REVOKED" },
+            { status: 409, headers: { "Cache-Control": "no-store" } },
+          );
+        }
+        expect(init?.method).toBe("GET");
+        return Response.json(
+          {
+            protocolVersion: 1,
+            installationId: installation!.installationId,
+            state: "claimed",
+            project: { id: "project_test", organizationId: "org_owner" },
+            credentialVersion: 1,
+            capturePolicy: "metadata-only-v1",
+            expiresAt: null,
+            limits: { traces: 100, spans: 1000, bytes: 2097152 },
+            usage: { traces: 1, spans: 1, bytes: 100 },
+            claimUrl: null,
+            endpoints: {
+              otlp: "/api/v1/otlp/v1/traces",
+              receipt: "/api/v1/traces/{traceId}/receipt",
+            },
+          },
+          { headers: { "Cache-Control": "no-store" } },
+        );
+      }) as typeof fetch,
+    });
+    const installation = await backend.prepare();
+    installation.credential = {
+      apiKey: "synthetic-revoked-v0",
+      keyId: "key_v0",
+      version: 0,
+    };
+    await backend.store.save(installation);
+    const checkpoints = new MemoryCheckpoints();
+    await runSetup({
+      command: "setup",
+      mode: "jsonl",
+      runId: "setup_revoked",
+      projectRoot,
+      checkpoints,
+      project: { detect: detectSetupProject },
+      emit: () => {},
+    });
+    const events: SetupEvent[] = [];
+    const result = await runSetup({
+      command: "claim",
+      mode: "jsonl",
+      runId: "setup_revoked",
+      projectRoot,
+      checkpoints,
+      backend,
+      project: { detect: detectSetupProject },
+      emit: (event) => {
+        events.push(event);
+      },
+    });
+    expect(result.outcome).toBe("action_required");
+    expect(credentialCalls).toBe(1);
+    expect((await backend.localInstallation())?.credential).toEqual(
+      expect.objectContaining({ apiKey: "synthetic-revoked-v0", version: 0 }),
+    );
+    expect((await backend.localInstallation())?.revocationCredential).toBeUndefined();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "action.required",
+        message: expect.stringContaining("explicitly rotate"),
+      }),
+    );
+  });
+
   test("rejects response fields outside the frozen v1 shapes", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-exact-response-"));
     const origin = "https://example.test";
