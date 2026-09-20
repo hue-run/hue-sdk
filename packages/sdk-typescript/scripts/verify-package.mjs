@@ -98,6 +98,11 @@ if (!values.archive && !values["registry-version"]) {
     throw new Error(
       `Portable capture assets are outside this release: ${JSON.stringify(forbiddenCaptureFiles)}`,
     );
+  if (
+    Object.hasOwn(pkg.exports, "./evals/conversion-outcome-core.mjs") ||
+    [...npmFiles].some((file) => /conversion-outcome/u.test(file))
+  )
+    throw new Error("Outcome evaluator implementation assets are outside this release");
   console.log(`pack inventory: ${npmFiles.size} files agree between npm pack and bun pm pack`);
 }
 const packageSpec = values["registry-version"] ?? `file:${tarball}`;
@@ -432,6 +437,7 @@ run(
 const installedPackageTests = [
   "sdk.test.ts",
   "evals.test.ts",
+  "scorer-publication.test.ts",
   "attempt.test.ts",
   "environment.test.ts",
   "simulation.test.ts",
@@ -512,7 +518,15 @@ void [transition, event, options];
         .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"')
         .replaceAll('"../src/environment.js"', '"@hue-run/sdk/environment"')
         .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
-        .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"'),
+        .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"')
+        .replaceAll(
+          '"../src/evals/checkpoint.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/checkpoint.js"',
+        )
+        .replaceAll(
+          '"../src/evals/scorer-publication.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/scorer-publication.js"',
+        ),
     );
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
@@ -526,6 +540,8 @@ void [transition, event, options];
   );
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
+  for (const runtime of [process.execPath, "bun"])
+    run(runtime, [join(source, "scripts/verify-scorer-deferral.mjs"), consumer], destination);
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
   // HUE_JUNIT_DIR (set by CI) collects a JUnit report per AI SDK pair for the workflow summary.

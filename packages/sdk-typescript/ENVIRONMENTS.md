@@ -1,10 +1,9 @@
 # Simulated environments
 
-This guide documents the TypeScript `0.3.0` release candidate. Until registry acceptance, use
-the exact reviewed archive rather than requesting `0.3.0` from npm:
+The provider-aware environment APIs shipped in TypeScript `0.3.0` and are publicly available:
 
 ```bash
-npm install /path/to/reviewed/hue-run-sdk-0.3.0.tgz zod
+npm install @hue-run/sdk zod
 ```
 
 Your agent runs in your process while a disposable simulated world runs in Hue. The world is
@@ -192,7 +191,7 @@ arbitrary-step diffs are outside this interface.
 
 ## Candidate context migration
 
-This candidate-context restriction is part of the `@hue-run/sdk@0.3.0` release candidate.
+This candidate-context restriction shipped in `@hue-run/sdk@0.3.0`.
 
 `runSimulation` now supplies `context.item` as `{ id, externalKey }`. Read candidate inputs
 from the callback's first argument. Expected outcomes, case metadata and environment-version

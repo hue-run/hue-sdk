@@ -123,7 +123,7 @@ export type MetricDefinition =
       /** Allowed values. */
       categories: string[];
     };
-/** A pinned scorer definition: a Hue built-in, trusted local code, a manual rubric or a hosted judge. */
+/** A pinned scorer definition executed locally, by a person, or by Hue. */
 export type ScorerDefinition =
   | {
       /** Hue built-in scorer. */
@@ -165,6 +165,14 @@ export type ScorerDefinition =
       /** SHA-256 of the declared source. */
       sourceDigest: string;
       /** Metrics the callback reports. */
+      metrics: MetricDefinition[];
+    }
+  | {
+      /** Scored inside Hue using immutable world evidence; the local runner defers it. */
+      kind: "world_outcome";
+      /** Pinned Hue-executed outcome evaluator. */
+      entry: "hue.conversion_outcome.v1";
+      /** The seven fixed boolean metrics defined by the entry. */
       metrics: MetricDefinition[];
     }
   | {

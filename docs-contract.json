@@ -38,9 +38,10 @@
       "Evaluation coverage",
       "Hue-managed runs",
       "Failure isolation",
-      "App-launched local agents"
+      "App-launched local agents",
+      "Scorer forward compatibility"
     ],
-    "sha256": "sha256:c6577d2871cb05a65b9594169e4ed5ef79908a0de21753d3d3b52040d7011422",
+    "sha256": "sha256:c4c625029a71da59b454a4c153ff0c443fb524d61ec25bc4c9c800fb19e2b444",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -366,7 +367,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.3.0"
+      "version": "0.3.1"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",

@@ -27,6 +27,7 @@ import {
   type LocalAgentTargetContext,
   type LocalScorer,
   type RunLocalAgentOptions,
+  type ScorerVersion,
 } from "../src/evals.js";
 
 const key = "synthetic-local-worker-key";
@@ -562,6 +563,63 @@ function fixture(options: {
 }
 
 describe("local agent worker", () => {
+  for (const providerOutcome of ["ready", "environment_incomplete"] as const) {
+    test(`generic worker defers nonlocal scorer pins for ${providerOutcome} V2 work`, async () => {
+      const f = fixture({ capabilityStatus: 500, providerOutcome });
+      const pins = ["world_outcome", "future_hosted_kind"].map((kind) => ({
+        id: randomUUID(),
+        contentDigest: digest,
+        definition: { kind, entry: "hue.conversion_outcome.v1", metrics: [] },
+      })) as ScorerVersion[];
+      f.experiment.evaluation.scorerVersions = pins;
+      const directory = await mkdtemp(join(tmpdir(), "hue-generic-provider-"));
+      const hue = createHue({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        serviceName: "generic",
+        captureContent: false,
+      });
+      let targetCalls = 0;
+      let completed = false;
+      try {
+        await runLocalAgent({
+          client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+          environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+          hue,
+          checkpointDirectory: directory,
+          agent: { key: "generic", name: "Generic", revision: "v2" },
+          scorers: [],
+          actualAgentManifest: () => f.provider!.actualManifest,
+          requestedProviders: [
+            { providerInstanceKey: "gmail-primary", surfaceKeys: ["google.gmail/mcp"] },
+          ],
+          mcpSurface: { providerInstanceKey: "gmail-primary", surfaceKey: "google.gmail/mcp" },
+          maxRuns: 1,
+          target() {
+            targetCalls++;
+            return { drafted: true };
+          },
+          onCompleted(report) {
+            completed = true;
+            expect(report.deferredScorerVersionIds).toEqual(pins.map((pin) => pin.id));
+            expect(report.resultIds).toEqual([]);
+          },
+        });
+        expect(completed).toBe(true);
+        expect(targetCalls).toBe(providerOutcome === "ready" ? 1 : 0);
+        expect(f.calls.prepare).toBe(1);
+        expect(f.calls.results).toEqual([]);
+        expect([...f.worlds.values()].map((world) => world.status)).toEqual(["completed"]);
+        expect(f.queueState()).toBe("completed");
+        expect(await checkpointContents(directory)).not.toContain(f.bearer);
+      } finally {
+        await hue.shutdown();
+        f.server.stop(true);
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  }
+
   test("a failed MCP capability request still seals the world so the execution can complete", async () => {
     const f = fixture({ capabilityStatus: 503 });
     const hue = createHue({

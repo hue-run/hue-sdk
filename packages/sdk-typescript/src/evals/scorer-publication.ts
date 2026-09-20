@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { json } from "./json.js";
+import { json, digest } from "./json.js";
 import type { JsonValue, ScorerDefinition } from "./types.js";
 
 const metricName = z
@@ -23,6 +23,15 @@ const metric = z.discriminatedUnion("type", [
   }),
 ]);
 const metrics = z.array(metric).min(1);
+const worldOutcomeMetrics = [
+  "completed_run",
+  "saved_draft",
+  "correct_destination",
+  "content",
+  "unrelated_preserved",
+  "process_constraints",
+  "task_success",
+].map((name) => ({ name, type: "boolean" as const }));
 const jsonValue = z.custom<JsonValue>((value) => {
   try {
     json(value);
@@ -76,6 +85,16 @@ const sdkScorerPublication = z.union([
     entrypoint: z.string(),
     sourceDigest: z.string(),
     metrics,
+  }),
+  z.strictObject({
+    kind: z.literal("world_outcome"),
+    entry: z.literal("hue.conversion_outcome.v1"),
+    metrics: metrics
+      .default(worldOutcomeMetrics)
+      .refine(
+        (value) => digest(value) === digest(worldOutcomeMetrics),
+        "World outcome metrics are fixed by the pinned entry",
+      ),
   }),
   z.strictObject({ kind: z.literal("manual"), metrics }),
   z.strictObject({ kind: z.literal("llm_judge"), config: judgeConfig, metrics }),

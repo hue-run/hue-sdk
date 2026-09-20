@@ -132,12 +132,25 @@ export function validateScorerBindings(
       );
   }
 }
+/** Only implementations this SDK owns may produce local results. Unknown pins are deferred. */
+export function isLocallyExecutable(definition: {
+  kind: string;
+  entry?: string;
+}): definition is Extract<ScorerDefinition, { kind: "builtin" | "local_code" }> {
+  return (
+    definition.kind === "local_code" ||
+    (definition.kind === "builtin" &&
+      ["hue.exact_match.v1", "hue.includes.v1", "hue.json_schema.v1"].includes(
+        definition.entry ?? "",
+      ))
+  );
+}
+
 /**
- * Scores one subject with a pinned scorer version on this machine: built-ins run here, `local_code`
- * pins run the matching callback from `options.scorers`, `manual` pins are skipped. Failures are
- * returned as sanitized error scores.
+ * Scores one subject locally using a known built-in or a bound `local_code` callback.
+ * Scorer failures are returned as sanitized error scores.
  *
- * @throws TypeError for an `llm_judge` pin, which must be dispatched through `createJudgeJobs`.
+ * @throws TypeError for pins without a local implementation; their authorized executor owns scoring.
  */
 export async function scoreLocally(
   version: ScorerVersion,
@@ -145,9 +158,9 @@ export async function scoreLocally(
   options: { scorers?: LocalScorer[]; schemaTimeoutMillis?: number } = {},
 ): Promise<Score> {
   const definition = version.definition;
-  if (definition.kind === "llm_judge")
+  if (!isLocallyExecutable(definition))
     throw new TypeError(
-      "Hosted judge pins require dispatch through createJudgeJobs; do not submit a local result",
+      "This scorer must be deferred to its authorized executor; do not submit a local result",
     );
   const timeout = options.schemaTimeoutMillis ?? 2000;
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 60_000)
@@ -170,7 +183,6 @@ export async function scoreLocally(
     json(ordinaryEvidence, aggregateBounds(1024 * 1024));
     if (environment !== undefined) validateEnvironmentEvidence(environment);
     const owned = structuredClone(context);
-    if (definition.kind === "manual") return skip("Manual scoring requires a human session");
     if (definition.kind === "local_code") {
       const binding = options.scorers?.find(
         (local) => digest(local.definition) === digest(definition),

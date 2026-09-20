@@ -120,7 +120,11 @@ All declared metrics must appear exactly once and satisfy pinned types, bounds a
 
 ### Hosted and manual scorer pins
 
-The local runner leaves `llm_judge` and `manual` pins pending and reports their IDs in `deferredScorerVersionIds`. It does not upload a synthetic skipped result that would occupy their immutable result slot. Manual results require a human session. Hosted dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
+In TypeScript `0.3.1` (unreleased), the local runner executes only the three known built-in entries and bound `local_code` scorers. It leaves every other pin pending and reports its ID in `deferredScorerVersionIds`, including kinds and built-in entries introduced by a newer server. It never uploads a placeholder result that would occupy the immutable result slot, including placeholders already saved in an older SDK's checkpoint. Direct `scoreLocally()` calls reject pins that require another executor.
+
+`world_outcome` pins run inside Hue and need no local callback or executable source digest. A supporting server owns their execution from saved world evidence. Legacy `local_code` pins still require the exact registered callback; changing the worker cannot convert those immutable pins into hosted ones.
+
+Manual results require a human session. Hosted model-judge dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
 
 When present, the budget's `authentication` reports credential resolution only. An
 `available` status or `configured: true` does not prove that a provider accepted the
@@ -156,12 +160,10 @@ The runner stops scheduling more cases after an operational failure and waits fo
 
 ## Outbound local agent worker
 
-`runLocalAgent` is included in the `@hue-run/sdk@0.3.0` release candidate. Queue registration,
-claims, scoped MCP capabilities and sealed evidence require a supporting Hue server and project
-access; the package version alone does not establish hosted availability. Until registry
-acceptance, install the exact reviewed `hue-run-sdk-0.3.0.tgz` archive with the optional `zod`
-peer. `node packages/sdk-typescript/scripts/verify-package.mjs` creates and verifies that archive;
-do not request `0.3.0` from npm yet.
+`runLocalAgent` shipped in `@hue-run/sdk@0.3.0` and is publicly available. Install
+`npm install @hue-run/sdk zod`. Queue registration, claims, scoped MCP capabilities and sealed
+evidence require a supporting Hue server and project access; the package version alone does not
+establish hosted provider availability.
 
 `runLocalAgent` registers one fixed application callback and polls for queued runs. Hue selects
 the registered key/revision; it does not send executable code or shell commands. Keep the
@@ -183,6 +185,7 @@ try {
     hue,
     agent: { key: "support-agent", name: "Support agent", revision: "1" },
     checkpointDirectory: ".hue-checkpoints/support-agent",
+    scorers: [], // Hue-executed scorers require no local callback registration.
     target: (inputs, tools, context) => runMyAgent({ inputs, tools, config: context.config }),
   });
 } finally {
