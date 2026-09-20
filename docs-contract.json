@@ -328,6 +328,9 @@
             "RunFailedEvent",
             "RunStartedEvent",
             "SETUP_EVENT_CONTRACT_VERSION",
+            "SetupApplicationActionRequired",
+            "SetupApplicationEvidence",
+            "SetupApplicationPlan",
             "SetupBackendAdapter",
             "SetupBackendAdapterOptions",
             "SetupBackendClaim",
@@ -336,6 +339,8 @@
             "SetupBackendReceipt",
             "SetupBackendTrial",
             "SetupCheckpointAdapter",
+            "SetupCommand",
+            "SetupCommandRunner",
             "SetupCredentialResult",
             "SetupEffect",
             "SetupEvent",
@@ -343,6 +348,7 @@
             "SetupFileChange",
             "SetupInstallationRecord",
             "SetupInstallationStatus",
+            "SetupLegalActionRequired",
             "SetupMachineInput",
             "SetupMachineState",
             "SetupOutputMode",
@@ -352,6 +358,8 @@
             "SetupProjectDetection",
             "SetupRunOptions",
             "SetupRunResult",
+            "SetupStoredApplicationAttempt",
+            "SetupStoredApplicationEvidence",
             "SetupStoredCredential",
             "SetupStoredProbe",
             "SetupTransition",
@@ -360,12 +368,16 @@
             "TrialCreatedEvent",
             "createInitialSetupState",
             "detectSetupProject",
+            "installSetupRuntime",
+            "planSetupApplication",
             "renderHumanEvent",
             "renderJsonlEvent",
             "renderPlainEvent",
             "runSetup",
+            "runSetupCommand",
             "selectSetupOutputMode",
-            "transitionSetup"
+            "transitionSetup",
+            "wireSetupApplication"
           ]
         }
       },
@@ -374,7 +386,7 @@
         "@hue-run/sdk/setup-events.schema.json": {
           "contractVersion": 1,
           "id": "https://hue.run/schemas/setup-events-v1.json",
-          "sha256": "sha256:bc0227b88fdea13e67bc2fc5bd58c9ce544715470f7c05270437ed3b3593cadc",
+          "sha256": "sha256:bd0d7110d949160d8e2723480835f65e0bf9da766582d22c41d94412de55f7b9",
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
@@ -387,10 +399,10 @@
     "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.2.3"
+      "version": "0.3.0"
     },
     "name": "hue",
-    "sha256": "sha256:4c65166dc2706a92abcccb817afd2e3efd0de8cc6338bd7975ac422370ab95d5",
+    "sha256": "sha256:b983a24c043f5054047d7bee24b0cba4a9bcec781afc60d379496094b44522dd",
     "source": "skills/hue/SKILL.md"
   }
 }

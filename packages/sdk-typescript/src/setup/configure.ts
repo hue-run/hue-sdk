@@ -43,7 +43,7 @@ function serviceName(root: string): string {
 
 function typescriptConfig(store: FileSetupInstallationStore): string {
   return `// Managed by Hue setup. This file contains no credential.
-import { readFileSync } from "node:fs";
+import { closeSync, constants, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createHue } from "@hue-run/sdk";
 
@@ -58,14 +58,56 @@ export const hue = createHue({
   serviceName: ${JSON.stringify(serviceName(store.projectRoot))},
   captureContent: false,
 });
+
+const evidencePath = fileURLToPath(new URL("./.hue/${basename(store.applicationEvidencePath)}", import.meta.url));
+let expressInstalled = false;
+
+function saveEvidence(value) {
+  if (process.env.HUE_SETUP_EVIDENCE_FILE !== evidencePath) return;
+  const temporary = evidencePath + "." + process.pid + ".tmp";
+  let descriptor;
+  try {
+    descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(descriptor, JSON.stringify(value) + "\\n", "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, evidencePath);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    try { unlinkSync(temporary); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+}
+
+export function installHueExpress(app) {
+  if (expressInstalled) return;
+  expressInstalled = true;
+  app.use((request, response, next) => {
+    void (async () => {
+      const ids = await hue.withSpan("hue.metadata", async (span) => {
+        const finished = new Promise((resolve) => {
+          response.once("finish", resolve);
+          response.once("close", resolve);
+        });
+        next();
+        await finished;
+        return { traceId: span.traceId, spanId: span.spanId };
+      });
+      await hue.flush();
+      saveEvidence({ ...ids, credentialVersion: installation.credential.version, source: "existing-application-request" });
+    })().catch(() => undefined);
+  });
+}
 `;
 }
 
 function pythonConfig(store: FileSetupInstallationStore): string {
   return `# Managed by Hue setup. This file contains no credential.
 import json
+import os
 from pathlib import Path
 
+from flask import g
 from hue_sdk import Hue
 
 _installation = json.loads(
@@ -80,6 +122,47 @@ hue = Hue(
     service_name=${JSON.stringify(serviceName(store.projectRoot))},
     capture_content=False,
 )
+
+_evidence_path = Path(__file__).parent / ".hue" / ${JSON.stringify(basename(store.applicationEvidencePath))}
+
+
+def _save_evidence(value):
+    if os.environ.get("HUE_SETUP_EVIDENCE_FILE") != str(_evidence_path):
+        return
+    temporary = _evidence_path.with_name(f".{_evidence_path.name}.{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        os.write(descriptor, (json.dumps(value) + "\\n").encode("utf-8"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, _evidence_path)
+
+
+def install_hue_flask(app):
+    if app.extensions.get("hue_setup_installed"):
+        return
+    app.extensions["hue_setup_installed"] = True
+
+    @app.before_request
+    def _hue_setup_before_request():
+        context = hue.span("hue.metadata")
+        span = context.__enter__()
+        g._hue_setup_context = context
+        g._hue_setup_ids = {"traceId": span.trace_id, "spanId": span.span_id}
+
+    @app.after_request
+    def _hue_setup_after_request(response):
+        context = getattr(g, "_hue_setup_context", None)
+        ids = getattr(g, "_hue_setup_ids", None)
+        if context is not None:
+            context.__exit__(None, None, None)
+        if ids is not None and hue.force_flush():
+            _save_evidence({**ids, "credentialVersion": _installation["credential"]["version"], "source": "existing-application-request"})
+        return response
 `;
 }
 

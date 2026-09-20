@@ -9,11 +9,73 @@ The SDK packages use the MIT license. A workflow file or a passing build does no
 1. Merge the reviewed version, changelog, package metadata and lockfile changes into `main`. For TypeScript, run `bun run build` in `packages/sdk-typescript` after changing `version` so the generated `src/version.ts` is committed alongside it (CI fails when they disagree). For Python, change `__version__` in `packages/sdk-python/src/hue_sdk/_version.py` together with `version` in `pyproject.toml`; the test suite fails when they disagree. The changelog must contain a `### [X.Y.Z]` entry under the package's section; the workflow refuses to prepare a version without one. Approve the actual license text before packaging; the archive gate rejects missing licenses and `UNLICENSED` metadata.
 2. Run **Release SDK** (`.github/workflows/release.yml`) from `main`, selecting the language and exact committed stable version. Leave **publish** unchecked to prepare downloadable artifacts without publishing. The workflow always checks out its immutable triggering commit; it cannot publish a feature branch.
 3. Preparation builds once, tests installed packages, inspects the distribution inventory, and records `release-manifest.json` plus `SHA256SUMS`. TypeScript runs both supported AI SDK/OTel patch pairs and the Node reference chatbot. Python installs the same wheel using both pip and uv on Python 3.10 and 3.14, exercising tracing, logs, evaluation, privacy, acknowledgements and cloud configuration against synthetic loopback services.
-4. After registry setup, select **publish** to prepare, verify and publish. Only the isolated publishing jobs receive `id-token: write`. They download the verified artifacts, check hashes and publish unchanged bytes; they do not check out source or rebuild packages. The npm job disables lifecycle scripts.
+4. After registry setup, select **publish** to prepare, verify and publish. Only the isolated publishing jobs receive `id-token: write`. They download the verified artifacts, check hashes and publish unchanged bytes; they do not check out source or rebuild packages. The npm job disables lifecycle scripts. Ordinary TypeScript releases retain the default `latest` tag; an activation-gated release selects the closed `hue-onboarding-candidate` tag instead.
 5. Public registry acceptance fetches the published archives and verifies their SHA-256 against the tested artifacts. For npm it also requires provenance attestations on the published version. Fresh consumers then install by package name and exact version, without GitHub credentials or local archive overrides, and rerun behavioral checks.
 6. After registry acceptance, the workflow creates or updates the language-specific GitHub release (for example `typescript-v0.1.2` and `python-v0.1.0`) from the changelog entry, attaching the archive, `release-manifest.json` and `SHA256SUMS`. Update public availability statements only after registry acceptance succeeds.
 
 Publication is not rolled back automatically if acceptance fails. Investigate the published version, correct the issue in a reviewed patch release, and use registry deprecation/yank controls deliberately if needed. Do not retry publication with different bytes under the same version.
+
+## Activation-gated npm release
+
+When a TypeScript release must pass hosted acceptance before becoming npm's default, publish the
+exact archive once under the repository's fixed non-default tag:
+
+```sh
+gh workflow run release.yml --ref main \
+  -f language=typescript -f version=0.4.0 -f publish=true \
+  -f npm_dist_tag=hue-onboarding-candidate
+```
+
+The workflow verifies registry bytes, provenance, installed behavior and that the candidate tag
+resolves to the requested version, then creates a GitHub prerelease identified as an activation
+candidate. For `0.4.0`, workflow validation refuses `latest` even though unrelated TypeScript
+releases retain the backward-compatible default. Run hosted acceptance against that immutable
+registry version. Do not use `@latest` for this gate.
+
+npm trusted-publisher OIDC authenticates `npm publish`, but not `npm dist-tag add`. Promotion
+therefore uses an authorized maintainer's interactive npm session rather than adding a registry
+token to GitHub. Download the successful release artifact without repacking it, record the current
+`latest`, and run the guarded helper without `--apply` first:
+
+```sh
+python3 scripts/npm-release-tags.py promote \
+  --version 0.4.0 --expected-latest 0.3.2 \
+  --artifacts .artifacts/typescript-0.4.0 \
+  --acceptance-evidence .artifacts/hosted-production-acceptance.json
+
+# Only after hosted acceptance and production activation are approved:
+python3 scripts/npm-release-tags.py promote \
+  --version 0.4.0 --expected-latest 0.3.2 \
+  --artifacts .artifacts/typescript-0.4.0 \
+  --acceptance-evidence .artifacts/hosted-production-acceptance.json --apply
+```
+
+The evidence file is the sanitized Fern hosted-production handoff: exact package version/SHA-256/npm
+integrity, SDK and Fern commits, Release SDK and hosted-acceptance Actions run URLs, hosted evidence
+artifact SHA-256, serving database identity, previous latest and `productionAccepted: true`. It must
+contain no cookie, claim capability, key or email-verification URL. The helper re-verifies that
+identity against the release manifest, exact registry bytes, candidate tag, provenance and unchanged
+previous `latest` before mutation. `--apply` additionally requires an authenticated interactive npm
+session (`npm whoami`); OIDC is not a dist-tag credential. It promotes the existing version with
+`npm dist-tag add`; it does not publish or pack. Immediately run the clean-repository `@latest`
+acceptance afterward and mark the GitHub candidate release final only with the same reviewed handoff.
+
+If activation must roll back, point `latest` back to the previously recorded immutable accepted
+version. Dry-run first, then apply through the same authenticated maintainer session:
+
+```sh
+python3 scripts/npm-release-tags.py rollback \
+  --from-version 0.4.0 --to-version 0.3.2 \
+  --artifacts .artifacts/typescript-0.3.2
+python3 scripts/npm-release-tags.py rollback \
+  --from-version 0.4.0 --to-version 0.3.2 \
+  --artifacts .artifacts/typescript-0.3.2 --apply
+```
+
+Rollback first re-verifies the recorded previous archive against its immutable registry bytes and
+provenance, then changes only the default tag. It cannot remove clients already pinned to 0.4.0; publish a
+reviewed patch and deprecate the affected version with an explicit message if the package itself is
+unsafe. Never republish different bytes under an existing version.
 
 ## Registry setup
 

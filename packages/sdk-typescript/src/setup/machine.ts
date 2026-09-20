@@ -133,7 +133,13 @@ export function transitionSetup(
   }
   if (state.phase === "detecting" && input.type === "project.detected") {
     const plan: SetupPlan = {
-      steps: ["detect-project", "configure-telemetry", "verify-receipt", "claim-project"],
+      steps: [
+        "detect-project",
+        "install-runtime",
+        "configure-telemetry",
+        "verify-application-receipt",
+        "claim-project",
+      ],
       mutatesProject: true,
       backendRequired: true,
     };

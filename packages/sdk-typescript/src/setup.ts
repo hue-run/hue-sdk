@@ -7,6 +7,7 @@ export {
   type DiagnosticEvent,
   type FileChangedEvent,
   type PlanReadyEvent,
+  type PrivacyNoticeEvent,
   type ProjectDetectedEvent,
   type ReceiptVerifiedEvent,
   type RunCompletedEvent,
@@ -41,17 +42,33 @@ export {
   SetupBackendError,
   type SetupBackendAdapterOptions,
   type SetupBackendClaim,
+  type SetupApplicationEvidence,
   type SetupBackendReceipt,
   type SetupBackendTrial,
   type SetupCredentialResult,
   type SetupInstallationStatus,
+  type SetupPreflightStatus,
+  type SetupClaimHandoff,
   type SetupProbeEvidence,
 } from "./setup/backend.js";
+export {
+  SetupApplicationActionRequired,
+  installSetupRuntime,
+  planSetupApplication,
+  runSetupCommand,
+  wireSetupApplication,
+  type SetupApplicationPlan,
+  type SetupCommand,
+  type SetupCommandRunner,
+} from "./setup/application.js";
 export { type SetupFileChange } from "./setup/configure.js";
 export {
   FileSetupInstallationStore,
   type SetupInstallationRecord,
   type SetupStoredCredential,
+  type SetupStoredApplicationEvidence,
+  type SetupStoredApplicationAttempt,
+  type SetupStoredClaimHandoff,
   type SetupStoredProbe,
 } from "./setup/installation.js";
 export { detectSetupProject } from "./setup/detect.js";

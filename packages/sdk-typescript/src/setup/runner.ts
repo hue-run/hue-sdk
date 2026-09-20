@@ -1,11 +1,13 @@
 import type {
   SetupBackendAdapter,
+  SetupApplicationEvidence,
   SetupInstallationStatus,
-  SetupProbeEvidence,
 } from "./backend.js";
 import { SetupBackendError } from "./backend.js";
+import { SetupApplicationActionRequired } from "./application.js";
 import type { SetupMachineState } from "./machine.js";
 import { createInitialSetupState, transitionSetup } from "./machine.js";
+import { redactSetupTranscriptText } from "./render.js";
 import {
   SETUP_EVENT_CONTRACT_VERSION,
   type SetupEvent,
@@ -35,8 +37,11 @@ export type SetupBackendOperations = Pick<
   | "provision"
   | "status"
   | "credentials"
+  | "installRuntime"
   | "configure"
-  | "verifyProbe"
+  | "exerciseApplication"
+  | "prepareClaimHandoff"
+  | "verifyApplication"
   | "verifyRevokedCredential"
 >;
 
@@ -62,6 +67,8 @@ export interface SetupRunOptions {
   now?: () => Date;
   /** Cancels bounded local and network work. */
   signal?: AbortSignal;
+  /** Explicit owner request to replace the current browser handoff. Human claim commands only. */
+  claimRestart?: boolean;
 }
 
 /** Terminal outcome and latest resumable state from one setup invocation. */
@@ -194,8 +201,58 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
     }
     if (options.command === "claim" && !local)
       throw new Error("No Hue setup installation exists for this project and origin");
+    try {
+      const availability = await options.backend.preflight(
+        project,
+        options.signal,
+        options.command === "setup" || options.command === "resume",
+      );
+      if (
+        (options.command === "setup" || options.command === "resume") &&
+        availability?.state === "inactive"
+      ) {
+        await emit({
+          event: "diagnostic",
+          level: "warning",
+          code: "setup.inactive",
+          message: "Hue anonymous setup is currently inactive; no project or installation files were changed.",
+        });
+        await emit({
+          event: "action.required",
+          action: "configure",
+          message: "Rerun hue resume after Hue setup admissions are available.",
+          command: "hue resume",
+        });
+        await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
+        return { outcome: "action_required", state };
+      }
+      if (availability) {
+        await emit({
+          event: "privacy.notice",
+          privacyUrl: availability.privacyNotice.url,
+          effectiveDate: availability.privacyNotice.effectiveDate,
+          securityUrl: availability.securityUrl,
+        });
+      }
+    } catch (error) {
+      if (!(error instanceof SetupApplicationActionRequired)) throw error;
+      await emit({
+        event: "action.required",
+        action: error.code === "ambiguous-project" ? "select-project" : "integrate-application",
+        message: error.message,
+        command: "hue resume",
+      });
+      await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
+      return { outcome: "action_required", state };
+    }
     if (options.command === "setup" || options.command === "resume") {
-      await options.backend.preflight(project);
+      await emit({ event: "step.started", step: "install-runtime" });
+      const installed = await options.backend.installRuntime(project);
+      await emit({
+        event: "step.completed",
+        step: "install-runtime",
+        outcome: installed ? "changed" : "unchanged",
+      });
       await options.backend.prepare();
       status = await options.backend.provision(options.signal);
       rejectTerminal(status);
@@ -224,27 +281,32 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
     if (
       options.command === "claim" &&
       status.state === "active" &&
-      local?.probe?.verified &&
-      local.probe.credentialVersion === 0
+      local?.applicationEvidence?.verified &&
+      local.applicationEvidence.credentialVersion === 0
     ) {
+      const handoff = await options.backend.prepareClaimHandoff(
+        status,
+        options.mode === "human",
+        options.claimRestart === true,
+        options.signal,
+      );
       await emit({
         event: "claim.required",
         claimId: status.installationId,
-        url: status.claimUrl!,
       });
       await emit({
         event: "action.required",
-        action: "open-claim-url",
-        message:
-          "Open this private claim link in a browser. The fragment is a bearer capability; do not log or share it.",
-        url: status.claimUrl!,
-        command: "hue claim",
+        action: handoff.restartRequired ? "restart-claim-handoff" : "open-claim-handoff",
+        message: handoff.restartRequired
+          ? "The one-time browser handoff is no longer usable. The project owner may explicitly replace it from an interactive local terminal."
+          : handoff.opened
+            ? "Finish account linkage in the browser opened from the owner-only local handoff, then rerun hue claim."
+            : "Ask the project owner to run hue claim in an interactive local terminal, finish account linkage in the browser, then rerun hue claim.",
+        command: handoff.restartRequired ? "hue claim --restart" : "hue claim",
       });
       await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
       return { outcome: "action_required", state };
     }
-
-    await options.backend.preflight(project);
 
     const before = await options.backend.prepare();
     let oldCredential =
@@ -292,23 +354,49 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       outcome: changes.length ? "changed" : "unchanged",
     });
 
-    await emit({ event: "step.started", step: "verify-receipt" });
-    const evidence: SetupProbeEvidence | undefined = await options.backend.verifyProbe(
+    await emit({ event: "step.started", step: "verify-application-receipt" });
+    const application = await options.backend.prepare();
+    if (!application.applicationEvidence && status.state === "claimed") {
+      await emit({
+        event: "action.required",
+        action: "run-instrumented-request",
+        message:
+          "The preserved initial application evidence is unavailable. Setup will not replay business work automatically; run one explicit instrumented request and rerun hue claim.",
+        command: "hue claim",
+      });
+      await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
+      return { outcome: "action_required", state };
+    }
+    if (!application.applicationEvidence) {
+      try {
+        await options.backend.exerciseApplication(project, options.signal);
+      } catch (error) {
+        if (!(error instanceof SetupApplicationActionRequired)) throw error;
+        await emit({
+          event: "action.required",
+          action: "run-instrumented-request",
+          message: error.message,
+        });
+        await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
+        return { outcome: "action_required", state };
+      }
+    }
+    const evidence: SetupApplicationEvidence | undefined = await options.backend.verifyApplication(
       options.signal,
     );
     if (!evidence) {
       await emit({
         event: "diagnostic",
         level: "warning",
-        code: "probe.unverified",
+        code: "application.unverified",
         message:
-          "The metadata probe was exported, but exact stored receipt evidence did not arrive within the bounded deadline.",
+          "The existing application request was exported, but exact stored receipt evidence did not arrive within the bounded deadline.",
       });
       await emit({
         event: "action.required",
         action: "run-instrumented-request",
         message:
-          "Run hue resume to retry receipt verification. Probe delivery is not proof that application instrumentation ran.",
+          "Run hue resume to retry the existing application request and exact receipt verification.",
         command: "hue resume",
       });
       await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
@@ -318,22 +406,30 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
       event: "receipt.verified",
       receiptId: evidence.traceId,
       traceId: evidence.traceId,
+      source: "repository-http-boundary",
     });
-    await emit({ event: "step.completed", step: "verify-receipt", outcome: "verified" });
+    await emit({
+      event: "step.completed",
+      step: "verify-application-receipt",
+      outcome: "verified",
+    });
 
     if (status.state === "active") {
+      const handoff =
+        options.mode === "human"
+          ? await options.backend.prepareClaimHandoff(status, true, false, options.signal)
+          : { opened: false, state: "pending" as const, restartRequired: false };
       await emit({
         event: "claim.required",
         claimId: status.installationId,
-        url: status.claimUrl!,
       });
       await emit({
         event: "action.required",
-        action: "claim-project",
-        message:
-          "The setup probe is stored. This proves only the probe, not that customer application instrumentation ran. Claim the project, then run hue claim again to reconcile credentials.",
+        action: "open-claim-handoff",
+        message: handoff.opened
+          ? "An existing application request and its exact receipt are verified. Finish account linkage in the browser opened from the owner-only local handoff, then rerun hue claim."
+          : "An existing application request and its exact receipt are verified. Ask the project owner to run hue claim in an interactive local terminal and finish account linkage, then rerun hue claim.",
         command: "hue claim",
-        url: status.claimUrl!,
       });
       await emit({ event: "run.completed", outcome: "action_required", checkpointed: true });
       return { outcome: "action_required", state };
@@ -345,9 +441,9 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
     await emit({
       event: "diagnostic",
       level: "info",
-      code: "probe.verified",
+      code: "claim.reconciled",
       message:
-        "The post-claim metadata probe and replacement credential are verified. Application instrumentation still requires a real application run.",
+        "The replacement credential can access the preserved application receipt, and the superseded anonymous key was refused.",
     });
     await emit({ event: "run.completed", outcome: "ready", checkpointed: true });
     return { outcome: "ready", state };
@@ -376,7 +472,7 @@ export async function runSetup(options: SetupRunOptions): Promise<SetupRunResult
             : conflict
               ? (error as Error).message
               : error instanceof SetupBackendError
-                ? error.message
+                ? redactSetupTranscriptText(error.message)
                 : "Setup session could not complete. Local resumable state was preserved.",
         resumable: state !== undefined && !missing,
       });

@@ -16,6 +16,11 @@ on:
         description: Publish after verification (requires registry setup)
         default: false
         type: boolean
+      npm_dist_tag:
+        description: npm tag for TypeScript publication; ordinary releases keep latest
+        default: latest
+        type: choice
+        options: [latest, hue-onboarding-candidate]
 
 permissions:
   contents: read
@@ -26,6 +31,7 @@ concurrency:
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
+  NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}
 
 jobs:
   prepare:
@@ -47,8 +53,12 @@ jobs:
           assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Expected a stable package version'
           if os.environ['RELEASE_LANGUAGE'] == 'typescript':
               metadata = json.loads(pathlib.Path('packages/sdk-typescript/package.json').read_text())
+              assert os.environ['NPM_DIST_TAG'] in ('latest', 'hue-onboarding-candidate'), 'Unsupported npm dist-tag'
+              if version == '0.4.0':
+                  assert os.environ['NPM_DIST_TAG'] == 'hue-onboarding-candidate', 'TypeScript 0.4.0 must publish under the onboarding candidate tag; latest promotion is separate'
           else:
               metadata = tomllib.loads(pathlib.Path('packages/sdk-python/pyproject.toml').read_text())['project']
+              assert os.environ['NPM_DIST_TAG'] == 'latest', 'npm dist-tag does not apply to Python releases'
           assert metadata['version'] == version, 'Version must match the committed package'
           PY
       - name: Require a changelog entry for the requested version
@@ -164,7 +174,8 @@ jobs:
             echo "::error::npm provenance requires a public source repository (visibility: ${visibility}); make the repository public before publishing"
             exit 1
           fi
-      - run: npm publish ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz" --access public --ignore-scripts --registry=https://registry.npmjs.org
+      - name: Publish the exact archive under the selected closed dist-tag
+        run: npm publish ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz" --tag "$NPM_DIST_TAG" --access public --ignore-scripts --registry=https://registry.npmjs.org
 
   publish-pypi:
     if: inputs.publish && inputs.language == 'python'
@@ -215,6 +226,10 @@ jobs:
         run: |
           url="$(npm view "@hue-run/sdk@${RELEASE_VERSION}" dist.attestations.url --registry=https://registry.npmjs.org)"
           test -n "$url" && echo "attestations: $url"
+      - name: Verify the selected dist-tag resolves to the accepted version
+        run: |
+          tagged="$(npm view "@hue-run/sdk@${NPM_DIST_TAG}" version --registry=https://registry.npmjs.org)"
+          test "$tagged" = "$RELEASE_VERSION"
       - run: node packages/sdk-typescript/scripts/verify-package.mjs --registry-version "$RELEASE_VERSION"
 
   accept-pypi:
@@ -267,11 +282,16 @@ jobs:
         run: |
           tag="${RELEASE_LANGUAGE}-v${RELEASE_VERSION}"
           if [ "$RELEASE_LANGUAGE" = typescript ]; then title="TypeScript SDK ${RELEASE_VERSION}"; else title="Python SDK ${RELEASE_VERSION}"; fi
+          prerelease=""
+          if [ "$RELEASE_LANGUAGE" = typescript ] && [ "$NPM_DIST_TAG" = hue-onboarding-candidate ]; then
+            title="$title (activation candidate)"
+            prerelease="--prerelease"
+          fi
           python3 scripts/changelog.py notes "$RELEASE_LANGUAGE" "$RELEASE_VERSION" "$GITHUB_SHA" \
             "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" .artifacts/SHA256SUMS > release-notes.md
           if gh release view "$tag" > /dev/null 2>&1; then
-            gh release edit "$tag" --title "$title" --notes-file release-notes.md
+            gh release edit "$tag" --title "$title" --notes-file release-notes.md $prerelease
             gh release upload "$tag" .artifacts/* --clobber
           else
-            gh release create "$tag" .artifacts/* --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md
+            gh release create "$tag" .artifacts/* --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md $prerelease
           fi

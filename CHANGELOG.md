@@ -25,12 +25,18 @@ refuses to publish a version without a matching entry below.
 - The `hue` executable now implements the frozen Setup HTTP protocol v1: per-project/per-origin
   installation proof is persisted before network writes, provisioning and credential recovery are
   idempotent, and account claim reconciles generation 1 while checking generation 0 revocation.
-- Clean TypeScript and Python projects receive secret-free metadata-only integration modules. Managed
-  credentials stay in ignored atomic `0600` files; custom conflicts, symlinks, unsafe paths, insecure
-  hosted origins, redirects and unexpected edits fail closed without executing project commands.
-- Setup exports and flushes a real metadata-only OTLP span and verifies its exact trace/span receipt.
-  It distinguishes that probe evidence from customer application instrumentation and creates no
-  Scenario, Hue Run, evaluation, source capture, worker or remote execution.
+- The automatic matrix is intentionally narrow: one npm/Bun Express server or one uv Flask server
+  with an unambiguous existing entrypoint, literal GET route and environment-selected port. Setup
+  installs exact runtime versions through that manager, adds bounded owned middleware blocks without
+  rewriting business logic, exercises the existing route and verifies those exact trace/span IDs.
+  Monorepos, mixed managers, custom runtime versions and unfamiliar shapes require an explicit action.
+- Anonymous setup has an enforced legal-approval step before dependency, project, installation-secret
+  or network mutation. Until Hue publishes an authoritative versioned Terms/Privacy notice and Fern
+  freezes the matching preflight/acceptance contract, the real adapter stops there without inferring
+  consent. Synthetic legal fixtures are limited to isolated tests and are not hosted acceptance.
+- Managed credentials stay in ignored atomic `0600` files; custom conflicts, symlinks, unsafe paths,
+  insecure hosted origins, redirects and unexpected edits fail closed. Setup creates no Scenario,
+  Hue Run, evaluation, source capture, worker or remote execution.
 - Human terminal and noninteractive version-1 JSONL agent modes support interruption/resume, private
   browser claim handoff, post-claim status reconciliation and bounded retries. Installed-tarball
   checks cover both modes and both project languages against a loopback protocol service; a separate

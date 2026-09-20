@@ -31,7 +31,7 @@
         "timestamp": { "type": "string", "format": "date-time", "maxLength": 40 }
       }
     },
-    "step": { "enum": ["detect-project", "configure-telemetry", "verify-receipt", "claim-project"] },
+    "step": { "enum": ["detect-project", "install-runtime", "configure-telemetry", "verify-application-receipt", "claim-project"] },
     "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "identifier": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
     "plan": {
@@ -95,7 +95,7 @@
     },
     "action.required": {
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["action", "message"], "properties": { "event": { "const": "action.required" }, "action": { "enum": ["claim-project", "configure", "run-instrumented-request", "open-claim-url", "capture-approved-content", "review-content-approved-trace"] }, "message": { "$ref": "#/$defs/text" }, "command": { "type": "string", "minLength": 1, "maxLength": 200 }, "url": { "type": "string", "format": "uri", "maxLength": 2048 } } }],
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["action", "message"], "properties": { "event": { "const": "action.required" }, "action": { "enum": ["claim-project", "configure", "select-project", "integrate-application", "run-instrumented-request", "open-claim-handoff", "restart-claim-handoff"] }, "message": { "$ref": "#/$defs/text" }, "command": { "type": "string", "minLength": 1, "maxLength": 200 } } }],
       "unevaluatedProperties": false
     },
     "trial.created": {
@@ -107,12 +107,12 @@
     "receipt.verified": {
       "type": "object",
       "description": "Instrumentation-only proof for an anonymous trace; not evidence of content approval or Scenario suitability.",
-      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["receiptId", "traceId"], "properties": { "event": { "const": "receipt.verified" }, "receiptId": { "$ref": "#/$defs/identifier" }, "traceId": { "type": "string", "pattern": "^[a-f0-9]{32}$" } } }],
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["receiptId", "traceId", "source"], "properties": { "event": { "const": "receipt.verified" }, "receiptId": { "$ref": "#/$defs/identifier" }, "traceId": { "type": "string", "pattern": "^[a-f0-9]{32}$" }, "source": { "const": "repository-http-boundary" } } }],
       "unevaluatedProperties": false
     },
     "claim.required": {
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["claimId", "url"], "properties": { "event": { "const": "claim.required" }, "claimId": { "$ref": "#/$defs/identifier" }, "url": { "type": "string", "format": "uri", "maxLength": 2048 } } }],
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["claimId"], "properties": { "event": { "const": "claim.required" }, "claimId": { "$ref": "#/$defs/identifier" } } }],
       "unevaluatedProperties": false
     },
     "claim.completed": {

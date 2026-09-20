@@ -1,12 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { gunzipSync } from "node:zlib";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import protobuf from "protobufjs/light.js";
 import { SetupBackendAdapter } from "../src/setup/backend.js";
+import {
+  installSetupRuntime,
+  exerciseSetupApplication,
+  planSetupApplication,
+  SetupApplicationActionRequired,
+  wireSetupApplication,
+} from "../src/setup/application.js";
 import { configureSetupProject } from "../src/setup/configure.js";
 import { FileSetupInstallationStore } from "../src/setup/installation.js";
 import { FileSetupCheckpointAdapter, setupRunId } from "../src/setup/checkpoint.js";
@@ -40,6 +47,43 @@ const detection = (root: string): SetupProjectDetection => ({
   hue: "multiple",
   openTelemetry: "multiple",
 });
+
+async function writeExpressProject(root: string, runtime = false): Promise<void> {
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "package.json"),
+    JSON.stringify({
+      private: true,
+      type: "module",
+      scripts: { start: "node src/server.mjs" },
+      dependencies: { express: "5.1.0", "@hue-run/sdk": "0.4.0" },
+      devDependencies: { typescript: "7.0.2" },
+    }),
+  );
+  await writeFile(join(root, "package-lock.json"), JSON.stringify({ lockfileVersion: 3 }));
+  await writeFile(
+    join(root, "src", "server.mjs"),
+    `${runtime ? `import { appendFileSync } from "node:fs";\n` : ""}import express from "express";\nconst app = express();\napp.get("/", (_request, response) => {${runtime ? ` appendFileSync(${JSON.stringify(join(root, "handler-count.txt"))}, "1");` : ""} response.end("ok"); });\napp.listen(Number(process.env.PORT), "127.0.0.1");\n`,
+  );
+  if (!runtime) return;
+  const express = join(root, "node_modules", "express");
+  const hue = join(root, "node_modules", "@hue-run");
+  await mkdir(express, { recursive: true });
+  await mkdir(hue, { recursive: true });
+  await writeFile(
+    join(express, "package.json"),
+    JSON.stringify({ name: "express", version: "5.1.0", type: "module", exports: "./index.js" }),
+  );
+  await writeFile(
+    join(express, "index.js"),
+    `import { createServer } from "node:http";\nexport default function express(){const middleware=[];const routes=new Map();const app=(request,response)=>{let index=0;const next=()=>{const item=middleware[index++];if(item)return item(request,response,next);const handler=routes.get(request.method+" "+new URL(request.url,"http://localhost").pathname);if(handler)return handler(request,response);response.statusCode=404;response.end();};next();};app.use=(value)=>middleware.push(value);app.get=(path,value)=>routes.set("GET "+path,value);app.listen=(port,host)=>createServer(app).listen(port,host);return app;}\n`,
+  );
+  await symlink(
+    resolve(dirname(import.meta.dir)),
+    join(hue, "sdk"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+}
 
 class MemoryCheckpoints implements SetupCheckpointAdapter {
   state?: SetupMachineState;
@@ -75,7 +119,13 @@ describe("setup state machine", () => {
     ).toBe(true);
     expect(
       (second.state as Extract<SetupMachineState, { phase: "local-ready" }>).plan.steps,
-    ).toEqual(["detect-project", "configure-telemetry", "verify-receipt", "claim-project"]);
+    ).toEqual([
+      "detect-project",
+      "install-runtime",
+      "configure-telemetry",
+      "verify-application-receipt",
+      "claim-project",
+    ]);
   });
 
   test("rejects out-of-order inputs", () => {
@@ -131,6 +181,220 @@ describe("project detection", () => {
       }),
     );
     expect((await detectSetupProject(root)).frameworks).toEqual([]);
+  });
+});
+
+describe("supported application matrix", () => {
+  test("selects one Express package and fails closed at an ambiguous workspace root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hue-setup-express-plan-"));
+    await writeExpressProject(root);
+    const project = await detectSetupProject(root);
+    expect(await planSetupApplication(project)).toMatchObject({
+      language: "typescript",
+      manager: "npm",
+      framework: "express",
+      entrypoint: "src/server.mjs",
+      requestPath: "/",
+    });
+    const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    manifest.workspaces = ["packages/*"];
+    await writeFile(join(root, "package.json"), JSON.stringify(manifest));
+    await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+      code: "ambiguous-project",
+    });
+    delete manifest.workspaces;
+    await writeFile(join(root, "package.json"), JSON.stringify(manifest));
+    await writeFile(join(root, "turbo.json"), "{}\n");
+    await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+      code: "ambiguous-project",
+    });
+  });
+
+  test("uses exact manager argv and never replaces a custom runtime version", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hue-setup-install-"));
+    await writeExpressProject(root);
+    const manifestPath = join(root, "package.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.dependencies["@hue-run/sdk"];
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const project = await detectSetupProject(root);
+    const plan = await planSetupApplication(project);
+    const commands: Array<{ command: string; args: string[] }> = [];
+    expect(
+      await installSetupRuntime(project, plan, async (command) => {
+        commands.push(command);
+        const updated = JSON.parse(await readFile(manifestPath, "utf8"));
+        updated.dependencies["@hue-run/sdk"] = "0.4.0";
+        await writeFile(manifestPath, JSON.stringify(updated));
+      }),
+    ).toBe(true);
+    expect(commands).toEqual([
+      expect.objectContaining({
+        command: "npm",
+        args: [
+          "install",
+          "--save-exact",
+          "--ignore-scripts",
+          "--no-audit",
+          "--no-fund",
+          "@hue-run/sdk@0.4.0",
+        ],
+      }),
+    ]);
+    expect(await installSetupRuntime(project, plan, async () => {})).toBe(false);
+    const custom = JSON.parse(await readFile(manifestPath, "utf8"));
+    custom.dependencies["@hue-run/sdk"] = "0.3.2";
+    await writeFile(manifestPath, JSON.stringify(custom));
+    await expect(installSetupRuntime(project, plan, async () => {})).rejects.toBeInstanceOf(
+      SetupApplicationActionRequired,
+    );
+  });
+
+  test("uses Bun and uv directly with fixed argv for their supported fixtures", async () => {
+    const bunRoot = await mkdtemp(join(tmpdir(), "hue-setup-bun-install-"));
+    await writeExpressProject(bunRoot);
+    await import("node:fs/promises").then(({ unlink }) =>
+      unlink(join(bunRoot, "package-lock.json")),
+    );
+    await writeFile(join(bunRoot, "bun.lock"), "synthetic\n");
+    const bunManifestPath = join(bunRoot, "package.json");
+    const bunManifest = JSON.parse(await readFile(bunManifestPath, "utf8"));
+    delete bunManifest.dependencies["@hue-run/sdk"];
+    await writeFile(bunManifestPath, JSON.stringify(bunManifest));
+    const bunProject = await detectSetupProject(bunRoot);
+    const bunPlan = await planSetupApplication(bunProject);
+    let bunCommand;
+    await installSetupRuntime(bunProject, bunPlan, async (command) => {
+      bunCommand = command;
+      const updated = JSON.parse(await readFile(bunManifestPath, "utf8"));
+      updated.dependencies["@hue-run/sdk"] = "0.4.0";
+      await writeFile(bunManifestPath, JSON.stringify(updated));
+    });
+    expect(bunCommand).toMatchObject({
+      command: "bun",
+      args: ["add", "--exact", "--ignore-scripts", "@hue-run/sdk@0.4.0"],
+    });
+
+    const pythonRoot = await mkdtemp(join(tmpdir(), "hue-setup-uv-install-"));
+    const pyproject = join(pythonRoot, "pyproject.toml");
+    await writeFile(pyproject, '[project]\nname = "setup-test"\ndependencies = ["flask==3.1.2"]\n');
+    await writeFile(join(pythonRoot, "uv.lock"), "version = 1\n");
+    await writeFile(
+      join(pythonRoot, "app.py"),
+      'import os\nfrom flask import Flask\napp = Flask(__name__)\n@app.get("/")\ndef home(): return "ok"\napp.run(port=int(os.environ["PORT"]))\n',
+    );
+    const pythonProject = await detectSetupProject(pythonRoot);
+    const pythonPlan = await planSetupApplication(pythonProject);
+    let uvCommand;
+    await installSetupRuntime(pythonProject, pythonPlan, async (command) => {
+      uvCommand = command;
+      await writeFile(
+        pyproject,
+        '[project]\nname = "setup-test"\ndependencies = ["flask==3.1.2", "hue-run==0.2.2"]\n',
+      );
+    });
+    expect(uvCommand).toMatchObject({
+      command: "uv",
+      args: ["add", "hue-run==0.2.2"],
+    });
+  });
+
+  test("wires a supported Flask app idempotently without changing its business route", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hue-setup-flask-plan-"));
+    const original = `import os\nfrom flask import Flask\n\napp = Flask(__name__)\n\n@app.get("/")\ndef home():\n    return "business-response"\n\nif __name__ == "__main__":\n    app.run(host="127.0.0.1", port=int(os.environ["PORT"]))\n`;
+    await writeFile(
+      join(root, "pyproject.toml"),
+      '[project]\nname = "setup-test"\ndependencies = ["flask==3.1.2", "hue-run==0.2.2"]\n',
+    );
+    await writeFile(join(root, "uv.lock"), "version = 1\n");
+    await writeFile(join(root, "app.py"), original);
+    const project = await detectSetupProject(root);
+    const plan = await planSetupApplication(project);
+    expect(plan).toMatchObject({ language: "python", manager: "uv", framework: "flask" });
+    expect(await installSetupRuntime(project, plan, async () => {})).toBe(false);
+    const store = new FileSetupInstallationStore(root, "https://example.test");
+    const record = await store.loadOrCreate();
+    await chmod(join(root, "app.py"), 0o750);
+    const first = await wireSetupApplication(store, record, plan);
+    expect(first).toEqual({ path: "app.py", change: "updated" });
+    const wired = await readFile(join(root, "app.py"), "utf8");
+    expect(wired).toContain('return "business-response"');
+    expect(wired.match(/Hue setup instrumentation \(managed; do not edit\)/gu)).toHaveLength(2);
+    expect((await lstat(join(root, "app.py"))).mode & 0o777).toBe(0o750);
+    expect(await wireSetupApplication(store, record, plan)).toBeUndefined();
+  });
+
+  test("fails closed on protected Python prologues and entrypoint changes after planning", async () => {
+    for (const prologue of [
+      "#!/usr/bin/env python3\n",
+      "# -*- coding: utf-8 -*-\n",
+      '"""module documentation"""\n',
+      "from __future__ import annotations\n",
+    ]) {
+      const root = await mkdtemp(join(tmpdir(), "hue-setup-python-prologue-"));
+      await writeFile(
+        join(root, "pyproject.toml"),
+        '[project]\nname = "setup-test"\ndependencies = ["flask==3.1.2"]\n',
+      );
+      await writeFile(join(root, "uv.lock"), "version = 1\n");
+      await writeFile(
+        join(root, "app.py"),
+        `${prologue}import os\nfrom flask import Flask\napp = Flask(__name__)\n@app.get("/")\ndef home(): return "ok"\napp.run(port=int(os.environ["PORT"]))\n`,
+      );
+      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+        code: "ambiguous-entrypoint",
+      });
+    }
+
+    const root = await mkdtemp(join(tmpdir(), "hue-setup-concurrent-edit-"));
+    await writeExpressProject(root);
+    const plan = await planSetupApplication(await detectSetupProject(root));
+    const entry = join(root, "src", "server.mjs");
+    const changed = `${await readFile(entry, "utf8")}\n// user concurrent edit\n`;
+    await writeFile(entry, changed);
+    const store = new FileSetupInstallationStore(root, "https://example.test");
+    const record = await store.loadOrCreate();
+    await expect(wireSetupApplication(store, record, plan)).rejects.toMatchObject({
+      code: "custom-instrumentation",
+    });
+    expect(await readFile(entry, "utf8")).toBe(changed);
+  });
+
+  test("waits on TCP then invokes a failing business route exactly once without evidence replay", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hue-setup-exact-once-"));
+    const countPath = join(root, "count.txt");
+    await writeFile(
+      join(root, "server.mjs"),
+      `import { appendFileSync } from "node:fs";\nimport { createServer } from "node:http";\nsetTimeout(() => createServer((_request, response) => { appendFileSync(${JSON.stringify(countPath)}, "1"); response.statusCode = 503; response.end("not ready"); }).listen(Number(process.env.PORT), "127.0.0.1"), 150);\n`,
+    );
+    const store = new FileSetupInstallationStore(root, "https://example.test");
+    const record = await store.loadOrCreate();
+    record.credential = { apiKey: "synthetic", keyId: "key", version: 0 };
+    await store.save(record);
+    const plan = {
+      language: "typescript" as const,
+      manager: "npm" as const,
+      framework: "express" as const,
+      entrypoint: "server.mjs",
+      requestPath: "/",
+      entryDigest: "a".repeat(64),
+    };
+    await expect(
+      exerciseSetupApplication(store, record, plan, undefined, {
+        readinessMillis: 1000,
+        requestMillis: 1000,
+        evidenceMillis: 200,
+      }),
+    ).rejects.toThrow("evidence");
+    expect(await readFile(countPath, "utf8")).toBe("1");
+    await expect(
+      exerciseSetupApplication(store, record, plan, undefined, {
+        readinessMillis: 1000,
+        requestMillis: 1000,
+        evidenceMillis: 200,
+      }),
+    ).rejects.toMatchObject({ code: "custom-instrumentation" });
+    expect(await readFile(countPath, "utf8")).toBe("1");
   });
 });
 
@@ -347,6 +611,61 @@ describe("runner and checkpoints", () => {
 });
 
 describe("real setup HTTP adapter", () => {
+  test("checks technical availability before runtime, project, or installation mutation", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-inactive-"));
+    await writeExpressProject(projectRoot);
+    const checkpoints = new MemoryCheckpoints();
+    let network = 0;
+    let commands = 0;
+    const backend = new SetupBackendAdapter({
+      projectRoot,
+      origin: "https://example.test",
+      fetch: (async (_input, init) => {
+        network += 1;
+        expect(new Headers(init?.headers).has("authorization")).toBe(false);
+        return Response.json(
+          {
+            protocolVersion: 1,
+            state: "inactive",
+            capturePolicy: "metadata-only-v1",
+            limits: { traces: 100, spans: 1000, bytes: 2097152 },
+            lifetime: { expiresAfterSeconds: 86400, purgeAfterSeconds: 691200 },
+          },
+          { headers: { "Cache-Control": "no-store" } },
+        );
+      }) as unknown as typeof fetch,
+      commandRunner: async () => {
+        commands += 1;
+      },
+    });
+    const events: SetupEvent[] = [];
+    const result = await runSetup({
+      command: "setup",
+      mode: "jsonl",
+      runId: "setup_inactive",
+      projectRoot,
+      checkpoints,
+      backend,
+      project: { detect: detectSetupProject },
+      emit: (event) => {
+        events.push(event);
+      },
+    });
+    expect(result.outcome).toBe("action_required");
+    expect(network).toBe(1);
+    expect(commands).toBe(0);
+    expect(await lstat(join(projectRoot, ".hue")).catch(() => undefined)).toBeUndefined();
+    expect(await readFile(join(projectRoot, "package.json"), "utf8")).not.toContain(
+      "installationSecret",
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "action.required",
+        action: "configure",
+      }),
+    );
+  });
+
   test("refuses insecure origins, custom config conflicts, and symlink targets", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-security-"));
     await writeFile(
@@ -398,10 +717,7 @@ describe("real setup HTTP adapter", () => {
     await expect(unsafe.loadOrCreate()).rejects.toThrow("symlink");
 
     const preflightRoot = await mkdtemp(join(tmpdir(), "hue-setup-preflight-conflict-"));
-    await writeFile(
-      join(preflightRoot, "package.json"),
-      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
-    );
+    await writeExpressProject(preflightRoot);
     await writeFile(join(preflightRoot, "hue.setup.mjs"), "// existing custom setup\n");
     const preflight = new SetupBackendAdapter({
       projectRoot: preflightRoot,
@@ -499,7 +815,7 @@ describe("real setup HTTP adapter", () => {
             expiresAt: "2026-09-21T12:00:00.000Z",
             limits: { traces: 100, spans: 1000, bytes: 2097152 },
             usage: { traces: 0, spans: 0, bytes: 0 },
-            claimUrl: `${origin}/setup/claim#${"c".repeat(43)}`,
+            claimHandoff: null,
             endpoints: {
               otlp: "/api/v1/otlp/v1/traces",
               receipt: "/api/v1/traces/{traceId}/receipt",
@@ -524,10 +840,7 @@ describe("real setup HTTP adapter", () => {
 
   test("treats a durable revoked lineage as terminal without minting or retrying", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-revoked-lineage-"));
-    await writeFile(
-      join(projectRoot, "package.json"),
-      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
-    );
+    await writeExpressProject(projectRoot);
     const origin = "https://example.test";
     let credentialCalls = 0;
     const backend = new SetupBackendAdapter({
@@ -557,7 +870,7 @@ describe("real setup HTTP adapter", () => {
             expiresAt: null,
             limits: { traces: 100, spans: 1000, bytes: 2097152 },
             usage: { traces: 1, spans: 1, bytes: 100 },
-            claimUrl: null,
+            claimHandoff: null,
             endpoints: {
               otlp: "/api/v1/otlp/v1/traces",
               receipt: "/api/v1/traces/{traceId}/receipt",
@@ -630,7 +943,7 @@ describe("real setup HTTP adapter", () => {
             expiresAt: "2026-09-21T12:00:00.000Z",
             limits: { traces: 100, spans: 1000, bytes: 2097152 },
             usage: { traces: 0, spans: 0, bytes: 0 },
-            claimUrl: `${origin}/setup/claim#${"c".repeat(43)}`,
+            claimHandoff: null,
             endpoints: {
               otlp: "/api/v1/otlp/v1/traces",
               receipt: "/api/v1/traces/{traceId}/receipt",
@@ -656,6 +969,78 @@ describe("real setup HTTP adapter", () => {
       requestTimeoutMillis: 1000,
     });
     await expect(invalidError.provision()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  test("rejects truncated and cross-origin claim capabilities without echoing them", async () => {
+    const origin = "https://example.test";
+    const handoffId = "11111111-1111-4111-8111-111111111111";
+    const cases = [
+      `${origin}/setup/claim#${"t".repeat(42)}`,
+      `https://attacker.invalid/setup/claim#${"x".repeat(43)}`,
+    ];
+    for (const claimUrl of cases) {
+      const projectRoot = await mkdtemp(join(tmpdir(), "hue-setup-invalid-claim-"));
+      const backend = new SetupBackendAdapter({
+        projectRoot,
+        origin,
+        fetch: (async (input) => {
+          const installation = await backend.prepare();
+          const url = new URL(input instanceof Request ? input.url : input.toString());
+          if (url.pathname.endsWith("/claim-handoff"))
+            return Response.json(
+              {
+                protocolVersion: 1,
+                installationId: installation.installationId,
+                handoff: {
+                  id: handoffId,
+                  state: "pending",
+                  expiresAt: "2026-09-20T12:10:00.000Z",
+                  sessionExpiresAt: null,
+                },
+                claimUrl,
+              },
+              { headers: { "Cache-Control": "no-store" } },
+            );
+          return Response.json(
+            {
+              protocolVersion: 1,
+              installationId: installation.installationId,
+              state: "active",
+              project: { id: "project_test", organizationId: "org_trial" },
+              credentialVersion: 0,
+              capturePolicy: "metadata-only-v1",
+              expiresAt: "2026-09-21T12:00:00.000Z",
+              limits: { traces: 100, spans: 1000, bytes: 2097152 },
+              usage: { traces: 0, spans: 0, bytes: 0 },
+              claimHandoff: {
+                id: handoffId,
+                state: "pending",
+                expiresAt: "2026-09-20T12:10:00.000Z",
+                sessionExpiresAt: null,
+              },
+              endpoints: {
+                otlp: "/api/v1/otlp/v1/traces",
+                receipt: "/api/v1/traces/{traceId}/receipt",
+              },
+            },
+            { headers: { "Cache-Control": "no-store" } },
+          );
+        }) as unknown as typeof fetch,
+      });
+      let failure: unknown;
+      try {
+        const status = await backend.provision();
+        const installation = await backend.prepare();
+        installation.claimHandoff = { id: handoffId, previousHandoffId: null };
+        await backend.store.save(installation);
+        await backend.prepareClaimHandoff(status, false);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({ code: "invalid_response" });
+      expect(String(failure)).not.toContain(claimUrl);
+      expect(await lstat(backend.store.claimHandoffPath).catch(() => undefined)).toBeUndefined();
+    }
   });
 
   test("refuses redirects without forwarding installation proof", async () => {
@@ -694,15 +1079,11 @@ describe("real setup HTTP adapter", () => {
     }
   });
 
-  test("persists proof first, configures both languages, verifies exact probes, and reconciles claim", async () => {
+  test("persists proof first, wires an existing app request, verifies exact receipts, and reconciles claim", async () => {
     const parent = await mkdtemp(join(tmpdir(), "hue-setup-http-"));
     const projectRoot = join(parent, "project");
     await mkdir(projectRoot);
-    await writeFile(
-      join(projectRoot, "package.json"),
-      JSON.stringify({ dependencies: { typescript: "7.0.2" } }),
-    );
-    await writeFile(join(projectRoot, "pyproject.toml"), '[project]\nname = "setup-test"\n');
+    await writeExpressProject(projectRoot, true);
     const traceType = protobuf.Root.fromJSON(otlpSchema).lookupType(
       "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
     );
@@ -712,8 +1093,12 @@ describe("real setup HTTP adapter", () => {
     let spanId = "";
     let oldKeyRejected = 0;
     let failRevocationOnce = true;
+    let receiptMissing = true;
+    let handoffIssued = false;
     const key0 = "synthetic-setup-key-v0";
     const key1 = "synthetic-setup-key-v1";
+    const claimCapability = "c".repeat(43);
+    let handoffId = "";
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -730,12 +1115,33 @@ describe("real setup HTTP adapter", () => {
           expiresAt: claimed ? null : "2026-09-21T12:00:00.000Z",
           limits: { traces: 100, spans: 1000, bytes: 2097152 },
           usage: { traces: traceId ? 1 : 0, spans: traceId ? 1 : 0, bytes: traceId ? 100 : 0 },
-          claimUrl: claimed ? null : `${url.origin}/setup/claim#${"c".repeat(43)}`,
+          claimHandoff:
+            claimed || !handoffIssued
+              ? null
+              : {
+                  id: handoffId,
+                  state: "pending",
+                  expiresAt: "2026-09-20T12:10:00.000Z",
+                  sessionExpiresAt: null,
+                },
           endpoints: {
             otlp: "/api/v1/otlp/v1/traces",
             receipt: "/api/v1/traces/{traceId}/receipt",
           },
         });
+        if (url.pathname === "/api/v1/setup/preflight") {
+          expect(request.headers.get("authorization")).toBeNull();
+          return Response.json(
+            {
+              protocolVersion: 1,
+              state: "available",
+              capturePolicy: "metadata-only-v1",
+              limits: { traces: 100, spans: 1000, bytes: 2097152 },
+              lifetime: { expiresAfterSeconds: 86400, purgeAfterSeconds: 691200 },
+            },
+            { headers: noStore },
+          );
+        }
         if (url.pathname.startsWith("/api/v1/setup/installations")) {
           expect(request.headers.get("authorization")).toMatch(
             /^Bearer hue_install_[A-Za-z0-9_-]{43}$/u,
@@ -759,6 +1165,29 @@ describe("real setup HTTP adapter", () => {
             return Response.json(status(), { headers: noStore });
           }
           if (request.method === "GET") return Response.json(status(), { headers: noStore });
+          if (url.pathname.endsWith("/claim-handoff")) {
+            const body = (await request.json()) as {
+              protocolVersion: number;
+              handoffId: string;
+              previousHandoffId: string | null;
+            };
+            expect(body.protocolVersion).toBe(1);
+            expect(body.handoffId).toMatch(
+              /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u,
+            );
+            expect(body.previousHandoffId).toBeNull();
+            handoffId = body.handoffId;
+            handoffIssued = true;
+            return Response.json(
+              {
+                protocolVersion: 1,
+                installationId,
+                handoff: status().claimHandoff,
+                claimUrl: `${url.origin}/setup/claim#${claimCapability}`,
+              },
+              { headers: noStore },
+            );
+          }
           if (url.pathname.endsWith("/credentials")) {
             const body = (await request.json()) as { credentialVersion: number };
             expect(body.credentialVersion).toBe(claimed ? 1 : 0);
@@ -804,6 +1233,11 @@ describe("real setup HTTP adapter", () => {
           expect(authorization).toBe(`Bearer ${claimed ? key1 : key0}`);
           expect(match[1]).toBe(traceId);
           expect(url.searchParams.getAll("expectedSpanId")).toEqual([spanId]);
+          if (receiptMissing)
+            return Response.json(
+              { code: "TRACE_NOT_FOUND" },
+              { status: 404, headers: { "Cache-Control": "no-store" } },
+            );
           return Response.json({
             traceId,
             spanCount: 1,
@@ -823,7 +1257,8 @@ describe("real setup HTTP adapter", () => {
         projectRoot,
         origin,
         requestTimeoutMillis: 2000,
-        receiptTimeoutMillis: 2000,
+        receiptTimeoutMillis: 300,
+        commandRunner: async () => {},
       });
       const checkpoints = new MemoryCheckpoints();
       const events: SetupEvent[] = [];
@@ -839,7 +1274,17 @@ describe("real setup HTTP adapter", () => {
         },
       };
       expect((await runSetup({ ...options, command: "setup" })).outcome).toBe("action_required");
+      expect(events.some((event) => event.event === "receipt.verified")).toBe(false);
+      expect(await readFile(join(projectRoot, "handler-count.txt"), "utf8")).toBe("1");
+      receiptMissing = false;
+      events.length = 0;
+      expect((await runSetup({ ...options, command: "resume" })).outcome).toBe("action_required");
       expect(events.some((event) => event.event === "receipt.verified")).toBe(true);
+      expect(await readFile(join(projectRoot, "handler-count.txt"), "utf8")).toBe("1");
+      expect(JSON.stringify(events)).not.toContain(claimCapability);
+      expect(events.find((event) => event.event === "claim.required")).toEqual(
+        expect.not.objectContaining({ url: expect.anything() }),
+      );
       const installation = await backend.localInstallation();
       expect(installation?.credential?.version).toBe(0);
       expect((await lstat(backend.store.path)).mode & 0o777).toBe(0o600);
@@ -849,13 +1294,48 @@ describe("real setup HTTP adapter", () => {
       expect(await readFile(join(projectRoot, ".hue", ".gitignore"), "utf8")).toContain(
         "installation-*.json",
       );
-      for (const name of ["hue.setup.mjs", "hue_setup.py"]) {
+      expect(await readFile(join(projectRoot, ".gitignore"), "utf8")).toContain(
+        ".hue/claim-handoff-*.html",
+      );
+      expect(await lstat(backend.store.claimHandoffPath).catch(() => undefined)).toBeUndefined();
+      for (const name of ["hue.setup.mjs"]) {
         const config = await readFile(join(projectRoot, name), "utf8");
         expect(config).not.toContain(key0);
         expect(config).toContain(
           name.endsWith("mjs") ? "captureContent: false" : "capture_content=False",
         );
       }
+      const opened: string[] = [];
+      const ownerBackend = new SetupBackendAdapter({
+        projectRoot,
+        origin,
+        requestTimeoutMillis: 2000,
+        receiptTimeoutMillis: 2000,
+        commandRunner: async () => {},
+        openBrowser: async (localHandoffUrl) => {
+          opened.push(localHandoffUrl);
+        },
+      });
+      events.length = 0;
+      expect(
+        (
+          await runSetup({
+            ...options,
+            backend: ownerBackend,
+            mode: "human",
+            command: "claim",
+          })
+        ).outcome,
+      ).toBe("action_required");
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toStartWith("file:");
+      expect(opened[0]).not.toContain(claimCapability);
+      expect(opened[0]).not.toContain("/setup/claim");
+      expect(JSON.stringify(events)).not.toContain(claimCapability);
+      expect((await lstat(ownerBackend.store.claimHandoffPath)).mode & 0o777).toBe(0o600);
+      expect(await readFile(ownerBackend.store.claimHandoffPath, "utf8")).toContain(
+        claimCapability,
+      );
       claimed = true;
       events.length = 0;
       await expect(runSetup({ ...options, command: "claim" })).rejects.toThrow(
@@ -870,13 +1350,18 @@ describe("real setup HTTP adapter", () => {
         origin,
         requestTimeoutMillis: 2000,
         receiptTimeoutMillis: 2000,
+        commandRunner: async () => {},
       });
       expect(
         (await runSetup({ ...options, backend: resumedBackend, command: "claim" })).outcome,
       ).toBe("ready");
       expect((await resumedBackend.localInstallation())?.credential?.version).toBe(1);
       expect((await resumedBackend.localInstallation())?.revocationCredential).toBeUndefined();
+      expect(
+        await lstat(resumedBackend.store.claimHandoffPath).catch(() => undefined),
+      ).toBeUndefined();
       expect(oldKeyRejected).toBe(2);
+      expect(await readFile(join(projectRoot, "handler-count.txt"), "utf8")).toBe("1");
       expect(events.at(-1)).toEqual(
         expect.objectContaining({ event: "run.completed", outcome: "ready" }),
       );
@@ -923,6 +1408,29 @@ describe("renderers and event contract", () => {
     );
   });
 
+  test("all renderers drop and redact adversarial claim capabilities", () => {
+    const capability = "z".repeat(43);
+    const claimUrl = `https://example.test/setup/claim#${capability}`;
+    const adversarial = {
+      ...action,
+      message: `Open ${claimUrl} claim_token=${capability}`,
+      command: `browser ${claimUrl}`,
+      url: claimUrl,
+      unexpected: { claimUrl },
+    } as unknown as SetupEvent;
+    for (const rendered of [
+      renderJsonlEvent(adversarial),
+      renderPlainEvent(adversarial, 80),
+      renderHumanEvent(adversarial, 80, false),
+    ]) {
+      expect(rendered).not.toContain(capability);
+      expect(rendered).not.toContain("/setup/claim#");
+    }
+    const json = JSON.parse(renderJsonlEvent(adversarial)) as Record<string, unknown>;
+    expect(json).not.toHaveProperty("url");
+    expect(json).not.toHaveProperty("unexpected");
+  });
+
   test("all event variants satisfy the published bounded schema", async () => {
     const schema = JSON.parse(
       await readFile(join(dirname(import.meta.dir), "setup-events.schema.json"), "utf8"),
@@ -950,16 +1458,9 @@ describe("renderers and event contract", () => {
       {
         ...base,
         event: "action.required",
-        action: "capture-approved-content",
-        message:
-          "After claiming, explicitly approve and perform a content capture or rerun; the prepared tester is the first golden path.",
-      },
-      {
-        ...base,
-        event: "action.required",
-        action: "review-content-approved-trace",
-        message:
-          "Open the resulting content-approved trace in Hue for review and publication as a Scenario.",
+        action: "restart-claim-handoff",
+        message: "The project owner must explicitly replace the expired browser handoff.",
+        command: "hue claim --restart",
       },
       {
         ...base,
@@ -967,8 +1468,14 @@ describe("renderers and event contract", () => {
         trialId: "trial_123",
         expiresAt: "2026-09-20T12:00:00.000Z",
       },
-      { ...base, event: "receipt.verified", receiptId: "receipt_123", traceId: "a".repeat(32) },
-      { ...base, event: "claim.required", claimId: "claim_123", url: "https://example.test/claim" },
+      {
+        ...base,
+        event: "receipt.verified",
+        receiptId: "receipt_123",
+        traceId: "a".repeat(32),
+        source: "repository-http-boundary",
+      },
+      { ...base, event: "claim.required", claimId: "claim_123" },
       { ...base, event: "claim.completed", claimId: "claim_123" },
       { ...base, event: "run.completed", outcome: "action_required", checkpointed: true },
       {
@@ -991,6 +1498,9 @@ describe("renderers and event contract", () => {
       }),
     ).toBe(false);
     expect(validate({ ...action, unexpected: "unbounded" })).toBe(false);
+    expect(
+      validate({ ...base, event: "claim.required", claimId: "claim_123", url: "redacted" }),
+    ).toBe(false);
     expect(validate({ ...action, message: "x".repeat(1001) })).toBe(false);
   });
 });

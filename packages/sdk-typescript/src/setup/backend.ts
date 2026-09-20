@@ -1,11 +1,22 @@
 import { createHue } from "../client.js";
 import { isLoopbackHost } from "../config.js";
 import type { TraceReceipt } from "../types.js";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import {
   configureSetupProject,
   validateSetupConfiguration,
   type SetupFileChange,
 } from "./configure.js";
+import {
+  exerciseSetupApplication,
+  installSetupRuntime,
+  planSetupApplication,
+  wireSetupApplication,
+  type SetupApplicationPlan,
+  type SetupCommandRunner,
+} from "./application.js";
 import type { SetupProjectDetection } from "./types.js";
 import {
   FileSetupInstallationStore,
@@ -22,6 +33,7 @@ const SETUP_ERROR_STATUSES = new Map<string, number>([
   ["SETUP_FORBIDDEN", 403],
   ["SETUP_CHANGED", 409],
   ["SETUP_DESTINATION_REQUIRED", 409],
+  ["SETUP_HANDOFF_LIMIT", 409],
   ["SETUP_REVOKED", 409],
   ["SETUP_EXPIRED", 410],
   ["SETUP_BODY_TOO_LARGE", 413],
@@ -32,6 +44,25 @@ const SETUP_ERROR_STATUSES = new Map<string, number>([
   ["SETUP_BUSY", 503],
   ["SETUP_UNAVAILABLE", 503],
 ]);
+
+/** Read-only public setup availability and fixed anonymous bounds. */
+export interface SetupPreflightStatus {
+  protocolVersion: 1;
+  state: "available" | "inactive";
+  capturePolicy: "metadata-only-v1";
+  limits: { traces: 100; spans: 1000; bytes: 2097152 };
+  lifetime: { expiresAfterSeconds: 86400; purgeAfterSeconds: 691200 };
+  privacyNotice: { url: "https://hue.run/privacy"; effectiveDate: "2026-08-24" };
+  securityUrl: "https://trust.hue.run/";
+}
+
+/** Non-secret descriptor for the current one-time browser handoff. */
+export interface SetupClaimHandoff {
+  id: string;
+  state: "pending" | "consumed" | "expired" | "revoked";
+  expiresAt: string;
+  sessionExpiresAt: string | null;
+}
 
 /** Strictly validated Setup HTTP protocol v1 installation status. */
 export interface SetupInstallationStatus {
@@ -72,8 +103,8 @@ export interface SetupInstallationStatus {
     /** Accepted canonical stored bytes. */
     bytes: number;
   };
-  /** Private browser claim capability while active; never log or persist it. */
-  claimUrl: string | null;
+  /** Non-secret current one-time browser handoff descriptor. */
+  claimHandoff: SetupClaimHandoff | null;
   /** Same-origin telemetry and receipt routes fixed by protocol v1. */
   endpoints: {
     /** Relative OTLP/HTTP traces route. */
@@ -88,7 +119,7 @@ export interface SetupCredentialResult extends SetupInstallationStatus {
   /** Telemetry-only credential for the requested generation. */
   credential: SetupStoredCredential & {
     /** Closed capability set enforced for setup-issued keys. */
-    capabilities: ["telemetry_write"];
+    capabilities: ["setup_telemetry_write"];
   };
 }
 
@@ -102,19 +133,25 @@ export interface SetupProbeEvidence {
   receipt: TraceReceipt;
 }
 
+/** Exact receipt evidence from a request through the repository's existing application. */
+export interface SetupApplicationEvidence extends SetupProbeEvidence {
+  /** Closed evidence source; synthetic setup probes can never satisfy application verification. */
+  source: "existing-application-request";
+}
+
 /** @deprecated Use SetupInstallationStatus. Retained as an exported compatibility name. */
 export type SetupBackendTrial = SetupInstallationStatus;
 /** @deprecated Use SetupProbeEvidence. Retained as an exported compatibility name. */
 export type SetupBackendReceipt = SetupProbeEvidence;
-/** Account-claim state is represented by the installation status and its private claim URL. */
+/** Non-secret account-claim state; bearer handoffs are never part of public adapter results. */
 export type SetupBackendClaim =
   | {
       /** Browser owner action is still required. */
       status: "required";
       /** Installation identity associated with the claim. */
       claimId: string;
-      /** Private browser capability; never log or persist it. */
-      url: string;
+      /** Capability-free indication that the browser handoff is stored owner-only. */
+      handoff: "owner-local";
     }
   | {
       /** Browser claim and local reconciliation completed. */
@@ -157,6 +194,31 @@ export interface SetupBackendAdapterOptions {
   requestTimeoutMillis?: number;
   /** Total receipt polling deadline in milliseconds. */
   receiptTimeoutMillis?: number;
+  /** Injectable owner-browser opener used only by isolated tests. */
+  openBrowser?: (localHandoffUrl: string) => Promise<void>;
+  /** Injectable fixed-argv package-manager runner used only by isolated tests. */
+  commandRunner?: SetupCommandRunner;
+}
+
+async function openLocalHandoff(localHandoffUrl: string): Promise<void> {
+  const executable =
+    process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32"
+        ? "explorer.exe"
+        : "xdg-open";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(executable, [localHandoffUrl], {
+      detached: true,
+      stdio: "ignore",
+      shell: false,
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -199,10 +261,84 @@ function isoDate(value: unknown): value is string {
   return typeof value === "string" && value.length <= 40 && Number.isFinite(Date.parse(value));
 }
 
+function uuidV4(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(value)
+  );
+}
+
+function parseClaimHandoff(value: unknown): SetupClaimHandoff | null {
+  if (value === null) return null;
+  if (
+    !record(value) ||
+    !exactKeys(value, ["id", "state", "expiresAt", "sessionExpiresAt"]) ||
+    !uuidV4(value.id) ||
+    !["pending", "consumed", "expired", "revoked"].includes(value.state as string) ||
+    !isoDate(value.expiresAt) ||
+    !(value.sessionExpiresAt === null || isoDate(value.sessionExpiresAt)) ||
+    (value.state === "pending" && value.sessionExpiresAt !== null)
+  )
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid setup response.");
+  return {
+    id: value.id,
+    state: value.state as SetupClaimHandoff["state"],
+    expiresAt: value.expiresAt,
+    sessionExpiresAt: value.sessionExpiresAt as string | null,
+  };
+}
+
+function parsePreflight(value: unknown): SetupPreflightStatus {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "protocolVersion",
+      "state",
+      "capturePolicy",
+      "limits",
+      "lifetime",
+      "privacyNotice",
+      "securityUrl",
+    ])
+  )
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid setup preflight response.");
+  const limits = value.limits;
+  const lifetime = value.lifetime;
+  const privacyNotice = value.privacyNotice;
+  if (
+    value.protocolVersion !== 1 ||
+    (value.state !== "available" && value.state !== "inactive") ||
+    value.capturePolicy !== "metadata-only-v1" ||
+    !record(limits) ||
+    !exactKeys(limits, ["traces", "spans", "bytes"]) ||
+    limits.traces !== 100 ||
+    limits.spans !== 1000 ||
+    limits.bytes !== 2097152 ||
+    !record(lifetime) ||
+    !exactKeys(lifetime, ["expiresAfterSeconds", "purgeAfterSeconds"]) ||
+    lifetime.expiresAfterSeconds !== 86400 ||
+    lifetime.purgeAfterSeconds !== 691200 ||
+    !record(privacyNotice) ||
+    !exactKeys(privacyNotice, ["url", "effectiveDate"]) ||
+    privacyNotice.url !== "https://hue.run/privacy" ||
+    privacyNotice.effectiveDate !== "2026-08-24" ||
+    value.securityUrl !== "https://trust.hue.run/"
+  )
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid setup preflight response.");
+  return {
+    protocolVersion: 1,
+    state: value.state,
+    capturePolicy: "metadata-only-v1",
+    limits: { traces: 100, spans: 1000, bytes: 2097152 },
+    lifetime: { expiresAfterSeconds: 86400, purgeAfterSeconds: 691200 },
+    privacyNotice: { url: "https://hue.run/privacy", effectiveDate: "2026-08-24" },
+    securityUrl: "https://trust.hue.run/",
+  };
+}
+
 function parseStatus(
   value: unknown,
   installationId: string,
-  origin: string,
   credentialResponse = false,
 ): SetupInstallationStatus {
   if (!record(value))
@@ -217,7 +353,7 @@ function parseStatus(
     "expiresAt",
     "limits",
     "usage",
-    "claimUrl",
+    "claimHandoff",
     "endpoints",
   ];
   if (!exactKeys(value, credentialResponse ? [...keys, "credential"] : keys))
@@ -226,6 +362,7 @@ function parseStatus(
   const limits = value.limits;
   const usage = value.usage;
   const endpoints = value.endpoints;
+  const claimHandoff = parseClaimHandoff(value.claimHandoff);
   if (
     value.protocolVersion !== 1 ||
     value.installationId !== installationId ||
@@ -256,30 +393,10 @@ function parseStatus(
     endpoints.receipt !== "/api/v1/traces/{traceId}/receipt"
   )
     throw new SetupBackendError("invalid_response", "Hue returned an invalid setup response.");
-  if (value.state === "active") {
-    if (
-      typeof value.claimUrl !== "string" ||
-      value.expiresAt === null ||
-      project === null ||
-      value.credentialVersion !== 0
-    )
-      throw new SetupBackendError("invalid_response", "Hue returned an invalid setup response.");
-    let claim: URL;
-    try {
-      claim = new URL(value.claimUrl);
-    } catch {
-      throw new SetupBackendError("invalid_response", "Hue returned an invalid setup response.");
-    }
-    if (
-      claim.origin !== origin ||
-      claim.username ||
-      claim.password ||
-      claim.pathname !== "/setup/claim" ||
-      claim.search ||
-      !/^#[A-Za-z0-9_-]{43}$/u.test(claim.hash)
-    )
-      throw new SetupBackendError("invalid_response", "Hue returned an invalid setup response.");
-  } else if (value.claimUrl !== null) {
+  if (
+    value.state === "active" &&
+    (value.expiresAt === null || project === null || value.credentialVersion !== 0)
+  ) {
     throw new SetupBackendError("invalid_response", "Hue returned an invalid setup response.");
   }
   if (
@@ -297,7 +414,7 @@ function parseStatus(
     expiresAt: value.expiresAt as string | null,
     limits: { traces: 100, spans: 1000, bytes: 2097152 },
     usage: usage as SetupInstallationStatus["usage"],
-    claimUrl: value.claimUrl as string | null,
+    claimHandoff,
     endpoints: {
       otlp: "/api/v1/otlp/v1/traces",
       receipt: "/api/v1/traces/{traceId}/receipt",
@@ -308,9 +425,8 @@ function parseStatus(
 function parseCredential(
   value: unknown,
   installationId: string,
-  origin: string,
 ): SetupCredentialResult {
-  const status = parseStatus(value, installationId, origin, true);
+  const status = parseStatus(value, installationId, true);
   if (!record(value) || !record(value.credential))
     throw new SetupBackendError(
       "invalid_response",
@@ -326,7 +442,7 @@ function parseCredential(
     !boundedId(credential.keyId) ||
     !Array.isArray(credential.capabilities) ||
     credential.capabilities.length !== 1 ||
-    credential.capabilities[0] !== "telemetry_write" ||
+    credential.capabilities[0] !== "setup_telemetry_write" ||
     (credential.version !== 0 && credential.version !== 1) ||
     credential.version !== status.credentialVersion
   )
@@ -339,7 +455,7 @@ function parseCredential(
     credential: {
       apiKey: credential.apiKey,
       keyId: credential.keyId as string,
-      capabilities: ["telemetry_write"],
+      capabilities: ["setup_telemetry_write"],
       version: credential.version,
     },
   };
@@ -352,6 +468,50 @@ function retryAfter(header: string | null): number {
   return Number.isFinite(parsed)
     ? Math.min(Math.max(0, parsed - Date.now()), 24 * 60 * 60 * 1000)
     : 0;
+}
+
+function validateClaimUrl(value: unknown, origin: string): string {
+  if (typeof value !== "string")
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid private handoff.");
+  let claim: URL;
+  try {
+    claim = new URL(value);
+  } catch {
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid private handoff.");
+  }
+  if (
+    claim.origin !== origin ||
+    claim.username ||
+    claim.password ||
+    claim.pathname !== "/setup/claim" ||
+    claim.search ||
+    !/^#[A-Za-z0-9_-]{43}$/u.test(claim.hash)
+  )
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid private handoff.");
+  return value;
+}
+
+function parseClaimHandoffResponse(
+  value: unknown,
+  installationId: string,
+  handoffId: string,
+  origin: string,
+): { handoff: SetupClaimHandoff; claimUrl: string | null } {
+  if (
+    !record(value) ||
+    !exactKeys(value, ["protocolVersion", "installationId", "handoff", "claimUrl"]) ||
+    value.protocolVersion !== 1 ||
+    value.installationId !== installationId
+  )
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid private handoff.");
+  const handoff = parseClaimHandoff(value.handoff);
+  if (!handoff || handoff.id !== handoffId)
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid private handoff.");
+  if (handoff.state === "pending")
+    return { handoff, claimUrl: validateClaimUrl(value.claimUrl, origin) };
+  if (value.claimUrl !== null)
+    throw new SetupBackendError("invalid_response", "Hue returned an invalid private handoff.");
+  return { handoff, claimUrl: null };
 }
 
 async function pause(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -378,7 +538,10 @@ export class SetupBackendAdapter {
   private readonly fetcher: typeof globalThis.fetch;
   private readonly requestTimeoutMillis: number;
   private readonly receiptTimeoutMillis: number;
+  private readonly browserOpener: (localHandoffUrl: string) => Promise<void>;
+  private readonly commandRunner?: SetupCommandRunner;
   private installation?: SetupInstallationRecord;
+  private applicationPlan?: SetupApplicationPlan;
 
   constructor(options: SetupBackendAdapterOptions) {
     this.origin = parseOrigin(options.origin ?? DEFAULT_ORIGIN);
@@ -386,6 +549,8 @@ export class SetupBackendAdapter {
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.requestTimeoutMillis = options.requestTimeoutMillis ?? 10_000;
     this.receiptTimeoutMillis = options.receiptTimeoutMillis ?? 10_000;
+    this.browserOpener = options.openBrowser ?? openLocalHandoff;
+    this.commandRunner = options.commandRunner;
     if (
       !Number.isInteger(this.requestTimeoutMillis) ||
       this.requestTimeoutMillis < 100 ||
@@ -454,6 +619,75 @@ export class SetupBackendAdapter {
     } catch {
       throw new SetupBackendError("invalid_response", "Hue returned invalid setup JSON.");
     }
+  }
+
+  private async publicPreflightRequest(signal?: AbortSignal): Promise<SetupPreflightStatus> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (signal?.aborted) throw signal.reason;
+      try {
+        const timeout = AbortSignal.timeout(this.requestTimeoutMillis);
+        const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+        const response = await this.fetcher(new URL("/api/v1/setup/preflight", this.origin), {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          redirect: "manual",
+          credentials: "omit",
+          cache: "no-store",
+          signal: requestSignal,
+        });
+        if (response.status >= 300 && response.status < 400) {
+          await response.body?.cancel();
+          throw new SetupBackendError(
+            "invalid_response",
+            "Hue setup preflight refused a redirect.",
+            response.status,
+          );
+        }
+        const value = await this.readJson(response);
+        if (response.status === 200) return parsePreflight(value);
+        const code = record(value) && typeof value.code === "string" ? value.code : undefined;
+        if (
+          !code ||
+          !record(value) ||
+          !exactKeys(value, ["protocolVersion", "code"]) ||
+          value.protocolVersion !== 1 ||
+          SETUP_ERROR_STATUSES.get(code) !== response.status
+        )
+          throw new SetupBackendError(
+            "invalid_response",
+            "Hue returned an invalid setup preflight error.",
+            response.status,
+          );
+        const wait = retryAfter(response.headers.get("retry-after"));
+        const delay = Math.max(wait, 250 * 2 ** attempt);
+        if ((response.status === 429 || response.status === 503) && attempt < 2 && delay <= 5000) {
+          await pause(delay, signal);
+          continue;
+        }
+        throw new SetupBackendError(
+          code as `SETUP_${string}`,
+          `Hue setup stopped with ${code}.`,
+          response.status,
+          wait,
+        );
+      } catch (error) {
+        if (error instanceof SetupBackendError) throw error;
+        if (signal?.aborted) throw signal.reason;
+        lastError = error;
+        if (attempt < 2) {
+          await pause(250 * 2 ** attempt, signal);
+          continue;
+        }
+      }
+    }
+    throw new SetupBackendError(
+      "transport",
+      "Hue setup could not reach the configured origin.",
+      undefined,
+      undefined,
+      { cause: lastError },
+    );
   }
 
   private async request(
@@ -568,7 +802,7 @@ export class SetupBackendAdapter {
         await this.store.save(installation);
       },
     );
-    return parseStatus(value, installation.installationId, this.origin);
+    return parseStatus(value, installation.installationId);
   }
 
   /** Reads and validates the current installation status without provisioning. */
@@ -581,7 +815,104 @@ export class SetupBackendAdapter {
       3,
       signal,
     );
-    return parseStatus(value, installation.installationId, this.origin);
+    const status = parseStatus(value, installation.installationId);
+    if (status.state !== "active") await this.store.removeClaimHandoff();
+    return status;
+  }
+
+  /** Requests or recovers one proof-bound handoff and opens only its owner-local file URL. */
+  async prepareClaimHandoff(
+    status: SetupInstallationStatus,
+    openBrowser: boolean,
+    restart = false,
+    signal?: AbortSignal,
+  ): Promise<{
+    opened: boolean;
+    state: SetupClaimHandoff["state"];
+    restartRequired: boolean;
+  }> {
+    if (status.state !== "active")
+      throw new SetupBackendError(
+        "invalid_response",
+        "Hue does not permit a browser handoff for this installation state.",
+      );
+    const installation = await this.prepare();
+    let stored = installation.claimHandoff;
+    if (restart) {
+      stored = {
+        id: randomUUID().toLowerCase(),
+        previousHandoffId: status.claimHandoff?.id ?? null,
+      };
+      installation.claimHandoff = stored;
+      await this.store.save(installation);
+    } else if (stored) {
+      if (status.claimHandoff && status.claimHandoff.id !== stored.id)
+        throw new SetupBackendError(
+          "SETUP_CHANGED",
+          "The browser handoff changed. Refresh status and choose explicitly whether to restart it.",
+          409,
+        );
+    } else if (status.claimHandoff) {
+      if (status.claimHandoff.state !== "pending")
+        return {
+          opened: false,
+          state: status.claimHandoff.state,
+          restartRequired: true,
+        };
+      stored = { id: status.claimHandoff.id, previousHandoffId: null };
+      installation.claimHandoff = stored;
+      await this.store.save(installation);
+    } else {
+      stored = { id: randomUUID().toLowerCase(), previousHandoffId: null };
+      installation.claimHandoff = stored;
+      await this.store.save(installation);
+    }
+    let value: unknown;
+    try {
+      value = await this.request(
+        "POST",
+        `/api/v1/setup/installations/${installation.installationId}/claim-handoff`,
+        {
+          protocolVersion: 1,
+          handoffId: stored.id,
+          previousHandoffId: stored.previousHandoffId,
+        },
+        3,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof SetupBackendError && error.code === "SETUP_CHANGED") {
+        await this.status(signal);
+      }
+      throw error;
+    }
+    const result = parseClaimHandoffResponse(
+      value,
+      installation.installationId,
+      stored.id,
+      this.origin,
+    );
+    installation.claimHandoff = {
+      id: result.handoff.id,
+      previousHandoffId: stored.previousHandoffId,
+      state: result.handoff.state,
+      expiresAt: result.handoff.expiresAt,
+      sessionExpiresAt: result.handoff.sessionExpiresAt,
+    };
+    await this.store.save(installation);
+    if (!result.claimUrl) {
+      await this.store.removeClaimHandoff();
+      return { opened: false, state: result.handoff.state, restartRequired: true };
+    }
+    const path = await this.store.saveClaimHandoff(result.claimUrl);
+    if (!openBrowser)
+      return { opened: false, state: result.handoff.state, restartRequired: false };
+    try {
+      await this.browserOpener(pathToFileURL(path).href);
+      return { opened: true, state: result.handoff.state, restartRequired: false };
+    } catch {
+      return { opened: false, state: result.handoff.state, restartRequired: false };
+    }
   }
 
   /** Retrieves an idempotent generation and persists it before it can be used by project config. */
@@ -597,7 +928,7 @@ export class SetupBackendAdapter {
       3,
       signal,
     );
-    const result = parseCredential(value, installation.installationId, this.origin);
+    const result = parseCredential(value, installation.installationId);
     if (result.credential.version !== credentialVersion)
       throw new SetupBackendError(
         "invalid_response",
@@ -616,21 +947,113 @@ export class SetupBackendAdapter {
       version: result.credential.version,
     };
     if (installation.probe?.credentialVersion !== credentialVersion) delete installation.probe;
+    if (
+      installation.applicationEvidence?.credentialVersion !== credentialVersion &&
+      credentialVersion === 0
+    )
+      delete installation.applicationEvidence;
+    if (installation.applicationAttempt?.credentialVersion !== credentialVersion && credentialVersion === 0)
+      delete installation.applicationAttempt;
     await this.store.save(installation);
+    if (credentialVersion === 1) {
+      delete installation.claimHandoff;
+      await this.store.save(installation);
+      await this.store.removeClaimHandoff();
+    }
     return result;
   }
 
-  /** Writes only setup-owned, secret-free metadata integration files. */
+  /** Installs the exact Hue runtime through the one unambiguous project package manager. */
+  async installRuntime(project: SetupProjectDetection): Promise<boolean> {
+    this.applicationPlan ??= await planSetupApplication(project);
+    return installSetupRuntime(project, this.applicationPlan, this.commandRunner);
+  }
+
+  /** Writes secret-free config and an owned middleware block into the recognized application. */
   async configure(project: SetupProjectDetection): Promise<SetupFileChange[]> {
     const installation = await this.prepare();
     if (!installation.credential) throw new Error("Setup credential is not available");
-    return configureSetupProject(this.store, installation, project);
+    this.applicationPlan ??= await planSetupApplication(project);
+    const changes = await configureSetupProject(this.store, installation, project);
+    const wiring = await wireSetupApplication(this.store, installation, this.applicationPlan);
+    if (wiring) changes.push(wiring);
+    return changes;
   }
 
-  /** Fails before provisioning when credentials or managed configuration conflict. */
-  async preflight(project: SetupProjectDetection): Promise<void> {
+  /** Fails before mutation on unsafe project state, then reads public technical availability. */
+  async preflight(
+    project: SetupProjectDetection,
+    signal?: AbortSignal,
+    checkAvailability = true,
+  ): Promise<SetupPreflightStatus | undefined> {
+    this.applicationPlan = await planSetupApplication(project);
     const installation = await this.localInstallation();
     await validateSetupConfiguration(this.store, installation, project);
+    return checkAvailability ? this.publicPreflightRequest(signal) : undefined;
+  }
+
+  /** Runs one request through the recognized existing app and privately checkpoints its IDs. */
+  async exerciseApplication(project: SetupProjectDetection, signal?: AbortSignal): Promise<void> {
+    const installation = await this.prepare();
+    this.applicationPlan ??= await planSetupApplication(project);
+    await exerciseSetupApplication(this.store, installation, this.applicationPlan, signal);
+  }
+
+  private async verifyStoredApplication(
+    signal?: AbortSignal,
+  ): Promise<SetupApplicationEvidence | undefined> {
+    if (signal?.aborted) throw signal.reason;
+    const installation = await this.prepare();
+    const credential = installation.credential;
+    const evidence = installation.applicationEvidence;
+    if (
+      !credential ||
+      !evidence ||
+      !(
+        evidence.credentialVersion === credential.version ||
+        (evidence.credentialVersion === 0 && credential.version === 1)
+      )
+    )
+      return undefined;
+    const hue = createHue({
+      apiKey: credential.apiKey,
+      baseUrl: this.origin,
+      serviceName: "hue-setup-receipt",
+      captureContent: false,
+      timeoutMillis: this.requestTimeoutMillis,
+    });
+    try {
+      const verification = await hue.verifyTrace(evidence.traceId, {
+        expectedSpanIds: [evidence.spanId],
+        timeoutMillis: this.receiptTimeoutMillis,
+      });
+      if (signal?.aborted) throw signal.reason;
+      if (!verification.verified || !verification.receipt) return undefined;
+      const receipt = verification.receipt;
+      if (
+        receipt.traceId !== evidence.traceId ||
+        receipt.spanCount <= 0 ||
+        receipt.missingSpanIds.length !== 0 ||
+        receipt.matchedSpanIds.length !== 1 ||
+        receipt.matchedSpanIds[0] !== evidence.spanId ||
+        receipt.fields.input ||
+        receipt.fields.output
+      )
+        throw new SetupBackendError(
+          "invalid_response",
+          "Hue returned invalid metadata-only application evidence.",
+        );
+      evidence.verified = true;
+      await this.store.save(installation);
+      return { ...evidence, receipt };
+    } finally {
+      await hue.shutdownSafe({ timeoutMillis: this.requestTimeoutMillis });
+    }
+  }
+
+  /** Verifies only IDs emitted by the existing application request; it never creates a probe. */
+  async verifyApplication(signal?: AbortSignal): Promise<SetupApplicationEvidence | undefined> {
+    return this.verifyStoredApplication(signal);
   }
 
   private async verifyStoredProbe(signal?: AbortSignal): Promise<SetupProbeEvidence | undefined> {

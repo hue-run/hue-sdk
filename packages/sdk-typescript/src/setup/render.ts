@@ -12,6 +12,125 @@ const ansi = {
   reset: "\u001b[0m",
 };
 
+/** Removes capability-shaped fragments and bounds text before it reaches a public transcript. */
+export function redactSetupTranscriptText(value: string): string {
+  const withoutUrls = value.replace(/https?:\/\/[^\s"'<>]+/giu, (candidate) => {
+    try {
+      const url = new URL(candidate);
+      return url.hash || url.pathname.includes("/setup/claim")
+        ? "[private claim handoff]"
+        : candidate;
+    } catch {
+      return "[redacted URL]";
+    }
+  });
+  const redacted = withoutUrls
+    .replace(/#[A-Za-z0-9_-]{20,}/gu, "#[redacted]")
+    .replace(
+      /\b(claim[_-]?(?:secret|token)|hue_claim_)(\s*[:=]\s*)[A-Za-z0-9_-]{16,}/giu,
+      "$1$2[redacted]",
+    );
+  let printable = "";
+  for (const character of redacted) {
+    const code = character.codePointAt(0)!;
+    if ((code >= 32 && code !== 127) || character === "\n" || character === "\t")
+      printable += character;
+  }
+  return printable.slice(0, 1000);
+}
+
+function publicEvent(event: SetupEvent): SetupEvent {
+  const base = {
+    contractVersion: event.contractVersion,
+    runId: redactSetupTranscriptText(event.runId),
+    sequence: event.sequence,
+    timestamp: event.timestamp,
+  };
+  switch (event.event) {
+    case "run.started":
+      return {
+        ...base,
+        event: "run.started",
+        command: event.command,
+        mode: event.mode,
+        resumed: event.resumed,
+      };
+    case "project.detected":
+      return { ...base, event: "project.detected", project: event.project };
+    case "plan.ready":
+      return { ...base, event: "plan.ready", plan: event.plan };
+    case "step.started":
+      return { ...base, event: "step.started", step: event.step };
+    case "step.completed":
+      return { ...base, event: "step.completed", step: event.step, outcome: event.outcome };
+    case "file.changed":
+      return {
+        ...base,
+        event: "file.changed",
+        path: redactSetupTranscriptText(event.path),
+        change: event.change,
+      };
+    case "diagnostic":
+      return {
+        ...base,
+        event: "diagnostic",
+        level: event.level,
+        code: event.code,
+        message: redactSetupTranscriptText(event.message),
+      };
+    case "privacy.notice":
+      return {
+        ...base,
+        event: "privacy.notice",
+        privacyUrl: event.privacyUrl,
+        effectiveDate: event.effectiveDate,
+        securityUrl: event.securityUrl,
+      };
+    case "action.required":
+      return {
+        ...base,
+        event: "action.required",
+        action: event.action,
+        message: redactSetupTranscriptText(event.message),
+        ...(event.command ? { command: redactSetupTranscriptText(event.command) } : {}),
+      };
+    case "trial.created":
+      return {
+        ...base,
+        event: "trial.created",
+        trialId: event.trialId,
+        expiresAt: event.expiresAt,
+      };
+    case "receipt.verified":
+      return {
+        ...base,
+        event: "receipt.verified",
+        receiptId: event.receiptId,
+        traceId: event.traceId,
+        source: event.source,
+      };
+    case "claim.required":
+      return { ...base, event: "claim.required", claimId: event.claimId };
+    case "claim.completed":
+      return { ...base, event: "claim.completed", claimId: event.claimId };
+    case "run.completed":
+      return {
+        ...base,
+        event: "run.completed",
+        outcome: event.outcome,
+        checkpointed: event.checkpointed,
+      };
+    case "run.failed":
+      return {
+        ...base,
+        event: "run.failed",
+        code: event.code,
+        message: redactSetupTranscriptText(event.message),
+        resumable: event.resumable,
+      };
+  }
+}
+
 function wrap(text: string, width: number, prefix: string): string {
   const available = Math.max(20, width - prefix.length);
   const words = text.split(/\s+/u);
@@ -50,14 +169,16 @@ function summary(event: SetupEvent): string | undefined {
       return `${event.change === "created" ? "Created" : "Updated"} ${event.path}.`;
     case "diagnostic":
       return `${event.code}: ${event.message}`;
+    case "privacy.notice":
+      return `Privacy notice effective ${event.effectiveDate}: ${event.privacyUrl}. Security: ${event.securityUrl}`;
     case "action.required":
       return `${event.message}${event.command ? ` Next: ${event.command}.` : ""}`;
     case "trial.created":
       return `Anonymous trial ${event.trialId} created; expires ${event.expiresAt}.`;
     case "receipt.verified":
-      return `Instrumentation receipt ${event.receiptId} verified for trace ${event.traceId}.`;
+      return `Repository HTTP boundary receipt ${event.receiptId} verified for trace ${event.traceId}.`;
     case "claim.required":
-      return `Claim ${event.claimId} is ready: ${event.url}`;
+      return `Account linkage is ready for project owner action (${event.claimId}).`;
     case "claim.completed":
       return `Claim ${event.claimId} completed.`;
     case "run.completed":
@@ -69,12 +190,12 @@ function summary(event: SetupEvent): string | undefined {
 
 /** Renders one newline-free JSON object for JSONL output. */
 export function renderJsonlEvent(event: SetupEvent): string {
-  return JSON.stringify(event);
+  return JSON.stringify(publicEvent(event));
 }
 
 /** Renders one ANSI-free append-only transcript entry. */
 export function renderPlainEvent(event: SetupEvent, width = 80): string {
-  const text = summary(event);
+  const text = summary(publicEvent(event));
   if (!text) return "";
   const marker =
     event.event === "run.failed"
@@ -87,7 +208,7 @@ export function renderPlainEvent(event: SetupEvent, width = 80): string {
 
 /** Renders one lightweight append-only terminal entry; it never moves the cursor or clears the screen. */
 export function renderHumanEvent(event: SetupEvent, width = 80, color = true): string {
-  const text = summary(event);
+  const text = summary(publicEvent(event));
   if (!text) return "";
   const [symbol, tone] =
     event.event === "run.failed"

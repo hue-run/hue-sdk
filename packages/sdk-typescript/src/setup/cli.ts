@@ -39,13 +39,14 @@ async function main(): Promise<number> {
         format: { type: "string" },
         project: { type: "string" },
         origin: { type: "string" },
+        restart: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     });
   } catch {
     if (!agentRequested) {
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL]\n",
+        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
       return 2;
     }
@@ -78,7 +79,7 @@ async function main(): Promise<number> {
       return 2;
     }
     process.stdout.write(
-      "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL]\n",
+      "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
     );
     return 0;
   }
@@ -91,7 +92,14 @@ async function main(): Promise<number> {
     !commands.has(command as "setup") ||
     parsed.positionals.length !== 1 ||
     !validFormat ||
-    (parsed.values.agent && format !== undefined && format !== "jsonl")
+    (parsed.values.agent && format !== undefined && format !== "jsonl") ||
+    (parsed.values.restart &&
+      (command !== "claim" ||
+        parsed.values.agent ||
+        format === "plain" ||
+        format === "jsonl" ||
+        !process.stdin.isTTY ||
+        !process.stdout.isTTY))
   ) {
     if (parsed.values.agent) {
       const event: RunFailedEvent = {
@@ -107,7 +115,7 @@ async function main(): Promise<number> {
       process.stdout.write(`${renderJsonlEvent(event)}\n`);
     } else
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL]\n",
+        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
     return 2;
   }
@@ -137,6 +145,7 @@ async function main(): Promise<number> {
       project: { detect: detectSetupProject },
       checkpoints: new FileSetupCheckpointAdapter(),
       backend,
+      claimRestart: parsed.values.restart,
       signal: controller.signal,
       emit: (event) => {
         if (event.event === "run.completed" || event.event === "run.failed") terminalEmitted = true;

@@ -52,18 +52,21 @@ npm install @hue-run/sdk
 bun add @hue-run/sdk
 ```
 
-After `0.4.0` is published, a clean TypeScript or Python server project can start metadata-only
-onboarding with one command:
+The reviewed `0.4.0` candidate is preparing a deliberately narrow one-command onboarding path:
 
 ```sh
-npx --yes @hue-run/sdk@0.4.0 setup
+npx --yes @hue-run/sdk@latest setup --agent
 ```
 
-It saves a project/origin installation proof in an ignored owner-only file before contacting Hue,
-configures a secret-free metadata-only integration module, exports a real setup probe and verifies
-that probe's exact receipt. Probe verification is not proof that the application itself is
-instrumented. Setup never captures content or creates a Scenario, Hue Run, evaluation or remote
-execution. See the [CLI contract and claim/resume instructions](./packages/sdk-typescript/CLI.md).
+It is not public yet. Automatic setup is limited to one unambiguous npm/Bun Express server or one uv
+Flask server with a statically recognizable entrypoint, existing GET route and environment-selected
+port. It installs the exact runtime through that project's manager, adds owned middleware wiring,
+exercises the existing route and verifies those exact trace/span IDs. Monorepos, mixed managers and
+unfamiliar entrypoints stop with a structured action instead of guessing. Anonymous setup also
+requires a canonical versioned Terms/Privacy notice and explicit human acceptance; no approved
+notice currently exists, so this checkout fails closed before dependency, project, secret or network
+side effects. Setup never captures content or creates a Scenario, Hue Run, evaluation, source
+capture or remote execution. See the [CLI contract](./packages/sdk-typescript/CLI.md).
 
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
 

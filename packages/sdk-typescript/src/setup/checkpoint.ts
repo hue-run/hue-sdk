@@ -7,7 +7,19 @@ import type { SetupCheckpointAdapter } from "./runner.js";
 import type { SetupMachineState } from "./machine.js";
 
 const MAX_CHECKPOINT_BYTES = 256 * 1024;
-const STEPS = ["detect-project", "configure-telemetry", "verify-receipt", "claim-project"] as const;
+const STEPS = [
+  "detect-project",
+  "install-runtime",
+  "configure-telemetry",
+  "verify-application-receipt",
+  "claim-project",
+] as const;
+const LEGACY_STEPS = [
+  "detect-project",
+  "configure-telemetry",
+  "verify-receipt",
+  "claim-project",
+] as const;
 
 function isInside(parent: string, child: string): boolean {
   const path = relative(parent, child);
@@ -100,7 +112,9 @@ function validState(
     typeof plan === "object" &&
     !Array.isArray(plan) &&
     hasExactKeys(plan as Record<string, unknown>, ["steps", "mutatesProject", "backendRequired"]) &&
-    JSON.stringify((plan as Record<string, unknown>).steps) === JSON.stringify(STEPS) &&
+    [JSON.stringify(STEPS), JSON.stringify(LEGACY_STEPS)].includes(
+      JSON.stringify((plan as Record<string, unknown>).steps),
+    ) &&
     (plan as Record<string, unknown>).mutatesProject === true &&
     (plan as Record<string, unknown>).backendRequired === true
   );
@@ -176,6 +190,11 @@ export class FileSetupCheckpointAdapter implements SetupCheckpointAdapter {
         throw new Error("Setup checkpoint integrity check failed");
       if (!validState(state, runId, await realpath(projectRoot)))
         throw new Error("Setup checkpoint identity or shape does not match this project");
+      if (
+        state.phase === "local-ready" &&
+        JSON.stringify(state.plan.steps) === JSON.stringify(LEGACY_STEPS)
+      )
+        return { ...state, plan: { ...state.plan, steps: [...STEPS] } };
       return state;
     } finally {
       await handle.close();

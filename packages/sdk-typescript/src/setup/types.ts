@@ -10,6 +10,7 @@ export type SetupEventName =
   | "step.completed"
   | "file.changed"
   | "diagnostic"
+  | "privacy.notice"
   | "action.required"
   | "trial.created"
   | "receipt.verified"
@@ -70,7 +71,13 @@ export interface ProjectDetectedEvent extends EventBase<"project.detected"> {
 /** A bounded local setup plan. */
 export interface SetupPlan {
   /** Ordered setup step names. */
-  steps: Array<"detect-project" | "configure-telemetry" | "verify-receipt" | "claim-project">;
+  steps: Array<
+    | "detect-project"
+    | "install-runtime"
+    | "configure-telemetry"
+    | "verify-application-receipt"
+    | "claim-project"
+  >;
   /** Whether this plan is permitted to change project files. */
   mutatesProject: boolean;
   /** Whether completion ultimately requires a backend adapter. */
@@ -115,22 +122,31 @@ export interface DiagnosticEvent extends EventBase<"diagnostic"> {
   message: string;
 }
 
+/** Published, non-blocking privacy and security disclosure shown before telemetry. */
+export interface PrivacyNoticeEvent extends EventBase<"privacy.notice"> {
+  /** Canonical privacy notice URL supplied by setup preflight. */
+  privacyUrl: "https://hue.run/privacy";
+  /** Published effective date supplied by setup preflight. */
+  effectiveDate: "2026-08-24";
+  /** Canonical security information URL supplied by setup preflight. */
+  securityUrl: "https://trust.hue.run/";
+}
+
 /** Progress needs an explicit local or human action. */
 export interface ActionRequiredEvent extends EventBase<"action.required"> {
   /** Kind of action needed to continue. */
   action:
     | "claim-project"
     | "configure"
+    | "select-project"
+    | "integrate-application"
     | "run-instrumented-request"
-    | "open-claim-url"
-    | "capture-approved-content"
-    | "review-content-approved-trace";
+    | "open-claim-handoff"
+    | "restart-claim-handoff";
   /** Secret-free explanation of the action. */
   message: string;
   /** Optional command the caller may run. */
   command?: string;
-  /** Optional HTTPS destination for a user action. */
-  url?: string;
 }
 
 /** A backend adapter created an anonymous trial. */
@@ -147,14 +163,14 @@ export interface ReceiptVerifiedEvent extends EventBase<"receipt.verified"> {
   receiptId: string;
   /** Verified lowercase OpenTelemetry trace identifier; this does not prove content approval. */
   traceId: string;
+  /** Repository-owned runtime boundary that produced the verified trace. */
+  source: "repository-http-boundary";
 }
 
 /** The anonymous project can be claimed by a person. */
 export interface ClaimRequiredEvent extends EventBase<"claim.required"> {
   /** Non-secret claim identifier. */
   claimId: string;
-  /** User-facing claim destination; never persisted in setup checkpoints. */
-  url: string;
 }
 
 /** A backend adapter confirmed that the project was claimed. */
@@ -190,6 +206,7 @@ export type SetupEvent =
   | StepCompletedEvent
   | FileChangedEvent
   | DiagnosticEvent
+  | PrivacyNoticeEvent
   | ActionRequiredEvent
   | TrialCreatedEvent
   | ReceiptVerifiedEvent

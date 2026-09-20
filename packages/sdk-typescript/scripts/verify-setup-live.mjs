@@ -74,6 +74,10 @@ const result = spawnSync(cli, args, {
   timeout: 90_000,
   env: { ...process.env, NO_COLOR: values.mode === "agent" ? "1" : "" },
 });
+const containsClaimCapability = (value) =>
+  /\/setup\/claim#[A-Za-z0-9_-]+/u.test(value) || /#[A-Za-z0-9_-]{43}(?:\b|$)/u.test(value);
+if (containsClaimCapability(result.stdout ?? "") || containsClaimCapability(result.stderr ?? ""))
+  throw new Error("The installed CLI emitted a private claim capability; output was suppressed.");
 if (result.stderr) process.stderr.write(result.stderr);
 
 let evidence;
@@ -83,11 +87,8 @@ if (values.mode === "agent" && result.stdout) {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-  const claim = events.find((event) => event.event === "claim.required")?.url;
-  if (claim) process.stderr.write(`Private claim link (do not record or share): ${claim}\n`);
   for (const event of events) {
     const safe = structuredClone(event);
-    delete safe.url;
     if (safe.project) delete safe.project.root;
     if (safe.event === "receipt.verified") {
       delete safe.receiptId;

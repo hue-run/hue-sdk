@@ -40,8 +40,9 @@ Linux is tested in CI. macOS is used for development and is supported. On Window
   version. Their `run.*` names describe command invocations, not Hue Runs. Setup checkpoints carry
   `format: 1`; later 0.x setup implementations either read that format or fail explicitly without
   mutating the project. New event versions use a new schema rather than silently changing version 1.
-- Setup installation requests carry `protocolVersion: 1`. Their exact provisioning, status,
-  credential-generation and metadata-probe receipt shapes are coordinated with Hue Cloud. A breaking
+- Setup installation requests carry `protocolVersion: 1`. Their exact legal preflight/acceptance,
+  provisioning, status, credential-generation, private claim-handoff and application-receipt shapes
+  are coordinated with Hue Cloud. A breaking
   request/response change requires a new protocol version and a coordinated `0.MINOR` SDK release.
   Project/origin installation proof and telemetry credentials are private local state, not portable
   setup checkpoints or public configuration.

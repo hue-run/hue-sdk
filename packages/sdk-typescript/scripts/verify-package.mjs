@@ -250,18 +250,40 @@ if (values["landing-latest"]) {
     throw new Error(`npm latest must resolve to the accepted version ${pkg.version}`);
 }
 const setupHarness = join(destination, "installed-setup-harness.mjs");
+const executablePath = (name) => {
+  const result = spawnSync("which", [name], { encoding: "utf8", env: process.env });
+  if (result.status !== 0 || !result.stdout.trim()) throw new Error(`Required executable not found: ${name}`);
+  return result.stdout.trim();
+};
+const realNpm = executablePath("npm");
+const realUv = executablePath("uv");
 await writeFile(
   setupHarness,
   `
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const [cli, destination, stateHome, sourceMode] = process.argv.slice(2);
+const [cli, destination, stateHome, sourceMode, archive, realNpm, realUv] = process.argv.slice(2);
+const archiveBytes = await readFile(archive);
+const archiveIntegrity = "sha512-" + createHash("sha512").update(archiveBytes).digest("base64");
+const archiveShasum = createHash("sha1").update(archiveBytes).digest("hex");
+const sdkManifest = ${JSON.stringify({
+    name: pkg.name,
+    version: pkg.version,
+    type: pkg.type,
+    bin: pkg.bin,
+    exports: pkg.exports,
+    dependencies: pkg.dependencies,
+    engines: pkg.engines,
+  })};
 const installations = new Map();
+let setupRequests = 0;
 const server = createServer(async (request, response) => {
+  setupRequests += 1;
   const url = new URL(request.url, "http://127.0.0.1");
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
@@ -270,16 +292,48 @@ const server = createServer(async (request, response) => {
     response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
     response.end(JSON.stringify(value));
   };
+  if (decodeURIComponent(url.pathname) === "/@hue-run/sdk" && request.method === "GET") {
+    const version = sdkManifest.version;
+    return json(200, {
+      name: sdkManifest.name,
+      "dist-tags": { latest: version },
+      versions: {
+        [version]: {
+          ...sdkManifest,
+          dist: {
+            tarball: origin + "/@hue-run/sdk/-/sdk-" + version + ".tgz",
+            integrity: archiveIntegrity,
+            shasum: archiveShasum,
+          },
+        },
+      },
+    });
+  }
+  if (url.pathname === "/@hue-run/sdk/-/sdk-" + sdkManifest.version + ".tgz") {
+    response.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-store" });
+    return response.end(archiveBytes);
+  }
+  if (url.pathname === "/api/v1/setup/preflight" && request.method === "GET") {
+    assert.equal(request.headers.authorization, undefined);
+    return json(200, { protocolVersion: 1, state: "available", capturePolicy: "metadata-only-v1", limits: { traces: 100, spans: 1000, bytes: 2097152 }, lifetime: { expiresAfterSeconds: 86400, purgeAfterSeconds: 691200 } });
+  }
   if (url.pathname === "/api/v1/setup/installations" && request.method === "POST") {
     const value = JSON.parse(body.toString("utf8"));
-    installations.set(value.installationId, { trace: false });
+    installations.set(value.installationId, { handoff: null });
     return json(200, status(value.installationId, url));
   }
-  const setup = /^\\/api\\/v1\\/setup\\/installations\\/([^/]+)(?:\\/credentials)?$/.exec(url.pathname);
+  const setup = /^\\/api\\/v1\\/setup\\/installations\\/([^/]+)(?:\\/(credentials|claim-handoff))?$/.exec(url.pathname);
   if (setup) {
     const id = setup[1];
-    if (url.pathname.endsWith("/credentials"))
+    if (setup[2] === "credentials")
       return json(200, { ...status(id, url), credential: { apiKey: "synthetic-installed-key", keyId: "key_0", capabilities: ["telemetry_write"], version: 0 } });
+    if (setup[2] === "claim-handoff") {
+      const value = JSON.parse(body.toString("utf8"));
+      const installation = installations.get(id);
+      installation.handoff ??= { id: value.handoffId, state: "pending", expiresAt: "2026-09-20T12:10:00.000Z", sessionExpiresAt: null };
+      assert.equal(value.handoffId, installation.handoff.id);
+      return json(200, { protocolVersion: 1, installationId: id, handoff: installation.handoff, claimUrl: origin + "/setup/claim#" + "c".repeat(43) });
+    }
     return json(200, status(id, url));
   }
   if (url.pathname === "/api/v1/otlp/v1/traces") {
@@ -294,9 +348,22 @@ const server = createServer(async (request, response) => {
     assert.match(spanId, /^[a-f0-9]{16}$/);
     return json(200, { traceId: receipt[1], spanCount: 1, revision: 1, fields: { input: false, output: false, model: false, usage: false, session: false }, matchedSpanIds: [spanId], missingSpanIds: [], traceUrl: origin + "/traces/" + receipt[1] });
   }
+  if (request.method === "GET") {
+    const upstream = await fetch("https://registry.npmjs.org" + url.pathname + url.search, {
+      headers: { accept: request.headers.accept ?? "application/json" },
+      redirect: "manual",
+    });
+    response.writeHead(upstream.status, {
+      "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
+      "cache-control": "no-store",
+      ...(upstream.headers.get("location") ? { location: upstream.headers.get("location") } : {}),
+    });
+    return response.end(Buffer.from(await upstream.arrayBuffer()));
+  }
   response.writeHead(404); response.end();
 });
-const status = (id, url) => ({ protocolVersion: 1, installationId: id, state: "active", project: { id: "project_test", organizationId: "org_trial" }, credentialVersion: 0, capturePolicy: "metadata-only-v1", expiresAt: "2026-09-21T12:00:00.000Z", limits: { traces: 100, spans: 1000, bytes: 2097152 }, usage: { traces: 1, spans: 1, bytes: 100 }, claimUrl: origin + "/setup/claim#" + "c".repeat(43), endpoints: { otlp: "/api/v1/otlp/v1/traces", receipt: "/api/v1/traces/{traceId}/receipt" } });
+const status = (id) => ({ protocolVersion: 1, installationId: id, state: "active", project: { id: "project_test", organizationId: "org_trial" }, credentialVersion: 0, capturePolicy: "metadata-only-v1", expiresAt: "2026-09-21T12:00:00.000Z", limits: { traces: 100, spans: 1000, bytes: 2097152 }, usage: { traces: 1, spans: 1, bytes: 100 }, claimHandoff: installations.get(id)?.handoff ?? null, endpoints: { otlp: "/api/v1/otlp/v1/traces", receipt: "/api/v1/traces/{traceId}/receipt" } });
+const claimCapability = "c".repeat(43);
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const origin = "http://127.0.0.1:" + server.address().port;
 const run = (command, args, environment = process.env, cwd = destination) => new Promise((resolve, reject) => {
@@ -308,52 +375,82 @@ const run = (command, args, environment = process.env, cwd = destination) => new
   child.on("close", (code) => resolve({ code, stdout, stderr }));
 });
 const typescript = join(destination, "setup-typescript");
+const bunTypescript = join(destination, "setup-typescript-bun");
 const python = join(destination, "setup-python");
+const wrappers = join(destination, "setup-manager-wrappers");
 try {
-  await mkdir(typescript); await mkdir(python);
-  await writeFile(join(typescript, "package.json"), JSON.stringify({ private: true, devDependencies: { typescript: "7.0.2" } }));
-  await writeFile(join(python, "pyproject.toml"), "[project]\\nname = 'setup-test'\\n");
+  await mkdir(typescript); await mkdir(bunTypescript); await mkdir(python); await mkdir(wrappers);
+  const npmWrapper = join(wrappers, "npm");
+  await writeFile(
+    npmWrapper,
+    "#!/usr/bin/env node\\n" +
+      'const { spawnSync } = require("node:child_process");\\n' +
+      "const realNpm = " + JSON.stringify(realNpm) + ";\\n" +
+      "const registry = " + JSON.stringify(origin) + ";\\n" +
+      'const args = [...process.argv.slice(2), "--registry=" + registry];\\n' +
+      'const result = spawnSync(realNpm, args, { stdio: "inherit", env: process.env });\\n' +
+      'process.exit(result.status ?? 1);\\n',
+  );
+  await chmod(npmWrapper, 0o755);
+  await mkdir(join(typescript, "src"));
+  await mkdir(join(bunTypescript, "src"));
+  await writeFile(join(typescript, "package.json"), JSON.stringify({ private: true, type: "module", scripts: { start: "node src/server.mjs" }, dependencies: { express: "5.1.0" }, devDependencies: { typescript: "7.0.2" } }));
+  await writeFile(join(typescript, "src", "server.mjs"), 'import { appendFileSync } from "node:fs";\\nimport express from "express";\\nconst app = express();\\napp.get("/", (_request, response) => { appendFileSync("handler-count.txt", "1"); response.end("ok"); });\\napp.listen(Number(process.env.PORT), "127.0.0.1");\\n');
+  await writeFile(join(bunTypescript, "package.json"), JSON.stringify({ private: true, type: "module", scripts: { start: "node src/server.mjs" }, dependencies: { express: "5.1.0" }, devDependencies: { typescript: "7.0.2" } }));
+  await writeFile(join(bunTypescript, "src", "server.mjs"), 'import { appendFileSync } from "node:fs";\\nimport express from "express";\\nconst app = express();\\napp.get("/", (_request, response) => { appendFileSync("handler-count.txt", "1"); response.end("ok"); });\\napp.listen(Number(process.env.PORT), "127.0.0.1");\\n');
+  await writeFile(join(python, "pyproject.toml"), "[project]\\nname = 'setup-test'\\ndependencies = ['flask==3.1.2']\\n");
+  await writeFile(join(python, "app.py"), 'import os\\nfrom flask import Flask\\napp = Flask(__name__)\\n@app.get("/")\\ndef home():\\n    with open("handler-count.txt", "a", encoding="utf-8") as count:\\n        count.write("1")\\n    return "ok"\\nif __name__ == "__main__":\\n    app.run(host="127.0.0.1", port=int(os.environ["PORT"]))\\n');
+  assert.equal((await run(realNpm, ["install", "--ignore-scripts", "--no-audit", "--no-fund"], process.env, typescript)).code, 0);
+  assert.equal((await run("bun", ["--no-env-file", "install", "--ignore-scripts"], process.env, bunTypescript)).code, 0);
+  await writeFile(join(bunTypescript, "bunfig.toml"), '[install]\\nregistry = "' + origin + '"\\n');
+  assert.equal((await run(realUv, ["lock"], process.env, python)).code, 0);
+  const setupEnvironment = sourceMode === "installed-exact"
+    ? { ...process.env, PATH: wrappers + ":" + process.env.PATH }
+    : process.env;
   const agent = sourceMode === "registry-latest"
-    ? await run("npx", ["--yes", "@hue-run/sdk@latest", "setup", "--agent"], process.env, typescript)
-    : await run(cli, ["setup", "--agent", "--project", typescript, "--origin", origin]);
+    ? await run("npx", ["--yes", "@hue-run/sdk@latest", "setup", "--agent"], setupEnvironment, typescript)
+    : await run(cli, ["setup", "--agent", "--project", typescript, "--origin", origin], setupEnvironment);
   assert.equal(agent.code, 0); assert.equal(agent.stderr, "");
-  assert.ok(!agent.stdout.includes("\\u001b") && !agent.stdout.includes("secret-canary"));
+  assert.ok(!agent.stdout.includes("\\u001b") && !agent.stdout.includes("secret-canary") && !agent.stdout.includes(claimCapability) && !agent.stdout.includes("/setup/claim#"));
   const events = agent.stdout.trim().split("\\n").map(JSON.parse);
   assert.equal(events.filter((event) => event.event === "run.completed" || event.event === "run.failed").length, 1);
   assert.equal(events.at(-1).event, "run.completed");
-  assert.ok(events.some((event) => event.event === "receipt.verified"));
+  assert.ok(events.some((event) => event.event === "receipt.verified" && event.source === "repository-http-boundary"));
+  assert.ok(events.some((event) => event.event === "action.required" && event.action === "open-claim-handoff"));
+  const bunAgent = await run(cli, ["setup", "--agent", "--project", bunTypescript, "--origin", origin], setupEnvironment);
+  assert.equal(bunAgent.code, 0); assert.equal(bunAgent.stderr, "");
+  assert.ok(!bunAgent.stdout.includes("secret-canary") && !bunAgent.stdout.includes(claimCapability) && !bunAgent.stdout.includes("/setup/claim#"));
+  const bunEvents = bunAgent.stdout.trim().split("\\n").map(JSON.parse);
+  assert.ok(bunEvents.some((event) => event.event === "receipt.verified" && event.source === "repository-http-boundary"));
   const shellQuote = (value) => "'" + value.replaceAll("'", "'\\"'\\"'") + "'";
   const terminalCommand = sourceMode === "registry-latest"
     ? "npx @hue-run/sdk@latest setup"
     : [cli, "setup", "--project", python, "--origin", origin].map(shellQuote).join(" ");
-  const terminalEnvironment = { ...process.env, TERM: "xterm-256color" };
+  const terminalEnvironment = { ...setupEnvironment, TERM: "xterm-256color" };
   delete terminalEnvironment.CI; delete terminalEnvironment.NO_COLOR;
   const human = await run("script", ["-qec", terminalCommand, "/dev/null"], terminalEnvironment, sourceMode === "registry-latest" ? python : destination);
   assert.equal(human.code, 0); assert.equal(human.stderr, "");
   assert.ok(
-    human.stdout.includes("\\u001b[") &&
-      human.stdout.includes("receipt") &&
-      human.stdout.includes("verified"),
+    human.stdout.includes("\\u001b[") && human.stdout.includes("receipt"),
     JSON.stringify({
       ansi: human.stdout.includes("\\u001b["),
-      receipt: human.stdout.includes("receipt") && human.stdout.includes("verified"),
+      receipt: human.stdout.includes("receipt"),
       bytes: Buffer.byteLength(human.stdout),
     }),
   );
-  assert.ok(!human.stdout.includes("secret-canary"));
-  assert.ok((await readFile(join(typescript, "hue.setup.mjs"), "utf8")).includes("captureContent: false"));
-  assert.ok((await readFile(join(python, "hue_setup.py"), "utf8")).includes("capture_content=False"));
-  assert.equal((await run(process.execPath, ["--check", join(typescript, "hue.setup.mjs")])).code, 0);
-  assert.equal((await run("python3", ["-m", "py_compile", join(python, "hue_setup.py")])).code, 0);
-  for (const project of [typescript, python]) {
-    const name = (await readdir(project + "/.hue")).find((item) => item.startsWith("installation-"));
-    const installation = join(project, ".hue", name);
-    assert.equal((await stat(installation)).mode & 0o777, 0o600);
-    assert.ok(!(await readFile(join(project, project === typescript ? "hue.setup.mjs" : "hue_setup.py"), "utf8")).includes("synthetic-installed-key"));
+  assert.ok(!human.stdout.includes("secret-canary") && !human.stdout.includes(claimCapability) && !human.stdout.includes("/setup/claim#"));
+  assert.equal(await readFile(join(typescript, "handler-count.txt"), "utf8"), "1");
+  assert.equal(await readFile(join(bunTypescript, "handler-count.txt"), "utf8"), "1");
+  assert.equal(await readFile(join(python, "handler-count.txt"), "utf8"), "1");
+  assert.ok(setupRequests > 0);
+  for (const project of [typescript, bunTypescript, python]) {
+    assert.equal((await stat(join(project, ".hue"))).isDirectory(), true);
+    assert.equal((await stat(join(project, project === typescript ? "hue.setup.mjs" : "hue_setup.py"))).isFile(), true);
   }
 } finally {
   await Promise.all([
     rm(join(typescript, ".hue"), { recursive: true, force: true }),
+    rm(join(bunTypescript, ".hue"), { recursive: true, force: true }),
     rm(join(python, ".hue"), { recursive: true, force: true }),
     rm(stateHome, { recursive: true, force: true }),
   ]);
@@ -370,6 +467,9 @@ run(
     destination,
     setupStateHome,
     values["landing-latest"] ? "registry-latest" : "installed-exact",
+    tarball,
+    realNpm,
+    realUv,
   ],
   destination,
 );

@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.2.3"
+  version: "0.3.0"
 ---
 
 # Hue tracing
@@ -22,6 +22,41 @@ Read the application's repository instructions and inspect its runtime, dependen
 | Existing OTel provider or framework instrumentation | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); retain the provider and other exporters |
 
 Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. Receipt helpers require TypeScript `0.1.3` or Python `0.1.1`; check package availability and release notes before using them. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
+
+## One-command onboarding
+
+When the user specifically asks for Hue onboarding, first inspect the repository and then run:
+
+```sh
+npx --yes @hue-run/sdk@latest setup --agent
+```
+
+Treat each JSONL `action.required` as a real stop, make only the requested repository change, and
+rerun `hue resume --agent`. Do not infer success from file creation, a connection check or a setup
+probe. Ready means the CLI exercised an existing application request path, flushed its exporter and
+verified that request's exact receipt. Report the exact supported shape; do not claim every agent or
+repository works.
+
+Automatic setup is intentionally limited to one selected npm/Bun Express package or one uv Flask
+package with an unambiguous existing server entrypoint, literal GET route and environment-selected
+port. At a workspace root, mixed-language repository, ambiguous manager, custom Hue version or
+unfamiliar framework, use the structured action to select a package with `--project` or integrate Hue
+into an existing request. Never choose a monorepo project heuristically, add placeholder “real app”
+comments, simulate business behavior or rewrite an existing route.
+
+The active Terms/Privacy notice belongs to the human. Agent mode must surface its canonical URLs and
+version when the backend provides them, then stop. Ask the user to approve that exact version outside
+the model transcript and rerun using the documented acknowledgement mechanism; never accept, invent
+or derive a legal version. If no approved notice is available, onboarding is blocked before package,
+project, secret, provisioning or telemetry side effects.
+
+Account linkage is also deferred to the human. Never request, print, summarize or copy a claim URL,
+fragment, cookie, verification URL, installation proof or telemetry key. In an interactive owner
+terminal, `hue claim` opens an ignored mode-`0600` local handoff without placing its capability in a
+process argument or terminal output. In agent mode report only the generic owner action. After the
+owner finishes, rerun status/claim and require replacement-key application evidence plus old-key
+refusal. This protects logs and model transcripts; it does not hide repository files from a malicious
+local process.
 
 **Existing AI SDK 6:** Hue core coexists with AI SDK 6. Pass `hueExperimentalTelemetry(hue)` from `@hue-run/sdk` as `experimental_telemetry` (requires TypeScript 0.2.0); `hueTelemetry` remains AI SDK 7 only. Alternatively keep the existing instrumentation/provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade the app merely to add tracing.
 
