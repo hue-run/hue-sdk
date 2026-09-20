@@ -156,12 +156,10 @@ The runner stops scheduling more cases after an operational failure and waits fo
 
 ## Outbound local agent worker
 
-`runLocalAgent` is included in the `@hue-run/sdk@0.3.0` release candidate. Queue registration,
-claims, scoped MCP capabilities and sealed evidence require a supporting Hue server and project
-access; the package version alone does not establish hosted availability. Until registry
-acceptance, install the exact reviewed `hue-run-sdk-0.3.0.tgz` archive with the optional `zod`
-peer. `node packages/sdk-typescript/scripts/verify-package.mjs` creates and verifies that archive;
-do not request `0.3.0` from npm yet.
+`runLocalAgent` shipped in `@hue-run/sdk@0.3.0` and is publicly available. Install
+`npm install @hue-run/sdk zod`. Queue registration, claims, scoped MCP capabilities and sealed
+evidence require a supporting Hue server and project access; the package version alone does not
+establish hosted provider availability.
 
 `runLocalAgent` registers one fixed application callback and polls for queued runs. Hue selects
 the registered key/revision; it does not send executable code or shell commands. Keep the
@@ -215,3 +213,45 @@ the worker reports `attention` and stops; operator investigation is required. Su
 automatically reclaimed, and presenting the same uncertain checkpoint again cannot replay the
 candidate. Public package acceptance proves this lifecycle against local fixtures; exact
 installed-registry-package to hosted-facade acceptance remains a post-publication Fern gate.
+
+## Reviewed Scenario evaluator
+
+Unreleased TypeScript `0.3.1` adds the canonical conversion evaluator. After registry acceptance,
+install `npm install @hue-run/sdk@0.3.1 zod` (also `ajv` for source capture). Prepublication checks use
+an exact locally packed candidate; applications must wait for the public release before replacing
+it with a registry dependency.
+
+For an existing signed-in project's local worker, preserve its reviewed V2 baseline, ordered
+provider request, manifest observation and existing tracing. Supply the canonical scorer:
+
+```ts
+import {
+  createConversionOutcomeScorer,
+  runLocalAgent,
+  type RunLocalAgentOptions,
+} from "@hue-run/sdk/evals";
+
+export function runReviewedScenarios(options: Omit<RunLocalAgentOptions, "scorers">) {
+  return runLocalAgent({ ...options, scorers: [createConversionOutcomeScorer()] });
+}
+```
+
+The scorer's `definition` is suitable for `local_code` registration: `language: "typescript"`,
+`entrypoint: "scoreConversionOutcome"`, ordered boolean metrics and source SHA-256
+`27d096eedc80fbfb747b849c891762f76165ef76429727b0a93ec7dbebaf7b05`. This is the complete executable,
+including its sealed-evidence coverage gate. It is copied unchanged by the build. To verify
+installed bytes, resolve `@hue-run/sdk/evals/conversion-outcome-core.mjs` with `import.meta.resolve`,
+read that file, and compare `sourceDigest(bytes)` to the definition. Do not hash the TypeScript
+wrapper, a function's `toString()`, or an alias forwarding module.
+
+A reviewed Scenario pins the full scorer definition. Different source, entrypoint, language or
+metrics fail local binding before target execution; never substitute a convenient scorer. Expected
+outcomes stay private to grading. The evaluator checks saved effects, destination, explicit literal
+content, unrelated-state preservation and any reviewed process constraints. Literal text checks are
+not semantic quality judgments. The current joined workflow is a synthetic standalone Gmail draft;
+the evaluator's ability to grade other rubrics does not activate those provider operations.
+
+Capture is separately opt-in: record and acknowledge the initial provider state before the real
+agent executes, then append the acknowledged sealed journal and provider inventory and finalize
+against that request's trace. See [provider source capture](CAPTURE.md#provider-source-capture).
+Setup/claim commands do not approve a baseline, register this worker or launch a Scenario.

@@ -1,0 +1,135 @@
+{
+  "initial": {
+    "id": "initial-provider",
+    "kind": "initial_snapshot",
+    "schemaVersion": "1",
+    "adapter": "gmail-provider@1",
+    "service": "google.gmail",
+    "accountId": "owner@example.test",
+    "actorId": "00000000-0000-4000-8000-000000000010",
+    "resourceId": "gmail-primary",
+    "boundary": {
+      "phase": "pre_execution",
+      "completeCollections": [
+        "messages",
+        "drafts"
+      ],
+      "omissions": []
+    },
+    "initialState": {
+      "collections": {
+        "messages": {
+          "parent": {
+            "id": "parent",
+            "threadId": "existing"
+          }
+        },
+        "drafts": {}
+      }
+    },
+    "actions": [],
+    "providerInterface": {
+      "schemaVersion": "gmail-provider/v1",
+      "providerInstances": [
+        {
+          "providerInstanceKey": "gmail-primary",
+          "providerId": "google.gmail",
+          "syntheticPrincipalId": "00000000-0000-4000-8000-000000000010",
+          "configuration": {
+            "mailboxAddress": "owner@example.test"
+          }
+        }
+      ],
+      "mcpTools": [
+        {
+          "name": "create_draft",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      "restOperations": [
+        {
+          "name": "gmail.drafts.create",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      "scopes": [
+        "mail.draft"
+      ],
+      "environmentVersionId": "00000000-0000-4000-8000-000000000003",
+      "environmentRunId": "00000000-0000-4000-8000-000000000001",
+      "executionId": "00000000-0000-4000-8000-000000000002"
+    }
+  },
+  "journal": {
+    "id": "journal-provider",
+    "kind": "execution_journal",
+    "schemaVersion": "1",
+    "adapter": "gmail-provider@1",
+    "service": "google.gmail",
+    "accountId": "owner@example.test",
+    "actorId": "00000000-0000-4000-8000-000000000010",
+    "resourceId": "gmail-primary",
+    "boundary": {
+      "phase": "after_execution",
+      "completeCollections": [],
+      "omissions": []
+    },
+    "journal": {
+      "schemaVersion": "hue.environment-journal/v1",
+      "environmentVersionId": "00000000-0000-4000-8000-000000000003",
+      "environmentRunId": "00000000-0000-4000-8000-000000000001",
+      "executionId": "00000000-0000-4000-8000-000000000002",
+      "complete": true,
+      "stepCount": 1,
+      "worldStatus": "completed",
+      "validity": "not_assessed",
+      "coverageGap": null,
+      "steps": [
+        {
+          "id": "00000000-0000-4000-8000-000000000004",
+          "ordinal": 0,
+          "invocationId": "00000000-0000-4000-8000-000000000005",
+          "action": "provider_call",
+          "args": {
+            "operation": "create_draft",
+            "arguments": {
+              "to": [
+                "recipient@example.test"
+              ]
+            }
+          },
+          "observation": {
+            "status": "ok"
+          },
+          "effects": [
+            {
+              "kind": "created",
+              "collection": "drafts",
+              "entityId": "draft",
+              "fields": [
+                "id"
+              ]
+            }
+          ],
+          "mutated": true,
+          "clockNs": "1",
+          "stateDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "providerCalls": {
+        "complete": true,
+        "items": [
+          {
+            "operation": "create_draft",
+            "transport": "mcp",
+            "status": "completed"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -38,9 +38,10 @@
       "Evaluation coverage",
       "Hue-managed runs",
       "Failure isolation",
-      "App-launched local agents"
+      "App-launched local agents",
+      "Portable source capture and exact evaluators"
     ],
-    "sha256": "sha256:c6577d2871cb05a65b9594169e4ed5ef79908a0de21753d3d3b52040d7011422",
+    "sha256": "sha256:f4720e6db1fc3b192f3ca77f9cff44a24e48937d4a9dfe7f11f75f9590531f84",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -142,6 +143,28 @@
         "@hue-run/sdk/ai-sdk": {
           "publicExports": [
             "hueTelemetry"
+          ]
+        },
+        "@hue-run/sdk/capture": {
+          "publicExports": [
+            "Binding",
+            "BlobRef",
+            "CaptureOperation",
+            "CaptureOptions",
+            "CaptureReport",
+            "CaptureSession",
+            "ExecutionJournalEvidence",
+            "JsonValue",
+            "Manifest",
+            "Observation",
+            "Omission",
+            "Payload",
+            "Producer",
+            "ProviderInterfaceEvidence",
+            "Source",
+            "StateEvidence",
+            "canonicalCaptureJson",
+            "captureRequestKey"
           ]
         },
         "@hue-run/sdk/environment": {
@@ -280,6 +303,9 @@
             "attemptConnectionBundleV2",
             "attemptIdentityV2",
             "builtins",
+            "conversionOutcomeMetrics",
+            "conversionOutcomeScorerDefinition",
+            "createConversionOutcomeScorer",
             "createEvaluationClient",
             "defineLocalScorer",
             "dependencyManifestV2",
@@ -295,10 +321,17 @@
             "runExperiment",
             "runLocalAgent",
             "runSimulation",
+            "scoreConversionOutcome",
             "scoreLocally",
             "secretFreeBindingV2",
             "sourceDigest",
             "surfaceBindingV2"
+          ]
+        },
+        "@hue-run/sdk/evals/conversion-outcome-core.mjs": {
+          "publicExports": [
+            "conversionOutcomeMetrics",
+            "scoreConversionOutcome"
           ]
         },
         "@hue-run/sdk/managed": {
@@ -366,7 +399,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.3.0"
+      "version": "0.3.1"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",

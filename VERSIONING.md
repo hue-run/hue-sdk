@@ -10,10 +10,16 @@ This policy covers `@hue-run/sdk` (npm) and `hue-run` (PyPI). Both packages are 
 
 ## Public API
 
-- TypeScript: the runtime exports and exported types of `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/environment`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` and `@hue-run/sdk/setup`; the `hue` binary; and `@hue-run/sdk/setup-events.schema.json`.
+- TypeScript: the runtime exports and exported types of `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/environment`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` and `@hue-run/sdk/setup`, `@hue-run/sdk/capture` and `@hue-run/sdk/evals/conversion-outcome-core.mjs`; the `hue` binary; and `@hue-run/sdk/setup-events.schema.json`.
 - Python: the names listed in `hue_sdk.__all__`, `hue_sdk.evals.__all__` and `hue_sdk.managed.__all__`.
 
 Everything else is internal even when importable: Python submodules such as `hue_sdk.client`, `hue_sdk.transport`, `hue_sdk.receipts`, `hue_sdk.processors` and `hue_sdk.snapshots`, any `_`-prefixed module or name, and class members prefixed with `_`. Internal names may change in any release.
+
+The conversion scorer's `sourceDigest` hashes the exact UTF-8 executable module, including whitespace.
+Its language, entrypoint and ordered metrics are part of the `local_code` binding. Editing its
+executable bytes requires a new digest and matching published evaluator; an SDK upgrade cannot
+silently substitute a different scorer for a frozen Scenario. The portable capture schema remains
+versioned independently at v1 and never changes ordinary telemetry capture policy.
 
 ## Deprecation
 

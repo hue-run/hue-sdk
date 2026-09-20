@@ -397,10 +397,9 @@ The optional `@hue-run/sdk/evals` entry point supports dataset/scorer registrati
 
 ### App-launched local workers
 
-The TypeScript `0.3.0` release candidate adds `runLocalAgent()` for a fixed local callback that
-claims app-launched simulation work while keeping the agent, provider orchestration and debugger
-in the developer's process. Until registry acceptance, test it only from the exact reviewed
-`hue-run-sdk-0.3.0.tgz` archive rather than requesting `0.3.0` from npm. It shares
+`runLocalAgent()` shipped in TypeScript `0.3.0` and is available from npm. It connects a fixed local
+callback to app-launched simulation work while keeping the agent and provider orchestration in
+the developer's process. It shares
 `runSimulation()`'s provider-aware world lifecycle, keeps scoped credentials in callback memory,
 skips target/scorer execution for incomplete environments, and never reacquires or replays after
 an uncertain preparation. See the
@@ -408,6 +407,17 @@ an uncertain preparation. See the
 [simulated environment guide](ENVIRONMENTS.md). Tests exercise local control-plane fixtures, not
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
+
+### Reviewed Scenarios and source capture
+
+Unreleased TypeScript `0.3.1` adds `createConversionOutcomeScorer()` and `@hue-run/sdk/capture`.
+The scorer pins the canonical executable bytes used by reviewed conversion outcomes, including
+standalone drafts. Capture requires its own explicit `sourceContent` policy; enabling telemetry
+content does not enable source capture. See [reviewed Scenarios](EVALUATIONS.md#reviewed-scenario-evaluator)
+and [source capture](CAPTURE.md). Python has no equivalent capture API in its published package.
+
+The [setup CLI](CLI.md) is a resumable local inspection core. Existing customers connect their
+agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.
 
 ## Managed targets
 

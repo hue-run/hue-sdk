@@ -1,6 +1,6 @@
 # Compatibility
 
-This matrix describes the current releases, TypeScript `0.3.0` and Python `0.2.2`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+The published releases are TypeScript `0.3.0` and Python `0.2.2`. This matrix also governs the unreleased TypeScript `0.3.1` additions. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -50,10 +50,25 @@ Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: f
 
 ## App-launched local agents
 
-The TypeScript `0.3.0` release includes `runLocalAgent()` and the restricted
+`runLocalAgent()` shipped in TypeScript `0.3.0` with the restricted
 `runSimulation()` candidate projection; generic evaluations remain compatible. Both paths share
 the same provider-aware world lifecycle and uncertainty rules. A matching Hue API deployment is
 required. Public package tests exercise local control-plane responses and connection-bundle
 handling; they do not call an issued provider facade. These tests do not call the official Gmail
 service or establish universal Gmail or Slack parity. Python remains at `0.2.2` and does not
 include a native local-worker implementation.
+
+## Portable source capture and exact evaluators
+
+Unreleased TypeScript `0.3.1` adds the optional `@hue-run/sdk/capture` entry point (`ajv` required),
+independent of ordinary telemetry's content policy. The language-neutral capture v1 schema covers
+selected function/MCP/HTTP contracts, explicit pre-execution state, provider interfaces and
+post-execution journals. No automatic interception, provider activation, or complete-world inference
+is included. Python capture remains unavailable in its published package.
+
+`createConversionOutcomeScorer()` from `@hue-run/sdk/evals` binds a local callback to the exact
+canonical source and metrics. The public `@hue-run/sdk/evals/conversion-outcome-core.mjs` subpath
+ships executable bytes unchanged; installed checks verify its digest and grading under Node and
+Bun. A server scorer with different source or metrics requires a matching reviewed SDK version.
+The V2 connection bundle, provider transport, worker recovery and OpenTelemetry ownership remain
+unchanged from the published worker. Setup is a separate local inspection CLI, not a Scenario launcher.

@@ -11,6 +11,7 @@ export default tseslint.config(
   {
     ignores: [
       "**/node_modules/**",
+      "**/.context/**",
       "**/dist/**",
       "**/.venv/**",
       "examples/reference-chatbot/**",
@@ -59,7 +60,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["packages/sdk-typescript/scripts/**/*.mjs", "scripts/**/*.mjs"],
+    files: ["packages/sdk-typescript/scripts/**/*.mjs", "scripts/**/*.mjs", "packages/sdk-typescript/src/evals/*.mjs"],
     languageOptions: { globals: globals.node },
     rules: {
       "no-empty": ["error", { allowEmptyCatch: true }],

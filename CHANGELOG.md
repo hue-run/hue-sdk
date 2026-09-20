@@ -10,6 +10,34 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.3.1] - Unreleased
+
+#### Added
+
+- `createConversionOutcomeScorer()`, `conversionOutcomeScorerDefinition`, `conversionOutcomeMetrics`
+  and `scoreConversionOutcome` are public evaluation exports. The canonical executable is also
+  available at `@hue-run/sdk/evals/conversion-outcome-core.mjs`; its exact SHA-256 is
+  `27d096eedc80fbfb747b849c891762f76165ef76429727b0a93ec7dbebaf7b05`. It grades reviewed
+  reply/standalone drafts, destination, literal content, preservation and explicit process constraints.
+- Opt-in `@hue-run/sdk/capture` adds bounded source capture, immutable finalization, omission reports,
+  selected operation schemas, provider initial snapshots and execution journals. Capture uses a
+  separate source-content choice and authorization; ordinary telemetry capture is unchanged.
+- A dependency-free `hue` setup-session CLI and `@hue-run/sdk/setup` installer contract provide
+  deterministic local project detection, private resumable checkpoints, append-only human/plain
+  renderers and versioned JSONL agent events. This first slice does not change project files, contact
+  the Hue backend, or create a Scenario, evaluation, worker or Hue Run.
+- The unpublished npm alias tracks the new package exports and version. Public installation still
+  uses `@hue-run/sdk`; alias publication remains separate.
+
+#### Fixed
+
+- Availability documentation now records the already-published worker correctly. The setup CLI core
+  was merged after publication and first belongs to this new release, not the existing 0.3.0 archive.
+
+The existing `runLocalAgent` API, V2 connection bundle, provider transport, environment lifecycle,
+checkpoint formats, telemetry ownership and capture defaults are unchanged. Python remains at 0.2.2.
+No registry release is claimed until publication and registry acceptance complete.
+
 ### [0.3.0](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.0) - 2026-09-19
 
 #### Breaking
@@ -19,10 +47,6 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
-- A dependency-free `hue` setup-session CLI and `@hue-run/sdk/setup` installer contract provide
-  deterministic local project detection, private resumable checkpoints, append-only human/plain
-  renderers and versioned JSONL agent events. This first slice does not change project files, contact
-  the Hue backend, or create a Scenario, evaluation, worker or Hue Run.
 - `runLocalAgent()` connects a fixed local TypeScript agent entry point to app-launched, versioned simulation jobs while preserving checkpoint recovery and the developer's existing process, debugger and provider orchestration.
 - `runLocalAgent()` and `runSimulation()` share one provider-aware world lifecycle: V2 manifest preflight runs once before target code, ready bundles remain memory-only, incomplete environments skip targets and scorers, and uncertain preparation is never reacquired or replayed.
 - Environment publication supports explicit V1 and V2 definitions, including immutable Gmail provider-instance bindings and canonical synthetic-principal UUID comparison.

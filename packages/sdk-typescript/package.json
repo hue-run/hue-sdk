@@ -1,6 +1,6 @@
 {
   "name": "@hue-run/sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": false,
   "license": "MIT",
   "publishConfig": {
@@ -35,7 +35,8 @@
     "EVALUATIONS.md",
     "ENVIRONMENTS.md",
     "MANAGED_TARGETS.md",
-    "LICENSE"
+    "LICENSE",
+    "CAPTURE.md"
   ],
   "type": "module",
   "bin": {
@@ -76,10 +77,20 @@
       "default": "./dist/setup.js"
     },
     "./setup-events.schema.json": "./setup-events.schema.json",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./capture": {
+      "types": "./dist/capture.d.ts",
+      "import": "./dist/capture.js",
+      "default": "./dist/capture.js"
+    },
+    "./evals/conversion-outcome-core.mjs": {
+      "types": "./dist/evals/conversion-outcome-core.d.mts",
+      "import": "./dist/evals/conversion-outcome-core.mjs",
+      "default": "./dist/evals/conversion-outcome-core.mjs"
+    }
   },
   "scripts": {
-    "build": "node scripts/write-version.mjs && tsc -p tsconfig.build.json",
+    "build": "node scripts/write-version.mjs && tsc -p tsconfig.build.json && node scripts/copy-portable-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test tests"
   },

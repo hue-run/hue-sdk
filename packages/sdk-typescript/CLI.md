@@ -1,13 +1,13 @@
 # Hue setup-session CLI contract
 
-This package includes the local first slice of the claimable anonymous onboarding CLI:
+Unreleased TypeScript `0.3.1` includes the merged local setup-session CLI core:
 
 ```sh
 hue setup
 hue setup --agent
 hue resume
 hue status
-hue claim # preserve the anonymous project by attaching it to an account
+hue claim # reports account attachment unavailable in this local core
 ```
 
 These commands belong only to an installer setup session. They do not create or launch a Hue Run,

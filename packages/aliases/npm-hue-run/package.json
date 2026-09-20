@@ -1,6 +1,6 @@
 {
   "name": "hue-run",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Alias of @hue-run/sdk. Install @hue-run/sdk directly; this package only re-exports it.",
   "license": "MIT",
   "type": "module",
@@ -26,7 +26,9 @@
     "setup.js",
     "setup-events.schema.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "capture.js",
+    "conversion-outcome-core.mjs"
   ],
   "exports": {
     ".": "./index.js",
@@ -35,9 +37,11 @@
     "./managed": "./managed.js",
     "./environment": "./environment.js",
     "./setup": "./setup.js",
-    "./setup-events.schema.json": "./setup-events.schema.json"
+    "./setup-events.schema.json": "./setup-events.schema.json",
+    "./capture": "./capture.js",
+    "./evals/conversion-outcome-core.mjs": "./conversion-outcome-core.mjs"
   },
   "dependencies": {
-    "@hue-run/sdk": "0.3.0"
+    "@hue-run/sdk": "0.3.1"
   }
 }

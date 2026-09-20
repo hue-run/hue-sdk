@@ -1,14 +1,24 @@
 {
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["esnext", "dom"],
+    "lib": [
+      "esnext",
+      "dom"
+    ],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "types": ["node", "bun"],
+    "types": [
+      "node",
+      "bun"
+    ],
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "noEmit": true
+    "noEmit": true,
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts"
+  ]
 }
