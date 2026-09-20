@@ -32,10 +32,12 @@ function inside(parent: string, child: string): boolean {
 }
 
 function serviceName(root: string): string {
-  const value = basename(root)
-    .replace(/[^A-Za-z0-9_.-]+/gu, "-")
-    .replace(/^-+|-+$/gu, "")
-    .slice(0, 220);
+  const normalized = basename(root).replace(/[^A-Za-z0-9_.-]+/gu, "-");
+  let start = 0;
+  let end = normalized.length;
+  while (normalized[start] === "-") start += 1;
+  while (end > start && normalized[end - 1] === "-") end -= 1;
+  const value = normalized.slice(start, end).slice(0, 220);
   return value ? `hue-setup-${value}` : "hue-setup-project";
 }
 
