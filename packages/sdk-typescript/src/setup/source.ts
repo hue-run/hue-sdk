@@ -91,7 +91,34 @@ export function inspectExpressSource(source: string): ApplicationSyntax {
       throw fail();
   }
   let routeCalls = 0;
+  let listenerCalls = 0;
   walk(program, (item, parent) => {
+    // The one setup request traverses a private local proxy. Apps inspecting
+    // socket identity need manual integration so setup cannot alter their input.
+    if (
+      ["MemberExpression", "OptionalMemberExpression", "ObjectProperty"].includes(item.type) &&
+      ["socket", "connection"].some(
+        (name) =>
+          identifier(item.property ?? item.key, name) ||
+          node(item.property ?? item.key)?.value === name,
+      )
+    )
+      throw fail();
+    if (
+      ["process", "Number"].some((name) => identifier(item, name)) &&
+      ((parent?.type === "VariableDeclarator" && parent.id === item) ||
+        ((parent?.type === "FunctionDeclaration" || parent?.type === "ClassDeclaration") &&
+          parent.id === item) ||
+        (Array.isArray(parent?.params) && parent.params.includes(item)) ||
+        (parent?.type.endsWith("Specifier") && parent.local === item) ||
+        (parent?.type === "ObjectProperty" && parent.value === item) ||
+        parent?.type === "ArrayPattern" ||
+        parent?.type === "RestElement" ||
+        (parent?.type === "AssignmentPattern" && parent.left === item) ||
+        (parent?.type === "AssignmentExpression" && parent.left === item) ||
+        (parent?.type === "UpdateExpression" && parent.argument === item))
+    )
+      throw fail();
     if (
       identifier(item, "app") &&
       !(
@@ -132,6 +159,7 @@ export function inspectExpressSource(source: string): ApplicationSyntax {
     )
       throw fail();
     if (item.type === "CallExpression" && member(item.callee, "app", "get")) routeCalls++;
+    if (item.type === "CallExpression" && member(item.callee, "app", "listen")) listenerCalls++;
     if (
       item.type === "ImportExpression" ||
       (item.type === "CallExpression" &&
@@ -181,18 +209,26 @@ export function inspectExpressSource(source: string): ApplicationSyntax {
     .filter((item) => item.type === "ExpressionStatement")
     .map((item) => node(item.expression))
     .filter((item) => item?.type === "CallExpression" && member(item.callee, "app", "listen"));
-  if (listeners.length !== 1) throw fail();
-  let port = false;
-  walk(nodes(listeners[0]!.arguments)[0], (item) => {
-    if (
-      item.type === "MemberExpression" &&
-      !item.computed &&
-      member(item.object, "process", "env") &&
-      identifier(item.property, "PORT")
-    )
-      port = true;
-  });
-  if (!port) throw fail();
+  if (listeners.length !== 1 || listenerCalls !== 1 || listeners[0]!.start! <= routes[0]!.end!)
+    throw fail();
+  const listenerArguments = nodes(listeners[0]!.arguments);
+  const portArgument = listenerArguments[0];
+  const port =
+    portArgument?.type === "CallExpression" && identifier(portArgument.callee, "Number")
+      ? nodes(portArgument.arguments).length === 1
+        ? nodes(portArgument.arguments)[0]
+        : undefined
+      : portArgument;
+  if (
+    listenerArguments.length !== 2 ||
+    port?.type !== "MemberExpression" ||
+    port.computed !== false ||
+    !member(port.object, "process", "env") ||
+    !identifier(port.property, "PORT") ||
+    listenerArguments[1]?.type !== "StringLiteral" ||
+    listenerArguments[1].value !== "127.0.0.1"
+  )
+    throw fail();
   return {
     constructorEnd: constructors[0]!.end!,
     importOffset: 0,
@@ -204,6 +240,7 @@ const PYTHON_INSPECT = String.raw`
 import ast, json, sys
 source = sys.stdin.read()
 tree = ast.parse(source)
+compile(source, '<setup-static-inspection>', 'exec')
 parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 lines = source.splitlines(keepends=True)
 def endline(item):
@@ -216,6 +253,20 @@ constructors = [item for item in tree.body if isinstance(item, ast.Assign) and l
 assert len(constructors) == 1
 for item in ast.walk(tree):
     parent = parents.get(item)
+    if isinstance(item, ast.Attribute) and item.attr in ('socket', 'connection'):
+        raise AssertionError('Socket-aware applications require manual integration')
+    if isinstance(item, ast.Constant) and item.value == 'werkzeug.socket':
+        raise AssertionError('Socket-aware applications require manual integration')
+    if isinstance(item, ast.Name) and item.id in ('int', 'os') and isinstance(item.ctx, ast.Store):
+        raise AssertionError('Custom port conversion requires manual integration')
+    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and item.name in ('int', 'os'):
+        raise AssertionError('Custom port conversion requires manual integration')
+    if isinstance(item, ast.arg) and item.arg in ('int', 'os'):
+        raise AssertionError('Custom port conversion requires manual integration')
+    if isinstance(item, ast.alias):
+        bound = item.asname or item.name.split('.')[0]
+        if bound == 'int' or (bound == 'os' and not (isinstance(parent, ast.Import) and item.name == 'os')):
+            raise AssertionError('Custom port conversion requires manual integration')
     if name(item, 'app'):
         assert (parent is constructors[0] and item in parent.targets) or (isinstance(parent, ast.Attribute) and parent.value is item)
     if isinstance(item, ast.Attribute) and name(item.value, 'app'):
@@ -232,7 +283,24 @@ assert handler.lineno > constructors[0].end_lineno and len(route.args) == 1 and 
 assert ast.get_source_segment(source, route.args[0]) in (json.dumps(route.args[0].value), "'" + route.args[0].value + "'")
 listeners = [item for item in ast.walk(tree) if isinstance(item, ast.Call) and member(item.func, 'app', 'run')]
 assert len(listeners) == 1
-assert any(isinstance(item, ast.Subscript) and member(item.value, 'os', 'environ') and isinstance(item.slice, ast.Constant) and item.slice.value == 'PORT' for item in ast.walk(listeners[0]))
+listener = listeners[0]
+statement = parents.get(listener)
+assert isinstance(statement, ast.Expr) and statement.value is listener and statement.lineno > handler.end_lineno
+owner = parents.get(statement)
+if owner is not tree:
+    assert isinstance(owner, ast.If) and parents.get(owner) is tree and owner.body == [statement] and not owner.orelse
+    condition = owner.test
+    assert isinstance(condition, ast.Compare) and name(condition.left, '__name__') and len(condition.ops) == 1 and isinstance(condition.ops[0], ast.Eq) and len(condition.comparators) == 1 and isinstance(condition.comparators[0], ast.Constant) and condition.comparators[0].value == '__main__'
+assert not listener.args and all(keyword.arg in ('host', 'port') for keyword in listener.keywords)
+keywords = {keyword.arg: keyword.value for keyword in listener.keywords}
+assert len(keywords) == len(listener.keywords) and 'port' in keywords
+if 'host' in keywords:
+    assert isinstance(keywords['host'], ast.Constant) and keywords['host'].value == '127.0.0.1'
+port = keywords['port']
+assert isinstance(port, ast.Call) and name(port.func, 'int') and len(port.args) == 1 and not port.keywords
+value = port.args[0]
+assert isinstance(value, ast.Subscript) and member(value.value, 'os', 'environ') and isinstance(value.slice, ast.Constant) and value.slice.value == 'PORT'
+assert any(isinstance(item, ast.Import) and any(alias.name == 'os' and alias.asname in (None, 'os') for alias in item.names) for item in tree.body)
 index = 0
 if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str): index = 1
 while index < len(tree.body) and isinstance(tree.body[index], ast.ImportFrom) and tree.body[index].module == '__future__': index += 1

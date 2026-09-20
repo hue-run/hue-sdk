@@ -1,9 +1,10 @@
-import { randomInt, randomUUID } from "node:crypto";
+import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { createConnection } from "node:net";
+import { connectOwnedApplication, requestOwnedApplication } from "./socket.js";
 import { sdkVersion } from "../version.js";
 import { inspectExpressSource, inspectFlaskSource, type ApplicationSyntax } from "./source.js";
 import type { SetupFileChange } from "./configure.js";
@@ -24,6 +25,58 @@ const EXPRESS_RUNTIME_DEPENDENCIES = {
 const MAX_SOURCE_BYTES = 1024 * 1024;
 const START_MARKER = "Hue setup instrumentation (managed; do not edit)";
 const END_MARKER = "End Hue setup instrumentation";
+
+/** Never let Bun evaluate a project preload while checking runtime support. */
+async function bunConfiguration(root: string): Promise<string> {
+  const refuse = () =>
+    new SetupApplicationActionRequired(
+      "custom-instrumentation",
+      "Review Bun configuration and dotenv files before automatic setup; custom runtime/bootstrap ownership is unsupported.",
+    );
+  if ((await readdir(root)).some((name) => /^\.env(?:\.|$)/u.test(name))) throw refuse();
+  const globals = new Set([
+    join(homedir(), ".bunfig.toml"),
+    ...(process.env.XDG_CONFIG_HOME ? [join(process.env.XDG_CONFIG_HOME, ".bunfig.toml")] : []),
+  ]);
+  for (const path of globals) {
+    try {
+      await lstat(path);
+      throw refuse();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  let source: string;
+  try {
+    source = await safeRead(root, "bunfig.toml");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "/dev/null";
+    throw error;
+  }
+  // The pre-publication registry overlay is the sole supported local Bun setting.
+  // Unknown/quoted/dotted/multiline TOML never gets evaluated by Bun during preflight.
+  const match = /^\s*\[install\]\s*\n\s*registry\s*=\s*"([^"\\\r\n]+)"\s*$/u.exec(source);
+  if (!match) throw refuse();
+  let url: URL;
+  try {
+    url = new URL(match[1]!);
+  } catch {
+    throw refuse();
+  }
+  if (
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/" ||
+    !(
+      url.protocol === "https:" ||
+      (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
+    )
+  )
+    throw refuse();
+  return join(root, "bunfig.toml");
+}
 
 /** Closed automatic application matrix; other projects require an explicit agent-owned integration. */
 export type SetupApplicationPlan =
@@ -348,6 +401,21 @@ function pythonProject(source: string): { dependencies: string[]; hasHue: boolea
   return { dependencies, hasHue: hue.length === 1 };
 }
 
+async function flaskConfiguration(root: string): Promise<void> {
+  if (
+    Object.keys(process.env).some(
+      (key) => key.startsWith("FLASK_") || key === "PYTHONPATH" || key === "PYTHONHOME",
+    ) ||
+    (await readdir(root)).some(
+      (name) => name === ".env" || name.startsWith(".env.") || name === ".flaskenv",
+    )
+  )
+    throw new SetupApplicationActionRequired(
+      "custom-instrumentation",
+      "Review Flask runtime and dotenv configuration before setup; reloader or custom bootstrap ownership is unsupported.",
+    );
+}
+
 /** Statically recognizes the deliberately narrow automatic matrix without executing project code. */
 export async function planSetupApplication(
   project: SetupProjectDetection,
@@ -417,28 +485,32 @@ export async function planSetupApplication(
     };
     const source = unmanagedApplicationSource(original, plan);
     plan.requestPath = syntax(source, "typescript").requestPath;
+    if (plan.manager === "bun" || plan.runtime === "bun") await bunConfiguration(project.root);
     // Inspect only the selected runtime, never import the app or a user bootstrap.
     // Fixed argv + bounded output; unsupported runtimes fail before installation/provisioning.
     const runtime = spawnSync(
       plan.runtime === "bun" ? "bun" : "node",
       [
-        ...(plan.runtime === "bun" ? ["--no-env-file"] : []),
+        ...(plan.runtime === "bun"
+          ? ["--no-env-file", "--config=/dev/null"]
+          : ["--experimental-vm-modules"]),
         "--input-type=module",
         "-e",
-        'import { AsyncLocalStorage } from "node:async_hooks"; const major=Number(process.versions.node.split(".")[0]); if (process.versions.bun ? process.versions.bun !== "1.4.2" : ![22,24,26].includes(major)) process.exit(2); const storage=new AsyncLocalStorage(); await storage.run(1, async()=>{await new Promise(r=>setImmediate(r));if(storage.getStore()!==1)process.exit(2)}); storage.disable();',
+        'import { AsyncLocalStorage } from "node:async_hooks"; import { readFileSync } from "node:fs"; import * as module from "node:module"; import * as vm from "node:vm"; try { const input=JSON.parse(readFileSync(0,"utf8")); const major=Number(process.versions.node.split(".")[0]); if (process.versions.bun ? process.versions.bun !== "1.4.2" : ![22,24,26].includes(major)) process.exit(2); if(process.versions.bun) new Bun.Transpiler({loader:input.typescript?"ts":"js"}).transformSync(input.source); else new vm.SourceTextModule(input.typescript?module.stripTypeScriptTypes(input.source,{mode:"strip"}):input.source); const storage=new AsyncLocalStorage(); await storage.run(1, async()=>{await new Promise(r=>setImmediate(r));if(storage.getStore()!==1)process.exit(2)}); storage.disable(); } catch { process.exitCode=2; }',
       ],
       {
         cwd: project.root,
         timeout: 5000,
         maxBuffer: 8192,
         shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
+        input: JSON.stringify({ source, typescript: /\.(?:ts|mts)$/u.test(entrypoint) }),
+        stdio: ["pipe", "pipe", "pipe"],
       },
     );
     if (runtime.status !== 0)
       throw new SetupApplicationActionRequired(
         "custom-instrumentation",
-        "The selected runtime cannot safely support setup-owned asynchronous context. Use the tested Node or Bun runtime before rerunning setup.",
+        "The selected runtime cannot compile this entrypoint or safely support setup-owned asynchronous context. Review syntax/runtime compatibility before rerunning setup.",
       );
     return plan;
   }
@@ -453,6 +525,7 @@ export async function planSetupApplication(
       "Automatic setup currently supports single-package Flask servers only. Add Hue to one existing request path, then rerun hue resume.",
     );
   pythonProject(await safeRead(project.root, "pyproject.toml"));
+  await flaskConfiguration(project.root);
   // uv searches parents for workspaces, even when the current package has its own manifest.
   for (let parent = dirname(project.root); ; parent = dirname(parent)) {
     try {
@@ -526,6 +599,7 @@ export async function installSetupRuntime(
   runner: SetupCommandRunner = runSetupCommand,
 ): Promise<boolean> {
   if (plan.language === "typescript") {
+    const bunConfig = plan.manager === "bun" ? await bunConfiguration(project.root) : undefined;
     const specs = Object.entries(EXPRESS_RUNTIME_DEPENDENCIES).map(
       ([name, version]) => `${name}@${version}`,
     );
@@ -556,7 +630,12 @@ export async function installSetupRuntime(
         : pinned
           ? ["install", ...(locked ? ["--frozen-lockfile"] : []), "--ignore-scripts"]
           : ["add", "--exact", "--ignore-scripts", ...specs];
-    await runner({ command: plan.manager, args, cwd: project.root, timeoutMillis: 120_000 });
+    await runner({
+      command: plan.manager,
+      args: bunConfig ? ["--no-env-file", `--config=${bunConfig}`, ...args] : args,
+      cwd: project.root,
+      timeoutMillis: 120_000,
+    });
     const updated = JSON.parse(await safeRead(project.root, "package.json")) as Record<
       string,
       unknown
@@ -769,33 +848,6 @@ function validEvidence(value: unknown, version: 0 | 1): SetupStoredApplicationEv
   };
 }
 
-async function waitForListener(
-  port: number,
-  child: ReturnType<typeof spawn>,
-  signal: AbortSignal | undefined,
-  timeoutMillis: number,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMillis;
-  while (Date.now() < deadline) {
-    if (signal?.aborted) throw new Error("Setup interrupted");
-    if (child.exitCode !== null) throw new Error("The application exited before verification");
-    const ready = await new Promise<boolean>((resolvePromise) => {
-      const socket = createConnection({ host: "127.0.0.1", port });
-      const finish = (value: boolean) => {
-        socket.removeAllListeners();
-        socket.destroy();
-        resolvePromise(value);
-      };
-      socket.setTimeout(500, () => finish(false));
-      socket.once("connect", () => finish(true));
-      socket.once("error", () => finish(false));
-    });
-    if (ready) return;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-  }
-  throw new Error("The application did not become ready within the setup deadline");
-}
-
 /** Starts the existing entrypoint without a shell and exercises one existing HTTP GET route. */
 export async function exerciseSetupApplication(
   store: FileSetupInstallationStore,
@@ -806,11 +858,16 @@ export async function exerciseSetupApplication(
     readinessMillis: number;
     requestMillis: number;
     evidenceMillis: number;
+    /** Internal loopback test seam; the public CLI always chooses a random port. */
+    port?: number;
   } = { readinessMillis: 10_000, requestMillis: 10_000, evidenceMillis: 10_000 },
 ): Promise<SetupStoredApplicationEvidence> {
   if (!record.credential) throw new Error("Setup credential is not available");
   applicationRequestUrl(plan.requestPath, "http://127.0.0.1:1");
   await safeRead(store.projectRoot, plan.entrypoint);
+  if (plan.language === "typescript" && (plan.runtime === "bun" || plan.manager === "bun"))
+    await bunConfiguration(store.projectRoot);
+  if (plan.language === "python") await flaskConfiguration(store.projectRoot);
   if (record.applicationAttempt)
     throw new SetupApplicationActionRequired(
       "custom-instrumentation",
@@ -822,7 +879,10 @@ export async function exerciseSetupApplication(
   };
   await store.save(record);
   await store.removeApplicationEvidence();
-  const port = randomInt(20_000, 60_000);
+  const port = deadlines.port ?? randomInt(20_000, 60_000);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("Invalid application port");
+  const socketProof = randomBytes(32).toString("base64url");
   const command =
     plan.language === "typescript"
       ? plan.runtime === "bun"
@@ -833,7 +893,11 @@ export async function exerciseSetupApplication(
       : "uv";
   const args =
     plan.language === "typescript"
-      ? [...(plan.sourceMaps ? ["--enable-source-maps"] : []), plan.entrypoint]
+      ? [
+          ...(plan.runtime === "bun" ? ["--no-env-file", "--config=/dev/null"] : []),
+          ...(plan.sourceMaps ? ["--enable-source-maps"] : []),
+          plan.entrypoint,
+        ]
       : ["run", "--frozen", "--no-build", "--no-sync", "python", plan.entrypoint];
   const child = spawn(command, args, {
     cwd: store.projectRoot,
@@ -841,6 +905,7 @@ export async function exerciseSetupApplication(
       ...process.env,
       PORT: String(port),
       HUE_SETUP_EVIDENCE_FILE: store.applicationEvidencePath,
+      HUE_SETUP_SOCKET_PROOF: socketProof,
     },
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
@@ -858,40 +923,16 @@ export async function exerciseSetupApplication(
   });
   try {
     if (child.pid === undefined) throw new Error("The application runtime is unavailable");
-    await waitForListener(port, child, signal, deadlines.readinessMillis);
-    if (launchFailed) throw new Error("The application runtime is unavailable");
     const origin = `http://127.0.0.1:${port}`;
     const requestUrl = applicationRequestUrl(plan.requestPath, origin);
-    const response = await fetch(requestUrl, {
-      redirect: "manual",
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(deadlines.requestMillis)])
-        : AbortSignal.timeout(deadlines.requestMillis),
-    });
-    if (response.status < 200 || response.status >= 300) {
-      await response.body?.cancel();
-      throw new Error(
-        "The selected application handler did not return a successful response; it will not be replayed",
-      );
-    }
-    // Drain the one response without retaining customer content. Cancelling after
-    // headers could abort a streaming handler before its span/evidence completes.
-    const reader = response.body?.getReader();
-    let bytes = 0;
-    if (reader)
-      try {
-        for (;;) {
-          const item = await reader.read();
-          if (item.done) break;
-          bytes += item.value.byteLength;
-          if (bytes > 1024 * 1024) {
-            await reader.cancel();
-            throw new Error("The application response exceeded the bounded setup read budget");
-          }
-        }
-      } finally {
-        reader.releaseLock();
-      }
+    const socket = await connectOwnedApplication(
+      port,
+      socketProof,
+      () => !launchFailed && child.exitCode === null,
+      deadlines.readinessMillis,
+      signal,
+    );
+    await requestOwnedApplication(socket, requestUrl, deadlines.requestMillis, signal);
     const deadline = Date.now() + deadlines.evidenceMillis;
     for (;;) {
       if (signal?.aborted) throw new Error("Setup interrupted");

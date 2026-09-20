@@ -14,8 +14,8 @@ activation, production acceptance and `latest` promotion all pass. The automatic
 to Express with npm, Express with Bun, and Flask with uv in a single application package with one recognizable
 entrypoint, a literal existing GET route and `PORT` supplied by the environment. The command uses the
 detected manager to install an exact runtime, inserts two owned middleware marker blocks without
-rewriting business logic, starts that exact entrypoint without a shell, waits for its loopback TCP
-listener, makes one request to the existing route, flushes, and verifies its exact trace/span receipt.
+rewriting business logic, starts that exact entrypoint without a shell, authenticates its loopback
+socket before sending HTTP, makes one request on that same socket, flushes, and verifies its exact trace/span receipt.
 A delayed listener, failing handler, missing telemetry or receipt failure never authorizes replay of
 business work. A setup probe is separate transport evidence and cannot establish application
 instrumentation.
@@ -56,6 +56,28 @@ Syntax parsing, not matches inside comments/strings/templates/regular expression
 constructor and literal route. Custom middleware, alternate route methods, app aliases/escapes and
 extra Flask handler decorators are outside the automatic matrix. The one selected request must finish with a 2xx response; a 404 or
 telemetry failure never authorizes a business retry.
+
+Bun runtime checks and application launch use an explicit empty config and disable dotenv loading.
+Local runtime/preload settings, dotenv files and a global `.bunfig.toml` require manual review before
+any Bun invocation. The only supported local `bunfig.toml` is an `[install]` section with one
+credential-free registry origin for package installation; this does not become runtime config.
+
+Automatic Express listeners must be the single top-level
+`app.listen(Number(process.env.PORT), "127.0.0.1")` (the direct `process.env.PORT` argument
+is also recognized). Flask permits only `app.run(port=int(os.environ["PORT"]))`, optionally
+with `host="127.0.0.1"`, at module level or under the usual main guard. Custom callbacks,
+server handles, socket metadata access, reloaders, workers and listener options require manual
+integration. Flask dotenv/runtime bootstrap configuration also requires review.
+Before dependency or credential changes, an isolated compile-only check validates the selected
+Node/Bun entrypoint without executing it; Node-unsupported TypeScript syntax is refused.
+
+During this setup-owned invocation only, a bounded server-first proof authenticates the retained
+loopback connection. HTTP uses that exact socket once, with no redirect, redial or retry. Express
+uses a private inner listener and a one-connection forwarding listener; Flask uses its standard
+request-handler seam. The per-attempt secret stays in memory/private child transport, never in
+events, checkpoints or receipts. Ordinary app starts have no handshake and retain their original
+listener behavior. This prevents accidental requests to an unrelated listener, not access by
+malicious code running as the same local user.
 
 Setup creates no Scenario, Hue Run, evaluation, source capture, worker or remote execution. Package
 manager lifecycle scripts are disabled. The supported existing application entrypoint is executed

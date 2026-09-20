@@ -293,6 +293,8 @@ describe("supported application matrix", () => {
     expect(bunCommand).toMatchObject({
       command: "bun",
       args: [
+        "--no-env-file",
+        "--config=/dev/null",
         "add",
         "--exact",
         "--ignore-scripts",
@@ -389,7 +391,7 @@ describe("supported application matrix", () => {
     expect(await readFile(entry, "utf8")).toBe(changed);
   });
 
-  test("waits on TCP then invokes a failing business route exactly once without evidence replay", async () => {
+  test("TCP availability alone sends no request and leaves a durable no-replay attempt", async () => {
     const root = await mkdtemp(join(tmpdir(), "hue-setup-exact-once-"));
     const countPath = join(root, "count.txt");
     await writeFile(
@@ -414,8 +416,8 @@ describe("supported application matrix", () => {
         requestMillis: 1000,
         evidenceMillis: 200,
       }),
-    ).rejects.toThrow("did not return a successful response");
-    expect(await readFile(countPath, "utf8")).toBe("1");
+    ).rejects.toThrow("did not prove ownership");
+    expect(await readFile(countPath, "utf8").catch(() => undefined)).toBeUndefined();
     await expect(
       exerciseSetupApplication(store, record, plan, undefined, {
         readinessMillis: 1000,
@@ -423,7 +425,7 @@ describe("supported application matrix", () => {
         evidenceMillis: 200,
       }),
     ).rejects.toMatchObject({ code: "custom-instrumentation" });
-    expect(await readFile(countPath, "utf8")).toBe("1");
+    expect(await readFile(countPath, "utf8").catch(() => undefined)).toBeUndefined();
   });
 });
 

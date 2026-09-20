@@ -325,6 +325,87 @@ describe("application source preservation", () => {
 });
 
 describe("runtime installation and invocation", () => {
+  test("Node compile-only preflight rejects enum and invalid runtime syntax without executing source", async () => {
+    for (const [extension, declaration] of [
+      ["ts", "enum Color { Red }"],
+      ["mjs", "const value: string = 'x';"],
+    ]) {
+      const root = await expressProject();
+      const manifestPath = join(root, "package.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.scripts.start = `node src/server.${extension}`;
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      const entrypoint = join(root, "src", `server.${extension}`);
+      const source =
+        `import { writeFileSync } from "node:fs";\n${declaration}\nwriteFileSync("should-not-run", "1");\n` +
+        expressSource();
+      await writeFile(entrypoint, source);
+      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+        code: "custom-instrumentation",
+      });
+      expect(await readFile(entrypoint, "utf8")).toBe(source);
+      await expect(lstat(join(root, "should-not-run"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expectNoSetupFiles(root);
+    }
+  });
+  test("Bun preloads and dotenv are refused before runtime inspection or local mutation", async () => {
+    for (const variant of ["preload", "define", "dotenv-node", "dotenv-bun", "global"]) {
+      const root = await expressProject({ bun: true });
+      const marker = join(root, "preload-ran");
+      await writeFile(
+        join(root, "preload.mjs"),
+        `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "1");`,
+      );
+      const previous = process.env.XDG_CONFIG_HOME;
+      try {
+        if (variant === "global") {
+          const config = await directory();
+          await writeFile(
+            join(config, ".bunfig.toml"),
+            `preload = [${JSON.stringify(join(root, "preload.mjs"))}]\n`,
+          );
+          process.env.XDG_CONFIG_HOME = config;
+        } else if (variant.startsWith("dotenv")) {
+          await writeFile(
+            join(root, ".env"),
+            `${variant === "dotenv-node" ? "NODE_OPTIONS" : "BUN_OPTIONS"}=--preload ./preload.mjs\n`,
+          );
+        } else
+          await writeFile(
+            join(root, "bunfig.toml"),
+            variant === "preload"
+              ? 'preload=["./preload.mjs"]\n'
+              : '[define]\n"process.env.NODE_ENV"="development"\n',
+          );
+        await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+          code: "custom-instrumentation",
+        });
+        await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+        await expectNoSetupFiles(root);
+      } finally {
+        if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = previous;
+      }
+    }
+  });
+
+  test("Bun 1.4.2 positive preload control demonstrates empty-config isolation", async () => {
+    const root = await expressProject({ bun: true });
+    const marker = join(root, "preload-ran");
+    await writeFile(
+      join(root, "preload.mjs"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "1");`,
+    );
+    await writeFile(join(root, "bunfig.toml"), 'preload=["./preload.mjs"]\n');
+    const args = ["--no-env-file", "--input-type=module", "-e", "void 0"];
+    expect(spawnSync("bun", args, { cwd: root, timeout: 5000 }).status).toBe(0);
+    expect(await readFile(marker, "utf8")).toBe("1");
+    await rm(marker);
+    expect(
+      spawnSync("bun", ["--config=/dev/null", ...args], { cwd: root, timeout: 5000 }).status,
+    ).toBe(0);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
   test("all ancestor Python manifests refuse, including quoted and inline uv workspace forms", async () => {
     for (const workspace of [
       '[tool.uv."workspace"]\nmembers=["app"]\n',
@@ -408,7 +489,13 @@ describe("runtime installation and invocation", () => {
       expect(calls[0]!.command).toBe(bun ? "bun" : "npm");
       expect(calls[0]!.args).toEqual(
         bun
-          ? ["install", "--frozen-lockfile", "--ignore-scripts"]
+          ? [
+              "--no-env-file",
+              "--config=/dev/null",
+              "install",
+              "--frozen-lockfile",
+              "--ignore-scripts",
+            ]
           : ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
       );
       await expect(lstat(join(root, "node_modules"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -467,7 +554,7 @@ describe("runtime installation and invocation", () => {
     }
   });
 
-  test("executes the Bun runtime and never replays the business route after evidence failure", async () => {
+  test("unowned Bun listener receives no business request and cannot be retried", async () => {
     const root = await expressProject({ bun: true });
     const plan = await planSetupApplication(await detectSetupProject(root));
     await writeFile(
@@ -486,12 +573,12 @@ describe("runtime installation and invocation", () => {
     const deadlines = { readinessMillis: 3000, requestMillis: 1000, evidenceMillis: 20 };
     await expect(
       exerciseSetupApplication(store, record, plan, undefined, deadlines),
-    ).rejects.toThrow("did not return a successful response");
-    expect(await readFile(join(root, "handler-count.txt"), "utf8")).toBe("B");
+    ).rejects.toThrow("did not prove ownership");
+    expect(await lstat(join(root, "handler-count.txt")).catch(() => undefined)).toBeUndefined();
     record.credential!.version = 1;
     await expect(
       exerciseSetupApplication(store, record, plan, undefined, deadlines),
     ).rejects.toMatchObject({ code: "custom-instrumentation" });
-    expect(await readFile(join(root, "handler-count.txt"), "utf8")).toBe("B");
+    expect(await lstat(join(root, "handler-count.txt")).catch(() => undefined)).toBeUndefined();
   });
 });

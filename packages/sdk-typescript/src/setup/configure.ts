@@ -110,6 +110,8 @@ function typescriptConfig(store: FileSetupInstallationStore): string {
   return `// Managed by Hue setup. This file contains no credential.
 import { closeSync, constants, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createHmac } from "node:crypto";
+import { createServer, createConnection } from "node:net";
 import { createHue } from "@hue-run/sdk";
 import { context, createContextKey, ROOT_CONTEXT, SpanKind } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
@@ -155,6 +157,45 @@ export const hue = createHue({
 const evidencePath = fileURLToPath(new URL("./.hue/${basename(store.applicationEvidencePath)}", import.meta.url));
 const expressInstalled = Symbol.for("hue.setup.express.installed");
 
+// Setup-only transport. Normal app serving never sends an ownership frame.
+function installOwnedListener(app) {
+  const proof = process.env.HUE_SETUP_SOCKET_PROOF;
+  delete process.env.HUE_SETUP_SOCKET_PROOF;
+  if (proof === undefined) return;
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(proof)) throw new Error("Invalid setup invocation");
+  const original = app.listen;
+  app.listen = function (port, host) {
+    if ((host !== undefined && host !== "127.0.0.1") || arguments.length > 2)
+      throw new Error("Unsupported setup listener ownership");
+    const inner = original.call(app, 0, "127.0.0.1");
+    let accepted = false;
+    const sockets = new Set();
+    const outer = createServer((socket) => {
+      if (accepted || !inner.listening) { socket.destroy(); return; }
+      accepted = true;
+      sockets.add(socket);
+      const upstream = createConnection({ host: "127.0.0.1", port: inner.address().port });
+      sockets.add(upstream);
+      const close = () => { socket.destroy(); upstream.destroy(); sockets.delete(socket); sockets.delete(upstream); };
+      socket.on("error", close); upstream.on("error", close);
+      socket.on("close", close); upstream.on("close", close);
+      socket.setTimeout(15000, close); upstream.setTimeout(15000, close);
+      upstream.once("connect", () => {
+        if (!inner.listening || socket.destroyed) { close(); return; }
+        const digest = createHmac("sha256", Buffer.from(proof, "base64url"))
+          .update("hue-setup-owned-v1\\0" + socket.localPort + "\\0" + socket.remotePort).digest("base64url");
+        socket.write("Hue-setup-owned:" + digest + "\\n");
+        socket.pipe(upstream); upstream.pipe(socket);
+      });
+    });
+    const close = () => { for (const socket of sockets) socket.destroy(); inner.close(); };
+    outer.on("error", close); outer.on("close", close);
+    inner.on("error", () => outer.close());
+    inner.once("listening", () => outer.listen(Number(port), "127.0.0.1"));
+    return outer;
+  };
+}
+
 function saveEvidence(value) {
   if (process.env.HUE_SETUP_EVIDENCE_FILE !== evidencePath) return;
   const temporary = evidencePath + "." + process.pid + ".tmp";
@@ -175,6 +216,7 @@ function saveEvidence(value) {
 export function installHueExpress(app, requestPath) {
   if (app[expressInstalled]) throw new Error("Duplicate Hue setup middleware requires explicit review");
   app[expressInstalled] = true;
+  installOwnedListener(app);
   app.use((request, response, next) => {
     void (async () => {
       const ids = await hue.withSpan("hue.metadata", async (span) => {
@@ -199,11 +241,15 @@ function pythonConfig(store: FileSetupInstallationStore): string {
   return `# Managed by Hue setup. This file contains no credential.
 import json
 import os
+import base64
+import hashlib
+import hmac
 from pathlib import Path
 
 from flask import g, request
 from hue_sdk import Hue
 from opentelemetry.trace import SpanKind, use_span
+from werkzeug.serving import WSGIRequestHandler
 
 _installation = json.loads(
     (Path(__file__).parent / ".hue" / ${JSON.stringify(basename(store.path))}).read_text(encoding="utf-8")
@@ -241,6 +287,31 @@ def install_hue_flask(app, request_path):
     if app.extensions.get("hue_setup_installed"):
         raise RuntimeError("Duplicate Hue setup middleware requires explicit review")
     app.extensions["hue_setup_installed"] = True
+    proof = os.environ.pop("HUE_SETUP_SOCKET_PROOF", None)
+    if proof is not None:
+        if len(proof) != 43 or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in proof):
+            raise RuntimeError("Invalid setup invocation")
+        accepted = False
+        class OwnedHandler(WSGIRequestHandler):
+            def handle(self):
+                nonlocal accepted
+                if accepted:
+                    return
+                accepted = True
+                try:
+                    self.connection.settimeout(15)
+                    message = "hue-setup-owned-v1\\0" + str(self.connection.getsockname()[1]) + "\\0" + str(self.connection.getpeername()[1])
+                    digest = base64.urlsafe_b64encode(hmac.new(base64.urlsafe_b64decode(proof + "="), message.encode("ascii"), hashlib.sha256).digest()).rstrip(b"=")
+                    self.connection.sendall(b"Hue-setup-owned:" + digest + b"\\n")
+                    super().handle()
+                except (OSError, ValueError):
+                    pass
+        original_run = app.run
+        def owned_run(*args, **kwargs):
+            if args or set(kwargs) - {"host", "port"} or kwargs.get("host", "127.0.0.1") != "127.0.0.1":
+                raise RuntimeError("Unsupported setup listener ownership")
+            return original_run(**kwargs, request_handler=OwnedHandler, load_dotenv=False, use_reloader=False, threaded=False)
+        app.run = owned_run
 
     @app.before_request
     def _hue_setup_before_request():

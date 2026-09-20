@@ -2,14 +2,26 @@
 // Installed-package contract acceptance only. This loopback double is not hosted Fern evidence.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
+import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
+import { setupContextScenarios, setupContextCheckSource } from "./setup-context-checks.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -42,6 +54,98 @@ const rejectedRoots = [];
 let serverFailure;
 let origin;
 let pythonWheelEvidence;
+const typescriptRuntimeEvidence = [];
+const runtimeArchives = new Map();
+
+async function verifyRuntimeBytes(fixture, name, version) {
+  let archive = runtimeArchives.get(name);
+  if (!archive) {
+    const metadataResponse = await fetch(
+      `https://registry.npmjs.org/${encodeURIComponent(name)}/${version}`,
+      { redirect: "manual", signal: AbortSignal.timeout(30_000) },
+    );
+    requireThat(metadataResponse.ok, "official OTel runtime metadata is available");
+    const metadata = await metadataResponse.json();
+    const url = new URL(metadata.dist?.tarball);
+    requireThat(
+      metadata.name === name &&
+        metadata.version === version &&
+        url.origin === "https://registry.npmjs.org" &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash,
+      "canonical pinned OTel runtime archive identity",
+    );
+    const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(30_000) });
+    requireThat(response.ok, "official OTel runtime archive is available");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+    requireThat(
+      bytes.length < 4 * 1024 * 1024 && metadata.dist.integrity === integrity,
+      "official OTel runtime SRI matches downloaded bytes",
+    );
+    const path = join(destination, `runtime-${name.replaceAll(/[^a-z0-9-]/gu, "-")}.tgz`);
+    await writeFile(path, bytes);
+    const list = spawnSync("tar", ["-tzf", path], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+    requireThat(list.status === 0, "read OTel runtime archive inventory");
+    archive = {
+      path,
+      integrity,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      paths: list.stdout.split("\n").filter(Boolean),
+    };
+    runtimeArchives.set(name, archive);
+  }
+  const manifest = JSON.parse(await readFile(join(fixture.root, "package.json"), "utf8"));
+  requireThat(manifest.dependencies?.[name] === version, "explicit exact root OTel runtime pin");
+  const packageRoot = join(fixture.root, "node_modules", ...name.split("/"));
+  requireThat(
+    (await realpath(packageRoot)) === packageRoot,
+    "installed OTel runtime stays inside fixture",
+  );
+  const installed = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+  requireThat(
+    installed.name === name && installed.version === version,
+    "installed OTel runtime manifest matches root pin",
+  );
+  if (fixture.kind === "express-npm") {
+    const lock = JSON.parse(await readFile(join(fixture.root, "package-lock.json"), "utf8"));
+    requireThat(
+      lock.packages?.[""]?.dependencies?.[name] === version &&
+        lock.packages?.[`node_modules/${name}`]?.version === version &&
+        lock.packages?.[`node_modules/${name}`]?.integrity === archive.integrity,
+      "npm root and resolved runtime lock agree with exact registry artifact",
+    );
+  }
+  let filesVerified = 0;
+  for (const path of archive.paths) {
+    requireThat(
+      path.startsWith("package/") && !path.split("/").includes(".."),
+      "bounded OTel archive path",
+    );
+    if (path.endsWith("/")) continue;
+    const actualPath = join(packageRoot, path.slice("package/".length));
+    requireThat(
+      (await lstat(actualPath)).isFile() && (await realpath(actualPath)) === actualPath,
+      "installed runtime file is contained and regular",
+    );
+    const expected = spawnSync("tar", ["-xOf", archive.path, path], { maxBuffer: 4 * 1024 * 1024 });
+    requireThat(
+      expected.status === 0 && expected.stdout.equals(await readFile(actualPath)),
+      "every installed OTel runtime file matches exact official archive bytes",
+    );
+    filesVerified++;
+  }
+  typescriptRuntimeEvidence.push({
+    fixture: fixture.kind,
+    name,
+    version,
+    sha256: archive.sha256,
+    integrity: archive.integrity,
+    filesVerified,
+  });
+}
 
 function requireThat(condition, label) {
   // Do not include assertion actual/expected values: these may contain a test credential.
@@ -447,6 +551,28 @@ try {
   }
   const cli = join(dirname(dirname(installedPackage)), ".bin", "hue");
   const setup = await import(pathToFileURL(join(installedPackage, "dist", "setup.js")).href);
+  const { exerciseSetupApplication } = await import(
+    pathToFileURL(join(installedPackage, "dist", "setup", "application.js")).href
+  );
+  for (const runtime of ["node", "bun"]) {
+    const socketCheck = await run(
+      runtime,
+      [
+        ...(runtime === "bun" ? ["--no-env-file", "--config=/dev/null"] : []),
+        new URL("./setup-socket-checks.mjs", import.meta.url).pathname,
+        "--module",
+        join(installedPackage, "dist", "setup", "socket.js"),
+      ],
+      destination,
+    );
+    requireThat(
+      socketCheck.code === 0 &&
+        !socketCheck.stderr &&
+        JSON.parse(socketCheck.stdout).passed === true &&
+        JSON.parse(socketCheck.stdout).checks === 16,
+      "exact installed transport authenticates one socket without foreign HTTP or fallback dialing",
+    );
+  }
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
   origin = `http://127.0.0.1:${server.address().port}`;
   await mkdir(wrappers);
@@ -494,6 +620,11 @@ try {
     "flask-before-request",
     "flask-route",
     "flask-app-alias",
+    "bun-preload",
+    "bun-dotenv",
+    "bun-global-preload",
+    "node-enum",
+    "node-invalid-js",
   ]) {
     const root = join(destination, `refuse-${boundary}`);
     rejectedRoots.push(root);
@@ -539,8 +670,10 @@ try {
         JSON.stringify({
           private: true,
           type: "module",
-          packageManager: "npm@11.4.2",
-          scripts: { start: "node server.mjs" },
+          packageManager: boundary.startsWith("bun-") ? "bun@1.4.2" : "npm@11.4.2",
+          scripts: {
+            start: `${boundary.startsWith("bun-") ? "bun" : "node"} ${boundary === "node-enum" ? "server.ts" : "server.mjs"}`,
+          },
           dependencies: { express: "5.1.0" },
           ...(boundary === "npm-workspace" ? { workspaces: ["packages/*"] } : {}),
         }),
@@ -552,10 +685,10 @@ try {
             ? "/\\127.0.0.1:1/"
             : "/";
       await writeFile(
-        join(root, "server.mjs"),
+        join(root, boundary === "node-enum" ? "server.ts" : "server.mjs"),
         `import express from "express";\nconst app = express();\napp.get(${JSON.stringify(route)}, (_request, response) => response.end("ok"));\napp.listen(Number(process.env.PORT), "127.0.0.1");\n`,
       );
-      const path = join(root, "server.mjs");
+      const path = join(root, boundary === "node-enum" ? "server.ts" : "server.mjs");
       let source = await readFile(path, "utf8");
       if (boundary === "comment-only-route") source = source.replace("app.get(", "// app.get(");
       if (boundary === "template-only-route")
@@ -577,13 +710,43 @@ try {
           "app.get(",
           'const alias = app; alias.get("/", (_request,response)=>response.end("other"));\napp.get(',
         );
+      if (boundary === "node-enum") source += "\nenum Unsupported { Value }\n";
+      if (boundary === "node-invalid-js") source += "\nconst invalid: number = 1;\n";
       await writeFile(path, source);
+      if (boundary.startsWith("bun-")) {
+        await writeFile(join(root, "bun.lock"), "{}\n");
+        await writeFile(
+          join(root, "preload.mjs"),
+          'import { writeFileSync } from "node:fs"; writeFileSync("preload-ran", "1");\n',
+        );
+        if (boundary === "bun-preload")
+          await writeFile(join(root, "bunfig.toml"), 'preload=["./preload.mjs"]\n');
+        if (boundary === "bun-dotenv")
+          await writeFile(
+            join(root, ".env"),
+            "NODE_OPTIONS=--preload ./preload.mjs\nBUN_OPTIONS=--preload ./preload.mjs\n",
+          );
+        if (boundary === "bun-global-preload") {
+          await mkdir(join(root, "global-config"));
+          await writeFile(
+            join(root, "global-config", ".bunfig.toml"),
+            `preload=[${JSON.stringify(join(root, "preload.mjs"))}]\n`,
+          );
+        }
+      }
     }
     const before = JSON.stringify(counters);
     const managerBefore = await readFile(join(destination, "manager-calls"), "utf8").catch(
       () => "",
     );
-    const refused = await run(cli, ["setup", "--agent", "--origin", origin], root, environment);
+    const refused = await run(
+      cli,
+      ["setup", "--agent", "--origin", origin],
+      root,
+      boundary === "bun-global-preload"
+        ? { ...environment, XDG_CONFIG_HOME: join(root, "global-config") }
+        : environment,
+    );
     const refusedEvents = refused.stdout.trim().split("\n").map(JSON.parse);
     requireThat(
       refusedEvents.some((event) => event.event === "action.required"),
@@ -595,7 +758,14 @@ try {
         managerBefore,
       `${boundary} never invokes package manager`,
     );
-    for (const name of [".hue", ".gitignore", "build-hook-ran", "node_modules", ".venv"])
+    for (const name of [
+      ".hue",
+      ".gitignore",
+      "build-hook-ran",
+      "preload-ran",
+      "node_modules",
+      ".venv",
+    ])
       requireThat(
         !(await lstat(join(root, name)).catch(() => undefined)),
         `${boundary} leaves project state untouched`,
@@ -920,6 +1090,28 @@ app.listen(Number(process.env.PORT), "127.0.0.1");
           (fixture.kind === "express-bun" ? "bun" : "node"),
         "launch the repository's declared runtime",
       );
+    if (fixture.kind !== "flask-uv") {
+      await verifyRuntimeBytes(fixture, "@opentelemetry/api", "1.9.1");
+      await verifyRuntimeBytes(fixture, "@opentelemetry/context-async-hooks", "2.11.0");
+      const before = counters.exports;
+      for (const scenario of setupContextScenarios) {
+        const checked = await run(
+          fixture.kind === "express-bun" ? "bun" : "node",
+          ["--input-type=module", "-e", setupContextCheckSource(scenario)],
+          fixture.root,
+          environment,
+        );
+        requireThat(
+          checked.code === 0 && checked.stdout === "passed\n" && !checked.stderr,
+          "installed generated context preserves caller ownership and async/stream propagation",
+        );
+      }
+      requireThat(
+        counters.exports === before &&
+          (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+        "context ownership checks never replay business work or export substitute spans",
+      );
+    }
     const wiredSource = await readFile(fixture.entrypoint, "utf8");
     const withoutManagedBlocks = wiredSource.replace(
       /(?:\/\/|#) Hue setup instrumentation \(managed; do not edit\)\n[\s\S]*?(?:\/\/|#) End Hue setup instrumentation\n/gu,
@@ -981,6 +1173,91 @@ app.listen(Number(process.env.PORT), "127.0.0.1");
       "claim never repeats business request",
     );
     requireThat(!replacement.revocationCredential, "old key refusal was confirmed before cleanup");
+    // Exercise the installed child and generated listener against a real occupied port.
+    // A separate local checkpoint cannot alter/replay the original accepted application attempt.
+    const collisionStore = new setup.FileSetupInstallationStore(
+      fixture.root,
+      "https://owned-readiness.invalid",
+    );
+    const collisionRecord = await collisionStore.loadOrCreate();
+    collisionRecord.credential = { ...replacement.credential };
+    await collisionStore.save(collisionRecord);
+    const collisionPlan = await setup.planSetupApplication(
+      await setup.detectSetupProject(fixture.root),
+    );
+    let foreignBytes = 0;
+    let foreignConnections = 0;
+    const foreignSockets = new Set();
+    const foreign = createTcpServer((socket) => {
+      foreignConnections++;
+      foreignSockets.add(socket);
+      socket.on("data", (data) => {
+        foreignBytes += data.length;
+      });
+      socket.on("error", () => undefined);
+      socket.on("close", () => foreignSockets.delete(socket));
+    });
+    await new Promise((resolveListen) => foreign.listen(0, "127.0.0.1", resolveListen));
+    const collisionOptions = {
+      readinessMillis: 1500,
+      requestMillis: 1000,
+      evidenceMillis: 100,
+      port: foreign.address().port,
+    };
+    const beforeCollision = JSON.stringify(counters);
+    try {
+      let refused = false;
+      try {
+        await exerciseSetupApplication(
+          collisionStore,
+          collisionRecord,
+          collisionPlan,
+          undefined,
+          collisionOptions,
+        );
+      } catch {
+        refused = true;
+      }
+      requireThat(refused, "occupied listener cannot satisfy installed application readiness");
+      const durable = await collisionStore.load();
+      requireThat(
+        durable?.applicationAttempt,
+        "occupied-port attempt persisted before child startup",
+      );
+      const connections = foreignConnections;
+      let refusedResume = false;
+      try {
+        await exerciseSetupApplication(
+          collisionStore,
+          durable,
+          collisionPlan,
+          undefined,
+          collisionOptions,
+        );
+      } catch {
+        refusedResume = true;
+      }
+      requireThat(
+        refusedResume && foreignConnections === connections,
+        "interrupted attempt never launches or connects again",
+      );
+      requireThat(
+        foreignBytes === 0 && foreignConnections <= 1,
+        "foreign listener receives zero HTTP bytes and no retry",
+      );
+      requireThat(
+        JSON.stringify(counters) === beforeCollision &&
+          (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+        "occupied-port refusal never replays original handler or exports a substitute",
+      );
+      requireThat(
+        (await readFile(fixture.installationPath, "utf8")) === JSON.stringify(replacement) + "\n",
+        "original receipt checkpoint unchanged by isolated transport failure",
+      );
+    } finally {
+      for (const socket of foreignSockets) socket.destroy();
+      await new Promise((resolveClose) => foreign.close(resolveClose));
+    }
     const receiptUrl = `${origin}/api/v1/setup/traces/${fixture.evidence.traceId}/receipt?expectedSpanId=${fixture.evidence.spanId}`;
     const oldKey = fixture.installation.credentials[0].apiKey;
     requireThat(
@@ -1429,7 +1706,7 @@ print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWit
     "all installed fixtures check anonymous/reforged refusal",
   );
   process.stdout.write(
-    `${JSON.stringify({ kind: "synthetic-loopback-installed-setup", archiveSha256, pythonWheelEvidence, fixtureKinds, ...counters, hostedAcceptance: false })}\n`,
+    `${JSON.stringify({ kind: "synthetic-loopback-installed-setup", archiveSha256, pythonWheelEvidence, typescriptRuntimeEvidence, applicationServerSpansVerified: true, typescriptRuntimePinsVerified: true, fixtureKinds, ...counters, hostedAcceptance: false })}\n`,
   );
 } finally {
   // Never retain credentials, claim capabilities or checkpoint contents as test artifacts.
