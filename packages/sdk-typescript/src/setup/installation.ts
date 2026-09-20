@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -12,6 +13,7 @@ const IGNORE_RULES = [
   ".hue/.claim-handoff-*.tmp",
   ".hue/application-evidence-*.json",
   ".hue/.application-evidence-*.tmp",
+  ".hue/application-evidence-*.tmp",
 ] as const;
 const LOCAL_IGNORE_RULES = [
   "installation-*.json",
@@ -20,7 +22,46 @@ const LOCAL_IGNORE_RULES = [
   ".claim-handoff-*.tmp",
   "application-evidence-*.json",
   ".application-evidence-*.tmp",
+  "application-evidence-*.tmp",
 ] as const;
+
+async function gitDiagnostic(
+  root: string,
+  args: string[],
+  input?: string,
+): Promise<{ code: number; output: string }> {
+  // Repository discovery must not be redirected to another index/worktree by inherited Git options.
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+  );
+  return new Promise((resolvePromise, reject) => {
+    const child = execFile(
+      "git",
+      ["--no-optional-locks", "-c", "core.fsmonitor=false", ...args],
+      {
+        cwd: root,
+        env: { ...environment, GIT_TERMINAL_PROMPT: "0" },
+        shell: false,
+        windowsHide: true,
+        timeout: 5_000,
+        killSignal: "SIGKILL",
+        maxBuffer: 64 * 1024,
+        encoding: "utf8",
+      },
+      (error, output) => {
+        if (error && error.code !== 1) {
+          reject(
+            new Error("Refusing setup because private-file Git protection could not be checked"),
+          );
+          return;
+        }
+        resolvePromise({ code: error ? 1 : 0, output });
+      },
+    );
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(input);
+  });
+}
 
 /** Telemetry credential saved only in an ignored owner-only installation file. */
 export interface SetupStoredCredential {
@@ -377,6 +418,100 @@ export class FileSetupInstallationStore {
     }
   }
 
+  private async hasGitWorktree(): Promise<boolean> {
+    let directory = this.projectRoot;
+    for (;;) {
+      try {
+        const marker = await lstat(join(directory, ".git"));
+        if (marker.isSymbolicLink() || (!marker.isDirectory() && !marker.isFile()))
+          throw new Error("Refusing unsafe Git metadata while protecting setup private files");
+        const result = await gitDiagnostic(this.projectRoot, [
+          "rev-parse",
+          "--is-inside-work-tree",
+        ]);
+        if (result.code !== 0 || result.output.trim() !== "true")
+          throw new Error("Refusing setup outside a verifiable Git worktree");
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const parent = dirname(directory);
+      if (parent === directory) return false;
+      directory = parent;
+    }
+  }
+
+  private privatePaths(): string[] {
+    const names = [this.path, this.claimHandoffPath, this.applicationEvidencePath].map((path) =>
+      basename(path),
+    );
+    return [
+      ...names,
+      ...names.map((name) => `.${name}.00000000-0000-4000-8000-000000000000.tmp`),
+      `${basename(this.applicationEvidencePath)}.0.tmp`,
+    ].map((name) => `.hue/${name}`);
+  }
+
+  private async assertPrivateGitProtection(requireIgnored: boolean): Promise<void> {
+    // This is a private storage directory, not a general project ignore file.
+    // Refuse selective negations too: sampling a random temporary name cannot
+    // establish protection for every future atomic-write/app-process filename.
+    const localIgnore = join(this.directory, ".gitignore");
+    await rejectSymlink(this.directory, true);
+    await rejectSymlink(localIgnore, true);
+    try {
+      const handle = await open(
+        localIgnore,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size > 1024 * 1024)
+          throw new Error("Unsafe setup private ignore file");
+        if ((await handle.readFile("utf8")).split(/\r?\n/u).some((line) => line.startsWith("!")))
+          throw new Error("Refusing conflicting Git ignore rules for setup private files");
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (!(await this.hasGitWorktree())) return;
+    const tracked = await gitDiagnostic(this.projectRoot, [
+      "--literal-pathspecs",
+      "ls-files",
+      "--cached",
+      "-z",
+      "--",
+      ".hue",
+    ]);
+    if (
+      tracked.code !== 0 ||
+      tracked.output
+        .split("\0")
+        .some((path) =>
+          /^\.hue\/\.?(?:installation-|claim-handoff-|application-evidence-)/u.test(path),
+        )
+    )
+      throw new Error("Refusing tracked setup private files; remove them from the Git index first");
+    const paths = this.privatePaths();
+    const result = await gitDiagnostic(
+      this.projectRoot,
+      ["check-ignore", "--no-index", "--verbose", "--non-matching", "-z", "--stdin"],
+      `${paths.join("\0")}\0`,
+    );
+    const fields = result.output.split("\0");
+    if (fields.pop() !== "" || fields.length !== paths.length * 4)
+      throw new Error("Refusing unverifiable setup private-file ignore rules");
+    for (let index = 0; index < paths.length; index++) {
+      const pattern = fields[index * 4 + 2]!;
+      if (fields[index * 4 + 3] !== paths[index])
+        throw new Error("Refusing unverifiable setup private-file ignore rules");
+      if (pattern.startsWith("!") || (requireIgnored && !pattern))
+        throw new Error("Refusing conflicting Git ignore rules for setup private files");
+    }
+  }
+
   private async snapshot(): Promise<{ contents: string; info: Stats }> {
     await this.rejectUnsafeProjectRoot();
     await rejectSymlink(this.directory);
@@ -421,7 +556,16 @@ export class FileSetupInstallationStore {
     }
     if (source.split(/\r?\n/u).includes(rule)) return;
     const separator = source.length === 0 || source.endsWith("\n") ? "" : "\n";
-    await atomicWrite(ignorePath, `${source}${separator}${rule}\n`, mode);
+    await atomicWrite(ignorePath, `${source}${separator}${rule}\n`, mode, async () => {
+      await rejectSymlink(ignorePath, true);
+      let current = "";
+      try {
+        current = await readFile(ignorePath, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (current !== source) throw new Error("Refusing concurrently changed setup ignore rules");
+    });
   }
 
   private async ensureRootIgnored(): Promise<void> {
@@ -432,6 +576,7 @@ export class FileSetupInstallationStore {
   /** Revalidates owner-only storage and ignore rules before an existing proof is used for I/O. */
   async ensureIgnored(): Promise<void> {
     await this.rejectUnsafeProjectRoot();
+    await this.assertPrivateGitProtection(false);
     await this.ensureRootIgnored();
     await rejectSymlink(this.directory);
     const info = await lstat(this.directory);
@@ -439,6 +584,7 @@ export class FileSetupInstallationStore {
     if (process.platform !== "win32") await chmod(this.directory, 0o700);
     for (const rule of LOCAL_IGNORE_RULES)
       await this.ensureIgnoreFile(join(this.directory, ".gitignore"), rule);
+    await this.assertPrivateGitProtection(true);
   }
 
   /** Loads a valid owner-only record without creating one. */
@@ -446,9 +592,18 @@ export class FileSetupInstallationStore {
     await this.rejectUnsafeProjectRoot();
     await rejectSymlink(this.directory, true);
     await rejectSymlink(this.path, true);
+    await this.assertPrivateGitProtection(false);
     try {
+      await lstat(this.path);
+      await this.assertPrivateGitProtection(true);
       const current = await this.snapshot();
-      const record = parseRecord(JSON.parse(current.contents), this.origin);
+      let value: unknown;
+      try {
+        value = JSON.parse(current.contents);
+      } catch {
+        throw new Error("Invalid setup installation record");
+      }
+      const record = parseRecord(value, this.origin);
       this.lastSnapshot = current;
       return record;
     } catch (error) {
@@ -464,6 +619,7 @@ export class FileSetupInstallationStore {
       await this.ensureIgnored();
       return existing;
     }
+    await this.assertPrivateGitProtection(false);
     await this.ensureRootIgnored();
     await rejectSymlink(this.directory, true);
     await mkdir(this.directory, { recursive: false, mode: 0o700 }).catch((error) => {
@@ -473,6 +629,7 @@ export class FileSetupInstallationStore {
     if (process.platform !== "win32") await chmod(this.directory, 0o700);
     for (const rule of LOCAL_IGNORE_RULES)
       await this.ensureIgnoreFile(join(this.directory, ".gitignore"), rule);
+    await this.assertPrivateGitProtection(true);
     const record: SetupInstallationRecord = {
       format: 1,
       origin: this.origin,
@@ -516,11 +673,13 @@ export class FileSetupInstallationStore {
   /** Atomically replaces this store's validated owner-only record. */
   async save(record: SetupInstallationRecord): Promise<void> {
     parseRecord(record, this.origin);
+    await this.assertPrivateGitProtection(true);
     await rejectSymlink(this.directory);
     const expected = this.lastSnapshot;
     if (!expected)
       throw new Error("Refusing to save an installation without loading its current state");
     await atomicWrite(this.path, `${JSON.stringify(record)}\n`, 0o600, async () => {
+      await this.assertPrivateGitProtection(true);
       const current = await this.snapshot();
       if (
         current.contents !== expected.contents ||
@@ -549,7 +708,9 @@ export class FileSetupInstallationStore {
 <script>location.replace(${encoded})</script>
 <p>This private Hue setup handoff is opened locally. Close this page if it does not continue.</p>
 `;
-    await atomicWrite(this.claimHandoffPath, html, 0o600);
+    await atomicWrite(this.claimHandoffPath, html, 0o600, () =>
+      this.assertPrivateGitProtection(true),
+    );
     return this.claimHandoffPath;
   }
 

@@ -1211,20 +1211,31 @@ export class SetupBackendAdapter {
     evidence: SetupProbeEvidence,
     signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted) throw new Error("Setup interrupted");
     // A generic receipt rejects even an active setup key. Only the dedicated route,
     // positively verified with the replacement key first, can prove revocation.
     const url = new URL(`/api/v1/setup/traces/${evidence.traceId}/receipt`, this.origin);
     url.searchParams.set("expectedSpanId", evidence.spanId);
-    const response = await this.fetcher(url, {
-      headers: { Authorization: `Bearer ${oldApiKey}`, Accept: "application/json" },
-      redirect: "manual",
-      credentials: "omit",
-      cache: "no-store",
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(this.requestTimeoutMillis)])
-        : AbortSignal.timeout(this.requestTimeoutMillis),
-    });
-    await response.body?.cancel();
+    let response: Response;
+    try {
+      response = await this.fetcher(url, {
+        headers: { Authorization: `Bearer ${oldApiKey}`, Accept: "application/json" },
+        redirect: "manual",
+        credentials: "omit",
+        cache: "no-store",
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(this.requestTimeoutMillis)])
+          : AbortSignal.timeout(this.requestTimeoutMillis),
+      });
+      await response.body?.cancel();
+    } catch {
+      if (signal?.aborted) throw new Error("Setup interrupted");
+      throw new SetupBackendError(
+        "transport",
+        "Hue setup could not verify anonymous credential revocation.",
+      );
+    }
+    if (signal?.aborted) throw new Error("Setup interrupted");
     if (response.status !== 401)
       throw new SetupBackendError(
         "unverified",

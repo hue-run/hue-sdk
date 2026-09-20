@@ -5,7 +5,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync } from "node:zlib";
@@ -555,6 +555,10 @@ try {
 
   for (const fixture of fixtures) {
     await mkdir(fixture.root);
+    requireThat(
+      (await run("git", ["init", "--quiet"], fixture.root)).code === 0,
+      "prepare actual fixture Git worktree",
+    );
     if (fixture.kind === "flask-uv") {
       await writeFile(
         join(fixture.root, "pyproject.toml"),
@@ -691,6 +695,26 @@ try {
     requireThat(
       (await lstat(fixture.installationPath)).mode % 512 === 0o600,
       "owner-only installation",
+    );
+    const originHash = createHash("sha256").update(origin).digest("hex").slice(0, 20);
+    const protectedNames = [
+      basename(fixture.installationPath),
+      `claim-handoff-${originHash}.html`,
+      `application-evidence-${originHash}.json`,
+    ];
+    for (const name of [
+      ...protectedNames,
+      ...protectedNames.map((name) => `.${name}.test.tmp`),
+      `application-evidence-${originHash}.json.123.tmp`,
+    ])
+      requireThat(
+        (await run("git", ["check-ignore", "--quiet", "--", `.hue/${name}`], fixture.root)).code ===
+          0,
+        "actual Git ignores private files and temporary writes",
+      );
+    requireThat(
+      (await run("git", ["ls-files", "--cached", "--", ".hue"], fixture.root)).stdout === "",
+      "no private fixture file is tracked",
     );
     requireThat(
       local.applicationEvidence?.verified === true,
@@ -1037,6 +1061,54 @@ print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWit
           (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
         "lifecycle cases do not replay/export acceptance business request",
       );
+    }
+    const beforeProtectionRefusal = JSON.stringify(counters);
+    const privateBeforeRefusal = await readFile(fixture.installationPath, "utf8");
+    const ignorePath = join(fixture.root, ".hue", ".gitignore");
+    const safeIgnore = await readFile(ignorePath, "utf8");
+    for (const conflict of ["ignore-negation", "tracked-placeholder"]) {
+      if (conflict === "ignore-negation")
+        await writeFile(ignorePath, `${safeIgnore}!installation-*.json\n`);
+      else {
+        // Stage only a synthetic placeholder, never the actual installation or handoff.
+        await writeFile(join(fixture.root, ".hue", "installation-placeholder.json"), "placeholder");
+        requireThat(
+          (
+            await run(
+              "git",
+              ["add", "--force", "--", ".hue/installation-placeholder.json"],
+              fixture.root,
+            )
+          ).code === 0,
+          "prepare tracked non-secret refusal fixture",
+        );
+      }
+      const refused = await run(
+        cli,
+        ["resume", "--agent", "--origin", origin],
+        fixture.root,
+        environment,
+      );
+      requireThat(refused.code !== 0, "unsafe private Git protection refuses installed resume");
+      requireThat(
+        JSON.stringify(counters) === beforeProtectionRefusal,
+        "unsafe Git state causes no backend request",
+      );
+      requireThat(
+        (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+        "unsafe Git state never replays business work",
+      );
+      requireThat(
+        (await readFile(fixture.installationPath, "utf8")) === privateBeforeRefusal,
+        "unsafe Git state preserves private file",
+      );
+      if (conflict === "ignore-negation") {
+        requireThat(
+          (await readFile(ignorePath, "utf8")) === `${safeIgnore}!installation-*.json\n`,
+          "user ignore conflict is not overwritten",
+        );
+        await writeFile(ignorePath, safeIgnore);
+      }
     }
   }
   requireThat(!serverFailure, "loopback contract remained valid");

@@ -87,13 +87,15 @@ jobs:
           path: .artifacts
           run-id: ${{ inputs.prepared_run_id }}
           github-token: ${{ github.token }}
-      - name: Recheck unchanged accepted archive without packing or rebuilding
+      - name: Recheck prepared identity and exact downloaded inventory
         if: inputs.prepared_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/verify-prepared-release.py --run-id "$PREPARED_RUN_ID" --commit "$GITHUB_SHA" --version "$RELEASE_VERSION" --artifacts .artifacts
-          node packages/sdk-typescript/scripts/verify-package.mjs --archive ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz"
+        run: python3 scripts/verify-prepared-release.py --run-id "$PREPARED_RUN_ID" --commit "$GITHUB_SHA" --version "$RELEASE_VERSION" --artifacts .artifacts
+      - name: Test unchanged accepted archive without GitHub credentials or rebuilding
+        if: inputs.prepared_run_id != ''
+        # Package/application children must never inherit the evidence-read token.
+        run: env -u GH_TOKEN -u GITHUB_TOKEN node packages/sdk-typescript/scripts/verify-package.mjs --archive ".artifacts/hue-run-sdk-${RELEASE_VERSION}.tgz"
       - name: Check Python source and build distributions once
         if: inputs.language == 'python'
         working-directory: packages/sdk-python

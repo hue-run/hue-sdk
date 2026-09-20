@@ -3,7 +3,11 @@ import { mkdtemp, readFile, writeFile, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { SetupBackendAdapter, type SetupInstallationStatus } from "../src/setup/backend.js";
+import {
+  SetupBackendAdapter,
+  type SetupInstallationStatus,
+  type SetupProbeEvidence,
+} from "../src/setup/backend.js";
 import {
   FileSetupInstallationStore,
   type SetupStoredCredential,
@@ -46,6 +50,8 @@ test("strict wire and stored credentials reject namespace, id and capability sub
       { ...good, apiKey: good.apiKey.toUpperCase() },
       { ...good, capabilities: ["telemetry_write"] },
       { ...good, capabilities: ["setup_telemetry_write", "telemetry_write"] },
+      { ...good, kind: "ordinary" },
+      { ...good, kind: undefined },
     ];
     for (const candidate of variants) {
       const root = await mkdtemp(join(tmpdir(), "hue-credential-refusal-"));
@@ -63,7 +69,7 @@ test("strict wire and stored credentials reject namespace, id and capability sub
       });
       expect((await adapter.localInstallation())?.credential === undefined).toBe(true);
       const record = await adapter.prepare();
-      record.credential = { ...candidate, kind: "anonymous_trial" } as SetupStoredCredential;
+      record.credential = candidate as SetupStoredCredential;
       await expect(adapter.store.save(record)).rejects.toThrow("Invalid setup installation record");
     }
     const root = await mkdtemp(join(tmpdir(), "hue-credential-valid-"));
@@ -167,6 +173,60 @@ test("transport exceptions and abort reasons cannot carry private proof into ada
     captured = error;
   }
   expect(String(captured).includes(canary)).toBe(false);
+});
+
+test("revocation fetch and body failures never expose credentials or mark revocation complete", async () => {
+  const evidence = {
+    traceId: "a".repeat(32),
+    spanId: "b".repeat(16),
+  } as SetupProbeEvidence;
+  for (const boundary of ["fetch", "cancel", "abort", "redirect"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "hue-private-revocation-errors-"));
+    const old = credential(0);
+    const controller = new AbortController();
+    let calls = 0;
+    const adapter = new SetupBackendAdapter({
+      projectRoot: root,
+      origin,
+      fetch: (async (input, init) => {
+        calls += 1;
+        expect(new URL(String(input)).pathname).toBe(
+          `/api/v1/setup/traces/${evidence.traceId}/receipt`,
+        );
+        expect(init?.redirect).toBe("manual");
+        if (boundary === "fetch") throw new Error(old.apiKey, { cause: old.apiKey });
+        if (boundary === "abort") {
+          controller.abort(new Error(old.apiKey));
+          throw controller.signal.reason;
+        }
+        return new Response(
+          new ReadableStream({
+            cancel() {
+              if (boundary === "cancel") throw new Error(old.apiKey, { cause: old.apiKey });
+            },
+          }),
+          { status: boundary === "redirect" ? 302 : 401 },
+        );
+      }) as typeof fetch,
+    });
+    const installation = await adapter.prepare();
+    installation.credential = credential(1);
+    installation.revocationCredential = old;
+    await adapter.store.save(installation);
+    let captured: unknown;
+    try {
+      await adapter.verifyRevokedCredential(old.apiKey, evidence, controller.signal);
+    } catch (error) {
+      captured = error;
+    }
+    expect(captured).toBeInstanceOf(Error);
+    expect(String(captured).includes(old.apiKey)).toBe(false);
+    expect((captured as Error).cause).toBeUndefined();
+    expect(calls).toBe(1);
+    const persisted = await adapter.store.load();
+    expect(persisted?.anonymousKeyRevoked).toBeUndefined();
+    expect(persisted?.revocationCredential?.version).toBe(0);
+  }
 });
 
 test("lost explicit handoff restart retries its persisted id and original predecessor", async () => {
