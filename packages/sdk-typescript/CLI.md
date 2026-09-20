@@ -1,6 +1,6 @@
 # Hue setup-session CLI contract
 
-Unreleased TypeScript `0.3.1` includes the merged local setup-session CLI core:
+The local setup-session CLI core shipped in TypeScript `0.3.1` and is available from npm:
 
 ```sh
 hue setup

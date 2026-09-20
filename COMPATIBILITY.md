@@ -1,6 +1,6 @@
 # Compatibility
 
-The published releases are TypeScript `0.3.0` and Python `0.2.2`. This matrix also governs the unreleased TypeScript `0.3.1` additions. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+The published releases are TypeScript `0.3.1` and Python `0.2.2`. This matrix also governs the unreleased TypeScript `0.3.2` expired-world recovery fix. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -60,7 +60,7 @@ include a native local-worker implementation.
 
 ## Scorer forward compatibility
 
-Unreleased TypeScript `0.3.1` executes only known `builtin` entries and bound `local_code` scorers locally.
+Scorer deferral shipped in TypeScript `0.3.1`: only known `builtin` entries and bound `local_code` scorers execute locally.
 Every other kind is reported in `deferredScorerVersionIds` without a local result upload,
 including unknown kinds and built-in entries returned by a newer server. The responsible server or human executor
 must complete those scores. Legacy local-code pins still require their exact callback binding.

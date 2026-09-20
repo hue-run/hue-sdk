@@ -408,7 +408,7 @@ an uncertain preparation. See the
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
 
-Unreleased TypeScript `0.3.1` defers all scorers the SDK does not execute locally. Only built-ins
+Scorer deferral shipped in TypeScript `0.3.1`. Only built-ins
 and bound `local_code` callbacks run here; other pins remain pending for their authorized executor.
 See [scorer execution](EVALUATIONS.md#hosted-and-manual-scorer-pins).
 

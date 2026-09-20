@@ -64,10 +64,11 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is `0.3.0`, including `runLocalAgent()` and V2 environments.
-This checkout prepares unreleased TypeScript `0.3.1`: forward-compatible scorer deferral and the local
-[setup CLI core](./packages/sdk-typescript/CLI.md). Those additions require the new public release
-before applications can install them by version. Python remains published at `0.2.2` and has no
+The published TypeScript package is `0.3.1`, including `runLocalAgent()`, V2 environments,
+forward-compatible scorer deferral and the local [setup CLI core](./packages/sdk-typescript/CLI.md).
+This checkout prepares unreleased TypeScript `0.3.2`: finalization recovery for server-confirmed
+expired worlds. That fix requires the new public release before applications can install it by
+version. Python remains published at `0.2.2` and has no
 native local worker API. Package checks use synthetic local services.
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
