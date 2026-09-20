@@ -145,6 +145,7 @@ type ProviderOutcome = "ready" | "environment_incomplete" | "lost_ack";
 function fixture(options: {
   capabilityStatus: number;
   loseSealAcknowledgement?: boolean;
+  expireOnFinish?: boolean;
   failWorldRead?: boolean;
   failCompletionOnce?: boolean;
   caseCount?: number;
@@ -211,7 +212,7 @@ function fixture(options: {
     string,
     {
       executionId: string;
-      status: "open" | "completed" | "abandoned";
+      status: "open" | "completed" | "abandoned" | "expired";
       validity: "not_assessed" | "environment_incomplete";
       coverageGap: Record<string, unknown> | null;
     }
@@ -452,6 +453,11 @@ function fixture(options: {
           idempotencyKey: String(body.idempotencyKey),
           status: world.status,
         });
+        // An elapsed lease seals the world but conflicts with the requested finish.
+        if (options.expireOnFinish) {
+          world.status = "expired";
+          return new Response(null, { status: 409 });
+        }
         // Model an upstream/gateway response failure after the seal was committed.
         if (options.loseSealAcknowledgement) return new Response(null, { status: 503 });
         return Response.json({
@@ -981,6 +987,83 @@ test.each([false, true])(
       expect(targets).toBe(1);
       expect(f.calls.finishes).toHaveLength(1);
       expect(f.calls.completions).toHaveLength(1);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+      await rm(checkpointDirectory, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([false, true])(
+  "an expired world completes local recovery without a completed-run verdict (target error: %s)",
+  async (targetError) => {
+    const scorer = defineLocalScorer({
+      source: "synthetic-sealed-world-status-check",
+      entrypoint: "score",
+      metrics: [{ name: "completed_run", type: "boolean" }],
+      score({ environment }) {
+        expect(environment?.status).toBe("expired");
+        return {
+          state: "scored",
+          metrics: [{ name: "completed_run", value: environment?.status === "completed" }],
+          explanation: "Synthetic check of the authoritative sealed status.",
+        };
+      },
+    });
+    const f = fixture({ capabilityStatus: 200, expireOnFinish: true, scorer });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "expired-world-recovery",
+      captureContent: false,
+    });
+    const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-expired-world-recovery-"));
+    let targets = 0;
+    const options = {
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory,
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      scorers: [scorer],
+      maxRuns: 1,
+      target() {
+        targets++;
+        if (targetError) throw new Error("Synthetic candidate failure");
+        return "reply saved";
+      },
+    };
+    try {
+      await runLocalAgent(options);
+      expect(targets).toBe(1);
+      expect([...f.worlds.values()].map((world) => world.status)).toEqual(["expired"]);
+      expect(f.calls.finishes.map((finish) => finish.status)).toEqual([
+        targetError ? "abandoned" : "completed",
+      ]);
+      expect(f.calls.completions).toEqual([
+        expect.objectContaining(
+          targetError ? { state: "error", errorType: "TargetError" } : { state: "succeeded" },
+        ),
+      ]);
+      expect(f.calls.results).toEqual([
+        expect.objectContaining({
+          results: [
+            expect.objectContaining({
+              state: "scored",
+              metrics: [{ name: "completed_run", value: false }],
+            }),
+          ],
+        }),
+      ]);
+      expect(f.calls.experimentFinished).toBe(1);
+      expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+      f.reclaim();
+      await runLocalAgent(options);
+      expect(targets).toBe(1);
+      expect(f.calls.finishes).toHaveLength(1);
+      expect(f.calls.completions).toHaveLength(1);
+      expect(f.calls.results).toHaveLength(1);
     } finally {
       await hue.shutdown();
       f.server.stop(true);

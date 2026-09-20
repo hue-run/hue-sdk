@@ -155,7 +155,7 @@ async function seal(
     });
   } catch (error) {
     const recovered = await client.getRun(runId).catch(() => undefined);
-    if (recovered?.status !== status)
+    if (recovered?.status !== status && recovered?.status !== "expired")
       throw new TargetOutcomeUncertainError(executionId, { cause: error });
   }
 }
