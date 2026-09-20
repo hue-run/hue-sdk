@@ -20,7 +20,7 @@ refuses to publish a version without a matching entry below.
 - Availability documentation records TypeScript `0.3.1` as published, including scorer deferral
   and the local setup CLI core.
 
-No registry release is claimed until publication and registry acceptance complete.
+The [release artifacts](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2) are published and passed registry acceptance.
 
 ### [0.3.1] - 2026-09-20
 
