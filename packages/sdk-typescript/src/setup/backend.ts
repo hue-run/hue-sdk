@@ -15,6 +15,23 @@ import {
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_ORIGIN = "https://app.hue.run";
+const SETUP_ERROR_STATUSES = new Map<string, number>([
+  ["SETUP_INVALID_REQUEST", 400],
+  ["SETUP_UNAUTHORIZED", 401],
+  ["SETUP_ACCOUNT_REQUIRED", 401],
+  ["SETUP_FORBIDDEN", 403],
+  ["SETUP_CHANGED", 409],
+  ["SETUP_DESTINATION_REQUIRED", 409],
+  ["SETUP_REVOKED", 409],
+  ["SETUP_EXPIRED", 410],
+  ["SETUP_BODY_TOO_LARGE", 413],
+  ["SETUP_RATE_LIMITED", 429],
+  ["SETUP_CAPACITY", 429],
+  ["SETUP_QUOTA", 429],
+  ["SETUP_DISABLED", 503],
+  ["SETUP_BUSY", 503],
+  ["SETUP_UNAVAILABLE", 503],
+]);
 
 export interface SetupInstallationStatus {
   protocolVersion: 1;
@@ -417,10 +434,11 @@ export class SetupBackendAdapter {
         if (response.status === 200) return value;
         const code = record(value) && typeof value.code === "string" ? value.code : undefined;
         if (
-          !code?.startsWith("SETUP_") ||
+          !code ||
           !record(value) ||
           !exactKeys(value, ["protocolVersion", "code"]) ||
-          value.protocolVersion !== 1
+          value.protocolVersion !== 1 ||
+          SETUP_ERROR_STATUSES.get(code) !== response.status
         )
           throw new SetupBackendError(
             "invalid_response",

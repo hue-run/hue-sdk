@@ -449,6 +449,19 @@ describe("real setup HTTP adapter", () => {
       requestTimeoutMillis: 1000,
     });
     await expect(backend.provision()).rejects.toMatchObject({ code: "invalid_response" });
+
+    const errorRoot = await mkdtemp(join(tmpdir(), "hue-setup-exact-error-"));
+    const invalidError = new SetupBackendAdapter({
+      projectRoot: errorRoot,
+      origin,
+      fetch: (async (_input, _init) =>
+        Response.json(
+          { protocolVersion: 1, code: "SETUP_UNAUTHORIZED" },
+          { status: 503, headers: { "Cache-Control": "no-store" } },
+        )) as typeof fetch,
+      requestTimeoutMillis: 1000,
+    });
+    await expect(invalidError.provision()).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   test("refuses redirects without forwarding installation proof", async () => {
