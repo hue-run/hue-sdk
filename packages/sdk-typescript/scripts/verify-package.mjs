@@ -586,6 +586,7 @@ for (const patch of [99, 100]) {
     `
 import {
   SETUP_EVENT_CONTRACT_VERSION,
+  SetupBackendAdapter,
   createInitialSetupState,
   transitionSetup,
   type SetupEvent,
@@ -605,7 +606,11 @@ const event: SetupEvent = {
   resumed: false,
 };
 declare const options: SetupRunOptions;
-void [transition, event, options];
+const backend = new SetupBackendAdapter({
+  projectRoot: "/project",
+  origin: "http://127.0.0.1:4318",
+});
+void [transition, event, options, backend];
 `,
   );
   for (const name of installedPackageTests) {
