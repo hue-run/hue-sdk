@@ -245,10 +245,10 @@ describe("runner and checkpoints", () => {
     const realBackend = new SetupBackendAdapter({
       projectRoot,
       origin: "https://example.test",
-      fetch: (async () => {
+      fetch: (async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
         statusNetworkCalls += 1;
         throw new Error("status must not use the network without a local installation");
-      }) as typeof fetch,
+      }) as unknown as typeof fetch,
     });
     const backendStatus: SetupEvent[] = [];
     await runSetup({
@@ -434,10 +434,10 @@ describe("real setup HTTP adapter", () => {
     const backend = new SetupBackendAdapter({
       projectRoot,
       origin: "https://example.test",
-      fetch: (async () => {
+      fetch: (async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
         networkCalls += 1;
         throw new Error("claim must not use the network without the original proof");
-      }) as typeof fetch,
+      }) as unknown as typeof fetch,
     });
     const events: SetupEvent[] = [];
     await expect(
