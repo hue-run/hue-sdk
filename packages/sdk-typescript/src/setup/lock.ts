@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, realpath, rmdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Serializes all origins for one project: they share manifests and application files. */
 export async function acquireSetupCommandLock(projectRoot: string): Promise<() => Promise<void>> {
   const root = await realpath(projectRoot);
-  const parent = join(await realpath(tmpdir()), `hue-setup-locks-${process.getuid?.() ?? "user"}`);
+  if ((process.platform !== "linux" && process.platform !== "darwin") || !process.getuid)
+    throw new Error("Automatic setup requires supported POSIX command ownership");
+  // The OS-wide canonical temporary directory is fixed, not selected by TMPDIR,
+  // HOME or XDG variables. All aliases/origins for the same real project share it.
+  const parent = join(await realpath("/tmp"), `hue-setup-locks-${process.getuid()}`);
   await mkdir(parent, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "EEXIST") throw error;
   });
@@ -14,7 +17,8 @@ export async function acquireSetupCommandLock(projectRoot: string): Promise<() =
   if (
     !info.isDirectory() ||
     info.isSymbolicLink() ||
-    (process.platform !== "win32" && ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))
+    (info.mode & 0o077) !== 0 ||
+    info.uid !== process.getuid()
   )
     throw new Error("Refusing unsafe setup command lock directory");
   const path = join(parent, createHash("sha256").update(root).digest("hex"));

@@ -43,13 +43,22 @@ const eventNames = new Set([
   "run.failed",
 ]);
 
-/** The manual runner records event kinds only; it does not independently verify receipts. */
+/** Diagnostic projection only: even valid v2 events are not independent receipt evidence. */
 export function publicSetupEvidenceEvents(events) {
   return events.map((event) => {
-    if (!event || typeof event !== "object" || !eventNames.has(event.event))
+    if (!event || typeof event !== "object" || Array.isArray(event) || !eventNames.has(event.event))
       throw new Error("The installed CLI returned an invalid event.");
     if (containsSetupSecretText(JSON.stringify(event)))
       throw new Error("The installed CLI emitted private material; output was suppressed.");
+    if (event.contractVersion !== 2)
+      throw new Error("The installed CLI returned an unsupported event version.");
+    if (
+      event.event === "receipt.verified" &&
+      (event.source !== "repository-http-boundary" ||
+        typeof event.traceId !== "string" ||
+        !/^(?!0{32}$)[a-f0-9]{32}$/u.test(event.traceId))
+    )
+      throw new Error("The installed CLI did not report an application-bound receipt.");
     return { event: event.event };
   });
 }
@@ -133,7 +142,10 @@ async function main() {
     for (const event of publicEvents) process.stdout.write(`${JSON.stringify(event)}\n`);
     const terminalOutcome = events.at(-1)?.outcome;
     evidence = {
-      format: 1,
+      format: 2,
+      purpose: "diagnostic-only",
+      independentlyVerifiedApplication: false,
+      accepted: false,
       recordedAt: new Date().toISOString(),
       archiveSha256: createHash("sha256")
         .update(await readFile(archive))
@@ -143,7 +155,12 @@ async function main() {
       language: values.language ?? null,
       exitCode: result.status,
       events: publicEvents.map((event) => event.event),
-      cliReportedReceiptVerified: events.some((event) => event.event === "receipt.verified"),
+      cliReportedReceiptVerified: events.some(
+        (event) =>
+          event.event === "receipt.verified" &&
+          event.contractVersion === 2 &&
+          event.source === "repository-http-boundary",
+      ),
       terminalOutcome: ["ready", "action_required", "unchanged"].includes(terminalOutcome)
         ? terminalOutcome
         : null,
@@ -159,18 +176,19 @@ async function main() {
     await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
   }
   if (result.error) throw new Error("The installed CLI did not finish within the runner deadline.");
-  // Event presence alone is insufficient acceptance. Paused, unsupported and
-  // no-application runs must never turn an exit-zero CLI action into a green gate.
-  process.exitCode =
-    result.status ||
-    (evidence?.terminalOutcome === "ready" && evidence?.cliReportedReceiptVerified === true
-      ? 0
-      : 2);
+  // This diagnostic has no independent original-handler span observation or
+  // server-side receipt check. A v2 application claim, ready outcome, or even a
+  // real but unrelated probe receipt must never authorize acceptance. Fern's
+  // hosted harness owns that gate; do not add an event-based success shortcut.
+  process.stderr.write(
+    "Diagnostic only: original-handler span binding and stored application evidence were not independently verified; acceptance remains unverified.\n",
+  );
+  process.exitCode = result.status || 2;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href)
   await main().catch(() => {
     // Do not expose a child exception, parser payload, filesystem path or capability.
-    process.stderr.write("Setup acceptance runner failed; private child output was suppressed.\n");
+    process.stderr.write("Setup diagnostic runner failed; private child output was suppressed.\n");
     process.exitCode = 1;
   });

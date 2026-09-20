@@ -47,6 +47,17 @@ unfamiliar framework, use the structured action to select a package with `--proj
 into an existing request. Never choose a monorepo project heuristically, add placeholder “real app”
 comments, simulate business behavior or rewrite an existing route.
 
+Automatic Express setup supports the bounded import/bootstrap shapes documented in the bundled
+CLI guide; it pins the standard OTel API and async-hooks context support with Hue. Unknown local
+imports, runtime preloads, conflicting telemetry dependencies or late/custom context-manager
+registration require review before mutation. The generated bootstrap preserves a working caller
+manager; core Hue never takes its ownership. Python uses an isolated Python 3 syntax parser and
+refuses any ancestor Python project manifest rather than risk modifying a parent uv environment.
+For acceptance, independently observe the original handler's standard OTel active trace/span IDs
+through async/streaming completion and match them to the exact SERVER-span receipt. A handler count
+and an unrelated valid probe receipt are not sufficient. Never repeat the business request to obtain
+missing evidence.
+
 Technical preflight presents the published privacy notice before telemetry; it does not request legal
 acceptance. Never invent legal metadata. Capture remains off. Trial credentials cannot enable content
 capture even after claim; that requires explicit opt-in and a separately account-managed normal key.

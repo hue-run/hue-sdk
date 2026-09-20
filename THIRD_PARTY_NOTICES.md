@@ -12,6 +12,13 @@ software, which keeps its own license. Transitive dependencies are recorded in
 | `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and their transitives | Apache-2.0 | `hue-run` |
 | `requests` (with `certifi` under MPL-2.0, `urllib3`, `charset-normalizer`, `idna`) | Apache-2.0 / MPL-2.0 / MIT / BSD-3-Clause | `hue-run` |
 
+## Setup integration
+
+The setup CLI additionally uses `@babel/parser` (MIT) for static JavaScript/TypeScript
+syntax inspection. Generated Express bootstrap integrations explicitly install
+`@opentelemetry/api` and `@opentelemetry/context-async-hooks` (Apache-2.0); the tracing
+core does not register a global context manager.
+
 ## Optional dependencies for evaluations
 
 | Package | License | Used by |

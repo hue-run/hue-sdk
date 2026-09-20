@@ -2,9 +2,10 @@ import { randomInt, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
 import { sdkVersion } from "../version.js";
+import { inspectExpressSource, inspectFlaskSource, type ApplicationSyntax } from "./source.js";
 import type { SetupFileChange } from "./configure.js";
 import {
   setupManagedDigest,
@@ -15,6 +16,11 @@ import {
 import type { SetupProjectDetection } from "./types.js";
 
 const PYTHON_RUNTIME_VERSION = "0.2.2";
+const EXPRESS_RUNTIME_DEPENDENCIES = {
+  "@hue-run/sdk": sdkVersion,
+  "@opentelemetry/api": "1.9.1",
+  "@opentelemetry/context-async-hooks": "2.11.0",
+} as const;
 const MAX_SOURCE_BYTES = 1024 * 1024;
 const START_MARKER = "Hue setup instrumentation (managed; do not edit)";
 const END_MARKER = "End Hue setup instrumentation";
@@ -193,7 +199,7 @@ function typescriptRuntimeDeclared(manifest: Record<string, unknown>): boolean {
       `The project declares a custom or malformed @hue-run/sdk dependency. Select ${sdkVersion} explicitly, review compatibility, and rerun setup.`,
     );
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw refuse();
-  const declared: unknown[] = [];
+  const declared = new Map<string, unknown[]>();
   for (const section of [
     "dependencies",
     "devDependencies",
@@ -204,13 +210,20 @@ function typescriptRuntimeDeclared(manifest: Record<string, unknown>): boolean {
     if (dependencies === undefined) continue;
     if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies))
       throw refuse();
-    if (Object.hasOwn(dependencies, "@hue-run/sdk")) {
-      if (section === "peerDependencies") throw refuse();
-      declared.push((dependencies as Record<string, unknown>)["@hue-run/sdk"]);
+    for (const [name, value] of Object.entries(dependencies)) {
+      if (name.startsWith("@opentelemetry/") && !Object.hasOwn(EXPRESS_RUNTIME_DEPENDENCIES, name))
+        throw refuse();
+      if (Object.hasOwn(EXPRESS_RUNTIME_DEPENDENCIES, name)) {
+        if (section === "peerDependencies" || section === "optionalDependencies") throw refuse();
+        declared.set(name, [...(declared.get(name) ?? []), value]);
+      }
     }
   }
-  if (declared.length > 1 || (declared.length === 1 && declared[0] !== sdkVersion)) throw refuse();
-  return declared.length === 1;
+  for (const [name, version] of Object.entries(EXPRESS_RUNTIME_DEPENDENCIES)) {
+    const versions = declared.get(name) ?? [];
+    if (versions.length > 1 || (versions.length === 1 && versions[0] !== version)) throw refuse();
+  }
+  return Object.keys(EXPRESS_RUNTIME_DEPENDENCIES).every((name) => declared.has(name));
 }
 
 function applicationRequestUrl(path: string, origin: string): URL {
@@ -233,22 +246,18 @@ function applicationRequestUrl(path: string, origin: string): URL {
   return url;
 }
 
-function literalGetPath(source: string, language: "typescript" | "python"): string {
-  const pattern =
-    language === "typescript"
-      ? /\bapp\.get\(\s*(["'])([^"']*)\1\s*,/gu
-      : /@app\.get\(\s*(["'])([^"']*)\1\s*\)/gu;
-  const matches = [...source.matchAll(pattern)].map((match) => match[2]!);
-  const calls = [
-    ...source.matchAll(language === "typescript" ? /\bapp\.get\s*\(/gu : /@app\.get\s*\(/gu),
-  ];
-  if (matches.length !== 1 || calls.length !== 1)
+function syntax(source: string, language: "typescript" | "python"): ApplicationSyntax {
+  let result: ApplicationSyntax;
+  try {
+    result = language === "typescript" ? inspectExpressSource(source) : inspectFlaskSource(source);
+  } catch {
     throw new SetupApplicationActionRequired(
       "ambiguous-entrypoint",
-      "Hue could not identify one existing literal GET route to exercise. Review the application integration without guessing a route.",
+      "Hue requires a supported runtime and unambiguous executable constructor, literal GET handler and telemetry ownership. Review this application before setup changes it.",
     );
-  applicationRequestUrl(matches[0]!, "http://127.0.0.1:1");
-  return matches[0]!;
+  }
+  applicationRequestUrl(result.requestPath, "http://127.0.0.1:1");
+  return result;
 }
 
 function pythonProject(source: string): { dependencies: string[]; hasHue: boolean } {
@@ -350,6 +359,11 @@ export async function planSetupApplication(
       "Select one TypeScript or Python package root with --project; Hue will not choose a monorepo package or language automatically.",
     );
   if (project.languages[0] === "typescript") {
+    if (process.env.NODE_OPTIONS || process.env.BUN_OPTIONS)
+      throw new SetupApplicationActionRequired(
+        "custom-instrumentation",
+        "Review runtime preload options before automatic setup; context ownership is ambiguous.",
+      );
     const managers = project.packageManagers.filter(
       (manager): manager is "bun" | "npm" => manager === "bun" || manager === "npm",
     );
@@ -402,22 +416,30 @@ export async function planSetupApplication(
       entryDigest: setupManagedDigest(original),
     };
     const source = unmanagedApplicationSource(original, plan);
-    if (source.startsWith("#!") || source.startsWith("\ufeff"))
+    plan.requestPath = syntax(source, "typescript").requestPath;
+    // Inspect only the selected runtime, never import the app or a user bootstrap.
+    // Fixed argv + bounded output; unsupported runtimes fail before installation/provisioning.
+    const runtime = spawnSync(
+      plan.runtime === "bun" ? "bun" : "node",
+      [
+        ...(plan.runtime === "bun" ? ["--no-env-file"] : []),
+        "--input-type=module",
+        "-e",
+        'import { AsyncLocalStorage } from "node:async_hooks"; const major=Number(process.versions.node.split(".")[0]); if (process.versions.bun ? process.versions.bun !== "1.4.2" : ![22,24,26].includes(major)) process.exit(2); const storage=new AsyncLocalStorage(); await storage.run(1, async()=>{await new Promise(r=>setImmediate(r));if(storage.getStore()!==1)process.exit(2)}); storage.disable();',
+      ],
+      {
+        cwd: project.root,
+        timeout: 5000,
+        maxBuffer: 8192,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    if (runtime.status !== 0)
       throw new SetupApplicationActionRequired(
-        "ambiguous-entrypoint",
-        "The Express entrypoint has a protected prologue. Add instrumentation without moving that prologue before rerunning setup.",
+        "custom-instrumentation",
+        "The selected runtime cannot safely support setup-owned asynchronous context. Use the tested Node or Bun runtime before rerunning setup.",
       );
-    if (!/\b(?:const|let)\s+app\s*=\s*express\(\s*\)\s*;/u.test(source))
-      throw new SetupApplicationActionRequired(
-        "ambiguous-entrypoint",
-        "Hue could not identify the Express app construction without guessing about business logic.",
-      );
-    if (!/\bapp\.listen\([^;]*process\.env\.PORT/su.test(source))
-      throw new SetupApplicationActionRequired(
-        "ambiguous-entrypoint",
-        "The supported Express entrypoint must honor process.env.PORT so setup can exercise it without taking over a fixed port.",
-      );
-    plan.requestPath = literalGetPath(source, "typescript");
     return plan;
   }
   if (project.packageManagers.length !== 1 || project.packageManagers[0] !== "uv")
@@ -434,12 +456,11 @@ export async function planSetupApplication(
   // uv searches parents for workspaces, even when the current package has its own manifest.
   for (let parent = dirname(project.root); ; parent = dirname(parent)) {
     try {
-      const manifest = await safeRead(parent, "pyproject.toml");
-      if (/^\s*\[\s*tool\s*\.\s*uv\s*\.\s*workspace\s*\]/mu.test(manifest))
-        throw new SetupApplicationActionRequired(
-          "ambiguous-project",
-          "Automatic Flask setup does not mutate uv workspaces. Select an independent uv application project.",
-        );
+      await safeRead(parent, "pyproject.toml");
+      throw new SetupApplicationActionRequired(
+        "ambiguous-project",
+        "An ancestor Python project may own this environment or workspace. Select an independent uv application project.",
+      );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -455,29 +476,17 @@ export async function planSetupApplication(
     entryDigest: setupManagedDigest(original),
   };
   const source = unmanagedApplicationSource(original, plan);
-  const withoutLeadingComments = source.replace(/^(?:[ \t]*(?:#[^\n]*)?\r?\n)*/u, "");
-  if (
-    source.startsWith("#!") ||
-    source.startsWith("\ufeff") ||
-    /^(?:[^\n]*\n)?[^\n]*coding\s*[:=]/u.test(source) ||
-    /^\s*(?:[rubfRUBF]{0,2})?["']/u.test(withoutLeadingComments) ||
-    /^\s*from\s+__future__\s+import\s+/mu.test(source)
-  )
+  const encoding = source
+    .split("\n")
+    .slice(0, 2)
+    .join("\n")
+    .match(/coding\s*[:=]\s*([-\w.]+)/u)?.[1];
+  if (source.startsWith("\ufeff") || (encoding && !/^(?:utf-?8|ascii)$/iu.test(encoding)))
     throw new SetupApplicationActionRequired(
       "ambiguous-entrypoint",
-      "The Flask entrypoint has a protected Python prologue. Integrate Hue after its prologue and rerun hue resume.",
+      "Automatic Flask setup preserves UTF-8/ASCII prologues only; review this source encoding before changes.",
     );
-  if (!/^app\s*=\s*Flask\(__name__\)\s*$/mu.test(source))
-    throw new SetupApplicationActionRequired(
-      "ambiguous-entrypoint",
-      "Hue could not identify the Flask app construction without guessing about business logic.",
-    );
-  if (!/app\.run\([^)]*os\.environ\[(["'])PORT\1\]/su.test(source))
-    throw new SetupApplicationActionRequired(
-      "ambiguous-entrypoint",
-      "The supported Flask entrypoint must honor os.environ['PORT'] so setup can exercise it without taking over a fixed port.",
-    );
-  plan.requestPath = literalGetPath(source, "python");
+  plan.requestPath = syntax(source, "python").requestPath;
   return plan;
 }
 
@@ -517,7 +526,9 @@ export async function installSetupRuntime(
   runner: SetupCommandRunner = runSetupCommand,
 ): Promise<boolean> {
   if (plan.language === "typescript") {
-    const spec = `@hue-run/sdk@${sdkVersion}`;
+    const specs = Object.entries(EXPRESS_RUNTIME_DEPENDENCIES).map(
+      ([name, version]) => `${name}@${version}`,
+    );
     const manifest = JSON.parse(await safeRead(project.root, "package.json")) as Record<
       string,
       unknown
@@ -541,19 +552,16 @@ export async function installSetupRuntime(
       plan.manager === "npm"
         ? pinned
           ? [locked ? "ci" : "install", "--ignore-scripts", "--no-audit", "--no-fund"]
-          : ["install", "--save-exact", "--ignore-scripts", "--no-audit", "--no-fund", spec]
+          : ["install", "--save-exact", "--ignore-scripts", "--no-audit", "--no-fund", ...specs]
         : pinned
           ? ["install", ...(locked ? ["--frozen-lockfile"] : []), "--ignore-scripts"]
-          : ["add", "--exact", "--ignore-scripts", spec];
+          : ["add", "--exact", "--ignore-scripts", ...specs];
     await runner({ command: plan.manager, args, cwd: project.root, timeoutMillis: 120_000 });
     const updated = JSON.parse(await safeRead(project.root, "package.json")) as Record<
       string,
       unknown
     >;
-    const dependencies = ["dependencies", "devDependencies", "optionalDependencies"].map(
-      (name) => updated[name] as Record<string, unknown> | undefined,
-    );
-    if (!dependencies.some((section) => section?.["@hue-run/sdk"] === sdkVersion))
+    if (!typescriptRuntimeDeclared(updated))
       throw new Error("The package manager did not record the exact Hue runtime version");
     return true;
   }
@@ -593,13 +601,25 @@ function markerBlock(plan: SetupApplicationPlan): string {
 
 function callBlock(plan: SetupApplicationPlan): string {
   return plan.language === "typescript"
-    ? `\n// ${START_MARKER}\ninstallHueExpress(app);\n// ${END_MARKER}\n`
-    : `\n# ${START_MARKER}\ninstall_hue_flask(app)\n# ${END_MARKER}\n`;
+    ? `\n// ${START_MARKER}\ninstallHueExpress(app, ${JSON.stringify(plan.requestPath)});\n// ${END_MARKER}\n`
+    : `\n# ${START_MARKER}\ninstall_hue_flask(app, ${JSON.stringify(plan.requestPath)})\n# ${END_MARKER}\n`;
+}
+
+function instrumentedSource(source: string, plan: SetupApplicationPlan): string {
+  const positions = syntax(source, plan.language);
+  const first = markerBlock(plan);
+  const second = callBlock({ ...plan, requestPath: positions.requestPath });
+  return (
+    source.slice(0, positions.importOffset) +
+    first +
+    source.slice(positions.importOffset, positions.constructorEnd) +
+    second +
+    source.slice(positions.constructorEnd)
+  );
 }
 
 function unmanagedApplicationSource(source: string, plan: SetupApplicationPlan): string {
   const first = markerBlock(plan);
-  const second = callBlock(plan);
   const starts = source.split(START_MARKER).length - 1;
   const ends = source.split(END_MARKER).length - 1;
   if (!starts && !ends) {
@@ -610,25 +630,29 @@ function unmanagedApplicationSource(source: string, plan: SetupApplicationPlan):
       );
     return source;
   }
-  const anchor =
+  const callPattern =
     plan.language === "typescript"
-      ? /\b(?:const|let)\s+app\s*=\s*express\(\s*\)\s*;/u
-      : /^app\s*=\s*Flask\(__name__\)[ \t]*$/mu;
-  const stripped = source.slice(first.length);
-  const match = anchor.exec(stripped);
-  const offset = match ? match.index + match[0].length : -1;
+      ? /\n\/\/ Hue setup instrumentation \(managed; do not edit\)\ninstallHueExpress\(app, "[^"\n]*"\);\n\/\/ End Hue setup instrumentation\n/u
+      : /\n# Hue setup instrumentation \(managed; do not edit\)\ninstall_hue_flask\(app, "[^"\n]*"\)\n# End Hue setup instrumentation\n/u;
+  const stripped = source.replace(first, "").replace(callPattern, "");
+  let restored: string | undefined;
+  try {
+    restored = instrumentedSource(stripped, plan);
+  } catch {
+    /* Edited syntax is a managed-block conflict. */
+  }
   if (
     starts !== 2 ||
     ends !== 2 ||
-    !source.startsWith(first) ||
-    offset < 0 ||
-    stripped.slice(offset, offset + second.length) !== second
+    !source.includes(first) ||
+    stripped === source ||
+    restored !== source
   )
     throw new SetupApplicationActionRequired(
       "custom-instrumentation",
       "The existing Hue instrumentation markers were edited or moved. Review the application wiring before rerunning setup.",
     );
-  return stripped.slice(0, offset) + stripped.slice(offset + second.length);
+  return stripped;
 }
 
 async function atomicSourceWrite(
@@ -707,18 +731,12 @@ export async function wireSetupApplication(
       "custom-instrumentation",
       "The application entrypoint changed after detection; Hue refused to merge a concurrent edit.",
     );
-  const anchor =
-    plan.language === "typescript"
-      ? /\b(?:const|let)\s+app\s*=\s*express\(\s*\)\s*;/u
-      : /^app\s*=\s*Flask\(__name__\)[ \t]*$/mu;
-  const match = anchor.exec(source);
-  if (!match)
+  if (syntax(source, plan.language).requestPath !== plan.requestPath)
     throw new SetupApplicationActionRequired(
       "ambiguous-entrypoint",
       "The application entrypoint changed after detection; Hue made no wiring change.",
     );
-  const offset = match.index + match[0].length;
-  const next = `${first}${source.slice(0, offset)}${second}${source.slice(offset)}`;
+  const next = instrumentedSource(source, plan);
   await atomicSourceWrite(store.projectRoot, path, source, next);
   record.managedFiles[`application:${plan.entrypoint}`] = setupManagedDigest(first + second);
   await store.save(record);
@@ -850,7 +868,30 @@ export async function exerciseSetupApplication(
         ? AbortSignal.any([signal, AbortSignal.timeout(deadlines.requestMillis)])
         : AbortSignal.timeout(deadlines.requestMillis),
     });
-    await response.body?.cancel();
+    if (response.status < 200 || response.status >= 300) {
+      await response.body?.cancel();
+      throw new Error(
+        "The selected application handler did not return a successful response; it will not be replayed",
+      );
+    }
+    // Drain the one response without retaining customer content. Cancelling after
+    // headers could abort a streaming handler before its span/evidence completes.
+    const reader = response.body?.getReader();
+    let bytes = 0;
+    if (reader)
+      try {
+        for (;;) {
+          const item = await reader.read();
+          if (item.done) break;
+          bytes += item.value.byteLength;
+          if (bytes > 1024 * 1024) {
+            await reader.cancel();
+            throw new Error("The application response exceeded the bounded setup read budget");
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
     const deadline = Date.now() + deadlines.evidenceMillis;
     for (;;) {
       if (signal?.aborted) throw new Error("Setup interrupted");

@@ -64,7 +64,12 @@ async function writeExpressProject(root: string, runtime = false): Promise<void>
       private: true,
       type: "module",
       scripts: { start: "node src/server.mjs" },
-      dependencies: { express: "5.1.0", "@hue-run/sdk": "0.4.0" },
+      dependencies: {
+        express: "5.1.0",
+        "@hue-run/sdk": "0.4.0",
+        "@opentelemetry/api": "1.9.1",
+        "@opentelemetry/context-async-hooks": "2.11.0",
+      },
       devDependencies: { typescript: "7.0.2" },
     }),
   );
@@ -84,12 +89,17 @@ async function writeExpressProject(root: string, runtime = false): Promise<void>
   );
   await writeFile(
     join(express, "index.js"),
-    `import { createServer } from "node:http";\nexport default function express(){const middleware=[];const routes=new Map();const app=(request,response)=>{let index=0;const next=()=>{const item=middleware[index++];if(item)return item(request,response,next);const handler=routes.get(request.method+" "+new URL(request.url,"http://localhost").pathname);if(handler)return handler(request,response);response.statusCode=404;response.end();};next();};app.use=(value)=>middleware.push(value);app.get=(path,value)=>routes.set("GET "+path,value);app.listen=(port,host)=>createServer(app).listen(port,host);return app;}\n`,
+    `import { createServer } from "node:http";\nexport default function express(){const middleware=[];const routes=new Map();const app=(request,response)=>{request.path=new URL(request.url,"http://localhost").pathname;let index=0;const next=()=>{const item=middleware[index++];if(item)return item(request,response,next);const handler=routes.get(request.method+" "+request.path);if(handler){request.route={path:request.path};return handler(request,response);}response.statusCode=404;response.end();};next();};app.use=(value)=>middleware.push(value);app.get=(path,value)=>routes.set("GET "+path,value);app.listen=(port,host)=>createServer(app).listen(port,host);return app;}\n`,
   );
   await symlink(
     resolve(dirname(import.meta.dir)),
     join(hue, "sdk"),
     process.platform === "win32" ? "junction" : "dir",
+  );
+  await symlink(
+    resolve(dirname(import.meta.dir), "node_modules", "@opentelemetry"),
+    join(root, "node_modules", "@opentelemetry"),
+    "dir",
   );
 }
 
@@ -246,6 +256,8 @@ describe("supported application matrix", () => {
           "--no-audit",
           "--no-fund",
           "@hue-run/sdk@0.4.0",
+          "@opentelemetry/api@1.9.1",
+          "@opentelemetry/context-async-hooks@2.11.0",
         ],
       }),
     ]);
@@ -280,7 +292,14 @@ describe("supported application matrix", () => {
     });
     expect(bunCommand).toMatchObject({
       command: "bun",
-      args: ["add", "--exact", "--ignore-scripts", "@hue-run/sdk@0.4.0"],
+      args: [
+        "add",
+        "--exact",
+        "--ignore-scripts",
+        "@hue-run/sdk@0.4.0",
+        "@opentelemetry/api@1.9.1",
+        "@opentelemetry/context-async-hooks@2.11.0",
+      ],
     });
 
     const pythonRoot = await mkdtemp(join(tmpdir(), "hue-setup-uv-install-"));
@@ -332,7 +351,7 @@ describe("supported application matrix", () => {
     expect(await wireSetupApplication(store, record, plan)).toBeUndefined();
   });
 
-  test("fails closed on protected Python prologues and entrypoint changes after planning", async () => {
+  test("preserves supported Python prologues and refuses entrypoint changes after planning", async () => {
     for (const prologue of [
       "#!/usr/bin/env python3\n",
       "# -*- coding: utf-8 -*-\n",
@@ -349,9 +368,11 @@ describe("supported application matrix", () => {
         join(root, "app.py"),
         `${prologue}import os\nfrom flask import Flask\napp = Flask(__name__)\n@app.get("/")\ndef home(): return "ok"\napp.run(port=int(os.environ["PORT"]))\n`,
       );
-      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
-        code: "ambiguous-entrypoint",
-      });
+      const plan = await planSetupApplication(await detectSetupProject(root));
+      const store = new FileSetupInstallationStore(root, "https://example.test");
+      const record = await store.loadOrCreate();
+      await wireSetupApplication(store, record, plan);
+      expect((await readFile(join(root, "app.py"), "utf8")).startsWith(prologue)).toBe(true);
     }
 
     const root = await mkdtemp(join(tmpdir(), "hue-setup-concurrent-edit-"));
@@ -393,7 +414,7 @@ describe("supported application matrix", () => {
         requestMillis: 1000,
         evidenceMillis: 200,
       }),
-    ).rejects.toThrow("evidence");
+    ).rejects.toThrow("did not return a successful response");
     expect(await readFile(countPath, "utf8")).toBe("1");
     await expect(
       exerciseSetupApplication(store, record, plan, undefined, {

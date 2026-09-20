@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
   exerciseSetupApplication,
@@ -52,7 +53,16 @@ async function expressProject(
       type: "module",
       packageManager: options.bun ? "bun@1.4.2" : "npm@11.0.0",
       scripts: { start: `${options.bun ? "bun" : "node"} src/server.mjs` },
-      dependencies: { express: "5.1.0", ...(options.pinned ? { "@hue-run/sdk": "0.4.0" } : {}) },
+      dependencies: {
+        express: "5.1.0",
+        ...(options.pinned
+          ? {
+              "@hue-run/sdk": "0.4.0",
+              "@opentelemetry/api": "1.9.1",
+              "@opentelemetry/context-async-hooks": "2.11.0",
+            }
+          : {}),
+      },
     }),
   );
   await writeFile(join(root, options.bun ? "bun.lock" : "package-lock.json"), "{}\n");
@@ -141,6 +151,80 @@ describe("application request containment", () => {
 });
 
 describe("application source preservation", () => {
+  test("syntax detection ignores constructor and route decoys without corrupting business source", async () => {
+    const root = await expressProject();
+    const path = join(root, "src", "server.mjs");
+    const decoys = [
+      'const note = "const app = express();";\n',
+      '// const app = express(); app.get("/fake", handler);\n',
+      'const note = `const app = express(); app.get("/fake", handler);`;\n',
+      "const pattern = /const app = express\\(\\); app.get/;\n",
+    ];
+    for (const decoy of decoys) {
+      const original = decoy + expressSource();
+      await writeFile(path, original);
+      const plan = await planSetupApplication(await detectSetupProject(root));
+      const store = new FileSetupInstallationStore(root, "https://example.test");
+      const record = await store.loadOrCreate();
+      await wireSetupApplication(store, record, plan);
+      const wired = await readFile(path, "utf8");
+      expect(wired).toContain(decoy);
+      expect(spawnSync("node", ["--check", path]).status).toBe(0);
+      expect((await planSetupApplication(await detectSetupProject(root))).requestPath).toBe("/");
+    }
+  });
+
+  test("comment/string/template/regex-only routes and ambiguous context bootstraps refuse before writes", async () => {
+    for (const replacement of [
+      '// app.get("/", handler);',
+      "const note = 'app.get(\"/\", handler);';",
+      'const note = `app.get("/", handler);`;',
+      "const pattern = /app.get/;",
+    ]) {
+      const root = await expressProject();
+      await writeFile(
+        join(root, "src", "server.mjs"),
+        expressSource().replace(/^app\.get.*$/mu, replacement),
+      );
+      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+        code: "ambiguous-entrypoint",
+      });
+      await expectNoSetupFiles(root);
+    }
+    for (const bootstrap of [
+      'import "./telemetry.mjs";\n',
+      'import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";\n',
+      'import { context } from "@opentelemetry/api"; context.setGlobalContextManager(manager);\n',
+      'await import("./telemetry.mjs");\n',
+      'export * from "./telemetry.mjs";\n',
+      'export { bootstrap } from "./telemetry.mjs";\n',
+    ]) {
+      const root = await expressProject();
+      await writeFile(join(root, "src", "server.mjs"), bootstrap + expressSource());
+      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+        code: "ambiguous-entrypoint",
+      });
+      await expectNoSetupFiles(root);
+    }
+    for (const addition of [
+      'app.all("/", (_request, response) => response.end("different handler"));\n',
+      'app.use((_request, response) => response.end("different handler"));\n',
+      'app["get"]("/", handler);\n',
+      'const routed = app; routed.get("/", handler);\n',
+      'const register = app.get; register("/", handler);\n',
+      "customBootstrap(app);\n",
+    ]) {
+      const root = await expressProject();
+      await writeFile(
+        join(root, "src", "server.mjs"),
+        expressSource().replace('app.get("/",', addition + 'app.get("/",'),
+      );
+      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+        code: "ambiguous-entrypoint",
+      });
+      await expectNoSetupFiles(root);
+    }
+  });
   test("refuses symlink ancestors both while planning and after a directory swap", async () => {
     const root = await expressProject();
     const outside = await directory();
@@ -160,7 +244,7 @@ describe("application source preservation", () => {
     expect(await readFile(join(root, "original-src", "server.mjs"), "utf8")).toBe(expressSource());
   });
 
-  test("refuses JS shebang and commented Python string prologues without changing sources", async () => {
+  test("refuses JS shebang and preserves Python syntax/prologue semantics", async () => {
     const root = await expressProject();
     const entrypoint = join(root, "src", "server.mjs");
     const shebang = "#!/usr/bin/env node\n" + expressSource();
@@ -175,15 +259,40 @@ describe("application source preservation", () => {
       '# comment\n\n"""module docs"""\n',
       "# comment\n'''module docs'''\n",
       "# comment\nfrom __future__ import annotations\n",
-      "# comment\n# coding: latin-1\n",
+      "#!/usr/bin/env python3\n# coding: utf-8\n# comment\n('parenthesized docs')\nfrom __future__ import annotations\n",
+      '# comment\n(\n "multiline "\n "docs"\n)\n',
     ]) {
       const source = prologue + flaskSource();
       const python = await flaskProject({ source });
-      await expect(planSetupApplication(await detectSetupProject(python))).rejects.toMatchObject({
-        code: "ambiguous-entrypoint",
-      });
-      expect(await readFile(join(python, "app.py"), "utf8")).toBe(source);
-      await expectNoSetupFiles(python);
+      const plan = await planSetupApplication(await detectSetupProject(python));
+      const store = new FileSetupInstallationStore(python, "https://example.test");
+      const record = await store.loadOrCreate();
+      await chmod(join(python, "app.py"), 0o750);
+      await wireSetupApplication(store, record, plan);
+      const wired = await readFile(join(python, "app.py"), "utf8");
+      expect(wired.startsWith(prologue)).toBe(true);
+      expect((await lstat(join(python, "app.py"))).mode & 0o777).toBe(0o750);
+      const inspect = (value: string) =>
+        spawnSync(
+          "python3",
+          [
+            "-I",
+            "-B",
+            "-S",
+            "-c",
+            "import ast,json,sys; t=ast.parse(sys.stdin.read()); compile(t,'fixture','exec'); print(json.dumps(ast.get_docstring(t)))",
+          ],
+          { input: value, encoding: "utf8" },
+        );
+      expect(inspect(wired).status).toBe(0);
+      expect(inspect(wired).stdout).toBe(inspect(source).stdout);
+      expect(
+        await wireSetupApplication(
+          store,
+          record,
+          await planSetupApplication(await detectSetupProject(python)),
+        ),
+      ).toBeUndefined();
     }
   });
 
@@ -199,10 +308,10 @@ describe("application source preservation", () => {
     const wired = await readFile(entrypoint, "utf8");
     expect((await planSetupApplication(await detectSetupProject(root))).requestPath).toBe("/");
     for (const changed of [
-      wired.replace("installHueExpress(app);", "installHueExpress(otherApp);"),
+      wired.replace('installHueExpress(app, "/");', 'installHueExpress(otherApp, "/");'),
       wired.replace(
-        "installHueExpress(app);",
-        "installHueExpress(app);\napp.disable('x-powered-by');",
+        'installHueExpress(app, "/");',
+        'installHueExpress(app, "/");\napp.disable("x-powered-by");',
       ),
       "// moved header\n" + wired,
     ]) {
@@ -216,6 +325,29 @@ describe("application source preservation", () => {
 });
 
 describe("runtime installation and invocation", () => {
+  test("all ancestor Python manifests refuse, including quoted and inline uv workspace forms", async () => {
+    for (const workspace of [
+      '[tool.uv."workspace"]\nmembers=["app"]\n',
+      'tool.uv.workspace = { members = ["app"] }\n',
+    ]) {
+      const parent = await directory();
+      const independent = await flaskProject();
+      const root = join(parent, "app");
+      await rename(independent, root);
+      await writeFile(join(parent, "pyproject.toml"), workspace);
+      await writeFile(join(parent, "uv.lock"), "parent-lock-preserved");
+      await mkdir(join(parent, ".venv"));
+      await writeFile(join(parent, ".venv", "sentinel"), "parent-environment-preserved");
+      await expect(planSetupApplication(await detectSetupProject(root))).rejects.toMatchObject({
+        code: "ambiguous-project",
+      });
+      expect(await readFile(join(parent, "uv.lock"), "utf8")).toBe("parent-lock-preserved");
+      expect(await readFile(join(parent, ".venv", "sentinel"), "utf8")).toBe(
+        "parent-environment-preserved",
+      );
+      await expectNoSetupFiles(root);
+    }
+  });
   test("npm and Bun workspace members refuse before the manager can rewrite an ancestor lock", async () => {
     for (const bun of [false, true]) {
       const workspace = await directory();
@@ -354,7 +486,7 @@ describe("runtime installation and invocation", () => {
     const deadlines = { readinessMillis: 3000, requestMillis: 1000, evidenceMillis: 20 };
     await expect(
       exerciseSetupApplication(store, record, plan, undefined, deadlines),
-    ).rejects.toThrow("did not produce");
+    ).rejects.toThrow("did not return a successful response");
     expect(await readFile(join(root, "handler-count.txt"), "utf8")).toBe("B");
     record.credential!.version = 1;
     await expect(

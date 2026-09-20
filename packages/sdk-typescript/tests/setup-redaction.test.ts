@@ -155,7 +155,7 @@ describe("setup transcript privacy boundaries", () => {
   });
 });
 
-describe("manual acceptance output guard", () => {
+describe("manual diagnostic output guard", () => {
   test("independently suppresses keys, truncations and encoded/bare claim capabilities", () => {
     for (const value of [
       ...tokens,
@@ -171,11 +171,32 @@ describe("manual acceptance output guard", () => {
 
   test("evidence uses a closed projection and never labels event presence as independent receipt proof", () => {
     expect(
-      publicSetupEvidenceEvents([{ event: "receipt.verified", traceId: "a".repeat(32) }]),
+      publicSetupEvidenceEvents([
+        {
+          contractVersion: 2,
+          event: "receipt.verified",
+          source: "repository-http-boundary",
+          traceId: "a".repeat(32),
+        },
+      ]),
     ).toEqual([{ event: "receipt.verified" }]);
     expect(() =>
       publicSetupEvidenceEvents([{ event: "claim.required", nested: { token: tokens[2] } }]),
     ).toThrow("private material");
     expect(() => publicSetupEvidenceEvents([{ event: tokens[2] }])).toThrow("invalid event");
+  });
+
+  test("rejects historical receipt events and probe claims instead of treating them as application evidence", () => {
+    expect(() =>
+      publicSetupEvidenceEvents([
+        { contractVersion: 1, event: "receipt.verified", traceId: "a".repeat(32) },
+      ]),
+    ).toThrow("unsupported event version");
+    for (const source of [undefined, "setup-probe", "existing-application-request"])
+      expect(() =>
+        publicSetupEvidenceEvents([
+          { contractVersion: 2, event: "receipt.verified", source, traceId: "a".repeat(32) },
+        ]),
+      ).toThrow("application-bound receipt");
   });
 });

@@ -32,16 +32,30 @@ one literal `app.get(...)`, an environment-selected listen port, and a start scr
 requires the Bun manager. Plain JavaScript does not need a TypeScript dependency. Flask uses root
 `app.py`, `app = Flask(__name__)`, one literal `@app.get(...)` and a port read from
 `os.environ["PORT"]`. Routes cannot contain network-path prefixes, escapes or dynamic segments.
-Shebang/BOM entrypoints and protected Python encoding/docstring/future-import prologues require
-manual integration. Package roots nested in an npm/Bun/uv workspace are refused because managers
-can update ancestor locks; Python build-system/custom-source projects are also outside this matrix.
+JavaScript/TypeScript shebang/BOM entrypoints require manual integration. Python UTF-8/ASCII
+shebang, encoding, comments, module docstring (including parenthesized forms) and future imports
+are preserved using an isolated stdlib Python 3 syntax parser. Other encodings and ambiguous
+statement layouts are refused. Package roots nested in an npm/Bun workspace or beneath any Python
+project manifest are refused because managers can update ancestor locks; Python build-system/custom-source projects are also outside this matrix.
 `uv` uses binary-only dependency installation and starts with no implicit sync/build.
 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.4.0`; Python uses `hue-run==0.2.2`.
+not a completed integration. TypeScript uses `@hue-run/sdk@0.4.0`, `@opentelemetry/api@1.9.1` and
+`@opentelemetry/context-async-hooks@2.11.0`; Python uses `hue-run==0.2.2`.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
+
+The generated bootstrap supplies standard active SERVER-span context across asynchronous/streaming
+handlers; the core SDK's global-provider/context ownership is unchanged. It preserves a working
+caller context manager and disposes only its own instance. Unknown local imports, custom/late manager
+bootstraps, runtime preloads and conflicting OTel dependencies require manual review before any
+mutation or provisioning. Automatic Express entrypoints import only Express, the standard OTel API,
+or the supported `node:fs`, `node:fs/promises`, `node:timers/promises` and `node:stream` modules.
+Syntax parsing, not matches inside comments/strings/templates/regular expressions, establishes the
+constructor and literal route. Custom middleware, alternate route methods, app aliases/escapes and
+extra Flask handler decorators are outside the automatic matrix. The one selected request must finish with a 2xx response; a 404 or
+telemetry failure never authorizes a business retry.
 
 Setup creates no Scenario, Hue Run, evaluation, source capture, worker or remote execution. Package
 manager lifecycle scripts are disabled. The supported existing application entrypoint is executed
@@ -122,9 +136,12 @@ exhausted lifetime quota fail closed instead of silently replacing an installati
 Commands serialize all origins for one canonical project and reload current state under that lock.
 Every invocation re-detects current manifests, managers and managed blocks before mutation. Normal
 interruptions release the lock; after a forcible process kill, the owner must inspect the stale
-non-secret lock in the system temporary directory (`hue-setup-locks-<uid>/<sha256(project-root)>`)
-and remove only that lock after confirming no setup command remains active. Setup never breaks an
-unexplained lock automatically or retries business work.
+non-secret lock under canonical `/tmp` on Linux/macOS
+(`hue-setup-locks-<uid>/<sha256(canonical-project-root)>`) and remove only that lock after confirming
+no setup command remains active. Its location does not depend on `TMPDIR`, `HOME` or state-directory
+overrides; project aliases and different Hue origins share ownership. Other operating systems fail
+closed for automatic setup. Setup never breaks an unexplained lock automatically or retries
+business work.
 
 Both setup credential generations use exactly
 `^hue_setup_(live|test)_setup-([a-f0-9]{24})_([A-Za-z0-9_-]{43})$`, with `keyId` equal to
@@ -189,10 +206,13 @@ first accepts the reviewed PR archive, then after merge downloads the exact `pub
 SDK archive without repacking and repeats acceptance. It uses two persistent installations and at
 most four provisioning admissions. Local compatibility fixtures do not spend hosted admissions.
 
-The local/manual runner accepts an already prepared supported application fixture. Its `--language`
+The local/manual diagnostic runner accepts an already prepared supported application fixture. Its `--language`
 scaffolding does not create such an application, and its human-output option does not allocate a PTY.
-It records CLI outcomes, not independent server evidence, and must not be represented as hosted
-acceptance:
+It records CLI outcomes, not independent original-handler span binding or server evidence. It always
+exits nonzero: exit `2` means the diagnostic finished but acceptance remains unverified; malformed
+events, private output and child failures also fail closed. Even a valid version-2 application receipt
+event followed by `ready` cannot make this runner an acceptance gate. Do not use it to authorize a
+release, count it as hosted acceptance, or suppress its exit code in a release gate:
 
 ```sh
 node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifacts/typescript
@@ -216,8 +236,9 @@ node packages/sdk-typescript/scripts/verify-setup-live.mjs \
   --evidence .context/setup-staging-after-claim.json
 ```
 
-Repeat from an existing supported Flask/uv fixture when that hosted pass is budgeted. Evidence files contain the archive
-hash, bounded event names and terminal outcome only—never the claim capability, installation proof,
+Repeat from an existing supported Flask/uv fixture when that diagnostic pass is budgeted. Evidence files explicitly
+record `purpose: "diagnostic-only"`, `independentlyVerifiedApplication: false` and `accepted: false`,
+with the archive hash, bounded event names and terminal outcome—never the claim capability, installation proof,
 telemetry key, cookie, verification URL, project path or trace/span IDs. The runner installs and
 executes the exact tarball; it does not establish hosted acceptance, registry publication or
 production activation.

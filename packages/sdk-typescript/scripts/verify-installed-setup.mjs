@@ -354,8 +354,8 @@ const server = createServer((request, response) => {
           ),
           "metadata-only application span",
         );
-        const stored = installation.traces.get(traceId) ?? new Set();
-        stored.add(spanId);
+        const stored = installation.traces.get(traceId) ?? new Map();
+        stored.set(spanId, { kind: span.kind });
         installation.traces.set(traceId, stored);
         if (!installation.internalTraceIds.has(traceId))
           installation.internalTraceIds.set(traceId, randomUUID());
@@ -483,17 +483,30 @@ try {
     "npm-workspace",
     "uv-workspace",
     "uv-build-hook",
+    "comment-only-route",
+    "string-only-constructor",
+    "template-only-route",
+    "regex-only-route",
+    "late-context-owner",
+    "reexport-context-owner",
+    "aliased-route",
+    "all-route",
+    "flask-before-request",
+    "flask-route",
+    "flask-app-alias",
   ]) {
     const root = join(destination, `refuse-${boundary}`);
     rejectedRoots.push(root);
     await mkdir(root);
-    if (boundary.startsWith("uv-")) {
+    if (boundary.startsWith("uv-") || boundary.startsWith("flask-")) {
       await writeFile(
         join(root, "pyproject.toml"),
         '[project]\nname = "setup-refusal"\nversion = "0.0.0"\ndependencies = ["flask==3.1.2"]\n' +
           (boundary === "uv-workspace"
             ? '[tool.uv.workspace]\nmembers = ["packages/*"]\n'
-            : '[build-system]\nrequires = []\nbuild-backend = "local_build_hook"\nbackend-path = ["."]\n'),
+            : boundary === "uv-build-hook"
+              ? '[build-system]\nrequires = []\nbuild-backend = "local_build_hook"\nbackend-path = ["."]\n'
+              : ""),
       );
       await writeFile(
         join(root, "uv.lock"),
@@ -507,6 +520,19 @@ try {
         join(root, "local_build_hook.py"),
         'from pathlib import Path\nPath("build-hook-ran").write_text("unsafe")\n',
       );
+      if (boundary.startsWith("flask-")) {
+        const source = await readFile(join(root, "app.py"), "utf8");
+        const competing =
+          boundary === "flask-before-request"
+            ? '@app.before_request\ndef intercept(): return "other handler"\n'
+            : boundary === "flask-route"
+              ? '@app.route("/")\ndef intercept(): return "other handler"\n'
+              : "alias = app\n";
+        await writeFile(
+          join(root, "app.py"),
+          source.replace('@app.get("/")', competing + '@app.get("/")'),
+        );
+      }
     } else {
       await writeFile(
         join(root, "package.json"),
@@ -529,6 +555,29 @@ try {
         join(root, "server.mjs"),
         `import express from "express";\nconst app = express();\napp.get(${JSON.stringify(route)}, (_request, response) => response.end("ok"));\napp.listen(Number(process.env.PORT), "127.0.0.1");\n`,
       );
+      const path = join(root, "server.mjs");
+      let source = await readFile(path, "utf8");
+      if (boundary === "comment-only-route") source = source.replace("app.get(", "// app.get(");
+      if (boundary === "template-only-route")
+        source = source.replace(/^app.get.*$/mu, 'const note = `app.get("/", handler);`;');
+      if (boundary === "regex-only-route")
+        source = source.replace(/^app.get.*$/mu, "const pattern = /app.get/;");
+      if (boundary === "string-only-constructor")
+        source = source.replace("const app = express();", 'const note = "const app = express();";');
+      if (boundary === "late-context-owner") source += 'await import("./custom-context.mjs");\n';
+      if (boundary === "reexport-context-owner")
+        source += 'export * from "./custom-context.mjs";\n';
+      if (boundary === "all-route")
+        source = source.replace(
+          "app.get(",
+          'app.all("/", (_request,response)=>response.end("other"));\napp.get(',
+        );
+      if (boundary === "aliased-route")
+        source = source.replace(
+          "app.get(",
+          'const alias = app; alias.get("/", (_request,response)=>response.end("other"));\napp.get(',
+        );
+      await writeFile(path, source);
     }
     const before = JSON.stringify(counters);
     const managerBefore = await readFile(join(destination, "manager-calls"), "utf8").catch(
@@ -553,6 +602,54 @@ try {
       );
   }
 
+  for (const [index, table] of [
+    '[tool.uv."workspace"]\nmembers=["app"]\n',
+    'tool.uv.workspace={members=["app"]}\n',
+  ].entries()) {
+    const parent = join(destination, `quoted-workspace-${index}`);
+    const root = join(parent, "app");
+    rejectedRoots.push(parent);
+    await mkdir(root, { recursive: true });
+    await mkdir(join(parent, ".venv"));
+    await writeFile(join(parent, "pyproject.toml"), table);
+    await writeFile(join(parent, "uv.lock"), "unchanged parent lock");
+    await writeFile(join(parent, ".venv", "sentinel"), "unchanged parent environment");
+    await writeFile(
+      join(root, "pyproject.toml"),
+      '[project]\nname="member"\nversion="0.0.0"\ndependencies=["flask==3.1.2"]\n',
+    );
+    await writeFile(join(root, "uv.lock"), "version = 1\n");
+    await writeFile(
+      join(root, "app.py"),
+      'import os\nfrom flask import Flask\napp=Flask(__name__)\n@app.get("/")\ndef home(): return "ok"\napp.run(port=int(os.environ["PORT"]))\n',
+    );
+    const before = JSON.stringify(counters);
+    const refused = await run(cli, ["setup", "--agent", "--origin", origin], root, environment);
+    requireThat(
+      refused.stdout
+        .split("\n")
+        .filter(Boolean)
+        .map(JSON.parse)
+        .some((event) => event.event === "action.required"),
+      "quoted/inline ancestor uv workspace requires explicit project selection",
+    );
+    requireThat(
+      JSON.stringify(counters) === before,
+      "ancestor workspace refusal spends no admission",
+    );
+    requireThat(
+      (await readFile(join(parent, "uv.lock"), "utf8")) === "unchanged parent lock" &&
+        (await readFile(join(parent, ".venv", "sentinel"), "utf8")) ===
+          "unchanged parent environment",
+      "ancestor lock/environment bytes unchanged",
+    );
+    for (const name of [".hue", ".gitignore", ".venv"])
+      requireThat(
+        !(await lstat(join(root, name)).catch(() => undefined)),
+        "unsafe member root remains untouched",
+      );
+  }
+
   for (const fixture of fixtures) {
     await mkdir(fixture.root);
     requireThat(
@@ -566,7 +663,39 @@ try {
       );
       await writeFile(
         join(fixture.root, "app.py"),
-        'import os\nfrom flask import Flask\napp = Flask(__name__)\n@app.get("/")\ndef home():\n    with open("handler-count.txt", "a", encoding="utf-8") as count:\n        count.write("1")\n    return "ok"\nif __name__ == "__main__":\n    app.run(host="127.0.0.1", port=int(os.environ["PORT"]))\n',
+        `#!/usr/bin/env python3
+# coding: utf-8
+# This original application docstring must survive integration.
+("Original fixture module")
+from __future__ import annotations
+import json
+import os
+import time
+from flask import Flask, Response, stream_with_context
+from opentelemetry.trace import get_current_span
+app = Flask(__name__)
+@app.get("/")
+def home():
+    with open("handler-count.txt", "a", encoding="utf-8") as count:
+        count.write("1")
+    observations = []
+    def observe():
+        span = get_current_span()
+        ids = span.get_span_context()
+        observations.append({"traceId": format(ids.trace_id, "032x"), "spanId": format(ids.span_id, "016x")})
+    observe()
+    def body():
+        observe()
+        yield "o"
+        time.sleep(0.01)
+        observe()
+        with open("handler-evidence.json", "w", encoding="utf-8") as evidence:
+            json.dump({"observations": observations, "moduleDoc": __doc__}, evidence)
+        yield "k"
+    return Response(stream_with_context(body()))
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=int(os.environ["PORT"]))
+`,
       );
       requireThat((await run(realUv, ["lock"], fixture.root)).code === 0, "prepare Flask lockfile");
     } else {
@@ -585,7 +714,31 @@ try {
       );
       await writeFile(
         join(fixture.root, "src", "server.mjs"),
-        'import { appendFileSync, writeFileSync } from "node:fs";\nimport express from "express";\nconst app = express();\napp.get("/", (_request, response) => { appendFileSync("handler-count.txt", "1"); writeFileSync("runtime.txt", typeof Bun === "undefined" ? "node" : "bun"); response.end("ok"); });\napp.listen(Number(process.env.PORT), "127.0.0.1");\n',
+        `import { appendFileSync, writeFileSync } from "node:fs";
+import { setTimeout } from "node:timers/promises";
+import { trace } from "@opentelemetry/api";
+import express from "express";
+const note = "const app = express();";
+const template = \`app.get("/fake", handler);\`;
+const pattern = /const app = express\\(\\)/;
+// app.get("/comment-only", handler);
+const app = express();
+app.get("/", async (_request, response) => {
+  appendFileSync("handler-count.txt", "1");
+  writeFileSync("runtime.txt", typeof Bun === "undefined" ? "node" : "bun");
+  const observations = [];
+  const observe = () => { const ids = trace.getActiveSpan()?.spanContext(); observations.push({ traceId: ids?.traceId, spanId: ids?.spanId }); };
+  observe();
+  await Promise.resolve();
+  observe();
+  response.write("o");
+  await setTimeout(10);
+  observe();
+  writeFileSync("handler-evidence.json", JSON.stringify({ observations }));
+  response.end("k");
+});
+app.listen(Number(process.env.PORT), "127.0.0.1");
+`,
       );
       if (fixture.kind === "express-bun") {
         requireThat(
@@ -624,8 +777,12 @@ try {
       "--origin",
       origin,
     ];
+    const competingTemp = join(destination, `alternate-temp-${fixture.kind}`);
+    await mkdir(competingTemp);
     const competing =
-      fixture.kind === "express-npm" ? run(cli, initialArgs, fixture.root, environment) : undefined;
+      fixture.kind === "express-npm"
+        ? run(cli, initialArgs, fixture.root, { ...environment, TMPDIR: competingTemp })
+        : undefined;
     const attempt =
       fixture.kind === "flask-uv"
         ? await run(
@@ -721,9 +878,37 @@ try {
       "verified application evidence persisted",
     );
     fixture.evidence = local.applicationEvidence;
+    const handlerEvidence = JSON.parse(
+      await readFile(join(fixture.root, "handler-evidence.json"), "utf8"),
+    );
+    noSecrets(JSON.stringify(handlerEvidence), "original handler evidence");
+    const boundHandler = (candidate) =>
+      handlerEvidence.observations?.length === 3 &&
+      handlerEvidence.observations.every(
+        (observed) =>
+          observed.traceId === candidate.traceId && observed.spanId === candidate.spanId,
+      );
+    requireThat(
+      boundHandler(fixture.evidence),
+      `${fixture.kind} original handler standard span IDs match application evidence across async/streaming boundaries`,
+    );
+    if (fixture.kind === "flask-uv")
+      requireThat(
+        handlerEvidence.moduleDoc === "Original fixture module",
+        "parenthesized module docstring survives installed integration",
+      );
+    requireThat(
+      !boundHandler({ traceId: "f".repeat(32), spanId: "e".repeat(16) }),
+      "unrelated probe IDs cannot replace original handler IDs even with one business request",
+    );
     requireThat(
       fixture.installation.traces.get(fixture.evidence.traceId)?.has(fixture.evidence.spanId),
       "receipt IDs match independently decoded OTLP",
+    );
+    requireThat(
+      fixture.installation.traces.get(fixture.evidence.traceId)?.get(fixture.evidence.spanId)
+        ?.kind === 2,
+      "decoded OTLP span is SERVER",
     );
     requireThat(
       (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
@@ -832,6 +1017,112 @@ try {
       missing.status === 404,
       "receiver cannot fabricate evidence for an unexported trace",
     );
+    // A valid unrelated exported probe must not satisfy the original handler binding.
+    // This is a separate synthetic test process, never a replay of the business route.
+    const unrelated =
+      fixture.kind === "flask-uv"
+        ? await run(
+            realUv,
+            [
+              "run",
+              "--frozen",
+              "--no-build",
+              "--no-sync",
+              "python",
+              "-c",
+              `
+import json
+from pathlib import Path
+from hue_sdk import Hue
+record = json.loads(Path(${JSON.stringify(fixture.installationPath)}).read_text())
+hue = Hue(api_key=record["credential"]["apiKey"], base_url=record["origin"], service_name="unrelated-probe", capture_content=False)
+with hue.span("hue.metadata") as span:
+    ids = {"traceId": span.trace_id, "spanId": span.span_id}
+if not hue.force_flush() or not hue.shutdown():
+    raise RuntimeError("Synthetic unrelated probe did not flush")
+print(json.dumps(ids))
+`,
+            ],
+            fixture.root,
+            environment,
+          )
+        : await run(
+            fixture.kind === "express-bun" ? "bun" : "node",
+            [
+              "--input-type=module",
+              "-e",
+              `
+import { readFileSync } from "node:fs";
+import { createHue } from "@hue-run/sdk";
+const record = JSON.parse(readFileSync(${JSON.stringify(fixture.installationPath)}, "utf8"));
+const hue = createHue({ apiKey: record.credential.apiKey, baseUrl: record.origin, serviceName: "unrelated-probe", captureContent: false });
+const ids = await hue.withSpan("hue.metadata", span => ({traceId:span.traceId,spanId:span.spanId}));
+await hue.flush(); await hue.shutdown(); console.log(JSON.stringify(ids));
+`,
+            ],
+            fixture.root,
+            environment,
+          );
+    requireThat(unrelated.code === 0, "actual installed unrelated probe exported");
+    const unrelatedIds = JSON.parse(unrelated.stdout);
+    const unrelatedReceipt = await fetch(
+      `${origin}/api/v1/setup/traces/${unrelatedIds.traceId}/receipt?expectedSpanId=${unrelatedIds.spanId}`,
+      { headers: { Authorization: `Bearer ${replacement.credential.apiKey}` }, redirect: "manual" },
+    );
+    requireThat(
+      unrelatedReceipt.status === 200,
+      "unrelated probe has independently decoded stored receipt",
+    );
+    const unrelatedEvidence = await unrelatedReceipt.json();
+    requireThat(
+      unrelatedEvidence.traceId === unrelatedIds.traceId &&
+        unrelatedEvidence.matchedSpanIds.includes(unrelatedIds.spanId) &&
+        unrelatedEvidence.missingSpanIds.length === 0 &&
+        unrelatedEvidence.spanCount > 0,
+      "unrelated probe receipt is genuinely valid",
+    );
+    requireThat(
+      !boundHandler(unrelatedIds) &&
+        (await readFile(join(fixture.root, "handler-count.txt"), "utf8")) === "1",
+      "valid probe plus one business invocation fails original handler evidence binding",
+    );
+    if (fixture.kind !== "flask-uv") {
+      const invalidResponse = await run(
+        fixture.kind === "express-bun" ? "bun" : "node",
+        [
+          "--input-type=module",
+          "-e",
+          `
+import { existsSync } from "node:fs";
+import express from "express";
+import { hue, installHueExpress } from "./hue.setup.mjs";
+for (const status of [404,503]) {
+  let calls=0; const app=express(); installHueExpress(app,"/");
+  app.get("/", (_request,response)=>{calls++;response.status(status).end("business-error");});
+  const server=app.listen(0,"127.0.0.1"); await new Promise(resolve=>server.once("listening",resolve));
+  const response=await fetch("http://127.0.0.1:"+server.address().port+"/"); await response.arrayBuffer();
+  await new Promise(resolve=>setTimeout(resolve,100)); await hue.flush();
+  await new Promise(resolve=>server.close(resolve));
+  if (calls!==1 || response.status!==status || existsSync(process.env.HUE_SETUP_EVIDENCE_FILE)) throw new Error("Non-success handler produced setup evidence or replayed");
+}
+await hue.shutdown(); console.log(JSON.stringify({cases:2,noEvidence:true}));
+`,
+        ],
+        fixture.root,
+        {
+          ...environment,
+          HUE_SETUP_EVIDENCE_FILE: join(
+            fixture.root,
+            ".hue",
+            `application-evidence-${originHash}.json`,
+          ),
+        },
+      );
+      requireThat(
+        invalidResponse.code === 0 && JSON.parse(invalidResponse.stdout).noEvidence === true,
+        "installed generated middleware never treats 404/5xx handler as successful application evidence",
+      );
+    }
     const rendererEvent = {
       contractVersion: setup.SETUP_EVENT_CONTRACT_VERSION,
       runId: "setup_synthetic",
@@ -1001,11 +1292,11 @@ for failure in ("span", "enter", "exit", "flush", "evidence"):
             counts["exit"] += 1
             if failure == "exit":
                 raise RuntimeError("synthetic span-exit failure")
-    def span(_name):
+    def span(_name, **_kwargs):
         counts["span"] += 1
         if failure == "span":
             raise RuntimeError("synthetic span-construction failure")
-        return Context()
+        return SimpleNamespace(get_span_context=lambda: SimpleNamespace(trace_id=int("a" * 32, 16), span_id=int("b" * 16, 16)), end=lambda: None)
     def flush():
         counts["flush"] += 1
         if failure == "flush":
@@ -1015,10 +1306,11 @@ for failure in ("span", "enter", "exit", "flush", "evidence"):
         counts["evidence"] += 1
         if failure == "evidence":
             raise RuntimeError("synthetic evidence failure")
-    hue_setup.hue = SimpleNamespace(span=span, force_flush=flush)
+    hue_setup.hue = SimpleNamespace(tracer=SimpleNamespace(start_span=span), force_flush=flush)
+    hue_setup.use_span = lambda *_args, **_kwargs: Context()
     hue_setup._save_evidence = evidence
     app = Flask("lifecycle-" + failure)
-    hue_setup.install_hue_flask(app)
+    hue_setup.install_hue_flask(app, "/lifecycle")
     @app.get("/lifecycle")
     def business():
         counts["business"] += 1
@@ -1033,7 +1325,7 @@ failure = "normal"
 counts = {name: 0 for name in ("business", "span", "enter", "exit", "flush", "evidence")}
 os.environ.pop("HUE_SETUP_EVIDENCE_FILE", None)
 normal = Flask("normal-serving")
-hue_setup.install_hue_flask(normal)
+hue_setup.install_hue_flask(normal, "/normal")
 @normal.get("/normal")
 def normal_business():
     counts["business"] += 1
@@ -1041,6 +1333,18 @@ def normal_business():
 response = normal.test_client().get("/normal")
 if response.status_code != 203 or response.data != b"normal-response" or counts != {"business": 1, "span": 1, "enter": 1, "exit": 1, "flush": 0, "evidence": 0}:
     raise RuntimeError("Ordinary serving must not force a flush or save setup evidence")
+for status in (404, 503):
+    counts = {name: 0 for name in ("business", "span", "enter", "exit", "flush", "evidence")}
+    os.environ["HUE_SETUP_EVIDENCE_FILE"] = str(hue_setup._evidence_path)
+    app = Flask("invalid-response-" + str(status))
+    hue_setup.install_hue_flask(app, "/")
+    @app.get("/")
+    def invalid_business():
+        counts["business"] += 1
+        return "business-error", status
+    response = app.test_client().get("/")
+    if response.status_code != status or counts["business"] != 1 or counts["flush"] or counts["evidence"]:
+        raise RuntimeError("Non-success handler became setup evidence")
 print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWithoutFlush": True}))
 `,
         ],
@@ -1116,7 +1420,10 @@ print(json.dumps({"cases": 5, "responsesPreserved": preserved, "normalServingWit
     counters.provisions === 3 && installations.size === 3,
     "bounded synthetic matrix admissions",
   );
-  requireThat(counters.exports === 3, "exactly one actual application export per fixture");
+  requireThat(
+    counters.exports === 10,
+    "three application exports, three unrelated probes and four isolated failed-response middleware checks",
+  );
   requireThat(
     counters.revoked === 6 && counters.rewrittenRefused === 6,
     "all installed fixtures check anonymous/reforged refusal",
