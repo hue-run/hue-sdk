@@ -47,6 +47,7 @@ export {
   type SetupInstallationStatus,
   type SetupProbeEvidence,
 } from "./setup/backend.js";
+export { type SetupFileChange } from "./setup/configure.js";
 export {
   FileSetupInstallationStore,
   type SetupInstallationRecord,

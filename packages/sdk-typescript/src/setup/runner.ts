@@ -12,15 +12,21 @@ import {
   type SetupProjectDetection,
 } from "./types.js";
 
+/** Detects the supported language and safe setup plan for a project root. */
 export interface SetupProjectAdapter {
+  /** Inspects a project without executing its code. */
   detect(root: string, signal?: AbortSignal): Promise<SetupProjectDetection>;
 }
 
+/** Persists secret-free setup progress across interruptions. */
 export interface SetupCheckpointAdapter {
+  /** Reads the checkpoint for one setup run and project. */
   load(runId: string, projectRoot: string): Promise<SetupMachineState | undefined>;
+  /** Atomically saves the latest setup state. */
   save(state: SetupMachineState): Promise<void>;
 }
 
+/** Backend operations consumed by the resumable setup runner. */
 export type SetupBackendOperations = Pick<
   SetupBackendAdapter,
   | "prepare"
@@ -34,21 +40,35 @@ export type SetupBackendOperations = Pick<
   | "verifyRevokedCredential"
 >;
 
+/** Inputs for one invocation of the resumable setup runner. */
 export interface SetupRunOptions {
+  /** Operation requested by the caller. */
   command: "setup" | "resume" | "status" | "claim";
+  /** Output contract selected by the CLI. */
   mode: "human" | "plain" | "jsonl";
+  /** Stable identifier for this resumable invocation. */
   runId: string;
+  /** Absolute project directory being configured. */
   projectRoot: string;
+  /** Safe project detector. */
   project: SetupProjectAdapter;
+  /** Secret-free checkpoint persistence. */
   checkpoints: SetupCheckpointAdapter;
+  /** Real protocol adapter; omitting it can only report that action is required. */
   backend?: SetupBackendOperations;
+  /** Receives each ordered setup event. */
   emit(event: SetupEvent): void | Promise<void>;
+  /** Injectable clock used by deterministic tests. */
   now?: () => Date;
+  /** Cancels bounded local and network work. */
   signal?: AbortSignal;
 }
 
+/** Terminal outcome and latest resumable state from one setup invocation. */
 export interface SetupRunResult {
+  /** Whether setup is verified, needs owner action, or made no change. */
   outcome: "ready" | "action_required" | "unchanged";
+  /** Latest checkpoint state when project detection has begun. */
   state?: SetupMachineState;
 }
 

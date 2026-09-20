@@ -33,30 +33,72 @@ const SETUP_ERROR_STATUSES = new Map<string, number>([
   ["SETUP_UNAVAILABLE", 503],
 ]);
 
+/** Strictly validated Setup HTTP protocol v1 installation status. */
 export interface SetupInstallationStatus {
+  /** Setup protocol version. */
   protocolVersion: 1;
+  /** Project/origin-scoped lowercase UUIDv4. */
   installationId: string;
+  /** Server lifecycle state; expired and purged are terminal. */
   state: "active" | "claimed" | "expired" | "purged";
-  project: { id: string; organizationId: string } | null;
+  /** Isolated trial project, or null only when the protocol permits no project. */
+  project: {
+    /** Project identifier retained across account claim. */
+    id: string;
+    /** Organization currently owning the project. */
+    organizationId: string;
+  } | null;
+  /** Current anonymous or post-claim credential generation. */
   credentialVersion: 0 | 1;
+  /** Server-enforced setup telemetry policy. */
   capturePolicy: "metadata-only-v1";
+  /** Trial expiry timestamp, or null after claim. */
   expiresAt: string | null;
-  limits: { traces: 100; spans: 1000; bytes: 2097152 };
-  usage: { traces: number; spans: number; bytes: number };
+  /** Fixed anonymous lifetime limits. */
+  limits: {
+    /** Maximum anonymous traces. */
+    traces: 100;
+    /** Maximum anonymous spans. */
+    spans: 1000;
+    /** Maximum anonymous canonical stored bytes. */
+    bytes: 2097152;
+  };
+  /** Anonymous lifetime usage counters. */
+  usage: {
+    /** Accepted trace count. */
+    traces: number;
+    /** Accepted span count. */
+    spans: number;
+    /** Accepted canonical stored bytes. */
+    bytes: number;
+  };
+  /** Private browser claim capability while active; never log or persist it. */
   claimUrl: string | null;
+  /** Same-origin telemetry and receipt routes fixed by protocol v1. */
   endpoints: {
+    /** Relative OTLP/HTTP traces route. */
     otlp: "/api/v1/otlp/v1/traces";
+    /** Relative exact-receipt route template. */
     receipt: "/api/v1/traces/{traceId}/receipt";
   };
 }
 
+/** Installation status plus one idempotently recovered telemetry credential. */
 export interface SetupCredentialResult extends SetupInstallationStatus {
-  credential: SetupStoredCredential & { capabilities: ["telemetry_write"] };
+  /** Telemetry-only credential for the requested generation. */
+  credential: SetupStoredCredential & {
+    /** Closed capability set enforced for setup-issued keys. */
+    capabilities: ["telemetry_write"];
+  };
 }
 
+/** Exact receipt evidence for one real metadata-only setup probe. */
 export interface SetupProbeEvidence {
+  /** External trace identifier sent by the probe. */
   traceId: string;
+  /** External span identifier required in the receipt. */
   spanId: string;
+  /** Validated positive receipt containing the exact identifiers. */
   receipt: TraceReceipt;
 }
 
@@ -66,11 +108,25 @@ export type SetupBackendTrial = SetupInstallationStatus;
 export type SetupBackendReceipt = SetupProbeEvidence;
 /** Account-claim state is represented by the installation status and its private claim URL. */
 export type SetupBackendClaim =
-  | { status: "required"; claimId: string; url: string }
-  | { status: "completed"; claimId: string };
+  | {
+      /** Browser owner action is still required. */
+      status: "required";
+      /** Installation identity associated with the claim. */
+      claimId: string;
+      /** Private browser capability; never log or persist it. */
+      url: string;
+    }
+  | {
+      /** Browser claim and local reconciliation completed. */
+      status: "completed";
+      /** Installation identity associated with the claim. */
+      claimId: string;
+    };
 
+/** Sanitized setup failure with a stable local or protocol code. */
 export class SetupBackendError extends Error {
   constructor(
+    /** Stable local code or exact `SETUP_*` server code. */
     readonly code:
       | "invalid_origin"
       | "transport"
@@ -78,7 +134,9 @@ export class SetupBackendError extends Error {
       | "unverified"
       | `SETUP_${string}`,
     message: string,
+    /** Validated HTTP status when the failure came from the server. */
     readonly status?: number,
+    /** Bounded server-requested retry delay, when provided. */
     readonly retryAfterMillis?: number,
     options?: ErrorOptions,
   ) {
@@ -87,11 +145,17 @@ export class SetupBackendError extends Error {
   }
 }
 
+/** Construction options for the real Setup HTTP protocol v1 adapter. */
 export interface SetupBackendAdapterOptions {
+  /** Project directory that owns the installation identity and managed configuration. */
   projectRoot: string;
+  /** HTTPS Hue origin, or an explicit loopback HTTP origin for isolated tests. */
   origin?: string;
+  /** Injectable Fetch implementation used by synthetic loopback tests. */
   fetch?: typeof globalThis.fetch;
+  /** Per-request deadline in milliseconds. */
   requestTimeoutMillis?: number;
+  /** Total receipt polling deadline in milliseconds. */
   receiptTimeoutMillis?: number;
 }
 
@@ -307,7 +371,9 @@ async function pause(milliseconds: number, signal?: AbortSignal): Promise<void> 
 
 /** Real implementation of the frozen Setup HTTP protocol v1. */
 export class SetupBackendAdapter {
+  /** Exact normalized Hue origin used by every request. */
   readonly origin: string;
+  /** Project/origin-scoped owner-only installation store. */
   readonly store: FileSetupInstallationStore;
   private readonly fetcher: typeof globalThis.fetch;
   private readonly requestTimeoutMillis: number;
@@ -505,6 +571,7 @@ export class SetupBackendAdapter {
     return parseStatus(value, installation.installationId, this.origin);
   }
 
+  /** Reads and validates the current installation status without provisioning. */
   async status(signal?: AbortSignal): Promise<SetupInstallationStatus> {
     const installation = await this.prepare();
     const value = await this.request(
@@ -546,12 +613,14 @@ export class SetupBackendAdapter {
     return result;
   }
 
+  /** Writes only setup-owned, secret-free metadata integration files. */
   async configure(project: SetupProjectDetection): Promise<SetupFileChange[]> {
     const installation = await this.prepare();
     if (!installation.credential) throw new Error("Setup credential is not available");
     return configureSetupProject(this.store, installation, project);
   }
 
+  /** Fails before provisioning when credentials or managed configuration conflict. */
   async preflight(project: SetupProjectDetection): Promise<void> {
     const installation = await this.prepare();
     await validateSetupConfiguration(this.store, installation, project);

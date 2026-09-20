@@ -9,8 +9,11 @@ import {
   type SetupInstallationRecord,
 } from "./installation.js";
 
+/** A secret-free managed integration file created or replaced by setup. */
 export interface SetupFileChange {
+  /** Project-relative managed file path. */
   path: string;
+  /** Safe write performed during this invocation. */
   change: "created" | "updated";
 }
 

@@ -340,6 +340,7 @@
             "SetupEffect",
             "SetupEvent",
             "SetupEventName",
+            "SetupFileChange",
             "SetupInstallationRecord",
             "SetupInstallationStatus",
             "SetupMachineInput",

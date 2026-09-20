@@ -7,28 +7,45 @@ const MAX_FILE_BYTES = 32 * 1024;
 const IGNORE_RULES = [".hue/installation-*.json", ".hue/.installation-*.tmp"] as const;
 const LOCAL_IGNORE_RULES = ["installation-*.json", ".installation-*.tmp"] as const;
 
+/** Telemetry credential saved only in an ignored owner-only installation file. */
 export interface SetupStoredCredential {
+  /** Bearer credential used solely for telemetry export and receipt verification. */
   apiKey: string;
+  /** Server identifier for the credential generation. */
   keyId: string;
+  /** Anonymous or post-claim credential generation. */
   version: 0 | 1;
 }
 
+/** Exact metadata probe identifiers retained for resumable receipt verification. */
 export interface SetupStoredProbe {
+  /** Lowercase external trace identifier. */
   traceId: string;
+  /** Lowercase external span identifier expected in the receipt. */
   spanId: string;
+  /** Credential generation that exported the probe. */
   credentialVersion: 0 | 1;
+  /** Whether an exact metadata-only receipt was observed. */
   verified: boolean;
 }
 
 /** Secret local installation state. It must never be emitted or copied into diagnostics. */
 export interface SetupInstallationRecord {
+  /** Local file format version. */
   format: 1;
+  /** Exact normalized Hue origin owning this installation. */
   origin: string;
+  /** Lowercase UUIDv4 installation identity. */
   installationId: string;
+  /** Unpadded base64url installation proof; never log or diagnose this value. */
   installationSecret: string;
+  /** Latest locally managed telemetry credential. */
   credential?: SetupStoredCredential;
+  /** Latest probe awaiting or carrying exact receipt evidence. */
   probe?: SetupStoredProbe;
+  /** Provision request timestamps used to enforce the local hourly bound. */
   provisionAttempts: string[];
+  /** Digests of files setup owns and may safely replace. */
   managedFiles: Record<string, string>;
 }
 
@@ -171,9 +188,13 @@ function parseRecord(value: unknown, origin: string): SetupInstallationRecord {
 
 /** Owner-only, project/origin-scoped storage for installation proof and telemetry credentials. */
 export class FileSetupInstallationStore {
+  /** Resolved project directory containing the installation state. */
   readonly projectRoot: string;
+  /** Exact normalized Hue origin scoped to this store. */
   readonly origin: string;
+  /** Owner-only `.hue` directory. */
   readonly directory: string;
+  /** Origin-scoped ignored installation record path. */
   readonly path: string;
 
   constructor(projectRoot: string, origin: string) {
@@ -225,6 +246,7 @@ export class FileSetupInstallationStore {
       await this.ensureIgnoreFile(join(this.directory, ".gitignore"), rule);
   }
 
+  /** Loads a valid owner-only record without creating one. */
   async load(): Promise<SetupInstallationRecord | undefined> {
     await this.rejectUnsafeProjectRoot();
     await rejectSymlink(this.directory, true);
@@ -297,6 +319,7 @@ export class FileSetupInstallationStore {
     }
   }
 
+  /** Atomically replaces this store's validated owner-only record. */
   async save(record: SetupInstallationRecord): Promise<void> {
     parseRecord(record, this.origin);
     await rejectSymlink(this.directory);
@@ -304,6 +327,7 @@ export class FileSetupInstallationStore {
   }
 }
 
+/** Computes the digest used to detect unexpected edits to managed files. */
 export function setupManagedDigest(contents: string): string {
   return createHash("sha256").update(contents).digest("hex");
 }
