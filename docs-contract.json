@@ -99,6 +99,9 @@
       "version": "0.2.2"
     },
     "typescript": {
+      "bins": {
+        "hue": "./dist/setup/cli.js"
+      },
       "entrypoints": {
         "@hue-run/sdk": {
           "publicExports": [
@@ -308,9 +311,61 @@
             "ManagedTargetResult",
             "createManagedTargetHandler"
           ]
+        },
+        "@hue-run/sdk/setup": {
+          "publicExports": [
+            "ActionRequiredEvent",
+            "ClaimCompletedEvent",
+            "ClaimRequiredEvent",
+            "DiagnosticEvent",
+            "FileChangedEvent",
+            "PlanReadyEvent",
+            "ProjectDetectedEvent",
+            "ReceiptVerifiedEvent",
+            "RunCompletedEvent",
+            "RunFailedEvent",
+            "RunStartedEvent",
+            "SETUP_EVENT_CONTRACT_VERSION",
+            "SetupBackendAdapter",
+            "SetupBackendClaim",
+            "SetupBackendReceipt",
+            "SetupBackendTrial",
+            "SetupCheckpointAdapter",
+            "SetupEffect",
+            "SetupEvent",
+            "SetupEventName",
+            "SetupMachineInput",
+            "SetupMachineState",
+            "SetupOutputMode",
+            "SetupPlan",
+            "SetupProjectAdapter",
+            "SetupProjectDetection",
+            "SetupRunOptions",
+            "SetupRunResult",
+            "SetupTransition",
+            "StepCompletedEvent",
+            "StepStartedEvent",
+            "TrialCreatedEvent",
+            "createInitialSetupState",
+            "detectSetupProject",
+            "renderHumanEvent",
+            "renderJsonlEvent",
+            "renderPlainEvent",
+            "runSetup",
+            "selectSetupOutputMode",
+            "transitionSetup"
+          ]
         }
       },
       "name": "@hue-run/sdk",
+      "schemas": {
+        "@hue-run/sdk/setup-events.schema.json": {
+          "contractVersion": 1,
+          "id": "https://hue.run/schemas/setup-events-v1.json",
+          "sha256": "sha256:bc0227b88fdea13e67bc2fc5bd58c9ce544715470f7c05270437ed3b3593cadc",
+          "source": "packages/sdk-typescript/setup-events.schema.json"
+        }
+      },
       "version": "0.3.0"
     }
   },

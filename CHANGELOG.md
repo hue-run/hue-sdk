@@ -19,6 +19,10 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- A dependency-free `hue` setup-session CLI and `@hue-run/sdk/setup` installer contract provide
+  deterministic local project detection, private resumable checkpoints, append-only human/plain
+  renderers and versioned JSONL agent events. This first slice does not change project files, contact
+  the Hue backend, or create a Scenario, evaluation, worker or Hue Run.
 - `runLocalAgent()` connects a fixed local TypeScript agent entry point to app-launched, versioned simulation jobs while preserving checkpoint recovery and the developer's existing process, debugger and provider orchestration.
 - `runLocalAgent()` and `runSimulation()` share one provider-aware world lifecycle: V2 manifest preflight runs once before target code, ready bundles remain memory-only, incomplete environments skip targets and scorers, and uncertain preparation is never reacquired or replayed.
 - Environment publication supports explicit V1 and V2 definitions, including immutable Gmail provider-instance bindings and canonical synthetic-principal UUID comparison.

@@ -203,9 +203,11 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
         "./environment": "environment.ts",
         "./evals": "evals.ts",
         "./managed": "managed.ts",
+        "./setup": "setup.ts",
     }
+    ts_schema_exports = {"./setup-events.schema.json"}
     declared_entrypoints = set(ts_manifest["exports"]) - {"./package.json"}
-    if declared_entrypoints != set(ts_entry_files):
+    if declared_entrypoints != set(ts_entry_files) | ts_schema_exports:
         raise ValueError(
             "TypeScript public entry points changed; update the documentation contract generator: "
             f"declared={sorted(declared_entrypoints)}, known={sorted(ts_entry_files)}"
@@ -216,6 +218,8 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
             ts_manifest["name"] if export_path == "." else f"{ts_manifest['name']}{export_path[1:]}"
         )
         ts_entrypoints[specifier] = {"publicExports": typescript_exports(ts_source / filename)}
+    setup_schema_path = root / "packages/sdk-typescript/setup-events.schema.json"
+    setup_schema = json.loads(setup_schema_path.read_text())
 
     py_modules = {
         "hue_sdk": py_source / "__init__.py",
@@ -232,7 +236,18 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
             "typescript": {
                 "name": ts_manifest["name"],
                 "version": ts_manifest["version"],
+                "bins": ts_manifest.get("bin", {}),
                 "entrypoints": ts_entrypoints,
+                "schemas": {
+                    f"{ts_manifest['name']}/setup-events.schema.json": {
+                        "contractVersion": setup_schema["$defs"]["base"]["properties"][
+                            "contractVersion"
+                        ]["const"],
+                        "id": setup_schema["$id"],
+                        "source": str(setup_schema_path.relative_to(root)),
+                        "sha256": sha256(setup_schema_path),
+                    }
+                },
             },
             "python": {
                 "name": py_manifest["name"],
