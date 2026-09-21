@@ -15,6 +15,7 @@ import {
   runLocalAgent,
   withFiles,
   rescore,
+  type ArtifactUpload,
   type Completion,
   type Execution,
   type Experiment,
@@ -46,12 +47,16 @@ type StoredArtifact = {
   byteSize: number;
   sha256: string;
   state: "reserved" | "ready";
-  copyState: "none" | "acknowledged";
+  copyState: "none" | "started" | "acknowledged";
   bytes?: Uint8Array;
 };
 
 /** Synthetic control plane: one frozen case with pinned input files, artifacts and executions. */
-function fixture(options: { scorers: ScorerVersion[]; failReserveOnce?: boolean }) {
+function fixture(options: {
+  scorers: ScorerVersion[];
+  failReserveOnce?: boolean;
+  failPutOnce?: boolean;
+}) {
   const projectId = randomUUID();
   const datasetVersionId = randomUUID();
   const agentId = randomUUID();
@@ -150,6 +155,7 @@ function fixture(options: { scorers: ScorerVersion[]; failReserveOnce?: boolean 
     registrations: [] as Record<string, unknown>[],
   };
   let failReserve = options.failReserveOnce ?? false;
+  let failPut = options.failPutOnce ?? false;
   let claimed = false;
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -160,6 +166,10 @@ function fixture(options: { scorers: ScorerVersion[]; failReserveOnce?: boolean 
         // Storage capability: the Hue key must never reach it.
         expect(request.headers.get("authorization")).toBeNull();
         expect(request.method).toBe("PUT");
+        if (failPut) {
+          failPut = false;
+          return new Response(null, { status: 500 });
+        }
         const stored = artifacts.get(url.pathname.slice("/blob/".length))!;
         stored.bytes = new Uint8Array(await request.arrayBuffer());
         calls.uploads++;
@@ -257,13 +267,15 @@ function fixture(options: { scorers: ScorerVersion[]; failReserveOnce?: boolean 
       if (action) {
         const stored = artifacts.get(action[1]!);
         if (!stored) return new Response(null, { status: 404 });
-        if (action[2] === "upload")
+        if (action[2] === "upload") {
+          stored.copyState = "started";
           return Response.json({
             uploadUrl: `${url.origin}/blob/${stored.id}`,
             method: "PUT",
             headers: { "content-type": stored.contentType, "x-vercel-blob-access": "private" },
             expiresAt: new Date(Date.now() + 60_000).toISOString(),
           });
+        }
         if (!stored.bytes) return new Response(null, { status: 409 });
         if (stored.bytes.byteLength !== stored.byteSize || sha256(stored.bytes) !== stored.sha256)
           return Response.json({ error: "mismatch" }, { status: 409 });
@@ -869,6 +881,46 @@ describe("file-based cases", () => {
     }
   });
 
+  test("a started copy without stored bytes resumes by issuing another PUT", async () => {
+    const f = fixture({ scorers: [version(builtins.exactMatch())], failPutOnce: true });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "resume-started-copy",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    let invocations = 0;
+    const options = {
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      experimentId: f.experiment.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      traceEvidence: { mode: "omit" as const, reason: "Synthetic worker keeps traces local" },
+      target: () => {
+        invocations++;
+        return withFiles({ ok: true }, [
+          { bytes: Buffer.from("letter"), filename: "Letter.docx", contentType: docx },
+        ]);
+      },
+    };
+    try {
+      await expect(runExperiment(options)).rejects.toThrow("HTTP 409");
+      expect(invocations).toBe(1);
+      expect(f.calls.uploads).toBe(0);
+      expect(f.calls.completions).toHaveLength(0);
+      const report = await runExperiment(options);
+      expect(invocations).toBe(1);
+      expect(f.calls.uploads).toBe(1);
+      expect(report.subjectIds).toHaveLength(1);
+      expect(f.calls.completions[0]).toMatchObject({ state: "succeeded", output: { ok: true } });
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+
   test("a failed upload resumes from the staged files without invoking the target again", async () => {
     const f = fixture({ scorers: [version(builtins.exactMatch())], failReserveOnce: true });
     const hue = createHue({
@@ -1100,7 +1152,7 @@ describe("file-based cases", () => {
     }
   });
 
-  test("upload capabilities are refused when they carry credentials, fragments or no headers", async () => {
+  test("upload capabilities are refused when they carry credentials, fragments or invalid grants", async () => {
     const f = fixture({ scorers: [] });
     const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl });
     const bytes = Buffer.from("letter");
@@ -1112,19 +1164,21 @@ describe("file-based cases", () => {
         "http://169.254.169.254/blob/x",
       ])
         await expect(
-          client.uploadArtifactBytes({ ...valid, uploadUrl }, bytes),
+          client.uploadArtifactBytes({ ...valid, uploadUrl }, bytes, docx),
         ).rejects.toBeInstanceOf(HueApiError);
-      for (const headers of [null, undefined, "content-type: x", { cookie: "session" }])
+      for (const headers of ["content-type: x", { cookie: "session" }])
         await expect(
           client.uploadArtifactBytes(
             { ...valid, uploadUrl: `${f.baseUrl}/blob/x`, headers: headers as never },
             bytes,
+            docx,
           ),
         ).rejects.toBeInstanceOf(HueApiError);
       await expect(
         client.uploadArtifactBytes(
           { ...valid, uploadUrl: `${f.baseUrl}/blob/x`, method: "POST" as never },
           bytes,
+          docx,
         ),
       ).rejects.toBeInstanceOf(HueApiError);
     } finally {
@@ -1155,5 +1209,138 @@ describe("file-based cases", () => {
         directTarget: () => undefined,
       }),
     ).toThrow("environment:v1 requires a target callback");
+  });
+});
+
+describe("signed artifact uploads", () => {
+  const contentType = "text/plain";
+  const bytes = new Uint8Array([1, 2, 3]);
+  const capability = (
+    uploadUrl: string,
+    headers?: ArtifactUpload["headers"],
+    method: ArtifactUpload["method"] = "PUT",
+  ): ArtifactUpload => ({
+    uploadUrl,
+    method,
+    headers,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+
+  test("omitted or null headers send only the file content-type and preserve the signed URL", async () => {
+    const seen: { url: string; contentType: string | null; extra: string[] }[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const extra: string[] = [];
+        request.headers.forEach((_, name) => {
+          if (name !== "content-type" && name !== "content-length") extra.push(name);
+        });
+        seen.push({
+          url: request.url,
+          contentType: request.headers.get("content-type"),
+          extra,
+        });
+        return new Response(null, { status: 200 });
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    try {
+      const signed = `http://127.0.0.1:${server.port}/put?signature=A%2fb+%2B`;
+      await client.uploadArtifactBytes(capability(signed, null), bytes, contentType);
+      await client.uploadArtifactBytes(capability(signed), bytes, contentType);
+      expect(seen).toHaveLength(2);
+      expect(seen.every((put) => put.url === signed)).toBe(true);
+      expect(seen.every((put) => put.contentType === contentType)).toBe(true);
+      expect(seen.every((put) => !put.extra.includes("authorization"))).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("loopback IPv6 HTTP uploads are accepted", async () => {
+    const server = Bun.serve({
+      hostname: "::1",
+      port: 0,
+      fetch() {
+        return new Response(null, { status: 200 });
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    try {
+      await client.uploadArtifactBytes(
+        capability(`http://[::1]:${server.port}/put`, {
+          "content-type": contentType,
+          "x-vercel-blob-access": "private",
+        }),
+        bytes,
+        contentType,
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects userinfo, fragments, control characters and ungranted headers without sending bytes", async () => {
+    let puts = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        puts++;
+        return new Response(null, { status: 200 });
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    const origin = `http://127.0.0.1:${server.port}`;
+    try {
+      for (const uploadUrl of [
+        `http://user:pass@127.0.0.1:${server.port}/put`,
+        `${origin}/put#fragment`,
+        `${origin}/put\nHost: evil.example`,
+        "http://example.com/put",
+      ]) {
+        await expect(
+          client.uploadArtifactBytes(
+            capability(uploadUrl, { "content-type": contentType }),
+            bytes,
+            contentType,
+          ),
+        ).rejects.toBeInstanceOf(HueApiError);
+      }
+      await expect(
+        client.uploadArtifactBytes(
+          capability(`${origin}/put`, { authorization: "must-never-forward" }),
+          bytes,
+          contentType,
+        ),
+      ).rejects.toBeInstanceOf(HueApiError);
+      await expect(
+        client.uploadArtifactBytes(
+          capability(`${origin}/put`, { cookie: "session=1", "content-type": contentType }),
+          bytes,
+          contentType,
+        ),
+      ).rejects.toBeInstanceOf(HueApiError);
+      await expect(
+        client.uploadArtifactBytes(
+          capability(`${origin}/put`, { "x-custom": "nope", "content-type": contentType }),
+          bytes,
+          contentType,
+        ),
+      ).rejects.toBeInstanceOf(HueApiError);
+      expect(puts).toBe(0);
+    } finally {
+      server.stop(true);
+    }
   });
 });

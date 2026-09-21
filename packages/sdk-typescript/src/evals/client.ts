@@ -1,4 +1,4 @@
-import { validateOptions } from "../config.js";
+import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
 import { json, uuid, valueBounds } from "./json.js";
 import {
@@ -186,25 +186,19 @@ export class EvaluationClient {
     }
   }
   /** Stage bytes at the storage capability Hue issued. The Hue key is never sent to storage. */
-  async uploadArtifactBytes(upload: ArtifactUpload, bytes: Uint8Array): Promise<void> {
-    const url = new URL(upload.uploadUrl);
-    if (url.protocol !== "https:" && !/^(localhost|127\.0\.0\.1)$/.test(url.hostname))
-      throw new HueApiError();
-    // The capability is a signed URL issued by Hue: refuse anything that smuggles credentials or
-    // a fragment, and treat a malformed header map as an invalid capability rather than a crash.
-    if (url.username || url.password || url.hash) throw new HueApiError();
-    if (
-      typeof upload.headers !== "object" ||
-      upload.headers === null ||
-      Object.keys(upload.headers).some((name) => /^(authorization|cookie)$/i.test(name)) ||
-      upload.method !== "PUT"
-    )
-      throw new HueApiError();
+  async uploadArtifactBytes(
+    upload: ArtifactUpload,
+    bytes: Uint8Array,
+    contentType: string,
+  ): Promise<void> {
+    const uploadUrl = signedUploadUrl(upload.uploadUrl);
+    if (upload.method !== "PUT") throw new HueApiError();
+    const headers = signedUploadHeaders(upload.headers, contentType);
     let response: Response;
     try {
-      response = await fetch(upload.uploadUrl, {
+      response = await fetch(uploadUrl, {
         method: "PUT",
-        headers: upload.headers,
+        headers,
         body: bytes as Uint8Array<ArrayBuffer>,
         redirect: "error",
         signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
@@ -604,4 +598,46 @@ export class EvaluationClient {
  */
 export function createEvaluationClient(options: EvaluationClientOptions): EvaluationClient {
   return new EvaluationClient(options);
+}
+
+function signedUploadUrl(value: unknown): string {
+  // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
+  if (typeof value !== "string" || value.length > 8192 || /[\x00-\x20\x7f]/u.test(value))
+    throw new HueApiError();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new HueApiError();
+  }
+  if (
+    (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) ||
+    url.username ||
+    url.password ||
+    url.hash
+  )
+    throw new HueApiError();
+  // Validate without rewriting the provider's signed capability.
+  return value;
+}
+
+function signedUploadHeaders(value: unknown, contentType: string): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": contentType };
+  if (value === undefined || value === null) return headers;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new HueApiError();
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      typeof raw !== "string" ||
+      !raw ||
+      raw.length > 255 ||
+      // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
+      /[\x00-\x1f\x7f]/u.test(raw)
+    )
+      throw new HueApiError();
+    const lower = name.toLowerCase();
+    if (lower === "content-type" && raw === contentType) headers[lower] = raw;
+    else if (lower === "x-vercel-blob-access" && raw === "private") headers[lower] = raw;
+    else throw new HueApiError();
+  }
+  return headers;
 }

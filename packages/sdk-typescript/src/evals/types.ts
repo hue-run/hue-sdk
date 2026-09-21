@@ -732,8 +732,8 @@ export interface ArtifactUpload {
   uploadUrl: string;
   /** HTTP method the capability accepts. */
   method: "PUT";
-  /** Headers to send with the bytes. */
-  headers: Record<string, string>;
+  /** Headers to send with the bytes; omitted or null means the file content-type only. */
+  headers?: Record<string, string> | null;
   /** Capability expiry as an ISO timestamp. */
   expiresAt: string;
 }

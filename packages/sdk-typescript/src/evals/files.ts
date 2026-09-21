@@ -206,10 +206,10 @@ export async function uploadOutputFiles(
     });
     let state = reserved.state;
     if (state !== "ready") {
-      if (reserved.copyState === "none") {
+      if (reserved.copyState !== "acknowledged") {
         const upload = await client.requestArtifactUpload(reserved.id);
         try {
-          await client.uploadArtifactBytes(upload, bytes);
+          await client.uploadArtifactBytes(upload, bytes, file.contentType);
         } catch {
           // A lost staging acknowledgement or an immutable object already present can only be
           // settled by verified completion; never rewrite a final object here.
