@@ -477,7 +477,13 @@ function hueStandIn(options: { verdict?: Verdict; deferredPolls?: number; frozen
 /** Spawns the CLI asynchronously so the in-process stand-in keeps serving while it runs. */
 function hue(
   args: string[],
-  options: { cwd: string; env?: Record<string, string>; dropKey?: boolean },
+  options: {
+    cwd: string;
+    env?: Record<string, string>;
+    dropKey?: boolean;
+    /** Sends SIGINT once the CLI prints a line matching this, standing in for Ctrl+C. */
+    interruptOn?: RegExp;
+  },
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
   return new Promise((resolve, reject) => {
@@ -493,8 +499,21 @@ function hue(
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    let interrupted = false;
+    const maybeInterrupt = (text: string) => {
+      if (!interrupted && options.interruptOn?.test(text)) {
+        interrupted = true;
+        child.kill("SIGINT");
+      }
+    };
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+      maybeInterrupt(chunk);
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+      maybeInterrupt(chunk);
+    });
     const timer = setTimeout(() => child.kill("SIGKILL"), SPAWN_TIMEOUT);
     child.on("error", (error) => {
       clearTimeout(timer);
@@ -546,10 +565,21 @@ process.stdout.write(JSON.stringify({
 }));
 `;
 
+/** Never answers: leaves a grandchild that writes a marker unless the whole group is stopped. */
+const spawnerSource = `import { spawn } from "node:child_process";
+spawn(
+  process.execPath,
+  ["-e", 'setTimeout(() => require("fs").writeFileSync(process.env.HUE_TEST_SURVIVOR, "alive"), 2500)'],
+  { stdio: "ignore" },
+);
+setTimeout(() => {}, 60_000);
+`;
+
 async function workspace() {
   const directory = await mkdtemp(join(tmpdir(), "hue-cli-eval-"));
   await writeFile(join(directory, "hue-agent.ts"), adapterSource);
   await writeFile(join(directory, "agent-command.mjs"), commandSource);
+  await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
   return directory;
 }
 
@@ -781,6 +811,69 @@ describe("hue eval", () => {
       }
     },
     SPAWN_TIMEOUT * 4,
+  );
+
+  test(
+    "a timed-out --command stops the agent's whole process group",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-spawner.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--timeout",
+            "1",
+            "--wait",
+            "0",
+          ],
+          { cwd, env: { HUE_TEST_SURVIVOR: survivor } },
+        );
+        expect(result.status).toBe(1);
+        expectNoSecrets(result);
+        expect(f.calls.completions).toEqual([
+          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+        ]);
+        // The grandchild writes 2500 ms after the agent starts. Signalling only the shell
+        // would leave it holding HUE_MCP_TOKEN and writing after Hue failed the case.
+        await new Promise((done) => setTimeout(done, 3_000));
+        await expect(readFile(survivor, "utf8")).rejects.toThrow();
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "an interrupt while waiting for Hue's checks exits 130 without a verdict",
+    async () => {
+      // Verdicts that never land, so the interrupt always arrives during the wait.
+      const f = hueStandIn({ deferredPolls: 1_000 });
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl, "--wait", "600"],
+          { cwd, interruptOn: /Waiting for Hue checks/ },
+        );
+        expect(result.status).toBe(130);
+        expectNoSecrets(result);
+        expect(result.stderr).toContain("Interrupted.");
+        expect(result.stdout).not.toContain("case passed");
+        expect(result.stdout).not.toContain("refund_recorded");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
   );
 
   test(

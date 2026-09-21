@@ -72,7 +72,8 @@ Output and limits:
   --name <run name>               Experiment name (default: <scenario> · <agent key> · <revision>)
   --baseline <experiment id|url>  Compare verdicts with a previous experiment
   --json                          Print one JSON document on stdout; progress goes to stderr
-  --content                       Capture telemetry content and persist outputs/explanations
+  --content                       Capture telemetry content; one-shot also persists
+                                  outputs/explanations (--worker always persists them)
   --save-version                  Freeze an unsaved eval-set version before running
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
   --concurrency <n>               Cases in flight, 1-16 (default: 1)
@@ -233,12 +234,20 @@ async function loadAdapter(file: string): Promise<EvalAdapter> {
   return candidate as EvalAdapter;
 }
 
+/** Grace between the stop signal and SIGKILL for an agent command that ignores SIGTERM. */
+const COMMAND_KILL_GRACE_MS = 5_000;
+
 /** Runs the shell command once per case; the MCP token travels only through the child's environment. */
 function commandAdapter(command: string, timeoutSeconds: number): EvalAdapter {
   return (inputs, context) =>
     new Promise((resolvePromise, reject) => {
+      // Own process group so a timeout or Ctrl+C stops the agent the shell started, not only the
+      // shell: a survivor would still hold the world token and could write after Hue recorded the
+      // case as failed. Windows has no process group to signal, so the child alone is stopped.
+      const group = process.platform !== "win32";
       const child = spawn(command, {
         shell: true,
+        detached: group,
         env: {
           ...process.env,
           HUE_MCP_URL: context.mcp.url,
@@ -255,8 +264,19 @@ function commandAdapter(command: string, timeoutSeconds: number): EvalAdapter {
       let size = 0;
       let timedOut = false;
       let oversized = false;
+      let escalation: NodeJS.Timeout | undefined;
+      const signalTree = (signal: NodeJS.Signals) => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        try {
+          if (group && child.pid !== undefined) process.kill(-child.pid, signal);
+          else child.kill(signal);
+        } catch {
+          // The group is already gone; nothing is left to stop.
+        }
+      };
       const stop = (signal: NodeJS.Signals) => {
-        if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+        signalTree(signal);
+        escalation ??= setTimeout(() => signalTree("SIGKILL"), COMMAND_KILL_GRACE_MS).unref();
       };
       const timer = setTimeout(() => {
         timedOut = true;
@@ -277,11 +297,13 @@ function commandAdapter(command: string, timeoutSeconds: number): EvalAdapter {
       child.stdin.end(JSON.stringify({ inputs, config: context.config }));
       child.on("error", (error) => {
         clearTimeout(timer);
+        clearTimeout(escalation);
         context.signal?.removeEventListener("abort", cancel);
         reject(new Error(`Unable to start the agent command: ${error.message}`));
       });
       child.on("close", (code, signal) => {
         clearTimeout(timer);
+        clearTimeout(escalation);
         context.signal?.removeEventListener("abort", cancel);
         if (context.signal?.aborted) return reject(new TargetCancelledError());
         if (timedOut)
@@ -576,6 +598,12 @@ async function runOnce(
     timeoutMillis: wait * 1000,
     signal,
   });
+  // The wait returns its partial state on abort rather than throwing, so Ctrl+C here must not
+  // fall through to a baseline read and a verdict table that nobody asked to finish.
+  if (signal.aborted) {
+    process.stderr.write("Interrupted.\n");
+    return 130;
+  }
   let baseline: { experimentId: string; comparison: VerdictComparison } | undefined;
   if (baselineId) {
     const previous = await collectExperimentVerdicts(client, {

@@ -175,8 +175,9 @@ simulated world and grades the sealed outcome. Scenario review and publication s
    ```
 
 Exit code 0 means every case passed; 1 means a case failed, errored or Hue's checks were still
-pending; 2 is a usage error. Content capture and persisted outputs stay off unless `--content` is
-passed. Report the run URL and the printed verdicts; do not claim a pass without them.
+pending; 2 is a usage error. Content capture stays off unless `--content` is passed, and in
+one-shot mode so does persisting case outputs and explanations to Hue; `--worker` always persists
+them so a run launched from Hue can be read on its run page. Report the run URL and the printed verdicts; do not claim a pass without them.
 
 ## Troubleshooting
 
