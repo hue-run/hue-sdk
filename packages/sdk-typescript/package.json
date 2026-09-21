@@ -1,6 +1,6 @@
 {
   "name": "@hue-run/sdk",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": false,
   "license": "MIT",
   "publishConfig": {
@@ -84,6 +84,7 @@
     "test": "bun test tests"
   },
   "dependencies": {
+    "@babel/parser": "7.29.9",
     "@opentelemetry/api-logs": "0.222.0",
     "@opentelemetry/core": "2.11.0",
     "@opentelemetry/otlp-exporter-base": "0.222.0",

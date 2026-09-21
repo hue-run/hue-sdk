@@ -36,6 +36,42 @@ class DocumentationVersionTests(unittest.TestCase):
         line = "Current releases are TypeScript 0.3.0 and Python 0.2.2."
         self.assertEqual(checker.stale_mentions("COMPATIBILITY.md", line, self.versions), [])
 
+    def test_typescript_cli_can_explicitly_name_current_python_runtime(self):
+        text = (
+            "`@opentelemetry/context-async-hooks@2.11.0`; Python uses `hue-run==0.2.2`.\n"
+            "generic project, receipt, evaluation, log or browsing APIs. Python `0.2.2` can export"
+        )
+        self.assertEqual(
+            checker.stale_mentions("packages/sdk-typescript/CLI.md", text, self.versions), []
+        )
+
+    def test_explicit_language_versions_are_not_interchangeable(self):
+        for name in ("COMPATIBILITY.md", "packages/sdk-typescript/CLI.md"):
+            for line, stale in (
+                ("TypeScript 0.2.2 and Python 0.2.2.", "0.2.2"),
+                ("Python 0.2.2 and TypeScript 0.2.2.", "0.2.2"),
+                ("TypeScript 0.3.0 and Python 0.3.0.", "0.3.0"),
+                ("Python 0.3.0 and TypeScript 0.3.0.", "0.3.0"),
+            ):
+                with self.subTest(name=name, line=line):
+                    problems = checker.stale_mentions(name, line, self.versions)
+                    self.assertEqual(len(problems), 1)
+                    self.assertIn(f"stale version {stale}", problems[0])
+
+    def test_explicit_package_labels_override_guide_without_allowing_stale_versions(self):
+        for line, expected_count in (
+            ("@hue-run/sdk 0.3.0 and Python 0.2.2", 0),
+            ("@hue-run/sdk 0.2.2 and Python 0.2.2", 1),
+            ("PyPI 0.2.2 and npm 0.3.0", 0),
+            ("PyPI 0.2.2 and npm 0.2.2", 1),
+            ("Python 0.1.0", 1),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    len(checker.stale_mentions("packages/sdk-typescript/CLI.md", line, self.versions)),
+                    expected_count,
+                )
+
     def test_new_minor_versions_are_scanned(self):
         problems = checker.stale_mentions(
             "packages/sdk-typescript/README.md",

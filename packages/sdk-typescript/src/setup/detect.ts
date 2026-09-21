@@ -86,7 +86,12 @@ export async function detectSetupProject(projectRoot: string): Promise<SetupProj
     .filter((value): value is string => value !== undefined)
     .join("\n");
   const languages: SetupProjectDetection["languages"] = [];
-  if (contents.has("tsconfig.json") || nodeDependencies.has("typescript"))
+  // The existing public language discriminator covers JavaScript as well as TypeScript.
+  if (
+    contents.has("tsconfig.json") ||
+    nodeDependencies.has("typescript") ||
+    nodeDependencies.has("express")
+  )
     languages.push("typescript");
   if (python || contents.has("pyproject.toml")) languages.push("python");
   const packageManagers: SetupProjectDetection["packageManagers"] = [];

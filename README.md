@@ -52,6 +52,25 @@ npm install @hue-run/sdk
 bun add @hue-run/sdk
 ```
 
+The reviewed `0.4.0` candidate is preparing a deliberately narrow one-command onboarding path:
+
+```sh
+npx --yes @hue-run/sdk@latest setup --agent
+```
+
+It is not public yet. Automatic setup supports Express with npm, Express with Bun, and Flask with uv
+in one unambiguous application package with a recognizable entrypoint, existing GET route and
+environment-selected port. It installs the exact runtime through that project's manager, wires the
+application, makes one request to that route and verifies its exact trace/span receipt. Monorepos,
+mixed managers and unfamiliar entrypoints stop with a structured action. Technical preflight checks
+availability and presents the published [privacy notice](https://hue.run/privacy) and
+[security information](https://trust.hue.run/) before telemetry. An anonymous trial lasts 24 hours
+with limits of 100 traces, 1,000 spans and 2 MiB. A private local browser handoff lets the owner link
+an account while preserving the project and original request evidence; reconciliation refuses the
+old anonymous key and does not replay business work. Setup never enables content capture or creates
+a Scenario, Hue Run, evaluation, source capture or remote execution. See the
+[CLI contract](./packages/sdk-typescript/CLI.md).
+
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
 
 ## What you can do
@@ -67,8 +86,10 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 The published TypeScript package is [`0.3.2`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2), including `runLocalAgent()`, V2 environments,
 forward-compatible scorer deferral and the local [setup CLI core](./packages/sdk-typescript/CLI.md).
 Finalization accepts server-confirmed expired worlds as sealed while preserving target errors
-and avoiding target replay. Python remains published at `0.2.2` and has no native local worker
-API. Package checks use synthetic local services.
+and avoiding target replay. This checkout prepares the breaking TypeScript `0.4.0` release with the
+real [one-command setup CLI](./packages/sdk-typescript/CLI.md). The setup additions require the
+new public release before applications can install them by version. Python remains published at
+`0.2.2` and has no native local worker API. Package checks use synthetic local services.
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 

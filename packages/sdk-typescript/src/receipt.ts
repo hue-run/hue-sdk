@@ -52,6 +52,7 @@ function parseReceipt(
   traceId: string,
   expected: string[],
   origin: string,
+  setup = false,
 ): TraceReceipt {
   if (
     !record(value) ||
@@ -73,6 +74,27 @@ function parseReceipt(
     invalidResponse();
   }
   if (traceUrl!.origin !== origin || traceUrl!.username || traceUrl!.password) invalidResponse();
+  if (setup) {
+    const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+    if (
+      traceUrl!.href !== value.traceUrl ||
+      traceUrl!.hash ||
+      !traceUrl!.pathname.startsWith("/traces/") ||
+      !uuid.test(traceUrl!.pathname.slice(8))
+    )
+      invalidResponse();
+    const queryNames: string[] = [];
+    traceUrl!.searchParams.forEach((value, name) => {
+      if (
+        !["projectId", "organizationId"].includes(name) ||
+        queryNames.includes(name) ||
+        !uuid.test(value)
+      )
+        invalidResponse();
+      queryNames.push(name);
+    });
+    if (queryNames.length !== 2) invalidResponse();
+  }
   const matched = value.matchedSpanIds,
     missing = value.missingSpanIds;
   if (
@@ -155,6 +177,28 @@ export async function verifyTrace(
   traceId: string,
   options: VerifyTraceOptions = {},
 ): Promise<TraceVerification> {
+  return verifyTraceAtPath(connection, traceId, options, false, fetch);
+}
+
+/** @internal Dedicated receipt path for setup credentials; ordinary clients stay unchanged. */
+export async function verifySetupTrace(
+  connection: Pick<HueOptions, "apiKey"> & { baseUrl: string },
+  traceId: string,
+  options: VerifyTraceOptions,
+  fetcher: typeof globalThis.fetch,
+  signal?: AbortSignal,
+): Promise<TraceVerification> {
+  return verifyTraceAtPath(connection, traceId, options, true, fetcher, signal);
+}
+
+async function verifyTraceAtPath(
+  connection: Pick<HueOptions, "apiKey"> & { baseUrl: string },
+  traceId: string,
+  options: VerifyTraceOptions,
+  setup: boolean,
+  fetcher: typeof globalThis.fetch,
+  signal?: AbortSignal,
+): Promise<TraceVerification> {
   if (!validId(traceId, 32))
     throw new TypeError("traceId must be a nonzero lowercase 32-character OpenTelemetry trace ID");
   if (options === null || typeof options !== "object" || Array.isArray(options))
@@ -184,27 +228,31 @@ export async function verifyTrace(
   // Snapshot caller arrays so concurrent mutation cannot alter the verification criteria.
   const expectedIds = [...expected],
     requiredFields = [...required];
-  const url = new URL(`/api/v1/traces/${traceId}/receipt`, connection.baseUrl);
+  const url = new URL(
+    `/api/v1/${setup ? "setup/" : ""}traces/${traceId}/receipt`,
+    connection.baseUrl,
+  );
   for (const id of expectedIds) url.searchParams.append("expectedSpanId", id);
   const controller = new AbortController();
   const deadline = performance.now() + timeout;
   const timer = setTimeout(() => controller.abort(), timeout);
+  const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   let receipt: TraceReceipt | null = null;
   let delay = 250;
   try {
-    while (!controller.signal.aborted && performance.now() < deadline) {
-      const response = await fetch(url, {
+    while (!requestSignal.aborted && performance.now() < deadline) {
+      const response = await fetcher(url, {
         headers: { Authorization: `Bearer ${connection.apiKey}`, Accept: "application/json" },
         redirect: "manual",
         credentials: "omit",
         cache: "no-store",
-        signal: controller.signal,
+        signal: requestSignal,
       });
       let retryAfter = 0;
       if (response.status === 200) {
-        receipt = parseReceipt(await readJson(response), traceId, expectedIds, url.origin);
+        receipt = parseReceipt(await readJson(response), traceId, expectedIds, url.origin, setup);
         if (
-          !controller.signal.aborted &&
+          !requestSignal.aborted &&
           performance.now() < deadline &&
           receipt.missingSpanIds.length === 0 &&
           requiredFields.every((field) => receipt!.fields[field])
@@ -239,12 +287,13 @@ export async function verifyTrace(
       const remaining = deadline - performance.now();
       if (remaining <= 0) break;
       const wait = Math.max(delay, retryAfter);
-      await pause(Math.min(wait, remaining), controller.signal);
+      await pause(Math.min(wait, remaining), requestSignal);
       // A truncated backoff exhausts this call even if a timer wakes just early.
       if (wait >= remaining) break;
       delay = Math.min(delay * 2, 1000);
     }
   } catch (error) {
+    if (signal?.aborted) throw new Error("Setup interrupted");
     if (!controller.signal.aborted && performance.now() < deadline) {
       if (error instanceof HueTraceVerificationError) throw error;
       throw new HueTraceVerificationError(

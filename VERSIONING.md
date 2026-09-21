@@ -36,10 +36,26 @@ Linux is tested in CI. macOS is used for development and is supported. On Window
 - Conventions: Hue helpers emit OpenTelemetry GenAI semantic conventions (currently Development status upstream), including `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `user.id`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, and opt-in message content carried by the `gen_ai.client.inference.operation.details` log event, whose record attributes repeat `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.provider.name` and `gen_ai.conversation.id`. Generic spans use `input.value` and `output.value`. The third-party conventions recognized for metadata-only stripping are listed in COMPATIBILITY.md.
 - A change to an emitted attribute name, event name or endpoint path is a wire change and is announced as **Breaking**.
 - Managed-target requests carry `protocolVersion: 1` and evaluation checkpoints carry `format: 1`. A later 0.x release reads checkpoints written by an earlier 0.x release; a patch release never changes the checkpoint format.
-- Installer setup-session JSONL events carry `contractVersion: 1` independently of the package
-  version. Their `run.*` names describe command invocations, not Hue Runs. Setup checkpoints carry
+- Installer setup-session JSONL events carry their own `contractVersion` independently of the package
+  and HTTP protocol versions. Event version 1 shipped in TypeScript `0.3.1` and `0.3.2`; TypeScript
+  `0.4.0` uses version 2 and `https://hue.run/schemas/setup-events-v2.json` because it removes public
+  claim URLs, changes the step/action set, adds privacy disclosure and requires the application
+  receipt source. Consumers migrate to the bundled v2 schema rather than accepting changed events
+  under the v1 identity. Their `run.*` names describe command invocations, not Hue Runs. Setup checkpoints carry
   `format: 1`; later 0.x setup implementations either read that format or fail explicitly without
   mutating the project. New event versions use a new schema rather than silently changing version 1.
+- Setup installation requests carry `protocolVersion: 1`. Their technical availability preflight,
+  published privacy disclosure, provisioning, status, credential-generation, private claim-handoff
+  and application-receipt shapes are coordinated with Hue Cloud. A breaking
+  request/response change requires a new protocol version and a coordinated `0.MINOR` SDK release.
+  Project/origin installation proof and telemetry credentials are private local state, not portable
+  setup checkpoints or public configuration.
+- Before its first release, Setup HTTP v1 uses the isolated credential namespace
+  `^hue_setup_(live|test)_setup-([a-f0-9]{24})_([A-Za-z0-9_-]{43})$` with the sole
+  `setup_telemetry_write` capability in both
+  generations. Setup receipts use `/api/v1/setup/traces/{traceId}/receipt`; ordinary account-managed
+  credentials and receipt APIs remain distinct. The setup CLI preserves the initial application
+  request evidence across account claim without replaying business work.
 
 ## Release cadence
 

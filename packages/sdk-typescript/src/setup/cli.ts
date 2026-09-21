@@ -2,6 +2,7 @@
 import { realpath } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { FileSetupCheckpointAdapter, setupRunId } from "./checkpoint.js";
+import { SetupBackendAdapter } from "./backend.js";
 import { detectSetupProject } from "./detect.js";
 import {
   renderHumanEvent,
@@ -37,13 +38,15 @@ async function main(): Promise<number> {
         agent: { type: "boolean", default: false },
         format: { type: "string" },
         project: { type: "string" },
+        origin: { type: "string" },
+        restart: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     });
   } catch {
     if (!agentRequested) {
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format plain|jsonl] [--project PATH]\n",
+        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
       return 2;
     }
@@ -76,7 +79,7 @@ async function main(): Promise<number> {
       return 2;
     }
     process.stdout.write(
-      "Usage: hue <setup|resume|status|claim> [--agent|--format plain|jsonl] [--project PATH]\n",
+      "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
     );
     return 0;
   }
@@ -89,7 +92,14 @@ async function main(): Promise<number> {
     !commands.has(command as "setup") ||
     parsed.positionals.length !== 1 ||
     !validFormat ||
-    (parsed.values.agent && format !== undefined && format !== "jsonl")
+    (parsed.values.agent && format !== undefined && format !== "jsonl") ||
+    (parsed.values.restart &&
+      (command !== "claim" ||
+        parsed.values.agent ||
+        format === "plain" ||
+        format === "jsonl" ||
+        !process.stdin.isTTY ||
+        !process.stdout.isTTY))
   ) {
     if (parsed.values.agent) {
       const event: RunFailedEvent = {
@@ -105,7 +115,7 @@ async function main(): Promise<number> {
       process.stdout.write(`${renderJsonlEvent(event)}\n`);
     } else
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format plain|jsonl] [--project PATH]\n",
+        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
     return 2;
   }
@@ -123,6 +133,10 @@ async function main(): Promise<number> {
   process.once("SIGTERM", interrupt);
   try {
     const root = await realpath(parsed.values.project ?? process.cwd());
+    const backend = new SetupBackendAdapter({
+      projectRoot: root,
+      ...(parsed.values.origin ? { origin: parsed.values.origin } : {}),
+    });
     await runSetup({
       command: command as "setup" | "resume" | "status" | "claim",
       mode,
@@ -130,6 +144,8 @@ async function main(): Promise<number> {
       projectRoot: root,
       project: { detect: detectSetupProject },
       checkpoints: new FileSetupCheckpointAdapter(),
+      backend,
+      claimRestart: parsed.values.restart,
       signal: controller.signal,
       emit: (event) => {
         if (event.event === "run.completed" || event.event === "run.failed") terminalEmitted = true;

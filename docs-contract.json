@@ -41,7 +41,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:fef82cf09a0b9b3ce68d2df83daa28a4b72420cad341025af0f943fdedd90dd4",
+    "sha256": "sha256:48bb3f09869721d2960daad8aae7bc44dd602f8cf716a2eb6464546711eeefc3",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -320,54 +320,80 @@
             "ClaimRequiredEvent",
             "DiagnosticEvent",
             "FileChangedEvent",
+            "FileSetupInstallationStore",
             "PlanReadyEvent",
+            "PrivacyNoticeEvent",
             "ProjectDetectedEvent",
             "ReceiptVerifiedEvent",
             "RunCompletedEvent",
             "RunFailedEvent",
             "RunStartedEvent",
             "SETUP_EVENT_CONTRACT_VERSION",
+            "SetupApplicationActionRequired",
+            "SetupApplicationEvidence",
+            "SetupApplicationPlan",
             "SetupBackendAdapter",
+            "SetupBackendAdapterOptions",
             "SetupBackendClaim",
+            "SetupBackendError",
+            "SetupBackendOperations",
             "SetupBackendReceipt",
             "SetupBackendTrial",
             "SetupCheckpointAdapter",
+            "SetupClaimHandoff",
+            "SetupCommand",
+            "SetupCommandRunner",
+            "SetupCredentialResult",
             "SetupEffect",
             "SetupEvent",
             "SetupEventName",
+            "SetupFileChange",
+            "SetupInstallationRecord",
+            "SetupInstallationStatus",
             "SetupMachineInput",
             "SetupMachineState",
             "SetupOutputMode",
             "SetupPlan",
+            "SetupPreflightStatus",
+            "SetupProbeEvidence",
             "SetupProjectAdapter",
             "SetupProjectDetection",
             "SetupRunOptions",
             "SetupRunResult",
+            "SetupStoredApplicationAttempt",
+            "SetupStoredApplicationEvidence",
+            "SetupStoredClaimHandoff",
+            "SetupStoredCredential",
+            "SetupStoredProbe",
             "SetupTransition",
             "StepCompletedEvent",
             "StepStartedEvent",
             "TrialCreatedEvent",
             "createInitialSetupState",
             "detectSetupProject",
+            "installSetupRuntime",
+            "planSetupApplication",
             "renderHumanEvent",
             "renderJsonlEvent",
             "renderPlainEvent",
             "runSetup",
+            "runSetupCommand",
             "selectSetupOutputMode",
-            "transitionSetup"
+            "transitionSetup",
+            "wireSetupApplication"
           ]
         }
       },
       "name": "@hue-run/sdk",
       "schemas": {
         "@hue-run/sdk/setup-events.schema.json": {
-          "contractVersion": 1,
-          "id": "https://hue.run/schemas/setup-events-v1.json",
-          "sha256": "sha256:bc0227b88fdea13e67bc2fc5bd58c9ce544715470f7c05270437ed3b3593cadc",
+          "contractVersion": 2,
+          "id": "https://hue.run/schemas/setup-events-v2.json",
+          "sha256": "sha256:ed42887a22cac3d0008d71be768041995a624c50e1d2f604260fb0d4e3aed9a1",
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.3.2"
+      "version": "0.4.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -376,10 +402,10 @@
     "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.2.3"
+      "version": "0.4.0"
     },
     "name": "hue",
-    "sha256": "sha256:4c65166dc2706a92abcccb817afd2e3efd0de8cc6338bd7975ac422370ab95d5",
+    "sha256": "sha256:609a3a7a1dced8f8b336778643b2d19885adb0838516090c73a20816b315b93d",
     "source": "skills/hue/SKILL.md"
   }
 }

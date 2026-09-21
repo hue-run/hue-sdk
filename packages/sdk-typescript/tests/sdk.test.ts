@@ -106,7 +106,13 @@ function receiver(
         records,
         raw: JSON.stringify(data),
         bytes: bytes.byteLength,
-        headers: Object.fromEntries(request.headers),
+        headers: (() => {
+          const headers: Record<string, string> = {};
+          request.headers.forEach((value, name) => {
+            headers[name] = value;
+          });
+          return headers;
+        })(),
       });
       await beforeReply?.(signal);
       if (mode === "malformed")

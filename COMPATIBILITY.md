@@ -1,6 +1,6 @@
 # Compatibility
 
-The published releases are TypeScript `0.3.2` and Python `0.2.2`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+The published releases are TypeScript `0.3.2` and Python `0.2.2`. This matrix also governs the unreleased TypeScript `0.4.0` additions. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |

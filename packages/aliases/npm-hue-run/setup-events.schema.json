@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hue.run/schemas/setup-events-v1.json",
-  "title": "Hue setup-session installer event version 1",
+  "$id": "https://hue.run/schemas/setup-events-v2.json",
+  "title": "Hue setup-session installer event version 2",
   "description": "Installer lifecycle events only. run.* events are setup-session invocations, not Hue Runs.",
   "oneOf": [
     { "$ref": "#/$defs/run.started" },
@@ -11,6 +11,7 @@
     { "$ref": "#/$defs/step.completed" },
     { "$ref": "#/$defs/file.changed" },
     { "$ref": "#/$defs/diagnostic" },
+    { "$ref": "#/$defs/privacy.notice" },
     { "$ref": "#/$defs/action.required" },
     { "$ref": "#/$defs/trial.created" },
     { "$ref": "#/$defs/receipt.verified" },
@@ -24,14 +25,14 @@
       "type": "object",
       "required": ["contractVersion", "event", "runId", "sequence", "timestamp"],
       "properties": {
-        "contractVersion": { "const": 1 },
+        "contractVersion": { "const": 2 },
         "event": { "type": "string", "maxLength": 40 },
         "runId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$" },
         "sequence": { "type": "integer", "minimum": 1, "maximum": 10000 },
         "timestamp": { "type": "string", "format": "date-time", "maxLength": 40 }
       }
     },
-    "step": { "enum": ["detect-project", "configure-telemetry", "verify-receipt", "claim-project"] },
+    "step": { "enum": ["detect-project", "install-runtime", "configure-telemetry", "verify-application-receipt", "claim-project"] },
     "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "identifier": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
     "plan": {
@@ -93,26 +94,32 @@
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["level", "code", "message"], "properties": { "event": { "const": "diagnostic" }, "level": { "enum": ["info", "warning", "error"] }, "code": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,79}$" }, "message": { "$ref": "#/$defs/text" } } }],
       "unevaluatedProperties": false
     },
+    "privacy.notice": {
+      "type": "object",
+      "description": "Published privacy and security disclosure presented before telemetry; no acknowledgement or consent is inferred.",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["privacyUrl", "effectiveDate", "securityUrl"], "properties": { "event": { "const": "privacy.notice" }, "privacyUrl": { "const": "https://hue.run/privacy" }, "effectiveDate": { "const": "2026-08-24" }, "securityUrl": { "const": "https://trust.hue.run/" } } }],
+      "unevaluatedProperties": false
+    },
     "action.required": {
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["action", "message"], "properties": { "event": { "const": "action.required" }, "action": { "enum": ["claim-project", "configure", "run-instrumented-request", "open-claim-url", "capture-approved-content", "review-content-approved-trace"] }, "message": { "$ref": "#/$defs/text" }, "command": { "type": "string", "minLength": 1, "maxLength": 200 }, "url": { "type": "string", "format": "uri", "maxLength": 2048 } } }],
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["action", "message"], "properties": { "event": { "const": "action.required" }, "action": { "enum": ["claim-project", "configure", "select-project", "integrate-application", "run-instrumented-request", "open-claim-handoff", "restart-claim-handoff"] }, "message": { "$ref": "#/$defs/text" }, "command": { "type": "string", "minLength": 1, "maxLength": 200 } } }],
       "unevaluatedProperties": false
     },
     "trial.created": {
       "type": "object",
-      "description": "An anonymous setup trial hard-pinned to trial_metadata_v1.",
+      "description": "An anonymous setup trial restricted to metadata-only-v1.",
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["trialId", "expiresAt"], "properties": { "event": { "const": "trial.created" }, "trialId": { "$ref": "#/$defs/identifier" }, "expiresAt": { "type": "string", "format": "date-time", "maxLength": 40 } } }],
       "unevaluatedProperties": false
     },
     "receipt.verified": {
       "type": "object",
-      "description": "Instrumentation-only proof for an anonymous trace; not evidence of content approval or Scenario suitability.",
-      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["receiptId", "traceId"], "properties": { "event": { "const": "receipt.verified" }, "receiptId": { "$ref": "#/$defs/identifier" }, "traceId": { "type": "string", "pattern": "^[a-f0-9]{32}$" } } }],
+      "description": "Exact stored trace/span evidence from the exercised repository HTTP boundary; does not establish that every application operation is instrumented.",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["receiptId", "traceId", "source"], "properties": { "event": { "const": "receipt.verified" }, "receiptId": { "$ref": "#/$defs/identifier" }, "traceId": { "type": "string", "pattern": "^[a-f0-9]{32}$" }, "source": { "const": "repository-http-boundary" } } }],
       "unevaluatedProperties": false
     },
     "claim.required": {
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["claimId", "url"], "properties": { "event": { "const": "claim.required" }, "claimId": { "$ref": "#/$defs/identifier" }, "url": { "type": "string", "format": "uri", "maxLength": 2048 } } }],
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "required": ["claimId"], "properties": { "event": { "const": "claim.required" }, "claimId": { "$ref": "#/$defs/identifier" } } }],
       "unevaluatedProperties": false
     },
     "claim.completed": {

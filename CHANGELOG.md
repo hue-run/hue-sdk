@@ -10,6 +10,54 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.4.0] - 2026-09-20
+
+#### Breaking
+
+- The unreleased setup-session placeholder is replaced by Setup HTTP protocol v1. The exported
+  `SetupBackendAdapter` is now a concrete installation/status/credential/OTLP-receipt adapter rather
+  than the historical `createTrial`/`verifyReceipt`/`getClaim` stub boundary. Migration: construct it
+  with `{ projectRoot, origin? }` and pass it to `runSetup`, or use the `hue` executable. Existing
+  `createHue`, exporter, evaluation and environment APIs are unchanged.
+- Setup JSONL events now carry `contractVersion: 2` and schema identity
+  `https://hue.run/schemas/setup-events-v2.json`. Version 1 shipped in `0.3.1` and `0.3.2` with a public
+  claim URL and different step/action fields. Migration: consume the bundled v2 schema, handle the
+  non-secret local-handoff actions and `privacy.notice`, use `verify-application-receipt`, and require
+  `receipt.verified.source: "repository-http-boundary"`. Claim events no longer include a URL.
+  Setup HTTP `protocolVersion: 1` is independent and remains an unreleased protocol candidate.
+
+#### Added
+
+- The `hue` executable implements the unreleased Setup HTTP protocol v1 candidate: per-project/per-origin
+  installation proof is persisted before network writes, provisioning and credential recovery are
+  idempotent, and account claim reconciles generation 1 while checking generation 0 revocation.
+- The automatic matrix is Express with npm, Express with Bun, and Flask with uv in one package
+  with an unambiguous existing entrypoint, literal GET route and environment-selected port. Setup
+  installs exact runtime versions through that manager, adds bounded owned middleware blocks without
+  rewriting business logic, makes one request to the existing route and verifies its exact trace/span
+  receipt. That original evidence is preserved through account claim without replaying business work.
+  Monorepos, mixed managers, custom runtime versions and unfamiliar shapes require an explicit action.
+- Technical preflight reports availability and presents the published privacy and security notice
+  before telemetry. The anonymous ingestion window is 24 hours with limits of 100 traces, 1,000 spans
+  and 2 MiB; unclaimed data is purged seven days after expiry.
+- Both credential generations use the isolated setup token namespace and sole
+  `setup_telemetry_write` capability. Exact receipts use the dedicated setup route. Normal and unknown
+  token substitutions are refused; content capture requires a separate account-managed key.
+- Managed credentials stay in ignored atomic `0600` files; custom conflicts, symlinks, unsafe paths,
+  insecure hosted origins, redirects and unexpected edits fail closed. Setup creates no Scenario,
+  Hue Run, evaluation, source capture, worker or remote execution.
+- Human terminal and noninteractive version-2 JSONL agent modes support interruption/resume, private
+  one-time browser handoff, post-claim status reconciliation and bounded retries. Handoffs last at
+  most ten minutes, browser sessions at most thirty minutes, and each installation permits at most
+  32 handoff IDs. Only an explicit human restart replaces a handoff; public output contains no claim
+  capability. Installed-tarball checks cover both modes and both project languages against a loopback
+  protocol service; a separate
+  staging/live runner records only secret-free evidence.
+- The unpublished `hue-run` npm alias tracks `0.4.0`, pins `@hue-run/sdk@0.4.0`, mirrors setup exports
+  and includes its own `hue` executable wrapper. Alias publication remains a separate release gate.
+
+No registry release is claimed until publication and registry acceptance complete.
+
 ### [0.3.2] - 2026-09-20
 
 #### Fixed

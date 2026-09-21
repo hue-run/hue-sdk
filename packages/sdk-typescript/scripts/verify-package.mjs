@@ -11,12 +11,17 @@ const { values } = parseArgs({
     archive: { type: "string" },
     "registry-version": { type: "string" },
     "artifacts-dir": { type: "string" },
+    "landing-latest": { type: "boolean", default: false },
   },
 });
 if (values.archive && values["registry-version"])
   throw new Error("Choose an archive or registry version");
 if (values["registry-version"] && values["artifacts-dir"])
   throw new Error("Registry verification does not produce a release archive");
+if (values["landing-latest"])
+  throw new Error(
+    "--landing-latest is not a loopback package check. Run Fern's hosted acceptance for the literal public @latest commands and preserve its separate evidence.",
+  );
 
 // Work entirely outside the monorepo: no workspace symlinks or private Hue imports.
 const source = fileURLToPath(new URL("../", import.meta.url));
@@ -31,6 +36,8 @@ const aliasSource = resolve(source, "../aliases/npm-hue-run");
 const aliasPkg = JSON.parse(await readFile(join(aliasSource, "package.json"), "utf8"));
 if (aliasPkg.version !== pkg.version || aliasPkg.dependencies?.[pkg.name] !== pkg.version)
   throw new Error("The hue-run alias version and dependency must match @hue-run/sdk");
+if (pkg.bin?.hue !== "./dist/setup/cli.js" || aliasPkg.bin?.hue !== "./bin/hue.mjs")
+  throw new Error("The canonical and alias packages must both expose the hue executable");
 if (
   (await readFile(join(aliasSource, "setup-events.schema.json"), "utf8")) !==
   (await readFile(join(source, "setup-events.schema.json"), "utf8"))
@@ -41,13 +48,30 @@ if (values["registry-version"] && values["registry-version"] !== pkg.version)
 const tarball = values.archive
   ? resolve(values.archive)
   : join(destination, `hue-run-sdk-${pkg.version}.tgz`);
+if (values["registry-version"]) {
+  // Fetch the already published immutable tarball; never rebuild registry acceptance bytes.
+  run(
+    "npm",
+    [
+      "pack",
+      `@hue-run/sdk@${values["registry-version"]}`,
+      "--ignore-scripts",
+      "--registry=https://registry.npmjs.org",
+      "--pack-destination",
+      destination,
+    ],
+    destination,
+  );
+}
+// Test harness dependencies belong to this isolated, frozen tooling checkout in
+// every mode. Archive/registry acceptance still never builds or repacks the SDK.
+await cp(source, staging, {
+  recursive: true,
+  filter: (path) =>
+    !/(?:^|\/)(?:node_modules|dist)(?:\/|$)/u.test(path) && !/(?:^|\/)\.env(?:\.|$)/u.test(path),
+});
+run("bun", ["--no-env-file", "install", "--frozen-lockfile"], staging);
 if (!values.archive && !values["registry-version"]) {
-  await cp(source, staging, {
-    recursive: true,
-    filter: (path) =>
-      !/(?:^|\/)(?:node_modules|dist)(?:\/|$)/u.test(path) && !/(?:^|\/)\.env(?:\.|$)/u.test(path),
-  });
-  run("bun", ["--no-env-file", "install", "--frozen-lockfile"], staging);
   // The committed version literal must already match package.json; the build regenerates it.
   run("node", ["scripts/write-version.mjs", "--check"], staging);
   run("bun", ["--no-env-file", "run", "typecheck"], staging);
@@ -134,12 +158,34 @@ if (!values.archive && !values["registry-version"]) {
   assert.equal(typeof require("hue-run/setup").transitionSetup, "function");
   assert.equal(
     require("hue-run/setup-events.schema.json").$id,
-    "https://hue.run/schemas/setup-events-v1.json",
+    "https://hue.run/schemas/setup-events-v2.json",
   );
 `,
     ],
     aliasConsumer,
   );
+  const aliasCli = spawnSync(
+    process.execPath,
+    [join(aliasConsumer, "node_modules", "hue-run", "bin", "hue.mjs"), "status", "--agent"],
+    {
+      cwd: aliasConsumer,
+      encoding: "utf8",
+      timeout: 5000,
+      env: { ...process.env, XDG_STATE_HOME: join(destination, "alias-setup-state") },
+    },
+  );
+  const aliasEvents = aliasCli.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  if (
+    aliasCli.status !== 0 ||
+    aliasCli.stderr ||
+    aliasEvents.at(-1)?.event !== "run.completed" ||
+    aliasEvents.filter((event) => event.event === "run.completed" || event.event === "run.failed")
+      .length !== 1
+  )
+    throw new Error("Installed hue-run alias executable did not dispatch to its pinned SDK");
 }
 // Check the advertised install before adding any test or optional AI dependencies.
 // Development dependencies must not conceal missing runtime package metadata.
@@ -191,7 +237,7 @@ run(
   assert.equal(typeof environment.createEnvironmentClient, "function");
   assert.equal(typeof managed.createManagedTargetHandler, "function");
   assert.equal(typeof setup.transitionSetup, "function");
-  assert.equal(setupSchema.$id, "https://hue.run/schemas/setup-events-v1.json");
+  assert.equal(setupSchema.$id, "https://hue.run/schemas/setup-events-v2.json");
   const hue = sdk.createHue({ enabled: false });
   hue
     .withSpan("require", () => 42)
@@ -208,71 +254,19 @@ run(
   ],
   minimal,
 );
-// Exercise the installed binary itself. Agent mode must stay noninteractive, ANSI-free,
-// secret-free, and terminate with exactly one terminal event without contacting a provider.
-const setupStateHome = join(destination, "setup-state-home");
-const cli = spawnSync(
-  join(minimal, "node_modules", ".bin", "hue"),
-  ["setup", "--agent", "--project", minimal],
-  {
-    cwd: minimal,
-    encoding: "utf8",
-    timeout: 5000,
-    env: {
-      ...process.env,
-      XDG_STATE_HOME: setupStateHome,
-      HUE_API_KEY: "secret-canary-package-key",
-      BROWSER: "secret-canary-package-browser",
-      NO_COLOR: "",
-    },
-  },
+// The installed CLI matrix uses only loopback synthetic contracts. Hosted browser claims and
+// literal public @latest acceptance belong to Fern's separately recorded hosted acceptance gate.
+run(
+  process.execPath,
+  [
+    join(staging, "scripts/verify-installed-setup.mjs"),
+    "--archive",
+    tarball,
+    "--installed-package",
+    join(minimal, "node_modules", "@hue-run", "sdk"),
+  ],
+  destination,
 );
-if (
-  cli.status !== 0 ||
-  cli.stderr ||
-  cli.stdout.includes("\u001b") ||
-  cli.stdout.includes("secret-canary")
-)
-  throw new Error("Installed hue setup --agent violated its noninteractive output contract");
-const cliEvents = cli.stdout
-  .trim()
-  .split("\n")
-  .map((line) => JSON.parse(line));
-const terminalEvents = cliEvents.filter(
-  (event) => event.event === "run.completed" || event.event === "run.failed",
-);
-if (terminalEvents.length !== 1 || cliEvents.at(-1)?.event !== "run.completed")
-  throw new Error("Installed hue setup --agent did not emit exactly one final terminal event");
-const claimCli = spawnSync(
-  join(minimal, "node_modules", ".bin", "hue"),
-  ["claim", "--agent", "--project", minimal],
-  {
-    cwd: minimal,
-    encoding: "utf8",
-    timeout: 5000,
-    env: {
-      ...process.env,
-      XDG_STATE_HOME: setupStateHome,
-      HUE_API_KEY: "secret-canary-package-key",
-      BROWSER: "secret-canary-package-browser",
-    },
-  },
-);
-const claimEvents = claimCli.stdout
-  .trim()
-  .split("\n")
-  .map((line) => JSON.parse(line));
-if (
-  claimCli.status !== 0 ||
-  claimCli.stderr ||
-  claimCli.stdout.includes("\u001b") ||
-  claimCli.stdout.includes("secret-canary") ||
-  claimEvents[0]?.command !== "claim" ||
-  claimEvents.filter((event) => event.event === "run.completed" || event.event === "run.failed")
-    .length !== 1 ||
-  claimEvents.at(-1)?.event !== "run.completed"
-)
-  throw new Error("Installed hue claim --agent violated its noninteractive output contract");
 const removedConnect = spawnSync(
   join(minimal, "node_modules", ".bin", "hue"),
   ["connect", "--agent"],
@@ -486,6 +480,7 @@ for (const patch of [99, 100]) {
     `
 import {
   SETUP_EVENT_CONTRACT_VERSION,
+  SetupBackendAdapter,
   createInitialSetupState,
   transitionSetup,
   type SetupEvent,
@@ -505,7 +500,11 @@ const event: SetupEvent = {
   resumed: false,
 };
 declare const options: SetupRunOptions;
-void [transition, event, options];
+const backend = new SetupBackendAdapter({
+  projectRoot: "/project",
+  origin: "http://127.0.0.1:4318",
+});
+void [transition, event, options, backend];
 `,
   );
   for (const name of installedPackageTests) {
