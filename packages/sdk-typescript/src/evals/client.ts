@@ -12,6 +12,8 @@ import {
   type PrepareAttemptRequestV2,
 } from "./attempt.js";
 import type {
+  ArtifactReservation,
+  ArtifactUpload,
   CaseWrite,
   CompleteExecution,
   Completion,
@@ -144,6 +146,69 @@ export class EvaluationClient {
     } catch {
       throw new HueApiError();
     }
+  }
+  /** Verified bytes of one ready artifact in this project, bounded to the 25 MiB pilot file size. */
+  async downloadArtifact(id: string): Promise<Uint8Array> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        redirect: "error",
+        signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
+      });
+    } catch {
+      throw new HueApiError();
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new HueApiError(response.status);
+    }
+    try {
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Missing response");
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 25 * 1024 * 1024) throw new Error("Oversized artifact");
+          chunks.push(value);
+        }
+      } finally {
+        await reader.cancel();
+      }
+      return new Uint8Array(Buffer.concat(chunks));
+    } catch {
+      throw new HueApiError();
+    }
+  }
+  /** Stage bytes at the storage capability Hue issued. The Hue key is never sent to storage. */
+  async uploadArtifactBytes(upload: ArtifactUpload, bytes: Uint8Array): Promise<void> {
+    const url = new URL(upload.uploadUrl);
+    if (url.protocol !== "https:" && !/^(localhost|127\.0\.0\.1)$/.test(url.hostname))
+      throw new HueApiError();
+    if (
+      Object.keys(upload.headers).some((name) => /^(authorization|cookie)$/i.test(name)) ||
+      upload.method !== "PUT"
+    )
+      throw new HueApiError();
+    let response: Response;
+    try {
+      response = await fetch(upload.uploadUrl, {
+        method: "PUT",
+        headers: upload.headers,
+        body: bytes as Uint8Array<ArrayBuffer>,
+        redirect: "error",
+        signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
+      });
+    } catch {
+      throw new HueApiError();
+    }
+    await response.body?.cancel().catch(() => undefined);
+    if (!response.ok) throw new HueApiError(response.status);
   }
   private page(options: PageOptions = {}): string {
     const query = new URLSearchParams();
@@ -362,6 +427,33 @@ export class EvaluationClient {
     } catch {
       throw new HueApiError();
     }
+  }
+  /** Reads one artifact reservation and its verification state. */
+  getArtifact(id: string) {
+    return this.request<ArtifactReservation>("GET", `/artifacts/${uuid(id)}`);
+  }
+  /** Reserves an artifact by declared identity; replaying the key returns the same reservation. */
+  reserveArtifact(input: {
+    /** Stable key; replaying it returns the same reservation. */
+    idempotencyKey: string;
+    /** Declared file name. */
+    filename: string;
+    /** Declared content type. */
+    contentType: string;
+    /** Declared size in bytes. */
+    byteSize: number;
+    /** Declared SHA-256, hex encoded. */
+    sha256: string;
+  }) {
+    return this.request<ArtifactReservation>("POST", "/artifacts", input);
+  }
+  /** Issues a short-lived storage capability for staging the reserved artifact's bytes. */
+  requestArtifactUpload(id: string) {
+    return this.request<ArtifactUpload>("POST", `/artifacts/${uuid(id)}/upload`, {});
+  }
+  /** Asks Hue to verify the staged bytes against the declared identity. */
+  completeArtifact(id: string) {
+    return this.request<ArtifactReservation>("POST", `/artifacts/${uuid(id)}/complete`, {});
   }
   /** Saves an execution's outcome and creates its immutable subject. */
   completeExecution(id: string, input: CompleteExecution) {

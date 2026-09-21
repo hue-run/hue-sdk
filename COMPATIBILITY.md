@@ -36,6 +36,8 @@ Neither SDK estimates unavailable token usage or cost. Queues are bounded and in
 
 Both SDKs support dataset/scorer creation, frozen versions, local experiments, built-in/custom scorers, resumable result uploads and historical rescoring. Hosted judge job/budget methods are available, but credential resolution is not proof of a successful provider call. Activation belongs to the platform environment.
 
+TypeScript local experiments, connected workers and rescoring also handle file-based cases: the runner downloads and verifies a case's pinned input files, uploads the documents a target returns as verified Hue artifacts, and hands both to local scorers, including when it regrades files a previous run saved. That file handling is unreleased, needs a Hue deployment that serves case input files, subject files and the artifact APIs, and has no Python equivalent.
+
 The clients do not yet expose every platform REST operation. Dataset editing/archival, case replacement/deletion, promotion from a trace, copying published scorers, experiment/run listing and frozen-trace snapshot reads are not convenience methods in these clients. Trace browsing for coding agents is served by the [Hue MCP server](https://docs.hue.run/agents/mcp-server) with a separate **Coding agent (read-only)** key, not by these clients. Open pull requests are not released functionality.
 
 API responses are limited to 4 MiB by the clients. Full dataset pages can exceed this limit when cases contain large values. Use smaller explicit page limits when listing full cases; the local experiment runner separately reads summaries and individual cases. A response-size failure does not establish that the server rejected the request.
