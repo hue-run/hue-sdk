@@ -558,7 +558,13 @@ class Hue:
                     self._record_issue()
 
     @contextmanager
-    def tool(self, name: str, *, call_id: str | None = None) -> Iterator[HueSpan]:
+    def tool(
+        self,
+        name: str,
+        *,
+        call_id: str | None = None,
+        mcp: Mapping[str, Any] | None = None,
+    ) -> Iterator[HueSpan]:
         name = self._metadata_string(name, "unknown")
         attributes: dict[str, AttributeValue] = {
             "gen_ai.operation.name": "execute_tool",
@@ -566,6 +572,21 @@ class Hue:
         }
         if call_id is not None:
             attributes["gen_ai.tool.call.id"] = self._metadata_string(call_id, "unknown")
+        if mcp is not None:
+            if isinstance(mcp, Mapping):
+                for key, field in (
+                    ("mcp.server.name", "name"),
+                    ("mcp.server.version", "version"),
+                ):
+                    value = mcp.get(field)
+                    if value is None:
+                        continue
+                    if _is_label(value):
+                        attributes[key] = value
+                    else:
+                        self._record_issue()
+            else:
+                self._record_issue()
         with self.span(f"execute_tool {name}", attributes=attributes, _category="tool") as span:
             yield span
 

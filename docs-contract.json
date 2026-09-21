@@ -407,7 +407,7 @@
       "version": "0.4.1"
     },
     "name": "hue",
-    "sha256": "sha256:7e7d8cda398ac6aed5aaa5271a7e5ead5772e1558cf4b57b55f381ba9a8d663f",
+    "sha256": "sha256:a96b309249b73dc20d2cc464343aa8905c41a1b0797ddd4f9af48233a9cbdf5a",
     "source": "skills/hue/SKILL.md"
   }
 }
