@@ -273,3 +273,84 @@ only the private local file and produces no secret-bearing screenshots, traces, 
 Publication under a candidate dist-tag, registry acceptance, production activation, promotion of
 the same version to `latest`, and clean-project literal `@latest` smoke remain separate gates; see
 [RELEASING.md](../../RELEASING.md).
+
+## Evaluate an agent against a Scenario
+
+`hue eval` runs a developer's local agent against a published Hue Scenario or a saved eval set
+and prints Hue's verdicts. It is the command-line form of `runSimulation()` (one-shot) and
+`runLocalAgent()` (worker): the agent, its prompts and its provider credentials stay in the local
+process, Hue creates one isolated simulated world per case, and Hue-owned outcome checks grade
+the sealed world. Hue never executes the agent. `HUE_API_KEY` must be a **Tracing and
+evaluations** project key (a **Tracing only** key cannot read Scenarios or create experiments);
+the CLI never prints it. The optional `zod` peer of `@hue-run/sdk/evals` must be installed.
+
+Write an adapter module that hands the case inputs and the world's tools or MCP connection to
+the real agent. The module exports `default` or `runMyAgent`; `context` is the SDK's
+`SimulationTargetContext` (`tools`, `mcp`, `config`, `item`, `executionId`, `environmentRunId`,
+`signal`):
+
+```ts
+// hue-agent.ts: erasable TypeScript only; Node.js 24 and Bun strip the types natively.
+import type { JsonValue, SimulationTargetContext } from "@hue-run/sdk/evals";
+import { runAgent } from "./src/agent.js"; // The application's existing entry point.
+
+export default function runMyAgent(inputs: JsonValue, context: SimulationTargetContext) {
+  // Hand context.tools or context.mcp to the agent's real tool boundary; configuration alone
+  // does not redirect provider calls. Pass context.signal for cooperative cancellation.
+  const { config, tools, mcp, signal } = context;
+  return runAgent({ inputs, config, tools, mcp, signal });
+}
+```
+
+```sh
+hue eval --scenario "Refund an eligible charge" ./hue-agent.ts --env-file .env.hue
+hue eval --scenario https://app.hue.run/projects/demo/scenarios/<id> ./hue-agent.ts --baseline <experiment id>
+hue eval --set "Billing regressions" --scorer-version <id> ./hue-agent.ts --save-version
+hue eval --scenario "Refund an eligible charge" --command "python agent.py" --timeout 120 --content
+hue eval --worker ./hue-agent.ts --agent-key support-agent --env-file .env.hue
+```
+
+The one-shot mode resolves the selection (`--scenario` by name, ID or URL; `--set` by name, ID or
+URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
+creates a fresh experiment from those immutable pins named `<scenario> · <agent key> · <revision>`
+(`--name` overrides), prints `Run: <url>` and `Experiment: <id>` as soon as the experiment exists,
+one line per case event (world created, agent started, world sealed), then
+`Waiting for Hue checks...` and a table with one row per case: boolean metrics as `PASS`/`FAIL`,
+numbers as values, text and category metrics as-is, an overall result per case and a pass count.
+Failing cases print the scorer explanation. `--baseline <experiment id|url>` adds improvement,
+regression and unchanged counts with per-case deltas. `--json` prints one JSON document
+(`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout
+and sends progress to stderr. `--wait <seconds>` (default 300) bounds the verdict wait because
+Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
+every case of the saved version; there is no case subset.
+
+`--command "<shell command>"` spawns the command once per case with `HUE_MCP_URL`,
+`HUE_MCP_TOKEN`, `HUE_MCP_EXPIRES_AT`, `HUE_EXECUTION_ID`, `HUE_ENVIRONMENT_RUN_ID`, `HUE_CASE_ID`
+and `HUE_CASE_KEY` in its environment and `{"inputs": ..., "config": ...}` on stdin. Its stdout is
+the answer (JSON when it parses, otherwise trimmed text; empty means no output); a non-zero exit
+or the per-case `--timeout` (default 600 seconds) is a target failure. The scoped MCP token is
+never logged. The agent key defaults to the slug of the command's script name.
+
+`--worker` registers the adapter through `runLocalAgent()` with key `--agent-key` (default: the
+adapter filename slug), name `--agent-name` (default: the key), revision `--revision` (default:
+`AGENT_REVISION`, then the Git `HEAD` short hash, then `dev`) and capability `environment:v1`,
+prints the registration and each claimed run with its URL, executes runs launched from Hue until
+Ctrl+C or `--max-runs <n>`, and prints the verdict table after each run. Selection flags do not
+apply; Hue chooses the pinned experiment. The worker exits 0 when it stops normally.
+
+A Scenario or eval set whose dataset version is not saved cannot back an experiment: the command
+exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
+version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
+(default `https://app.hue.run`), loaded from `--env-file <path>` first when given; `--origin`
+overrides the origin. Telemetry content capture and persisted outputs, error messages and
+explanations stay off unless `--content` is passed. Trace evidence is required for every case.
+Resumable checkpoints live in `.hue/eval/<agent-key>/<project id>/` (a `.gitignore` is written
+inside `.hue/eval/`); `--checkpoint-dir` overrides the root. Rerunning the same selection resumes
+an interrupted run without invoking the agent again; a different selection is refused until the
+unfinished one is resumed or its directory is removed.
+
+Exit codes: `0` every case passed, `1` a case failed, errored, was skipped or Hue's checks were
+still pending at `--wait`, `2` usage or configuration error (including a missing key), `130`
+interrupted. On Node.js 22, load TypeScript adapters with `NODE_OPTIONS=--experimental-strip-types`;
+non-erasable syntax (enums, parameter properties, namespaces) needs a loader such as `--import tsx`
+on any Node.js version.

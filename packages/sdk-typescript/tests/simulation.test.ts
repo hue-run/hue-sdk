@@ -1445,3 +1445,177 @@ test("simulation candidates cannot read grading references or mutate pinned case
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+describe("pinned scenarios", () => {
+  async function publishPins(fixture: ReturnType<typeof harness>) {
+    const environment = await fixture.environmentClient.createEnvironment({
+      name: "Pinned world",
+      slug: "pinned-world",
+    });
+    const environmentVersion = await fixture.environmentClient.publishVersion(
+      environment.id,
+      scenario.environment.definition,
+    );
+    const dataset = await fixture.client.createDataset({
+      name: "Refund flow",
+      slug: "refund-flow",
+    });
+    const draft = dataset.versions[0]!;
+    await fixture.client.addCase(draft.id, {
+      expectedRevision: draft.revision,
+      externalKey: "refund",
+      inputs: { task: "save" },
+      expected: "saved",
+      metadata: {},
+      environmentVersionId: environmentVersion.id,
+    });
+    const frozen = await fixture.client.freezeDatasetVersion(draft.id, draft.revision);
+    const scorer = await fixture.client.createScorer({ name: "Exact", slug: "exact" });
+    const exact = await fixture.client.publishScorerVersion(scorer.id, builtins.exactMatch());
+    const includes = await fixture.client.publishScorerVersion(scorer.id, builtins.includes(false));
+    return { frozen, exact, includes };
+  }
+
+  test("creates an experiment from published pins and runs the case end-to-end", async () => {
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const pins = await publishPins(fixture);
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-pins-"));
+    const progress: SimulationProgress[] = [];
+    try {
+      const report = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario: {
+          kind: "pins",
+          datasetVersionId: pins.frozen.id,
+          scorerVersionIds: [pins.exact.id],
+        },
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+        onProgress(event) {
+          progress.push(event);
+        },
+      });
+      const experiment = fixture.experiments.get(report.experimentId);
+      expect(experiment).toMatchObject({
+        name: "Refund flow",
+        datasetVersionId: pins.frozen.id,
+        config: {},
+      });
+      expect(experiment.evaluation.scorerVersions.map((version: any) => version.id)).toEqual([
+        pins.exact.id,
+      ]);
+      expect(experiment.finishedAt).toBeTruthy();
+      expect(fixture.targetCalls()).toBe(1);
+      expect(report.subjectIds).toHaveLength(1);
+      expect(report.runUrl).toBe(`${baseUrl}/experiments/${report.experimentId}`);
+      expect(fixture.results).toEqual([
+        expect.objectContaining({ state: "scored", scorerVersionId: pins.exact.id }),
+      ]);
+      expect(progress.map((event) => event.type)).toEqual([
+        "run_created",
+        "world_created",
+        "target_started",
+        "world_sealed",
+      ]);
+      expect([...fixture.worlds.values()].map((world) => world.status)).toEqual(["completed"]);
+
+      const named = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario: {
+          kind: "pins",
+          datasetVersionId: pins.frozen.id,
+          scorerVersionIds: [pins.exact.id, pins.includes.id],
+          name: "Custom name",
+          config: { mode: "strict" },
+        },
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+      });
+      expect(fixture.experiments.get(named.experimentId)).toMatchObject({
+        name: "Custom name",
+        config: { mode: "strict" },
+      });
+      expect(
+        fixture.experiments
+          .get(named.experimentId)
+          .evaluation.scorerVersions.map((version: any) => version.id),
+      ).toEqual([pins.exact.id, pins.includes.id]);
+      expect(fixture.targetCalls()).toBe(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a checkpoint whose pins differ and resumes matching pins without replay", async () => {
+    const fixture = harness({ evidenceFailures: 0, loseSealAcknowledgement: false });
+    const pins = await publishPins(fixture);
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-pins-identity-"));
+    const options = {
+      ...fixture,
+      checkpointDirectory: directory,
+      scenario: {
+        kind: "pins" as const,
+        datasetVersionId: pins.frozen.id,
+        scorerVersionIds: [pins.exact.id],
+      },
+      persistResultContent: false,
+      traceEvidence: { mode: "required" as const },
+    };
+    try {
+      await expect(runSimulation(options)).rejects.toThrow("lost completion acknowledgement");
+      expect(fixture.targetCalls()).toBe(1);
+      await expect(
+        runSimulation({
+          ...options,
+          scenario: { ...options.scenario, scorerVersionIds: [pins.includes.id] },
+        }),
+      ).rejects.toThrow("Recover the unfinished simulation before running a changed scenario");
+      await expect(
+        runSimulation({ ...options, scenario: { ...options.scenario, config: { changed: true } } }),
+      ).rejects.toThrow("Recover the unfinished simulation before running a changed scenario");
+      await expect(
+        runSimulation({
+          ...options,
+          scenario: { kind: "experiment", experimentId: randomUUID() },
+        }),
+      ).rejects.toThrow("Recover the unfinished simulation before running a changed scenario");
+      // The display name is cosmetic; the same pins resume the saved outcome.
+      const recovered = await runSimulation({
+        ...options,
+        scenario: { ...options.scenario, name: "Renamed" },
+      });
+      expect(fixture.targetCalls()).toBe(1);
+      expect(recovered.subjectIds).toHaveLength(1);
+      expect(fixture.experiments.get(recovered.experimentId).finishedAt).toBeTruthy();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("requires at least one scorer version before creating anything", async () => {
+    const fixture = harness();
+    const pins = await publishPins(fixture);
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-pins-empty-"));
+    try {
+      await expect(
+        runSimulation({
+          ...fixture,
+          checkpointDirectory: directory,
+          scenario: { kind: "pins", datasetVersionId: pins.frozen.id, scorerVersionIds: [] },
+          persistResultContent: false,
+          traceEvidence: { mode: "required" },
+        }),
+      ).rejects.toThrow("Pinned scenarios require a scorer version");
+      expect(fixture.experiments.size).toBe(0);
+      expect(fixture.targetCalls()).toBe(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

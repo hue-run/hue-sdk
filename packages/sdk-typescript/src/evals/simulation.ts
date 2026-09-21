@@ -50,13 +50,25 @@ export interface RepositorySimulationCase {
   /** Optional caller-owned case metadata. */
   metadata?: Record<string, JsonValue>;
 }
-/** Immutable app-authored experiment reference or repository-authored scenario definition. */
+/** Immutable app-authored experiment reference, published pins or repository-authored scenario definition. */
 export type SimulationScenario =
   | {
       /** Select an existing app-authored immutable experiment template. */
       kind: "experiment";
       /** Experiment to clone into a fresh attempt. */
       experimentId: string;
+    }
+  | {
+      /** Run already published immutable pins, such as a Scenario's frozen case and outcome checks. */
+      kind: "pins";
+      /** Frozen dataset version whose cases pin their simulated-world versions. */
+      datasetVersionId: string;
+      /** Immutable scorer versions to pin; Hue-executed pins need no local callback. */
+      scorerVersionIds: string[];
+      /** JSON configuration passed to every target callback; defaults to `{}`. */
+      config?: JsonValue;
+      /** Experiment display name; defaults to the dataset name, then `Simulation`. */
+      name?: string;
     }
   | {
       /** Publish and resolve the repository-authored definition. */
@@ -277,6 +289,14 @@ function normalizedEnvironmentDefinition(definition: PublishableEnvironmentDefin
 
 function scenarioIdentity(scenario: SimulationScenario): JsonValue {
   if (scenario.kind === "experiment") return scenario;
+  // The display name is cosmetic; the pins and configuration are the scenario.
+  if (scenario.kind === "pins")
+    return json({
+      kind: scenario.kind,
+      datasetVersionId: scenario.datasetVersionId,
+      scorerVersionIds: [...scenario.scorerVersionIds].sort(),
+      config: scenario.config ?? {},
+    });
   return json(
     {
       kind: scenario.kind,
@@ -578,6 +598,16 @@ async function resolveDataset(
   }
 }
 
+/** Display name of the dataset owning a version, or undefined when it cannot be read. */
+async function datasetName(client: EvaluationClient, versionId: string) {
+  try {
+    const version = await client.getDatasetVersion(versionId);
+    return (await client.getDataset(version.datasetId)).name;
+  } catch {
+    return undefined;
+  }
+}
+
 async function allCases(client: EvaluationClient, versionId: string) {
   const items = [];
   let after: string | undefined;
@@ -601,6 +631,22 @@ async function resolveExperiment(
       datasetVersionId: source.datasetVersionId,
       scorerVersionIds: source.evaluation.scorerVersions.map((item) => item.id),
       config: source.config,
+    });
+    return { experimentId: created.id, bindings: options.localScorers ?? [] };
+  }
+  if (options.scenario.kind === "pins") {
+    const { datasetVersionId, scorerVersionIds } = options.scenario;
+    if (!scorerVersionIds.length) throw new TypeError("Pinned scenarios require a scorer version");
+    const created = await options.client.createExperiment({
+      idempotencyKey,
+      name:
+        options.runName ??
+        options.scenario.name ??
+        (await datasetName(options.client, datasetVersionId)) ??
+        "Simulation",
+      datasetVersionId,
+      scorerVersionIds: [...scorerVersionIds],
+      config: options.scenario.config ?? {},
     });
     return { experimentId: created.id, bindings: options.localScorers ?? [] };
   }

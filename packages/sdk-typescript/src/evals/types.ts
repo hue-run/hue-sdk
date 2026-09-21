@@ -654,3 +654,44 @@ export interface LocalAgentClaim {
   /** Pinned experiment to execute. */
   experimentId: string;
 }
+/** A Scenario as listed by {@link EvaluationClient.listCaseConversions}. Extra server fields are ignored. */
+export interface CaseConversionSummary {
+  /** Scenario ID. */
+  id: string;
+  /** Scenario domain label. */
+  domain: string;
+  /** Whether the Scenario has immutable published pins. */
+  status: "draft" | "published";
+  /** Optimistic-concurrency revision of the Scenario. */
+  revision: number;
+  /** Creation timestamp. */
+  createdAt: string;
+  /** Source trace the Scenario was converted from. */
+  traceId: string;
+}
+/** Immutable pins created when a Scenario is published. */
+export interface CaseConversionPublication {
+  /** Published dataset case. */
+  caseId: string;
+  /** Dataset holding the published case. */
+  datasetId: string;
+  /** Frozen dataset version holding the published case. */
+  datasetVersionId: string;
+  /** Environment identity of the simulated world. */
+  environmentId: string;
+  /** Immutable environment version the case pins. */
+  environmentVersionId: string;
+  /** Scorer identity of the published outcome checks. */
+  scorerId: string;
+  /** Immutable scorer version pinned by the Scenario. */
+  scorerVersionId: string;
+}
+/** A Scenario read by {@link EvaluationClient.getCaseConversion}. Extra server fields are ignored. */
+export interface CaseConversion extends Partial<Omit<CaseConversionSummary, "id" | "status">> {
+  /** Scenario ID. */
+  id: string;
+  /** Whether the Scenario has immutable published pins. */
+  status: "draft" | "published";
+  /** Published pins, or `null` while the Scenario is a draft. */
+  publication: CaseConversionPublication | null;
+}
