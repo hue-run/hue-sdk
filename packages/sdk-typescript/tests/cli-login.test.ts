@@ -181,7 +181,8 @@ describe("hue login", () => {
     expect(result.stdout).toContain(
       `Stored HUE_MCP_KEY (${MCP_KEY.length} chars) and HUE_MCP_URL in .env.hue.`,
     );
-    expect(result.stdout).toContain("hue mcp install --client claude-code");
+    // A non-default origin stores its own MCP endpoint, so the printed next step carries it.
+    expect(result.stdout).toContain(`hue mcp install --client claude-code --url ${ORIGIN}/api/mcp`);
     expect(result.stdout).toContain(
       'hue eval --scenario "<name>" ./hue-agent.ts --env-file .env.hue',
     );
@@ -407,6 +408,41 @@ describe("hue login", () => {
     expect(check.status).toBe(0);
   });
 
+  test("a login that stops after one key still protects the env file it wrote", async () => {
+    const root = await temporaryRoot();
+    expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+    const result = await login(["--origin", ORIGIN, "--gitignore"], {
+      cwd: root,
+      lines: [EVAL_KEY, MCP_KEY],
+      fetch: syntheticHue({ mcpKey: "hue_live_other_key" }).fetchImpl,
+      env: process.env,
+    });
+    // The evaluations key is already on disk when the coding-agent key is refused; the ignore
+    // rule has to be written anyway, or a live key sits in a committable file.
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("The Hue MCP server rejected the coding-agent key (HTTP 403).");
+    expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
+      `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
+    );
+    expect(await readFile(join(root, ".gitignore"), "utf8")).toBe(".env.hue\n");
+    expect(spawnSync("git", ["check-ignore", "-q", ".env.hue"], { cwd: root }).status).toBe(0);
+    expect(result.stdout).not.toContain("Next steps:");
+
+    // A run that stores nothing writes no rule and does not warn about a file it never wrote.
+    const empty = await temporaryRoot();
+    expect(spawnSync("git", ["init", "-q"], { cwd: empty }).status).toBe(0);
+    const nothing = await login(["--origin", ORIGIN, "--keys", "evaluations", "--gitignore"], {
+      cwd: empty,
+      lines: ["hue_live_other_key"],
+      fetch: syntheticHue().fetchImpl,
+      env: process.env,
+    });
+    expect(nothing.code).toBe(1);
+    expect(nothing.stdout).not.toContain("Added .env.hue");
+    await expect(lstat(join(empty, ".gitignore"))).rejects.toThrow();
+    await expect(lstat(join(empty, ".env.hue"))).rejects.toThrow();
+  });
+
   test("opens the settings page only for a terminal and not with --no-browser", async () => {
     const root = await temporaryRoot();
     const opened: string[] = [];
@@ -547,7 +583,8 @@ describe("hue login", () => {
     });
     setTimeout(() => interruptedStdin.write(`partial${String.fromCharCode(3)}`), 10);
     expect(await second).toBe(130);
-    expect(interrupted.text()).toContain("Interrupted; nothing else was stored.");
+    // Nothing had been stored before the interrupt, so the message says exactly that.
+    expect(interrupted.text()).toContain("Interrupted; nothing was stored.");
     expect(interrupted.text()).not.toContain("partial");
     expect(hue.calls).toHaveLength(1);
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(

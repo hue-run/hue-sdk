@@ -648,18 +648,30 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   }
 
   const stored: KeyKind[] = [];
+  // A key written before a later prompt fails still has to reach the ignore protection below, so
+  // the loop records why it stopped instead of returning past it.
+  let failure: { message: string; code?: number } | undefined;
   const prompter = isTTY(stdin)
     ? createTerminalPrompter(stdin, stdout)
     : createLinePrompter(stdin, stdout);
+  const nothingElse = () => (stored.length ? "No further key was stored." : "Nothing was stored.");
   try {
     for (const kind of kinds) {
       const { variable, urlVariable, preset } = KEY_KINDS[kind];
       const urlValue = kind === "evaluations" ? origin : mcpUrl;
       const answer = await prompter.ask(`Paste the "${preset}" key (${variable}): `);
-      if (answer === null) return fail(`No ${variable} was entered; input ended.`);
+      if (answer === null) {
+        failure = { message: `No ${variable} was entered; input ended.` };
+        break;
+      }
       const value = answer.trim();
       const reason = invalidKeyReason(value);
-      if (reason) return fail(`${reason} Create a "${preset}" key at ${settingsUrl} and paste it.`);
+      if (reason) {
+        failure = {
+          message: `${reason} Create a "${preset}" key at ${settingsUrl} and paste it.`,
+        };
+        break;
+      }
       if (!parsed.values.force) {
         for (const [name, next] of [
           [variable, value],
@@ -667,21 +679,24 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
         ] as const) {
           const current = readEnvValue(envFile.text, name);
           if (current !== undefined && current !== next)
-            return fail(
-              `${name} in ${envDisplay} already has a different value; rerun with --force to replace it.`,
-            );
+            failure ??= {
+              message: `${name} in ${envDisplay} already has a different value; rerun with --force to replace it.`,
+            };
         }
+        if (failure) break;
       }
       const check =
         kind === "evaluations"
           ? await checkEvaluationsKey(fetchImpl, origin, value)
           : await checkCodingAgentKey(fetchImpl, mcpUrl, value);
-      if (!check.ok)
-        return fail(
-          check.rejected
+      if (!check.ok) {
+        failure = {
+          message: check.rejected
             ? `${check.detail} Create a "${preset}" key at ${settingsUrl} and try again.`
-            : `${check.detail} Nothing was stored.`,
-        );
+            : `${check.detail} ${nothingElse()}`,
+        };
+        break;
+      }
       out(
         kind === "evaluations"
           ? `Evaluations key accepted for project "${check.detail}".`
@@ -691,45 +706,56 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
       try {
         await writePrivateFile(envPath, text, 0o600);
       } catch (error) {
-        return fail(`Could not write ${envDisplay}: ${(error as Error).message}`);
+        failure = { message: `Could not write ${envDisplay}: ${(error as Error).message}` };
+        break;
       }
       envFile = { text, exists: true };
       stored.push(kind);
       out(`Stored ${variable} (${value.length} chars) and ${urlVariable} in ${envDisplay}.`);
     }
   } catch (error) {
-    if (error instanceof PromptInterrupted)
-      return fail("Interrupted; nothing else was stored.", 130);
-    return fail(`hue login failed: ${(error as Error).message}`);
+    failure =
+      error instanceof PromptInterrupted
+        ? { message: `Interrupted; ${nothingElse().toLowerCase()}`, code: 130 }
+        : { message: `hue login failed: ${(error as Error).message}` };
   } finally {
     prompter.close();
   }
 
-  const ignorePath = join(dirname(envPath), ".gitignore");
-  const status = await gitIgnoreStatus(envPath, env);
-  if (status === "not-ignored") {
-    if (parsed.values.gitignore) {
-      try {
-        await appendIgnoreRule(ignorePath, basename(envPath));
-        out(`Added ${basename(envPath)} to ${displayPath(cwd, ignorePath)}.`);
-      } catch (error) {
+  // Only reached when a key actually landed in the file: a run that stored nothing has no new
+  // secret to protect and should not warn about a file it did not write.
+  if (stored.length) {
+    const ignorePath = join(dirname(envPath), ".gitignore");
+    const status = await gitIgnoreStatus(envPath, env);
+    if (status === "not-ignored") {
+      if (parsed.values.gitignore) {
+        try {
+          await appendIgnoreRule(ignorePath, basename(envPath));
+          out(`Added ${basename(envPath)} to ${displayPath(cwd, ignorePath)}.`);
+        } catch (error) {
+          stderr.write(
+            `Warning: could not update ${displayPath(cwd, ignorePath)}: ${(error as Error).message}\n`,
+          );
+        }
+      } else {
         stderr.write(
-          `Warning: could not update ${displayPath(cwd, ignorePath)}: ${(error as Error).message}\n`,
+          `Warning: ${envDisplay} is not ignored by git. Rerun with --gitignore or add it to .gitignore before committing.\n`,
         );
       }
-    } else {
+    } else if (status === "unknown") {
       stderr.write(
-        `Warning: ${envDisplay} is not ignored by git. Rerun with --gitignore or add it to .gitignore before committing.\n`,
+        `Warning: could not confirm that git ignores ${envDisplay}; make sure it is never committed.\n`,
       );
     }
-  } else if (status === "unknown") {
-    stderr.write(
-      `Warning: could not confirm that git ignores ${envDisplay}; make sure it is never committed.\n`,
-    );
   }
+  if (failure) return fail(failure.message, failure.code);
 
   out("Next steps:");
-  if (stored.includes("coding-agent")) out("  hue mcp install --client claude-code");
+  if (stored.includes("coding-agent"))
+    // `hue mcp install` defaults to production; a non-default origin needs its own endpoint.
+    out(
+      `  hue mcp install --client claude-code${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
+    );
   if (stored.includes("evaluations"))
     out(`  hue eval --scenario "<name>" ./hue-agent.ts --env-file ${envDisplay}`);
   return 0;
