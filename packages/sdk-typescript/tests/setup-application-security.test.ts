@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   exerciseSetupApplication,
   installSetupRuntime,
@@ -94,6 +95,7 @@ describe("application request containment", () => {
       "/\\host/path",
       "/../outside",
       "/a/./b",
+      "/a//b",
       "/%2f%2fhost",
       "/users/:id",
       "/users/<id>",
@@ -110,6 +112,58 @@ describe("application request containment", () => {
         });
         await expectNoSetupFiles(root);
       }
+    }
+  });
+
+  test("rejects near-limit adversarial pathname through the real planner within a subprocess deadline", async () => {
+    const root = await expressProject({ route: "/" + "-".repeat(180) + "!" });
+    const compiled = await directory();
+    // Run actual current planner source on V8, not only Bun's regex engine or a
+    // stale dist build. The timeout contains the previously exponential case.
+    const build = await Bun.build({
+      entrypoints: [fileURLToPath(new URL("../src/setup/application.ts", import.meta.url))],
+      target: "node",
+      format: "esm",
+      packages: "external",
+    });
+    expect(build.success).toBe(true);
+    const plannerPath = join(compiled, "planner.mjs");
+    await writeFile(plannerPath, await build.outputs[0]!.text());
+    await symlink(
+      fileURLToPath(new URL("../node_modules", import.meta.url)),
+      join(compiled, "node_modules"),
+      "dir",
+    );
+    const plannerModule = pathToFileURL(plannerPath).href;
+    const project = await detectSetupProject(root);
+    const script = `
+      import { planSetupApplication } from ${JSON.stringify(plannerModule)};
+      try {
+        await planSetupApplication(${JSON.stringify(project)});
+        process.exitCode = 2;
+      } catch (error) {
+        if (error?.code === "ambiguous-entrypoint") process.stdout.write("refused\\n");
+        else process.exitCode = 3;
+      }
+    `;
+    const result = spawnSync("node", ["--input-type=module", "--eval", script], {
+      encoding: "utf8",
+      timeout: 3000,
+      killSignal: "SIGKILL",
+      maxBuffer: 4096,
+    });
+    expect(result.error === undefined).toBe(true);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("refused\n");
+    expect(result.stderr).toBe("");
+    await expectNoSetupFiles(root);
+  }, 5000);
+
+  test("preserves bounded literal segments, root and trailing-slash pathname support", async () => {
+    for (const route of ["/", "/" + "-".repeat(180), "/alpha_~.-9/beta/", "/.well-known/check"]) {
+      const root = await expressProject({ route });
+      expect((await planSetupApplication(await detectSetupProject(root))).requestPath).toBe(route);
+      await expectNoSetupFiles(root);
     }
   });
 

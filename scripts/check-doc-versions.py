@@ -24,6 +24,11 @@ ALLOWED_CONTEXT = re.compile(
     r"|OpenInference|instrumentation|dependency from|for example|unreleased|next releases?|published|^\s*version:)",
     re.I,
 )
+LANGUAGE_CONTEXT = re.compile(
+    r"(?P<typescript>TypeScript|@hue-run/sdk|\bnpm\b|runLocalAgent)"
+    r"|(?P<python>Python|hue_sdk|\bPyPI\b|`hue-run`)",
+    re.I,
+)
 
 
 def current_versions() -> dict[str, str]:
@@ -33,18 +38,22 @@ def current_versions() -> dict[str, str]:
 
 
 def languages_for(name: str, line: str) -> set[str]:
-    """Return the package languages a Markdown line is describing."""
+    """Resolve the context preceding a version, falling back to its guide's package.
+
+    An explicit language/package label wins over the document location. Choose
+    the nearest preceding label rather than allowing both languages' versions
+    throughout a mixed line, which could hide a stale TypeScript version.
+    """
+
+    contexts = list(LANGUAGE_CONTEXT.finditer(line))
+    if contexts:
+        return {contexts[-1].lastgroup}
 
     if name.startswith(("packages/sdk-typescript/", "packages/aliases/npm-hue-run/")):
         return {"typescript"}
     if name.startswith(("packages/sdk-python/", "packages/aliases/pypi-hue-sdk/")):
         return {"python"}
-    languages: set[str] = set()
-    if re.search(r"TypeScript|@hue-run/sdk|\bnpm\b|runLocalAgent", line, re.I):
-        languages.add("typescript")
-    if re.search(r"Python|hue_sdk|\bPyPI\b|`hue-run`", line, re.I):
-        languages.add("python")
-    return languages
+    return set()
 
 
 def stale_mentions(name: str, text: str, versions: dict[str, str]) -> list[str]:
@@ -52,11 +61,11 @@ def stale_mentions(name: str, text: str, versions: dict[str, str]) -> list[str]:
 
     problems: list[str] = []
     for number, line in enumerate(text.splitlines(), start=1):
-        languages = languages_for(name, line)
-        expected = {versions[language] for language in languages} or set(versions.values())
         # Hue is pre-1.0 and currently uses one-digit minor lines. Excluding 0.0.x
         # and multi-digit minors avoids mistaking fixture/tool versions for SDKs.
         for match in re.finditer(r"\b0\.[1-9]\.\d+\b", line):
+            languages = languages_for(name, line[: match.start()])
+            expected = {versions[language] for language in languages} or set(versions.values())
             value = match.group(0)
             if value in expected or ALLOWED_CONTEXT.search(line):
                 continue

@@ -22,6 +22,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { setupContextScenarios, setupContextCheckSource } from "./setup-context-checks.mjs";
+import { registryProxyUrl } from "./setup-registry-proxy.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -485,9 +486,10 @@ const server = createServer((request, response) => {
     if (url.pathname.startsWith("/api/")) return error(401, "SETUP_UNAUTHORIZED");
     if (request.method === "GET") {
       // Registry proxy only, with no credential forwarding. Hue bytes are always the supplied archive.
-      const upstream = await fetch(`https://registry.npmjs.org${url.pathname}${url.search}`, {
+      const upstream = await fetch(registryProxyUrl(url), {
         headers: { accept: request.headers.accept ?? "application/json" },
         redirect: "manual",
+        signal: AbortSignal.timeout(30_000),
       });
       response.writeHead(upstream.status, {
         "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
@@ -606,6 +608,7 @@ try {
   for (const boundary of [
     "network-path",
     "backslash-path",
+    "adversarial-route",
     "npm-workspace",
     "uv-workspace",
     "uv-build-hook",
@@ -683,7 +686,9 @@ try {
           ? "//127.0.0.1:1/"
           : boundary === "backslash-path"
             ? "/\\127.0.0.1:1/"
-            : "/";
+            : boundary === "adversarial-route"
+              ? `/${"-".repeat(180)}!`
+              : "/";
       await writeFile(
         join(root, boundary === "node-enum" ? "server.ts" : "server.mjs"),
         `import express from "express";\nconst app = express();\napp.get(${JSON.stringify(route)}, (_request, response) => response.end("ok"));\napp.listen(Number(process.env.PORT), "127.0.0.1");\n`,

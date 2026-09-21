@@ -63,13 +63,15 @@ if (values["registry-version"]) {
     destination,
   );
 }
+// Test harness dependencies belong to this isolated, frozen tooling checkout in
+// every mode. Archive/registry acceptance still never builds or repacks the SDK.
+await cp(source, staging, {
+  recursive: true,
+  filter: (path) =>
+    !/(?:^|\/)(?:node_modules|dist)(?:\/|$)/u.test(path) && !/(?:^|\/)\.env(?:\.|$)/u.test(path),
+});
+run("bun", ["--no-env-file", "install", "--frozen-lockfile"], staging);
 if (!values.archive && !values["registry-version"]) {
-  await cp(source, staging, {
-    recursive: true,
-    filter: (path) =>
-      !/(?:^|\/)(?:node_modules|dist)(?:\/|$)/u.test(path) && !/(?:^|\/)\.env(?:\.|$)/u.test(path),
-  });
-  run("bun", ["--no-env-file", "install", "--frozen-lockfile"], staging);
   // The committed version literal must already match package.json; the build regenerates it.
   run("node", ["scripts/write-version.mjs", "--check"], staging);
   run("bun", ["--no-env-file", "run", "typecheck"], staging);
@@ -257,7 +259,7 @@ run(
 run(
   process.execPath,
   [
-    join(source, "scripts/verify-installed-setup.mjs"),
+    join(staging, "scripts/verify-installed-setup.mjs"),
     "--archive",
     tarball,
     "--installed-package",

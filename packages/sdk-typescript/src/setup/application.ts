@@ -283,8 +283,8 @@ function applicationRequestUrl(path: string, origin: string): URL {
   const url = new URL(path, origin);
   if (
     path.length > 200 ||
-    !/^\/(?:[A-Za-z0-9_~.-]+\/?)*$/u.test(path) ||
-    path.startsWith("//") ||
+    !/^\/[A-Za-z0-9_~./-]*$/u.test(path) ||
+    path.includes("//") ||
     url.origin !== origin ||
     url.pathname !== path ||
     url.search !== "" ||
