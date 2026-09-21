@@ -1,6 +1,6 @@
 # Compatibility
 
-The published releases are TypeScript `0.3.2` and Python `0.2.2`. This matrix also governs the unreleased TypeScript `0.4.0` additions. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+The published releases are TypeScript `0.4.1` and Python `0.2.2`. This checkout prepares Python `0.2.3`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -55,7 +55,7 @@ Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: f
 the same provider-aware world lifecycle and uncertainty rules. A matching Hue API deployment is
 required. Public package tests exercise local control-plane responses and connection-bundle
 handling; they do not call an issued provider facade. These tests do not call the official Gmail
-service or establish universal Gmail or Slack parity. Python remains at `0.2.2` and does not
+service or establish universal Gmail or Slack parity. Python remains at `0.2.3` and does not
 include a native local-worker implementation.
 
 ## Scorer forward compatibility
