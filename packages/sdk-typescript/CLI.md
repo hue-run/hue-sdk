@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.4.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.4.1`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python uses `hue-run==0.2.2`.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -192,7 +192,7 @@ event set is `run.started`, `project.detected`, `plan.ready`, `step.started`, `s
 `receipt.verified`, `claim.required`, `claim.completed`, `run.completed` and `run.failed`.
 
 Event version 1 shipped in TypeScript `0.3.1` and `0.3.2`; its public claim URL, action set and receipt
-step are incompatible with this flow. Consumers of `0.4.0` use the bundled schema with identity
+step are incompatible with this flow. The v2 schema shipped in TypeScript `0.4.0` with identity
 `https://hue.run/schemas/setup-events-v2.json`. Event version 2 is independent of Setup HTTP
 `protocolVersion: 1` and the checkpoint format.
 
@@ -241,7 +241,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.4.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.4.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -252,7 +252,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.4.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.4.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json

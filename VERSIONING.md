@@ -37,8 +37,8 @@ Linux is tested in CI. macOS is used for development and is supported. On Window
 - A change to an emitted attribute name, event name or endpoint path is a wire change and is announced as **Breaking**.
 - Managed-target requests carry `protocolVersion: 1` and evaluation checkpoints carry `format: 1`. A later 0.x release reads checkpoints written by an earlier 0.x release; a patch release never changes the checkpoint format.
 - Installer setup-session JSONL events carry their own `contractVersion` independently of the package
-  and HTTP protocol versions. Event version 1 shipped in TypeScript `0.3.1` and `0.3.2`; TypeScript
-  `0.4.0` uses version 2 and `https://hue.run/schemas/setup-events-v2.json` because it removes public
+  and HTTP protocol versions. Event version 1 shipped in TypeScript `0.3.1` and `0.3.2`; version 2
+  shipped in TypeScript `0.4.0` and uses `https://hue.run/schemas/setup-events-v2.json` because it removes public
   claim URLs, changes the step/action set, adds privacy disclosure and requires the application
   receipt source. Consumers migrate to the bundled v2 schema rather than accepting changed events
   under the v1 identity. Their `run.*` names describe command invocations, not Hue Runs. Setup checkpoints carry

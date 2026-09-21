@@ -23,7 +23,14 @@ class DocumentationContractTests(unittest.TestCase):
     def test_contract_contains_only_public_package_surfaces(self):
         contract = generator.build_contract(ROOT)
         self.assertEqual(contract["schemaVersion"], 1)
-        self.assertEqual(contract["packages"]["typescript"]["version"], "0.4.0")
+        self.assertEqual(
+            contract["packages"]["typescript"]["version"],
+            json.loads((ROOT / "packages/sdk-typescript/package.json").read_text())["version"],
+        )
+        self.assertIn(
+            "McpServerInfo",
+            contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk"]["publicExports"],
+        )
         self.assertEqual(contract["packages"]["python"]["version"], "0.2.2")
         self.assertIn(
             "createHue",

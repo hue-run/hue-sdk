@@ -66,7 +66,7 @@ async function writeExpressProject(root: string, runtime = false): Promise<void>
       scripts: { start: "node src/server.mjs" },
       dependencies: {
         express: "5.1.0",
-        "@hue-run/sdk": "0.4.0",
+        "@hue-run/sdk": "0.4.1",
         "@opentelemetry/api": "1.9.1",
         "@opentelemetry/context-async-hooks": "2.11.0",
       },
@@ -242,7 +242,7 @@ describe("supported application matrix", () => {
       await installSetupRuntime(project, plan, async (command) => {
         commands.push(command);
         const updated = JSON.parse(await readFile(manifestPath, "utf8"));
-        updated.dependencies["@hue-run/sdk"] = "0.4.0";
+        updated.dependencies["@hue-run/sdk"] = "0.4.1";
         await writeFile(manifestPath, JSON.stringify(updated));
       }),
     ).toBe(true);
@@ -255,7 +255,7 @@ describe("supported application matrix", () => {
           "--ignore-scripts",
           "--no-audit",
           "--no-fund",
-          "@hue-run/sdk@0.4.0",
+          "@hue-run/sdk@0.4.1",
           "@opentelemetry/api@1.9.1",
           "@opentelemetry/context-async-hooks@2.11.0",
         ],
@@ -287,7 +287,7 @@ describe("supported application matrix", () => {
     await installSetupRuntime(bunProject, bunPlan, async (command) => {
       bunCommand = command;
       const updated = JSON.parse(await readFile(bunManifestPath, "utf8"));
-      updated.dependencies["@hue-run/sdk"] = "0.4.0";
+      updated.dependencies["@hue-run/sdk"] = "0.4.1";
       await writeFile(bunManifestPath, JSON.stringify(updated));
     });
     expect(bunCommand).toMatchObject({
@@ -298,7 +298,7 @@ describe("supported application matrix", () => {
         "add",
         "--exact",
         "--ignore-scripts",
-        "@hue-run/sdk@0.4.0",
+        "@hue-run/sdk@0.4.1",
         "@opentelemetry/api@1.9.1",
         "@opentelemetry/context-async-hooks@2.11.0",
       ],
