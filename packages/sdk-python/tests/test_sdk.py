@@ -100,6 +100,16 @@ def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
     assert "mcp.server.name" not in attrs(unlabeled)
 
 
+def test_disabled_client_does_not_count_invalid_mcp(receiver):
+    hue = Hue(receiver.url, KEY, capture_content=False, enabled=False)
+    with hue.tool("get_thread", mcp={"name": ""}):
+        pass
+    with hue.tool("get_thread", mcp="gmail"):
+        pass
+    assert hue.export_status.instrumentation_failures == 0
+    assert hue.shutdown()
+
+
 def test_inference_log_carries_request_metadata_and_a_structured_body(receiver):
     with Hue(receiver.url, KEY, capture_content=True) as hue:
         with hue.context(session_id="session-attributes"), hue.span("request") as root:

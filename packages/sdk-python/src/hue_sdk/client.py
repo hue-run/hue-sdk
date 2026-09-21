@@ -583,9 +583,9 @@ class Hue:
                         continue
                     if _is_label(value):
                         attributes[key] = value
-                    else:
+                    elif self._active:
                         self._record_issue()
-            else:
+            elif self._active:
                 self._record_issue()
         with self.span(f"execute_tool {name}", attributes=attributes, _category="tool") as span:
             yield span
