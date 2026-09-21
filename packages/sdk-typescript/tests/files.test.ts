@@ -9,6 +9,7 @@ import {
   builtins,
   createEvaluationClient,
   defineLocalScorer,
+  HueApiError,
   registeredCapabilities,
   runExperiment,
   runLocalAgent,
@@ -1096,6 +1097,38 @@ describe("file-based cases", () => {
         await hue.shutdown();
         f.server.stop(true);
       }
+    }
+  });
+
+  test("upload capabilities are refused when they carry credentials, fragments or no headers", async () => {
+    const f = fixture({ scorers: [] });
+    const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl });
+    const bytes = Buffer.from("letter");
+    const valid = { method: "PUT" as const, headers: { "content-type": docx }, expiresAt: "" };
+    try {
+      for (const uploadUrl of [
+        `${f.baseUrl.replace("http://", "http://user:secret@")}/blob/x`,
+        `${f.baseUrl}/blob/x#fragment`,
+        "http://169.254.169.254/blob/x",
+      ])
+        await expect(
+          client.uploadArtifactBytes({ ...valid, uploadUrl }, bytes),
+        ).rejects.toBeInstanceOf(HueApiError);
+      for (const headers of [null, undefined, "content-type: x", { cookie: "session" }])
+        await expect(
+          client.uploadArtifactBytes(
+            { ...valid, uploadUrl: `${f.baseUrl}/blob/x`, headers: headers as never },
+            bytes,
+          ),
+        ).rejects.toBeInstanceOf(HueApiError);
+      await expect(
+        client.uploadArtifactBytes(
+          { ...valid, uploadUrl: `${f.baseUrl}/blob/x`, method: "POST" as never },
+          bytes,
+        ),
+      ).rejects.toBeInstanceOf(HueApiError);
+    } finally {
+      f.server.stop(true);
     }
   });
 

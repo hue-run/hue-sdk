@@ -190,7 +190,12 @@ export class EvaluationClient {
     const url = new URL(upload.uploadUrl);
     if (url.protocol !== "https:" && !/^(localhost|127\.0\.0\.1)$/.test(url.hostname))
       throw new HueApiError();
+    // The capability is a signed URL issued by Hue: refuse anything that smuggles credentials or
+    // a fragment, and treat a malformed header map as an invalid capability rather than a crash.
+    if (url.username || url.password || url.hash) throw new HueApiError();
     if (
+      typeof upload.headers !== "object" ||
+      upload.headers === null ||
       Object.keys(upload.headers).some((name) => /^(authorization|cookie)$/i.test(name)) ||
       upload.method !== "PUT"
     )
