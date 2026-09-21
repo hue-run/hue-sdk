@@ -229,11 +229,15 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+### [0.2.3] - 2026-09-21
+
 #### Added
 
 - `hue.tool(..., mcp={"name", "version"})` records the MCP `initialize` `serverInfo` as
   `mcp.server.name` and `mcp.server.version`, matching TypeScript `hue.tool(..., { mcp })`.
   **Wire**
+
+No registry release is claimed until publication and registry acceptance complete.
 
 ### [0.2.2](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.2.2) - 2026-09-18
 

@@ -43,7 +43,7 @@ The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: 
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
 not a completed integration. TypeScript uses `@hue-run/sdk@0.4.1`, `@opentelemetry/api@1.9.1` and
-`@opentelemetry/context-async-hooks@2.11.0`; Python uses `hue-run==0.2.2`.
+`@opentelemetry/context-async-hooks@2.11.0`; Python uses published `hue-run==0.2.2`.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
 The generated bootstrap supplies standard active SERVER-span context across asynchronous/streaming
@@ -172,7 +172,7 @@ capability `setup_telemetry_write`.
 Normal project credentials and unknown token shapes are refused in setup responses and private
 managed state. These credentials authorize metadata-only OTLP at `/api/v1/otlp/v1/traces` and exact
 content-free receipt verification at `/api/v1/setup/traces/{traceId}/receipt`. They do not authorize
-generic project, receipt, evaluation, log or browsing APIs. Python `0.2.2` can export with the setup
+generic project, receipt, evaluation, log or browsing APIs. Published Python `0.2.2` can export with the setup
 credential; the CLI verifies the dedicated setup receipt instead of Python's generic receipt helper.
 
 Each command uses bounded timeouts and retries. Provisioning records at most five attempts per local

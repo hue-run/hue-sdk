@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -31,7 +32,12 @@ class DocumentationContractTests(unittest.TestCase):
             "McpServerInfo",
             contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk"]["publicExports"],
         )
-        self.assertEqual(contract["packages"]["python"]["version"], "0.2.2")
+        self.assertEqual(
+            contract["packages"]["python"]["version"],
+            tomllib.loads((ROOT / "packages/sdk-python/pyproject.toml").read_text())["project"][
+                "version"
+            ],
+        )
         self.assertIn(
             "createHue",
             contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk"]["publicExports"],
