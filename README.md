@@ -52,7 +52,7 @@ npm install @hue-run/sdk
 bun add @hue-run/sdk
 ```
 
-The reviewed `0.4.0` candidate is preparing a deliberately narrow one-command onboarding path:
+The one-command onboarding path shipped in TypeScript `0.4.0`:
 
 ```sh
 npx --yes @hue-run/sdk@latest setup --agent
@@ -86,9 +86,8 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 The published TypeScript package is [`0.3.2`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2), including `runLocalAgent()`, V2 environments,
 forward-compatible scorer deferral and the local [setup CLI core](./packages/sdk-typescript/CLI.md).
 Finalization accepts server-confirmed expired worlds as sealed while preserving target errors
-and avoiding target replay. This checkout prepares the breaking TypeScript `0.4.0` release with the
-real [one-command setup CLI](./packages/sdk-typescript/CLI.md). The setup additions require the
-new public release before applications can install them by version. Python remains published at
+and avoiding target replay. This checkout prepares TypeScript `0.4.1`, which records MCP
+`initialize` server identity on tool spans. Python remains published at
 `0.2.2` and has no native local worker API. Package checks use synthetic local services.
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.

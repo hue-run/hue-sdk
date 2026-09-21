@@ -161,6 +161,16 @@ await tools.refund_charge!.execute({ charge_id: "ch_2" });
 await client.finishRun(run.id, { idempotencyKey: randomUUID(), status: "completed" });
 ```
 
+Each bound call is an ordinary `hue.tool` span. When the catalog names an MCP server, the span
+also carries `mcp.server.name`. Wrap any MCP client the same way, using `serverInfo` from
+`initialize` — this is not specific to Hue-hosted Gmail or Slack:
+
+```ts
+await hue.tool(name, args, () => client.callTool({ name, arguments: args }), {
+  mcp: client.getServerVersion(),
+});
+```
+
 An observation with `status: "error"` is a recorded world answer, not a transport exception.
 Run mutations retry with stable invocation/idempotency identities. Registry writes do not retry
 automatically because identity creation and publication have no request key.

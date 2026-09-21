@@ -120,6 +120,7 @@
             "HueTraceVerificationError",
             "HueTransport",
             "JsonValue",
+            "McpServerInfo",
             "ModelOptions",
             "ProjectConnection",
             "RecordValue",
@@ -129,6 +130,7 @@
             "Signal",
             "SpanOptions",
             "TokenUsage",
+            "ToolOptions",
             "TraceReceipt",
             "TraceReceiptField",
             "TraceVerification",
@@ -393,7 +395,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.4.0"
+      "version": "0.4.1"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -402,10 +404,10 @@
     "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.4.0"
+      "version": "0.4.1"
     },
     "name": "hue",
-    "sha256": "sha256:609a3a7a1dced8f8b336778643b2d19885adb0838516090c73a20816b315b93d",
+    "sha256": "sha256:a96b309249b73dc20d2cc464343aa8905c41a1b0797ddd4f9af48233a9cbdf5a",
     "source": "skills/hue/SKILL.md"
   }
 }

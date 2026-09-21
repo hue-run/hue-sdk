@@ -29,7 +29,12 @@ export interface BindEnvironmentToolsOptions {
   invocationId?(action: string): string;
 }
 
-/** Binds a run's generated catalog to plain local callables without changing the agent framework. */
+/**
+ * Binds a run's generated catalog to plain local callables without changing the agent
+ * framework. Each call is recorded through {@link HueClient.tool}. Catalog entries that
+ * include `mcp` stamp `mcp.server.name` / `mcp.server.version` so a generic verb is
+ * attributed to that MCP server.
+ */
 export function bindEnvironmentTools(
   options: BindEnvironmentToolsOptions,
 ): Record<string, EnvironmentTool> {
@@ -51,6 +56,7 @@ export function bindEnvironmentTools(
           ).observation;
         return options.hue.tool(action.name, args, execute, {
           parentContext: options.parentContext,
+          ...(action.mcp === undefined ? {} : { mcp: action.mcp }),
         });
       },
     };

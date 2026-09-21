@@ -302,6 +302,41 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("tool records the MCP server that handled the call", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "mcp-tool-source",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      expect(
+        await hue.tool("get_thread", { thread_id: "t1" }, () => "ok", {
+          mcp: { name: "gmail", version: "1.2.3" },
+        }),
+      ).toBe("ok");
+      expect(
+        await hue.tool("get_thread", { thread_id: "t2" }, () => "ok", {
+          mcp: { name: "" },
+        }),
+      ).toBe("ok");
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(1);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const labeled = spans.find((span) => span.name === "execute_tool get_thread")!;
+      expect(attr(labeled, "gen_ai.tool.name")?.stringValue).toBe("get_thread");
+      expect(attr(labeled, "mcp.server.name")?.stringValue).toBe("gmail");
+      expect(attr(labeled, "mcp.server.version")?.stringValue).toBe("1.2.3");
+      const unlabeled = spans.filter((span) => span.name === "execute_tool get_thread")[1]!;
+      expect(attr(unlabeled, "mcp.server.name")).toBeUndefined();
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({
