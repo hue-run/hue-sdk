@@ -83,8 +83,8 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is [`0.4.0`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.4.0), including `runLocalAgent()`, V2 environments,
-forward-compatible scorer deferral and the [one-command setup CLI](./packages/sdk-typescript/CLI.md).
+The published TypeScript package is [`0.3.2`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2), including `runLocalAgent()`, V2 environments,
+forward-compatible scorer deferral and the local [setup CLI core](./packages/sdk-typescript/CLI.md).
 Finalization accepts server-confirmed expired worlds as sealed while preserving target errors
 and avoiding target replay. This checkout prepares TypeScript `0.4.1`, which records MCP
 `initialize` server identity on tool spans. Python remains published at
