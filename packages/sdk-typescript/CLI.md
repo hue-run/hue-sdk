@@ -111,6 +111,8 @@ hue claim --restart       # explicit owner recovery; requires an interactive loc
 hue setup --agent         # noninteractive version-2 JSONL events
 hue setup --format human  # explicit append-only terminal rendering
 hue setup --origin http://127.0.0.1:PORT # isolated loopback tests only
+hue login                 # validate keys created in Hue and store them in ./.env.hue
+hue mcp install --client claude-code # write the Hue MCP configuration for a coding agent
 ```
 
 Hosted setup accepts HTTPS origins only. HTTP is accepted solely for `localhost`, `127.0.0.1` and
@@ -137,6 +139,60 @@ explicitly replace an expired or lost handoff with `hue claim --restart`; this p
 uses the observed predecessor for compare-and-swap. A conflict refreshes status once and stops.
 At most 32 distinct handoff IDs exist per installation; `SETUP_HANDOFF_LIMIT` is terminal. Replacing a
 handoff does not create a trial, reset quota or rerun business work.
+
+## Sign in and store keys
+
+`hue login` stores keys that a person creates in Hue; it never mints one, because setup
+credentials are deliberately isolated from ordinary project keys. It prints the key settings page
+(`<origin>/settings/integrations`, opened in a browser only when a terminal is attached and
+`--no-browser` is absent), then reads each requested key from stdin without echo. A
+**Tracing and evaluations** key is validated with `GET /api/v1/projects/current` and stored as
+`HUE_API_KEY` with `HUE_BASE_URL`; a **Coding agent (read + evaluations)** key is validated with an
+MCP `tools/list` request and stored as `HUE_MCP_KEY` with `HUE_MCP_URL`. A rejected key (`401` or
+`403`) exits `1` and stores nothing for that key.
+
+```sh
+hue login                                  # both keys into ./.env.hue
+hue login --keys coding-agent --gitignore  # only HUE_MCP_KEY; add .env.hue to .gitignore
+hue login --origin https://staging.hue.run --env-file .env.staging
+```
+
+The env file is written with mode `0600` through a temporary file and an atomic rename. Other
+lines are preserved; a symlink or a non-regular file is refused; an existing different value is
+replaced only with `--force`. Empty values, whitespace and URLs are refused before any request.
+The MCP endpoint is `https://mcp.hue.run/mcp` for `https://app.hue.run`,
+`https://mcp.staging.hue.run/mcp` for `https://staging.hue.run` and `<origin>/api/mcp` otherwise;
+plain HTTP origins are accepted for loopback test servers only. Output names variables and lengths
+(`Stored HUE_API_KEY (NN chars)`), never values. When git does not ignore the env file, the command
+warns; `--gitignore` appends the file name to the `.gitignore` next to it. Exit codes: `0` stored,
+`1` failed, `2` usage error, `130` interrupted.
+
+## Install the MCP for your coding agent
+
+`hue mcp install --client <name>` writes, runs or prints the configuration for Hue's MCP server.
+Every shape matches the snippet Hue shows in Settings: server name `hue`, the endpoint (default
+`https://mcp.hue.run/mcp`; `--url https://mcp.staging.hue.run/mcp` for staging) and a reference to
+the `HUE_MCP_KEY` environment variable. A key value is never written.
+
+| Client | Result |
+| --- | --- |
+| `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. |
+| `cursor` | Merges `mcpServers.hue` into `./.cursor/mcp.json` with `${env:HUE_MCP_KEY}`. |
+| `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. |
+| `vscode` | Merges `servers.hue` and the `hue-mcp-key` password input into `./.vscode/mcp.json`. |
+| `windsurf` | Prints the `serverUrl` snippet for `~/.codeium/windsurf/mcp_config.json`; nothing is written to the home directory. |
+| `gemini` | Runs `gemini mcp add --transport http hue URL -H 'Authorization: Bearer $HUE_MCP_KEY'`, or prints it. |
+
+JSON files are parsed and merged: other servers, inputs and top-level fields are kept, only the
+`hue` entry is replaced, and invalid JSON (including comments) is refused together with the snippet
+to add by hand. Files are written with mode `0644` through a temporary file and an atomic rename;
+symlinks are refused. `--dry-run` prints the resulting file content or command without writing or
+running; `--print` prints only the snippet. Client CLIs run without a shell, so the
+`${HUE_MCP_KEY}` and `$HUE_MCP_KEY` references reach them literally; the printed commands use
+single quotes for the same reason. After installation the command reminds you to export
+`HUE_MCP_KEY` in the shell that starts the client (VS Code prompts for the key instead) and prints
+the verification prompt: `Use the Hue MCP: call get_project_context, then show my 5 most recent
+error traces with links.` Exit codes: `0` done or printed, `1` failed, `2` usage error.
 
 ## Local state and conflicts
 
