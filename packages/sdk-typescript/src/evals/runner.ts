@@ -130,6 +130,7 @@ function neededInputFiles(
     : files.filter((file) => (targetFileRoles as readonly string[]).includes(file.role));
 }
 
+/** Immutable case context passed to a direct experiment target. */
 export interface RunExperimentTargetContext {
   /** Frozen experiment configuration, validated as JSON. */
   config: JsonValue;
