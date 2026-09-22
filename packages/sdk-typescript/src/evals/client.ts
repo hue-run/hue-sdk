@@ -14,6 +14,8 @@ import {
 import type {
   ArtifactReservation,
   ArtifactUpload,
+  CaseConversion,
+  CaseConversionSummary,
   CaseWrite,
   CompleteExecution,
   Completion,
@@ -581,6 +583,14 @@ export class EvaluationClient {
       /** Acknowledged terminal queue state. */
       state: "completed" | "attention";
     }>("POST", "/local-agent-worker/runs/complete", input);
+  }
+  /** Lists Scenarios (draft and published) of the project; requires a Tracing and evaluations key. */
+  listCaseConversions(page?: PageOptions) {
+    return this.request<Page<CaseConversionSummary>>("GET", `/case-conversions${this.page(page)}`);
+  }
+  /** Reads one Scenario with its immutable publication pins. */
+  getCaseConversion(id: string) {
+    return this.request<CaseConversion>("GET", `/case-conversions/${uuid(id)}`);
   }
   /** Creates the legacy execution-scoped generic MCP capability for one world. */
   createSimulationMcpCapability(input: { runId: string; executionId: string }) {

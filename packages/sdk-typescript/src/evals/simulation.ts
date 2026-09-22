@@ -50,13 +50,25 @@ export interface RepositorySimulationCase {
   /** Optional caller-owned case metadata. */
   metadata?: Record<string, JsonValue>;
 }
-/** Immutable app-authored experiment reference or repository-authored simulation definition. */
+/** Immutable app-authored experiment reference, published pins or repository-authored definition. */
 export type SimulationDefinition =
   | {
       /** Select an existing app-authored immutable experiment template. */
       kind: "experiment";
       /** Experiment to clone into a fresh attempt. */
       experimentId: string;
+    }
+  | {
+      /** Run already published immutable pins, such as a Scenario's frozen case and outcome checks. */
+      kind: "pins";
+      /** Frozen dataset version whose cases pin their simulated-world versions. */
+      datasetVersionId: string;
+      /** Immutable scorer versions to pin; Hue-executed pins need no local callback. */
+      scorerVersionIds: string[];
+      /** JSON configuration passed to every target callback; defaults to `{}`. */
+      config?: JsonValue;
+      /** Experiment display name; defaults to the dataset name, then `Simulation`. */
+      name?: string;
     }
   | {
       /** Publish and resolve the repository-authored definition. */
@@ -286,6 +298,14 @@ export type SimulationScenario = SimulationDefinition;
 
 function definitionIdentity(definition: SimulationDefinition): JsonValue {
   if (definition.kind === "experiment") return definition;
+  // The display name is cosmetic; the pins and configuration define the immutable selection.
+  if (definition.kind === "pins")
+    return json({
+      kind: definition.kind,
+      datasetVersionId: definition.datasetVersionId,
+      scorerVersionIds: [...definition.scorerVersionIds].sort(),
+      config: definition.config ?? {},
+    });
   return json(
     {
       kind: definition.kind,
@@ -587,6 +607,16 @@ async function resolveDataset(
   }
 }
 
+/** Display name of the dataset owning a version, or undefined when it cannot be read. */
+async function datasetName(client: EvaluationClient, versionId: string) {
+  try {
+    const version = await client.getDatasetVersion(versionId);
+    return (await client.getDataset(version.datasetId)).name;
+  } catch {
+    return undefined;
+  }
+}
+
 async function allCases(client: EvaluationClient, versionId: string) {
   const items = [];
   let after: string | undefined;
@@ -600,7 +630,7 @@ async function allCases(client: EvaluationClient, versionId: string) {
 
 async function resolveExperiment(
   options: RunSimulationOptions,
-  definition: SimulationDefinition & { kind: "repository" | "experiment" },
+  definition: SimulationDefinition,
   idempotencyKey: string,
 ): Promise<{ experimentId: string; bindings: LocalScorer[] }> {
   if (definition.kind === "experiment") {
@@ -611,6 +641,22 @@ async function resolveExperiment(
       datasetVersionId: source.datasetVersionId,
       scorerVersionIds: source.evaluation.scorerVersions.map((item) => item.id),
       config: source.config,
+    });
+    return { experimentId: created.id, bindings: options.localScorers ?? [] };
+  }
+  if (definition.kind === "pins") {
+    const { datasetVersionId, scorerVersionIds } = definition;
+    if (!scorerVersionIds.length) throw new TypeError("Pinned scenarios require a scorer version");
+    const created = await options.client.createExperiment({
+      idempotencyKey,
+      name:
+        options.runName ??
+        definition.name ??
+        (await datasetName(options.client, datasetVersionId)) ??
+        "Simulation",
+      datasetVersionId,
+      scorerVersionIds: [...scorerVersionIds],
+      config: definition.config ?? {},
     });
     return { experimentId: created.id, bindings: options.localScorers ?? [] };
   }
@@ -643,6 +689,8 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
   if (!definition) throw new TypeError("runSimulation requires a definition");
   if (options.definition && options.scenario && options.definition !== options.scenario)
     throw new TypeError("Pass either definition or scenario, not both");
+  if (definition.kind === "pins" && !definition.scorerVersionIds.length)
+    throw new TypeError("Pinned scenarios require a scorer version");
   if (!options.definition && !scenarioDeprecationWarned) {
     scenarioDeprecationWarned = true;
     process.emitWarning(

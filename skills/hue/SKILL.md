@@ -148,6 +148,37 @@ If the [Hue MCP server](https://docs.hue.run/agents/mcp-server) is connected (to
 
 Summarize the installed version, changed files, configuration names, capture policy, checks run, and delivery evidence. Separate locally tested behavior, collector acknowledgement, stored receipt evidence, and content inspected in Hue. State remaining access or verification steps without claiming success.
 
+## Evaluate against a Scenario
+
+When the user asks to evaluate or regression-test their agent against a Hue Scenario, use this loop.
+Hue never executes the agent: it runs in the user's process, and Hue only hosts the isolated
+simulated world and grades the sealed outcome. Scenario review and publication stay in the Hue UI.
+
+1. Find the published Scenario with the Hue MCP tools `list_scenarios` and `get_scenario`, or use
+   the Scenario URL the user pastes.
+2. Check `list_local_agents`. If no agent is online, run the evaluation from the shell:
+
+   ```sh
+   hue eval --scenario "<name>" ./hue-agent.ts --env-file .env.hue
+   ```
+
+   `hue-agent.ts` exports `runMyAgent(inputs, context)` and hands `context.mcp` or `context.tools`
+   to the real agent's tool boundary. The **Tracing and evaluations** key comes from `hue login`
+   into an ignored env file such as `.env.hue`; never print it, paste it into chat or commit it.
+3. Read the printed run URL and the per-case PASS/FAIL checks. Investigate with `get_experiment`
+   (`include_failing_cases`), `get_experiment_item` and `get_trace`, change the agent, and rerun with
+   `--baseline <previous experiment id>` to see improvements and regressions.
+4. To let the Run button and `launch_local_run` use this agent, start a worker instead:
+
+   ```sh
+   hue eval --worker ./hue-agent.ts --env-file .env.hue
+   ```
+
+Exit code 0 means every case passed; 1 means a case failed, errored or Hue's checks were still
+pending; 2 is a usage error. Content capture stays off unless `--content` is passed, and in
+one-shot mode so does persisting case outputs and explanations to Hue; `--worker` always persists
+them so a run launched from Hue can be read on its run page. Report the run URL and the printed verdicts; do not claim a pass without them.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

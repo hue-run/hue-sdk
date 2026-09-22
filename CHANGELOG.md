@@ -12,6 +12,26 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- `hue eval` runs a local adapter file or shell command against a published Scenario or a saved
+  eval set through `runSimulation()`, or as an outbound worker through `runLocalAgent()`. It
+  resolves Scenarios by name, ID or URL, creates a fresh experiment from the published pins, prints
+  the run URL and per-case PASS/FAIL verdicts once Hue's outcome checks finish, compares against a
+  `--baseline` experiment, emits `--json`, and exits 0, 1, 2 or 130. `HUE_API_KEY` must be a
+  Tracing and evaluations key and is never printed; content capture stays off unless `--content`
+  is passed, and in one-shot mode so does persisting case outputs and explanations (`--worker`
+  keeps `runLocalAgent()`'s existing behavior of persisting them). A timed-out or interrupted
+  `--command` agent is stopped by process group and then SIGKILL, and an interrupt during the
+  verdict wait exits 130. Existing `setup`, `resume`, `status` and `claim` behavior and the
+  JSONL event contract are unchanged.
+- `runSimulation()` accepts `scenario: { kind: "pins", datasetVersionId, scorerVersionIds, config?, name? }`
+  for already published immutable pins; the checkpoint identity binds those pins.
+- `@hue-run/sdk/evals` exports `listScenarios`, `getScenario`, `resolveScenarioPins`,
+  `resolveEvalSetPins`, `parseScenarioSelector` and `matchByName`, the `EvaluationClient` methods
+  `listCaseConversions` and `getCaseConversion`, and the verdict helpers `waitForResults`,
+  `summarizeVerdicts`, `compareVerdicts`, `collectExperimentVerdicts` and `metricPassed`, with
+  their types.
+- The portable skill gains an "Evaluate against a Scenario" section describing the `hue eval` loop
+  for coding agents.
 - `runExperiment()` runs file-based cases. Before an execution exists it downloads every pinned
   `inputFiles` entry of the frozen case, verifies its byte count and SHA-256, and passes the
   agent-visible roles (`source`, `attached_template`, `attached_reference`, `original`) as

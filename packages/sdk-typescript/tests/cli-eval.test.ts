@@ -1,0 +1,1104 @@
+import { describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
+
+const cli = join(import.meta.dir, "../src/setup/cli.ts");
+const key = "synthetic-eval-key-canary";
+const mcpToken = "hue_sim_synthetic_token_canary";
+const digest = "d".repeat(64);
+const SPAWN_TIMEOUT = 90_000;
+
+type Verdict = "pass" | "fail" | "error" | "none";
+
+/** Loopback Hue stand-in: one published Scenario, worlds, executions and deferred verdicts. */
+function hueStandIn(options: { verdict?: Verdict; deferredPolls?: number; frozen?: boolean } = {}) {
+  const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
+  const projectId = randomUUID();
+  const environmentId = randomUUID();
+  const environmentVersionId = randomUUID();
+  const dataset = {
+    id: randomUUID(),
+    name: "Refund flow",
+    slug: "refund-flow",
+    archivedAt: null,
+    versions: [
+      {
+        id: randomUUID(),
+        datasetId: "",
+        version: 1,
+        revision: 2,
+        frozenAt: options.frozen === false ? null : "2026-09-18T00:00:00.000Z",
+        contentDigest: options.frozen === false ? null : digest,
+      },
+    ],
+  };
+  dataset.versions[0]!.datasetId = dataset.id;
+  const version = dataset.versions[0]!;
+  const frozenCase = {
+    id: randomUUID(),
+    externalKey: "refund",
+    inputs: { task: "refund charge ch_2" },
+    expected: "saved",
+    metadata: { suite: "billing" },
+    datasetVersionId: version.id,
+    environmentVersionId,
+    hasExpected: true,
+  };
+  const scorerId = randomUUID();
+  const scorerVersion = {
+    id: randomUUID(),
+    contentDigest: digest,
+    definition: {
+      kind: "world_outcome",
+      entry: "hue.conversion_outcome.v1",
+      metrics: [
+        { name: "refund_recorded", type: "boolean" },
+        { name: "tone", type: "text" },
+      ],
+    },
+  };
+  const scenario = {
+    id: randomUUID(),
+    domain: "billing",
+    status: "published",
+    revision: 1,
+    createdAt: "2026-09-18T00:00:00.000Z",
+    traceId: randomUUID(),
+    publication: {
+      caseId: frozenCase.id,
+      datasetId: dataset.id,
+      datasetVersionId: version.id,
+      environmentId,
+      environmentVersionId,
+      scorerId,
+      scorerVersionId: scorerVersion.id,
+    },
+  };
+  const draftScenario = { ...scenario, id: randomUUID(), status: "draft", publication: null };
+  const experiments = new Map<string, Experiment>();
+  const executions = new Map<string, Execution & { experimentId: string; caseId: string }>();
+  const worlds = new Map<
+    string,
+    { id: string; executionId: string; status: string; steps: Record<string, unknown>[] }
+  >();
+  const subjects = new Map<string, Subject>();
+  const runItems = new Map<
+    string,
+    { id: string; subjectId: string; hasOutput: boolean; traceSnapshotId: string | null }[]
+  >();
+  const results = new Map<string, StoredResult[]>();
+  const resultPolls = new Map<string, number>();
+  const calls = {
+    requests: [] as string[],
+    otlp: 0,
+    frozen: [] as number[],
+    completions: [] as Record<string, unknown>[],
+    experiments: [] as Record<string, unknown>[],
+    register: [] as Record<string, unknown>[],
+    claims: 0,
+    localRuns: [] as Record<string, unknown>[],
+  };
+  const queue: { runId: string; experimentId: string; state: string; workerId?: string }[] = [];
+  const agentId = randomUUID();
+  function createExperiment(body: Record<string, unknown>) {
+    const experiment = {
+      id: randomUUID(),
+      name: String(body.name),
+      datasetVersionId: String(body.datasetVersionId),
+      config: (body.config ?? {}) as Experiment["config"],
+      configDigest: digest,
+      evaluation: {
+        id: randomUUID(),
+        name: "default",
+        scorerVersions: (body.scorerVersionIds as string[]).map((id) => ({
+          ...scorerVersion,
+          id,
+        })) as Experiment["evaluation"]["scorerVersions"],
+        itemCount: 1,
+        scores: { scored: 0, error: 0, skipped: 0, pending: 1 },
+      },
+      caseCount: 1,
+      finishedAt: null,
+      execution: { unstarted: 1, started: 0, uncertain: 0, succeeded: 0, error: 0, cancelled: 0 },
+    } satisfies Experiment;
+    experiments.set(experiment.id, experiment);
+    runItems.set(experiment.evaluation.id, []);
+    results.set(experiment.evaluation.id, []);
+    return experiment;
+  }
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      const path = url.pathname.replace("/api/v1", "");
+      calls.requests.push(`${request.method} ${path}`);
+      if (request.headers.get("authorization") !== `Bearer ${key}`)
+        return new Response(null, { status: 401 });
+      if (path === "/projects/current")
+        return Response.json({
+          id: projectId,
+          name: "Synthetic",
+          slug: "synthetic",
+          organizationId: randomUUID(),
+        });
+      if (path.startsWith("/otlp/")) {
+        calls.otlp++;
+        await request.arrayBuffer();
+        return new Response(new Uint8Array(), {
+          headers: { "Content-Type": "application/x-protobuf" },
+        });
+      }
+      const body =
+        request.method === "GET" ? {} : ((await request.json()) as Record<string, unknown>);
+      if (path === "/case-conversions") {
+        const summaries = [scenario, draftScenario].map(({ publication: _pins, ...item }) => item);
+        return Response.json({ items: summaries, nextCursor: null });
+      }
+      if (path === `/case-conversions/${scenario.id}`) return Response.json(scenario);
+      if (path === `/case-conversions/${draftScenario.id}`) return Response.json(draftScenario);
+      if (path === "/datasets") {
+        const { versions: _versions, ...summary } = dataset;
+        return Response.json({ items: [summary], nextCursor: null });
+      }
+      if (path === `/datasets/${dataset.id}`) return Response.json(dataset);
+      if (path === `/dataset-versions/${version.id}`) return Response.json(version);
+      if (path === `/dataset-versions/${version.id}/freeze`) {
+        calls.frozen.push(Number(body.expectedRevision));
+        if (body.expectedRevision !== version.revision) return new Response(null, { status: 409 });
+        version.frozenAt = new Date().toISOString();
+        version.contentDigest = digest;
+        version.revision++;
+        return Response.json(version);
+      }
+      if (path === "/experiments") {
+        calls.experiments.push(body);
+        if (body.datasetVersionId !== version.id) return new Response(null, { status: 404 });
+        if (!version.frozenAt) return new Response(null, { status: 409 });
+        const experiment = createExperiment(body);
+        return Response.json({ id: experiment.id, evaluationRunId: experiment.evaluation.id });
+      }
+      const experimentMatch =
+        /^\/experiments\/([^/]+)(?:\/items(?:\/([^/]+)(?:\/(start))?)?|\/(finish))?$/.exec(path);
+      if (experimentMatch) {
+        const experiment = experiments.get(experimentMatch[1]!);
+        if (!experiment) return new Response(null, { status: 404 });
+        if (experimentMatch[4]) {
+          experiment.finishedAt = new Date().toISOString();
+          return Response.json({ id: experiment.id, finishedAt: experiment.finishedAt });
+        }
+        if (experimentMatch[3]) {
+          const existing = [...executions.values()].find(
+            (execution) =>
+              execution.experimentId === experiment.id && execution.caseId === frozenCase.id,
+          );
+          if (existing) return Response.json(existing);
+          const execution = {
+            id: randomUUID(),
+            attempt: 1,
+            state: "started" as const,
+            traceExternalId: String(body.traceExternalId),
+            experimentId: experiment.id,
+            caseId: frozenCase.id,
+          };
+          executions.set(execution.id, execution);
+          return Response.json(execution);
+        }
+        if (experimentMatch[2]) {
+          if (experimentMatch[2] !== frozenCase.id) return new Response(null, { status: 404 });
+          return Response.json(frozenCase);
+        }
+        if (path.endsWith("/items"))
+          return Response.json({
+            items: [
+              {
+                id: frozenCase.id,
+                externalKey: frozenCase.externalKey,
+                hasExpected: true,
+                execution:
+                  [...executions.values()].find(
+                    (execution) => execution.experimentId === experiment.id,
+                  ) ?? null,
+              },
+            ],
+            nextCursor: null,
+          });
+        return Response.json(experiment);
+      }
+      if (path === "/environment-runs") {
+        const world = {
+          id: randomUUID(),
+          executionId: String(body.executionId),
+          status: "open",
+          steps: [] as Record<string, unknown>[],
+        };
+        worlds.set(world.id, world);
+        return Response.json({
+          id: world.id,
+          environmentVersionId,
+          clockNs: "0",
+          stateDigest: digest,
+          maxSteps: 50,
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          actions: [
+            {
+              name: "save",
+              description: "Record the refund",
+              inputSchema: {
+                type: "object",
+                properties: { note: { type: "string" } },
+                required: [],
+                additionalProperties: false,
+              },
+            },
+          ],
+        });
+      }
+      const worldMatch = /^\/environment-runs\/([^/]+)(?:\/(actions|finish))?$/.exec(path);
+      if (worldMatch) {
+        const world = worlds.get(worldMatch[1]!);
+        if (!world) return new Response(null, { status: 404 });
+        if (worldMatch[2] === "actions") {
+          if (world.status !== "open") return new Response(null, { status: 409 });
+          world.steps.push({ action: body.action, args: body.args });
+          return Response.json({
+            runId: world.id,
+            stepOrdinal: world.steps.length - 1,
+            observation: { status: "ok", data: { recorded: true } },
+            effects: [],
+            stateDigest: digest,
+            clockNs: String(world.steps.length),
+            replayed: false,
+            stepsRemaining: 50 - world.steps.length,
+          });
+        }
+        if (worldMatch[2] === "finish") {
+          if (world.status !== "open") return new Response(null, { status: 409 });
+          world.status = String(body.status);
+          return Response.json({
+            id: world.id,
+            status: world.status,
+            stepCount: world.steps.length,
+            stateDigest: digest,
+            sealedAt: new Date().toISOString(),
+          });
+        }
+        return Response.json({
+          id: world.id,
+          environmentVersionId,
+          executionId: world.executionId,
+          seed: "e".repeat(32),
+          status: world.status,
+          stepCount: world.steps.length,
+          maxSteps: 50,
+          clockNs: "0",
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          createdAt: new Date().toISOString(),
+          sealedAt: world.status === "open" ? null : new Date().toISOString(),
+          stateDigest: digest,
+          finalState: { collections: {} },
+          validity: "not_assessed",
+          coverageGap: null,
+        });
+      }
+      if (path === "/local-agent-worker/mcp-capability")
+        return Response.json({
+          url: `${url.origin}/api/v1/simulation-mcp/${String(body.runId)}`,
+          token: mcpToken,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        });
+      if (path === "/local-agent-worker/register") {
+        calls.register.push(body);
+        return Response.json({
+          id: agentId,
+          ...body,
+          enabled: true,
+          lastSeenAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        });
+      }
+      if (path === "/local-agent-worker/claim") {
+        calls.claims++;
+        const queued = queue.find((item) => item.state === "queued");
+        if (!queued) return Response.json(null);
+        queued.state = "claimed";
+        queued.workerId = String(body.workerId);
+        return Response.json({ runId: queued.runId, experimentId: queued.experimentId });
+      }
+      if (path === "/local-agent-worker/runs/heartbeat")
+        return Response.json({ runId: body.runId, active: true });
+      if (path === "/local-agent-worker/runs/complete") {
+        calls.localRuns.push(body);
+        const claimed = queue.find((item) => item.runId === body.runId);
+        if (claimed) claimed.state = String(body.state);
+        return Response.json({ runId: body.runId, state: body.state });
+      }
+      const executionMatch = /^\/experiment-executions\/([^/]+)(\/complete)?$/.exec(path);
+      if (executionMatch) {
+        const execution = executions.get(executionMatch[1]!);
+        if (!execution) return new Response(null, { status: 404 });
+        if (!executionMatch[2]) return Response.json(execution);
+        const world = [...worlds.values()].find((item) => item.executionId === execution.id);
+        if (world?.status === "open") return new Response(null, { status: 409 });
+        const experiment = experiments.get(execution.experimentId)!;
+        execution.state = body.state as Execution["state"];
+        const subjectId = randomUUID();
+        const evaluationItemId = randomUUID();
+        const hasOutput = Object.hasOwn(body, "output");
+        calls.completions.push({
+          executionId: execution.id,
+          state: body.state,
+          ...(hasOutput ? { output: body.output } : {}),
+          ...(body.error ? { error: body.error } : {}),
+        });
+        execution.subjectId = subjectId;
+        subjects.set(subjectId, {
+          id: subjectId,
+          executionId: execution.id,
+          inputs: frozenCase.inputs,
+          hasOutput,
+          ...(hasOutput ? { output: body.output as Subject["output"] } : {}),
+          hasExpected: true,
+          expected: frozenCase.expected,
+          metadata: frozenCase.metadata,
+          contentDigest: digest,
+          outputEvidence: hasOutput ? "available" : "unavailable",
+          executionState: body.state as Subject["executionState"],
+          traceSnapshotId: randomUUID(),
+          caseId: frozenCase.id,
+          datasetVersionId: version.id,
+          caseExternalKey: frozenCase.externalKey,
+          experimentId: experiment.id,
+          attempt: 1,
+          traceEvidence: "captured",
+          traceExternalId: execution.traceExternalId,
+          omissionReason: null,
+        });
+        runItems
+          .get(experiment.evaluation.id)!
+          .push({ id: evaluationItemId, subjectId, hasOutput, traceSnapshotId: randomUUID() });
+        // Hue grades world_outcome pins after the seal; the CLI must wait for them.
+        const verdict = state.verdict;
+        const failed = verdict === "fail" || body.state !== "succeeded";
+        if (verdict !== "none")
+          results.get(experiment.evaluation.id)!.push({
+            id: randomUUID(),
+            runId: experiment.evaluation.id,
+            itemId: evaluationItemId,
+            scorerVersionId: scorerVersion.id,
+            state: verdict === "error" ? "error" : "scored",
+            metrics:
+              verdict === "error"
+                ? []
+                : [
+                    { name: "refund_recorded", value: !failed },
+                    { name: "tone", value: "polite" },
+                  ],
+            explanation:
+              verdict === "error"
+                ? null
+                : failed
+                  ? "No refund was recorded in the world journal."
+                  : "The refund was recorded in the world journal.",
+            evidence: null,
+            error: verdict === "error" ? { type: "OutcomeEvaluatorUnavailable" } : null,
+            sourceDigest: null,
+          });
+        return Response.json({
+          executionId: execution.id,
+          subjectId,
+          evaluationItemId,
+          traceSnapshotId: randomUUID(),
+        } satisfies Completion);
+      }
+      const runMatch = /^\/evaluation-runs\/([^/]+)\/(items|results)$/.exec(path);
+      if (runMatch) {
+        if (runMatch[2] === "items")
+          return Response.json({ items: runItems.get(runMatch[1]!) ?? [], nextCursor: null });
+        if (request.method === "POST") return Response.json({ ids: [randomUUID()] });
+        const polls = (resultPolls.get(runMatch[1]!) ?? 0) + 1;
+        resultPolls.set(runMatch[1]!, polls);
+        if (polls <= state.deferredPolls) return Response.json({ items: [], nextCursor: null });
+        return Response.json({
+          items: (results.get(runMatch[1]!) ?? []).map(
+            ({ id, itemId, scorerVersionId, state }) => ({
+              id,
+              itemId,
+              scorerVersionId,
+              state,
+            }),
+          ),
+          nextCursor: null,
+        });
+      }
+      const resultMatch = /^\/evaluation-results\/([^/]+)$/.exec(path);
+      if (resultMatch) {
+        const stored = [...results.values()].flat().find((item) => item.id === resultMatch[1]);
+        return stored ? Response.json(stored) : new Response(null, { status: 404 });
+      }
+      const subjectMatch = /^\/evaluation-subjects\/([^/]+)$/.exec(path);
+      if (subjectMatch) {
+        const subject = subjects.get(subjectMatch[1]!);
+        return subject ? Response.json(subject) : new Response(null, { status: 404 });
+      }
+      throw new Error(`Unexpected request ${request.method} ${path}`);
+    },
+  });
+  const baseUrl = `http://127.0.0.1:${server.port}`;
+  return {
+    server,
+    baseUrl,
+    state,
+    calls,
+    scenario,
+    version,
+    scorerVersion,
+    experiments,
+    worlds,
+    enqueueRun() {
+      const experiment = createExperiment({
+        name: "Launched from Hue",
+        datasetVersionId: version.id,
+        scorerVersionIds: [scorerVersion.id],
+        config: { launched: true },
+      });
+      const runId = randomUUID();
+      queue.push({ runId, experimentId: experiment.id, state: "queued" });
+      return { runId, experimentId: experiment.id };
+    },
+    stop: () => server.stop(true),
+  };
+}
+
+/** Spawns the CLI asynchronously so the in-process stand-in keeps serving while it runs. */
+function hue(
+  args: string[],
+  options: {
+    cwd: string;
+    env?: Record<string, string>;
+    dropKey?: boolean;
+    /** Sends SIGINT once the CLI prints a line matching this, standing in for Ctrl+C. */
+    interruptOn?: RegExp;
+  },
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, "eval", ...args], {
+      cwd: options.cwd,
+      env: {
+        ...inherited,
+        NO_COLOR: "1",
+        ...(options.dropKey ? {} : { HUE_API_KEY: key }),
+        ...options.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let interrupted = false;
+    const maybeInterrupt = (text: string) => {
+      if (!interrupted && options.interruptOn?.test(text)) {
+        interrupted = true;
+        child.kill("SIGINT");
+      }
+    };
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+      maybeInterrupt(chunk);
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+      maybeInterrupt(chunk);
+    });
+    const timer = setTimeout(() => child.kill("SIGKILL"), SPAWN_TIMEOUT);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
+
+const adapterSource = `type Tool = { execute(args?: Record<string, unknown>): Promise<unknown> };
+type Context = {
+  tools: Record<string, Tool>;
+  mcp: { url: string; token: string; expiresAt: string };
+  item: { id: string; externalKey: string };
+  config: unknown;
+};
+export default async function runMyAgent(inputs: { task: string }, context: Context) {
+  const observation = await context.tools.save!.execute({ note: inputs.task });
+  return {
+    answer: "saved",
+    caseKey: context.item.externalKey,
+    observation,
+    hasMcp: typeof context.mcp.token === "string" && context.mcp.url.includes("/simulation-mcp/"),
+  };
+}
+`;
+
+const commandSource = `let data = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) data += chunk;
+const { inputs, config } = JSON.parse(data);
+if (process.env.FAIL_AGENT) process.exit(3);
+process.stdout.write(JSON.stringify({
+  answer: "saved",
+  task: inputs.task,
+  config,
+  env: {
+    hasToken: process.env.HUE_MCP_TOKEN === ${JSON.stringify(mcpToken)},
+    url: process.env.HUE_MCP_URL,
+    expiresAt: typeof process.env.HUE_MCP_EXPIRES_AT,
+    caseKey: process.env.HUE_CASE_KEY,
+    caseId: process.env.HUE_CASE_ID,
+    executionId: process.env.HUE_EXECUTION_ID,
+    worldId: process.env.HUE_ENVIRONMENT_RUN_ID,
+  },
+}));
+`;
+
+/** Never answers: leaves a grandchild that writes a marker unless the whole group is stopped. */
+const spawnerSource = `import { spawn } from "node:child_process";
+spawn(
+  process.execPath,
+  ["-e", 'setTimeout(() => require("fs").writeFileSync(process.env.HUE_TEST_SURVIVOR, "alive"), 2500)'],
+  { stdio: "ignore" },
+);
+setTimeout(() => {}, 60_000);
+`;
+
+async function workspace() {
+  const directory = await mkdtemp(join(tmpdir(), "hue-cli-eval-"));
+  await writeFile(join(directory, "hue-agent.ts"), adapterSource);
+  await writeFile(join(directory, "agent-command.mjs"), commandSource);
+  await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
+  return directory;
+}
+
+function expectNoSecrets(result: { stdout: string; stderr: string }) {
+  expect(result.stdout).not.toContain(key);
+  expect(result.stderr).not.toContain(key);
+  expect(result.stdout).not.toContain(mcpToken);
+  expect(result.stderr).not.toContain(mcpToken);
+}
+
+describe("hue eval", () => {
+  test(
+    "runs a Scenario by name with an adapter file and prints Hue's verdicts",
+    async () => {
+      const f = hueStandIn({ deferredPolls: 1 });
+      const cwd = await workspace();
+      try {
+        await writeFile(join(cwd, ".env.hue"), `HUE_API_KEY=${key}\nHUE_BASE_URL=${f.baseUrl}\n`);
+        const result = await hue(
+          [
+            "--scenario",
+            "refund FLOW",
+            "./hue-agent.ts",
+            "--env-file",
+            ".env.hue",
+            "--revision",
+            "v1",
+          ],
+          { cwd, dropKey: true },
+        );
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        expectNoSecrets(result);
+        const [experiment] = [...f.experiments.values()];
+        expect(experiment).toMatchObject({
+          name: "Refund flow · hue-agent · v1",
+          datasetVersionId: f.version.id,
+          config: {},
+        });
+        expect(f.calls.experiments[0]).toMatchObject({ scorerVersionIds: [f.scorerVersion.id] });
+        expect(experiment!.finishedAt).toBeTruthy();
+        const lines = result.stdout.split("\n");
+        expect(lines[0]).toBe(`Run: ${f.baseUrl}/experiments/${experiment!.id}`);
+        expect(lines[1]).toBe(`Experiment: ${experiment!.id}`);
+        expect(lines.slice(2, 6)).toEqual([
+          "[refund] world created",
+          "[refund] agent started",
+          "[refund] world sealed",
+          "Waiting for Hue checks...",
+        ]);
+        expect(result.stdout).toContain("Case    refund_recorded  tone    Result");
+        expect(result.stdout).toContain("refund  PASS             polite  PASSED");
+        expect(result.stdout).toContain("1 of 1 case passed");
+        expect(result.stdout.trim().split("\n").at(-1)).toBe(
+          `Run: ${f.baseUrl}/experiments/${experiment!.id}`,
+        );
+        expect([...f.worlds.values()].map((world) => [world.status, world.steps])).toEqual([
+          ["completed", [{ action: "save", args: { note: "refund charge ch_2" } }]],
+        ]);
+        // Metadata-only by default: the completion carries no output.
+        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
+        expect(f.calls.completions[0]).not.toHaveProperty("output");
+        expect(f.calls.otlp).toBeGreaterThan(0);
+        expect(await readFile(join(cwd, ".hue", "eval", ".gitignore"), "utf8")).toBe("*\n");
+        expect(f.calls.requests.filter((line) => line === "GET /case-conversions")).toHaveLength(1);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "spawns --command per case with the scoped environment and emits JSON",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const checkpoints = join(cwd, "checkpoints");
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            f.scenario.id,
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--content",
+            "--json",
+            "--checkpoint-dir",
+            checkpoints,
+            "--revision",
+            "cmd",
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        expectNoSecrets(result);
+        expect(result.stderr).toContain("[refund] agent started");
+        const document = JSON.parse(result.stdout) as Record<string, any>;
+        const [experiment] = [...f.experiments.values()];
+        expect(experiment?.name).toBe("Refund flow · agent-command · cmd");
+        expect(document).toMatchObject({
+          experimentId: experiment!.id,
+          runId: experiment!.evaluation.id,
+          runUrl: `${f.baseUrl}/experiments/${experiment!.id}`,
+          complete: true,
+          totals: { cases: 1, passed: 1, failed: 0, error: 0, skipped: 0, pending: 1 - 1 },
+        });
+        expect(document.cases).toEqual([
+          expect.objectContaining({
+            externalKey: "refund",
+            state: "passed",
+            passed: true,
+            metrics: [
+              { name: "refund_recorded", value: true, scorerVersionId: f.scorerVersion.id },
+              { name: "tone", value: "polite", scorerVersionId: f.scorerVersion.id },
+            ],
+          }),
+        ]);
+        const [world] = [...f.worlds.values()];
+        const [completion] = f.calls.completions;
+        expect(completion).toMatchObject({ state: "succeeded" });
+        expect(completion!.output).toEqual({
+          answer: "saved",
+          task: "refund charge ch_2",
+          config: {},
+          env: {
+            hasToken: true,
+            url: `${f.baseUrl}/api/v1/simulation-mcp/${world!.id}`,
+            expiresAt: "string",
+            caseKey: "refund",
+            caseId: f.scenario.publication.caseId,
+            executionId: world!.executionId,
+            worldId: world!.id,
+          },
+        });
+        expect(result.stdout.trim().split("\n")).toHaveLength(1);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "exits 1 for failing verdicts, failing commands and incomplete checks",
+    async () => {
+      const cwd = await workspace();
+      const failing = hueStandIn({ verdict: "fail" });
+      try {
+        const result = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", failing.baseUrl],
+          { cwd, env: { AGENT_REVISION: "env-rev" } },
+        );
+        expect(result.status).toBe(1);
+        expectNoSecrets(result);
+        expect(result.stdout).toContain("refund  FAIL             polite  FAILED");
+        expect(result.stdout).toContain("  refund: No refund was recorded in the world journal.");
+        expect(result.stdout).toContain("0 of 1 case passed");
+        expect([...failing.experiments.values()][0]?.name).toBe(
+          "Refund flow · hue-agent · env-rev",
+        );
+      } finally {
+        failing.stop();
+      }
+      const crashing = hueStandIn();
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--origin",
+            crashing.baseUrl,
+            "--json",
+          ],
+          { cwd, env: { FAIL_AGENT: "1" } },
+        );
+        expect(result.status).toBe(1);
+        expectNoSecrets(result);
+        expect(crashing.calls.completions).toEqual([
+          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+        ]);
+        expect([...crashing.worlds.values()][0]?.status).toBe("abandoned");
+        const document = JSON.parse(result.stdout) as Record<string, any>;
+        expect(document.cases[0]).toMatchObject({ state: "failed", passed: false });
+      } finally {
+        crashing.stop();
+      }
+      const silent = hueStandIn({ verdict: "none" });
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "./hue-agent.ts",
+            "--origin",
+            silent.baseUrl,
+            "--wait",
+            "0",
+            "--json",
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(1);
+        const document = JSON.parse(result.stdout) as Record<string, any>;
+        expect(document).toMatchObject({ complete: false, totals: { pending: 1, passed: 0 } });
+        expect(document.cases[0]).toMatchObject({ state: "pending" });
+      } finally {
+        silent.stop();
+      }
+      const errored = hueStandIn({ verdict: "error" });
+      try {
+        const result = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", errored.baseUrl],
+          { cwd },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stdout).toContain("refund  ERROR");
+        expect(result.stdout).toContain("  refund: scorer error OutcomeEvaluatorUnavailable");
+        expect(result.stdout).toContain("0 of 1 case passed (1 error)");
+      } finally {
+        errored.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 4,
+  );
+
+  test(
+    "a timed-out --command stops the agent's whole process group",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-spawner.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--timeout",
+            "1",
+            "--wait",
+            "0",
+          ],
+          { cwd, env: { HUE_TEST_SURVIVOR: survivor } },
+        );
+        expect(result.status).toBe(1);
+        expectNoSecrets(result);
+        expect(f.calls.completions).toEqual([
+          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+        ]);
+        // The grandchild writes 2500 ms after the agent starts. Signalling only the shell
+        // would leave it holding HUE_MCP_TOKEN and writing after Hue failed the case.
+        await new Promise((done) => setTimeout(done, 3_000));
+        await expect(readFile(survivor, "utf8")).rejects.toThrow();
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "an interrupt while waiting for Hue's checks exits 130 without a verdict",
+    async () => {
+      // Verdicts that never land, so the interrupt always arrives during the wait.
+      const f = hueStandIn({ deferredPolls: 1_000 });
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl, "--wait", "600"],
+          { cwd, interruptOn: /Waiting for Hue checks/ },
+        );
+        expect(result.status).toBe(130);
+        expectNoSecrets(result);
+        expect(result.stderr).toContain("Interrupted.");
+        expect(result.stdout).not.toContain("case passed");
+        expect(result.stdout).not.toContain("refund_recorded");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "refuses missing keys and invalid selections with exit 2 before contacting Hue",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      try {
+        const missingKey = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl],
+          {
+            cwd,
+            dropKey: true,
+          },
+        );
+        expect(missingKey.status).toBe(2);
+        expect(missingKey.stdout).toBe("");
+        expect(missingKey.stderr).toContain("HUE_API_KEY is required");
+        expect(f.calls.requests).toEqual([]);
+        for (const args of [
+          ["./hue-agent.ts"],
+          ["--scenario", "Refund flow"],
+          ["--scenario", "Refund flow", "--set", "Refund flow", "./hue-agent.ts"],
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--command", "true"],
+          ["--worker", "--scenario", "Refund flow", "./hue-agent.ts"],
+          ["--set", "Refund flow", "./hue-agent.ts"],
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--wait", "-1"],
+          ["--scenario", "Refund flow", "./missing-adapter.ts"],
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--unknown"],
+        ]) {
+          const result = await hue([...args, "--origin", f.baseUrl], { cwd });
+          expect(result.status).toBe(2);
+          expect(result.stderr).toContain("Usage: hue eval");
+        }
+        expect(f.calls.requests).toEqual([]);
+        const help = await hue(["--help"], { cwd, dropKey: true });
+        expect(help.status).toBe(0);
+        expect(help.stdout).toContain("Usage: hue eval [adapter-file] [options]");
+        const unauthorized = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl],
+          { cwd, env: { HUE_API_KEY: "wrong-key" } },
+        );
+        expect(unauthorized.status).toBe(1);
+        expect(unauthorized.stderr).toContain("HTTP 401");
+        expect(unauthorized.stderr).toContain("Tracing and evaluations");
+        expect(unauthorized.stderr).not.toContain("wrong-key");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "requires a saved version and freezes it only with --save-version",
+    async () => {
+      const f = hueStandIn({ frozen: false });
+      const cwd = await workspace();
+      try {
+        const refused = await hue(
+          [
+            "--set",
+            "Refund flow",
+            "--scorer-version",
+            f.scorerVersion.id,
+            "./hue-agent.ts",
+            "--origin",
+            f.baseUrl,
+          ],
+          { cwd },
+        );
+        expect(refused.status).toBe(1);
+        expect(refused.stderr).toContain('Choose "Save eval-set version" in Hue');
+        expect(refused.stderr).toContain("--save-version");
+        expect(f.calls.frozen).toEqual([]);
+        expect(f.experiments.size).toBe(0);
+        const saved = await hue(
+          [
+            "--dataset-version",
+            f.version.id,
+            "--scorer-version",
+            f.scorerVersion.id,
+            "./hue-agent.ts",
+            "--origin",
+            f.baseUrl,
+            "--save-version",
+            "--name",
+            "Saved on demand",
+          ],
+          { cwd },
+        );
+        expect(saved.status).toBe(0);
+        expect(saved.stdout).toContain('Saved "Refund flow" version 1.');
+        expect(f.calls.frozen).toEqual([2]);
+        expect([...f.experiments.values()][0]?.name).toBe("Saved on demand");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "compares verdicts with a --baseline experiment",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const common = ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl];
+      try {
+        const first = await hue(common, { cwd });
+        expect(first.status).toBe(0);
+        const firstId = /^Experiment: (.+)$/m.exec(first.stdout)?.[1];
+        expect(firstId).toBeTruthy();
+        f.state.verdict = "fail";
+        const second = await hue([...common, "--baseline", `${f.baseUrl}/experiments/${firstId}`], {
+          cwd,
+        });
+        expect(second.status).toBe(1);
+        expect(second.stdout).toContain(
+          `Baseline ${firstId}: 0 improved, 1 regressed, 0 unchanged`,
+        );
+        expect(second.stdout).toContain("  refund: passed -> failed (regressed)");
+        const secondId = /^Experiment: (.+)$/m.exec(second.stdout)?.[1];
+        f.state.verdict = "pass";
+        const third = await hue([...common, "--baseline", secondId!, "--json"], { cwd });
+        expect(third.status).toBe(0);
+        const document = JSON.parse(third.stdout) as Record<string, any>;
+        expect(document.baseline).toEqual({
+          experimentId: secondId,
+          improvements: 1,
+          regressions: 0,
+          unchanged: 0,
+          cases: [{ externalKey: "refund", before: "failed", after: "passed", change: "improved" }],
+        });
+        expect(f.experiments.size).toBe(3);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 3,
+  );
+
+  test(
+    "--worker registers the agent, claims a queued run and reports it",
+    async () => {
+      const f = hueStandIn();
+      const queued = f.enqueueRun();
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          [
+            "--worker",
+            "./hue-agent.ts",
+            "--origin",
+            f.baseUrl,
+            "--max-runs",
+            "1",
+            "--agent-key",
+            "refund-bot",
+            "--agent-name",
+            "Refund bot",
+            "--revision",
+            "v7",
+            "--checkpoint-dir",
+            join(cwd, "worker-state"),
+          ],
+          { cwd },
+        );
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        expectNoSecrets(result);
+        expect(f.calls.register[0]).toEqual({
+          key: "refund-bot",
+          name: "Refund bot",
+          revision: "v7",
+          capabilities: ["environment:v1"],
+          scorerDigests: [],
+        });
+        expect(f.calls.claims).toBeGreaterThanOrEqual(1);
+        expect(f.calls.localRuns).toEqual([
+          { runId: queued.runId, workerId: expect.any(String), state: "completed" },
+        ]);
+        expect(result.stdout).toContain(
+          `Registered agent refund-bot (revision v7) with ${f.baseUrl}; waiting for runs launched from Hue (stops after 1)`,
+        );
+        expect(result.stdout).toContain(
+          `Claimed run ${queued.runId}: ${f.baseUrl}/experiments/${queued.experimentId}`,
+        );
+        expect(result.stdout).toContain("[refund] agent started");
+        expect(result.stdout).toContain("completed: 1 case");
+        expect(result.stdout).toContain("refund  PASS             polite  PASSED");
+        expect(f.experiments.get(queued.experimentId)?.finishedAt).toBeTruthy();
+        expect([...f.worlds.values()][0]?.status).toBe("completed");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "an interrupted worker verdict wait exits 130 without printing partial verdicts",
+    async () => {
+      const f = hueStandIn({ deferredPolls: 100 });
+      f.enqueueRun();
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          ["--worker", "./hue-agent.ts", "--origin", f.baseUrl, "--max-runs", "1", "--wait", "30"],
+          { cwd, interruptOn: /Waiting for Hue checks\.\.\./ },
+        );
+        expect(result.status).toBe(130);
+        expect(result.stderr).toContain("Interrupted.");
+        expect(result.stdout).toContain("Waiting for Hue checks...");
+        expect(result.stdout).not.toContain("PASS");
+        expect(result.stdout).not.toContain('"totals"');
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+});

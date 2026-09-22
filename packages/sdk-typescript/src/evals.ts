@@ -89,3 +89,37 @@ export type {
   LocalAgentTargetContext,
   RunLocalAgentOptions,
 } from "./evals/local-worker.js";
+
+export {
+  getScenario,
+  listScenarios,
+  matchByName,
+  parseScenarioSelector,
+  resolveEvalSetPins,
+  resolveScenarioPins,
+} from "./evals/scenarios.js";
+export type {
+  NamedCandidate,
+  NameMatch,
+  ScenarioClient,
+  ScenarioPins,
+  ScenarioSelector,
+} from "./evals/scenarios.js";
+export {
+  collectExperimentVerdicts,
+  compareVerdicts,
+  metricPassed,
+  summarizeVerdicts,
+  waitForResults,
+} from "./evals/verdicts.js";
+export type {
+  CaseVerdict,
+  CollectExperimentVerdictsOptions,
+  ExperimentVerdicts,
+  VerdictClient,
+  VerdictComparison,
+  VerdictResult,
+  VerdictResults,
+  VerdictSummary,
+  WaitForResultsOptions,
+} from "./evals/verdicts.js";

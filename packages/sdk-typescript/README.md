@@ -436,6 +436,16 @@ The published [setup CLI](CLI.md) is a resumable local inspection core; the unre
 candidate adds the bounded application onboarding flow described above. Existing customers connect
 their agents with `runLocalAgent()`; setup does not register workers or launch simulations.
 
+### Command-line evaluation
+
+The unreleased `hue eval` command wraps `runSimulation()` and `runLocalAgent()` for an adapter
+file or a shell command: `hue eval --scenario "<name>" ./hue-agent.ts` creates a fresh experiment
+from a published Scenario's immutable pins, runs the agent in one isolated world per case, waits
+for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
+`--worker` registers the same adapter for runs launched from Hue. It needs a Tracing and
+evaluations key in `HUE_API_KEY` (never printed) and keeps content capture off unless `--content`
+is passed. See [Evaluate an agent against a Scenario](CLI.md#evaluate-an-agent-against-a-scenario).
+
 ## Managed targets
 
 Start a frozen dataset run in Hue while your agent stays in your application. Expose a

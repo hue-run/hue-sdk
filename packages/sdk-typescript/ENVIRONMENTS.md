@@ -60,6 +60,27 @@ identifies the same world for adapter control operations such as
 `environmentClient.recordCoverageGap`; it is not a credential. The MCP token is delivered only
 to the callback and is never written to checkpoints.
 
+### Published pins and verdicts
+
+`scenario: { kind: "pins", datasetVersionId, scorerVersionIds, config?, name? }` runs already
+published immutable pins, such as a Scenario's frozen case and Hue-owned outcome checks or a saved
+eval set with explicitly chosen scorer versions. `resolveScenarioPins(client, selector)` reads
+those pins from a Scenario ID, its Hue URL or its name (`listScenarios` and `getScenario` expose
+the underlying reads; a Tracing and evaluations key is required), and `resolveEvalSetPins`
+resolves an eval set to its latest saved version. `runSimulation` creates the experiment directly
+(`name` defaults to the dataset name, `config` to `{}`) and binds the pins and configuration into
+the checkpoint identity, so resuming with different pins is refused like the other kinds.
+Hue-executed pins such as `world_outcome` need no local callback; pass `localScorers` only for
+bound `local_code` pins.
+
+Hue grades `world_outcome` pins after the world seals, so the runner's report precedes the
+verdicts. `waitForResults(client, { runId, scorerVersionIds, subjectIds, timeoutMillis })` polls
+until every item has a terminal result for every pin or the budget elapses (`complete: false`);
+`summarizeVerdicts` turns results into per-case rows with `passed` and totals; `compareVerdicts`
+diffs two summaries by case key; and `collectExperimentVerdicts` combines those reads for one
+experiment. The `hue eval` command uses the same path; see
+[Evaluate an agent against a Scenario](CLI.md#evaluate-an-agent-against-a-scenario).
+
 ### Pinned provider-profile preflight
 
 An experiment with an immutable `attemptBaselineV2` can require the local process to describe

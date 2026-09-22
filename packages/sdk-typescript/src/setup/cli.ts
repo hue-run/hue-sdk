@@ -15,6 +15,11 @@ import { runSetup } from "./runner.js";
 import { SETUP_EVENT_CONTRACT_VERSION, type RunFailedEvent, type SetupEvent } from "./types.js";
 
 const commands = new Set(["setup", "resume", "status", "claim"] as const);
+// Additional commands live in ../cli and load lazily so the setup parser, its usage text and its
+// JSONL error contract stay untouched for every other input. Add a command with one entry.
+const extensions = new Map<string, () => Promise<number>>([
+  ["eval", async () => (await import("../cli/eval.js")).runEvalCommand(process.argv.slice(3))],
+]);
 
 function writeEvent(event: SetupEvent, mode: SetupOutputMode, width: number): void {
   const line =
@@ -27,6 +32,8 @@ function writeEvent(event: SetupEvent, mode: SetupOutputMode, width: number): vo
 }
 
 async function main(): Promise<number> {
+  const extension = extensions.get(process.argv[2] ?? "");
+  if (extension) return extension();
   const agentRequested = process.argv.slice(2).includes("--agent");
   let parsed;
   try {
@@ -46,7 +53,7 @@ async function main(): Promise<number> {
   } catch {
     if (!agentRequested) {
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
+        "Usage: hue <setup|resume|status|claim|eval> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
       return 2;
     }
@@ -79,7 +86,7 @@ async function main(): Promise<number> {
       return 2;
     }
     process.stdout.write(
-      "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
+      "Usage: hue <setup|resume|status|claim|eval> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
     );
     return 0;
   }
@@ -115,7 +122,7 @@ async function main(): Promise<number> {
       process.stdout.write(`${renderJsonlEvent(event)}\n`);
     } else
       process.stderr.write(
-        "Usage: hue <setup|resume|status|claim> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
+        "Usage: hue <setup|resume|status|claim|eval> [--agent|--format human|plain|jsonl] [--project PATH] [--origin URL] [--restart]\n",
       );
     return 2;
   }
