@@ -134,6 +134,21 @@ async function listOutputFiles(
   return found;
 }
 
+/** Artifact filenames cannot contain path separators or controls. Encode only those forbidden
+ * characters plus `%`, then represent `/` as `%2F`; distinct output paths stay distinct. */
+function artifactFilename(relativePath: string): string {
+  return relativePath
+    .split("/")
+    .map((segment) =>
+      segment
+        .replaceAll("%", "%25")
+        .replaceAll("\\", "%5C")
+        // eslint-disable-next-line no-control-regex -- artifact filenames forbid controls
+        .replace(/[\x00-\x1f\x7f]/gu, (character) => encodeURIComponent(character)),
+    )
+    .join("%2F");
+}
+
 /**
  * Turns the output folder into the target's result. Every regular file, in subdirectories too,
  * becomes a generated file; an unsupported extension is the agent's error rather than a silently
@@ -185,17 +200,17 @@ export async function collectDirectOutputs(
       throw new Error(`The agent wrote an empty file: ${entry.name}`);
     files.push({
       path: entry.path,
-      filename: entry.name,
+      filename: artifactFilename(entry.name),
       contentType: outputExtensions[extname(entry.name).toLowerCase()]!,
     });
   }
   if (typeof declaredPrimary === "string") {
-    const primary = files.find((file) => file.filename === declaredPrimary);
-    if (!primary)
+    const primaryIndex = entries.findIndex((entry) => entry.name === declaredPrimary);
+    if (primaryIndex < 0)
       throw new Error(
         `manifest.json names a primary file that was not written: ${declaredPrimary}`,
       );
-    primary.primary = true;
+    files[primaryIndex]!.primary = true;
   } else if (files.length === 1) files[0]!.primary = true;
   return withFiles(output, files);
 }

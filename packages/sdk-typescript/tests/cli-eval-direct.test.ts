@@ -814,9 +814,15 @@ describe("hue eval on a document eval set", () => {
     expect(nested.files.map((file) => file.filename)).toEqual([
       "Anexo.pdf",
       "Letter.docx",
-      "anexos/Soporte.pdf",
+      "anexos%2FSoporte.pdf",
     ]);
     expect(nested.files[2]!.path).toBe(join(layout.outputDirectory, "anexos", "Soporte.pdf"));
+    await writeFile(
+      join(layout.outputDirectory, "manifest.json"),
+      JSON.stringify({ primary: "anexos/Soporte.pdf" }),
+    );
+    const nestedPrimary = await collectDirectOutputs(layout.outputDirectory);
+    expect(nestedPrimary.files.find((file) => file.primary)?.filename).toBe("anexos%2FSoporte.pdf");
     await writeFile(
       join(layout.outputDirectory, "manifest.json"),
       JSON.stringify({ primary: "Missing.docx" }),
