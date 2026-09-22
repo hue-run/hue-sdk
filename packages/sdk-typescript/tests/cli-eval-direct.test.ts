@@ -534,7 +534,41 @@ writeFileSync(join(out, "manifest.json"), JSON.stringify({ primary: "Citacion.do
 process.stdout.write(JSON.stringify({ roles, corpusVisible: existsSync(join(dir, "files", "evaluator_reference")), executionId: typeof process.env.HUE_EXECUTION_ID }));
 `;
 
+const adapterSource = `export default async function (_inputs, context) {
+  if ("metadata" in context.item) throw new Error("grader metadata reached the direct adapter");
+  return { itemKeys: Object.keys(context.item).sort() };
+}
+`;
+
 describe("hue eval on a document eval set", () => {
+  test("file adapters receive case identity but not grader metadata", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-adapter-"));
+    await writeFile(join(cwd, "adapter.mjs"), adapterSource);
+    try {
+      const run = await hue(
+        [
+          "--set",
+          "gia-d1-citation",
+          "--scorer",
+          "gia-d1-citation",
+          "./adapter.mjs",
+          "--content",
+          "--json",
+          "--wait",
+          "30",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      expect(run.status).toBe(0);
+      expect(standIn.calls.completions[0]).toMatchObject({
+        output: { itemKeys: ["externalKey", "id"] },
+      });
+    } finally {
+      standIn.stop();
+    }
+  }, 30_000);
+
   test("runs the command in a case directory, uploads its documents and waits for Hue's grader", async () => {
     const standIn = documentStandIn({ gradedAfterPolls: 2 });
     const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));

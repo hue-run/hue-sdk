@@ -58,7 +58,7 @@ export type EvalAdapter = (
 export interface DirectTargetContext {
   mode: "direct";
   config: JsonValue;
-  item: Pick<ExperimentCase, "id" | "externalKey" | "metadata">;
+  item: Pick<ExperimentCase, "id" | "externalKey">;
   executionId: string;
   /** Verified copies of the agent-visible pinned files (`source`, templates, originals). */
   files: LocalFile[];
@@ -983,7 +983,6 @@ async function runDirect(
           item: {
             id: context.item.id,
             externalKey: context.item.externalKey,
-            metadata: structuredClone(context.item.metadata),
           },
           executionId: context.executionId,
           files: structuredClone(context.files),
