@@ -10,6 +10,21 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.4.2] - 2026-09-22
+
+#### Added
+
+- `runSimulation` accepts `definition` for the simulation definition, and `SimulationDefinition`
+  is exported alongside the options type.
+
+#### Deprecated
+
+- The `runSimulation` `scenario` option and the `SimulationScenario` alias are deprecated in
+  favour of `definition` and `SimulationDefinition`; they are removed no earlier than two
+  subsequent `0.MINOR` releases per VERSIONING.md.
+
+No registry release is claimed until publication and registry acceptance complete.
+
 ### [0.4.1] - 2026-09-21
 
 #### Added

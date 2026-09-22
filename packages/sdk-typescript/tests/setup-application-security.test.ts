@@ -58,7 +58,7 @@ async function expressProject(
         express: "5.1.0",
         ...(options.pinned
           ? {
-              "@hue-run/sdk": "0.4.1",
+              "@hue-run/sdk": "0.4.2",
               "@opentelemetry/api": "1.9.1",
               "@opentelemetry/context-async-hooks": "2.11.0",
             }

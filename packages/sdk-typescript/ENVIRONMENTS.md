@@ -30,7 +30,7 @@ try {
     environmentClient: createEnvironmentClient(connection),
     hue,
     checkpointDirectory: ".hue-checkpoints/refund-scenario",
-    scenario: { kind: "experiment", experimentId: process.env.HUE_EXPERIMENT_ID! },
+    definition: { kind: "experiment", experimentId: process.env.HUE_EXPERIMENT_ID! },
     persistResultContent: true,
     traceEvidence: { mode: "required" },
     target: (inputs, { tools, mcp, config, signal }) =>
