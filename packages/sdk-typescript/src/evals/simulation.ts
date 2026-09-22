@@ -689,6 +689,8 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
   if (!definition) throw new TypeError("runSimulation requires a definition");
   if (options.definition && options.scenario && options.definition !== options.scenario)
     throw new TypeError("Pass either definition or scenario, not both");
+  if (definition.kind === "pins" && !definition.scorerVersionIds.length)
+    throw new TypeError("Pinned scenarios require a scorer version");
   if (!options.definition && !scenarioDeprecationWarned) {
     scenarioDeprecationWarned = true;
     process.emitWarning(

@@ -1077,4 +1077,28 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT,
   );
+
+  test(
+    "an interrupted worker verdict wait exits 130 without printing partial verdicts",
+    async () => {
+      const f = hueStandIn({ deferredPolls: 100 });
+      f.enqueueRun();
+      const cwd = await workspace();
+      try {
+        const result = await hue(
+          ["--worker", "./hue-agent.ts", "--origin", f.baseUrl, "--max-runs", "1", "--wait", "30"],
+          { cwd, interruptOn: /Waiting for Hue checks\.\.\./ },
+        );
+        expect(result.status).toBe(130);
+        expect(result.stderr).toContain("Interrupted.");
+        expect(result.stdout).toContain("Waiting for Hue checks...");
+        expect(result.stdout).not.toContain("PASS");
+        expect(result.stdout).not.toContain('"totals"');
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
 });

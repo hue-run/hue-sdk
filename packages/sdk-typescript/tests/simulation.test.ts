@@ -1647,7 +1647,11 @@ describe("pinned scenarios", () => {
   });
 
   test("requires at least one scorer version before creating anything", async () => {
-    const fixture = harness();
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
     const pins = await publishPins(fixture);
     const directory = await mkdtemp(join(tmpdir(), "hue-simulation-pins-empty-"));
     try {
@@ -1662,6 +1666,19 @@ describe("pinned scenarios", () => {
       ).rejects.toThrow("Pinned scenarios require a scorer version");
       expect(fixture.experiments.size).toBe(0);
       expect(fixture.targetCalls()).toBe(0);
+      const recovered = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        definition: {
+          kind: "pins",
+          datasetVersionId: pins.frozen.id,
+          scorerVersionIds: [pins.exact.id],
+        },
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+      });
+      expect(recovered.subjectIds).toHaveLength(1);
+      expect(fixture.targetCalls()).toBe(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

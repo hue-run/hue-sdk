@@ -555,7 +555,7 @@ async function runOnce(
     environmentClient,
     hue,
     checkpointDirectory,
-    scenario: {
+    definition: {
       kind: "pins",
       datasetVersionId: pins.datasetVersionId,
       scorerVersionIds: pins.scorerVersionIds,
@@ -705,6 +705,7 @@ async function runWorker(
           timeoutMillis: wait * 1000,
           signal,
         });
+        if (signal.aborted) return;
         if (values.json)
           process.stdout.write(
             `${JSON.stringify(toJson(verdicts, new URL(`/experiments/${current.experimentId}`, connection.baseUrl).toString()))}\n`,
@@ -715,7 +716,11 @@ async function runWorker(
       }
     },
   });
-  return signal.aborted ? 130 : 0;
+  if (signal.aborted) {
+    process.stderr.write("Interrupted.\n");
+    return 130;
+  }
+  return 0;
 }
 
 /**
