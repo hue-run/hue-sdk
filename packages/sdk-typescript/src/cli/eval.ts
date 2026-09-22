@@ -3,23 +3,31 @@ import { access, mkdir, writeFile } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { randomUUID } from "node:crypto";
 import { createHue, type HueClient } from "../client.js";
 import { createEnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
 import type {
+  ExperimentCase,
   LocalAgentClaim,
   LocalAgentRegistration,
+  LocalFile,
   RegisteredLocalAgent,
+  Scorer,
+  ScorerVersion,
 } from "../evals/types.js";
+import { TargetResult } from "../evals/types.js";
 import { runLocalAgent } from "../evals/local-worker.js";
-import { TargetCancelledError } from "../evals/runner.js";
+import { runExperiment, TargetCancelledError } from "../evals/runner.js";
 import {
+  matchByName,
   parseScenarioSelector,
   resolveEvalSetPins,
   resolveScenarioPins,
   type ScenarioPins,
 } from "../evals/scenarios.js";
+import { collectDirectOutputs, stageDirectCase } from "./eval-direct.js";
 import {
   runSimulation,
   type SimulationProgress,
@@ -41,21 +49,53 @@ export type EvalAdapter = (
   context: SimulationTargetContext,
 ) => JsonValue | undefined | Promise<JsonValue | undefined>;
 
+/**
+ * Context of a direct (file) case: pinned input files in, generated documents out. The same
+ * adapter module serves both modes; `mode` tells it which context it received.
+ */
+export interface DirectTargetContext {
+  mode: "direct";
+  config: JsonValue;
+  item: Pick<ExperimentCase, "id" | "externalKey" | "metadata">;
+  executionId: string;
+  /** Verified copies of the agent-visible pinned files (`source`, templates, originals). */
+  files: LocalFile[];
+  /** Private scratch directory for this case; generated files may be written here. */
+  outputDirectory: string;
+  signal?: AbortSignal;
+}
+export type DirectEvalAdapter = (
+  inputs: JsonValue,
+  context: DirectTargetContext,
+) => JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
+/** What an adapter file exports: one function that receives whichever context the case kind needs. */
+type LoadedAdapter = (
+  inputs: JsonValue,
+  context: SimulationTargetContext | DirectTargetContext,
+) => JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
+
 const USAGE = `Usage: hue eval [adapter-file] [options]
 
 Run a local agent against a Hue Scenario or eval set, then print Hue's verdicts.
 
 Selection (exactly one, not used with --worker):
   --scenario <name|id|url>        Published Scenario to run
-  --set <name|id|url>             Saved eval set; requires --scorer-version
-  --dataset-version <id>          Frozen dataset version; requires --scorer-version
+  --set <name|id|url>             Saved eval set; requires --scorer or --scorer-version
+  --set-version <n>               Saved version number of the eval set (default: latest saved)
+  --dataset-version <id>          Frozen dataset version; requires --scorer or --scorer-version
+  --scorer <slug|name|id>         Evaluator to pin at its latest published version (repeatable)
   --scorer-version <id>           Scorer version to pin (repeatable)
+  --mode <auto|direct|simulation> Case kind; auto picks direct for sets whose cases pin no world
 
 Agent (exactly one):
   <adapter-file>                  Module exporting default or runMyAgent(inputs, context)
-  --command "<shell command>"     Spawned per case with HUE_MCP_URL, HUE_MCP_TOKEN,
+  --command "<shell command>"     Simulation: spawned per case with HUE_MCP_URL, HUE_MCP_TOKEN,
                                   HUE_MCP_EXPIRES_AT, HUE_EXECUTION_ID, HUE_ENVIRONMENT_RUN_ID,
-                                  HUE_CASE_ID and HUE_CASE_KEY set; {"inputs","config"} on stdin
+                                  HUE_CASE_ID and HUE_CASE_KEY set; {"inputs","config"} on stdin.
+                                  Direct: spawned in a private case directory with HUE_CASE_DIR,
+                                  HUE_CASE_INPUTS, HUE_CASE_OUTPUT_DIR, HUE_CASE_ID, HUE_CASE_KEY
+                                  and HUE_EXECUTION_ID set; files/<role>/ hold the pinned inputs
+                                  and every file written to output/ is uploaded to Hue
 
 Modes:
   --worker                        Register the agent and poll for runs launched from Hue
@@ -82,8 +122,9 @@ Output and limits:
   -h, --help                      Show this help
 
 HUE_API_KEY must be a "Tracing and evaluations" project key; it is never printed.
-Exit codes: 0 every case passed, 1 a case failed, errored or is incomplete, 2 usage error,
-130 interrupted.
+Code evaluators pinned to a direct run are graded by Hue's executor after the upload; the wait
+covers them. Exit codes: 0 every case passed, 1 a case failed, errored or is incomplete,
+2 usage error, 130 interrupted.
 `;
 
 /** Thrown for invalid arguments or configuration; exits with status 2. */
@@ -110,8 +151,11 @@ function parse(argv: string[]) {
       options: {
         scenario: { type: "string" },
         set: { type: "string" },
+        "set-version": { type: "string" },
         "dataset-version": { type: "string" },
+        scorer: { type: "string", multiple: true },
         "scorer-version": { type: "string", multiple: true },
+        mode: { type: "string" },
         command: { type: "string" },
         worker: { type: "boolean", default: false },
         "max-runs": { type: "string" },
@@ -207,7 +251,7 @@ function gitRevision(): string | undefined {
   }
 }
 
-async function loadAdapter(file: string): Promise<EvalAdapter> {
+async function loadAdapter(file: string): Promise<LoadedAdapter> {
   const path = resolve(file);
   try {
     await access(path);
@@ -231,23 +275,116 @@ async function loadAdapter(file: string): Promise<EvalAdapter> {
   const candidate = loaded.default ?? loaded.runMyAgent;
   if (typeof candidate !== "function")
     throw new UsageError(`${file} must export a default function or runMyAgent(inputs, context)`);
-  return candidate as EvalAdapter;
+  return candidate as LoadedAdapter;
 }
 
 /** Grace between the stop signal and SIGKILL for an agent command that ignores SIGTERM. */
 const COMMAND_KILL_GRACE_MS = 5_000;
 
+/**
+ * Spawns the agent command once in its own process group and returns its trimmed stdout. A
+ * timeout or Ctrl+C stops the agent the shell started, not only the shell: a survivor would still
+ * hold a world token and could write after Hue recorded the case as failed. Windows has no
+ * process group to signal, so the child alone is stopped there.
+ */
+function spawnAgentCommand(
+  command: string,
+  options: {
+    cwd?: string;
+    env: Record<string, string | undefined>;
+    stdin?: string;
+    timeoutSeconds: number;
+    signal?: AbortSignal;
+  },
+): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    const group = process.platform !== "win32";
+    const child = spawn(command, {
+      shell: true,
+      detached: group,
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      env: options.env,
+      stdio: ["pipe", "pipe", "inherit"],
+    });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let timedOut = false;
+    let oversized = false;
+    let escalation: NodeJS.Timeout | undefined;
+    const signalTree = (signal: NodeJS.Signals) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        if (group && child.pid !== undefined) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        // The group is already gone; nothing is left to stop.
+      }
+    };
+    const stop = (signal: NodeJS.Signals) => {
+      signalTree(signal);
+      escalation ??= setTimeout(() => signalTree("SIGKILL"), COMMAND_KILL_GRACE_MS).unref();
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop("SIGTERM");
+    }, options.timeoutSeconds * 1000);
+    const cancel = () => stop("SIGTERM");
+    options.signal?.addEventListener("abort", cancel, { once: true });
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size > 4 * 1024 * 1024) {
+        oversized = true;
+        stop("SIGTERM");
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stdin.on("error", () => undefined);
+    if (options.stdin !== undefined) child.stdin.end(options.stdin);
+    else child.stdin.end();
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      clearTimeout(escalation);
+      options.signal?.removeEventListener("abort", cancel);
+      reject(new Error(`Unable to start the agent command: ${error.message}`));
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      clearTimeout(escalation);
+      options.signal?.removeEventListener("abort", cancel);
+      if (options.signal?.aborted) return reject(new TargetCancelledError());
+      if (timedOut)
+        return reject(
+          new Error(`The agent command timed out after ${options.timeoutSeconds} seconds`),
+        );
+      if (oversized) return reject(new Error("The agent command printed more than 4 MiB"));
+      if (code !== 0)
+        return reject(
+          new Error(
+            signal
+              ? `The agent command was stopped by ${signal}`
+              : `The agent command exited with code ${code}`,
+          ),
+        );
+      resolvePromise(Buffer.concat(chunks).toString("utf8").trim());
+    });
+  });
+}
+
+function parseAnswer(text: string): JsonValue | undefined {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as JsonValue;
+  } catch {
+    return text;
+  }
+}
+
 /** Runs the shell command once per case; the MCP token travels only through the child's environment. */
 function commandAdapter(command: string, timeoutSeconds: number): EvalAdapter {
-  return (inputs, context) =>
-    new Promise((resolvePromise, reject) => {
-      // Own process group so a timeout or Ctrl+C stops the agent the shell started, not only the
-      // shell: a survivor would still hold the world token and could write after Hue recorded the
-      // case as failed. Windows has no process group to signal, so the child alone is stopped.
-      const group = process.platform !== "win32";
-      const child = spawn(command, {
-        shell: true,
-        detached: group,
+  return async (inputs, context) =>
+    parseAnswer(
+      await spawnAgentCommand(command, {
         env: {
           ...process.env,
           HUE_MCP_URL: context.mcp.url,
@@ -258,74 +395,43 @@ function commandAdapter(command: string, timeoutSeconds: number): EvalAdapter {
           HUE_CASE_ID: context.item.id,
           HUE_CASE_KEY: context.item.externalKey,
         },
-        stdio: ["pipe", "pipe", "inherit"],
-      });
-      const chunks: Buffer[] = [];
-      let size = 0;
-      let timedOut = false;
-      let oversized = false;
-      let escalation: NodeJS.Timeout | undefined;
-      const signalTree = (signal: NodeJS.Signals) => {
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        try {
-          if (group && child.pid !== undefined) process.kill(-child.pid, signal);
-          else child.kill(signal);
-        } catch {
-          // The group is already gone; nothing is left to stop.
-        }
-      };
-      const stop = (signal: NodeJS.Signals) => {
-        signalTree(signal);
-        escalation ??= setTimeout(() => signalTree("SIGKILL"), COMMAND_KILL_GRACE_MS).unref();
-      };
-      const timer = setTimeout(() => {
-        timedOut = true;
-        stop("SIGTERM");
-      }, timeoutSeconds * 1000);
-      const cancel = () => stop("SIGTERM");
-      context.signal?.addEventListener("abort", cancel, { once: true });
-      child.stdout.on("data", (chunk: Buffer) => {
-        size += chunk.byteLength;
-        if (size > 4 * 1024 * 1024) {
-          oversized = true;
-          stop("SIGTERM");
-          return;
-        }
-        chunks.push(chunk);
-      });
-      child.stdin.on("error", () => undefined);
-      child.stdin.end(JSON.stringify({ inputs, config: context.config }));
-      child.on("error", (error) => {
-        clearTimeout(timer);
-        clearTimeout(escalation);
-        context.signal?.removeEventListener("abort", cancel);
-        reject(new Error(`Unable to start the agent command: ${error.message}`));
-      });
-      child.on("close", (code, signal) => {
-        clearTimeout(timer);
-        clearTimeout(escalation);
-        context.signal?.removeEventListener("abort", cancel);
-        if (context.signal?.aborted) return reject(new TargetCancelledError());
-        if (timedOut)
-          return reject(new Error(`The agent command timed out after ${timeoutSeconds} seconds`));
-        if (oversized) return reject(new Error("The agent command printed more than 4 MiB"));
-        if (code !== 0)
-          return reject(
-            new Error(
-              signal
-                ? `The agent command was stopped by ${signal}`
-                : `The agent command exited with code ${code}`,
-            ),
-          );
-        const text = Buffer.concat(chunks).toString("utf8").trim();
-        if (!text) return resolvePromise(undefined);
-        try {
-          resolvePromise(JSON.parse(text) as JsonValue);
-        } catch {
-          resolvePromise(text);
-        }
-      });
+        stdin: JSON.stringify({ inputs, config: context.config }),
+        timeoutSeconds,
+        ...(context.signal ? { signal: context.signal } : {}),
+      }),
+    );
+}
+
+/**
+ * Direct cases: the command works in a private case directory and writes its documents to
+ * `output/`. Its stdout is only used as the JSON output when it wrote no result or summary file.
+ */
+function directCommandAdapter(command: string, timeoutSeconds: number): DirectEvalAdapter {
+  return async (inputs, context) => {
+    const layout = await stageDirectCase(context.outputDirectory, {
+      inputs,
+      config: context.config,
+      item: context.item,
+      executionId: context.executionId,
+      files: context.files,
     });
+    const stdout = await spawnAgentCommand(command, {
+      cwd: layout.caseDirectory,
+      env: {
+        ...process.env,
+        HUE_CASE_DIR: layout.caseDirectory,
+        HUE_CASE_INPUTS: layout.inputsPath,
+        HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
+        HUE_CASE_ID: context.item.id,
+        HUE_CASE_KEY: context.item.externalKey,
+        HUE_EXECUTION_ID: context.executionId,
+      },
+      stdin: JSON.stringify({ inputs, config: context.config }),
+      timeoutSeconds,
+      ...(context.signal ? { signal: context.signal } : {}),
+    });
+    return collectDirectOutputs(layout.outputDirectory, parseAnswer(stdout));
+  };
 }
 
 function metricText(metric: CaseVerdict["metrics"][number]): string {
@@ -462,21 +568,90 @@ interface Connection {
   baseUrl: string;
 }
 
+const MAX_LISTED_SCORERS = 1000;
+
+/** Newest published version of an evaluator named by ID, slug or display name. */
+async function resolveScorerVersion(client: EvaluationClient, selector: string): Promise<string> {
+  const parsed = parseScenarioSelector(selector, ["scorers", "evaluators"]);
+  let scorer: Scorer;
+  if (parsed.kind === "id") scorer = await client.getScorer(parsed.id);
+  else {
+    const candidates: Scorer[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = await client.listScorers({ after, limit: 100 });
+      candidates.push(...page.items.filter((item) => !item.archivedAt));
+      if (!page.nextCursor || candidates.length >= MAX_LISTED_SCORERS) break;
+      after = page.nextCursor;
+    }
+    const wanted = parsed.name.trim().toLowerCase();
+    const bySlug = candidates.filter((item) => item.slug.toLowerCase() === wanted);
+    const { matches } = bySlug.length ? { matches: bySlug } : matchByName(candidates, parsed.name);
+    if (matches.length > 1)
+      throw new UsageError(
+        `Several evaluators match "${parsed.name}"; pass a slug or ID: ${matches.map((item) => item.slug).join(", ")}`,
+      );
+    if (!matches.length)
+      throw new UsageError(
+        candidates.length
+          ? `No evaluator matches "${parsed.name}". Evaluators: ${candidates.map((item) => item.slug).join(", ")}`
+          : `No evaluator matches "${parsed.name}"`,
+      );
+    scorer = await client.getScorer(matches[0]!.id);
+  }
+  const versions = scorer.versions ?? [];
+  if (!versions.length)
+    throw new UsageError(`Evaluator "${scorer.slug}" has no published version to pin`);
+  // Servers list versions newest first; prefer the version number when the response carries it.
+  const latest = versions.reduce<ScorerVersion & { version?: number }>(
+    (best, item) => {
+      const candidate = item as ScorerVersion & { version?: number };
+      return best.version !== undefined && candidate.version !== undefined
+        ? candidate.version > best.version
+          ? candidate
+          : best
+        : best;
+    },
+    versions[0] as ScorerVersion & { version?: number },
+  );
+  return latest.id;
+}
+
 async function resolveSelection(
   client: EvaluationClient,
   values: ReturnType<typeof parse>["values"],
 ): Promise<ScenarioPins> {
-  const extra = values["scorer-version"] ?? [];
+  const extra = [...(values["scorer-version"] ?? [])];
+  for (const selector of values.scorer ?? [])
+    extra.push(await resolveScorerVersion(client, selector));
   if (values.scenario) {
+    if (values["set-version"]) throw new UsageError("--set-version applies to --set only");
     const pins = await resolveScenarioPins(client, values.scenario);
     pins.scorerVersionIds = [...new Set([...pins.scorerVersionIds, ...extra])];
     return pins;
   }
   if (!extra.length)
     throw new UsageError(
-      `${values.set ? "--set" : "--dataset-version"} needs at least one --scorer-version; use --scenario for published pins`,
+      `${values.set ? "--set" : "--dataset-version"} needs at least one --scorer or --scorer-version; use --scenario for published pins`,
     );
-  if (values.set) return resolveEvalSetPins(client, values.set, { scorerVersionIds: extra });
+  if (values.set) {
+    const pins = await resolveEvalSetPins(client, values.set, { scorerVersionIds: extra });
+    if (values["set-version"] === undefined) return pins;
+    const wanted = integer("set-version", values["set-version"], 1, 1, 1_000_000);
+    const dataset = await client.getDataset(pins.datasetId);
+    const version = dataset.versions.find((item) => item.version === wanted);
+    if (!version)
+      throw new UsageError(
+        `Eval set "${dataset.name}" has no version ${wanted}; versions: ${dataset.versions.map((item) => item.version).join(", ")}`,
+      );
+    return {
+      ...pins,
+      datasetVersionId: version.id,
+      saved: version.frozenAt !== null,
+      revision: version.revision,
+    };
+  }
+  if (values["set-version"]) throw new UsageError("--set-version applies to --set only");
   const version = await client.getDatasetVersion(values["dataset-version"]!);
   const dataset = await client.getDataset(version.datasetId);
   return {
@@ -491,10 +666,36 @@ async function resolveSelection(
   };
 }
 
+type RunMode = "auto" | "direct" | "simulation";
+
+function parseMode(value: string | undefined): RunMode {
+  if (value === undefined) return "auto";
+  if (value === "auto" || value === "direct" || value === "simulation") return value;
+  throw new UsageError("--mode must be auto, direct or simulation");
+}
+
+/** Direct when nothing pins a simulated world: not a Scenario, and no case of the version does. */
+async function detectDirect(
+  client: EvaluationClient,
+  pins: ScenarioPins,
+  mode: RunMode,
+): Promise<boolean> {
+  if (mode !== "auto") return mode === "direct";
+  if (pins.scenarioId || pins.environmentVersionId) return false;
+  let after: string | undefined;
+  do {
+    const page = await client.listCases(pins.datasetVersionId, { after });
+    if (page.items.some((item) => item.environmentVersionId)) return false;
+    after = page.nextCursor ?? undefined;
+  } while (after);
+  return true;
+}
+
 function toJson(
   verdicts: ExperimentVerdicts,
   runUrl: string,
   baseline?: { experimentId: string; comparison: VerdictComparison },
+  extra: Record<string, JsonValue> = {},
 ) {
   return {
     experimentId: verdicts.experimentId,
@@ -503,32 +704,89 @@ function toJson(
     complete: verdicts.results.complete,
     cases: verdicts.summary.cases,
     totals: verdicts.summary.totals,
+    ...extra,
     ...(baseline
       ? { baseline: { experimentId: baseline.experimentId, ...baseline.comparison } }
       : {}),
   };
 }
 
+/** Waits for Hue's verdicts, prints them (table or JSON, with the optional baseline) and returns the exit code. */
+async function reportVerdicts(
+  client: EvaluationClient,
+  values: ReturnType<typeof parse>["values"],
+  run: {
+    experimentId: string;
+    subjectIds: string[];
+    runUrl: string;
+    extra?: Record<string, JsonValue>;
+  },
+  baselineId: string | undefined,
+  output: Output,
+  signal: AbortSignal,
+): Promise<number> {
+  const wait = integer("wait", values.wait, 300, 0, 86_400);
+  output.log("Waiting for Hue checks...");
+  const verdicts = await collectExperimentVerdicts(client, {
+    experimentId: run.experimentId,
+    subjectIds: run.subjectIds,
+    timeoutMillis: wait * 1000,
+    signal,
+  });
+  // The wait returns its partial state on abort rather than throwing, so Ctrl+C here must not
+  // fall through to a baseline read and a verdict table that nobody asked to finish.
+  if (signal.aborted) {
+    process.stderr.write("Interrupted.\n");
+    return 130;
+  }
+  let baseline: { experimentId: string; comparison: VerdictComparison } | undefined;
+  if (baselineId) {
+    const previous = await collectExperimentVerdicts(client, {
+      experimentId: baselineId,
+      timeoutMillis: 0,
+    });
+    baseline = {
+      experimentId: baselineId,
+      comparison: compareVerdicts(verdicts.summary, previous.summary),
+    };
+  }
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(toJson(verdicts, run.runUrl, baseline, run.extra))}\n`);
+  } else {
+    renderTable(verdicts, output);
+    if (baseline) renderComparison(baseline.experimentId, baseline.comparison, output);
+    output.log(`Run: ${run.runUrl}`);
+  }
+  const totals = verdicts.summary.totals;
+  return verdicts.results.complete && totals.cases > 0 && totals.passed === totals.cases ? 0 : 1;
+}
+
+function parseBaseline(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const parsed = parseScenarioSelector(value, ["experiments"]);
+  if (parsed.kind !== "id")
+    throw new UsageError("--baseline must be an experiment ID or its Hue URL");
+  return parsed.id;
+}
+
+interface Agents {
+  simulation: EvalAdapter;
+  direct: DirectEvalAdapter;
+}
+
 async function runOnce(
   values: ReturnType<typeof parse>["values"],
   connection: Connection,
-  adapter: EvalAdapter,
+  agents: Agents,
   agent: { key: string; revision: string },
   hue: HueClient,
   output: Output,
   signal: AbortSignal,
 ): Promise<number> {
   const client = new EvaluationClient(connection);
-  const environmentClient = createEnvironmentClient(connection);
-  const wait = integer("wait", values.wait, 300, 0, 86_400);
   const concurrency = integer("concurrency", values.concurrency, 1, 1, 16);
-  let baselineId: string | undefined;
-  if (values.baseline) {
-    const parsed = parseScenarioSelector(values.baseline, ["experiments"]);
-    if (parsed.kind !== "id")
-      throw new UsageError("--baseline must be an experiment ID or its Hue URL");
-    baselineId = parsed.id;
-  }
+  const baselineId = parseBaseline(values.baseline);
+  const mode = parseMode(values.mode);
   const pins = await resolveSelection(client, values);
   if (!pins.saved) {
     if (!values["save-version"]) {
@@ -542,6 +800,25 @@ async function runOnce(
   }
   const runName = values.name ?? `${pins.name} · ${agent.key} · ${agent.revision}`;
   const project = await client.checkConnection();
+  if (await detectDirect(client, pins, mode))
+    return runDirect(
+      {
+        client,
+        values,
+        pins,
+        runName,
+        projectId: project.id,
+        agent,
+        agents,
+        hue,
+        output,
+        signal,
+        concurrency,
+        baselineId,
+      },
+      connection,
+    );
+  const environmentClient = createEnvironmentClient(connection);
   const checkpointDirectory = await prepareCheckpointDirectory(
     values["checkpoint-dir"],
     agent.key,
@@ -565,7 +842,7 @@ async function runOnce(
     traceEvidence: { mode: "required" },
     concurrency,
     signal,
-    target: adapter,
+    target: agents.simulation,
     async onProgress(event: SimulationProgress) {
       if (event.type === "run_created") {
         runUrl = event.runUrl;
@@ -591,41 +868,111 @@ async function runOnce(
         output.log(`[${label}] attempt prepared: ${event.status}`);
     },
   });
-  output.log("Waiting for Hue checks...");
-  const verdicts = await collectExperimentVerdicts(client, {
-    experimentId: report.experimentId,
-    subjectIds: report.subjectIds,
-    timeoutMillis: wait * 1000,
+  return reportVerdicts(
+    client,
+    values,
+    {
+      experimentId: report.experimentId,
+      subjectIds: report.subjectIds,
+      runUrl: runUrl || report.runUrl,
+    },
+    baselineId,
+    output,
     signal,
+  );
+}
+
+/**
+ * Direct cases: one ordinary experiment through `runExperiment`. The agent receives the case's
+ * pinned files and returns generated documents; code evaluators pinned to the run stay deferred
+ * for Hue's executor (`deferUnboundLocalScorers`), so no evaluator source runs on this machine.
+ */
+async function runDirect(
+  run: {
+    client: EvaluationClient;
+    values: ReturnType<typeof parse>["values"];
+    pins: ScenarioPins;
+    runName: string;
+    projectId: string;
+    agent: { key: string; revision: string };
+    agents: Agents;
+    hue: HueClient;
+    output: Output;
+    signal: AbortSignal;
+    concurrency: number;
+    baselineId: string | undefined;
+  },
+  connection: Connection,
+): Promise<number> {
+  const { client, values, pins, output, signal } = run;
+  const experiment = await client.createExperiment({
+    idempotencyKey: randomUUID(),
+    name: run.runName.slice(0, 100),
+    datasetVersionId: pins.datasetVersionId,
+    scorerVersionIds: pins.scorerVersionIds,
+    config: { agentKey: run.agent.key, agentRevision: run.agent.revision },
   });
-  // The wait returns its partial state on abort rather than throwing, so Ctrl+C here must not
-  // fall through to a baseline read and a verdict table that nobody asked to finish.
-  if (signal.aborted) {
-    process.stderr.write("Interrupted.\n");
-    return 130;
-  }
-  let baseline: { experimentId: string; comparison: VerdictComparison } | undefined;
-  if (baselineId) {
-    const previous = await collectExperimentVerdicts(client, {
-      experimentId: baselineId,
-      timeoutMillis: 0,
-    });
-    baseline = {
-      experimentId: baselineId,
-      comparison: compareVerdicts(verdicts.summary, previous.summary),
-    };
-  }
-  if (values.json) {
-    process.stdout.write(
-      `${JSON.stringify(toJson(verdicts, runUrl || report.runUrl, baseline))}\n`,
+  const runUrl = new URL(`/experiments/${experiment.id}`, connection.baseUrl).toString();
+  output.log(`Run: ${runUrl}`);
+  output.log(`Experiment: ${experiment.id}`);
+  const checkpointDirectory = await prepareCheckpointDirectory(
+    values["checkpoint-dir"],
+    run.agent.key,
+    run.projectId,
+    join("direct", experiment.id),
+  );
+  const report = await runExperiment({
+    client,
+    hue: run.hue,
+    experimentId: experiment.id,
+    checkpointDirectory,
+    persistResultContent: values.content,
+    traceEvidence: { mode: "required" },
+    concurrency: run.concurrency,
+    scorers: [],
+    deferUnboundLocalScorers: true,
+    environmentEvidence: "when_pinned",
+    async target(inputs, context) {
+      if (signal.aborted) throw new TargetCancelledError();
+      output.log(`[${context.item.externalKey}] agent started`);
+      const result = await run.agents.direct(inputs, {
+        mode: "direct",
+        config: structuredClone(context.config),
+        item: {
+          id: context.item.id,
+          externalKey: context.item.externalKey,
+          metadata: structuredClone(context.item.metadata),
+        },
+        executionId: context.executionId,
+        files: structuredClone(context.files),
+        outputDirectory: context.outputDirectory,
+        signal,
+      });
+      const count =
+        result instanceof TargetResult ? result.files.length : result === undefined ? 0 : null;
+      output.log(
+        `[${context.item.externalKey}] ${count === null ? "answer returned" : `${count} file${count === 1 ? "" : "s"} produced`}`,
+      );
+      return result;
+    },
+  });
+  if (report.deferredScorerVersionIds.length)
+    output.log(
+      `${report.deferredScorerVersionIds.length} evaluator version${report.deferredScorerVersionIds.length === 1 ? "" : "s"} left to Hue's executor`,
     );
-  } else {
-    renderTable(verdicts, output);
-    if (baseline) renderComparison(baseline.experimentId, baseline.comparison, output);
-    output.log(`Run: ${runUrl || report.runUrl}`);
-  }
-  const totals = verdicts.summary.totals;
-  return verdicts.results.complete && totals.cases > 0 && totals.passed === totals.cases ? 0 : 1;
+  return reportVerdicts(
+    client,
+    values,
+    {
+      experimentId: experiment.id,
+      subjectIds: report.subjectIds,
+      runUrl,
+      extra: { mode: "direct", deferredScorerVersionIds: report.deferredScorerVersionIds },
+    },
+    run.baselineId,
+    output,
+    signal,
+  );
 }
 
 async function runWorker(
@@ -782,13 +1129,33 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       name: values["agent-name"] ?? key,
       revision: values.revision ?? process.env.AGENT_REVISION?.trim() ?? gitRevision() ?? "dev",
     };
-    const adapter = adapterFile
-      ? await loadAdapter(adapterFile)
-      : commandAdapter(values.command!, timeout);
+    if (values.worker && (values.mode || values["set-version"] || values.scorer?.length))
+      throw new UsageError("--worker takes no selection; Hue chooses the run to execute");
+    const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;
+    // One adapter module serves both case kinds; the direct context announces itself with `mode`.
+    const agents: Agents = {
+      simulation: loaded
+        ? async (inputs, context) => {
+            const answer = await loaded(inputs, context);
+            if (answer instanceof TargetResult)
+              throw new Error("The adapter returned generated files for a simulated-world case");
+            return answer;
+          }
+        : commandAdapter(values.command!, timeout),
+      direct: loaded ?? directCommandAdapter(values.command!, timeout),
+    };
     hue = createHue({ apiKey, baseUrl, serviceName: key, captureContent: values.content });
     return values.worker
-      ? await runWorker(values, connection, adapter, agent, hue, output, controller.signal)
-      : await runOnce(values, connection, adapter, agent, hue, output, controller.signal);
+      ? await runWorker(
+          values,
+          connection,
+          agents.simulation,
+          agent,
+          hue,
+          output,
+          controller.signal,
+        )
+      : await runOnce(values, connection, agents, agent, hue, output, controller.signal);
   } catch (error) {
     if (controller.signal.aborted || error instanceof TargetCancelledError) {
       process.stderr.write("Interrupted.\n");

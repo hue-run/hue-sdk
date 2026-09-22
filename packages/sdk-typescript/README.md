@@ -445,6 +445,10 @@ for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts 
 `--worker` registers the same adapter for runs launched from Hue. It needs a Tracing and
 evaluations key in `HUE_API_KEY` (never printed) and keeps content capture off unless `--content`
 is passed. See [Evaluate an agent against a Scenario](CLI.md#evaluate-an-agent-against-a-scenario).
+Eval sets whose cases pin files instead of a world run as direct cases through `runExperiment()`:
+`hue eval --set <slug> --scorer <slug> --command "…"` hands the agent each case's pinned files in a
+private directory, uploads the documents it writes and waits for Hue's grading executor to score
+them. See [Evaluate a document eval set](CLI.md#evaluate-a-document-eval-set).
 
 ## Managed targets
 

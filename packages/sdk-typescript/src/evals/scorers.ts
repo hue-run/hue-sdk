@@ -118,19 +118,34 @@ function skip(explanation: string): Score {
 }
 
 /** Check local callbacks before target invocation; never execute downloaded source code. */
+export function isBoundLocally(definition: ScorerDefinition, scorers: LocalScorer[] = []): boolean {
+  return scorers.some((local) => digest(local.definition) === digest(definition));
+}
 export function validateScorerBindings(
   versions: ScorerVersion[],
   scorers: LocalScorer[] = [],
 ): void {
   for (const { definition } of versions) {
-    if (
-      definition.kind === "local_code" &&
-      !scorers.some((local) => digest(local.definition) === digest(definition))
-    )
+    if (definition.kind === "local_code" && !isBoundLocally(definition, scorers))
       throw new Error(
         "A pinned local scorer has no matching language/source/entrypoint/metric binding",
       );
   }
+}
+/**
+ * Whether this process produces the result for a pinned version. Built-ins always run here; a
+ * `local_code` pin runs here when bound, and with `deferUnboundLocalScorers` an unbound pin is
+ * left to the executor that owns its source (for example Hue's grading worker) instead of
+ * failing the run.
+ */
+export function executableHere(
+  definition: ScorerDefinition,
+  options: { scorers?: LocalScorer[]; deferUnboundLocalScorers?: boolean },
+): definition is Extract<ScorerDefinition, { kind: "builtin" | "local_code" }> {
+  if (!isLocallyExecutable(definition)) return false;
+  if (definition.kind === "local_code" && options.deferUnboundLocalScorers)
+    return isBoundLocally(definition, options.scorers);
+  return true;
 }
 /** Only implementations this SDK owns may produce local results. Unknown pins are deferred. */
 export function isLocallyExecutable(definition: {
