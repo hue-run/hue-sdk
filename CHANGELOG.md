@@ -33,6 +33,27 @@ refuses to publish a version without a matching entry below.
 - The portable skill gains an "Evaluate against a Scenario" section describing the `hue eval` loop
   for coding agents.
 
+#### Changed
+
+- Documentation and examples now name the simulation `definition` / `SimulationDefinition` and
+  use case terminology; the deprecated `scenario` option and `SimulationScenario` alias are
+  unchanged. No API change.
+
+### [0.4.2] - 2026-09-22
+
+#### Added
+
+- `runSimulation` accepts `definition` for the simulation definition, and `SimulationDefinition`
+  is exported alongside the options type.
+
+#### Deprecated
+
+- The `runSimulation` `scenario` option and the `SimulationScenario` alias are deprecated in
+  favour of `definition` and `SimulationDefinition`; they are removed no earlier than two
+  subsequent `0.MINOR` releases per VERSIONING.md.
+
+No registry release is claimed until publication and registry acceptance complete.
+
 ### [0.4.1] - 2026-09-21
 
 #### Added

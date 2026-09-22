@@ -74,7 +74,7 @@ preflight checks availability and presents the published [privacy notice](https:
 and [security information](https://trust.hue.run/) before telemetry. Anonymous trials last 24 hours
 and are limited to 100 traces, 1,000 spans and 2 MiB. A private owner-only browser handoff supports
 account linkage; the original request evidence is retained and business work is never replayed on
-claim. Setup never enables content capture or creates a Scenario, Hue Run, evaluation, source capture
+claim. Setup never enables content capture or creates a simulation, Hue Run, evaluation, source capture
 or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
 `checkConnection()` rejects with `HueConnectionError`: its fixed message is safe to log, `status`
@@ -429,7 +429,7 @@ See [scorer execution](EVALUATIONS.md#hosted-and-manual-scorer-pins).
 
 The published [setup CLI](CLI.md) is a resumable local inspection core; the unreleased `0.4.0`
 candidate adds the bounded application onboarding flow described above. Existing customers connect
-their agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.
+their agents with `runLocalAgent()`; setup does not register workers or launch simulations.
 
 ### Command-line evaluation
 

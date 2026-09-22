@@ -75,7 +75,7 @@ Create another experiment with the same frozen version and different `config` to
 For the shorter agent-against-a-hosted-world workflow, use `runSimulation`. It owns immutable
 resolution, a fresh linked world per case, local and hosted MCP tools, finalization, sealed
 evidence and scoring while retaining this runner's checkpoint guarantees. See
-[Simulated environments](ENVIRONMENTS.md#run-a-scenario-like-a-test).
+[Simulated environments](ENVIRONMENTS.md#run-a-definition-like-a-test).
 
 ## Content and result states
 
