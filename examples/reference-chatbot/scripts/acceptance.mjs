@@ -44,13 +44,13 @@ for (const captureContent of ["true", "false"]) {
     assert.equal(config.captureContent, captureContent === "true");
     assert.equal(config.mode, "synthetic");
     const sessionId = randomUUID();
-    for (const scenario of ["chat", "controlled-error"]) {
+    for (const mode of ["chat", "controlled-error"]) {
       const response = await fetch(`${ready.url}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId,
-          scenario,
+          mode,
           messages: [
             { role: "user", content: "Count words in this synthetic integration request." },
           ],
@@ -78,7 +78,7 @@ for (const captureContent of ["true", "false"]) {
       );
       assert.ok(telemetry.report.acceptedSpans > 0);
       assert.equal(telemetry.report.acceptedLogs > 0, captureContent === "true");
-      if (scenario === "chat") {
+      if (mode === "chat") {
         assert.ok(
           events.some((event) => event.name === "tool" && event.data.name === "textStatistics"),
         );
@@ -86,7 +86,7 @@ for (const captureContent of ["true", "false"]) {
         assert.ok(events.some((event) => event.name === "text"));
         assert.ok(!events.some((event) => event.name === "error"));
       } else assert.ok(events.some((event) => event.name === "error"));
-      evidence.push({ captureContent, scenario, traceId, sessionId, report: telemetry.report });
+      evidence.push({ captureContent, mode, traceId, sessionId, report: telemetry.report });
     }
   } finally {
     if (child.exitCode === null && child.signalCode === null) {

@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- Documentation and examples now name the simulation `definition` / `SimulationDefinition` and
+  use case terminology; the deprecated `scenario` option and `SimulationScenario` alias are
+  unchanged. No API change.
+
 ### [0.4.2] - 2026-09-22
 
 #### Added
