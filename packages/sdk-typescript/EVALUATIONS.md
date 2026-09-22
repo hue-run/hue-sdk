@@ -298,8 +298,10 @@ case's `inputFiles` and verifies byte count and SHA-256. A download failure is a
 consumes no execution slot; a file already saved with the pinned identity is reused instead of
 downloaded again. The target sees only the agent-visible roles — `source`, `attached_template`,
 `attached_reference` and `original` — as `context.files`; evaluator-only
-`org_template` files reach scorers but not the agent. Verified copies live under `filesDirectory`
-(default `<checkpointDirectory>/files`, created mode 0700), and each case gets its own private
+`org_template` and `evaluator_reference` files (an organization's template, a legal corpus, an
+answer key) reach scorers but not the agent, and are not even downloaded when no bound code
+evaluator runs in this process. Verified copies live under `filesDirectory` (default
+`<checkpointDirectory>/files`, created mode 0700), and each case gets its own private
 `context.outputDirectory` to write into.
 
 Return generated documents by wrapping the output in `withFiles(output, files)`. Each entry names a
@@ -324,3 +326,16 @@ worker that supplies `directTarget` uses `when_pinned`: direct cases never conta
 evidence endpoint, while cases pinned to a world still require sealed evidence. Use the same policy
 for file-only regrading, and keep `required` for a generic target that attaches a world
 independently of the case pin.
+
+### Grading on Hue's side
+
+By default a pinned `local_code` version without a matching local scorer refuses the run: nobody
+would produce its result. `deferUnboundLocalScorers: true` changes that for both `runExperiment`
+and `rescore`: unbound code-evaluator pins are reported in `deferredScorerVersionIds` and left to
+the executor that owns their source, typically a grading worker Hue operates with its own provider
+credentials. The customer's process then runs only the agent and uploads its documents; nothing
+grader-related is installed there and evaluator-only files never reach it. The grading worker
+calls `rescore` on the same run with the evaluator bound and the same option, so pins belonging to
+other evaluators are left alone rather than refused. `EvaluationClient.listEvaluationRuns` pages
+the project's runs so such a worker can find the ones that still owe it results. `hue eval` uses
+this mode for eval sets whose cases pin no simulated world.

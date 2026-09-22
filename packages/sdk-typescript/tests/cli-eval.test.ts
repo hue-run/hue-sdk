@@ -167,6 +167,9 @@ function hueStandIn(options: { verdict?: Verdict; deferredPolls?: number; frozen
       }
       if (path === `/datasets/${dataset.id}`) return Response.json(dataset);
       if (path === `/dataset-versions/${version.id}`) return Response.json(version);
+      // The case pins a world, so `hue eval --set` on this stand-in stays a simulation run.
+      if (path === `/dataset-versions/${version.id}/cases`)
+        return Response.json({ items: [frozenCase], nextCursor: null });
       if (path === `/dataset-versions/${version.id}/freeze`) {
         calls.frozen.push(Number(body.expectedRevision));
         if (body.expectedRevision !== version.revision) return new Response(null, { status: 409 });
