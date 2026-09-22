@@ -633,11 +633,11 @@ async function resolveExperiment(
   };
 }
 
+let scenarioDeprecationWarned = false;
+
 /** Run an existing agent callback against one fresh hosted world per case. The helper
  * owns immutable resolution, execution linkage, finalization, scoring and resumable uploads.
  */
-let scenarioDeprecationWarned = false;
-
 export async function runSimulation(options: RunSimulationOptions): Promise<SimulationReport> {
   const definition = options.definition ?? options.scenario;
   if (!definition) throw new TypeError("runSimulation requires a definition");

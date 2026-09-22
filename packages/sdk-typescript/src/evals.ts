@@ -14,6 +14,7 @@ export type {
   RepositorySimulationCase,
   RepositorySimulationScorer,
   RunSimulationOptions,
+  SimulationDefinition,
   SimulationProgress,
   SimulationReport,
   SimulationScenario,
