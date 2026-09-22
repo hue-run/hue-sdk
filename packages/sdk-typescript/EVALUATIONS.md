@@ -72,10 +72,20 @@ try {
 
 Create another experiment with the same frozen version and different `config` to compare configurations. The runner reads the exact experiment case/version and scorer definitions; it never resolves a mutable latest version. `rescore` accepts an existing evaluation-run ID and has no target callback. Subject IDs refer to immutable saved outputs and trace evidence.
 
+`rescore` preserves terminal scores already recorded for each item and evaluator version,
+including built-in checks scheduled by Hue's **Grade again** flow. It computes only the missing
+local scores and reports the existing receipts alongside the new ones. If another executor
+finishes the same score while this one uploads, the runner accepts that exact item/version
+receipt; an unrelated conflict still fails. To evaluate the same saved output again, create a new
+scoring run.
+
 For the shorter agent-against-a-hosted-world workflow, use `runSimulation`. It owns immutable
 resolution, a fresh linked world per case, local and hosted MCP tools, finalization, sealed
 evidence and scoring while retaining this runner's checkpoint guarantees. See
 [Simulated environments](ENVIRONMENTS.md#run-a-definition-like-a-test).
+
+Cases whose inputs are a task plus pinned documents, and rescoring over documents a run already
+saved, use the same runner without a world. See [Direct cases and files](#direct-cases-and-files).
 
 ## Content and result states
 
@@ -110,13 +120,20 @@ const published = await client.publishScorerVersion(identity.id, local.definitio
 // Pin published.id in the experiment and pass scorers:[local] to the runner.
 ```
 
-A callback receives `{inputs,hasOutput,output?,hasExpected,expected?,metadata,executionState}` and returns one of:
+A callback receives `{inputs,hasOutput,output?,hasExpected,expected?,metadata,executionState,files?}` and returns one of:
 
 - `{state:"scored",metrics:[{name,value,passed?}],explanation?,evidence?}` (explanation or evidence required).
 - `{state:"error",error:{type,message?}}`.
 - `{state:"skipped",explanation:"reason"}`.
 
 All declared metrics must appear exactly once and satisfy pinned types, bounds and categories. The binding must match language, entrypoint, SHA-256 source digest and metric definitions. The digest is an authenticated caller declaration; it does not attest closures, dependency versions or actual execution. Callback source is never downloaded or evaluated. Callbacks are trusted local code; they have **no execution timeout or side-effect cancellation**. Concurrency limits active cases to 1–16 (default 1), with scorers evaluated sequentially within each case.
+
+`files` is present only when the runner handled files for that execution: every pinned input file
+(all roles, including the evaluator-only `org_template`) and every generated output, each with its
+verified local `path`, `role`, `filename`, `contentType`, `byteSize`, `sha256`, `artifactId` and
+`primary` flag. A `local_code` callback runs when generated files exist even without a JSON output;
+built-ins keep their usual missing-output behavior. See
+[Direct cases and files](#direct-cases-and-files).
 
 ### Hosted and manual scorer pins
 
@@ -156,7 +173,7 @@ The runner stops scheduling more cases after an operational failure and waits fo
 
 ## Verification boundaries
 
-`scripts/verify-package.mjs` installs a real packed tarball outside the monorepo and runs HTTP contract tests against a synthetic service plus actual OpenTelemetry exporters. It checks two configurations, rescoring without target invocation, absent/null output, upload resume, uncertain execution, exclusive checkpoints, source/metric contracts, content policy and terminating schema workers. It also exercises the local worker's ready, incomplete and uncertain provider-attempt control-plane paths, but does not call an issued provider facade. `scripts/verify-evaluation-api.mjs` is a separate opt-in acceptance against a real Hue receiver/API; it creates synthetic datasets/scorers/experiments in the project associated with the supplied development key.
+`scripts/verify-package.mjs` installs a real packed tarball outside the monorepo and runs HTTP contract tests against a synthetic service plus actual OpenTelemetry exporters. It checks two configurations, rescoring without target invocation, absent/null output, upload resume, uncertain execution, exclusive checkpoints, source/metric contracts, content policy and terminating schema workers. It also exercises the local worker's ready, incomplete and uncertain provider-attempt control-plane paths, but does not call an issued provider facade. `scripts/verify-file-cases.mjs` runs against the same installed consumer: pinned input download and verification, artifact publication of a generated document, file-aware local scoring during the run and again on a later rescore, and a declared file the target could not deliver recorded as the target's own error. `scripts/verify-evaluation-api.mjs` is a separate opt-in acceptance against a real Hue receiver/API; it creates synthetic datasets/scorers/experiments in the project associated with the supplied development key.
 
 ## Outbound local agent worker
 
@@ -168,7 +185,9 @@ establish hosted provider availability.
 `runLocalAgent` registers one fixed application callback and polls for queued runs. Hue selects
 the registered key/revision; it does not send executable code or shell commands. Keep the
 checkpoint directory private and durable. The worker persists result content and requires
-acknowledged trace and sealed environment evidence.
+acknowledged trace evidence; a case pinned to a world also requires sealed environment evidence.
+A case without a world runs through `directTarget` instead, described in
+[Direct cases and files](#direct-cases-and-files).
 
 ```ts
 import { createHue } from "@hue-run/sdk";
@@ -218,3 +237,90 @@ the worker reports `attention` and stops; operator investigation is required. Su
 automatically reclaimed, and presenting the same uncertain checkpoint again cannot replay the
 candidate. Public package acceptance proves this lifecycle against local fixtures; exact
 installed-registry-package to hosted-facade acceptance remains a post-publication Fern gate.
+
+## Direct cases and files
+
+Cases without a simulated world — document workflows whose inputs are a task plus pinned files —
+run on the same runner under the same checkpoint rules. This is unreleased and ships in the next
+`@hue-run/sdk` release. It requires a Hue deployment that serves case `inputFiles` on experiment
+items, subject `files`, and the artifact reservation, upload, completion and download APIs. The
+Python SDK has no equivalent.
+
+On the outbound worker, supply `directTarget` beside or instead of `target`. Supplying
+`directTarget` registers the `direct:v1` capability and supplying `target` registers
+`environment:v1` (both strings are exported as `localAgentCapabilities`). Declare the file
+capabilities the agent accepts and returns — `input:docx`, `input:pdf`, `output:docx` and so on — so
+Hue matches them against each case's `hue.requiredCapabilities` metadata and offers only matching
+cases. `registeredCapabilities` refuses a registration that names a capability without its callback.
+
+```ts
+import { basename } from "node:path";
+import { createEnvironmentClient } from "@hue-run/sdk/environment";
+import { createEvaluationClient, runLocalAgent, withFiles } from "@hue-run/sdk/evals";
+import { runMyAgent } from "./document-agent.js"; // Your existing application entry point.
+import { letterGrader } from "./letter-grader.js"; // A defineLocalScorer binding.
+
+await runLocalAgent({
+  client: createEvaluationClient(connection),
+  environmentClient: createEnvironmentClient(connection),
+  hue,
+  checkpointDirectory: ".hue-checkpoints/document-worker",
+  agent: {
+    key: "letter-agent",
+    name: "Letter agent",
+    revision: process.env.GIT_COMMIT!,
+    capabilities: ["input:docx", "input:pdf", "output:docx"], // direct:v1 is added for directTarget
+  },
+  scorers: [letterGrader], // Its callback reads context.files.
+  directTarget: async (inputs, { config, files, outputDirectory }) => {
+    // `files` are verified copies of the case's agent-visible input files on disk.
+    const { summary, documents } = await runMyAgent({ inputs, config, files, outputDirectory });
+    return withFiles(
+      { summary },
+      documents.map((path, index) => ({
+        path,
+        filename: basename(path),
+        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        primary: index === 0,
+      })),
+    );
+  },
+});
+```
+
+The direct callback receives cloned inputs and an allowlisted context of `config`,
+`item: {id, externalKey}`, `executionId`, `trace: {traceId,spanId}`, `files` and `outputDirectory`,
+plus the worker's `signal` when one was supplied. Expected outcomes and case metadata stay with
+grading, as they do for world cases.
+
+Before an execution exists, `runExperiment` downloads every pinned input file named by the frozen
+case's `inputFiles` and verifies byte count and SHA-256. A download failure is an SDK failure and
+consumes no execution slot; a file already saved with the pinned identity is reused instead of
+downloaded again. The target sees only the agent-visible roles — `source`, `attached_template`,
+`attached_reference` and `original` — as `context.files`; evaluator-only
+`org_template` files reach scorers but not the agent. Verified copies live under `filesDirectory`
+(default `<checkpointDirectory>/files`, created mode 0700), and each case gets its own private
+`context.outputDirectory` to write into.
+
+Return generated documents by wrapping the output in `withFiles(output, files)`. Each entry names a
+`path` or in-memory `bytes`, a `filename`, a Hue-accepted `contentType` and at most one `primary`.
+The runner copies them next to its checkpoint, publishes them through the artifact reservation,
+upload and verified completion APIs with stable per-execution keys, and completes the execution with
+`artifactIds` and `primaryArtifactId`, so the subject's frozen manifest holds inputs and outputs
+together. Generated files are always uploaded regardless of `persistResultContent`: they are the
+execution's evidence. A declared file that cannot be read, exceeds 25 MiB, repeats a filename or has
+an unsupported content type is saved as the target's error (`TargetError`), not as an uncertain
+execution. A crash after the target finished resumes from the staged files without invoking the
+target again; if result content is not persisted, the JSON output cannot be reconstructed and the
+case is reported as uncertain.
+
+`rescore` downloads a subject's frozen `files` — the pinned inputs and the generated outputs, with
+`role: "output"` for the documents a run produced — so a code evaluator can grade saved documents
+without invoking an agent. Local scorers receive them as `context.files` exactly as they do during
+an experiment.
+
+`runExperiment` and `rescore` accept `environmentEvidence: "required" | "when_pinned"`. A connected
+worker that supplies `directTarget` uses `when_pinned`: direct cases never contact the environment
+evidence endpoint, while cases pinned to a world still require sealed evidence. Use the same policy
+for file-only regrading, and keep `required` for a generic target that attaches a world
+independently of the case pin.
