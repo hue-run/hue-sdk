@@ -264,6 +264,7 @@
             "ScorerVersion",
             "SimulationMcpCapability",
             "SimulationProgress",
+            "SimulationDefinition",
             "SimulationReport",
             "SimulationScenario",
             "SimulationTargetContext",

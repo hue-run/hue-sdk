@@ -50,8 +50,8 @@ export interface RepositorySimulationCase {
   /** Optional caller-owned case metadata. */
   metadata?: Record<string, JsonValue>;
 }
-/** Immutable app-authored experiment reference or repository-authored scenario definition. */
-export type SimulationScenario =
+/** Immutable app-authored experiment reference or repository-authored simulation definition. */
+export type SimulationDefinition =
   | {
       /** Select an existing app-authored immutable experiment template. */
       kind: "experiment";
@@ -154,8 +154,12 @@ export interface RunSimulationOptions {
   hue: HueClient;
   /** Dedicated private directory for resumable checkpoints. */
   checkpointDirectory: string;
-  /** App-authored reference or repository-authored scenario. */
-  scenario: SimulationScenario;
+  /** App-authored reference or repository-authored definition. */
+  definition?: SimulationDefinition;
+  /**
+   * @deprecated Use `definition`.
+   */
+  scenario?: SimulationDefinition;
   /** Required privacy decision for saved target/scorer content. */
   persistResultContent: boolean;
   /** Required trace receipt policy for every target attempt. */
@@ -275,26 +279,31 @@ function normalizedEnvironmentDefinition(definition: PublishableEnvironmentDefin
   );
 }
 
-function scenarioIdentity(scenario: SimulationScenario): JsonValue {
-  if (scenario.kind === "experiment") return scenario;
+/**
+ * @deprecated Use {@link SimulationDefinition}.
+ */
+export type SimulationScenario = SimulationDefinition;
+
+function definitionIdentity(definition: SimulationDefinition): JsonValue {
+  if (definition.kind === "experiment") return definition;
   return json(
     {
-      kind: scenario.kind,
-      name: scenario.name,
-      slug: scenario.slug,
-      description: scenario.description ?? "",
+      kind: definition.kind,
+      name: definition.name,
+      slug: definition.slug,
+      description: definition.description ?? "",
       environment: {
-        ...scenario.environment,
-        definition: normalizedEnvironmentDefinition(scenario.environment.definition),
+        ...definition.environment,
+        definition: normalizedEnvironmentDefinition(definition.environment.definition),
       },
-      cases: scenario.cases,
-      scorers: scenario.scorers.map(({ scorer, ...identity }) => ({
+      cases: definition.cases,
+      scorers: definition.scorers.map(({ scorer, ...identity }) => ({
         ...identity,
         definition: normalizeScorerDefinitionForPublication(
           "definition" in scorer ? scorer.definition : scorer,
         ),
       })),
-      config: scenario.config ?? {},
+      config: definition.config ?? {},
     },
     aggregateBounds(8 * 1024 * 1024),
   );
@@ -347,7 +356,7 @@ async function reconcileWrite<T>(
 
 async function resolveEnvironment(
   client: EnvironmentClient,
-  source: Extract<SimulationScenario, { kind: "repository" }>["environment"],
+  source: Extract<SimulationDefinition, { kind: "repository" }>["environment"],
 ): Promise<string> {
   let identity = await findBySlug(
     (after) => client.listEnvironments({ after, limit: 100 }),
@@ -474,7 +483,7 @@ const caseDigestValue = (value: CaseDigestInput) => ({
 
 async function resolveDataset(
   client: EvaluationClient,
-  scenario: Extract<SimulationScenario, { kind: "repository" }>,
+  scenario: Extract<SimulationDefinition, { kind: "repository" }>,
   environmentVersionId: string,
 ): Promise<string> {
   if (!scenario.cases.length) throw new TypeError("Repository scenarios require at least one case");
@@ -591,10 +600,11 @@ async function allCases(client: EvaluationClient, versionId: string) {
 
 async function resolveExperiment(
   options: RunSimulationOptions,
+  definition: SimulationDefinition & { kind: "repository" | "experiment" },
   idempotencyKey: string,
 ): Promise<{ experimentId: string; bindings: LocalScorer[] }> {
-  if (options.scenario.kind === "experiment") {
-    const source = await options.client.getExperiment(options.scenario.experimentId);
+  if (definition.kind === "experiment") {
+    const source = await options.client.getExperiment(definition.experimentId);
     const created = await options.client.createExperiment({
       idempotencyKey,
       name: options.runName ?? source.name,
@@ -606,20 +616,16 @@ async function resolveExperiment(
   }
   const environmentVersionId = await resolveEnvironment(
     options.environmentClient,
-    options.scenario.environment,
+    definition.environment,
   );
-  const datasetVersionId = await resolveDataset(
-    options.client,
-    options.scenario,
-    environmentVersionId,
-  );
-  const scorers = await resolveScorers(options.client, options.scenario.scorers);
+  const datasetVersionId = await resolveDataset(options.client, definition, environmentVersionId);
+  const scorers = await resolveScorers(options.client, definition.scorers);
   const created = await options.client.createExperiment({
     idempotencyKey,
-    name: options.runName ?? options.scenario.name,
+    name: options.runName ?? definition.name,
     datasetVersionId,
     scorerVersionIds: scorers.versionIds,
-    config: options.scenario.config ?? {},
+    config: definition.config ?? {},
   });
   return {
     experimentId: created.id,
@@ -630,7 +636,20 @@ async function resolveExperiment(
 /** Run an existing agent callback against one fresh hosted world per case. The helper
  * owns immutable resolution, execution linkage, finalization, scoring and resumable uploads.
  */
+let scenarioDeprecationWarned = false;
+
 export async function runSimulation(options: RunSimulationOptions): Promise<SimulationReport> {
+  const definition = options.definition ?? options.scenario;
+  if (!definition) throw new TypeError("runSimulation requires a definition");
+  if (options.definition && options.scenario && options.definition !== options.scenario)
+    throw new TypeError("Pass either definition or scenario, not both");
+  if (!options.definition && !scenarioDeprecationWarned) {
+    scenarioDeprecationWarned = true;
+    process.emitWarning(
+      "runSimulation option scenario is deprecated; use definition",
+      "DeprecationWarning",
+    );
+  }
   const requestedConfiguration = requestedAttemptV2(options);
   if (
     options.maxSteps !== undefined &&
@@ -653,7 +672,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
     baseUrl: options.client.baseUrl,
   });
   try {
-    const scenarioDigest = digest(scenarioIdentity(options.scenario));
+    const scenarioDigest = digest(definitionIdentity(definition));
     let attempt = await store.read<Attempt>("active-attempt");
     if (attempt && attempt.stage !== "completed" && attempt.scenarioDigest !== scenarioDigest)
       throw new Error("Recover the unfinished simulation before running a changed scenario");
@@ -667,14 +686,14 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
     }
     let bindings = options.localScorers ?? [];
     if (!attempt.experimentId) {
-      const resolved = await resolveExperiment(options, attempt.idempotencyKey);
+      const resolved = await resolveExperiment(options, definition, attempt.idempotencyKey);
       attempt.experimentId = resolved.experimentId;
       bindings = resolved.bindings;
       attempt.stage = "running";
       await store.write("active-attempt", attempt);
-    } else if (options.scenario.kind === "repository") {
+    } else if (definition.kind === "repository") {
       bindings = [
-        ...options.scenario.scorers
+        ...definition.scorers
           .filter((item) => "definition" in item.scorer)
           .map((item) => item.scorer as LocalScorer),
         ...(options.localScorers ?? []),
