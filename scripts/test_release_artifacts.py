@@ -225,11 +225,28 @@ class ArchiveGateTests(unittest.TestCase):
                         "package/dist/transport.js": b'export async function transport(protocol) { return import(protocol === "https:" ? "node:https" : "node:http"); }',
                         "package/dist/ai-sdk.js": b'import { createRequire } from "node:module"; export const metadata = createRequire(import.meta.url)("ai/package.json");',
                         "package/dist/evals/scorers.js": b'import { createRequire } from "node:module"; export const optional = createRequire(import.meta.url).resolve("ajv/dist/2020.js");',
+                        "package/dist/cli/eval.js": b'import { pathToFileURL } from "node:url"; export async function load(path) { return import(pathToFileURL(path).href); }',
                     },
                 ),
                 "typescript",
                 "1.2.3",
             )
+
+    def test_accepts_the_eval_adapter_loader_only_in_the_eval_command(self):
+        loader = b'import { pathToFileURL } from "node:url"; export async function load(path) { return import(pathToFileURL(path).href); }'
+        with tempfile.TemporaryDirectory() as folder:
+            for files in (
+                {"package/dist/index.js": loader},
+                {"package/dist/cli/login.js": loader},
+                {"package/dist/cli/eval.js": b"export async function load(target) { return import(target); }"},
+            ):
+                with (
+                    self.subTest(files=list(files)),
+                    self.assertRaisesRegex(AssertionError, "Computed import is unsupported"),
+                ):
+                    release.inspect(
+                        self.parser_archive(folder, files), "typescript", "1.2.3"
+                    )
 
     def test_rejects_private_metadata_hooks_and_wrong_identity(self):
         with tempfile.TemporaryDirectory() as folder:
