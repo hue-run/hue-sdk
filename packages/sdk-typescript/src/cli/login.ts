@@ -408,7 +408,7 @@ const ASSIGNMENT = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/u;
 
 function unquote(raw: string): string {
   const value = raw.trim();
-  const quoted = /^(["'`])(.*)\1$/su.exec(value);
+  const quoted = /^(["'`])(.*?)\1(?:\s*(?:#.*)?)$/su.exec(value);
   if (quoted) return quoted[2] ?? "";
   const comment = value.indexOf(" #");
   return (comment >= 0 ? value.slice(0, comment) : value).trim();

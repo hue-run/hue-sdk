@@ -347,6 +347,7 @@ describe("hue login", () => {
     expect(
       readEnvValue("A=1\nHUE_API_KEY='first'\nHUE_API_KEY=second # note\n", "HUE_API_KEY"),
     ).toBe("second");
+    expect(readEnvValue('HUE_API_KEY="same" # keep this note\n', "HUE_API_KEY")).toBe("same");
     expect(readEnvValue("A=1\n", "HUE_API_KEY")).toBeUndefined();
     expect(mergeEnvText("", { HUE_API_KEY: "k" })).toBe("HUE_API_KEY=k\n");
     expect(mergeEnvText("A=1", { HUE_API_KEY: "k" })).toBe("A=1\nHUE_API_KEY=k\n");
