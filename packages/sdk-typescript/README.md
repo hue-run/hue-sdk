@@ -423,6 +423,11 @@ an uncertain preparation. See the
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
 
+An unreleased `directTarget` callback extends the same worker to cases without a world: the runner
+verifies the case's pinned input files, hands them to the agent, and uploads the documents it
+returns as verified Hue artifacts for scoring. See
+[direct cases and files](EVALUATIONS.md#direct-cases-and-files).
+
 Scorer deferral shipped in TypeScript `0.3.1`. Only built-ins
 and bound `local_code` callbacks run here; other pins remain pending for their authorized executor.
 See [scorer execution](EVALUATIONS.md#hosted-and-manual-scorer-pins).

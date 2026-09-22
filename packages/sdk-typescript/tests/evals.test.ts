@@ -329,6 +329,7 @@ function fixture() {
             nextCursor: null,
           });
         }
+        if (request.method === "GET") return send({ items: [], nextCursor: null });
         if (resultFailures-- > 0) return new Response(null, { status: 503 });
         const submitted = body.results as Result[];
         results.push(...submitted);
@@ -915,7 +916,7 @@ describe("installed evaluation API and runner contract", () => {
       expect(rescored.resultIds).toHaveLength(4);
       expect(calls).toBe(2);
       const uploaded = f.requests
-        .filter((request) => request.path.endsWith("/results") && request.body)
+        .filter((request) => request.path.endsWith("/results") && request.body.results)
         .flatMap((request) => (request.body as { results: Result[] }).results);
       expect(uploaded.every((score) => score.scorerVersionId !== deferred.id)).toBe(true);
     } finally {
@@ -1117,9 +1118,10 @@ describe("installed evaluation API and runner contract", () => {
       expect(
         [...f.subjects.values()].every((subject) => !subject.hasOutput && !("output" in subject)),
       ).toBe(true);
-      for (const name of await readdir(dir)) {
-        expect((await stat(join(dir, name))).mode & 0o077).toBe(0);
-        expect(await readFile(join(dir, name), "utf8")).not.toContain("secret-output");
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        expect((await stat(join(dir, entry.name))).mode & 0o077).toBe(0);
+        if (entry.isFile())
+          expect(await readFile(join(dir, entry.name), "utf8")).not.toContain("secret-output");
       }
       expect(f.wire.join()).not.toContain("secret-input");
       expect(f.wire.join()).not.toContain("secret-output");

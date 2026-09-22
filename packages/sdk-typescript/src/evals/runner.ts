@@ -1,11 +1,22 @@
 import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { ROOT_CONTEXT } from "@opentelemetry/api";
 import type { HueClient } from "../client.js";
 import { HueExportError } from "../transport.js";
 import type { HueSpan } from "../types.js";
-import { EvaluationClient } from "./client.js";
+import { EvaluationClient, HueApiError } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { CheckpointStore } from "./checkpoint.js";
+import {
+  downloadCaseFiles,
+  localOutputFiles,
+  OutputFileError,
+  stageOutputFiles,
+  targetFileRoles,
+  uploadOutputFiles,
+  type StagedOutputFile,
+} from "./files.js";
 import { json, uuid } from "./json.js";
 import {
   persistedScore,
@@ -13,16 +24,19 @@ import {
   validateScorerBindings,
   isLocallyExecutable,
 } from "./scorers.js";
-import type {
-  CompleteExecution,
-  Completion,
-  ExperimentCase,
-  JsonValue,
-  LocalScorer,
-  Result,
-  ScoreContext,
-  ScorerVersion,
-  TerminalState,
+import {
+  TargetResult,
+  type CompleteExecution,
+  type Completion,
+  type ExperimentCase,
+  type JsonValue,
+  type LocalFile,
+  type LocalScorer,
+  type Result,
+  type ScoreContext,
+  type ScorerVersion,
+  type TerminalState,
+  type TypedError,
 } from "./types.js";
 
 /**
@@ -88,8 +102,28 @@ interface RunnerOptions {
   concurrency?: number;
   /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */
   schemaTimeoutMillis?: number;
-  /** Resolve sealed world evidence for local scoring and historical rescoring. */
-  environmentEvidence?: "required";
+  /** Resolve sealed evidence by execution identity. when_pinned skips known direct cases. */
+  environmentEvidence?: "required" | "when_pinned";
+  /** Verified input copies and generated files live here; defaults to `<checkpointDirectory>/files`.
+   * Generated files are always saved and uploaded: they are the execution's evidence. */
+  filesDirectory?: string;
+}
+/** What {@link RunExperimentOptions.target} receives for one frozen case. */
+export interface RunExperimentTargetContext {
+  /** Frozen experiment configuration, validated as JSON. */
+  config: JsonValue;
+  /** The frozen case, cloned before invocation. */
+  item: ExperimentCase;
+  /** The `hue.experiment.case` span this attempt runs inside. */
+  span: HueSpan;
+  /** `executionId` identifies this attempt. Deriving an environment run's idempotency
+   * key from it keeps a resumed upload bound to the same world. */
+  executionId: string;
+  /** Verified copies of the case's pinned input files meant for the agent. Evaluator-only
+   * organization templates are withheld, as in the managed protocol. */
+  files: LocalFile[];
+  /** A private scratch directory for this case; return generated files with `withFiles`. */
+  outputDirectory: string;
 }
 /** Options for {@link runExperiment}. */
 export interface RunExperimentOptions extends RunnerOptions {
@@ -109,11 +143,12 @@ export interface RunExperimentOptions extends RunnerOptions {
         /** Why evidence is omitted, up to 4000 characters. */
         reason: string;
       };
-  /** Runs the application for one frozen case; return the output, or `undefined` when unavailable. */
+  /** Runs the application for one frozen case; return the output, `withFiles(output, files)`
+   * when it generated files, or `undefined` when unavailable. */
   target(
     inputs: JsonValue,
-    context: { config: JsonValue; item: ExperimentCase; span: HueSpan; executionId: string },
-  ): JsonValue | undefined | Promise<JsonValue | undefined>;
+    context: RunExperimentTargetContext,
+  ): JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
 }
 /** Options for {@link rescore}. */
 export interface RescoreOptions extends RunnerOptions {
@@ -144,14 +179,29 @@ interface Prepared {
   scores: SavedResult[];
   exportState: "pending" | "accepted";
 }
+/** The target finished and its generated files are staged; publication and scoring can resume. */
+interface Uploading {
+  stage: "uploading";
+  executionId: string;
+  state: TerminalState;
+  hasOutput: boolean;
+  output?: JsonValue;
+  error?: TypedError;
+  files: StagedOutputFile[];
+}
 type CaseCheckpoint =
   | Prepared
+  | Uploading
   | { stage: "starting"; startKey: string; traceExternalId: string }
   | { stage: "running" | "serialization_failed"; executionId: string };
 
 function settings(options: RunnerOptions): number {
-  if (options.environmentEvidence !== undefined && options.environmentEvidence !== "required")
-    throw new TypeError("environmentEvidence must be required when supplied");
+  if (
+    options.environmentEvidence !== undefined &&
+    options.environmentEvidence !== "required" &&
+    options.environmentEvidence !== "when_pinned"
+  )
+    throw new TypeError("environmentEvidence must be required or when_pinned when supplied");
   if (typeof options.persistResultContent !== "boolean")
     throw new TypeError("Choose persistResultContent explicitly: true or false");
   const concurrency = options.concurrency ?? 1;
@@ -164,6 +214,7 @@ function settings(options: RunnerOptions): number {
 }
 async function allPages<T>(
   page: (after?: string) => Promise<{ items: T[]; nextCursor: string | null }>,
+  maximum = 5000,
 ): Promise<T[]> {
   const items: T[] = [];
   const cursors = new Set<string>();
@@ -171,7 +222,7 @@ async function allPages<T>(
   do {
     const response = await page(after);
     items.push(...response.items);
-    if (items.length > 5000) throw new RangeError("Runner supports at most 5000 items");
+    if (items.length > maximum) throw new RangeError(`Runner supports at most ${maximum} items`);
     if (response.nextCursor === null) break;
     after = uuid(response.nextCursor);
     if (cursors.has(after)) throw new Error("API pagination repeated a cursor");
@@ -210,11 +261,13 @@ async function scoresFor(
   context: ScoreContext,
   options: RunnerOptions,
   executionId: string,
+  hasEnvironment = true,
 ): Promise<SavedResult[]> {
   const scores: SavedResult[] = [];
   let environmentUnavailable = false;
   if (
-    options.environmentEvidence === "required" &&
+    (options.environmentEvidence === "required" ||
+      (options.environmentEvidence === "when_pinned" && hasEnvironment)) &&
     versions.some((version) => isLocallyExecutable(version.definition))
   ) {
     try {
@@ -222,8 +275,11 @@ async function scoresFor(
         ...context,
         environment: await loadEnvironmentEvidence(options.client, executionId),
       };
-    } catch {
-      environmentUnavailable = true;
+    } catch (error) {
+      // Generic targets may attach a world independently of the case pin. Preserve
+      // required evidence lookups, including the optional 404 for an unpinned case.
+      if (!(error instanceof HueApiError && error.status === 404 && !hasEnvironment))
+        environmentUnavailable = true;
     }
   }
   for (const version of versions) {
@@ -254,6 +310,7 @@ async function uploadScores(
   scores: SavedResult[],
   save: () => Promise<void>,
   versions: ScorerVersion[],
+  resolveConflict?: (score: SavedResult) => Promise<string[] | undefined>,
 ): Promise<string[]> {
   // A previous SDK may have checkpointed a placeholder for an unknown kind.
   // Keep its evidence intact, but never upload or report it as a local result.
@@ -266,11 +323,20 @@ async function uploadScores(
     if (score.receipt) continue;
     if (!score.payload.evaluationItemId)
       throw new Error("Scoring requires the acknowledged evaluation item identity");
-    const result = await options.client.submitResults(runId, {
-      idempotencyKey: score.key,
-      results: [score.payload as Result],
-    });
-    score.receipt = result.ids;
+    try {
+      const result = await options.client.submitResults(runId, {
+        idempotencyKey: score.key,
+        results: [score.payload as Result],
+      });
+      score.receipt = result.ids;
+    } catch (error) {
+      const receipt =
+        error instanceof HueApiError && error.status === 409
+          ? await resolveConflict?.(score)
+          : undefined;
+      if (!receipt) throw error;
+      score.receipt = receipt;
+    }
     await save();
   }
   return local.flatMap((score) => score.receipt ?? []);
@@ -338,10 +404,83 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       .map((version) => version.id),
   };
   try {
+    const filesRoot = resolve(options.filesDirectory ?? join(options.checkpointDirectory, "files"));
+    const sanitize = (message: string) =>
+      message.slice(0, 4000).toWellFormed().replaceAll("\u0000", "");
+    const errorPayload = (error: unknown): TypedError => ({
+      type: "TargetError",
+      ...(options.persistResultContent && error instanceof Error
+        ? { message: sanitize(error.message) }
+        : {}),
+    });
+    /** Publish staged files, score with every verified file on disk and save the completion. */
+    async function prepare(
+      file: string,
+      saved: Uploading,
+      frozenCase: ExperimentCase,
+      caseDirectory: string,
+      /** The target's output, in memory when result content is not persisted. */
+      output: JsonValue | undefined,
+    ): Promise<Prepared> {
+      const inputs = frozenCase.inputFiles?.length
+        ? await downloadCaseFiles(
+            options.client,
+            frozenCase.inputFiles,
+            join(caseDirectory, "inputs"),
+          )
+        : [];
+      await uploadOutputFiles(options.client, saved.executionId, saved.files, () =>
+        store.write(file, saved),
+      );
+      const outputs = localOutputFiles(saved.files);
+      const primary = outputs.find((item) => item.primary);
+      const scores = await scoresFor(
+        versions,
+        {
+          inputs: frozenCase.inputs,
+          hasExpected: frozenCase.hasExpected,
+          ...(frozenCase.hasExpected ? { expected: frozenCase.expected! } : {}),
+          metadata: frozenCase.metadata,
+          hasOutput: saved.hasOutput,
+          ...(saved.hasOutput ? { output: output! } : {}),
+          executionState: saved.state,
+          ...(inputs.length || outputs.length ? { files: [...inputs, ...outputs] } : {}),
+        },
+        options,
+        saved.executionId,
+        Boolean(frozenCase.environmentVersionId),
+      );
+      const complete: CompleteExecution = {
+        idempotencyKey: randomUUID(),
+        state: saved.state,
+        ...(options.persistResultContent && saved.hasOutput ? { output: output! } : {}),
+        ...(saved.error ? { error: saved.error } : {}),
+        ...(outputs.length
+          ? {
+              artifactIds: outputs.map((item) => item.artifactId),
+              ...(primary ? { primaryArtifactId: primary.artifactId } : {}),
+            }
+          : {}),
+        traceEvidence: options.traceEvidence.mode,
+        ...(options.traceEvidence.mode === "omit"
+          ? { omissionReason: options.traceEvidence.reason }
+          : {}),
+      };
+      const prepared: Prepared = {
+        stage: "prepared",
+        executionId: saved.executionId,
+        complete,
+        scores,
+        exportState: "pending",
+      };
+      await store.write(file, prepared);
+      return prepared;
+    }
     await pool(items, concurrency, async (item) => {
       const file = `case-${uuid(item.id)}`;
+      const caseDirectory = join(filesRoot, `case-${uuid(item.id)}`);
       let checkpoint = await store.read<CaseCheckpoint>(file);
-      if (checkpoint && checkpoint.stage !== "prepared") {
+      if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
         if (checkpoint.stage === "serialization_failed")
           throw new OutcomeSerializationError(checkpoint.executionId);
         const execution =
@@ -353,13 +492,33 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             : await options.client.getExecution(checkpoint.executionId);
         throw new UncertainExecutionError(item.id, execution.id);
       }
+      if (checkpoint?.stage === "uploading") {
+        // The target finished and its files are staged: publish and score them without a
+        // second invocation. Metadata-only mode discarded the output, so its outcome is lost.
+        if (checkpoint.hasOutput && checkpoint.output === undefined)
+          throw new UncertainExecutionError(item.id, checkpoint.executionId);
+        const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
+        checkpoint = await prepare(file, checkpoint, frozenCase, caseDirectory, checkpoint.output);
+      }
       if (!checkpoint) {
         if (item.execution) throw new UncertainExecutionError(item.id, item.execution.id);
         const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
         if (frozenCase.datasetVersionId !== version.id)
           throw new Error("Case is not from the pinned dataset version");
+        // Validate before creating a remote execution. SDK/input failures are not
+        // target failures and cannot consume a case's execution slot.
         const targetInputs = json(frozenCase.inputs);
         const targetConfig = json(experiment.config);
+        // Pinned input files are verified on disk before an execution exists for the same reason.
+        const inputFiles = frozenCase.inputFiles?.length
+          ? await downloadCaseFiles(
+              options.client,
+              frozenCase.inputFiles,
+              join(caseDirectory, "inputs"),
+            )
+          : [];
+        const outputDirectory = join(caseDirectory, "work");
+        await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
         const failureSequenceBefore = options.hue.transport.getFailureSequence();
         checkpoint = await options.hue.withSpan(
           "hue.experiment.case",
@@ -377,14 +536,25 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             await store.write(file, { stage: "running", executionId: execution.id });
             let state: TerminalState = "succeeded";
             let output: JsonValue | undefined;
+            let generated: TargetResult["files"] | undefined;
             let targetError: unknown;
             try {
-              output = await options.target(targetInputs, {
+              const result = await options.target(targetInputs, {
                 config: targetConfig,
                 item: structuredClone(frozenCase),
                 span,
                 executionId: execution.id,
+                files: structuredClone(
+                  inputFiles.filter((entry) =>
+                    (targetFileRoles as readonly string[]).includes(entry.role),
+                  ),
+                ),
+                outputDirectory,
               });
+              if (result instanceof TargetResult) {
+                output = result.output;
+                generated = result.files;
+              } else output = result;
             } catch (error) {
               if (error instanceof TargetOutcomeUncertainError) throw error;
               state = error instanceof TargetCancelledError ? "cancelled" : "error";
@@ -404,53 +574,32 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
               }
             }
             if (output !== undefined) span.setOutput(output);
-            const scores = await scoresFor(
-              versions,
-              {
-                inputs: frozenCase.inputs,
-                hasExpected: frozenCase.hasExpected,
-                ...(frozenCase.hasExpected ? { expected: frozenCase.expected! } : {}),
-                metadata: frozenCase.metadata,
-                hasOutput: output !== undefined,
-                ...(output !== undefined ? { output } : {}),
-                executionState: state,
-              },
-              options,
-              execution.id,
-            );
-            const complete: CompleteExecution = {
-              idempotencyKey: randomUUID(),
-              state,
-              ...(options.persistResultContent && output !== undefined ? { output } : {}),
-              ...(state === "error"
-                ? {
-                    error: {
-                      type: "TargetError",
-                      ...(options.persistResultContent && targetError instanceof Error
-                        ? {
-                            message: targetError.message
-                              .slice(0, 4000)
-                              .toWellFormed()
-                              .replaceAll("\u0000", ""),
-                          }
-                        : {}),
-                    },
-                  }
-                : {}),
-              traceEvidence: options.traceEvidence.mode,
-              ...(options.traceEvidence.mode === "omit"
-                ? { omissionReason: options.traceEvidence.reason }
-                : {}),
-            };
-            const prepared: Prepared = {
-              stage: "prepared",
+            let staged: StagedOutputFile[] = [];
+            if (generated !== undefined && state === "succeeded") {
+              try {
+                staged = await stageOutputFiles(generated, join(caseDirectory, "outputs"));
+              } catch (error) {
+                // Files the target declared but did not deliver are its own failure; the
+                // outcome is still saved instead of leaving the execution uncertain.
+                if (!(error instanceof OutputFileError)) throw error;
+                state = "error";
+                targetError = error;
+                options.hue.recordError(span.span, error);
+              }
+            }
+            const uploading: Uploading = {
+              stage: "uploading",
               executionId: execution.id,
-              complete,
-              scores,
-              exportState: "pending",
+              state,
+              hasOutput: output !== undefined,
+              ...(options.persistResultContent && output !== undefined ? { output } : {}),
+              ...(state === "error" ? { error: errorPayload(targetError) } : {}),
+              files: staged,
             };
-            await store.write(file, prepared);
-            return prepared;
+            // Without persisted result content a restart cannot reconstruct the outcome; the
+            // saved stage then reports the execution as uncertain instead of guessing.
+            await store.write(file, uploading);
+            return prepare(file, uploading, frozenCase, caseDirectory, output);
           },
           {
             parentContext: ROOT_CONTEXT,
@@ -547,14 +696,46 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
       .filter((version) => !isLocallyExecutable(version.definition))
       .map((version) => version.id),
   };
+  const filesRoot = resolve(options.filesDirectory ?? join(options.checkpointDirectory, "files"));
   try {
+    // Grade again can also schedule Hue's built-in checks. Terminal results are immutable:
+    // preserve their receipts, including when another executor wins during local scoring.
+    const resultKey = (itemId: string, scorerVersionId: string) => `${itemId}:${scorerVersionId}`;
+    const receipts = new Map<string, string>();
+    const refreshReceipts = async () => {
+      const results = await allPages(
+        (after) => options.client.listResults(run.id, { after }),
+        5000 * 32,
+      );
+      for (const result of results)
+        receipts.set(resultKey(result.itemId, result.scorerVersionId), result.id);
+    };
+    await refreshReceipts();
     await pool(items, concurrency, async (item) => {
       const file = `item-${uuid(item.id)}`;
+      const pending = run.scorerVersions.filter(
+        (version) => !receipts.has(resultKey(item.id, version.id)),
+      );
       let saved = await store.read<{ scores: SavedResult[] }>(file);
+      if (!saved && !pending.some((version) => isLocallyExecutable(version.definition)))
+        saved = { scores: [] };
       if (!saved) {
         const subject = await options.client.getSubject(item.subjectId);
+        // The frozen manifest holds the case inputs and the target's documents; a code
+        // evaluator grades the saved bytes, verified against their pinned identities.
+        const files = subject.files?.length
+          ? await downloadCaseFiles(
+              options.client,
+              subject.files,
+              join(filesRoot, `subject-${uuid(item.subjectId)}`),
+              subject.primaryArtifactId,
+            )
+          : [];
+        // Older servers omit the world pin; keep their previous behaviour.
+        const hasEnvironment =
+          subject.environmentVersionId === undefined ? true : subject.environmentVersionId !== null;
         const scores = await scoresFor(
-          run.scorerVersions,
+          pending,
           {
             inputs: subject.inputs,
             hasOutput: subject.hasOutput,
@@ -563,24 +744,43 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
             ...(subject.hasExpected ? { expected: subject.expected! } : {}),
             metadata: subject.metadata,
             executionState: subject.executionState,
+            ...(files.length ? { files } : {}),
           },
           options,
           subject.executionId,
+          hasEnvironment,
         );
         for (const score of scores) score.payload.evaluationItemId = item.id;
         saved = { scores };
         await store.write(file, saved);
       }
       const current = saved;
+      for (const score of current.scores) {
+        const receipt = receipts.get(resultKey(item.id, score.payload.scorerVersionId));
+        if (receipt) score.receipt = [receipt];
+      }
       const results = await uploadScores(
         options,
         run.id,
         current.scores,
         () => store.write(file, current),
         run.scorerVersions,
+        async (score) => {
+          await refreshReceipts();
+          const receipt = receipts.get(resultKey(item.id, score.payload.scorerVersionId));
+          return receipt ? [receipt] : undefined;
+        },
       );
       report.subjectIds.push(item.subjectId);
-      report.resultIds.push(...results);
+      report.resultIds.push(
+        ...new Set([
+          ...results,
+          ...run.scorerVersions.flatMap((version) => {
+            const receipt = receipts.get(resultKey(item.id, version.id));
+            return receipt && isLocallyExecutable(version.definition) ? [receipt] : [];
+          }),
+        ]),
+      );
     });
     return report;
   } finally {
