@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.5.0] - 2026-09-22
+
 #### Added
 
 - `hue eval` runs document eval sets as **direct** cases: when the saved version's cases pin no
@@ -104,13 +106,15 @@ refuses to publish a version without a matching entry below.
 
 **Requires** a Hue deployment that serves case input files on experiment items, subject files on
 evaluation subjects, and the artifact reservation, upload, completion and download APIs. Python
-remains at `0.2.2` and has no file-based cases.
+remains at `0.2.3` and has no file-based cases.
 
 #### Changed
 
 - Documentation and examples now name the simulation `definition` / `SimulationDefinition` and
   use case terminology; the deprecated `scenario` option and `SimulationScenario` alias are
   unchanged. No API change.
+
+No registry release is claimed until publication and registry acceptance complete.
 
 ### [0.4.2] - 2026-09-22
 
