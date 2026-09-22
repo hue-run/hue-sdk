@@ -228,7 +228,7 @@ export async function resolveEvalSetPins(
   let dataset: Dataset;
   if (parsed.kind === "id") dataset = await client.getDataset(parsed.id);
   else {
-    const candidates: { id: string; name: string }[] = [];
+    const candidates: { id: string; name: string; slug?: string }[] = [];
     let after: string | undefined;
     for (;;) {
       const page = await client.listDatasets({ after, limit: 100 });
@@ -236,7 +236,10 @@ export async function resolveEvalSetPins(
       if (!page.nextCursor || candidates.length >= MAX_LISTED) break;
       after = page.nextCursor;
     }
-    const { matches } = matchByName(candidates, parsed.name);
+    // An exact slug is the stable handle scripts and agents pass; names are matched after it.
+    const wanted = parsed.name.trim().toLowerCase();
+    const bySlug = candidates.filter((item) => item.slug?.toLowerCase() === wanted);
+    const { matches } = bySlug.length ? { matches: bySlug } : matchByName(candidates, parsed.name);
     if (matches.length > 1)
       throw new Error(
         `Several eval sets match "${parsed.name}"; pass an ID or URL instead: ${describe(matches)}`,

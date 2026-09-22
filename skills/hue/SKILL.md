@@ -179,6 +179,29 @@ pending; 2 is a usage error. Content capture stays off unless `--content` is pas
 one-shot mode so does persisting case outputs and explanations to Hue; `--worker` always persists
 them so a run launched from Hue can be read on its run page. Report the run URL and the printed verdicts; do not claim a pass without them.
 
+## Evaluate a document eval set
+
+When the eval set's cases are a task plus pinned input files answered with generated documents
+(a letter, a deck), `hue eval` runs them as direct cases: no simulated world, and Hue's own
+grading executor scores the uploaded documents after the run.
+
+1. Find the set with `list_datasets` (or use the slug the team gave you) and the evaluator with
+   `list_scorers`; both are pinned by slug:
+
+   ```sh
+   hue eval --set <eval-set-slug> --scorer <evaluator-slug> --command "<agent command>" \
+     --revision <prompt or commit revision> --wait 1800 --json --env-file .env.hue
+   ```
+
+2. The command runs once per case inside a private case directory: read `HUE_CASE_INPUTS`
+   (inputs JSON) and `files/<role>/` (the pinned inputs), write the generated documents to
+   `HUE_CASE_OUTPUT_DIR`, optionally `summary.txt` and `manifest.json` (`{"primary": "<file>"}`).
+   Nothing evaluator-related runs or is installed on this machine.
+3. Read the `--json` document: `cases[].state`, `totals`, `runUrl`, `mode: "direct"` and
+   `deferredScorerVersionIds` (the evaluator versions Hue graded). `complete: false` with exit 1
+   means Hue's grading had not finished within `--wait`; rerun with a longer wait or inspect the
+   run URL and `get_experiment`. Compare prompt revisions with `--baseline <previous experiment id>`.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

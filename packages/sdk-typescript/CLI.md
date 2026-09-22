@@ -413,3 +413,51 @@ still pending at `--wait`, `2` usage or configuration error (including a missing
 interrupted. On Node.js 22, load TypeScript adapters with `NODE_OPTIONS=--experimental-strip-types`;
 non-erasable syntax (enums, parameter properties, namespaces) needs a loader such as `--import tsx`
 on any Node.js version.
+
+## Evaluate a document eval set
+
+Eval sets whose cases pin no simulated world — a task plus pinned input files, answered with
+generated documents — run as **direct** cases through `runExperiment()`. `hue eval` detects this
+from the saved version (`--mode direct|simulation` overrides the detection; `--scenario` is always
+a simulation). `--set` accepts the eval set's slug, name, ID or URL; `--set-version <n>` pins a
+saved version other than the latest; `--scorer <slug|name|id>` pins an evaluator at its newest
+published version, beside or instead of explicit `--scorer-version` IDs.
+
+```sh
+hue eval --set gia-d1-citation --scorer gia-d1-citation \
+  --command "pnpm --filter @august/frontend run hue:gia-agent" \
+  --revision prompt-v10 --wait 1800 --json --env-file .env.hue
+hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-agent.ts --baseline <experiment id>
+```
+
+For each case the command is spawned once **inside a private case directory** with
+`HUE_CASE_DIR`, `HUE_CASE_INPUTS`, `HUE_CASE_OUTPUT_DIR`, `HUE_CASE_ID`, `HUE_CASE_KEY` and
+`HUE_EXECUTION_ID` in its environment (`{"inputs","config"}` is also written to stdin):
+
+```text
+<case dir>/inputs.json            the case inputs (for example {"query": "...", "tipo_diligencia": "Virtual"})
+<case dir>/case.json              id, external key, execution id, run config, staged file list
+<case dir>/files/<role>/<name>    verified copies of the agent-visible pinned files
+<case dir>/output/                write the generated documents here
+```
+
+Every regular file the command leaves under `output/` is uploaded as a generated document
+(accepted: `.pdf .docx .pptx .xlsx .json .txt .csv .png .jpg .jpeg .webp`; another extension or an
+empty file is the case's error). Optional helpers: `manifest.json` (`{"primary": "<filename>",
+"output": <json>}`) names the primary document and the JSON output; `result.json` is the JSON
+output; `summary.txt` or `summary.md` is recorded as `{"summary": "..."}`. When none is written,
+the command's stdout is the output (JSON when it parses). A single generated file is the primary
+document by default. Model and provider credentials stay in the command's own environment; the
+scoped case files are copies under `--checkpoint-dir` (default `.hue/eval/<agent-key>/<project>/direct/<experiment>`).
+
+An adapter file works too: it is called with `(inputs, context)` where `context.mode` is
+`"direct"` and `context` carries `config`, `item`, `executionId`, `files` (agent-visible pinned
+files on disk), `outputDirectory` and `signal`. Return a JSON value, or `withFiles(output, files)`
+from `@hue-run/sdk/evals` to attach generated documents.
+
+Code evaluators pinned to the run are **not** executed on your machine: the CLI leaves them
+deferred (`deferUnboundLocalScorers`) and Hue's grading executor scores the uploaded documents;
+evaluator-only pinned files such as a legal corpus are never downloaded. `Waiting for Hue
+checks...` then covers that grading, so size `--wait` to the evaluator's runtime. The
+`--json` document gains `"mode": "direct"` and `"deferredScorerVersionIds"`. Exit codes, `--baseline`
+and checkpoints behave as for Scenarios.

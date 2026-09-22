@@ -223,6 +223,7 @@
             "EvaluationClientOptions",
             "EvaluationItem",
             "EvaluationRun",
+            "EvaluationRunSummary",
             "Execution",
             "ExpectedAgentManifestV2",
             "Experiment",
@@ -453,7 +454,7 @@
       "version": "0.4.1"
     },
     "name": "hue",
-    "sha256": "sha256:80d2c982e662f29923b60def5ced0f8d907d75e91b77514665cbd54fbe7a1a2e",
+    "sha256": "sha256:b24ade74b3bc6352d5c437d6a47b7903ed3491248dc8ca7e20ff55def84500cb",
     "source": "skills/hue/SKILL.md"
   }
 }

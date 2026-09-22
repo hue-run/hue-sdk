@@ -24,6 +24,7 @@ import type {
   DatasetVersion,
   EvaluationItem,
   EvaluationRun,
+  EvaluationRunSummary,
   EnvironmentEvidenceSnapshot,
   Execution,
   Experiment,
@@ -484,6 +485,10 @@ export class EvaluationClient {
   /** Reads an evaluation run and its scoring progress. */
   getEvaluationRun(id: string) {
     return this.request<EvaluationRun>("GET", `/evaluation-runs/${uuid(id)}`);
+  }
+  /** Every evaluation run of the project, oldest first; a grading worker polls this for pending pins. */
+  listEvaluationRuns(page?: PageOptions) {
+    return this.request<Page<EvaluationRunSummary>>("GET", `/evaluation-runs${this.page(page)}`);
   }
   /** Lists the subjects of an evaluation run. */
   listEvaluationItems(id: string, page?: PageOptions) {

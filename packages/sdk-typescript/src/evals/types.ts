@@ -82,7 +82,13 @@ export interface CaseFile {
   /** Hue artifact identity of the pinned bytes. */
   artifactId: string;
   /** How the file relates to the case; `org_template` is evaluator-only. */
-  role: "source" | "attached_template" | "attached_reference" | "original" | "org_template";
+  role:
+    | "source"
+    | "attached_template"
+    | "attached_reference"
+    | "original"
+    | "org_template"
+    | "evaluator_reference";
   /** Declared file name. */
   filename: string;
   /** Declared content type. */
@@ -404,6 +410,17 @@ export interface EvaluationRun {
     /** Results not yet recorded. */
     pending: number;
   };
+}
+/** One row of the project's evaluation-run listing; `getEvaluationRun` reads the pins and score counts. */
+export interface EvaluationRunSummary {
+  /** Run ID. */
+  id: string;
+  /** Display name. */
+  name: string;
+  /** Experiment whose default run this is, or `null` for a standalone scoring run. */
+  experimentId: string | null;
+  /** Creation time. */
+  createdAt: string;
 }
 /** An experiment: a frozen dataset version, a configuration and pinned scorers. */
 export interface Experiment {

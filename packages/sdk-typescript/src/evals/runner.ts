@@ -18,14 +18,10 @@ import {
   type StagedOutputFile,
 } from "./files.js";
 import { json, uuid } from "./json.js";
-import {
-  persistedScore,
-  scoreLocally,
-  validateScorerBindings,
-  isLocallyExecutable,
-} from "./scorers.js";
+import { executableHere, persistedScore, scoreLocally, validateScorerBindings } from "./scorers.js";
 import {
   TargetResult,
+  type CaseFile,
   type CompleteExecution,
   type Completion,
   type ExperimentCase,
@@ -98,6 +94,10 @@ interface RunnerOptions {
   persistResultContent: boolean;
   /** Local callbacks bound to `local_code` scorer pins by digest. */
   scorers?: LocalScorer[];
+  /** Leave pinned `local_code` versions this process has no binding for to another executor
+   * (for example a Hue-operated grading worker that owns the evaluator source) instead of
+   * refusing the run. Their IDs are reported in `deferredScorerVersionIds`. */
+  deferUnboundLocalScorers?: boolean;
   /** Cases in flight at once, 1–16. Default 1. */
   concurrency?: number;
   /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */
@@ -109,6 +109,28 @@ interface RunnerOptions {
   filesDirectory?: string;
 }
 /** What {@link RunExperimentOptions.target} receives for one frozen case. */
+/**
+ * Pinned inputs this process must download. The target receives the agent-visible roles;
+ * scorer-only roles (organization templates, evaluator references such as a legal corpus) are
+ * fetched only when a bound code evaluator will grade here. A customer running `hue eval` with
+ * grading deferred to Hue never receives them.
+ */
+function neededInputFiles(
+  files: CaseFile[] | undefined,
+  versions: ScorerVersion[],
+  options: RunnerOptions,
+): CaseFile[] {
+  if (!files?.length) return [];
+  const codeEvaluatorRunsHere = versions.some(
+    (version) =>
+      version.definition.kind === "local_code" && executableHere(version.definition, options),
+  );
+  return codeEvaluatorRunsHere
+    ? files
+    : files.filter((file) => (targetFileRoles as readonly string[]).includes(file.role));
+}
+
+/** Immutable case context passed to a direct experiment target. */
 export interface RunExperimentTargetContext {
   /** Frozen experiment configuration, validated as JSON. */
   config: JsonValue;
@@ -268,7 +290,7 @@ async function scoresFor(
   if (
     (options.environmentEvidence === "required" ||
       (options.environmentEvidence === "when_pinned" && hasEnvironment)) &&
-    versions.some((version) => isLocallyExecutable(version.definition))
+    versions.some((version) => executableHere(version.definition, options))
   ) {
     try {
       context = {
@@ -284,7 +306,7 @@ async function scoresFor(
   }
   for (const version of versions) {
     // Every pin without a local implementation belongs to another executor.
-    if (!isLocallyExecutable(version.definition)) continue;
+    if (!executableHere(version.definition, options)) continue;
     const score = persistedScore(
       environmentUnavailable && version.definition.kind === "local_code"
         ? { state: "error", error: { type: "EnvironmentEvidenceUnavailable" } }
@@ -317,7 +339,7 @@ async function uploadScores(
   const local = scores.filter((score) => {
     const pin = versions.find((version) => version.id === score.payload.scorerVersionId);
     if (!pin) throw new Error("Saved result references an unpinned scorer version");
-    return isLocallyExecutable(pin.definition);
+    return executableHere(pin.definition, options);
   });
   for (const score of local) {
     if (score.receipt) continue;
@@ -373,7 +395,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
   if (!version.frozenAt || !version.contentDigest)
     throw new Error("Experiment dataset must be frozen");
   const versions = experiment.evaluation.scorerVersions;
-  validateScorerBindings(versions, options.scorers);
+  if (!options.deferUnboundLocalScorers) validateScorerBindings(versions, options.scorers);
   const items = await allPages((after) =>
     options.client.listExperimentItems(experiment.id, { after }),
   );
@@ -400,7 +422,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     subjectIds: [],
     resultIds: [],
     deferredScorerVersionIds: versions
-      .filter((version) => !isLocallyExecutable(version.definition))
+      .filter((version) => !executableHere(version.definition, options))
       .map((version) => version.id),
   };
   try {
@@ -422,12 +444,9 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       /** The target's output, in memory when result content is not persisted. */
       output: JsonValue | undefined,
     ): Promise<Prepared> {
-      const inputs = frozenCase.inputFiles?.length
-        ? await downloadCaseFiles(
-            options.client,
-            frozenCase.inputFiles,
-            join(caseDirectory, "inputs"),
-          )
+      const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
+      const inputs = needed.length
+        ? await downloadCaseFiles(options.client, needed, join(caseDirectory, "inputs"))
         : [];
       await uploadOutputFiles(options.client, saved.executionId, saved.files, () =>
         store.write(file, saved),
@@ -510,12 +529,9 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         const targetInputs = json(frozenCase.inputs);
         const targetConfig = json(experiment.config);
         // Pinned input files are verified on disk before an execution exists for the same reason.
-        const inputFiles = frozenCase.inputFiles?.length
-          ? await downloadCaseFiles(
-              options.client,
-              frozenCase.inputFiles,
-              join(caseDirectory, "inputs"),
-            )
+        const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
+        const inputFiles = needed.length
+          ? await downloadCaseFiles(options.client, needed, join(caseDirectory, "inputs"))
           : [];
         const outputDirectory = join(caseDirectory, "work");
         await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
@@ -575,7 +591,9 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             }
             if (output !== undefined) span.setOutput(output);
             let staged: StagedOutputFile[] = [];
-            if (generated !== undefined && state === "succeeded") {
+            // An empty declared list (a direct case answered only through stdout, or
+            // `withFiles(output, [])`) means no generated files, not a missing-files error.
+            if (generated !== undefined && generated.length > 0 && state === "succeeded") {
               try {
                 staged = await stageOutputFiles(generated, join(caseDirectory, "outputs"));
               } catch (error) {
@@ -673,7 +691,8 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
     options.client.checkConnection(),
     options.client.getEvaluationRun(options.runId),
   ]);
-  validateScorerBindings(run.scorerVersions, options.scorers);
+  if (!options.deferUnboundLocalScorers)
+    validateScorerBindings(run.scorerVersions, options.scorers);
   const items = await allPages((after) => options.client.listEvaluationItems(run.id, { after }));
   if (items.length !== run.itemCount)
     throw new Error("Frozen evaluation run item count differs from API items");
@@ -693,7 +712,7 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
     subjectIds: [],
     resultIds: [],
     deferredScorerVersionIds: run.scorerVersions
-      .filter((version) => !isLocallyExecutable(version.definition))
+      .filter((version) => !executableHere(version.definition, options))
       .map((version) => version.id),
   };
   const filesRoot = resolve(options.filesDirectory ?? join(options.checkpointDirectory, "files"));
@@ -717,20 +736,27 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
         (version) => !receipts.has(resultKey(item.id, version.id)),
       );
       let saved = await store.read<{ scores: SavedResult[] }>(file);
-      if (!saved && !pending.some((version) => isLocallyExecutable(version.definition)))
+      if (!saved && !pending.some((version) => executableHere(version.definition, options)))
         saved = { scores: [] };
       if (!saved) {
         const subject = await options.client.getSubject(item.subjectId);
         // The frozen manifest holds the case inputs and the target's documents; a code
         // evaluator grades the saved bytes, verified against their pinned identities.
-        const files = subject.files?.length
-          ? await downloadCaseFiles(
-              options.client,
-              subject.files,
-              join(filesRoot, `subject-${uuid(item.subjectId)}`),
-              subject.primaryArtifactId,
-            )
-          : [];
+        // Built-ins grade the JSON output alone, so no file — least of all a scorer-only
+        // organization template or evaluator reference — is fetched onto this machine for them.
+        const codeEvaluatorRunsHere = pending.some(
+          (version) =>
+            version.definition.kind === "local_code" && executableHere(version.definition, options),
+        );
+        const files =
+          codeEvaluatorRunsHere && subject.files?.length
+            ? await downloadCaseFiles(
+                options.client,
+                subject.files,
+                join(filesRoot, `subject-${uuid(item.subjectId)}`),
+                subject.primaryArtifactId,
+              )
+            : [];
         // Older servers omit the world pin; keep their previous behaviour.
         const hasEnvironment =
           subject.environmentVersionId === undefined ? true : subject.environmentVersionId !== null;
@@ -777,7 +803,7 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
           ...results,
           ...run.scorerVersions.flatMap((version) => {
             const receipt = receipts.get(resultKey(item.id, version.id));
-            return receipt && isLocallyExecutable(version.definition) ? [receipt] : [];
+            return receipt && executableHere(version.definition, options) ? [receipt] : [];
           }),
         ]),
       );

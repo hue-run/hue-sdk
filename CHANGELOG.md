@@ -12,6 +12,25 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- `hue eval` runs document eval sets as **direct** cases: when the saved version's cases pin no
+  simulated world (or with `--mode direct`), it creates one experiment through `runExperiment()`,
+  hands each case's agent-visible pinned files to the agent and uploads the documents it produces.
+  `--command` is spawned inside a private case directory with `HUE_CASE_DIR`, `HUE_CASE_INPUTS`,
+  `HUE_CASE_OUTPUT_DIR`, `HUE_CASE_ID`, `HUE_CASE_KEY` and `HUE_EXECUTION_ID`; every file written
+  to `output/` is uploaded (`manifest.json`, `result.json` and `summary.txt` are optional helpers).
+  Adapter files receive a `DirectTargetContext` (`mode: "direct"`) and may return `withFiles(...)`.
+  Code evaluators pinned to the run are left to Hue's grading executor (`deferUnboundLocalScorers`)
+  and the verdict wait covers them; `--json` reports `mode` and `deferredScorerVersionIds`.
+  `--set` also matches an eval set's slug, `--set-version <n>` pins a saved version and
+  `--scorer <slug|name|id>` pins an evaluator at its newest published version.
+- `runExperiment()` and `rescore()` accept `deferUnboundLocalScorers`: a pinned `local_code`
+  version with no local binding is reported in `deferredScorerVersionIds` instead of refusing the
+  run, so a customer process can upload outputs while a Hue-operated worker grades them, and a
+  grading worker bound to one evaluator leaves other evaluators' pins alone. Scorer-only pinned
+  files are downloaded only when a bound code evaluator runs in the process.
+- `EvaluationClient.listEvaluationRuns()` pages the project's evaluation runs; `CaseFile.role`
+  gains `evaluator_reference`, a scorer-only role for customer material an evaluator compares
+  against. **Wire**
 - `hue eval` runs a local adapter file or shell command against a published Scenario or a saved
   eval set through `runSimulation()`, or as an outbound worker through `runLocalAgent()`. It
   resolves Scenarios by name, ID or URL, creates a fresh experiment from the published pins, prints
