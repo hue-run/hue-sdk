@@ -10,7 +10,7 @@ Your agent runs in your process while a disposable simulated world runs in Hue. 
 authoritative and records an ordered journal; Hue does not execute your agent code or provider
 credentials.
 
-## Run a scenario like a test
+## Run a definition like a test
 
 `runSimulation` is the one-shot developer path. It calls your existing callback directly, so
 IDE breakpoints and cooperative cancellation work. It does not register a worker, poll for jobs,
@@ -29,7 +29,7 @@ try {
     client: createEvaluationClient(connection),
     environmentClient: createEnvironmentClient(connection),
     hue,
-    checkpointDirectory: ".hue-checkpoints/refund-scenario",
+    checkpointDirectory: ".hue-checkpoints/refund-definition",
     definition: { kind: "experiment", experimentId: process.env.HUE_EXPERIMENT_ID! },
     persistResultContent: true,
     traceEvidence: { mode: "required" },
@@ -84,10 +84,10 @@ facade acceptance remains a post-publication Fern integration gate. No public SD
 official Gmail service, and passing these tests is not evidence of universal Gmail or Slack
 parity. A matching Hue deployment and verified provider profile remain required.
 
-## Repository-authored scenarios
+## Repository-authored definitions
 
-Repository scenarios publish through the same validated environment, dataset, scorer and
-experiment APIs as Hue-authored scenarios. Stable slugs reuse matching immutable content
+Repository definitions publish through the same validated environment, dataset, scorer and
+experiment APIs as definitions authored in Hue. Stable slugs reuse matching immutable content
 digests; changed definitions, tasks or scorers publish new versions. Hue does not synchronize
 files back from its UI, and the helper refuses an unrelated mutable dataset draft instead of
 overwriting it.
@@ -106,7 +106,7 @@ the same before comparing immutable digests, so casing-only UUID changes reuse t
 version without dropping provider bindings.
 
 ```ts
-const scenario = {
+const definition = {
   kind: "repository" as const,
   name: "Refund an eligible charge",
   slug: "refund-eligible-charge",
@@ -130,8 +130,8 @@ await runSimulation({
   client,
   environmentClient,
   hue,
-  checkpointDirectory: ".hue-checkpoints/refund-scenario",
-  scenario,
+  checkpointDirectory: ".hue-checkpoints/refund-definition",
+  definition,
   persistResultContent: false,
   traceEvidence: { mode: "required" },
   target: (inputs, context) => runMyExistingAgent({ inputs, ...context }),

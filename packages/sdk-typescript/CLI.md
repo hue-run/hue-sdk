@@ -79,7 +79,7 @@ events, checkpoints or receipts. Ordinary app starts have no handshake and retai
 listener behavior. This prevents accidental requests to an unrelated listener, not access by
 malicious code running as the same local user.
 
-Setup creates no Scenario, Hue Run, evaluation, source capture, worker or remote execution. Package
+Setup creates no simulation, Hue Run, evaluation, source capture, worker or remote execution. Package
 manager lifecycle scripts are disabled. The supported existing application entrypoint is executed
 directly with fixed argv solely for its bounded local HTTP verification; no shell command is accepted.
 

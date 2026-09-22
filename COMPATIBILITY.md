@@ -65,4 +65,4 @@ Every other kind is reported in `deferredScorerVersionIds` without a local resul
 including unknown kinds and built-in entries returned by a newer server. The responsible server or human executor
 must complete those scores. Legacy local-code pins still require their exact callback binding.
 The V2 connection bundle, provider transport, worker recovery and OpenTelemetry ownership remain
-unchanged. Setup is a separate local inspection CLI, not a Scenario launcher.
+unchanged. Setup is a separate local inspection CLI, not a simulation launcher.

@@ -68,7 +68,7 @@ availability and presents the published [privacy notice](https://hue.run/privacy
 with limits of 100 traces, 1,000 spans and 2 MiB. A private local browser handoff lets the owner link
 an account while preserving the project and original request evidence; reconciliation refuses the
 old anonymous key and does not replay business work. Setup never enables content capture or creates
-a Scenario, Hue Run, evaluation, source capture or remote execution. See the
+a simulation, Hue Run, evaluation, source capture or remote execution. See the
 [CLI contract](./packages/sdk-typescript/CLI.md).
 
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
