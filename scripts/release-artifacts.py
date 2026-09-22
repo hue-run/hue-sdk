@@ -206,13 +206,17 @@ def module_imports(source: str, filename: str) -> list[str]:
                     imports.append(literal(index + 2))
                     assert after[2] == ("punct", ")"), "Computed import is unsupported"
                 else:
-                    # Existing core behavior: the only computed import selects two
-                    # built-in transports, never a package or archive module.
-                    expected = javascript_tokens(
-                        'import(protocol === "https:" ? "node:https" : "node:http")'
-                    )
+                    # The transport selects one of two built-ins, and `hue eval <adapter-file>`
+                    # loads the adapter file the user named; neither loads an archive module.
+                    allowed = {
+                        "package/dist/transport.js": (
+                            'import(protocol === "https:" ? "node:https" : "node:http")'
+                        ),
+                        "package/dist/cli/eval.js": "import(pathToFileURL(path).href)",
+                    }.get(filename)
+                    expected = javascript_tokens(allowed) if allowed else None
                     assert (
-                        filename == "package/dist/transport.js"
+                        expected is not None
                         and tokens[index : index + len(expected)] == expected
                     ), "Computed import is unsupported"
                 continue
