@@ -65,7 +65,9 @@ export function safeFilename(name: string): string {
     .filter((c) => c.charCodeAt(0) >= 32 && c.charCodeAt(0) !== 127 && c !== "/" && c !== "\\")
     .join("")
     .trim();
-  return cleaned && cleaned !== "." && cleaned !== ".." ? cleaned.slice(0, 200) : "file";
+  return cleaned && cleaned !== "." && cleaned !== ".."
+    ? [...cleaned].slice(0, 200).join("")
+    : "file";
 }
 async function privateDirectory(path: string): Promise<string> {
   const root = resolve(path);

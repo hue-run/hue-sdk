@@ -13,6 +13,7 @@ import {
   registeredCapabilities,
   runExperiment,
   runLocalAgent,
+  safeFilename,
   withFiles,
   rescore,
   type ArtifactUpload,
@@ -486,6 +487,13 @@ function fixture(options: {
 }
 
 describe("file-based cases", () => {
+  test("filename truncation preserves a Unicode code point at the boundary", () => {
+    const expected = `${"a".repeat(199)}😀`;
+    const filename = safeFilename(`${expected}ignored`);
+    expect(filename).toBe(expected);
+    expect([...filename]).toHaveLength(200);
+  });
+
   test("downloads pinned inputs, uploads generated files and grades them locally", async () => {
     const seen: { scorer?: LocalFile[]; target?: LocalFile[] } = {};
     const grader = defineLocalScorer({
