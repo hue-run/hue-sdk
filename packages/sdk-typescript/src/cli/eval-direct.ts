@@ -116,11 +116,29 @@ async function readJsonFile(path: string): Promise<JsonValue | undefined> {
   }
 }
 
+/** Regular files anywhere under the output directory, named by their `/`-joined relative path.
+ * Hidden and lock entries (dot names, `~$…`) and symlinks are skipped at every level. */
+async function listOutputFiles(
+  directory: string,
+  prefix = "",
+): Promise<{ name: string; path: string }[]> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  const found: { name: string; path: string }[] = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name.startsWith("~$")) continue;
+    const path = join(directory, entry.name);
+    const name = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) found.push(...(await listOutputFiles(path, `${name}/`)));
+    else if (entry.isFile()) found.push({ name, path });
+  }
+  return found;
+}
+
 /**
- * Turns the output folder into the target's result. Every regular file becomes a generated
- * file; an unsupported extension is the agent's error rather than a silently dropped document.
- * `fallbackOutput` (for example the command's stdout) is used when no JSON output or summary
- * file was written.
+ * Turns the output folder into the target's result. Every regular file, in subdirectories too,
+ * becomes a generated file; an unsupported extension is the agent's error rather than a silently
+ * dropped document. `fallbackOutput` (for example the command's stdout) is used when no JSON
+ * output or summary file was written.
  */
 export async function collectDirectOutputs(
   outputDirectory: string,
@@ -148,13 +166,9 @@ export async function collectDirectOutputs(
       }
     }
   if (output === undefined) output = fallbackOutput;
-  const entries = (await readdir(outputDirectory, { withFileTypes: true }).catch(() => [])).filter(
-    (entry) =>
-      entry.isFile() &&
-      !entry.name.startsWith(".") &&
-      !entry.name.startsWith("~$") &&
-      !HELPER_FILES.has(entry.name) &&
-      !SUMMARY_FILES.includes(entry.name),
+  // Helper and summary names are reserved at the top level only; a nested one is a document.
+  const entries = (await listOutputFiles(outputDirectory)).filter(
+    (entry) => !HELPER_FILES.has(entry.name) && !SUMMARY_FILES.includes(entry.name),
   );
   // Directory order differs between filesystems; keep uploads stable.
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -167,11 +181,10 @@ export async function collectDirectOutputs(
     );
   const files: OutputFile[] = [];
   for (const entry of entries) {
-    const path = join(outputDirectory, entry.name);
-    if ((await stat(path)).size === 0)
+    if ((await stat(entry.path)).size === 0)
       throw new Error(`The agent wrote an empty file: ${entry.name}`);
     files.push({
-      path,
+      path: entry.path,
       filename: entry.name,
       contentType: outputExtensions[extname(entry.name).toLowerCase()]!,
     });

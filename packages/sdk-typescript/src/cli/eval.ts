@@ -18,8 +18,10 @@ import type {
   ScorerVersion,
 } from "../evals/types.js";
 import { TargetResult } from "../evals/types.js";
+import { CheckpointStore } from "../evals/checkpoint.js";
+import { digest } from "../evals/json.js";
 import { runLocalAgent } from "../evals/local-worker.js";
-import { runExperiment, TargetCancelledError } from "../evals/runner.js";
+import { runExperiment, TargetCancelledError, type RunnerReport } from "../evals/runner.js";
 import {
   matchByName,
   parseScenarioSelector,
@@ -882,10 +884,22 @@ async function runOnce(
   );
 }
 
+/** Resumable direct-run attempt: the created experiment is finished before a new one starts. */
+interface DirectAttempt {
+  /** Digest of the selection: dataset version, scorer pins and experiment configuration. */
+  selectionDigest: string;
+  /** Stable experiment-creation key; a resumed attempt never creates a second experiment. */
+  idempotencyKey: string;
+  stage: "preparing" | "running" | "completed";
+  experimentId?: string;
+}
+
 /**
  * Direct cases: one ordinary experiment through `runExperiment`. The agent receives the case's
  * pinned files and returns generated documents; code evaluators pinned to the run stay deferred
  * for Hue's executor (`deferUnboundLocalScorers`), so no evaluator source runs on this machine.
+ * The attempt is checkpointed as in simulation mode: rerunning the same selection resumes the
+ * saved experiment without invoking the agent again for its finished cases.
  */
 async function runDirect(
   run: {
@@ -905,57 +919,90 @@ async function runDirect(
   connection: Connection,
 ): Promise<number> {
   const { client, values, pins, output, signal } = run;
-  const experiment = await client.createExperiment({
-    idempotencyKey: randomUUID(),
-    name: run.runName.slice(0, 100),
-    datasetVersionId: pins.datasetVersionId,
-    scorerVersionIds: pins.scorerVersionIds,
-    config: { agentKey: run.agent.key, agentRevision: run.agent.revision },
-  });
-  const runUrl = new URL(`/experiments/${experiment.id}`, connection.baseUrl).toString();
-  output.log(`Run: ${runUrl}`);
-  output.log(`Experiment: ${experiment.id}`);
+  const config = { agentKey: run.agent.key, agentRevision: run.agent.revision };
   const checkpointDirectory = await prepareCheckpointDirectory(
     values["checkpoint-dir"],
     run.agent.key,
     run.projectId,
-    join("direct", experiment.id),
+    "direct",
   );
-  const report = await runExperiment({
-    client,
-    hue: run.hue,
-    experimentId: experiment.id,
-    checkpointDirectory,
-    persistResultContent: values.content,
-    traceEvidence: { mode: "required" },
-    concurrency: run.concurrency,
-    scorers: [],
-    deferUnboundLocalScorers: true,
-    environmentEvidence: "when_pinned",
-    async target(inputs, context) {
-      if (signal.aborted) throw new TargetCancelledError();
-      output.log(`[${context.item.externalKey}] agent started`);
-      const result = await run.agents.direct(inputs, {
-        mode: "direct",
-        config: structuredClone(context.config),
-        item: {
-          id: context.item.id,
-          externalKey: context.item.externalKey,
-          metadata: structuredClone(context.item.metadata),
-        },
-        executionId: context.executionId,
-        files: structuredClone(context.files),
-        outputDirectory: context.outputDirectory,
-        signal,
-      });
-      const count =
-        result instanceof TargetResult ? result.files.length : result === undefined ? 0 : null;
-      output.log(
-        `[${context.item.externalKey}] ${count === null ? "answer returned" : `${count} file${count === 1 ? "" : "s"} produced`}`,
-      );
-      return result;
-    },
+  const store = await CheckpointStore.acquire(checkpointDirectory, {
+    kind: "direct",
+    projectId: run.projectId,
+    baseUrl: connection.baseUrl,
   });
+  let experimentId = "";
+  let runUrl = "";
+  let report: RunnerReport;
+  try {
+    const selectionDigest = digest({
+      datasetVersionId: pins.datasetVersionId,
+      scorerVersionIds: [...pins.scorerVersionIds].sort(),
+      config,
+    });
+    let attempt = await store.read<DirectAttempt>("active-attempt");
+    if (attempt && attempt.stage !== "completed" && attempt.selectionDigest !== selectionDigest)
+      throw new Error("Recover the unfinished direct run before running a changed selection");
+    if (!attempt || attempt.stage === "completed") {
+      attempt = { selectionDigest, idempotencyKey: randomUUID(), stage: "preparing" };
+      await store.write("active-attempt", attempt);
+    }
+    if (!attempt.experimentId) {
+      const experiment = await client.createExperiment({
+        idempotencyKey: attempt.idempotencyKey,
+        name: run.runName.slice(0, 100),
+        datasetVersionId: pins.datasetVersionId,
+        scorerVersionIds: pins.scorerVersionIds,
+        config,
+      });
+      attempt.experimentId = experiment.id;
+      attempt.stage = "running";
+      await store.write("active-attempt", attempt);
+    }
+    experimentId = attempt.experimentId;
+    runUrl = new URL(`/experiments/${experimentId}`, connection.baseUrl).toString();
+    output.log(`Run: ${runUrl}`);
+    output.log(`Experiment: ${experimentId}`);
+    report = await runExperiment({
+      client,
+      hue: run.hue,
+      experimentId,
+      checkpointDirectory: join(store.directory, experimentId),
+      persistResultContent: values.content,
+      traceEvidence: { mode: "required" },
+      concurrency: run.concurrency,
+      scorers: [],
+      deferUnboundLocalScorers: true,
+      environmentEvidence: "when_pinned",
+      async target(inputs, context) {
+        if (signal.aborted) throw new TargetCancelledError();
+        output.log(`[${context.item.externalKey}] agent started`);
+        const result = await run.agents.direct(inputs, {
+          mode: "direct",
+          config: structuredClone(context.config),
+          item: {
+            id: context.item.id,
+            externalKey: context.item.externalKey,
+            metadata: structuredClone(context.item.metadata),
+          },
+          executionId: context.executionId,
+          files: structuredClone(context.files),
+          outputDirectory: context.outputDirectory,
+          signal,
+        });
+        const count =
+          result instanceof TargetResult ? result.files.length : result === undefined ? 0 : null;
+        output.log(
+          `[${context.item.externalKey}] ${count === null ? "answer returned" : `${count} file${count === 1 ? "" : "s"} produced`}`,
+        );
+        return result;
+      },
+    });
+    attempt.stage = "completed";
+    await store.write("active-attempt", attempt);
+  } finally {
+    await store.release();
+  }
   if (report.deferredScorerVersionIds.length)
     output.log(
       `${report.deferredScorerVersionIds.length} evaluator version${report.deferredScorerVersionIds.length === 1 ? "" : "s"} left to Hue's executor`,
@@ -964,7 +1011,7 @@ async function runDirect(
     client,
     values,
     {
-      experimentId: experiment.id,
+      experimentId,
       subjectIds: report.subjectIds,
       runUrl,
       extra: { mode: "direct", deferredScorerVersionIds: report.deferredScorerVersionIds },

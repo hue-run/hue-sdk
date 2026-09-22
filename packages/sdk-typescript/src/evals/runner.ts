@@ -590,7 +590,9 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             }
             if (output !== undefined) span.setOutput(output);
             let staged: StagedOutputFile[] = [];
-            if (generated !== undefined && state === "succeeded") {
+            // An empty declared list (a direct case answered only through stdout, or
+            // `withFiles(output, [])`) means no generated files, not a missing-files error.
+            if (generated !== undefined && generated.length > 0 && state === "succeeded") {
               try {
                 staged = await stageOutputFiles(generated, join(caseDirectory, "outputs"));
               } catch (error) {
@@ -739,14 +741,21 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
         const subject = await options.client.getSubject(item.subjectId);
         // The frozen manifest holds the case inputs and the target's documents; a code
         // evaluator grades the saved bytes, verified against their pinned identities.
-        const files = subject.files?.length
-          ? await downloadCaseFiles(
-              options.client,
-              subject.files,
-              join(filesRoot, `subject-${uuid(item.subjectId)}`),
-              subject.primaryArtifactId,
-            )
-          : [];
+        // Built-ins grade the JSON output alone, so no file — least of all a scorer-only
+        // organization template or evaluator reference — is fetched onto this machine for them.
+        const codeEvaluatorRunsHere = pending.some(
+          (version) =>
+            version.definition.kind === "local_code" && executableHere(version.definition, options),
+        );
+        const files =
+          codeEvaluatorRunsHere && subject.files?.length
+            ? await downloadCaseFiles(
+                options.client,
+                subject.files,
+                join(filesRoot, `subject-${uuid(item.subjectId)}`),
+                subject.primaryArtifactId,
+              )
+            : [];
         // Older servers omit the world pin; keep their previous behaviour.
         const hasEnvironment =
           subject.environmentVersionId === undefined ? true : subject.environmentVersionId !== null;

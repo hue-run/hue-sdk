@@ -802,6 +802,81 @@ describe("file-based cases", () => {
     });
   }
 
+  test("a builtin-only regrade grades the stored output without downloading any files", async () => {
+    const builtin = version(builtins.exactMatch());
+    const f = fixture({ scorers: [builtin] });
+    const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "builtin-regrade",
+      captureContent: false,
+    });
+    try {
+      const original = await runExperiment({
+        client,
+        hue,
+        experimentId: f.experiment.id,
+        checkpointDirectory: await directory(),
+        persistResultContent: true,
+        traceEvidence: { mode: "omit", reason: "Synthetic test" },
+        target: () =>
+          withFiles({ ok: true }, [
+            { bytes: Buffer.from("saved letter"), filename: "Letter.docx", contentType: docx },
+          ]),
+      });
+      const run = await client.createEvaluationRun({
+        idempotencyKey: randomUUID(),
+        name: "Builtin regrade",
+        subjectIds: original.subjectIds,
+        scorerVersionIds: [builtin.id],
+      });
+      const downloads = f.calls.downloads.length;
+      const report = await rescore({
+        client,
+        runId: run.id,
+        checkpointDirectory: await directory(),
+        persistResultContent: true,
+        deferUnboundLocalScorers: true,
+      });
+      expect(report.resultIds).toHaveLength(1);
+      // The built-in grades the stored JSON; the subject's files (a scorer-only organization
+      // template among them) stay off this machine.
+      expect(f.calls.downloads).toHaveLength(downloads);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+
+  test("an empty declared file list is a JSON-only outcome, not a target error", async () => {
+    const f = fixture({ scorers: [version(builtins.exactMatch())] });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "no-files",
+      captureContent: false,
+    });
+    try {
+      const report = await runExperiment({
+        client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+        hue,
+        experimentId: f.experiment.id,
+        checkpointDirectory: await directory(),
+        persistResultContent: true,
+        traceEvidence: { mode: "required" },
+        target: () => withFiles({ answer: 42 }, []),
+      });
+      expect(report.subjectIds).toHaveLength(1);
+      expect(f.calls.reserves).toBe(0);
+      expect(f.calls.completions[0]).toMatchObject({ state: "succeeded", output: { answer: 42 } });
+      expect(f.calls.completions[0]).not.toHaveProperty("artifactIds");
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+
   test("a code evaluator grades generated files without a JSON output; built-ins stay skipped", async () => {
     const grader = defineLocalScorer({
       source: "files only",

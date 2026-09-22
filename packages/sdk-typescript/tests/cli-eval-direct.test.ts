@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -37,7 +37,9 @@ type Stored = {
  * (one of them evaluator-only), an evaluator with two published code versions, artifacts, and a
  * grader that posts the deferred result a few polls after the letter is uploaded.
  */
-function documentStandIn(options: { gradedAfterPolls?: number; verdict?: "pass" | "fail" } = {}) {
+function documentStandIn(
+  options: { gradedAfterPolls?: number; verdict?: "pass" | "fail"; failCompletions?: number } = {},
+) {
   const projectId = randomUUID();
   const dataset = {
     id: randomUUID(),
@@ -149,6 +151,7 @@ function documentStandIn(options: { gradedAfterPolls?: number; verdict?: "pass" 
   const results = new Map<string, StoredResult[]>();
   const polls = new Map<string, number>();
   const reservations = new Map<string, string>();
+  let failCompletions = options.failCompletions ?? 0;
   const calls = {
     requests: [] as string[],
     experiments: [] as Record<string, unknown>[],
@@ -367,6 +370,10 @@ function documentStandIn(options: { gradedAfterPolls?: number; verdict?: "pass" 
         if (!execution) return new Response(null, { status: 404 });
         if (executionMatch[2] === "/environment") return new Response(null, { status: 404 });
         if (!executionMatch[2]) return Response.json(execution);
+        if (failCompletions > 0) {
+          failCompletions--;
+          return new Response(null, { status: 500 });
+        }
         const experiment = experiments.get(execution.experimentId)!;
         const frozenCase = cases.get(experiment.versionId)!;
         const ids = (body.artifactIds as string[] | undefined) ?? [];
@@ -696,6 +703,45 @@ describe("hue eval on a document eval set", () => {
     }
   }, 120_000);
 
+  test("an interrupted run resumes the saved experiment without invoking the agent again", async () => {
+    const standIn = documentStandIn({ failCompletions: 1 });
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
+    await writeFile(join(cwd, "agent.mjs"), agentSource);
+    const args = [
+      "--set",
+      "gia-d1-citation",
+      "--scorer",
+      "gia-d1-citation",
+      "--command",
+      `${process.execPath} ${join(cwd, "agent.mjs")}`,
+      "--json",
+      "--revision",
+      "prompt-v10",
+      "--wait",
+      "30",
+    ];
+    try {
+      const interrupted = await hue(args, { cwd, env: { HUE_BASE_URL: standIn.baseUrl } });
+      expect(interrupted.status).toBe(1);
+      expect(standIn.calls.completions).toHaveLength(0);
+      const uploadsBefore = standIn.calls.uploads;
+      const resumed = await hue(args, { cwd, env: { HUE_BASE_URL: standIn.baseUrl } });
+      expect(resumed.status).toBe(0);
+      // One experiment and one started execution across both invocations: the rerun finished
+      // the saved run from its checkpoints instead of spawning the agent or uploading again.
+      expect(standIn.calls.experiments).toHaveLength(1);
+      expect(standIn.calls.requests.filter((request) => request.endsWith("/start"))).toHaveLength(
+        1,
+      );
+      expect(standIn.calls.uploads).toBe(uploadsBefore);
+      expect(standIn.calls.completions).toHaveLength(1);
+      const report = JSON.parse(resumed.stdout) as Record<string, unknown>;
+      expect(report).toMatchObject({ complete: true, totals: { cases: 1, passed: 1 } });
+    } finally {
+      standIn.stop();
+    }
+  }, 120_000);
+
   test("stageDirectCase and collectDirectOutputs implement the case-directory protocol", async () => {
     const root = await mkdtemp(join(tmpdir(), "hue-direct-"));
     const source = join(root, "Informe.pdf");
@@ -760,6 +806,17 @@ describe("hue eval on a document eval set", () => {
       ["Anexo.pdf", false],
       ["Letter.docx", false],
     ]);
+    // Files in subdirectories are documents too; hidden folders stay skipped.
+    await mkdir(join(layout.outputDirectory, "anexos", ".cache"), { recursive: true });
+    await writeFile(join(layout.outputDirectory, "anexos", "Soporte.pdf"), "%PDF");
+    await writeFile(join(layout.outputDirectory, "anexos", ".cache", "tmp.bin"), "junk");
+    const nested = await collectDirectOutputs(layout.outputDirectory);
+    expect(nested.files.map((file) => file.filename)).toEqual([
+      "Anexo.pdf",
+      "Letter.docx",
+      "anexos/Soporte.pdf",
+    ]);
+    expect(nested.files[2]!.path).toBe(join(layout.outputDirectory, "anexos", "Soporte.pdf"));
     await writeFile(
       join(layout.outputDirectory, "manifest.json"),
       JSON.stringify({ primary: "Missing.docx" }),
