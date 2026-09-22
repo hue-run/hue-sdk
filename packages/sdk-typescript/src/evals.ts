@@ -8,12 +8,26 @@ export {
   TargetCancelledError,
   TargetOutcomeUncertainError,
 } from "./evals/runner.js";
-export type { RunExperimentOptions, RescoreOptions, RunnerReport } from "./evals/runner.js";
+export type {
+  RunExperimentOptions,
+  RunExperimentTargetContext,
+  RescoreOptions,
+  RunnerReport,
+} from "./evals/runner.js";
+export { TargetResult, withFiles } from "./evals/types.js";
+export {
+  outputContentTypes,
+  outputFileLimits,
+  OutputFileError,
+  safeFilename,
+  targetFileRoles,
+} from "./evals/files.js";
 export { runSimulation } from "./evals/simulation.js";
 export type {
   RepositorySimulationCase,
   RepositorySimulationScorer,
   RunSimulationOptions,
+  SimulationDefinition,
   SimulationProgress,
   SimulationReport,
   SimulationScenario,
@@ -65,8 +79,16 @@ export { builtins, defineLocalScorer, scoreLocally } from "./evals/scorers.js";
 export { sourceDigest } from "./evals/json.js";
 export type * from "./evals/types.js";
 
-export { runLocalAgent } from "./evals/local-worker.js";
-export type { LocalAgentTargetContext, RunLocalAgentOptions } from "./evals/local-worker.js";
+export {
+  localAgentCapabilities,
+  registeredCapabilities,
+  runLocalAgent,
+} from "./evals/local-worker.js";
+export type {
+  LocalAgentDirectContext,
+  LocalAgentTargetContext,
+  RunLocalAgentOptions,
+} from "./evals/local-worker.js";
 
 export {
   getScenario,

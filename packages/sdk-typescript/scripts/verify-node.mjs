@@ -186,7 +186,7 @@ try {
     const logs = all.filter(({ signal }) => signal === "logs").map(({ record }) => record);
     assert.ok(spans.length >= 2);
     assert.ok(spans.some((span) => span.name === "chat.request"));
-    if (run.scenario === "chat") {
+    if (run.mode === "chat") {
       assert.ok(spans.some((span) => span.name.includes("tool")));
       const raw = JSON.stringify(all);
       if (run.captureContent === "true") {
@@ -211,7 +211,7 @@ try {
   console.log(
     JSON.stringify({
       node: process.version,
-      externalChatbotScenarios: evidence.evidence.length,
+      externalChatbotCases: evidence.evidence.length,
       spans: requests
         .filter((request) => request.signal === "traces")
         .reduce((total, request) => total + request.records.length, 0),

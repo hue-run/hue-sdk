@@ -173,7 +173,12 @@ export async function scoreLocally(
       return { state: "error", error: { type: "LocalScorerError" } };
     }
   }
-  if (!context.hasOutput && !(definition.kind === "local_code" && context.environment))
+  // A code evaluator can grade a sealed world or generated files without a JSON output.
+  const generatedFiles = context.files?.some((file) => file.role === "output") ?? false;
+  if (
+    !context.hasOutput &&
+    !(definition.kind === "local_code" && (context.environment || generatedFiles))
+  )
     return skip("Output evidence is unavailable");
   if (context.hasOutput && context.output === undefined)
     throw new TypeError("hasOutput requires a present JSON output");

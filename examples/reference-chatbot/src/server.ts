@@ -28,7 +28,7 @@ const schema = z.object({
     .array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().min(1).max(8000) }))
     .min(1)
     .max(40),
-  scenario: z.enum(["chat", "controlled-error"]).default("chat"),
+  mode: z.enum(["chat", "controlled-error"]).default("chat"),
 });
 async function readRequest(request: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -103,7 +103,7 @@ const server = createServer(async (request, response) => {
         traceId = span.traceId;
         event(response, "trace", { traceId, sessionId: input.sessionId });
         hue.recordMessages({ input: input.messages });
-        if (input.scenario === "controlled-error") {
+        if (input.mode === "controlled-error") {
           await hue.tool("controlledFailure", null, () => {
             throw new Error("Intentional reference-chatbot failure");
           });
@@ -135,7 +135,7 @@ const server = createServer(async (request, response) => {
   } catch {
     event(response, "error", {
       message:
-        input.scenario === "controlled-error"
+        input.mode === "controlled-error"
           ? "Intentional reference-chatbot failure recorded."
           : "The provider request failed or was interrupted. Inspect its trace for details.",
     });

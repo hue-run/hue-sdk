@@ -753,7 +753,7 @@ describe("one-shot simulation workflow", () => {
         environmentClient,
         hue,
         checkpointDirectory: directory,
-        scenario: {
+        definition: {
           ...scenario,
           environment: {
             ...scenario.environment,
@@ -786,9 +786,9 @@ describe("one-shot simulation workflow", () => {
       changed.metadata = { revision: "changed" };
       await runSimulation({
         ...options,
-        scenario: {
-          ...options.scenario,
-          environment: { ...options.scenario.environment, definition: changed },
+        definition: {
+          ...options.definition,
+          environment: { ...options.definition.environment, definition: changed },
         },
       });
       expect(publications).toHaveLength(2);
@@ -824,7 +824,7 @@ describe("one-shot simulation workflow", () => {
       const report = await runSimulation({
         ...fixture,
         checkpointDirectory: directory,
-        scenario: {
+        definition: {
           ...scenario,
           config: { attemptBaselineV2: attempt.baseline },
         },
@@ -928,7 +928,7 @@ describe("one-shot simulation workflow", () => {
       await runSimulation({
         ...fixture,
         checkpointDirectory: directory,
-        scenario: {
+        definition: {
           ...scenario,
           config: { attemptBaselineV2: attempt.baseline },
           scorers: [{ name: "Quality", slug: "quality", scorer }],
@@ -977,7 +977,7 @@ describe("one-shot simulation workflow", () => {
     const options = {
       ...fixture,
       checkpointDirectory: directory,
-      scenario: {
+      definition: {
         ...scenario,
         config: { attemptBaselineV2: attempt.baseline },
       },
@@ -1013,7 +1013,7 @@ describe("one-shot simulation workflow", () => {
       await runSimulation({
         ...fixture,
         checkpointDirectory: directory,
-        scenario: {
+        definition: {
           ...scenario,
           scorers: [
             {
@@ -1056,7 +1056,7 @@ describe("one-shot simulation workflow", () => {
         runSimulation({
           ...unsupported,
           checkpointDirectory: unsupportedDirectory,
-          scenario: {
+          definition: {
             ...scenario,
             scorers: [
               {
@@ -1083,7 +1083,7 @@ describe("one-shot simulation workflow", () => {
     const options = {
       ...fixture,
       checkpointDirectory: join(tmpdir(), "unused-hue-simulation-checkpoint"),
-      scenario,
+      definition: scenario,
       persistResultContent: false,
       traceEvidence: { mode: "required" as const },
     };
@@ -1099,13 +1099,61 @@ describe("one-shot simulation workflow", () => {
     expect(fixture.experiments.size).toBe(0);
   });
 
+  test("requires a definition and rejects conflicting definition/scenario options", async () => {
+    const fixture = harness();
+    const options = {
+      ...fixture,
+      checkpointDirectory: join(tmpdir(), "unused-hue-simulation-checkpoint"),
+      definition: scenario,
+      persistResultContent: false,
+      traceEvidence: { mode: "required" as const },
+    };
+    const { definition: _dropped, ...withoutDefinition } = options;
+    await expect(runSimulation(withoutDefinition)).rejects.toThrow(
+      "runSimulation requires a definition",
+    );
+    await expect(
+      runSimulation({ ...options, scenario: { ...scenario, name: "Changed" } }),
+    ).rejects.toThrow("Pass either definition or scenario, not both");
+    expect(fixture.targetCalls()).toBe(0);
+  });
+
+  test("accepts the deprecated scenario option with a one-time DeprecationWarning", async () => {
+    const fixture = harness({
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "hue-simulation-"));
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => {
+      if (warning.name === "DeprecationWarning") warnings.push(warning.message);
+    };
+    process.on("warning", onWarning);
+    try {
+      const options = {
+        ...fixture,
+        checkpointDirectory: directory,
+        scenario,
+        persistResultContent: false,
+        traceEvidence: { mode: "required" as const },
+      };
+      const first = await runSimulation(options);
+      const second = await runSimulation(options);
+      expect(first.experimentId).not.toBe(second.experimentId);
+      expect(warnings).toEqual(["runSimulation option scenario is deprecated; use definition"]);
+    } finally {
+      process.off("warning", onWarning);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("recovers an upload without rerunning the target and reruns in a fresh world", async () => {
     const fixture = harness();
     const directory = await mkdtemp(join(tmpdir(), "hue-simulation-"));
     const options = {
       ...fixture,
       checkpointDirectory: directory,
-      scenario,
+      definition: scenario,
       persistResultContent: false,
       traceEvidence: { mode: "required" as const },
     };
@@ -1126,7 +1174,7 @@ describe("one-shot simulation workflow", () => {
       const appAuthored = await runSimulation({
         ...options,
         checkpointDirectory: join(directory, "app-authored"),
-        scenario: { kind: "experiment", experimentId: recovered.experimentId },
+        definition: { kind: "experiment", experimentId: recovered.experimentId },
       });
       expect(fixture.targetCalls()).toBe(3);
       expect(appAuthored.experimentId).not.toBe(recovered.experimentId);
@@ -1157,7 +1205,7 @@ describe("one-shot simulation workflow", () => {
         const report = await runSimulation({
           ...fixture,
           checkpointDirectory: directory,
-          scenario,
+          definition: scenario,
           persistResultContent: false,
           traceEvidence: { mode: "required" },
           target() {
@@ -1207,7 +1255,7 @@ describe("one-shot simulation workflow", () => {
       const options = {
         ...fixture,
         checkpointDirectory: directory,
-        scenario,
+        definition: scenario,
         persistResultContent: false,
         traceEvidence: { mode: "required" as const },
         target() {
@@ -1237,7 +1285,7 @@ describe("one-shot simulation workflow", () => {
     const options = {
       ...fixture,
       checkpointDirectory: directory,
-      scenario,
+      definition: scenario,
       persistResultContent: false,
       traceEvidence: { mode: "required" as const },
     };
@@ -1266,7 +1314,7 @@ describe("one-shot simulation workflow", () => {
       const report = await runSimulation({
         ...fixture,
         checkpointDirectory: directory,
-        scenario,
+        definition: scenario,
         persistResultContent: false,
         traceEvidence: { mode: "required" },
         signal: controller.signal,
@@ -1315,7 +1363,7 @@ describe("one-shot simulation workflow", () => {
       const report = await runSimulation({
         ...fixture,
         checkpointDirectory: directory,
-        scenario: {
+        definition: {
           ...scenario,
           scorers: [{ name: "Quality", slug: "quality", scorer }],
         },
@@ -1372,7 +1420,7 @@ describe("one-shot simulation workflow", () => {
     const options = {
       ...fixture,
       checkpointDirectory: directory,
-      scenario,
+      definition: scenario,
       persistResultContent: false,
       traceEvidence: { mode: "required" as const },
       target: async (_inputs: JsonValue, context: any) => {
@@ -1424,7 +1472,7 @@ test("simulation candidates cannot read grading references or mutate pinned case
     const report = await runSimulation({
       ...fixture,
       checkpointDirectory: directory,
-      scenario: privateScenario,
+      definition: privateScenario,
       persistResultContent: false,
       traceEvidence: { mode: "required" },
       target: async (inputs, context) => {
@@ -1599,7 +1647,11 @@ describe("pinned scenarios", () => {
   });
 
   test("requires at least one scorer version before creating anything", async () => {
-    const fixture = harness();
+    const fixture = harness({
+      evidenceFailures: 0,
+      loseCompletionAcknowledgement: false,
+      loseSealAcknowledgement: false,
+    });
     const pins = await publishPins(fixture);
     const directory = await mkdtemp(join(tmpdir(), "hue-simulation-pins-empty-"));
     try {
@@ -1614,6 +1666,19 @@ describe("pinned scenarios", () => {
       ).rejects.toThrow("Pinned scenarios require a scorer version");
       expect(fixture.experiments.size).toBe(0);
       expect(fixture.targetCalls()).toBe(0);
+      const recovered = await runSimulation({
+        ...fixture,
+        checkpointDirectory: directory,
+        definition: {
+          kind: "pins",
+          datasetVersionId: pins.frozen.id,
+          scorerVersionIds: [pins.exact.id],
+        },
+        persistResultContent: false,
+        traceEvidence: { mode: "required" },
+      });
+      expect(recovered.subjectIds).toHaveLength(1);
+      expect(fixture.targetCalls()).toBe(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

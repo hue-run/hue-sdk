@@ -92,6 +92,10 @@ const server = createServer(async (request, response) => {
       return send({ items: [{ id: itemId, subjectId, hasOutput: true }], nextCursor: null });
     if (path === `/api/v1/evaluation-subjects/${subjectId}`)
       return send({ id: subjectId, executionId: randomUUID(), ...evidence });
+    // rescore lists the run's recorded results before scoring so terminal scores are preserved;
+    // this synthetic run has none, so resume still relies on the checkpoint.
+    if (request.method === "GET" && path === `/api/v1/evaluation-runs/${runId}/results`)
+      return send({ items: [], nextCursor: null });
     assert.equal(request.method, "POST");
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);

@@ -1,4 +1,4 @@
-import { validateOptions } from "../config.js";
+import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
 import { json, uuid, valueBounds } from "./json.js";
 import {
@@ -12,6 +12,8 @@ import {
   type PrepareAttemptRequestV2,
 } from "./attempt.js";
 import type {
+  ArtifactReservation,
+  ArtifactUpload,
   CaseConversion,
   CaseConversionSummary,
   CaseWrite,
@@ -146,6 +148,68 @@ export class EvaluationClient {
     } catch {
       throw new HueApiError();
     }
+  }
+  /** Verified bytes of one ready artifact in this project, bounded to the 25 MiB pilot file size. */
+  async downloadArtifact(id: string): Promise<Uint8Array> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        redirect: "error",
+        signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
+      });
+    } catch {
+      throw new HueApiError();
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new HueApiError(response.status);
+    }
+    try {
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Missing response");
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 25 * 1024 * 1024) throw new Error("Oversized artifact");
+          chunks.push(value);
+        }
+      } finally {
+        await reader.cancel();
+      }
+      return new Uint8Array(Buffer.concat(chunks));
+    } catch {
+      throw new HueApiError();
+    }
+  }
+  /** Stage bytes at the storage capability Hue issued. The Hue key is never sent to storage. */
+  async uploadArtifactBytes(
+    upload: ArtifactUpload,
+    bytes: Uint8Array,
+    contentType: string,
+  ): Promise<void> {
+    const uploadUrl = signedUploadUrl(upload.uploadUrl);
+    if (upload.method !== "PUT") throw new HueApiError();
+    const headers = signedUploadHeaders(upload.headers, contentType);
+    let response: Response;
+    try {
+      response = await fetch(uploadUrl, {
+        method: "PUT",
+        headers,
+        body: bytes as Uint8Array<ArrayBuffer>,
+        redirect: "error",
+        signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
+      });
+    } catch {
+      throw new HueApiError();
+    }
+    await response.body?.cancel().catch(() => undefined);
+    if (!response.ok) throw new HueApiError(response.status);
   }
   private page(options: PageOptions = {}): string {
     const query = new URLSearchParams();
@@ -365,6 +429,33 @@ export class EvaluationClient {
       throw new HueApiError();
     }
   }
+  /** Reads one artifact reservation and its verification state. */
+  getArtifact(id: string) {
+    return this.request<ArtifactReservation>("GET", `/artifacts/${uuid(id)}`);
+  }
+  /** Reserves an artifact by declared identity; replaying the key returns the same reservation. */
+  reserveArtifact(input: {
+    /** Stable key; replaying it returns the same reservation. */
+    idempotencyKey: string;
+    /** Declared file name. */
+    filename: string;
+    /** Declared content type. */
+    contentType: string;
+    /** Declared size in bytes. */
+    byteSize: number;
+    /** Declared SHA-256, hex encoded. */
+    sha256: string;
+  }) {
+    return this.request<ArtifactReservation>("POST", "/artifacts", input);
+  }
+  /** Issues a short-lived storage capability for staging the reserved artifact's bytes. */
+  requestArtifactUpload(id: string) {
+    return this.request<ArtifactUpload>("POST", `/artifacts/${uuid(id)}/upload`, {});
+  }
+  /** Asks Hue to verify the staged bytes against the declared identity. */
+  completeArtifact(id: string) {
+    return this.request<ArtifactReservation>("POST", `/artifacts/${uuid(id)}/complete`, {});
+  }
   /** Saves an execution's outcome and creates its immutable subject. */
   completeExecution(id: string, input: CompleteExecution) {
     return this.request<Completion>("POST", `/experiment-executions/${uuid(id)}/complete`, input);
@@ -517,4 +608,46 @@ export class EvaluationClient {
  */
 export function createEvaluationClient(options: EvaluationClientOptions): EvaluationClient {
   return new EvaluationClient(options);
+}
+
+function signedUploadUrl(value: unknown): string {
+  // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
+  if (typeof value !== "string" || value.length > 8192 || /[\x00-\x20\x7f]/u.test(value))
+    throw new HueApiError();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new HueApiError();
+  }
+  if (
+    (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) ||
+    url.username ||
+    url.password ||
+    url.hash
+  )
+    throw new HueApiError();
+  // Validate without rewriting the provider's signed capability.
+  return value;
+}
+
+function signedUploadHeaders(value: unknown, contentType: string): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": contentType };
+  if (value === undefined || value === null) return headers;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new HueApiError();
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      typeof raw !== "string" ||
+      !raw ||
+      raw.length > 255 ||
+      // eslint-disable-next-line no-control-regex -- control characters are rejected deliberately
+      /[\x00-\x1f\x7f]/u.test(raw)
+    )
+      throw new HueApiError();
+    const lower = name.toLowerCase();
+    if (lower === "content-type" && raw === contentType) headers[lower] = raw;
+    else if (lower === "x-vercel-blob-access" && raw === "private") headers[lower] = raw;
+    else throw new HueApiError();
+  }
+  return headers;
 }

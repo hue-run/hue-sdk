@@ -21,9 +21,26 @@ import {
   OutcomeSerializationError,
   TargetOutcomeUncertainError,
   UncertainExecutionError,
+  type RunExperimentTargetContext,
   type RunnerReport,
 } from "./runner.js";
-import type { ExperimentCase, JsonValue, LocalAgentRegistration, LocalScorer } from "./types.js";
+import type {
+  ExperimentCase,
+  JsonValue,
+  LocalAgentRegistration,
+  LocalFile,
+  LocalScorer,
+  TargetResult,
+} from "./types.js";
+
+/** Capability strings a registration declares; Hue offers only matching cases. */
+export const localAgentCapabilities = {
+  /** Cases pinned to a hosted synthetic world. */
+  environment: "environment:v1",
+  /** Ordinary cases run directly on this machine: JSON inputs and pinned input files in,
+   * JSON output and generated files out. */
+  direct: "direct:v1",
+} as const;
 
 /** Candidate-visible context for one queued local agent execution. */
 export interface LocalAgentTargetContext {
@@ -54,6 +71,45 @@ export interface LocalAgentTargetContext {
   /** Credential-bearing provider connections for this callback only. Hue never
    * checkpoints, logs or adds this response to parity digests. */
   connectionBundle?: AttemptConnectionBundleV2;
+}
+
+/** Candidate-visible context for one queued ordinary case run directly on this machine. */
+export interface LocalAgentDirectContext {
+  /** Frozen candidate configuration, cloned before invocation. */
+  config: JsonValue;
+  /** Identity only. Expected outcomes and metadata are evaluator-private. */
+  item: Pick<ExperimentCase, "id" | "externalKey">;
+  /** Identity of this target execution. */
+  executionId: string;
+  /** Trace identities without mutable span or grading data. */
+  trace: {
+    /** OpenTelemetry trace identifier. */
+    traceId: string;
+    /** Root execution span identifier. */
+    spanId: string;
+  };
+  /** Verified copies of the case's input files meant for the agent. */
+  files: LocalFile[];
+  /** Private scratch directory for this case; return generated files with `withFiles`. */
+  outputDirectory: string;
+  /** Cooperative worker stop signal. */
+  signal?: AbortSignal;
+}
+
+/** Allowlist the candidate surface for an ordinary case; frozen expectations stay with grading. */
+export function localAgentDirectContext(
+  context: RunExperimentTargetContext,
+  signal?: AbortSignal,
+): LocalAgentDirectContext {
+  return {
+    config: structuredClone(context.config),
+    item: { id: context.item.id, externalKey: context.item.externalKey },
+    executionId: context.executionId,
+    trace: { traceId: context.span.traceId, spanId: context.span.spanId },
+    files: structuredClone(context.files),
+    outputDirectory: context.outputDirectory,
+    ...(signal ? { signal } : {}),
+  };
 }
 
 /** Allowlist the candidate surface instead of forwarding the generic evaluation context. */
@@ -118,14 +174,48 @@ export interface RunLocalAgentOptions {
     /** Selected MCP surface. */
     surfaceKey: "google.gmail/mcp" | "slack/mcp";
   };
-  /** Invokes the existing agent against isolated tools and candidate-safe context. */
-  target(
+  /** Runs cases pinned to a hosted world (`environment:v1`): invokes the existing agent against
+   * isolated tools and candidate-safe context. */
+  target?(
     inputs: JsonValue,
     tools: Record<string, EnvironmentTool>,
     context: LocalAgentTargetContext,
   ): JsonValue | undefined | Promise<JsonValue | undefined>;
+  /** Runs ordinary cases without a world (`direct:v1`): the agent receives the case inputs
+   * and verified input files and returns JSON output and/or generated files. */
+  directTarget?(
+    inputs: JsonValue,
+    context: LocalAgentDirectContext,
+  ): JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
   /** Called after the experiment and queue completion are acknowledged. */
   onCompleted?(report: RunnerReport): void | Promise<void>;
+}
+
+/** The registration's capabilities: explicit values plus one per supplied callback. */
+export function registeredCapabilities(options: {
+  /** Fixed agent key, revision and declared capabilities. */
+  agent: LocalAgentRegistration;
+  /** The environment-case callback, when supplied. */
+  target?: unknown;
+  /** The ordinary-case callback, when supplied. */
+  directTarget?: unknown;
+}): string[] {
+  if (!options.target && !options.directTarget)
+    throw new TypeError(
+      "Supply target for environment cases, directTarget for ordinary cases, or both",
+    );
+  const declared = options.agent.capabilities ?? [];
+  if (declared.includes(localAgentCapabilities.direct) && !options.directTarget)
+    throw new TypeError("direct:v1 requires a directTarget callback");
+  if (declared.includes(localAgentCapabilities.environment) && !options.target)
+    throw new TypeError("environment:v1 requires a target callback");
+  return [
+    ...new Set([
+      ...declared,
+      ...(options.target ? [localAgentCapabilities.environment] : []),
+      ...(options.directTarget ? [localAgentCapabilities.direct] : []),
+    ]),
+  ];
 }
 
 function validInterval(value: number | undefined): number {
@@ -174,6 +264,7 @@ function needsAttention(error: unknown, seen = new Set<unknown>()): boolean {
  * only the registered key/revision; no command or source is received from the cloud.
  */
 export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void> {
+  const capabilities = registeredCapabilities(options);
   const requestedConfiguration = requestedAttemptV2(options);
   const interval = validInterval(options.pollIntervalMillis);
   const maxRuns = options.maxRuns ?? Number.POSITIVE_INFINITY;
@@ -204,7 +295,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
     while (completed < maxRuns && !options.signal?.aborted) {
       const agent = await options.client.registerLocalAgent({
         ...options.agent,
-        capabilities: options.agent.capabilities ?? ["environment:v1"],
+        capabilities,
         scorerDigests:
           options.agent.scorerDigests ??
           options.scorers?.map((item) => item.definition.sourceDigest) ??
@@ -237,12 +328,26 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           experimentId: claim.experimentId,
           checkpointDirectory: join(directory, `experiment-${claim.experimentId}`),
           persistResultContent: true,
-          environmentEvidence: "required",
+          // Worker dispatch uses the case pin: directTarget never receives a world.
+          environmentEvidence: options.directTarget ? "when_pinned" : "required",
           traceEvidence: { mode: "required" },
           scorers: options.scorers,
           concurrency: options.concurrency,
-          target: (inputs, context) =>
-            runEnvironmentTarget({
+          target: (inputs, context) => {
+            if (!context.item.environmentVersionId) {
+              // Hue offers ordinary cases only to registrations that declared direct:v1.
+              if (!options.directTarget)
+                throw new Error("This worker runs only cases pinned to a Hue environment");
+              return options.directTarget(
+                structuredClone(inputs),
+                localAgentDirectContext(context, options.signal),
+              );
+            }
+            if (!options.target)
+              throw new Error("This worker runs only cases without a Hue environment");
+            // Bound to the options object, as the previous direct `options.target(...)` call was.
+            const target = options.target.bind(options);
+            return runEnvironmentTarget({
               client: options.client,
               environmentClient: options.environmentClient,
               hue: options.hue,
@@ -251,12 +356,13 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
               requested,
               signal: options.signal,
               target: (targetInputs, targetContext) =>
-                options.target(
+                target(
                   structuredClone(targetInputs),
                   targetContext.tools,
                   localAgentTargetContext(targetContext),
                 ),
-            }),
+            });
+          },
         });
         // From this point onward the experiment outcome is authoritative. If reporting the
         // queue completion fails, leave the claim intact for checkpointed recovery instead of

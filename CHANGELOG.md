@@ -45,6 +45,68 @@ refuses to publish a version without a matching entry below.
   another endpoint). The configuration references the `HUE_MCP_KEY` environment variable or a VS
   Code password input, never a key value; JSON files are merged so other servers are preserved,
   `--dry-run` previews the result and `--print` shows the snippet.
+- `runExperiment()` runs file-based cases. Before an execution exists it downloads every pinned
+  `inputFiles` entry of the frozen case, verifies its byte count and SHA-256, and passes the
+  agent-visible roles (`source`, `attached_template`, `attached_reference`, `original`) as
+  `context.files` with a private per-case `context.outputDirectory`. A download failure is an SDK
+  failure that consumes no execution slot; evaluator-only `org_template` files reach scorers but not
+  the target. **Wire**
+- Targets return `withFiles(output, files)`, a `TargetResult`, to save generated documents. The
+  runner stages each declared `path` or in-memory `bytes`, publishes them through artifact
+  reservation, upload and verified completion with stable per-execution keys, and completes the
+  execution with `artifactIds` and `primaryArtifactId`. Generated files are uploaded regardless of
+  `persistResultContent`. A file that cannot be read, exceeds 25 MiB, repeats a filename or has an
+  unsupported content type becomes the target's `TargetError` instead of an uncertain execution, and
+  a crash after the target finished resumes from the staged files without invoking it again. **Wire**
+- The `LocalFile`, `CaseFile`, `SubjectFile`, `OutputFile` and `TargetResult` types, the
+  `targetFileRoles`, `outputContentTypes`, `outputFileLimits` and `safeFilename` helpers, and the
+  `OutputFileError` raised for an unusable declared file.
+- Local scorers receive `context.files`: every pinned input and every generated output with its
+  verified local path, role, filename, content type, byte size, SHA-256 and artifact ID, using
+  `role: "output"` for generated documents. A bound `local_code` callback runs when generated files
+  exist even without a JSON output.
+- `rescore()` downloads a subject's frozen `files` so code evaluators can grade saved documents
+  without invoking an agent. It preserves terminal scores already recorded for an item and evaluator
+  version, including built-in checks scheduled by Hue's **Grade again** flow, computes only the
+  missing local scores, and accepts an exact matching item/version receipt when another executor
+  finished the same score during upload; an unrelated conflict still fails. **Wire**
+- `runLocalAgent()` accepts a `directTarget` callback for cases without a world. Supplying it
+  registers the `direct:v1` capability and supplying `target` registers `environment:v1`, beside
+  declared file capabilities such as `input:docx`, `input:pdf` and `output:docx`. New exports
+  `localAgentCapabilities` and `registeredCapabilities`, which refuses a registration naming a
+  capability without its callback.
+- `runExperiment()` and `rescore()` accept `environmentEvidence: "when_pinned"` beside `"required"`,
+  so direct cases skip the environment evidence read while cases pinned to a world still require
+  sealed evidence; workers with `directTarget` use it. The new `filesDirectory` option relocates the
+  verified input and generated output copies, which default to `<checkpointDirectory>/files`.
+- `EvaluationClient` gains `getArtifact()`, `reserveArtifact()`, `requestArtifactUpload()`,
+  `uploadArtifactBytes()`, `completeArtifact()` and `downloadArtifact()` for the artifact lifecycle
+  the runner uses. **Wire**
+
+**Requires** a Hue deployment that serves case input files on experiment items, subject files on
+evaluation subjects, and the artifact reservation, upload, completion and download APIs. Python
+remains at `0.2.2` and has no file-based cases.
+
+#### Changed
+
+- Documentation and examples now name the simulation `definition` / `SimulationDefinition` and
+  use case terminology; the deprecated `scenario` option and `SimulationScenario` alias are
+  unchanged. No API change.
+
+### [0.4.2] - 2026-09-22
+
+#### Added
+
+- `runSimulation` accepts `definition` for the simulation definition, and `SimulationDefinition`
+  is exported alongside the options type.
+
+#### Deprecated
+
+- The `runSimulation` `scenario` option and the `SimulationScenario` alias are deprecated in
+  favour of `definition` and `SimulationDefinition`; they are removed no earlier than two
+  subsequent `0.MINOR` releases per VERSIONING.md.
+
+No registry release is claimed until publication and registry acceptance complete.
 
 ### [0.4.1] - 2026-09-21
 

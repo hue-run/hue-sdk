@@ -74,7 +74,7 @@ preflight checks availability and presents the published [privacy notice](https:
 and [security information](https://trust.hue.run/) before telemetry. Anonymous trials last 24 hours
 and are limited to 100 traces, 1,000 spans and 2 MiB. A private owner-only browser handoff supports
 account linkage; the original request evidence is retained and business work is never replayed on
-claim. Setup never enables content capture or creates a Scenario, Hue Run, evaluation, source capture
+claim. Setup never enables content capture or creates a simulation, Hue Run, evaluation, source capture
 or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
 For an existing account, `hue login` validates keys created in Hue Settings and stores them in
@@ -429,13 +429,18 @@ an uncertain preparation. See the
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
 
+An unreleased `directTarget` callback extends the same worker to cases without a world: the runner
+verifies the case's pinned input files, hands them to the agent, and uploads the documents it
+returns as verified Hue artifacts for scoring. See
+[direct cases and files](EVALUATIONS.md#direct-cases-and-files).
+
 Scorer deferral shipped in TypeScript `0.3.1`. Only built-ins
 and bound `local_code` callbacks run here; other pins remain pending for their authorized executor.
 See [scorer execution](EVALUATIONS.md#hosted-and-manual-scorer-pins).
 
 The published [setup CLI](CLI.md) is a resumable local inspection core; the unreleased `0.4.0`
 candidate adds the bounded application onboarding flow described above. Existing customers connect
-their agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.
+their agents with `runLocalAgent()`; setup does not register workers or launch simulations.
 
 ### Command-line evaluation
 

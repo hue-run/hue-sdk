@@ -439,6 +439,7 @@ const installedPackageTests = [
   "coverage-gap.test.ts",
   "receipt.test.ts",
   "managed.test.ts",
+  "files.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -539,8 +540,10 @@ void [transition, event, options, backend];
   );
   if (installed.name !== pkg.name || installed.version !== pkg.version)
     throw new Error("Installed package does not match this checkout");
-  for (const runtime of [process.execPath, "bun"])
+  for (const runtime of [process.execPath, "bun"]) {
     run(runtime, [join(source, "scripts/verify-scorer-deferral.mjs"), consumer], destination);
+    run(runtime, [join(source, "scripts/verify-file-cases.mjs"), consumer], destination);
+  }
   // Check consumers against the packed declarations, not only source types.
   run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], consumer);
   // HUE_JUNIT_DIR (set by CI) collects a JUnit report per AI SDK pair for the workflow summary.
