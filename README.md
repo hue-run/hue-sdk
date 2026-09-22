@@ -152,6 +152,8 @@ methods and a kill switch. Test collector outages and verify a real trace in Hue
 
 You configure your project service key through your application's secret workflow; do not paste it into the agent chat. The skill can prepare and locally test the integration before the key is available. See [For agents](https://docs.hue.run/guides/agent-setup) for the documentation handoff.
 
+To let the agent inspect traces and evaluations in Hue, connect the [Hue MCP server](https://docs.hue.run/agents/mcp-server) with the `hue` executable: `hue login` validates a **Coding agent (read + evaluations)** key created in Settings and stores it in `.env.hue`, and `hue mcp install --client claude-code` (also `cursor`, `codex`, `vscode`, `windsurf` and `gemini`) writes the client configuration, which references the `HUE_MCP_KEY` environment variable rather than a key value. See [Install the MCP for your coding agent](./packages/sdk-typescript/CLI.md#install-the-mcp-for-your-coding-agent).
+
 For production request handlers, follow [production safety](https://docs.hue.run/guides/production-safety). The strict setup example above intentionally exposes delivery failures.
 
 The [tracing reliability contract](./RELIABILITY.md) maps failure isolation and resource limits to regression tests and application acceptance checks.

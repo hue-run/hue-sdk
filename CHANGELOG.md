@@ -51,6 +51,19 @@ refuses to publish a version without a matching entry below.
   their types.
 - The portable skill gains an "Evaluate against a Scenario" section describing the `hue eval` loop
   for coding agents.
+- `hue login` validates and stores keys created in Hue Settings > Integrations & API keys. The
+  "Tracing and evaluations" key is checked with `GET /api/v1/projects/current` and stored as
+  `HUE_API_KEY` with `HUE_BASE_URL`; the "Coding agent (read + evaluations)" key is checked with an
+  MCP `tools/list` request and stored as `HUE_MCP_KEY` with `HUE_MCP_URL`. Keys are read without
+  echo and never printed; `.env.hue` is written with mode `0600` through an atomic rename, symlinks
+  are refused, `--force` replaces a different existing value and `--gitignore` adds the file to
+  `.gitignore`. A run that stops after storing one key still applies that protection, and the
+  printed next step carries `--url` for a non-default origin. The command never mints a key.
+- `hue mcp install --client <claude-code|cursor|codex|vscode|windsurf|gemini>` writes, runs or
+  prints Hue's canonical MCP client configuration for `https://mcp.hue.run/mcp` (`--url` selects
+  another endpoint). The configuration references the `HUE_MCP_KEY` environment variable or a VS
+  Code password input, never a key value; JSON files are merged so other servers are preserved,
+  `--dry-run` previews the result and `--print` shows the snippet.
 - `runExperiment()` runs file-based cases. Before an execution exists it downloads every pinned
   `inputFiles` entry of the frozen case, verifies its byte count and SHA-256, and passes the
   agent-visible roles (`source`, `attached_template`, `attached_reference`, `original`) as
