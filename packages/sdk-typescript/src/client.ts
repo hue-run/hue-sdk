@@ -32,6 +32,7 @@ import type {
   ProjectConnection,
   SpanOptions,
   TokenUsage,
+  ToolOptions,
   VerifyTraceOptions,
   TraceVerification,
   SafeLifecycleOptions,
@@ -395,26 +396,29 @@ export class HueClient {
    * are recorded as `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` when `captureContent`
    * is true; values that are not JSON-encodable are omitted with an instrumentation failure.
    * `options.callId` is recorded as `gen_ai.tool.call.id`, like the Python `call_id=` keyword.
+   * `options.mcp` records the MCP `initialize` `serverInfo` as `mcp.server.name` /
+   * `mcp.server.version` so a generic tool name can be attributed to the server that
+   * handled it. Pass `client.getServerVersion()`.
    */
   async tool<T>(
     name: string,
     input: unknown,
     execute: () => Promise<T> | T,
-    options: Pick<SpanOptions, "parentContext"> & {
-      /** Provider-issued identifier of this tool call, recorded as `gen_ai.tool.call.id`. */
-      callId?: string;
-    } = {},
+    options: ToolOptions = {},
   ): Promise<T> {
     const attributes: Attributes = {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": name,
     };
-    const callId = options.callId;
-    if (callId !== undefined) {
-      // A blank or non-string id is omitted and counted; the tool call itself still runs.
-      if (isLabel(callId)) attributes["gen_ai.tool.call.id"] = callId;
+    const stamp = (key: string, value: unknown) => {
+      if (value === undefined) return;
+      // A blank or non-string label is omitted and counted; the tool call itself still runs.
+      if (isLabel(value)) attributes[key] = value;
       else if (this.enabled && !this.closed) this.transport.instrumentationFailure();
-    }
+    };
+    stamp("gen_ai.tool.call.id", options.callId);
+    stamp("mcp.server.name", options.mcp?.name);
+    stamp("mcp.server.version", options.mcp?.version);
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {

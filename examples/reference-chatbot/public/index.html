@@ -86,7 +86,7 @@ Count the words in: observability makes agents easier to understand.</textarea>
         byId("messages").append(node);
         return node;
       };
-      async function send(scenario) {
+      async function send(mode) {
         const prompt = byId("prompt").value.trim();
         if (!prompt) return;
         for (const button of document.querySelectorAll("button")) button.disabled = true;
@@ -98,7 +98,7 @@ Count the words in: observability makes agents easier to understand.</textarea>
           const response = await fetch("/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId, messages, scenario }),
+            body: JSON.stringify({ sessionId, messages, mode }),
           });
           if (!response.ok || !response.body) throw new Error("Chat request was rejected");
           const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();

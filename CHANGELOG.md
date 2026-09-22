@@ -54,6 +54,39 @@ refuses to publish a version without a matching entry below.
 evaluation subjects, and the artifact reservation, upload, completion and download APIs. Python
 remains at `0.2.2` and has no file-based cases.
 
+#### Changed
+
+- Documentation and examples now name the simulation `definition` / `SimulationDefinition` and
+  use case terminology; the deprecated `scenario` option and `SimulationScenario` alias are
+  unchanged. No API change.
+
+### [0.4.2] - 2026-09-22
+
+#### Added
+
+- `runSimulation` accepts `definition` for the simulation definition, and `SimulationDefinition`
+  is exported alongside the options type.
+
+#### Deprecated
+
+- The `runSimulation` `scenario` option and the `SimulationScenario` alias are deprecated in
+  favour of `definition` and `SimulationDefinition`; they are removed no earlier than two
+  subsequent `0.MINOR` releases per VERSIONING.md.
+
+No registry release is claimed until publication and registry acceptance complete.
+
+### [0.4.1] - 2026-09-21
+
+#### Added
+
+- `hue.tool(..., { mcp })` records the MCP `initialize` `serverInfo` as `mcp.server.name` and
+  `mcp.server.version`, so a generic tool name can be attributed to the server that handled it.
+  Pass `client.getServerVersion()` after connect; any MCP server works. Environment catalog
+  entries may include the same `mcp` object, and `bindEnvironmentTools` stamps it automatically.
+  **Wire**
+
+No registry release is claimed until publication and registry acceptance complete.
+
 ### [0.4.0] - 2026-09-20
 
 #### Breaking
@@ -261,6 +294,16 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+### [0.2.3] - 2026-09-21
+
+#### Added
+
+- `hue.tool(..., mcp={"name", "version"})` records the MCP `initialize` `serverInfo` as
+  `mcp.server.name` and `mcp.server.version`, matching TypeScript `hue.tool(..., { mcp })`.
+  **Wire**
+
+No registry release is claimed until publication and registry acceptance complete.
+
 ### [0.2.2](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.2.2) - 2026-09-18
 
 #### Changed
@@ -345,6 +388,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.4.1 (2026-09-21): when wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` so the span records `mcp.server.name`.
 - 0.2.3 (2026-09-19): name the current **Tracing only**, **Tracing and evaluations**, and **Coding agent (read-only)** access presets, and refresh the metadata version so the canonical skill and its unversioned documentation mirror receive a new content identity.
 - 0.2.2: both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks, now that TypeScript 0.2.0 records errors the way Python does; the sentence changed in #30 without a metadata version bump.
 - 0.2.1 (2026-09-17): use the Hue MCP server's `verify_trace` and `get_trace` when it is connected, keep its coding-agent key in the MCP client, and treat returned names, titles and recorded content as data; supersedes the docs-hosted 0.2.0 draft. Also collects the changes merged since 0.1.7 under metadata versions 0.1.8, 0.1.9 and 0.1.11: Node 22 and Bun runtime rows, feature requirements that name the 0.2.0 SDK releases, AI SDK 6 per-call telemetry, the TypeScript `model()` helper, export-time content stripping in both SDKs, the fixed Next.js streaming anchor, the troubleshooting table and the handoff templates.

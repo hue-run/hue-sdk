@@ -84,6 +84,32 @@ def test_actual_trace_log_correlation_and_content(receiver):
             assert headers["Content-Type"] == "application/x-protobuf"
 
 
+def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.tool("get_thread", mcp={"name": "gmail", "version": "1.2.3"}):
+            pass
+        with hue.tool("get_thread", mcp={"name": ""}):
+            pass
+        assert hue.export_status.instrumentation_failures == 1
+        hue.force_flush()
+    labeled, unlabeled = [
+        span for span in receiver.spans() if span.name == "execute_tool get_thread"
+    ]
+    assert attrs(labeled)["mcp.server.name"].string_value == "gmail"
+    assert attrs(labeled)["mcp.server.version"].string_value == "1.2.3"
+    assert "mcp.server.name" not in attrs(unlabeled)
+
+
+def test_disabled_client_does_not_count_invalid_mcp(receiver):
+    hue = Hue(receiver.url, KEY, capture_content=False, enabled=False)
+    with hue.tool("get_thread", mcp={"name": ""}):
+        pass
+    with hue.tool("get_thread", mcp="gmail"):
+        pass
+    assert hue.export_status.instrumentation_failures == 0
+    assert hue.shutdown()
+
+
 def test_inference_log_carries_request_metadata_and_a_structured_body(receiver):
     with Hue(receiver.url, KEY, capture_content=True) as hue:
         with hue.context(session_id="session-attributes"), hue.span("request") as root:

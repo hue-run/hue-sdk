@@ -82,7 +82,7 @@ scoring run.
 For the shorter agent-against-a-hosted-world workflow, use `runSimulation`. It owns immutable
 resolution, a fresh linked world per case, local and hosted MCP tools, finalization, sealed
 evidence and scoring while retaining this runner's checkpoint guarantees. See
-[Simulated environments](ENVIRONMENTS.md#run-a-scenario-like-a-test).
+[Simulated environments](ENVIRONMENTS.md#run-a-definition-like-a-test).
 
 Cases whose inputs are a task plus pinned documents, and rescoring over documents a run already
 saved, use the same runner without a world. See [Direct cases and files](#direct-cases-and-files).

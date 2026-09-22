@@ -1,4 +1,4 @@
-import type { JsonValue } from "../types.js";
+import type { JsonValue, McpServerInfo } from "../types.js";
 
 export type { JsonValue } from "../types.js";
 
@@ -276,6 +276,11 @@ export interface ActionDefinition {
   description?: string;
   /** Generated input contract. */
   inputSchema: ActionSchema;
+  /**
+   * MCP `initialize` identity when this action is served by one MCP surface.
+   * Bound environment tools record it on the tool span as `mcp.server.name`.
+   */
+  mcp?: McpServerInfo;
 }
 /** Recorded answer returned by the simulated world. */
 export interface Observation {

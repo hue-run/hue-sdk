@@ -65,7 +65,7 @@ HTTPS is required except for loopback HTTP or the explicit
 [`allowInsecureHttp`](#local-development-without-a-hue-account) opt-in. Redirects are refused for both
 project checks and exports.
 
-TypeScript `0.4.0` also prepares the `hue` executable. The unreleased
+The setup CLI shipped in TypeScript `0.4.0` also prepares the `hue` executable. The unreleased
 `npx --yes @hue-run/sdk@latest setup --agent` path supports Express with npm, Express with Bun, and
 Flask with uv in one application package with an unambiguous entrypoint and existing GET route. It
 installs the runtime, wires the application, makes one request and verifies that request's exact
@@ -74,7 +74,7 @@ preflight checks availability and presents the published [privacy notice](https:
 and [security information](https://trust.hue.run/) before telemetry. Anonymous trials last 24 hours
 and are limited to 100 traces, 1,000 spans and 2 MiB. A private owner-only browser handoff supports
 account linkage; the original request evidence is retained and business work is never replayed on
-claim. Setup never enables content capture or creates a Scenario, Hue Run, evaluation, source capture
+claim. Setup never enables content capture or creates a simulation, Hue Run, evaluation, source capture
 or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
 `checkConnection()` rejects with `HueConnectionError`: its fixed message is safe to log, `status`
@@ -132,7 +132,10 @@ options come after the callback and also accept `name`, `sessionId`, `userId`, `
 nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
 counted as instrumentation failures. Unknown usage stays absent. `hue.tool(name, input, execute)`
 creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result; an optional
-fourth argument `{ callId }` records the provider's tool call id as `gen_ai.tool.call.id`. Content
+fourth argument `{ callId }` records the provider's tool call id as `gen_ai.tool.call.id`. When the
+tool came from an MCP server, pass `{ mcp: client.getServerVersion() }` (the MCP `initialize`
+`serverInfo`) to record `mcp.server.name` and `mcp.server.version` so a generic verb such as
+`get_thread` is attributed to that server. Content
 helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`,
 `SpanOptions.input`) accept any value and encode plain JSON data (`JsonValue`) at runtime; a value
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
@@ -431,7 +434,7 @@ See [scorer execution](EVALUATIONS.md#hosted-and-manual-scorer-pins).
 
 The published [setup CLI](CLI.md) is a resumable local inspection core; the unreleased `0.4.0`
 candidate adds the bounded application onboarding flow described above. Existing customers connect
-their agents with `runLocalAgent()`; setup does not register workers or launch Scenarios.
+their agents with `runLocalAgent()`; setup does not register workers or launch simulations.
 
 ## Managed targets
 

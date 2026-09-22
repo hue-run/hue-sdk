@@ -160,6 +160,32 @@ export interface SpanOptions {
   parentContext?: Context;
 }
 
+/**
+ * MCP `initialize` `serverInfo` for {@link HueClient.tool}. Pass
+ * `client.getServerVersion()` after connect; any MCP server works.
+ */
+export interface McpServerInfo {
+  /** `serverInfo.name` from MCP initialize, recorded as `mcp.server.name`. */
+  name?: string;
+  /** `serverInfo.version` from MCP initialize, recorded as `mcp.server.version`. */
+  version?: string;
+}
+
+/**
+ * Options for {@link HueClient.tool}. `callId` is the provider-issued tool-call
+ * id; `mcp` is the MCP server that handled the call.
+ */
+export interface ToolOptions extends Pick<SpanOptions, "parentContext"> {
+  /** Provider-issued identifier of this tool call, recorded as `gen_ai.tool.call.id`. */
+  callId?: string;
+  /**
+   * MCP server that handled this call. Pass `client.getServerVersion()` or the
+   * `initialize` `serverInfo` so a generic verb such as `get_thread` is attributed
+   * to that server rather than inferred from the tool name.
+   */
+  mcp?: McpServerInfo;
+}
+
 /** Provider-reported token counts for {@link HueSpan.setUsage}. */
 export interface TokenUsage {
   /** Provider-reported prompt tokens (`gen_ai.usage.input_tokens`). */

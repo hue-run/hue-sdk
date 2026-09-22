@@ -52,7 +52,7 @@ npm install @hue-run/sdk
 bun add @hue-run/sdk
 ```
 
-The reviewed `0.4.0` candidate is preparing a deliberately narrow one-command onboarding path:
+The one-command onboarding path shipped in TypeScript `0.4.0`:
 
 ```sh
 npx --yes @hue-run/sdk@latest setup --agent
@@ -68,7 +68,7 @@ availability and presents the published [privacy notice](https://hue.run/privacy
 with limits of 100 traces, 1,000 spans and 2 MiB. A private local browser handoff lets the owner link
 an account while preserving the project and original request evidence; reconciliation refuses the
 old anonymous key and does not replay business work. Setup never enables content capture or creates
-a Scenario, Hue Run, evaluation, source capture or remote execution. See the
+a simulation, Hue Run, evaluation, source capture or remote execution. See the
 [CLI contract](./packages/sdk-typescript/CLI.md).
 
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
@@ -83,13 +83,13 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is [`0.3.2`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.3.2), including `runLocalAgent()`, V2 environments,
-forward-compatible scorer deferral and the local [setup CLI core](./packages/sdk-typescript/CLI.md).
-Finalization accepts server-confirmed expired worlds as sealed while preserving target errors
-and avoiding target replay. This checkout prepares the breaking TypeScript `0.4.0` release with the
-real [one-command setup CLI](./packages/sdk-typescript/CLI.md). The setup additions require the
-new public release before applications can install them by version. Python remains published at
-`0.2.2` and has no native local worker API. Package checks use synthetic local services.
+The published TypeScript package is [`0.4.1`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.4.1), including `runLocalAgent()`, V2 environments,
+forward-compatible scorer deferral, the local [setup CLI core](./packages/sdk-typescript/CLI.md),
+and MCP `initialize` server identity on tool spans. Finalization accepts server-confirmed expired
+worlds as sealed while preserving target errors and avoiding target replay. This checkout prepares
+Python `0.2.3` with the same MCP `mcp=` option. The published Python package remains
+`0.2.2` until registry acceptance; setup still installs that published pin. Package checks use
+synthetic local services.
 
 Your application runs the model or agent. Instrumentation must emit telemetry; the SDK cannot observe uninstrumented provider calls. Neither SDK estimates missing token usage or cost.
 

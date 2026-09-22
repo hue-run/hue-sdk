@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import {
+  bindEnvironmentTools,
   createEnvironmentClient,
   HueEnvironmentError,
   type EnvironmentDefinition,
@@ -136,5 +137,45 @@ describe("environment HTTP client", () => {
     } finally {
       server.stop(true);
     }
+  });
+
+  test("bindEnvironmentTools stamps catalog MCP identity on the tool span", async () => {
+    const recorded: Array<{ name: string; mcp?: { name?: string; version?: string } }> = [];
+    const hue = {
+      tool: async (
+        name: string,
+        _input: unknown,
+        execute: () => Promise<{ status: "ok" }>,
+        options: { mcp?: { name?: string; version?: string } } = {},
+      ) => {
+        recorded.push({ name, ...(options.mcp === undefined ? {} : { mcp: options.mcp }) });
+        return execute();
+      },
+    };
+    const tools = bindEnvironmentTools({
+      hue: hue as never,
+      client: {
+        act: async () => ({
+          observation: { status: "ok" as const },
+        }),
+      } as never,
+      run: {
+        id: randomUUID(),
+        actions: [
+          {
+            name: "get_thread",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              required: [],
+              additionalProperties: false,
+            },
+            mcp: { name: "gmail", version: "1" },
+          },
+        ],
+      } as never,
+    });
+    await tools.get_thread!.execute({ thread_id: "t1" });
+    expect(recorded).toEqual([{ name: "get_thread", mcp: { name: "gmail", version: "1" } }]);
   });
 });

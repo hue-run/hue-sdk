@@ -42,8 +42,8 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.4.0`, `@opentelemetry/api@1.9.1` and
-`@opentelemetry/context-async-hooks@2.11.0`; Python uses `hue-run==0.2.2`.
+not a completed integration. TypeScript uses `@hue-run/sdk@0.4.2`, `@opentelemetry/api@1.9.1` and
+`@opentelemetry/context-async-hooks@2.11.0`; Python uses published `hue-run==0.2.2`.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
 The generated bootstrap supplies standard active SERVER-span context across asynchronous/streaming
@@ -79,7 +79,7 @@ events, checkpoints or receipts. Ordinary app starts have no handshake and retai
 listener behavior. This prevents accidental requests to an unrelated listener, not access by
 malicious code running as the same local user.
 
-Setup creates no Scenario, Hue Run, evaluation, source capture, worker or remote execution. Package
+Setup creates no simulation, Hue Run, evaluation, source capture, worker or remote execution. Package
 manager lifecycle scripts are disabled. The supported existing application entrypoint is executed
 directly with fixed argv solely for its bounded local HTTP verification; no shell command is accepted.
 
@@ -172,7 +172,7 @@ capability `setup_telemetry_write`.
 Normal project credentials and unknown token shapes are refused in setup responses and private
 managed state. These credentials authorize metadata-only OTLP at `/api/v1/otlp/v1/traces` and exact
 content-free receipt verification at `/api/v1/setup/traces/{traceId}/receipt`. They do not authorize
-generic project, receipt, evaluation, log or browsing APIs. Python `0.2.2` can export with the setup
+generic project, receipt, evaluation, log or browsing APIs. Published Python `0.2.2` can export with the setup
 credential; the CLI verifies the dedicated setup receipt instead of Python's generic receipt helper.
 
 Each command uses bounded timeouts and retries. Provisioning records at most five attempts per local
@@ -192,7 +192,7 @@ event set is `run.started`, `project.detected`, `plan.ready`, `step.started`, `s
 `receipt.verified`, `claim.required`, `claim.completed`, `run.completed` and `run.failed`.
 
 Event version 1 shipped in TypeScript `0.3.1` and `0.3.2`; its public claim URL, action set and receipt
-step are incompatible with this flow. Consumers of `0.4.0` use the bundled schema with identity
+step are incompatible with this flow. The v2 schema shipped in TypeScript `0.4.0` with identity
 `https://hue.run/schemas/setup-events-v2.json`. Event version 2 is independent of Setup HTTP
 `protocolVersion: 1` and the checkpoint format.
 
@@ -241,7 +241,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.4.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.4.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -252,7 +252,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.4.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.4.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json

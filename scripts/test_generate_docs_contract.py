@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -23,8 +24,20 @@ class DocumentationContractTests(unittest.TestCase):
     def test_contract_contains_only_public_package_surfaces(self):
         contract = generator.build_contract(ROOT)
         self.assertEqual(contract["schemaVersion"], 1)
-        self.assertEqual(contract["packages"]["typescript"]["version"], "0.4.0")
-        self.assertEqual(contract["packages"]["python"]["version"], "0.2.2")
+        self.assertEqual(
+            contract["packages"]["typescript"]["version"],
+            json.loads((ROOT / "packages/sdk-typescript/package.json").read_text())["version"],
+        )
+        self.assertIn(
+            "McpServerInfo",
+            contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk"]["publicExports"],
+        )
+        self.assertEqual(
+            contract["packages"]["python"]["version"],
+            tomllib.loads((ROOT / "packages/sdk-python/pyproject.toml").read_text())["project"][
+                "version"
+            ],
+        )
         self.assertIn(
             "createHue",
             contract["packages"]["typescript"]["entrypoints"]["@hue-run/sdk"]["publicExports"],
