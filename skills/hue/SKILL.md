@@ -23,70 +23,18 @@ Read the application's repository instructions and inspect its runtime, dependen
 
 Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. Receipt helpers require TypeScript `0.1.3` or Python `0.1.1`; check package availability and release notes before using them. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
 
-## One-command onboarding
-
-When the user specifically asks for Hue onboarding, first inspect the repository and verify that
-`latest` is the accepted 0.4 release (the candidate is not a public activation promise), then run:
-
-```sh
-npx --yes @hue-run/sdk@latest setup --agent
-```
-
-Treat each JSONL `action.required` as a real stop, make only the requested repository change, and
-rerun `npx --yes @hue-run/sdk@latest resume --agent`. Event contract v2 is the machine-readable
-interface. `receipt.verified` must have `source: "repository-http-boundary"`: the CLI exercised one
-existing application request, flushed its exporter and verified the exact trace/span receipt.
-File creation, a connection check or a synthetic setup probe cannot establish that result. An
-`action_required` terminal outcome can still have verified application evidence while account
-linkage is deferred. Report both separately; do not claim every agent or repository works.
-
-Automatic setup is intentionally limited to one selected npm/Bun Express package or one uv Flask
-package with an unambiguous existing server entrypoint, literal GET route and environment-selected
-port. At a workspace root, mixed-language repository, ambiguous manager, custom Hue version or
-unfamiliar framework, use the structured action to select a package with `--project` or integrate Hue
-into an existing request. Never choose a monorepo project heuristically, add placeholder “real app”
-comments, simulate business behavior or rewrite an existing route.
-
-Automatic Express setup supports the bounded import/bootstrap shapes documented in the bundled
-CLI guide; it pins the standard OTel API and async-hooks context support with Hue. Unknown local
-imports, runtime preloads, conflicting telemetry dependencies or late/custom context-manager
-registration require review before mutation. The generated bootstrap preserves a working caller
-manager; core Hue never takes its ownership. Python uses an isolated Python 3 syntax parser and
-refuses any ancestor Python project manifest rather than risk modifying a parent uv environment.
-For acceptance, independently observe the original handler's standard OTel active trace/span IDs
-through async/streaming completion and match them to the exact SERVER-span receipt. A handler count
-and an unrelated valid probe receipt are not sufficient. Never repeat the business request to obtain
-missing evidence.
-
-Technical preflight presents the published privacy notice before telemetry; it does not request legal
-acceptance. Never invent legal metadata. Capture remains off. Trial credentials cannot enable content
-capture even after claim; that requires explicit opt-in and a separately account-managed normal key.
-
-For `select-project`, select the user's intended package with `--project`, never guess at a workspace
-root. For `integrate-application` or `configure`, inspect the concrete conflict and preserve custom
-configuration and existing telemetry ownership; do not overwrite edits or change business behavior.
-For `run-instrumented-request`, inspect the recorded failure. Resume only retries receipt verification
-when a request was already attempted; never delete the attempt marker or replay business work to fix
-telemetry. A new application request requires an explicit owner decision. Unsupported integrations
-stay action-required until supported evidence is actually available; do not forge a checkpoint.
-
-Account linkage is also deferred to the human. Never request, print, summarize or copy a claim URL,
-fragment, cookie, verification URL, installation proof or telemetry key. In an interactive owner
-terminal, `hue claim` opens an ignored mode-`0600` local handoff without placing its capability in a
-process argument or terminal output. In agent mode report only the generic owner action. After the
-owner finishes, rerun status/claim. Require the replacement key to verify the SAME original request's
-trace/span receipt and the anonymous key to return 401 on the dedicated setup receipt route. Do not
-run a second business request after claim. `claim.completed` reports verified reconciliation. A
-consumed browser session is resumed in that browser; only the owner may explicitly use
-`hue claim --restart` for a lost/expired handoff. This protects logs and model transcripts; it does not
-hide repository files from a malicious local process.
-
-Setup-managed credentials use a separate token namespace and only `setup_telemetry_write` in both
-generations. They cannot use normal project APIs or the SDK's generic receipt helper. The setup CLI
-uses `/api/v1/setup/traces/{traceId}/receipt`; a 401 from the generic receipt is NOT revocation proof.
-Do not read or print ignored installation/handoff files to recover a key or browser URL.
-
 **Existing AI SDK 6:** Hue core coexists with AI SDK 6. Pass `hueExperimentalTelemetry(hue)` from `@hue-run/sdk` as `experimental_telemetry` (requires TypeScript 0.2.0); `hueTelemetry` remains AI SDK 7 only. Alternatively keep the existing instrumentation/provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade the app merely to add tracing.
+
+## Invite-only access
+
+Hue Cloud is invite-only and anonymous setup is closed, so there is no trial to start. Before
+installing anything, check whether the user already has a Hue project and a **Tracing only** key
+(ask, or look for `HUE_API_KEY` in the application's secret workflow without reading its value). If
+not, do not run `setup --agent`, `resume`, `hue claim` or any install, create accounts or change files.
+Read the [agent setup page](https://docs.hue.run/guides/agent-setup.md), relay its reply to the user
+(it contains the booking link), then stop.
+
+If the user already has a key, they are invited: continue with the SDK guides above and the steps below.
 
 ## Install and configure
 
