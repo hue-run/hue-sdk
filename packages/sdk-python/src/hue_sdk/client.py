@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -42,6 +44,8 @@ from .transport import (
 
 Redactor = Callable[[str, Any], Any]
 _MISSING = object()
+_FILE_ROLES = frozenset({"input", "attachment", "output"})
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _is_label(value: Any) -> bool:
@@ -57,6 +61,15 @@ def _is_source_label(value: Any) -> bool:
         return len(value.encode("utf-16-le")) // 2 <= 256 and value.encode("utf-8") is not None
     except UnicodeEncodeError:
         return False
+def _is_text_label(value: Any) -> bool:
+    """A label that is also free of NUL and unpaired surrogates, so it can be exported."""
+    if not _is_label(value) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 class ProjectValidationError(RuntimeError):
@@ -153,6 +166,80 @@ class HueSpan:
         self._client._instrument(
             lambda: self.otel_span.add_event("exception", {"exception.type": error_type})
         )
+
+    def record_file(
+        self,
+        *,
+        role: str,
+        media_type: str,
+        sha256: str | None = None,
+        data: bytes | bytearray | memoryview | str | None = None,
+        byte_size: int | None = None,
+        name: str | None = None,
+    ) -> None:
+        """Add a ``hue.file`` event for a file the work read, received or produced.
+
+        ``role`` is ``input`` (given to the agent), ``attachment`` (from a tool or message) or
+        ``output`` (produced by the agent). ``data`` is hashed and measured locally and never
+        exported; a ``str`` is hashed as UTF-8. The event carries ``hue.file.sha256``,
+        ``hue.file.role``, ``hue.file.media_type``, ``hue.file.size`` when known and, when
+        content is captured, ``hue.file.name``. An invalid record is omitted and counted; an
+        invalid name alone is omitted and counted while the rest is recorded.
+        """
+        if not self._client._active:
+            return
+        self._client._instrument(
+            lambda: self._record_file(role, media_type, sha256, data, byte_size, name)
+        )
+
+    def _record_file(
+        self,
+        role: str,
+        media_type: str,
+        sha256: str | None,
+        data: bytes | bytearray | memoryview | str | None,
+        byte_size: int | None,
+        name: str | None,
+    ) -> None:
+        if role not in _FILE_ROLES:
+            raise ValueError("Invalid file role.")
+        if not _is_text_label(media_type):
+            raise ValueError("Invalid media type.")
+        digest = sha256.lower() if isinstance(sha256, str) else sha256
+        size = byte_size
+        if data is not None:
+            if isinstance(data, str):
+                content = data.encode("utf-8")
+            elif isinstance(data, (bytes, bytearray, memoryview)):
+                content = bytes(data)
+            else:
+                raise ValueError("File data must be bytes or a string.")
+            computed = hashlib.sha256(content).hexdigest()
+            # A caller-supplied digest or size must describe the same bytes.
+            if (digest is not None and digest != computed) or (
+                size is not None and size != len(content)
+            ):
+                raise ValueError("File digest or size does not match its data.")
+            digest, size = computed, len(content)
+        if not isinstance(digest, str) or not _SHA256.match(digest):
+            raise ValueError("A file needs a SHA-256 digest or its data.")
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
+            raise ValueError("Invalid file size.")
+        attributes: dict[str, AttributeValue] = {
+            "hue.file.sha256": digest,
+            "hue.file.role": role,
+            "hue.file.media_type": media_type,
+        }
+        if size is not None:
+            attributes["hue.file.size"] = size
+        if self._client.capture_content and name is not None:
+            if _is_text_label(name):
+                attributes["hue.file.name"] = name
+            else:
+                self._client._record_issue()
+        if not self.otel_span.is_recording():
+            raise ValueError("File records require a recording span.")
+        self.otel_span.add_event("hue.file", attributes)
 
     def log_inference(
         self,

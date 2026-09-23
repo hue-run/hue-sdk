@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import {
   context,
   isSpanContextValid,
@@ -25,6 +26,7 @@ import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
 import type {
   ExportReport,
+  FileRecord,
   FlushableLoggerProvider,
   FlushableTracerProvider,
   HueOptions,
@@ -104,6 +106,9 @@ function isSourceLabel(value: unknown): value is string {
     !value.includes("\u0000") &&
     value.isWellFormed()
   );
+/** A label that is also free of NUL and unpaired surrogates, which export would reject. */
+function isTextLabel(value: unknown): value is string {
+  return isLabel(value) && !value.includes("\u0000") && value.isWellFormed();
 }
 
 type Outcome<T> = { value: T } | { error: unknown };
@@ -639,6 +644,65 @@ export class HueClient {
       });
     } catch {
       this.transport.instrumentationFailure("logs");
+    }
+  }
+
+  /**
+   * Adds a `hue.file` event to the active (or given) span for a file the work read, received or
+   * produced: `hue.file.sha256`, `hue.file.role`, `hue.file.media_type`, `hue.file.size` when known
+   * and, when `captureContent` is true, `hue.file.name`. `data` is hashed and measured locally and
+   * never exported. The event is metadata, so it is recorded in both capture modes. An invalid
+   * record, or one without an active span, is omitted and counted, never thrown; an invalid name
+   * alone is omitted and counted while the rest is recorded.
+   */
+  recordFile(file: FileRecord, explicitContext?: Context): void {
+    if (!this.enabled || this.closed) return;
+    try {
+      const span = trace.getSpan(
+        explicitContext ?? this.storage.getStore()?.context ?? context.active(),
+      );
+      if (!span?.isRecording()) throw new Error("File records require an active span");
+      const { role, mediaType, data, name } = file;
+      if (role !== "input" && role !== "attachment" && role !== "output")
+        throw new TypeError("Invalid file role");
+      if (!isTextLabel(mediaType)) throw new TypeError("Invalid media type");
+      let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
+      let byteSize = file.byteSize;
+      if (data !== undefined) {
+        const bytes =
+          typeof data === "string"
+            ? Buffer.from(data, "utf8")
+            : data instanceof Uint8Array
+              ? data
+              : undefined;
+        if (!bytes) throw new TypeError("File data must be bytes or a string");
+        const digest = createHash("sha256").update(bytes).digest("hex");
+        // A caller-supplied digest or size must describe the same bytes.
+        if (
+          (sha256 !== undefined && sha256 !== digest) ||
+          (byteSize !== undefined && byteSize !== bytes.byteLength)
+        )
+          throw new TypeError("File digest or size does not match its data");
+        sha256 = digest;
+        byteSize = bytes.byteLength;
+      }
+      if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256))
+        throw new TypeError("A file needs a SHA-256 digest or its data");
+      if (byteSize !== undefined && (!Number.isSafeInteger(byteSize) || byteSize < 0))
+        throw new TypeError("Invalid file size");
+      const attributes: Attributes = {
+        "hue.file.sha256": sha256,
+        "hue.file.role": role,
+        "hue.file.media_type": mediaType,
+      };
+      if (byteSize !== undefined) attributes["hue.file.size"] = byteSize;
+      if (this.captureContent && name !== undefined) {
+        if (isTextLabel(name)) attributes["hue.file.name"] = name;
+        else this.transport.instrumentationFailure();
+      }
+      span.addEvent("hue.file", attributes);
+    } catch {
+      this.transport.instrumentationFailure();
     }
   }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -196,6 +197,58 @@ def test_tool_source_labels_use_utf16_length_like_typescript_and_fern(receiver):
     assert spans["accepted"]["hue.mcp.surface"].string_value == accepted
     assert "hue.mcp.provider" not in spans["rejected"]
     assert "hue.mcp.surface" not in spans["rejected"]
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver, capture_content):
+    body = "synthetic-file-body"
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    pdf = "AB" * 32
+    with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
+        with hue.span("request") as span:
+            span.record_file(
+                role="input", media_type="text/plain", data=body.encode(), name="notes.txt"
+            )
+            span.record_file(
+                role="output", media_type="application/pdf", sha256=pdf, byte_size=2048
+            )
+            # A str is hashed as UTF-8; a blank name is omitted (and counted when captured).
+            span.record_file(role="attachment", media_type="text/plain", data=body, name=" ")
+            # Each of these is omitted and counted; the block keeps running.
+            span.record_file(role="draft", media_type="text/plain", data=body)
+            span.record_file(role="input", media_type="text/plain", sha256="not-a-digest")
+            span.record_file(role="input", media_type="text/plain", data=body, sha256="0" * 64)
+            span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=-1)
+            span.record_file(role="input", media_type="", sha256=digest)
+        assert hue.export_status.instrumentation_failures == (6 if capture_content else 5)
+        hue.force_flush()
+    (request,) = receiver.spans()
+    files = [
+        {item.key: item.value.string_value or item.value.int_value for item in event.attributes}
+        for event in request.events
+        if event.name == "hue.file"
+    ]
+    assert files == [
+        {
+            "hue.file.sha256": digest,
+            "hue.file.role": "input",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": len(body),
+            **({"hue.file.name": "notes.txt"} if capture_content else {}),
+        },
+        {
+            "hue.file.sha256": pdf.lower(),
+            "hue.file.role": "output",
+            "hue.file.media_type": "application/pdf",
+            "hue.file.size": 2048,
+        },
+        {
+            "hue.file.sha256": digest,
+            "hue.file.role": "attachment",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": len(body),
+        },
+    ]
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert body.encode() not in telemetry
 
 
 def test_disabled_client_does_not_count_invalid_mcp(receiver):
