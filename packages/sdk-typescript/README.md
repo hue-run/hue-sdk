@@ -373,10 +373,11 @@ short span may send none and appear in Hue only when it finishes.
   name starting with `ai.`, are announced. HTTP, database and other framework spans are not.
 - Placeholder attributes follow `captureContent` and `redact` like the real span. Tool
   definitions, system instructions and any value over 64 KiB are left out.
-- The transport builds each placeholder from the running span itself, before any `onEnd` code
-  runs. A span processor that scrubs or rewrites attributes in `onEnd` before the span reaches Hue,
-  such as a wrapper that forwards `onStart` to Hue, therefore does not run on placeholders: they
-  carry the attributes the running span holds. Scrub with `redact`, which applies to placeholders
+- The transport builds each placeholder from the running span itself, so code in a wrapping
+  processor's `onEnd` never runs on it. If a wrapper forwards `onStart` to Hue but scrubs
+  attributes, renames the span or drops it in `onEnd`, a placeholder exported while the span is
+  still open is sent anyway: it has the span's original name, and its attributes as set on the span
+  with `captureContent` and `redact` applied. Scrub with `redact`, which applies to placeholders
   too, or before the value is set on the span, or turn live spans off with `liveSpans: false`.
 - Placeholders are advisory. They are queued only while the queue is under a quarter of its
   record and byte budgets, and skipped silently otherwise. While queued they count in

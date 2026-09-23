@@ -20,7 +20,9 @@ refuses to publish a version without a matching entry below.
   if a receiver without that header gets placeholders, their rejections are credited to them, one
   `warning` issue is recorded and live spans switch off for that client. Placeholders may use up
   to a quarter of the export queue, and placeholder warnings carry a nonzero `count`.
-  Migration: set `liveSpans: false` for the previous wire behavior. **Wire**
+  Migration: set `liveSpans: false` for the previous wire behavior. Scrubbing or filtering in a
+  wrapping processor's `onEnd` does not apply to placeholders; use `redact` or `liveSpans: false`.
+  **Wire**
 - A finished span no longer carries `hue.span_type` or `hue.pending_parent_id` attributes set by
   the application; Hue reserves them for placeholders. Migration: rename application attributes
   that use those keys. **Wire**
@@ -34,7 +36,7 @@ refuses to publish a version without a matching entry below.
   placeholder is queued at the transport's next 500 ms tick and sent with the next batch export
   (1 s batch delay), so it usually reaches Hue within about 1.5 s of its span starting: sooner when
   a batch is already scheduled, later while an earlier export is still in flight. A placeholder
-  whose span has ended by export time is not sent, so a short span may send none, and a request
+  whose span has ended by export time is not sent, so a short span may send none. A request
   carrying only placeholders never fails `flush()`. **Wire**
 - `liveSpans` option (default `true`; always off for setup credentials).
 
