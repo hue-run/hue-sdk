@@ -1,6 +1,6 @@
 # Compatibility
 
-The published releases are TypeScript `0.5.1` and Python `0.2.3`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+The published releases are TypeScript `0.6.0` and Python `0.3.0`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -34,7 +34,7 @@ Neither SDK estimates unavailable token usage or cost. Queues are bounded and in
 
 ## Evaluation coverage
 
-Both SDKs support dataset/scorer creation, frozen versions, local experiments, built-in/custom scorers, resumable result uploads and historical rescoring. Hosted judge job/budget methods are available, but credential resolution is not proof of a successful provider call. Activation belongs to the platform environment.
+Both SDKs expose product-named eval set, evaluator, run and scoring client methods while retaining the older low-level names and v1 paths. They support frozen versions, local runs, built-in and custom evaluators, resumable result uploads and historical rescoring. Hosted judge job and budget methods are available, but credential resolution is not proof of a successful provider call. Activation belongs to the platform environment.
 
 TypeScript local experiments, connected workers and rescoring also handle file-based cases: the runner downloads and verifies a case's pinned input files, uploads the documents a target returns as verified Hue artifacts, and hands both to local scorers, including when it regrades files a previous run saved. That file handling is unreleased, needs a Hue deployment that serves case input files, subject files and the artifact APIs, and has no Python equivalent.
 
