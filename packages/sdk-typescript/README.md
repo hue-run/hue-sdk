@@ -360,10 +360,13 @@ with its name, kind, start time and current attributes, an end time of 0,
 omitted for a root). Hue shows the span as running and replaces the placeholder when the real span
 arrives.
 
-The placeholder then waits for the next batch export like any queued span. The batch delay is 1 s
-(a full batch or `flush()` sends sooner), so a placeholder typically reaches Hue about 1.5 s after
-its span starts. A placeholder whose span has ended by the time it is exported is not sent, so a
-span shorter than about 1.5 s usually sends none and appears in Hue only when it finishes.
+The placeholder then waits for the next batch export like any queued span: up to 500 ms until the
+next tick, then the 1 s batch delay when nothing else is queued, so it usually reaches Hue within
+about 1.5 s of its span starting. It goes out sooner when a batch is already scheduled, for example
+because another span has just ended, and at once for a full batch or `flush()`. It goes out later
+while an earlier export is still in flight, because the next batch is scheduled only after that
+export finishes. A placeholder whose span has ended by the time it is exported is not sent, so a
+short span may send none and appear in Hue only when it finishes.
 
 - Only spans from the client's tracer (`withSpan`, `tool`, `model`, `hue.tracer` and the AI SDK
   adapters) and spans with a `gen_ai.`, `ai.`, `llm.` or `traceloop.` attribute at start, or a

@@ -31,10 +31,11 @@ refuses to publish a version without a matching entry below.
   calls before they finish. It is an ordinary OTLP span that names the running span as its
   parent, ends at 0 and carries `hue.span_type = "pending_span"` and `hue.pending_parent_id`;
   markers are added after redaction, and the content policy applies as for finished spans. A
-  placeholder is queued at the transport's 500 ms tick and sent with the next batch export (1 s
-  batch delay), so it typically reaches Hue about 1.5 s after its span starts. A placeholder whose
-  span has ended by export time is not sent, so a span shorter than about 1.5 s usually sends none,
-  and a request carrying only placeholders never fails `flush()`. **Wire**
+  placeholder is queued at the transport's next 500 ms tick and sent with the next batch export
+  (1 s batch delay), so it usually reaches Hue within about 1.5 s of its span starting: sooner when
+  a batch is already scheduled, later while an earlier export is still in flight. A placeholder
+  whose span has ended by export time is not sent, so a short span may send none, and a request
+  carrying only placeholders never fails `flush()`. **Wire**
 - `liveSpans` option (default `true`; always off for setup credentials).
 
 ### [0.6.0] - 2026-09-23
