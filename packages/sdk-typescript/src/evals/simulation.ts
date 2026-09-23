@@ -194,7 +194,7 @@ export interface RunSimulationOptions {
       };
   /** Local scorer callbacks bound by their declared source digests. */
   localScorers?: LocalScorer[];
-  /** Cases in flight, 1–16; defaults to 1. */
+  /** Cases in flight, 1–64; defaults to 1. */
   concurrency?: number;
   /** JSON Schema worker deadline in milliseconds. */
   schemaTimeoutMillis?: number;
