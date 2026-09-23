@@ -131,6 +131,35 @@ await hue.model(
 );
 ```
 
+Tools the provider runs itself, such as OpenAI hosted MCP, web search, file search and code
+interpreter, or Anthropic's MCP connector and server tools, never pass through `hue.tool()`. Inside
+the same `hue.model()` callback, hand the response to `hue.recordProviderToolCalls`:
+
+```ts
+await hue.model(
+  "gpt-5-mini",
+  async (span) => {
+    const response = await openai.responses.create(request);
+    span.setOutput(response.output_text);
+    hue.recordProviderToolCalls(response, { request });
+    return response;
+  },
+  { provider: "openai" },
+);
+```
+
+Each OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call` or `code_interpreter_call`
+item, and each Anthropic `mcp_tool_use` or `server_tool_use` block with its result, becomes an
+`execute_tool {name}` child span with `gen_ai.tool.type` `extension`, `gen_ai.tool.call.id` and,
+for MCP calls, `mcp.server.name` (the provider's label). Arguments and results follow
+`captureContent`; a failed call carries `error.type` (`mcp_error`, the provider's status or error
+code) and ERROR status. An `mcp_list_tools` item becomes a `tools/list` child span with that
+server's `gen_ai.tool.definitions`. Pass the request so each server's host is recorded as
+`server.address` (only server URLs are read, never credentials), and `servers` to record a
+server's real `name`, `version`, Hue `provider` and `surface` under its label. `provider` defaults
+to the enclosing `model()` call's provider (`openai` or `anthropic`). The spans have no duration of
+their own: the provider ran the tools inside the model request.
+
 The span is named `{operation} {model}` (`operation` defaults to `chat`) with
 `gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. Like `withSpan`, the
 options come after the callback and also accept `name`, `sessionId`, `userId`, `input` (recorded as

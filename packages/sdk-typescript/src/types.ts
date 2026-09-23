@@ -192,6 +192,38 @@ export interface ToolOptions extends Pick<SpanOptions, "parentContext"> {
   mcp?: McpServerInfo;
 }
 
+/** Providers whose hosted tool calls {@link HueClient.recordProviderToolCalls} can read. */
+export type HostedToolProvider = "openai" | "anthropic";
+
+/** Identity of a hosted MCP server, keyed by the label the provider uses for it. */
+export interface HostedServerInfo {
+  /** Server name recorded as `mcp.server.name`; defaults to the provider's label. */
+  name?: string;
+  /** Server version recorded as `mcp.server.version`. */
+  version?: string;
+  /** Hue provider id such as `google.gmail`, recorded as `hue.mcp.provider`. */
+  provider?: string;
+  /** Hue surface such as `google.gmail/mcp`, recorded as `hue.mcp.surface`. */
+  surface?: string;
+}
+
+/** Options for {@link HueClient.recordProviderToolCalls}. */
+export interface ProviderToolCallOptions extends Pick<SpanOptions, "parentContext"> {
+  /**
+   * `openai` (Responses API) or `anthropic` (Messages API). Defaults to the enclosing `model()`
+   * call's `provider` when it is one of these.
+   */
+  provider?: HostedToolProvider;
+  /**
+   * The request the response answers. Only hosted MCP server URLs are read from it (OpenAI
+   * `tools[].server_url` by `server_label`, Anthropic `mcp_servers[].url` by `name`), to record
+   * each server's host as `server.address`.
+   */
+  request?: unknown;
+  /** Identity of each hosted MCP server, by the label the provider uses for it. */
+  servers?: Record<string, HostedServerInfo>;
+}
+
 /** Provider-reported token counts for {@link HueSpan.setUsage}. */
 export interface TokenUsage {
   /** Provider-reported prompt tokens (`gen_ai.usage.input_tokens`). */
