@@ -27,6 +27,10 @@ afterEach(async () => {
 const ORIGIN = "https://hue.example";
 const EVAL_KEY = `hue_live_evaluations_${"e".repeat(40)}`;
 const MCP_KEY = `hue_live_agent_${"m".repeat(40)}`;
+/** One "Read and write" key: the default login stores it for evaluations and the coding agent. */
+const KEY = `hue_live_read_write_${"k".repeat(40)}`;
+/** A "Read" key: it reaches the project and the MCP server but cannot use evaluations. */
+const READ_KEY = `hue_live_read_${"r".repeat(40)}`;
 const SETTINGS_URL = `${ORIGIN}/settings/integrations`;
 
 function collector() {
@@ -55,7 +59,14 @@ interface RecordedCall {
 }
 
 /** Stands in for Hue's project check and the MCP `tools/list` route; no network is used. */
-function syntheticHue(options: { evalKey?: string; mcpKey?: string; sse?: boolean } = {}) {
+function syntheticHue(
+  options: { evalKeys?: string[]; mcpKeys?: string[]; readKeys?: string[]; sse?: boolean } = {},
+) {
+  const evalKeys = options.evalKeys ?? [EVAL_KEY, KEY];
+  const readKeys = options.readKeys ?? [READ_KEY];
+  const mcpKeys = options.mcpKeys ?? [MCP_KEY, KEY, READ_KEY];
+  const bearer = (authorization: string | null, keys: string[]) =>
+    keys.some((key) => authorization === `Bearer ${key}`);
   const calls: RecordedCall[] = [];
   const fetchImpl = (async (
     input: Parameters<typeof fetch>[0],
@@ -72,7 +83,7 @@ function syntheticHue(options: { evalKey?: string; mcpKey?: string; sse?: boolea
       body: typeof init?.body === "string" ? init.body : undefined,
     });
     if (url === `${ORIGIN}/api/v1/projects/current`) {
-      if (authorization !== `Bearer ${options.evalKey ?? EVAL_KEY}`)
+      if (!bearer(authorization, [...evalKeys, ...readKeys]))
         return Response.json(
           { error: "A valid project service key is required." },
           { status: 401 },
@@ -84,8 +95,13 @@ function syntheticHue(options: { evalKey?: string; mcpKey?: string; sse?: boolea
         organizationId: "33333333-3333-4333-8333-333333333333",
       });
     }
+    if (url === `${ORIGIN}/api/v1/datasets`) {
+      if (!bearer(authorization, evalKeys))
+        return Response.json({ error: "This key cannot use evaluations." }, { status: 403 });
+      return Response.json({ items: [], nextCursor: null });
+    }
     if (url === `${ORIGIN}/api/mcp`) {
-      if (authorization !== `Bearer ${options.mcpKey ?? MCP_KEY}`)
+      if (!bearer(authorization, mcpKeys))
         return Response.json({ error: "This key cannot read project data." }, { status: 403 });
       const message = {
         jsonrpc: "2.0",
@@ -160,48 +176,46 @@ describe("hue login", () => {
     await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
   });
 
-  test("validates both keys, stores them with mode 0600 and never echoes a value", async () => {
+  test("validates one key for both uses, stores it with mode 0600 and never echoes it", async () => {
     const root = await temporaryRoot();
     const hue = syntheticHue();
     const result = await login(["login", "--origin", ORIGIN], {
       cwd: root,
-      lines: [`  ${EVAL_KEY}  `, MCP_KEY],
+      lines: [`  ${KEY}  `],
       fetch: hue.fetchImpl,
     });
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain(`Create keys at: ${SETTINGS_URL}`);
-    expect(result.stdout).toContain('HUE_API_KEY: a "Read and write" key');
-    expect(result.stdout).toContain('HUE_MCP_KEY: a "Read and write" key');
-    expect(result.stdout).toContain('Evaluations key accepted for project "Synthetic".');
+    expect(result.stdout).toContain(`Create a "Read and write" key at: ${SETTINGS_URL}`);
+    expect(result.stdout).toContain("It is stored as HUE_API_KEY and HUE_MCP_KEY.");
     expect(result.stdout).toContain(
-      `Stored HUE_API_KEY (${EVAL_KEY.length} chars) and HUE_BASE_URL in .env.hue.`,
+      'Paste the "Read and write" key (HUE_API_KEY and HUE_MCP_KEY): ',
     );
+    expect(result.stdout).toContain('Evaluations access accepted for project "Synthetic".');
     expect(result.stdout).toContain("the Hue MCP server lists 2 tools");
     expect(result.stdout).toContain(
-      `Stored HUE_MCP_KEY (${MCP_KEY.length} chars) and HUE_MCP_URL in .env.hue.`,
+      `Stored the key (${KEY.length} chars) as HUE_API_KEY and HUE_MCP_KEY, with HUE_BASE_URL and HUE_MCP_URL, in .env.hue.`,
     );
     // A non-default origin stores its own MCP endpoint, so the printed next step carries it.
     expect(result.stdout).toContain(`hue mcp install --client claude-code --url ${ORIGIN}/api/mcp`);
     expect(result.stdout).toContain(
       'hue eval --scenario "<name>" ./hue-agent.ts --env-file .env.hue',
     );
-    expect(result.stdout).not.toContain(EVAL_KEY);
-    expect(result.stdout).not.toContain(MCP_KEY);
+    expect(result.stdout).not.toContain(KEY);
     expect(result.stdout).not.toContain("Opened");
     const envPath = join(root, ".env.hue");
     expect(await readFile(envPath, "utf8")).toBe(
-      `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\nHUE_MCP_KEY=${MCP_KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `HUE_API_KEY=${KEY}\nHUE_BASE_URL=${ORIGIN}\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
     );
     expect(await mode(envPath)).toBe(0o600);
 
     expect(hue.calls.map((call) => [call.method, call.url])).toEqual([
       ["GET", `${ORIGIN}/api/v1/projects/current`],
+      ["GET", `${ORIGIN}/api/v1/datasets`],
       ["POST", `${ORIGIN}/api/mcp`],
     ]);
-    const [project, mcp] = hue.calls as [RecordedCall, RecordedCall];
-    expect(project.authorization).toBe(`Bearer ${EVAL_KEY}`);
-    expect(mcp.authorization).toBe(`Bearer ${MCP_KEY}`);
+    for (const call of hue.calls) expect(call.authorization).toBe(`Bearer ${KEY}`);
+    const mcp = hue.calls[2]!;
     expect(mcp.headers.get("content-type")).toBe("application/json");
     expect(mcp.headers.get("accept")).toBe("application/json, text/event-stream");
     expect(JSON.parse(mcp.body ?? "null")).toEqual({
@@ -225,35 +239,34 @@ describe("hue login", () => {
 
   test("a rejected evaluations key exits 1 with a clear error and stores nothing", async () => {
     const root = await temporaryRoot();
-    const hue = syntheticHue({ evalKey: "hue_live_other_key" });
+    const hue = syntheticHue({ evalKeys: [], readKeys: [] });
     const result = await login(["--origin", ORIGIN], {
       cwd: root,
-      lines: [EVAL_KEY, MCP_KEY],
+      lines: [KEY],
       fetch: hue.fetchImpl,
     });
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("Hue rejected the evaluations key (HTTP 401).");
     expect(result.stderr).toContain(`Create a "Read and write" key at ${SETTINGS_URL}`);
-    expect(result.stderr).not.toContain(EVAL_KEY);
+    expect(result.stderr).toContain("Nothing was stored.");
+    expect(result.stderr).not.toContain(KEY);
     expect(hue.calls).toHaveLength(1);
     await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
   });
 
-  test("a rejected coding-agent key exits 1 and keeps an already stored evaluations key", async () => {
+  test("a key the MCP server rejects exits 1 and stores nothing for either use", async () => {
     const root = await temporaryRoot();
-    const hue = syntheticHue({ mcpKey: "hue_live_other_key" });
+    const hue = syntheticHue({ mcpKeys: [MCP_KEY] });
     const result = await login(["--origin", ORIGIN], {
       cwd: root,
-      lines: [EVAL_KEY, MCP_KEY],
+      lines: [KEY],
       fetch: hue.fetchImpl,
     });
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("The Hue MCP server rejected the coding-agent key (HTTP 403).");
     expect(result.stderr).toContain(`Create a "Read and write" key at ${SETTINGS_URL}`);
-    expect(result.stderr).not.toContain(MCP_KEY);
-    expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-      `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
-    );
+    expect(result.stderr).not.toContain(KEY);
+    await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
 
     const only = await login(["--keys", "coding-agent", "--origin", ORIGIN], {
       cwd: root,
@@ -261,9 +274,42 @@ describe("hue login", () => {
       fetch: syntheticHue().fetchImpl,
     });
     expect(only.code).toBe(0);
-    expect(only.stdout).not.toContain("Evaluations key accepted");
+    expect(only.stdout).toContain('Paste the "Read and write" key (HUE_MCP_KEY): ');
+    expect(only.stdout).not.toContain("Evaluations access accepted");
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-      `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\nHUE_MCP_KEY=${MCP_KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `HUE_MCP_KEY=${MCP_KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+    );
+  });
+
+  test("a Read key is refused for evaluations before anything is stored", async () => {
+    const root = await temporaryRoot();
+    const hue = syntheticHue();
+    const result = await login(["--origin", ORIGIN], {
+      cwd: root,
+      lines: [READ_KEY],
+      fetch: hue.fetchImpl,
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "This key cannot use evaluations (HTTP 403); it is a Read or Tracing only key.",
+    );
+    expect(result.stderr).toContain(`Create a "Read and write" key at ${SETTINGS_URL}`);
+    expect(result.stderr).not.toContain(READ_KEY);
+    expect(hue.calls.map((call) => call.url)).toEqual([
+      `${ORIGIN}/api/v1/projects/current`,
+      `${ORIGIN}/api/v1/datasets`,
+    ]);
+    await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
+
+    // A coding agent may be read-only, so a Read key is accepted when only HUE_MCP_KEY is asked for.
+    const agentOnly = await login(["--keys", "coding-agent", "--origin", ORIGIN], {
+      cwd: root,
+      lines: [READ_KEY],
+      fetch: syntheticHue().fetchImpl,
+    });
+    expect(agentOnly.code).toBe(0);
+    expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
+      `HUE_MCP_KEY=${READ_KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
     );
   });
 
@@ -289,7 +335,7 @@ describe("hue login", () => {
     expect(invalidKeyReason(EVAL_KEY)).toBeNull();
     const ended = await login(["--keys", "evaluations", "--origin", ORIGIN], { cwd: root });
     expect(ended.code).toBe(1);
-    expect(ended.stderr).toContain("No HUE_API_KEY was entered; input ended.");
+    expect(ended.stderr).toContain("No key was entered; input ended.");
     await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
   });
 
@@ -305,7 +351,7 @@ describe("hue login", () => {
 
     const refused = await login(["--origin", ORIGIN, "--env-file", "config/.env.local"], {
       cwd: root,
-      lines: [EVAL_KEY, MCP_KEY],
+      lines: [KEY],
     });
     expect(refused.code).toBe(1);
     expect(refused.stdout).toContain(
@@ -321,7 +367,7 @@ describe("hue login", () => {
       {
         cwd: root,
         lines: ["hue_live_previous"],
-        fetch: syntheticHue({ evalKey: "hue_live_previous" }).fetchImpl,
+        fetch: syntheticHue({ evalKeys: ["hue_live_previous"] }).fetchImpl,
       },
     );
     expect(same.code).toBe(0);
@@ -331,11 +377,11 @@ describe("hue login", () => {
 
     const forced = await login(["--origin", ORIGIN, "--env-file", "config/.env.local", "--force"], {
       cwd: root,
-      lines: [EVAL_KEY, MCP_KEY],
+      lines: [KEY],
     });
     expect(forced.code).toBe(0);
     expect(await readFile(envPath, "utf8")).toBe(
-      `# local settings\nOTHER=1\nexport HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\nTRAILING=yes\nHUE_MCP_KEY=${MCP_KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+      `# local settings\nOTHER=1\nexport HUE_API_KEY=${KEY}\nHUE_BASE_URL=${ORIGIN}\nTRAILING=yes\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
     );
     expect(await mode(envPath)).toBe(0o600);
     expect(forced.stdout).toContain("--env-file config/.env.local");
@@ -362,7 +408,7 @@ describe("hue login", () => {
     const hue = syntheticHue();
     const result = await login(["--origin", ORIGIN], {
       cwd: root,
-      lines: [EVAL_KEY, MCP_KEY],
+      lines: [KEY],
       fetch: hue.fetchImpl,
     });
     expect(result.code).toBe(1);
@@ -407,25 +453,17 @@ describe("hue login", () => {
     expect(check.status).toBe(0);
   });
 
-  test("a login that stops after one key still protects the env file it wrote", async () => {
+  test("a login protects the env file it wrote and adds no rule when nothing was stored", async () => {
     const root = await temporaryRoot();
     expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
     const result = await login(["--origin", ORIGIN, "--gitignore"], {
       cwd: root,
-      lines: [EVAL_KEY, MCP_KEY],
-      fetch: syntheticHue({ mcpKey: "hue_live_other_key" }).fetchImpl,
+      lines: [KEY],
       env: process.env,
     });
-    // The evaluations key is already on disk when the coding-agent key is refused; the ignore
-    // rule has to be written anyway, or a live key sits in a committable file.
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain("The Hue MCP server rejected the coding-agent key (HTTP 403).");
-    expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-      `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
-    );
+    expect(result.code).toBe(0);
     expect(await readFile(join(root, ".gitignore"), "utf8")).toBe(".env.hue\n");
     expect(spawnSync("git", ["check-ignore", "-q", ".env.hue"], { cwd: root }).status).toBe(0);
-    expect(result.stdout).not.toContain("Next steps:");
 
     // A run that stores nothing writes no rule and does not warn about a file it never wrote.
     const empty = await temporaryRoot();
@@ -486,8 +524,12 @@ describe("hue login", () => {
       async fetch(request) {
         const url = new URL(request.url);
         const authorization = request.headers.get("authorization");
+        if (url.pathname === "/api/v1/datasets") {
+          if (authorization !== `Bearer ${KEY}`) return new Response(null, { status: 403 });
+          return Response.json({ items: [], nextCursor: null });
+        }
         if (url.pathname === "/api/v1/projects/current") {
-          if (authorization !== `Bearer ${EVAL_KEY}`) return new Response(null, { status: 401 });
+          if (authorization !== `Bearer ${KEY}`) return new Response(null, { status: 401 });
           return Response.json({
             id: "22222222-2222-4222-8222-222222222222",
             name: "Loopback",
@@ -496,7 +538,7 @@ describe("hue login", () => {
           });
         }
         if (url.pathname === "/api/mcp" && request.method === "POST") {
-          if (authorization !== `Bearer ${MCP_KEY}`) return new Response(null, { status: 401 });
+          if (authorization !== `Bearer ${KEY}`) return new Response(null, { status: 401 });
           const body = (await request.json()) as { method?: string; id?: number };
           const message = {
             jsonrpc: "2.0",
@@ -517,7 +559,7 @@ describe("hue login", () => {
       const stdout = collector();
       const stderr = collector();
       const code = await runLoginCommand(["--origin", origin], {
-        stdin: pipedInput([EVAL_KEY, MCP_KEY]),
+        stdin: pipedInput([KEY]),
         stdout: stdout.stream,
         stderr: stderr.stream,
         cwd: root,
@@ -525,10 +567,10 @@ describe("hue login", () => {
       });
       expect(stderr.text()).toBe("");
       expect(code).toBe(0);
-      expect(stdout.text()).toContain('Evaluations key accepted for project "Loopback".');
+      expect(stdout.text()).toContain('Evaluations access accepted for project "Loopback".');
       expect(stdout.text()).toContain("lists 1 tools");
       expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
-        `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${origin}\nHUE_MCP_KEY=${MCP_KEY}\nHUE_MCP_URL=${origin}/api/mcp\n`,
+        `HUE_API_KEY=${KEY}\nHUE_BASE_URL=${origin}\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${origin}/api/mcp\n`,
       );
     } finally {
       server.stop(true);
@@ -585,7 +627,7 @@ describe("hue login", () => {
     // Nothing had been stored before the interrupt, so the message says exactly that.
     expect(interrupted.text()).toContain("Interrupted; nothing was stored.");
     expect(interrupted.text()).not.toContain("partial");
-    expect(hue.calls).toHaveLength(1);
+    expect(hue.calls).toHaveLength(2);
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
       `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
     );

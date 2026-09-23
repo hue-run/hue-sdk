@@ -145,15 +145,17 @@ handoff does not create a trial, reset quota or rerun business work.
 `hue login` stores keys that a person creates in Hue; it never mints one, because setup
 credentials are deliberately isolated from ordinary project keys. It prints the key settings page
 (`<origin>/settings/integrations`, opened in a browser only when a terminal is attached and
-`--no-browser` is absent), then reads each requested key from stdin without echo. Both keys
-use the **Read and write** preset. The evaluation key is validated with
-`GET /api/v1/projects/current` and stored as `HUE_API_KEY` with `HUE_BASE_URL`; the coding-agent key
-is validated with an MCP `tools/list` request and stored as `HUE_MCP_KEY` with `HUE_MCP_URL`. Use a
-separate key for each so either can be revoked alone. A rejected key (`401` or
-`403`) exits `1` and stores nothing for that key.
+`--no-browser` is absent), then reads one **Read and write** key from stdin without echo. By
+default that single key serves both uses: it is checked with `GET /api/v1/projects/current` and
+`GET /api/v1/datasets` (a **Read** or **Tracing only** key is refused because it cannot use
+evaluations) and with an MCP `tools/list` request, then stored as `HUE_API_KEY` with
+`HUE_BASE_URL` and `HUE_MCP_KEY` with `HUE_MCP_URL` in one write. A rejected key (`401` or `403`)
+exits `1` and stores nothing. `--keys evaluations` stores only `HUE_API_KEY`; `--keys coding-agent`
+stores only `HUE_MCP_KEY` and also accepts a **Read** key, for an agent that should only inspect the
+project. Run them separately with different keys if you want to revoke either use alone.
 
 ```sh
-hue login                                  # both keys into ./.env.hue
+hue login                                  # one key for both uses into ./.env.hue
 hue login --keys coding-agent --gitignore  # only HUE_MCP_KEY; add .env.hue to .gitignore
 hue login --origin https://staging.hue.run --env-file .env.staging
 ```
@@ -164,7 +166,7 @@ replaced only with `--force`. Empty values, whitespace and URLs are refused befo
 The MCP endpoint is `https://mcp.hue.run/mcp` for `https://app.hue.run`,
 `https://mcp.staging.hue.run/mcp` for `https://staging.hue.run` and `<origin>/api/mcp` otherwise;
 plain HTTP origins are accepted for loopback test servers only. Output names variables and lengths
-(`Stored HUE_API_KEY (NN chars)`), never values. When git does not ignore the env file, the command
+(`Stored the key (NN chars) as HUE_API_KEY and HUE_MCP_KEY`), never values. When git does not ignore the env file, the command
 warns; `--gitignore` appends the file name to the `.gitignore` next to it. Exit codes: `0` stored,
 `1` failed, `2` usage error, `130` interrupted.
 
