@@ -102,7 +102,7 @@ When the user asks to evaluate or regression-test their agent against a Hue Scen
 Hue never executes the agent: it runs in the user's process, and Hue only hosts the isolated
 simulated world and grades the sealed outcome. Scenario review and publication stay in the Hue UI.
 
-1. Find the published Scenario with the Hue MCP tools `list_scenarios` and `get_scenario`, or use
+1. Find the published Scenario with the Hue MCP tools `list_cases` and `get_case`, or use
    the Scenario URL the user pastes.
 2. Check `list_local_agents`. If no agent is online, run the evaluation from the shell:
 
