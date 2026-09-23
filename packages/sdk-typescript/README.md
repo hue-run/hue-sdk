@@ -358,13 +358,23 @@ tick, the transport queues a placeholder: an ordinary OTLP span whose parent is 
 with its name, kind, start time and current attributes, an end time of 0,
 `hue.span_type = "pending_span"` and `hue.pending_parent_id` (the running span's own parent,
 omitted for a root). Hue shows the span as running and replaces the placeholder when the real span
-arrives. A placeholder whose span has ended by the time it is exported is not sent.
+arrives.
+
+The placeholder then waits for the next batch export like any queued span. The batch delay is 1 s
+(a full batch or `flush()` sends sooner), so a placeholder typically reaches Hue about 1.5 s after
+its span starts. A placeholder whose span has ended by the time it is exported is not sent, so a
+span shorter than about 1.5 s usually sends none and appears in Hue only when it finishes.
 
 - Only spans from the client's tracer (`withSpan`, `tool`, `model`, `hue.tracer` and the AI SDK
   adapters) and spans with a `gen_ai.`, `ai.`, `llm.` or `traceloop.` attribute at start, or a
   name starting with `ai.`, are announced. HTTP, database and other framework spans are not.
 - Placeholder attributes follow `captureContent` and `redact` like the real span. Tool
   definitions, system instructions and any value over 64 KiB are left out.
+- The transport builds each placeholder from the running span itself, before any `onEnd` code
+  runs. A span processor that scrubs or rewrites attributes in `onEnd` before the span reaches Hue,
+  such as a wrapper that forwards `onStart` to Hue, therefore does not run on placeholders: they
+  carry the attributes the running span holds. Scrub with `redact`, which applies to placeholders
+  too, or before the value is set on the span, or turn live spans off with `liveSpans: false`.
 - Placeholders are advisory. They are queued only while the queue is under a quarter of its
   record and byte budgets, and skipped silently otherwise. While queued they count in
   `pendingSpans` and `pendingBytes`, but never as accepted, rejected, failed or dropped records.

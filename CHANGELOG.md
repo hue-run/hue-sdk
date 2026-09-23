@@ -30,9 +30,11 @@ refuses to publish a version without a matching entry below.
 - **Live spans.** A placeholder lets Hue show a trace, its request and its running model and tool
   calls before they finish. It is an ordinary OTLP span that names the running span as its
   parent, ends at 0 and carries `hue.span_type = "pending_span"` and `hue.pending_parent_id`;
-  markers are added after redaction, and the content policy applies as for finished spans. A span
-  that ends within about half a second sends none, a placeholder whose span has ended by export
-  time is not sent, and a request carrying only placeholders never fails `flush()`. **Wire**
+  markers are added after redaction, and the content policy applies as for finished spans. A
+  placeholder is queued at the transport's 500 ms tick and sent with the next batch export (1 s
+  batch delay), so it typically reaches Hue about 1.5 s after its span starts. A placeholder whose
+  span has ended by export time is not sent, so a span shorter than about 1.5 s usually sends none,
+  and a request carrying only placeholders never fails `flush()`. **Wire**
 - `liveSpans` option (default `true`; always off for setup credentials).
 
 ### [0.6.0] - 2026-09-23
