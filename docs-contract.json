@@ -41,7 +41,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:de1db6a9762aa633cc605812e69e4c0c899d5e4f5d16f0ed7ccff509b32a1905",
+    "sha256": "sha256:8bc7f4173a6b0c3cdb91f233cc12035a9b9441c9de63c5e839be793e9b87f01d",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
