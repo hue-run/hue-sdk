@@ -329,7 +329,8 @@ const hue = createHue({
 
 ## Delivery behavior
 
-Exports use official OTel retry handling for temporary HTTP/network failures. Each
+Exports retry temporary HTTP/network failures (429, 502, 503, 504 and connection errors,
+honoring `Retry-After`) within the export timeout, by OpenTelemetry's OTLP/HTTP exporter rules. Each
 request is limited to 1 MiB before gzip (with space reserved for gzip overhead) and each content value to 256 KiB. Batches
 split at record boundaries. Each signal queues at most 2,048 records, including
 exports in flight; overflow is reported through the callback, counters and next
@@ -348,6 +349,36 @@ keeps the latest 128 sanitized issues. Each concurrent caller receives a fresh s
 drain, including records emitted before its call. Stop request production
 before shutdown so late spans cannot race it. A client does not own instrumented
 operations still running in the application.
+
+## Live spans
+
+OpenTelemetry exports a span only when it ends, so a long streamed turn would otherwise stay
+invisible until it finishes. When a Hue or AI span is still open at the transport's next 500 ms
+tick, the transport queues a placeholder: an ordinary OTLP span whose parent is the running span,
+with its name, kind, start time and current attributes, an end time of 0,
+`hue.span_type = "pending_span"` and `hue.pending_parent_id` (the running span's own parent,
+omitted for a root). Hue shows the span as running and replaces the placeholder when the real span
+arrives. A placeholder whose span has ended by the time it is exported is not sent.
+
+- Only spans from the client's tracer (`withSpan`, `tool`, `model`, `hue.tracer` and the AI SDK
+  adapters) and spans with a `gen_ai.`, `ai.`, `llm.` or `traceloop.` attribute at start, or a
+  name starting with `ai.`, are announced. HTTP, database and other framework spans are not.
+- Placeholder attributes follow `captureContent` and `redact` like the real span. Tool
+  definitions, system instructions and any value over 64 KiB are left out.
+- Placeholders are advisory. They are queued only while the queue is under a quarter of its
+  record and byte budgets, and skipped silently otherwise. While queued they count in
+  `pendingSpans` and `pendingBytes`, but never as accepted, rejected, failed or dropped records.
+  Losing only placeholders records a warning and does not make `flush()` throw.
+- A Hue server that accepts placeholders sends `Hue-Pending-Spans: 1` on trace acknowledgements.
+  When a response to a request carrying placeholders lacks it, the receiver predates them: the
+  transport attributes up to one rejection per placeholder to them, records one warning and stops
+  sending placeholders for that client. Other rejections count against real spans as usual.
+- Opt out with `liveSpans: false`. Setup credentials never send placeholders.
+- With an existing provider, announcements start in `spanProcessor.onStart`. A wrapping processor
+  that forwards `onStart` should forward `onEnd` for the same spans: a span that ends without
+  reaching Hue is forgotten at the next tick, but a placeholder already sent keeps it showing as
+  running until Hue marks the trace stalled. The filtering wrapper above forwards no starts, so it
+  sends no placeholders.
 
 ## Verify a stored application trace
 

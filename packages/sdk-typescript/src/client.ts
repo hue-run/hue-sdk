@@ -18,6 +18,7 @@ import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
+import { HUE_SCOPE } from "./config.js";
 import { encodeContent, noopSpan, safeSpan } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
@@ -282,12 +283,12 @@ export class HueClient {
     this.captureContent = this.transport.options.captureContent;
     this.enabled = this.transport.options.enabled !== false;
     this.tracer = new ContextualTracer(
-      this.tracerProvider.getTracer("@hue-run/sdk", sdkVersion),
+      this.tracerProvider.getTracer(HUE_SCOPE, sdkVersion),
       this.storage,
       () => this.enabled && !this.closed,
       () => this.transport.instrumentationFailure(),
     );
-    this.logger = this.loggerProvider.getLogger("@hue-run/sdk", sdkVersion);
+    this.logger = this.loggerProvider.getLogger(HUE_SCOPE, sdkVersion);
   }
 
   /**

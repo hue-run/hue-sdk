@@ -41,6 +41,14 @@ DEFAULT_BASE_URL = "https://app.hue.run"
 # Hue's, as the TypeScript transport does.
 USER_AGENT = f"hue-sdk-python/{__version__} OTel-OTLP-Exporter-Python/{OTLP_EXPORTER_VERSION}"
 
+# Live-span placeholder markers (Hue's wire contract, versioned by the type value).
+PENDING_SPAN_TYPE_KEY = "hue.span_type"
+PENDING_SPAN_TYPE = "pending_span"
+PENDING_PARENT_KEY = "hue.pending_parent_id"
+# Every trace acknowledgement from a receiver that accepts placeholders carries this header
+# set to "1". Without it the receiver predates them and rejects each one (end time 0).
+PLACEHOLDERS_HEADER = "Hue-Pending-Spans"
+
 
 def reject_positional_api_key(base_url: object) -> None:
     """Explain a key passed where the origin goes, without echoing the value."""
@@ -80,9 +88,28 @@ def normalize_base_url(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
 
+class PendingSpan(ReadableSpan):
+    """An advisory placeholder announcing a still-open span; its end time is 0.
+
+    ``source`` is the live span it announces. It is never exported; the processor uses it
+    to drop the placeholder once that span has ended. Placeholders never count as dropped
+    or failed telemetry.
+    """
+
+    def __init__(self, source: ReadableSpan, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.source = source
+
+
 @dataclass(frozen=True)
 class ExportStatus:
-    """Cumulative failed export batches; contains no telemetry or credentials."""
+    """Cumulative failed export batches; contains no telemetry or credentials.
+
+    ``live_spans_rejected`` is a warning, not a failure, and does not affect ``ok``: a
+    trace acknowledgement for a request carrying live-span placeholders lacked the
+    ``Hue-Pending-Spans`` header, so the receiver predates placeholders and this client
+    stopped sending them.
+    """
 
     failed_trace_batches: int
     failed_log_batches: int
@@ -93,6 +120,7 @@ class ExportStatus:
     queued_trace_bytes: int = 0
     queued_log_bytes: int = 0
     instrumentation_failures: int = 0
+    live_spans_rejected: bool = False
 
     @property
     def ok(self) -> bool:
@@ -111,12 +139,17 @@ class SafeSession(requests.Session):
     The OTLP HTTP exporters in the supported OpenTelemetry range do not inspect
     partial_success themselves. A rejection is permanent: accepted records must
     not be retried as a whole batch.
+
+    The trace exporter sets ``placeholders`` before each export; a request reads it once
+    it holds the per-signal request lock, so a timed-out worker keeps its own count.
     """
 
     def __init__(self, signal: str | None = None) -> None:
         super().__init__()
         self.signal = signal
         self._request_lock = Lock()
+        self.placeholders = 0
+        self.live_spans_rejected = False
 
     @property
     def ready(self) -> bool:
@@ -138,6 +171,7 @@ class SafeSession(requests.Session):
         suppressed = export_context()
         if not self._request_lock.acquire(blocking=False):
             raise requests.RequestException("Hue telemetry transport is still busy.")
+        placeholders = self.placeholders
         completed = Event()
         deadline = monotonic() + timeout
         result: requests.Response | None = None
@@ -153,7 +187,7 @@ class SafeSession(requests.Session):
                     if remaining <= 0:
                         raise requests.RequestException("Hue telemetry request timed out.")
                     kwargs["timeout"] = remaining
-                    response = self._request(method, url, **kwargs)
+                    response = self._request(method, url, placeholders=placeholders, **kwargs)
                     # The OTLP HTTP exporters in the supported range do not
                     # honor 429 or Retry-After. Handle them here, without
                     # replaying partial acknowledgements or 4xx errors.
@@ -192,7 +226,9 @@ class SafeSession(requests.Session):
             raise requests.RequestException("Hue telemetry request failed.")
         return result
 
-    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+    def _request(
+        self, method: str, url: str, *, placeholders: int = 0, **kwargs: Any
+    ) -> requests.Response:
         kwargs["allow_redirects"] = False
         if self.signal:
             kwargs["stream"] = True
@@ -225,7 +261,15 @@ class SafeSession(requests.Session):
         if self.signal and response.ok:
             if response.status_code != 200:
                 raise requests.RequestException("Hue OTLP response must use HTTP 200.")
-            if _rejected_records(self.signal, response.content):
+            rejected = _rejected_records(self.signal, response.content)
+            if placeholders and response.headers.get(PLACEHOLDERS_HEADER) != "1":
+                # The receiver predates live spans and rejects each placeholder by timestamp.
+                # Stop sending them; only rejections beyond the placeholders are real. A
+                # receiver with the header never rejects a placeholder for being one, so its
+                # rejections count as they always have.
+                self.live_spans_rejected = True
+                rejected = max(0, rejected - placeholders)
+            if rejected:
                 raise requests.RequestException("Hue OTLP receiver rejected records.")
         return response
 
@@ -286,6 +330,10 @@ class BoundedSpanExporter(SpanExporter):
     def ready(self) -> bool:
         return self._session.ready
 
+    @property
+    def live_spans_rejected(self) -> bool:
+        return self._session.live_spans_rejected
+
     def record_failure(self) -> None:
         with self._lock:
             self._failures += 1
@@ -299,13 +347,21 @@ class BoundedSpanExporter(SpanExporter):
         failed = False
         try:
             for batch in _split_batches(spans, encode_spans):
-                if encode_spans(batch).ByteSize() > MAX_BATCH_BYTES:
-                    failed = True
-                elif self._delegate.export(batch) is not SpanExportResult.SUCCESS:
+                placeholders = sum(isinstance(span, PendingSpan) for span in batch)
+                try:
+                    if encode_spans(batch).ByteSize() > MAX_BATCH_BYTES:
+                        exported = False
+                    else:
+                        self._session.placeholders = placeholders
+                        exported = self._delegate.export(batch) is SpanExportResult.SUCCESS
+                except Exception:
+                    exported = False
+                # Placeholders are advisory: a batch holding only placeholders never fails.
+                if not exported and placeholders < len(batch):
                     failed = True
         except Exception:
             # Never surface record serialization errors containing customer values.
-            failed = True
+            failed = failed or any(not isinstance(span, PendingSpan) for span in spans)
         if failed:
             with self._lock:
                 self._failures += 1

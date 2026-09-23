@@ -20,6 +20,7 @@ import { hueTelemetry } from "../src/ai-sdk.js";
 import { generateText, streamText } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
+import sdkPackage from "@hue-run/sdk/package.json" with { type: "json" };
 
 type Value = {
   stringValue?: string;
@@ -168,6 +169,10 @@ describe("Hue SDK contract", () => {
         expect(request.headers["x-foreign-vendor"]).toBeUndefined();
         expect(request.headers["x-foreign-traces"]).toBeUndefined();
         expect(request.headers["user-agent"]).toMatch(/^hue-sdk-typescript\/\d/);
+        // Hue's token, then OpenTelemetry's exporter token for the pinned exporter version.
+        expect(request.headers["user-agent"]).toBe(
+          `hue-sdk-typescript/${sdkPackage.version} OTel-OTLP-Exporter-JavaScript/${sdkPackage.dependencies["@opentelemetry/otlp-exporter-base"]}`,
+        );
       }
     } finally {
       for (const [key, value] of Object.entries(previous)) {
@@ -1023,7 +1028,7 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("retryable failure is retried by the official exporter and accepted once", async () => {
+  test("retryable failure is retried after Retry-After and accepted once", async () => {
     const endpoint = receiver("retry");
     const hue = createHue({
       apiKey,
@@ -1034,12 +1039,92 @@ describe("Hue SDK contract", () => {
     });
     try {
       await hue.withSpan("retry", () => {});
+      const started = Date.now();
       expect((await hue.flush()).acceptedSpans).toBe(1);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(900);
       expect(endpoint.hits()).toBe(2);
       expect(hue.transport.getIssues()).toEqual([]);
     } finally {
       await hue.shutdown();
       await endpoint.server.stop(true);
+    }
+  });
+
+  test.each([
+    ["a client error is not retried", 401, {}],
+    ["a Retry-After beyond the request budget is not awaited", 503, { "Retry-After": "30" }],
+    ["an acknowledgement over 4 MiB is not accepted", 200, {}],
+  ] as const)("%s", async (_name, status, headers) => {
+    let hits = 0;
+    const endpoint = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        hits++;
+        await request.arrayBuffer();
+        const body = status === 200 ? new Uint8Array(4 * 1024 * 1024 + 1) : "synthetic failure";
+        return new Response(body, { status, headers });
+      },
+    });
+    const hue = createHue({
+      apiKey,
+      serviceName: "transport-rules",
+      captureContent: false,
+      baseUrl: `http://127.0.0.1:${endpoint.port}`,
+      timeoutMillis: 2000,
+    });
+    try {
+      await hue.withSpan("request", () => {});
+      const started = Date.now();
+      const error = await hue.flush().catch((reason: unknown) => reason);
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(error).toBeInstanceOf(HueExportError);
+      const lost = (error as HueExportError).issues.filter((issue) => issue.count > 0);
+      expect(lost).toEqual([expect.objectContaining({ kind: "failed", count: 1 })]);
+      // A retryable status that is not retried reports no status, as OpenTelemetry's exporter did.
+      expect(lost[0]!.status).toBe(status === 401 ? 401 : undefined);
+      expect(hits).toBe(1);
+    } finally {
+      await hue.shutdown();
+      await endpoint.stop(true);
+    }
+  });
+
+  test("a receiver that never acknowledges fails the export at its deadline and is disconnected", async () => {
+    let disconnected!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const endpoint = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        return new Promise<Response>((resolve) => {
+          request.signal.addEventListener("abort", () => {
+            disconnected();
+            resolve(new Response(null));
+          });
+        });
+      },
+    });
+    const hue = createHue({
+      apiKey,
+      serviceName: "hung",
+      captureContent: false,
+      baseUrl: `http://127.0.0.1:${endpoint.port}`,
+      timeoutMillis: 300,
+    });
+    try {
+      await hue.withSpan("unacknowledged", () => {});
+      const start = Date.now();
+      const error = await hue.flush().catch((reason: unknown) => reason);
+      expect(Date.now() - start).toBeLessThan(2000);
+      expect(error).toBeInstanceOf(HueExportError);
+      expect((error as HueExportError).report).toMatchObject({ acceptedSpans: 0, failedSpans: 1 });
+      await closed;
+    } finally {
+      await hue.shutdown();
+      await endpoint.stop(true);
     }
   });
 

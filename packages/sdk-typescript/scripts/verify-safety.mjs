@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Worker } from "node:worker_threads";
+import { gunzipSync } from "node:zlib";
 
 const [consumer] = process.argv.slice(2);
 const { createHue, createHueSafe, HueExportError } = await import(
@@ -123,14 +124,25 @@ console.log(JSON.stringify({ sharedMemoryBudget: "passed", sharedSnapshots, shar
 let mode = "unauthorized";
 let closedResponses = 0;
 let requests = 0;
+let placeholderRequests = 0;
 const server = createServer(async (request, response) => {
   requests++;
-  for await (const _chunk of request) {
-    /* Drain upload before replying. */
-  }
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
   response.on("close", () => {
     closedResponses++;
   });
+  if (mode === "live-current" || mode === "live-legacy") {
+    // Placeholders carry this marker value; the protobuf encodes strings verbatim.
+    if (gunzipSync(Buffer.concat(chunks)).includes("pending_span")) placeholderRequests++;
+    response
+      .writeHead(200, {
+        "Content-Type": "application/x-protobuf",
+        ...(mode === "live-current" ? { "Hue-Pending-Spans": "1" } : {}),
+      })
+      .end();
+    return;
+  }
   if (mode === "unauthorized") {
     response.writeHead(401).end("synthetic-private-body");
     return;
@@ -237,6 +249,33 @@ try {
   await healthy.withSpan("healthy", () => null);
   assert.equal((await healthy.flushSafe()).ok, true);
   assert.equal((await healthy.shutdownSafe()).ok, true);
+  // Live spans over Node's HTTP client: the acknowledgement header keeps them on; its absence
+  // (a receiver that predates placeholders) turns them off with one warning and no failure.
+  for (const receiver of ["live-current", "live-legacy"]) {
+    mode = receiver;
+    placeholderRequests = 0;
+    const live = createHue(options);
+    await live.withSpan("live", async () => {
+      const deadline = performance.now() + 5000;
+      while (live.transport.getReport().pendingSpans === 0) {
+        assert.ok(performance.now() < deadline, "No in-progress placeholder was queued");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal((await live.flushSafe()).ok, true);
+    });
+    assert.equal(placeholderRequests, 1, "The running span was announced once");
+    const report = (await live.shutdownSafe()).report;
+    assert.equal(report.acceptedSpans, 1);
+    assert.equal(report.failedSpans + report.rejectedSpans + report.droppedSpans, 0);
+    const issues = live.transport.getIssues();
+    if (receiver === "live-current") assert.deepEqual(issues, []);
+    else {
+      assert.equal(issues.length, 1);
+      assert.equal(issues[0].kind, "warning");
+      assert.match(issues[0].message, /live spans are disabled/);
+    }
+  }
+  mode = "success";
   const disabled = createHueSafe({ ...options, apiKey: "" });
   assert.equal(disabled.enabled, false);
   assert.equal(await disabled.withSpan("disabled", () => 42), 42);

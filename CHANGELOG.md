@@ -10,6 +10,29 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Breaking
+
+- Live spans are on by default: while a span from Hue's own helpers, the AI SDK adapter or a
+  recognized AI instrumentation is still running, the transport also exports a placeholder for
+  it (see Added). A Hue deployment that accepts placeholders answers with `Hue-Pending-Spans: 1`;
+  if a receiver without that header gets placeholders, their rejections are credited to them, one
+  `warning` issue is recorded and live spans switch off for that client. Placeholders may use up
+  to a quarter of the export queue, and placeholder warnings carry a nonzero `count`.
+  Migration: set `liveSpans: false` for the previous wire behavior. **Wire**
+- A finished span no longer carries `hue.span_type` or `hue.pending_parent_id` attributes set by
+  the application; Hue reserves them for placeholders. Migration: rename application attributes
+  that use those keys. **Wire**
+
+#### Added
+
+- **Live spans.** A placeholder lets Hue show a trace, its request and its running model and tool
+  calls before they finish. It is an ordinary OTLP span that names the running span as its
+  parent, ends at 0 and carries `hue.span_type = "pending_span"` and `hue.pending_parent_id`;
+  markers are added after redaction, and the content policy applies as for finished spans. A span
+  that ends within about half a second sends none, a placeholder whose span has ended by export
+  time is not sent, and a request carrying only placeholders never fails `flush()`. **Wire**
+- `liveSpans` option (default `true`; always off for setup credentials).
+
 ### [0.6.0] - 2026-09-23
 
 #### Added
@@ -380,6 +403,31 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Breaking
+
+- Live spans are on by default: while a span from Hue's own helpers or a recognized AI
+  instrumentation is still running, the exporter also exports a placeholder for it (see Added). A
+  Hue deployment that accepts placeholders answers with `Hue-Pending-Spans: 1`; if a receiver
+  without that header gets placeholders, their rejections are credited to them,
+  `ExportStatus.live_spans_rejected` is set and live spans switch off for that client.
+  Placeholders may use up to a quarter of the export queue. Migration: pass `live_spans=False`
+  for the previous wire behavior. **Wire**
+- A finished span no longer carries `hue.span_type` or `hue.pending_parent_id` attributes set by
+  the application; Hue reserves them for placeholders. Migration: rename application attributes
+  that use those keys. **Wire**
+
+#### Added
+
+- **Live spans.** A placeholder lets Hue show a trace, its request and its running model and tool
+  calls before they finish. It is an ordinary OTLP span that names the running span as its
+  parent, ends at 0 and carries `hue.span_type = "pending_span"` and `hue.pending_parent_id`;
+  markers are added after the content policy and redaction. Queued placeholders are never counted
+  as dropped, a placeholder whose span has ended by export time is not sent, and a request
+  carrying only placeholders never fails the export status; rejections in a request that also
+  carries finished spans fail it as before. **Wire**
+- `live_spans` keyword (default `True`; always off for setup credentials) and
+  `ExportStatus.live_spans_rejected`.
 
 ### [0.3.0] - 2026-09-23
 

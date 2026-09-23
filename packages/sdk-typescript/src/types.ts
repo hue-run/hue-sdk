@@ -56,6 +56,12 @@ export interface SharedHueOptions {
   timeoutMillis?: number;
   /** Aggregate estimated retained telemetry bytes across both signals, including in-flight work. Default 8 MiB. */
   maxQueueBytes?: number;
+  /**
+   * Announces AI and Hue spans that are still running with in-progress placeholder spans, so Hue
+   * shows a trace while it runs. Default `true`; always off for setup credentials (`hue_setup_…`),
+   * and turned off for the client when its receiver does not accept placeholders.
+   */
+  liveSpans?: boolean;
 }
 
 /**
@@ -92,7 +98,7 @@ export interface ExportIssue {
   signal: Signal;
   /** `rejected` by Hue, `failed` to deliver, `dropped` from the queue, `invalid` record or capture, or a non-failing `warning`. */
   kind: "rejected" | "failed" | "dropped" | "invalid" | "warning";
-  /** Records affected; zero for warnings and capture failures. */
+  /** Records affected; zero for capture failures and for warnings other than lost in-progress span placeholders. */
   count: number;
   /** HTTP status when the issue came from a response. */
   status?: number;

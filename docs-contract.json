@@ -30,6 +30,11 @@
         "boundary": "No Hue package or model wrapper required; metrics and OTLP gRPC ingestion are not supported.",
         "path": "Direct OpenTelemetry export",
         "verifiedSupport": "OTLP HTTP protobuf/JSON traces and correlated logs, including gzip"
+      },
+      {
+        "boundary": "Requires a Hue deployment that answers trace exports with `Hue-Pending-Spans: 1` (app.hue.run does). A receiver without that header, an older Hue or a generic collector, gets placeholders only in the first export that carries them: the SDK then records one warning and switches live spans off for that client. Turn `liveSpans` / `live_spans` off to send none at all.",
+        "path": "Live spans (unreleased)",
+        "verifiedSupport": "Placeholders for running Hue and AI spans, sent by the Hue transports"
       }
     ],
     "sections": [
@@ -41,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:640d991726f50c61a4fd5bc67ffccdcab7313594add44176e782306e90c2df2e",
+    "sha256": "sha256:30852c5ff0813b5c309f089583414c57a66cba0b8ed4233946255cc6c46046fa",
     "source": "COMPATIBILITY.md"
   },
   "packages": {

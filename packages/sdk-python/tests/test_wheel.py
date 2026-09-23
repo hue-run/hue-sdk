@@ -165,7 +165,7 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
     )
     receipt_tests = tmp_path / "receipt-tests"
     receipt_tests.mkdir()
-    for name in ("conftest.py", "test_receipts.py", "test_isolation.py"):
+    for name in ("conftest.py", "test_receipts.py", "test_isolation.py", "test_live_spans.py"):
         shutil.copyfile(package / "tests" / name, receipt_tests / name)
     subprocess.run(
         [str(python), "-m", "pytest", "-q", str(receipt_tests)],
