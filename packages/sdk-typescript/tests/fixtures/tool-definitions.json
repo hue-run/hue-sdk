@@ -15,7 +15,7 @@
     {
       "type": "function",
       "name": "fetch_page",
-      "description": "Fetch a page — résumé ✓ \"quoted\"\n",
+      "description": "Fetch a page — résumé ✓ \"quoted\"\n\u2028line\u2029paragraph",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -41,5 +41,5 @@
     { "type": "web_search_preview" }
   ],
   "names": ["gmail", "fetch_page", "lookup", "web_search_preview"],
-  "sha256": "e9b3dfc8a94d544d0f9d14012d868d73bb1a86d8f2e3b5f5813322df270a54c3"
+  "sha256": "1a64dd0776674fc91b307cf0a6cf902352066757b39aa3df31c3c19778206ea1"
 }
