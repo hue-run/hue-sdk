@@ -14,6 +14,8 @@ export type {
   RescoreOptions,
   RunnerReport,
 } from "./evals/runner.js";
+export { serveScoringJobs } from "./evals/scoring-worker.js";
+export type { ServeScoringJobsOptions, ScoringWorkerReport } from "./evals/scoring-worker.js";
 export { TargetResult, withFiles } from "./evals/types.js";
 export {
   outputContentTypes,

@@ -84,6 +84,7 @@ const sdkScorerPublication = z.union([
     language: z.enum(["typescript", "python"]),
     entrypoint: z.string(),
     sourceDigest: z.string(),
+    executor: z.literal("worker").optional(),
     metrics,
   }),
   z.strictObject({

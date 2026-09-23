@@ -53,6 +53,9 @@ import type {
   ScorerDefinition,
   ScorerVersion,
   Scoring,
+  ScoringJob,
+  ScoringJobState,
+  ScoringJobStats,
   ScoringResultInput,
   ScoringResultSummary,
   ScoringSubject,
@@ -817,6 +820,57 @@ export class EvaluationClient {
   /** Reads the project's hosted judge budget and admission controls. */
   getJudgeBudget() {
     return this.request<JudgeBudget>("GET", "/judge-budget");
+  }
+  /**
+   * Leases up to `limit` queued jobs of worker-executed evaluator versions, oldest first.
+   * Concurrent callers receive different jobs. {@link serveScoringJobs} runs the full loop.
+   */
+  claimScoringJobs(input: { evaluatorVersionIds: string[]; limit: number; leaseSeconds: number }) {
+    return this.request<{
+      /** Leased jobs; empty when none is claimable. */
+      jobs: ScoringJob[];
+    }>("POST", "/scoring-jobs/claim", input);
+  }
+  /** Extends a held lease; fails with HTTP 409 once another worker has claimed the job. */
+  extendScoringJob(id: string, input: { leaseToken: string; leaseSeconds: number }) {
+    return this.request<{
+      /** Job ID. */
+      id: string;
+      /** When the extended lease lapses, ISO 8601. */
+      leaseExpiresAt: string;
+    }>("POST", `/scoring-jobs/${uuid(id)}/lease`, input);
+  }
+  /** Completes a job once its item's result is recorded. Repeating it is safe. */
+  completeScoringJob(id: string, input: { leaseToken: string }) {
+    return this.request<{
+      /** Job ID. */
+      id: string;
+      /** Job state after the request. */
+      state: ScoringJobState;
+    }>("POST", `/scoring-jobs/${uuid(id)}/complete`, input);
+  }
+  /**
+   * Gives a job back. A retryable failure queues it again while attempts remain; otherwise Hue
+   * records an error result with `error.type`. Send a type, not a message that could quote
+   * scored documents.
+   */
+  releaseScoringJob(
+    id: string,
+    input: { leaseToken: string; retryable: boolean; error: { type: string; message?: string } },
+  ) {
+    return this.request<{
+      /** Job ID. */
+      id: string;
+      /** Job state after the request. */
+      state: ScoringJobState;
+    }>("POST", `/scoring-jobs/${uuid(id)}/release`, input);
+  }
+  /** Reads queue depth for worker-executed evaluator versions, for autoscaling and alerts. */
+  getScoringJobStats(evaluatorVersionIds: string[]) {
+    const query = new URLSearchParams(
+      evaluatorVersionIds.map((id) => ["evaluatorVersionId", uuid(id)]),
+    );
+    return this.request<ScoringJobStats>("GET", `/scoring-jobs/stats?${query}`);
   }
   /** Register or refresh the fixed local agent key and revision. */
   registerLocalAgent(input: LocalAgentRegistration) {

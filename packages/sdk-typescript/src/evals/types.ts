@@ -207,6 +207,12 @@ export type ScorerDefinition =
       entrypoint: string;
       /** SHA-256 of the declared source. */
       sourceDigest: string;
+      /**
+       * `"worker"`: Hue queues a scoring job for every completed item that pins this version, and
+       * scoring workers ({@link serveScoringJobs}) lease and score them. Absent: only a client that
+       * binds the callback scores it.
+       */
+      executor?: "worker";
       /** Metrics the callback reports. */
       metrics: MetricDefinition[];
     }
@@ -331,6 +337,40 @@ export interface JudgeJob {
   startedAt: string | null;
   /** Finish time, or `null` until the job is terminal. */
   finishedAt: string | null;
+}
+/** Lifecycle of a scoring job; `completed`, `error` and `skipped` are terminal. */
+export type ScoringJobState = "queued" | "running" | "completed" | "error" | "skipped";
+/** A scoring job leased by {@link EvaluationClient.claimScoringJobs}. */
+export interface ScoringJob {
+  /** Job ID. */
+  id: string;
+  /** Proves this worker holds the lease; required to extend, complete or release the job. */
+  leaseToken: string;
+  /** When the lease lapses unless extended, ISO 8601. */
+  leaseExpiresAt: string;
+  /** Scoring the item belongs to; pass it to `rescore` as `runId`. */
+  scoringId: string;
+  /** Evaluation item to score. */
+  itemId: string;
+  /** Worker-executed evaluator version to score the item with. */
+  evaluatorVersionId: string;
+  /** Claims of this job so far, including this one. */
+  attempts: number;
+}
+/** Queue depth for a set of worker-executed evaluator versions. */
+export interface ScoringJobStats {
+  /** Jobs waiting for a worker. */
+  queued: number;
+  /** Jobs under lease, including leases that have lapsed but are not yet claimed again. */
+  running: number;
+  /** Jobs whose result is recorded. */
+  completed: number;
+  /** Jobs that ended with an error result. */
+  error: number;
+  /** Jobs that ended without scoring. */
+  skipped: number;
+  /** Creation time of the oldest queued job, ISO 8601; `null` when none is queued. */
+  oldestQueuedAt: string | null;
 }
 /** The project's hosted judge budget and admission controls. */
 export interface JudgeBudget {

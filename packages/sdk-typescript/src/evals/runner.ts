@@ -176,6 +176,8 @@ export interface RunExperimentOptions extends RunnerOptions {
 export interface RescoreOptions extends RunnerOptions {
   /** Evaluation run created with `createEvaluationRun` over existing subjects. */
   runId: string;
+  /** Score only these items of the run, such as a scoring worker's leased jobs. Default: all items. */
+  itemIds?: string[];
 }
 /** Outcome of a runner call. */
 export interface RunnerReport {
@@ -693,9 +695,13 @@ export async function rescore(options: RescoreOptions): Promise<RunnerReport> {
   ]);
   if (!options.deferUnboundLocalScorers)
     validateScorerBindings(run.scorerVersions, options.scorers);
-  const items = await allPages((after) => options.client.listEvaluationItems(run.id, { after }));
-  if (items.length !== run.itemCount)
+  const allItems = await allPages((after) => options.client.listEvaluationItems(run.id, { after }));
+  if (allItems.length !== run.itemCount)
     throw new Error("Frozen evaluation run item count differs from API items");
+  const selected = options.itemIds ? new Set(options.itemIds) : undefined;
+  const items = selected ? allItems.filter((item) => selected.has(item.id)) : allItems;
+  if (selected && items.length !== selected.size)
+    throw new Error("A requested item is not part of this evaluation run");
   const store = await CheckpointStore.acquire(options.checkpointDirectory, {
     kind: "rescore",
     projectId: project.id,

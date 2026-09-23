@@ -10,6 +10,16 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- **Wire** Scoring workers. A `local_code` evaluator published with `executor: "worker"` (also a
+  `defineLocalScorer` option) has Hue queue a scoring job for every completed item that pins it.
+  `serveScoringJobs` leases those jobs and scores them with local scorers, renewing leases,
+  handing failures back by error type only and draining held jobs on abort. `EvaluationClient`
+  gains `claimScoringJobs`, `extendScoringJob`, `completeScoringJob`, `releaseScoringJob` and
+  `getScoringJobStats` for the `/api/v1/scoring-jobs` endpoints, and `rescore` accepts `itemIds`
+  to score part of a run.
+
 ### [0.6.0] - 2026-09-23
 
 #### Added

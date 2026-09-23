@@ -353,8 +353,41 @@ would produce its result. `deferUnboundLocalScorers: true` changes that for both
 and `rescore`: unbound code-evaluator pins are reported in `deferredScorerVersionIds` and left to
 the executor that owns their source, typically a grading worker Hue operates with its own provider
 credentials. The customer's process then runs only the agent and uploads its documents; nothing
-grader-related is installed there and evaluator-only files never reach it. The grading worker
-calls `rescore` on the same run with the evaluator bound and the same option, so pins belonging to
-other evaluators are left alone rather than refused. `EvaluationClient.listEvaluationRuns` pages
-the project's runs so such a worker can find the ones that still owe it results. `hue eval` uses
-this mode for eval sets whose cases pin no simulated world.
+grader-related is installed there and evaluator-only files never reach it. `hue eval` uses this
+mode for eval sets whose cases pin no simulated world.
+
+#### Scoring workers
+
+Publish the evaluator with `executor: "worker"` and Hue queues its grading: completing a case
+queues one scoring job for each pinned worker-executed version that has no result yet, and scoring
+a run over existing subjects queues its items. `serveScoringJobs` leases the jobs and scores each
+item with `rescore`, binding only its own evaluators:
+
+```ts
+import { createEvaluationClient, defineLocalScorer, serveScoringJobs } from "@hue-run/sdk/evals";
+
+const grader = defineLocalScorer({ source, entrypoint: "grade", metrics, executor: "worker", score });
+const identity = await client.createEvaluator({ name: "Document grader", slug: "document-grader" });
+const published = await client.publishEvaluatorVersion(identity.id, grader.definition);
+
+const stop = new AbortController();
+process.once("SIGTERM", () => stop.abort());
+await serveScoringJobs({
+  client,
+  scorers: [grader],
+  evaluatorVersionIds: [published.id],
+  checkpointRoot: ".hue-checkpoints/scoring-worker",
+  persistResultContent: true,
+  concurrency: 8,
+  signal: stop.signal,
+});
+```
+
+Each claim leases different jobs, so run as many workers as the queue needs; capacity is workers ×
+`concurrency`. Leases are renewed while a job runs. A job whose worker stops is claimed again once
+its lease lapses, and after five unfinished attempts Hue records a `ScoringRetriesExhausted` error
+result, so a client waiting for verdicts always finishes. A failed job is handed back with its
+error type only; exception messages stay in the worker. On abort the loop stops claiming and
+finishes the jobs it holds, so give the process a termination grace period longer than one grade.
+`getScoringJobStats` reports queue depth and the oldest queued job for autoscaling and alerts.
+Scoring jobs need a Hue server that supports them; elsewhere `claimScoringJobs` fails with HTTP 404.

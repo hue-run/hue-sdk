@@ -42,6 +42,7 @@ export function defineLocalScorer(options: {
   source: string | Uint8Array;
   entrypoint: string;
   metrics: MetricDefinition[];
+  executor?: "worker";
   score: LocalScorer["score"];
 }): LocalScorer {
   return {
@@ -50,6 +51,7 @@ export function defineLocalScorer(options: {
       language: "typescript",
       entrypoint: options.entrypoint,
       sourceDigest: sourceDigest(options.source),
+      ...(options.executor ? { executor: options.executor } : {}),
       metrics: options.metrics,
     },
     score: options.score,

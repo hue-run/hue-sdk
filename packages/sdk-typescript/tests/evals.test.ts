@@ -1141,6 +1141,53 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("rescore scores only the requested items and refuses items outside the run", async () => {
+    const f = fixture();
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "eval-test",
+      captureContent: true,
+    });
+    try {
+      const report = await runExperiment({
+        client: f.client,
+        hue,
+        experimentId: f.create().id,
+        checkpointDirectory: await directory(),
+        persistResultContent: true,
+        traceEvidence: { mode: "required" },
+        target: (input) => (input === null ? null : "answer"),
+      });
+      const before = f.results.length;
+      const run = await f.client.createEvaluationRun({
+        idempotencyKey: randomUUID(),
+        name: "Leased item",
+        subjectIds: report.subjectIds,
+        scorerVersionIds: [f.versions[0].id],
+      });
+      const { items } = await f.client.listEvaluationItems(run.id);
+      expect(items).toHaveLength(2);
+      const options = {
+        client: f.client,
+        runId: run.id,
+        persistResultContent: true,
+      };
+      await expect(
+        rescore({ ...options, itemIds: [randomUUID()], checkpointDirectory: await directory() }),
+      ).rejects.toThrow("not part of this evaluation run");
+      const rescored = await rescore({
+        ...options,
+        itemIds: [items[1].id],
+        checkpointDirectory: await directory(),
+      });
+      expect(rescored.subjectIds).toEqual([items[1].subjectId]);
+      expect(f.results.length).toBe(before + 1);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
   test("resume defers old checkpoint placeholders for both experiments and rescores without rerunning targets", async () => {
     const f = fixture();
     const deferred = version({
