@@ -95,6 +95,11 @@ function isLabel(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "" && value.length <= 256;
 }
 
+/** A label that is also free of NUL and unpaired surrogates, like Hue's own tool-source labels. */
+function isSourceLabel(value: unknown): value is string {
+  return isLabel(value) && !value.includes("\u0000") && value.isWellFormed();
+}
+
 type Outcome<T> = { value: T } | { error: unknown };
 
 /**
@@ -399,7 +404,8 @@ export class HueClient {
    * `options.callId` is recorded as `gen_ai.tool.call.id`, like the Python `call_id=` keyword.
    * `options.mcp` records the MCP `initialize` `serverInfo` as `mcp.server.name` /
    * `mcp.server.version` so a generic tool name can be attributed to the server that
-   * handled it. Pass `client.getServerVersion()`.
+   * handled it. Pass `client.getServerVersion()`. `mcp.provider` / `mcp.surface` record the Hue
+   * provider and surface as `hue.mcp.provider` / `hue.mcp.surface`.
    */
   async tool<T>(
     name: string,
@@ -411,15 +417,21 @@ export class HueClient {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": name,
     };
-    const stamp = (key: string, value: unknown) => {
+    const stamp = (
+      key: string,
+      value: unknown,
+      valid: (value: unknown) => value is string = isLabel,
+    ) => {
       if (value === undefined) return;
       // A blank or non-string label is omitted and counted; the tool call itself still runs.
-      if (isLabel(value)) attributes[key] = value;
+      if (valid(value)) attributes[key] = value;
       else if (this.enabled && !this.closed) this.transport.instrumentationFailure();
     };
     stamp("gen_ai.tool.call.id", options.callId);
     stamp("mcp.server.name", options.mcp?.name);
     stamp("mcp.server.version", options.mcp?.version);
+    stamp("hue.mcp.provider", options.mcp?.provider, isSourceLabel);
+    stamp("hue.mcp.surface", options.mcp?.surface, isSourceLabel);
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {

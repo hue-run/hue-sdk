@@ -49,6 +49,17 @@ def _is_label(value: Any) -> bool:
     return type(value) is str and bool(value.strip()) and len(value) <= 256
 
 
+def _is_source_label(value: Any) -> bool:
+    """A label without NUL or unpaired surrogates, matching TypeScript's ``isSourceLabel``."""
+    if not _is_label(value) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 class ProjectValidationError(RuntimeError):
     """Authentication, connectivity or invalid project response; never contains a key."""
 
@@ -589,14 +600,16 @@ class Hue:
             attributes["gen_ai.tool.call.id"] = self._metadata_string(call_id, "unknown")
         if mcp is not None:
             if isinstance(mcp, Mapping):
-                for key, field in (
-                    ("mcp.server.name", "name"),
-                    ("mcp.server.version", "version"),
+                for key, field, valid in (
+                    ("mcp.server.name", "name", _is_label),
+                    ("mcp.server.version", "version", _is_label),
+                    ("hue.mcp.provider", "provider", _is_source_label),
+                    ("hue.mcp.surface", "surface", _is_source_label),
                 ):
                     value = mcp.get(field)
                     if value is None:
                         continue
-                    if _is_label(value):
+                    if valid(value):
                         attributes[key] = value
                     elif self._active:
                         self._record_issue()

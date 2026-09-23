@@ -342,6 +342,55 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("tool records the Hue provider and surface and drops blank or invalid labels", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "mcp-tool-surface",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.tool("labeled", {}, () => "ok", {
+        mcp: { name: "gmail", provider: "google.gmail", surface: "google.gmail/mcp" },
+      });
+      await hue.tool("blank", {}, () => "ok", {
+        mcp: { name: "gmail", provider: " ", surface: "" },
+      });
+      await hue.tool("invalid", {}, () => "ok", {
+        mcp: {
+          name: "gmail",
+          provider: "google\u0000gmail",
+          surface: "\ud800",
+          version: 3 as unknown as string,
+        },
+      });
+      await hue.tool("oversized", {}, () => "ok", {
+        mcp: { provider: "p".repeat(257), surface: "s".repeat(256) },
+      });
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(6);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const span = (name: string) =>
+        spans.find((record) => record.name === `execute_tool ${name}`)!;
+      expect(attr(span("labeled"), "hue.mcp.provider")?.stringValue).toBe("google.gmail");
+      expect(attr(span("labeled"), "hue.mcp.surface")?.stringValue).toBe("google.gmail/mcp");
+      expect(attr(span("labeled"), "mcp.server.name")?.stringValue).toBe("gmail");
+      for (const name of ["blank", "invalid"]) {
+        expect(attr(span(name), "mcp.server.name")?.stringValue).toBe("gmail");
+        expect(attr(span(name), "mcp.server.version")).toBeUndefined();
+        expect(attr(span(name), "hue.mcp.provider")).toBeUndefined();
+        expect(attr(span(name), "hue.mcp.surface")).toBeUndefined();
+      }
+      expect(attr(span("oversized"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("oversized"), "hue.mcp.surface")?.stringValue).toBe("s".repeat(256));
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({

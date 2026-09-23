@@ -141,7 +141,10 @@ creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and res
 fourth argument `{ callId }` records the provider's tool call id as `gen_ai.tool.call.id`. When the
 tool came from an MCP server, pass `{ mcp: client.getServerVersion() }` (the MCP `initialize`
 `serverInfo`) to record `mcp.server.name` and `mcp.server.version` so a generic verb such as
-`get_thread` is attributed to that server. Content
+`get_thread` is attributed to that server. When the server is a Hue surface, `mcp.provider` and
+`mcp.surface` (for example `google.gmail` and `google.gmail/mcp`) record `hue.mcp.provider` and
+`hue.mcp.surface`. A blank, over-256-character or otherwise invalid label is omitted and counted as
+an instrumentation failure; the tool still runs. Content
 helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`,
 `SpanOptions.input`) accept any value and encode plain JSON data (`JsonValue`) at runtime; a value
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure

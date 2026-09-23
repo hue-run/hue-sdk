@@ -277,8 +277,9 @@ export interface ActionDefinition {
   /** Generated input contract. */
   inputSchema: ActionSchema;
   /**
-   * MCP `initialize` identity when this action is served by one MCP surface.
-   * Bound environment tools record it on the tool span as `mcp.server.name`.
+   * MCP `initialize` identity and Hue provider/surface when this action is served by one MCP
+   * surface. Bound environment tools record it on the tool span as `mcp.server.name`,
+   * `mcp.server.version`, `hue.mcp.provider` and `hue.mcp.surface`.
    */
   mcp?: McpServerInfo;
 }
