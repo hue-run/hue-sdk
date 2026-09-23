@@ -170,7 +170,9 @@ function productRunFields<T>(value: unknown, kind: "run" | "scoring" | "result")
 /**
  * Typed client for Hue's evaluation REST API: datasets, scorers, experiments, executions, runs,
  * results and hosted judge jobs. No implicit mutation retry: callers retain stable idempotency keys
- * for experiments and results. Responses are bounded to 4 MiB.
+ * for experiments and results. The one exception is a request Hue refused before acting on it with
+ * a short `Retry-After` (HTTP 503 or 429, at most 5 seconds), such as a busy key check; it is sent
+ * again up to four times. Responses are bounded to 4 MiB.
  */
 export class EvaluationClient {
   /** Validated Hue origin. */
@@ -186,6 +188,31 @@ export class EvaluationClient {
     this.baseUrl = validated.baseUrl;
     this.apiKey = validated.apiKey;
     this.timeoutMillis = validated.timeoutMillis;
+  }
+  // Hue sends a short Retry-After only when it refused the request before acting on it, such as a
+  // busy key check, so repeating any method is safe.
+  private async send(url: string, init: () => RequestInit): Promise<Response> {
+    for (let attempt = 1; ; attempt += 1) {
+      let response: Response;
+      try {
+        response = await fetch(url, init());
+      } catch {
+        throw new HueApiError();
+      }
+      const header = response.headers.get("retry-after") ?? "";
+      const retryAfter = /^\d+$/.test(header) ? Number(header) : undefined;
+      if (
+        (response.status !== 503 && response.status !== 429) ||
+        retryAfter === undefined ||
+        retryAfter > 5 ||
+        attempt > 4
+      )
+        return response;
+      await response.body?.cancel();
+      await new Promise((resolve) =>
+        setTimeout(resolve, retryAfter * 1000 * (1 + Math.random() / 2)),
+      );
+    }
   }
   private async request<T>(
     method: string,
@@ -205,21 +232,16 @@ export class EvaluationClient {
               bounds,
             ),
           );
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}/api/v1${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          ...(payload ? { "Content-Type": "application/json" } : {}),
-        },
-        body: payload,
-        redirect: "error",
-        signal: AbortSignal.timeout(this.timeoutMillis),
-      });
-    } catch {
-      throw new HueApiError();
-    }
+    const response = await this.send(`${this.baseUrl}/api/v1${path}`, () => ({
+      method,
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        ...(payload ? { "Content-Type": "application/json" } : {}),
+      },
+      body: payload,
+      redirect: "error",
+      signal: AbortSignal.timeout(this.timeoutMillis),
+    }));
     if (!response.ok) {
       await response.body?.cancel();
       throw new HueApiError(response.status);
@@ -247,17 +269,15 @@ export class EvaluationClient {
   }
   /** Verified bytes of one ready artifact in this project, bounded to the 25 MiB pilot file size. */
   async downloadArtifact(id: string): Promise<Uint8Array> {
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`, {
+    const response = await this.send(
+      `${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`,
+      () => ({
         method: "GET",
         headers: { Authorization: `Bearer ${this.apiKey}` },
         redirect: "error",
         signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
-      });
-    } catch {
-      throw new HueApiError();
-    }
+      }),
+    );
     if (!response.ok) {
       await response.body?.cancel();
       throw new HueApiError(response.status);

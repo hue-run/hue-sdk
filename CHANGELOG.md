@@ -20,6 +20,13 @@ refuses to publish a version without a matching entry below.
   `getScoringJobStats` for the `/api/v1/scoring-jobs` endpoints, and `rescore` accepts `itemIds`
   to score part of a run.
 
+#### Fixed
+
+- `EvaluationClient` sends a request again, up to four times, when Hue refused it before acting on
+  it with a short `Retry-After` (HTTP 503 or 429, at most 5 seconds). Hue does this when its key
+  check is busy, which parallel cases and scoring workers can trigger; such requests previously
+  failed the run or the job.
+
 ### [0.6.0] - 2026-09-23
 
 #### Added

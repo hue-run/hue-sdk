@@ -259,4 +259,49 @@ describe("scoring workers", () => {
       server.stop(true);
     }
   });
+  test("requests Hue refused with a short Retry-After are sent again; others fail at once", async () => {
+    let busy = 2;
+    const bodies: unknown[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path.endsWith("/claim")) {
+          bodies.push(await request.json());
+          if (busy-- > 0)
+            return Response.json(
+              { error: "busy" },
+              { status: 503, headers: { "Retry-After": "0" } },
+            );
+          return Response.json({ jobs: [] });
+        }
+        if (path.endsWith("/stats"))
+          return Response.json(
+            { error: "busy" },
+            { status: 503, headers: { "Retry-After": "60" } },
+          );
+        return Response.json({ error: "unavailable" }, { status: 503 });
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: "synthetic-key",
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    try {
+      const input = { evaluatorVersionIds: [VERSION], limit: 1, leaseSeconds: 60 };
+      expect(await client.claimScoringJobs(input)).toEqual({ jobs: [] });
+      expect(bodies).toEqual([input, input, input]);
+      await expect(client.getScoringJobStats([VERSION])).rejects.toMatchObject({ status: 503 });
+      await expect(
+        client.completeScoringJob(job(1).id, { leaseToken: job(1).leaseToken }),
+      ).rejects.toMatchObject({ status: 503 });
+      busy = 10;
+      bodies.length = 0;
+      await expect(client.claimScoringJobs(input)).rejects.toMatchObject({ status: 503 });
+      expect(bodies).toHaveLength(5);
+    } finally {
+      server.stop(true);
+    }
+  });
 });
