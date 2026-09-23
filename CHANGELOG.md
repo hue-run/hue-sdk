@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.7.0] - 2026-09-23
+
 #### Breaking
 
 - Live spans are on by default: while a span from Hue's own helpers, the AI SDK adapter or a
@@ -403,6 +405,8 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+### [0.4.0] - 2026-09-23
 
 #### Breaking
 
