@@ -79,7 +79,7 @@ until every item has a terminal result for every pin or the budget elapses (`com
 `summarizeVerdicts` turns results into per-case rows with `passed` and totals; `compareVerdicts`
 diffs two summaries by case key; and `collectExperimentVerdicts` combines those reads for one
 experiment. The `hue eval` command uses the same path; see
-[Evaluate an agent against a Scenario](CLI.md#evaluate-an-agent-against-a-scenario).
+[Evaluate an agent against a case](CLI.md#evaluate-an-agent-against-a-case).
 
 ### Pinned provider-profile preflight
 
