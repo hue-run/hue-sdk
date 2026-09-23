@@ -23,6 +23,8 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
+from ._tool_definitions import scrub_tool_credentials
+
 from .transport import (
     MAX_REQUEST_BYTES,
     PENDING_PARENT_KEY,
@@ -230,11 +232,11 @@ class _ValueBudget:
     def permitted(self, values: Any) -> Any:
         """Apply the content policy: metadata-only mode drops recognized content keys."""
         source = values or {}
-        if not self.capture_content and isinstance(source, Mapping):
+        if isinstance(source, Mapping):
             source = {
-                key: item
+                key: scrub_tool_credentials(key, item) if isinstance(key, str) else item
                 for key, item in source.items()
-                if not (isinstance(key, str) and is_content_key(key))
+                if self.capture_content or not (isinstance(key, str) and is_content_key(key))
             }
         return source
 

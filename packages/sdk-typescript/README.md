@@ -244,6 +244,17 @@ attributes, resources, event/link attributes and log bodies. Return a string.
 Invalid/oversized helper content is omitted with an instrumentation failure; the span can still be delivered. Export-time redactor failures reject the affected record and are reported by flush. Shared resources are redacted once per
 export batch. Do not put user content or secrets in span names or scope names.
 
+Hosted tools carry credentials in their definitions, such as the `authorization` and `headers` of
+an OpenAI hosted MCP tool. Before export, and before `redact`, Hue replaces the values of
+`authorization`, `authorization_token`, `headers`, `api_key`, `access_token` and `x-api-key` (in
+any case, with or without `-` and `_`) with `"[redacted]"` in recorded tool definitions
+(`gen_ai.tool.definitions`, `ai.prompt.tools`, `llm.tools.*.tool.json_schema`) and in the `tools`
+and `mcp_servers` entries of a raw provider request or response recorded as `input.value`,
+`output.value` or `llm.invocation_parameters`. Parameters named in a JSON Schema `properties`
+object keep their schemas, so a tool that takes a `headers` argument is still described. A
+definition nested more than 256 levels deep rejects its record. Credentials elsewhere, for example
+in a schema `default`, still need `redact`.
+
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
 application error marks the span with `error.type` (the error's `name`), an ERROR status and an
