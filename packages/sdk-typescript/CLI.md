@@ -333,14 +333,14 @@ Publication under a candidate dist-tag, registry acceptance, production activati
 the same version to `latest`, and clean-project literal `@latest` smoke remain separate gates; see
 [RELEASING.md](../../RELEASING.md).
 
-## Evaluate an agent against a Scenario
+## Evaluate an agent against a case
 
-`hue eval` runs a developer's local agent against a published Hue Scenario or a saved eval set
+`hue eval` runs a developer's local agent against a published Hue case or a saved eval set
 and prints Hue's verdicts. It is the command-line form of `runSimulation()` (one-shot) and
 `runLocalAgent()` (worker): the agent, its prompts and its provider credentials stay in the local
 process, Hue creates one isolated simulated world per case, and Hue-owned outcome checks grade
 the sealed world. Hue never executes the agent. `HUE_API_KEY` must be a **Read and
-write** project key (a **Read** or **Tracing only** key cannot read Scenarios or create experiments);
+write** project key (a **Read** or **Tracing only** key cannot read cases or create runs);
 the CLI never prints it. The optional `zod` peer of `@hue-run/sdk/evals` must be installed.
 
 Write an adapter module that hands the case inputs and the world's tools or MCP connection to
@@ -362,16 +362,18 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-hue eval --scenario "Refund an eligible charge" ./hue-agent.ts --env-file .env.hue
-hue eval --scenario https://app.hue.run/projects/demo/scenarios/<id> ./hue-agent.ts --baseline <experiment id>
+hue eval --case "Refund an eligible charge" ./hue-agent.ts --env-file .env.hue
+hue eval --case https://app.hue.run/projects/demo/scenarios/<id> ./hue-agent.ts --baseline <run id>
 hue eval --set "Billing regressions" --scorer-version <id> ./hue-agent.ts --save-version
-hue eval --scenario "Refund an eligible charge" --command "python agent.py" --timeout 120 --content
+hue eval --case "Refund an eligible charge" --command "python agent.py" --timeout 120 --content
 hue eval --worker ./hue-agent.ts --agent-key support-agent --env-file .env.hue
 ```
 
-The one-shot mode resolves the selection (`--scenario` by name, ID or URL; `--set` by name, ID or
+`--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
+
+The one-shot mode resolves the selection (`--case` by name, ID or URL; `--set` by name, ID or
 URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
-creates a fresh experiment from those immutable pins named `<scenario> · <agent key> · <revision>`
+creates a fresh run from those immutable pins named `<case> · <agent key> · <revision>`
 (`--name` overrides), prints `Run: <url>` and `Experiment: <id>` as soon as the experiment exists,
 one line per case event (world created, agent started, world sealed), then
 `Waiting for Hue checks...` and a table with one row per case: boolean metrics as `PASS`/`FAIL`,
@@ -421,7 +423,7 @@ on any Node.js version.
 
 Eval sets whose cases pin no simulated world — a task plus pinned input files, answered with
 generated documents — run as **direct** cases through `runExperiment()`. `hue eval` detects this
-from the saved version (`--mode direct|simulation` overrides the detection; `--scenario` is always
+from the saved version (`--mode direct|simulation` overrides the detection; `--case` is always
 a simulation). `--set` accepts the eval set's slug, name, ID or URL; `--set-version <n>` pins a
 saved version other than the latest; `--scorer <slug|name|id>` pins an evaluator at its newest
 published version, beside or instead of explicit `--scorer-version` IDs.

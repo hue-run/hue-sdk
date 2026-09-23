@@ -445,12 +445,12 @@ their agents with `runLocalAgent()`; setup does not register workers or launch s
 ### Command-line evaluation
 
 The unreleased `hue eval` command wraps `runSimulation()` and `runLocalAgent()` for an adapter
-file or a shell command: `hue eval --scenario "<name>" ./hue-agent.ts` creates a fresh experiment
-from a published Scenario's immutable pins, runs the agent in one isolated world per case, waits
+file or a shell command: `hue eval --case "<name>" ./hue-agent.ts` creates a fresh run
+from a published case's immutable pins, runs the agent in one isolated world per case, waits
 for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
 `--worker` registers the same adapter for runs launched from Hue. It needs a Read and
 write key in `HUE_API_KEY` (never printed) and keeps content capture off unless `--content`
-is passed. See [Evaluate an agent against a Scenario](CLI.md#evaluate-an-agent-against-a-scenario).
+is passed. See [Evaluate an agent against a case](CLI.md#evaluate-an-agent-against-a-case).
 Eval sets whose cases pin files instead of a world run as direct cases through `runExperiment()`:
 `hue eval --set <slug> --scorer <slug> --command "…"` hands the agent each case's pinned files in a
 private directory, uploads the documents it writes and waits for Hue's grading executor to score

@@ -790,6 +790,6 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
       `  hue mcp install --client claude-code${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
     );
   if (stored.includes("evaluations"))
-    out(`  hue eval --scenario "<name>" ./hue-agent.ts --env-file ${envDisplay}`);
+    out(`  hue eval --case "<name>" ./hue-agent.ts --env-file ${envDisplay}`);
   return 0;
 }

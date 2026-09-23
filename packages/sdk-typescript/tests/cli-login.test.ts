@@ -198,9 +198,7 @@ describe("hue login", () => {
     );
     // A non-default origin stores its own MCP endpoint, so the printed next step carries it.
     expect(result.stdout).toContain(`hue mcp install --client claude-code --url ${ORIGIN}/api/mcp`);
-    expect(result.stdout).toContain(
-      'hue eval --scenario "<name>" ./hue-agent.ts --env-file .env.hue',
-    );
+    expect(result.stdout).toContain('hue eval --case "<name>" ./hue-agent.ts --env-file .env.hue');
     expect(result.stdout).not.toContain(KEY);
     expect(result.stdout).not.toContain("Opened");
     const envPath = join(root, ".env.hue");

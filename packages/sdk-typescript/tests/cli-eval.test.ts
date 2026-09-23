@@ -595,22 +595,14 @@ function expectNoSecrets(result: { stdout: string; stderr: string }) {
 
 describe("hue eval", () => {
   test(
-    "runs a Scenario by name with an adapter file and prints Hue's verdicts",
+    "runs a published case by name with an adapter file and prints Hue's verdicts",
     async () => {
       const f = hueStandIn({ deferredPolls: 1 });
       const cwd = await workspace();
       try {
         await writeFile(join(cwd, ".env.hue"), `HUE_API_KEY=${key}\nHUE_BASE_URL=${f.baseUrl}\n`);
         const result = await hue(
-          [
-            "--scenario",
-            "refund FLOW",
-            "./hue-agent.ts",
-            "--env-file",
-            ".env.hue",
-            "--revision",
-            "v1",
-          ],
+          ["--case", "refund FLOW", "./hue-agent.ts", "--env-file", ".env.hue", "--revision", "v1"],
           { cwd, dropKey: true },
         );
         expect(result.stderr).toBe("");
@@ -900,6 +892,7 @@ describe("hue eval", () => {
           ["./hue-agent.ts"],
           ["--scenario", "Refund flow"],
           ["--scenario", "Refund flow", "--set", "Refund flow", "./hue-agent.ts"],
+          ["--case", "Refund flow", "--scenario", "Refund flow", "./hue-agent.ts"],
           ["--scenario", "Refund flow", "./hue-agent.ts", "--command", "true"],
           ["--worker", "--scenario", "Refund flow", "./hue-agent.ts"],
           ["--set", "Refund flow", "./hue-agent.ts"],
@@ -915,6 +908,7 @@ describe("hue eval", () => {
         const help = await hue(["--help"], { cwd, dropKey: true });
         expect(help.status).toBe(0);
         expect(help.stdout).toContain("Usage: hue eval [adapter-file] [options]");
+        expect(help.stdout).toContain("--case <name|id|url>");
         const unauthorized = await hue(
           ["--scenario", "Refund flow", "./hue-agent.ts", "--origin", f.baseUrl],
           { cwd, env: { HUE_API_KEY: "wrong-key" } },
