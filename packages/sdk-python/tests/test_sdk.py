@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -836,6 +837,33 @@ def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
                         "name": "gmail",
                         "id": "openai.mcp",
                         "args": {"serverLabel": "gmail", "authorization": "synthetic-oauth-token"},
+def test_large_inline_files_in_messages_export_as_their_digest(receiver):
+    image = bytes((index * 7) % 256 for index in range(100 * 1024))
+    image_base64 = base64.b64encode(image).decode()
+    image_digest = hashlib.sha256(image).hexdigest()
+    # Beyond the 1 MiB snapshot budget: dropped whole before, exported as a digest now.
+    document = bytes((index * 13) % 256 for index in range(2 * 1024 * 1024))
+    document_digest = hashlib.sha256(document).hexdigest()
+    text = "line\n" * 20000 + "end"
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("external")
+        span.set_attribute(
+            "gen_ai.input.messages",
+            json.dumps(
+                [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"type": "text", "content": "Summarize the contract"},
+                            {
+                                "type": "blob",
+                                "modality": "document",
+                                "mime_type": "application/pdf",
+                                "content": base64.b64encode(document).decode(),
+                            },
+                            {"type": "blob", "modality": "text", "content": "c21hbGw="},
+                        ],
                     }
                 ]
             ),
@@ -1047,6 +1075,65 @@ def test_metadata_only_export_summarizes_the_tool_definitions_it_removes(
         assert not any(key.startswith("llm.tools.") for key in values)
         assert "gen_ai.tool.definitions" not in values and "ai.prompt.tools" not in values
     assert b"Fetch a page" not in telemetry
+        # AI SDK 6 file parts: a data: URL is decoded, text content is hashed as UTF-8.
+        span.set_attribute(
+            "ai.prompt.messages",
+            json.dumps(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "file",
+                                "mediaType": "image/png",
+                                "filename": "chart.png",
+                                "data": f"data:image/png;base64,{image_base64}",
+                            },
+                            {"type": "file", "mediaType": "text/plain", "data": text},
+                        ],
+                    }
+                ]
+            ),
+        )
+        # Not a message attribute: left alone even though it carries the same part.
+        span.set_attribute(
+            "input.value", json.dumps({"parts": [{"type": "blob", "content": image_base64}]})
+        )
+        span.end()
+        assert hue.force_flush()
+    (exported,) = receiver.spans()
+    values = attrs(exported)
+    (message,) = json.loads(values["gen_ai.input.messages"].string_value)
+    assert message["parts"] == [
+        {"type": "text", "content": "Summarize the contract"},
+        {
+            "type": "blob",
+            "modality": "document",
+            "mime_type": "application/pdf",
+            "sha256": document_digest,
+            "size": len(document),
+        },
+        {"type": "blob", "modality": "text", "content": "c21hbGw="},
+    ]
+    (prompt,) = json.loads(values["ai.prompt.messages"].string_value)
+    assert prompt["content"] == [
+        {
+            "type": "file",
+            "mediaType": "image/png",
+            "filename": "chart.png",
+            "sha256": image_digest,
+            "size": len(image),
+        },
+        {
+            "type": "file",
+            "mediaType": "text/plain",
+            "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "size": len(text.encode()),
+        },
+    ]
+    assert image_base64 in values["input.value"].string_value
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert base64.b64encode(document)[:64] not in telemetry
 
 
 @pytest.mark.parametrize("capture_content", [True, False])

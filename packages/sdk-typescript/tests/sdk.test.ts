@@ -505,6 +505,102 @@ describe("Hue SDK contract", () => {
       expect(attr(span("nul"), "hue.mcp.surface")).toBeUndefined();
     } finally {
       await hue.shutdown();
+  test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "inline-files-export",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    const image = Uint8Array.from({ length: 100 * 1024 }, (_, index) => (index * 7) % 256);
+    const imageBase64 = Buffer.from(image).toString("base64");
+    const imageDigest = createHash("sha256").update(image).digest("hex");
+    const text = `${"line\n".repeat(20000)}end`;
+    const textDigest = createHash("sha256").update(text, "utf8").digest("hex");
+    try {
+      const span = tracerProvider.getTracer("third-party").startSpan("external");
+      // AI SDK 6 file parts: the large image is hashed, its other fields kept; small data stays.
+      span.setAttribute(
+        "ai.prompt.messages",
+        JSON.stringify([
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this" },
+              { type: "file", mediaType: "image/png", filename: "chart.png", data: imageBase64 },
+              { type: "file", mediaType: "text/plain", data: "c21hbGw=" },
+            ],
+          },
+        ]),
+      );
+      // GenAI blob parts: text content is hashed as UTF-8, a data: URL is decoded first.
+      span.setAttribute(
+        "gen_ai.output.messages",
+        JSON.stringify([
+          {
+            role: "assistant",
+            parts: [
+              { type: "blob", modality: "document", mime_type: "text/plain", content: text },
+              {
+                type: "blob",
+                modality: "image",
+                mime_type: "image/png",
+                content: `data:image/png;base64,${imageBase64}`,
+              },
+            ],
+            finish_reason: "stop",
+          },
+        ]),
+      );
+      // Not a message attribute: left alone even though it carries the same part.
+      span.setAttribute(
+        "input.value",
+        JSON.stringify({ parts: [{ type: "blob", content: imageBase64 }] }),
+      );
+      span.end();
+      await hue.flush();
+      const record = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((candidate) => candidate.name === "external")!;
+      const prompt = JSON.parse(attr(record, "ai.prompt.messages")!.stringValue!);
+      expect(prompt[0].content).toEqual([
+        { type: "text", text: "Describe this" },
+        {
+          type: "file",
+          mediaType: "image/png",
+          filename: "chart.png",
+          sha256: imageDigest,
+          size: image.byteLength,
+        },
+        { type: "file", mediaType: "text/plain", data: "c21hbGw=" },
+      ]);
+      const output = JSON.parse(attr(record, "gen_ai.output.messages")!.stringValue!);
+      expect(output[0].parts).toEqual([
+        {
+          type: "blob",
+          modality: "document",
+          mime_type: "text/plain",
+          sha256: textDigest,
+          size: Buffer.byteLength(text),
+        },
+        {
+          type: "blob",
+          modality: "image",
+          mime_type: "image/png",
+          sha256: imageDigest,
+          size: image.byteLength,
+        },
+      ]);
+      expect(attr(record, "input.value")?.stringValue).toContain(imageBase64);
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
       endpoint.server.stop(true);
     }
   });
@@ -1880,6 +1976,57 @@ describe("Vercel AI SDK integration", () => {
     } finally {
       await tracerProvider.shutdown();
       await transport.shutdown();
+  test("a large inline file in AI SDK 7 messages exports as its digest instead of rejecting the span", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "inline-files",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const pdf = Uint8Array.from({ length: 300 * 1024 }, (_, index) => index % 251);
+    const digest = createHash("sha256").update(pdf).digest("hex");
+    try {
+      await generateText({
+        model: new MockLanguageModelV4({
+          doGenerate: async () => ({
+            content: [{ type: "text", text: "Summary" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          }),
+        }),
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Summarize the contract" },
+              { type: "file", data: pdf, mediaType: "application/pdf" },
+            ],
+          },
+        ],
+        telemetry: hueTelemetry(hue),
+      });
+      // Strict flush: every span, including the ones that inlined the file, was accepted.
+      await hue.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const chat = spans.find((span) => span.name === "chat mock-model-id")!;
+      const [message] = JSON.parse(attr(chat, "gen_ai.input.messages")!.stringValue!) as {
+        parts: Record<string, unknown>[];
+      }[];
+      expect(message.parts[0]).toEqual({ type: "text", content: "Summarize the contract" });
+      expect(message.parts[1]).toMatchObject({
+        type: "blob",
+        mime_type: "application/pdf",
+        sha256: digest,
+        size: pdf.byteLength,
+      });
+      expect(message.parts[1].content).toBeUndefined();
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      expect(raw).not.toContain(Buffer.from(pdf).toString("base64").slice(0, 64));
+      expect(hue.transport.getReport().failedSpans).toBe(0);
+    } finally {
+      await hue.shutdown();
       await endpoint.server.stop(true);
     }
   });
