@@ -145,10 +145,11 @@ handoff does not create a trial, reset quota or rerun business work.
 `hue login` stores keys that a person creates in Hue; it never mints one, because setup
 credentials are deliberately isolated from ordinary project keys. It prints the key settings page
 (`<origin>/settings/integrations`, opened in a browser only when a terminal is attached and
-`--no-browser` is absent), then reads each requested key from stdin without echo. A
-**Tracing and evaluations** key is validated with `GET /api/v1/projects/current` and stored as
-`HUE_API_KEY` with `HUE_BASE_URL`; a **Coding agent (read + evaluations)** key is validated with an
-MCP `tools/list` request and stored as `HUE_MCP_KEY` with `HUE_MCP_URL`. A rejected key (`401` or
+`--no-browser` is absent), then reads each requested key from stdin without echo. Both keys
+use the **Read and write** preset. The evaluation key is validated with
+`GET /api/v1/projects/current` and stored as `HUE_API_KEY` with `HUE_BASE_URL`; the coding-agent key
+is validated with an MCP `tools/list` request and stored as `HUE_MCP_KEY` with `HUE_MCP_URL`. Use a
+separate key for each so either can be revoked alone. A rejected key (`401` or
 `403`) exits `1` and stores nothing for that key.
 
 ```sh

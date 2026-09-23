@@ -123,7 +123,7 @@ Output and limits:
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
   -h, --help                      Show this help
 
-HUE_API_KEY must be a "Tracing and evaluations" project key; it is never printed.
+HUE_API_KEY must be a "Read and write" project key; it is never printed.
 Code evaluators pinned to a direct run are graded by Hue's executor after the upload; the wait
 covers them. Exit codes: 0 every case passed, 1 a case failed, errored or is incomplete,
 2 usage error, 130 interrupted.
@@ -512,7 +512,7 @@ function redact(message: string, secrets: string[]): string {
 
 function explain(error: unknown): string {
   if (error instanceof HueApiError && (error.status === 401 || error.status === 403))
-    return `${error.message}. Check that HUE_API_KEY is a "Tracing and evaluations" project key for this origin.`;
+    return `${error.message}. Check that HUE_API_KEY is a "Read and write" project key for this origin.`;
   if (error instanceof Error) {
     const causes: string[] = [];
     let cause: unknown = error.cause;
@@ -1163,7 +1163,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     const apiKey = process.env.HUE_API_KEY?.trim();
     if (!apiKey)
       throw new UsageError(
-        'HUE_API_KEY is required: a "Tracing and evaluations" project key, set in the environment or an ignored --env-file',
+        'HUE_API_KEY is required: a "Read and write" project key, set in the environment or an ignored --env-file',
       );
     secrets.push(apiKey);
     const baseUrl = values.origin ?? process.env.HUE_BASE_URL?.trim() ?? "https://app.hue.run";

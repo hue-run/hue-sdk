@@ -47,12 +47,12 @@ const KEY_KINDS: Record<
   evaluations: {
     variable: "HUE_API_KEY",
     urlVariable: "HUE_BASE_URL",
-    preset: "Tracing and evaluations",
+    preset: "Read and write",
   },
   "coding-agent": {
     variable: "HUE_MCP_KEY",
     urlVariable: "HUE_MCP_URL",
-    preset: "Coding agent (read + evaluations)",
+    preset: "Read and write",
   },
 };
 

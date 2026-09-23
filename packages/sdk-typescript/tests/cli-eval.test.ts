@@ -921,7 +921,7 @@ describe("hue eval", () => {
         );
         expect(unauthorized.status).toBe(1);
         expect(unauthorized.stderr).toContain("HTTP 401");
-        expect(unauthorized.stderr).toContain("Tracing and evaluations");
+        expect(unauthorized.stderr).toContain("Read and write");
         expect(unauthorized.stderr).not.toContain("wrong-key");
       } finally {
         f.stop();

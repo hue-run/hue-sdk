@@ -171,8 +171,8 @@ describe("hue login", () => {
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(result.stdout).toContain(`Create keys at: ${SETTINGS_URL}`);
-    expect(result.stdout).toContain('HUE_API_KEY: a "Tracing and evaluations" key');
-    expect(result.stdout).toContain('HUE_MCP_KEY: a "Coding agent (read + evaluations)" key');
+    expect(result.stdout).toContain('HUE_API_KEY: a "Read and write" key');
+    expect(result.stdout).toContain('HUE_MCP_KEY: a "Read and write" key');
     expect(result.stdout).toContain('Evaluations key accepted for project "Synthetic".');
     expect(result.stdout).toContain(
       `Stored HUE_API_KEY (${EVAL_KEY.length} chars) and HUE_BASE_URL in .env.hue.`,
@@ -233,7 +233,7 @@ describe("hue login", () => {
     });
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("Hue rejected the evaluations key (HTTP 401).");
-    expect(result.stderr).toContain(`Create a "Tracing and evaluations" key at ${SETTINGS_URL}`);
+    expect(result.stderr).toContain(`Create a "Read and write" key at ${SETTINGS_URL}`);
     expect(result.stderr).not.toContain(EVAL_KEY);
     expect(hue.calls).toHaveLength(1);
     await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
@@ -249,9 +249,7 @@ describe("hue login", () => {
     });
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("The Hue MCP server rejected the coding-agent key (HTTP 403).");
-    expect(result.stderr).toContain(
-      `Create a "Coding agent (read + evaluations)" key at ${SETTINGS_URL}`,
-    );
+    expect(result.stderr).toContain(`Create a "Read and write" key at ${SETTINGS_URL}`);
     expect(result.stderr).not.toContain(MCP_KEY);
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
       `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
@@ -566,7 +564,7 @@ describe("hue login", () => {
     setTimeout(() => stdin.write(`${EVAL_KEY}\r`), 10);
     expect(await run).toBe(0);
     expect(rawModes).toEqual([true, false]);
-    expect(stdout.text()).toContain('Paste the "Tracing and evaluations" key (HUE_API_KEY): \n');
+    expect(stdout.text()).toContain('Paste the "Read and write" key (HUE_API_KEY): \n');
     expect(stdout.text()).not.toContain(EVAL_KEY);
     expect(await readFile(join(root, ".env.hue"), "utf8")).toBe(
       `HUE_API_KEY=${EVAL_KEY}\nHUE_BASE_URL=${ORIGIN}\n`,
