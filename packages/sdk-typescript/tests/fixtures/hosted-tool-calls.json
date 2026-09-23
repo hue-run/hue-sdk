@@ -1,0 +1,155 @@
+{
+  "openai": {
+    "request": {
+      "model": "synthetic-model",
+      "input": "Draft a reply to Maya",
+      "tools": [
+        {
+          "type": "mcp",
+          "server_label": "gmail",
+          "server_url": "https://mcp.example.test/gmail/mcp",
+          "authorization": "synthetic-oauth-token",
+          "require_approval": "never"
+        },
+        { "type": "web_search_preview" }
+      ]
+    },
+    "response": {
+      "id": "resp_synthetic",
+      "object": "response",
+      "model": "synthetic-model",
+      "status": "completed",
+      "output": [
+        {
+          "id": "mcpl_1",
+          "type": "mcp_list_tools",
+          "server_label": "gmail",
+          "tools": [
+            {
+              "name": "create_draft",
+              "description": "Create a draft",
+              "input_schema": { "type": "object", "properties": { "to": { "type": "string" } } }
+            },
+            { "name": "search_threads", "input_schema": { "type": "object" } }
+          ]
+        },
+        {
+          "id": "mcp_1",
+          "type": "mcp_call",
+          "server_label": "gmail",
+          "name": "search_threads",
+          "arguments": "{\"query\":\"from:maya\"}",
+          "output": "{\"threads\":[{\"id\":\"t1\"}]}",
+          "error": null
+        },
+        {
+          "id": "mcp_2",
+          "type": "mcp_call",
+          "server_label": "gmail",
+          "name": "create_draft",
+          "arguments": "{\"to\":\"maya@example.test\"}",
+          "output": null,
+          "error": "Rate limited"
+        },
+        {
+          "id": "ws_1",
+          "type": "web_search_call",
+          "status": "completed",
+          "action": { "type": "search", "query": "renewal terms" }
+        },
+        {
+          "id": "fs_1",
+          "type": "file_search_call",
+          "status": "failed",
+          "queries": ["contract"],
+          "results": null
+        },
+        {
+          "id": "ci_1",
+          "type": "code_interpreter_call",
+          "status": "completed",
+          "code": "print(1)",
+          "container_id": "cntr_1",
+          "outputs": [{ "type": "logs", "logs": "1\n" }]
+        },
+        {
+          "id": "mcpr_1",
+          "type": "mcp_approval_request",
+          "server_label": "gmail",
+          "name": "send_message",
+          "arguments": "{}"
+        },
+        {
+          "id": "msg_1",
+          "type": "message",
+          "role": "assistant",
+          "status": "completed",
+          "content": [{ "type": "output_text", "text": "Done", "annotations": [] }]
+        }
+      ]
+    }
+  },
+  "anthropic": {
+    "request": {
+      "model": "synthetic-model",
+      "max_tokens": 100,
+      "messages": [{ "role": "user", "content": "Post the update" }],
+      "mcp_servers": [
+        {
+          "type": "url",
+          "url": "https://mcp.example.test/slack/mcp",
+          "name": "slack",
+          "authorization_token": "synthetic-oauth-token"
+        }
+      ],
+      "tools": [{ "type": "web_search_20250305", "name": "web_search" }]
+    },
+    "response": {
+      "id": "msg_synthetic",
+      "type": "message",
+      "role": "assistant",
+      "model": "synthetic-model",
+      "stop_reason": "end_turn",
+      "content": [
+        {
+          "type": "server_tool_use",
+          "id": "srvtoolu_1",
+          "name": "web_search",
+          "input": { "query": "renewal terms" }
+        },
+        {
+          "type": "web_search_tool_result",
+          "tool_use_id": "srvtoolu_1",
+          "content": [
+            { "type": "web_search_result", "url": "https://example.test/terms", "title": "Terms" }
+          ]
+        },
+        {
+          "type": "mcp_tool_use",
+          "id": "mcptoolu_1",
+          "name": "post_message",
+          "server_name": "slack",
+          "input": { "channel": "C1", "text": "Update posted" }
+        },
+        {
+          "type": "mcp_tool_result",
+          "tool_use_id": "mcptoolu_1",
+          "is_error": true,
+          "content": [{ "type": "text", "text": "channel_not_found" }]
+        },
+        {
+          "type": "server_tool_use",
+          "id": "srvtoolu_2",
+          "name": "code_execution",
+          "input": { "code": "print(1)" }
+        },
+        {
+          "type": "code_execution_tool_result",
+          "tool_use_id": "srvtoolu_2",
+          "content": { "type": "code_execution_tool_result_error", "error_code": "unavailable" }
+        },
+        { "type": "text", "text": "Done" }
+      ]
+    }
+  }
+}

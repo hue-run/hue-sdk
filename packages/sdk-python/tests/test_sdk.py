@@ -100,6 +100,170 @@ def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
     assert "mcp.server.name" not in attrs(unlabeled)
 
 
+HOSTED_TOOL_CALLS_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "packages"
+    / "sdk-typescript"
+    / "tests"
+    / "fixtures"
+    / "hosted-tool-calls.json"
+)
+
+
+class _Model:
+    """Stands in for an SDK response object: read through ``model_dump()`` like pydantic."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def model_dump(self):
+        return self._data
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_record_provider_tool_calls_records_hosted_calls_as_extension_spans(
+    receiver, capture_content
+):
+    if not HOSTED_TOOL_CALLS_FIXTURE.is_file():
+        pytest.skip("Shared fixtures are not part of this checkout")
+    fixture = json.loads(HOSTED_TOOL_CALLS_FIXTURE.read_text(encoding="utf-8"))
+    with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
+        with hue.context(session_id="hosted-session"):
+            with hue.model("synthetic-model", provider="openai") as span:
+                span.record_provider_tool_calls(
+                    _Model(fixture["openai"]["response"]),
+                    request=fixture["openai"]["request"],
+                    servers={
+                        "gmail": {
+                            "version": "2.0",
+                            "provider": "google.gmail",
+                            "surface": "google.gmail/mcp",
+                        }
+                    },
+                )
+        with hue.model("synthetic-model", provider="anthropic", name="anthropic-call") as span:
+            span.record_provider_tool_calls(
+                fixture["anthropic"]["response"], request=fixture["anthropic"]["request"]
+            )
+        # Outside a model() block the provider is unknown: counted, nothing recorded.
+        with hue.span("plain") as span:
+            span.record_provider_tool_calls(fixture["openai"]["response"])
+        assert hue.export_status.instrumentation_failures == 1
+        hue.force_flush()
+    spans = receiver.spans()
+    by_name = {span.name: span for span in spans}
+
+    def children(parent_name):
+        parent = by_name[parent_name]
+        return [span for span in spans if span.parent_span_id == parent.span_id]
+
+    openai = children("chat synthetic-model")
+    assert [span.name for span in openai] == [
+        "execute_tool search_threads",
+        "execute_tool create_draft",
+        "execute_tool web_search",
+        "execute_tool file_search",
+        "execute_tool code_interpreter",
+        "tools/list",
+    ]
+    named = {span.name: span for span in openai}
+
+    def text(span, key):
+        value = attrs(span).get(key)
+        return None if value is None else value.string_value
+
+    def loads(span, key):
+        value = text(span, key)
+        return None if value is None else json.loads(value)
+
+    listing = named["tools/list"]
+    assert text(listing, "mcp.method.name") == "tools/list"
+    assert text(listing, "mcp.server.name") == "gmail"
+    assert text(listing, "mcp.server.version") == "2.0"
+    assert text(listing, "hue.mcp.provider") == "google.gmail"
+    assert text(listing, "hue.mcp.surface") == "google.gmail/mcp"
+    assert text(listing, "server.address") == "mcp.example.test"
+    search = named["execute_tool search_threads"]
+    assert text(search, "gen_ai.operation.name") == "execute_tool"
+    assert text(search, "gen_ai.tool.type") == "extension"
+    assert text(search, "gen_ai.tool.call.id") == "mcp_1"
+    assert text(search, "mcp.server.name") == "gmail"
+    assert text(search, "server.address") == "mcp.example.test"
+    assert text(search, "gen_ai.conversation.id") == "hosted-session"
+    assert search.status.code == 0
+    draft = named["execute_tool create_draft"]
+    assert text(draft, "error.type") == "mcp_error" and draft.status.code == 2
+    assert text(named["execute_tool web_search"], "gen_ai.tool.call.id") == "ws_1"
+    assert text(named["execute_tool web_search"], "mcp.server.name") is None
+    assert text(named["execute_tool file_search"], "error.type") == "failed"
+    assert named["execute_tool file_search"].status.code == 2
+    assert text(named["execute_tool code_interpreter"], "error.type") is None
+    anthropic = {span.name: span for span in children("anthropic-call")}
+    assert list(anthropic) == [
+        "execute_tool web_search",
+        "execute_tool post_message",
+        "execute_tool code_execution",
+    ]
+    post = anthropic["execute_tool post_message"]
+    assert text(post, "mcp.server.name") == "slack"
+    assert text(post, "server.address") == "mcp.example.test"
+    assert text(post, "gen_ai.tool.call.id") == "mcptoolu_1"
+    assert text(post, "error.type") == "mcp_error" and post.status.code == 2
+    assert text(anthropic["execute_tool code_execution"], "error.type") == "unavailable"
+    assert anthropic["execute_tool code_execution"].status.code == 2
+    assert anthropic["execute_tool web_search"].status.code == 0
+    assert children("plain") == []
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    # The request's credentials are never read, whatever the mode.
+    assert b"synthetic-oauth-token" not in telemetry
+    if not capture_content:
+        for span in [*openai, *anthropic.values()]:
+            for key in (
+                "gen_ai.tool.call.arguments",
+                "gen_ai.tool.call.result",
+                "gen_ai.tool.definitions",
+            ):
+                assert text(span, key) is None
+        assert b"from:maya" not in telemetry and b"Create a draft" not in telemetry
+        return
+    assert loads(listing, "gen_ai.tool.definitions") == [
+        {
+            "type": "function",
+            "name": "create_draft",
+            "description": "Create a draft",
+            "parameters": {"type": "object", "properties": {"to": {"type": "string"}}},
+        },
+        {"type": "function", "name": "search_threads", "parameters": {"type": "object"}},
+    ]
+    # MCP arguments arrive as JSON text and are recorded as the structure they encode.
+    assert loads(search, "gen_ai.tool.call.arguments") == {"query": "from:maya"}
+    assert loads(search, "gen_ai.tool.call.result") == '{"threads":[{"id":"t1"}]}'
+    assert loads(draft, "gen_ai.tool.call.arguments") == {"to": "maya@example.test"}
+    assert text(draft, "gen_ai.tool.call.result") is None
+    assert loads(named["execute_tool web_search"], "gen_ai.tool.call.arguments") == {
+        "type": "search",
+        "query": "renewal terms",
+    }
+    assert loads(named["execute_tool file_search"], "gen_ai.tool.call.arguments") == {
+        "queries": ["contract"]
+    }
+    assert loads(named["execute_tool code_interpreter"], "gen_ai.tool.call.arguments") == {
+        "code": "print(1)",
+        "container_id": "cntr_1",
+    }
+    assert loads(named["execute_tool code_interpreter"], "gen_ai.tool.call.result") == [
+        {"type": "logs", "logs": "1\n"}
+    ]
+    assert loads(anthropic["execute_tool web_search"], "gen_ai.tool.call.result") == [
+        {"type": "web_search_result", "url": "https://example.test/terms", "title": "Terms"}
+    ]
+    assert loads(post, "gen_ai.tool.call.arguments") == {"channel": "C1", "text": "Update posted"}
+    assert loads(anthropic["execute_tool code_execution"], "gen_ai.tool.call.result") == {
+        "type": "code_execution_tool_result_error",
+        "error_code": "unavailable",
+    }
+
+
 def test_disabled_client_does_not_count_invalid_mcp(receiver):
     hue = Hue(receiver.url, KEY, capture_content=False, enabled=False)
     with hue.tool("get_thread", mcp={"name": ""}):
