@@ -22,6 +22,9 @@ import type {
   Dataset,
   DatasetCase,
   DatasetVersion,
+  EvalSet,
+  EvalSetCase,
+  EvalSetVersion,
   EvaluationItem,
   EvaluationRun,
   EvaluationRunSummary,
@@ -30,6 +33,8 @@ import type {
   Experiment,
   ExperimentCase,
   ExperimentItem,
+  Evaluator,
+  EvaluatorVersion,
   Identity,
   JsonValue,
   LocalAgentClaim,
@@ -71,6 +76,33 @@ export class HueApiError extends Error {
     );
     this.name = "HueApiError";
   }
+}
+
+const registryFieldAliases = [
+  ["datasetId", "evalSetId"],
+  ["datasetVersionId", "evalSetVersionId"],
+  ["scorerId", "evaluatorId"],
+  ["scorerVersionId", "evaluatorVersionId"],
+] as const;
+const registryEnvelopes = new Set(["items", "item", "versions", "version"]);
+
+// Only Hue response envelopes are traversed. Case inputs, metadata, and evaluator
+// definitions are customer JSON and must retain their original field names.
+function productRegistryFields<T>(value: unknown): T {
+  if (Array.isArray(value)) return value.map((item) => productRegistryFields(item)) as T;
+  if (value === null || typeof value !== "object") return value as T;
+  const result: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of registryEnvelopes) {
+    if (Object.hasOwn(result, key)) result[key] = productRegistryFields(result[key]);
+  }
+  for (const [legacy, product] of registryFieldAliases) {
+    if (Object.hasOwn(result, legacy)) {
+      if (Object.hasOwn(result, product) && result[legacy] !== result[product])
+        throw new HueApiError();
+      result[product] = result[legacy];
+    }
+  }
+  return result as T;
 }
 /**
  * Typed client for Hue's evaluation REST API: datasets, scorers, experiments, executions, runs,
@@ -296,6 +328,67 @@ export class EvaluationClient {
   /** Reads a published scorer version. */
   getScorerVersion(id: string) {
     return this.request<ScorerVersion>("GET", `/scorer-versions/${uuid(id)}`);
+  }
+  /** Creates an eval set using the existing v1 registry path. */
+  async createEvalSet(input: Identity): Promise<EvalSet> {
+    return productRegistryFields(await this.createDataset(input));
+  }
+  /** Reads an eval set and its versions. */
+  async getEvalSet(id: string): Promise<EvalSet> {
+    return productRegistryFields(await this.getDataset(id));
+  }
+  /** Lists eval sets. */
+  async listEvalSets(page?: RegistryPageOptions): Promise<Page<Omit<EvalSet, "versions">>> {
+    return productRegistryFields(await this.listDatasets(page));
+  }
+  /** Creates a draft eval set version, optionally copying cases from another version. */
+  async createEvalSetVersion(
+    id: string,
+    input: { fromVersionId?: string } = {},
+  ): Promise<EvalSetVersion> {
+    return productRegistryFields(await this.createDatasetVersion(id, input));
+  }
+  /** Reads an eval set version. */
+  async getEvalSetVersion(id: string): Promise<EvalSetVersion> {
+    return productRegistryFields(await this.getDatasetVersion(id));
+  }
+  /** Lists cases in an eval set version. */
+  async listEvalSetCases(id: string, page?: PageOptions): Promise<Page<EvalSetCase>> {
+    return productRegistryFields(await this.listCases(id, page));
+  }
+  /** Adds a case to a draft eval set version at its expected revision. */
+  async addEvalSetCase(
+    id: string,
+    input: CaseWrite,
+  ): Promise<{ item: EvalSetCase; version: EvalSetVersion }> {
+    return productRegistryFields(await this.addCase(id, input));
+  }
+  /** Freezes a draft eval set version at its expected revision. */
+  async freezeEvalSetVersion(id: string, expectedRevision: number): Promise<EvalSetVersion> {
+    return productRegistryFields(await this.freezeDatasetVersion(id, expectedRevision));
+  }
+  /** Creates an evaluator identity. */
+  async createEvaluator(input: Identity): Promise<Evaluator> {
+    return productRegistryFields(await this.createScorer(input));
+  }
+  /** Reads an evaluator and its published versions. */
+  async getEvaluator(id: string): Promise<Evaluator> {
+    return productRegistryFields(await this.getScorer(id));
+  }
+  /** Lists evaluators. */
+  async listEvaluators(page?: RegistryPageOptions): Promise<Page<Evaluator>> {
+    return productRegistryFields(await this.listScorers(page));
+  }
+  /** Publishes an immutable evaluator version. */
+  async publishEvaluatorVersion(
+    id: string,
+    definition: ScorerDefinition,
+  ): Promise<EvaluatorVersion> {
+    return productRegistryFields(await this.publishScorerVersion(id, definition));
+  }
+  /** Reads a published evaluator version. */
+  async getEvaluatorVersion(id: string): Promise<EvaluatorVersion> {
+    return productRegistryFields(await this.getScorerVersion(id));
   }
   /** Creates an experiment over a frozen dataset version with pinned scorer versions and a configuration. */
   createExperiment(input: {

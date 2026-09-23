@@ -77,6 +77,12 @@ export interface DatasetCase {
   /** Immutable input-file manifest identity, when files are attached. */
   artifactManifestId?: string | null;
 }
+/** An eval set and its versions. Both field names remain available during v1 compatibility. */
+export type EvalSet = Omit<Dataset, "versions"> & { versions: EvalSetVersion[] };
+/** A version of an eval set, with its product field name. */
+export type EvalSetVersion = DatasetVersion & { evalSetId: string };
+/** A stored case in an eval set version. */
+export type EvalSetCase = DatasetCase & { evalSetVersionId: string };
 /** One pinned input file of a case or subject, as recorded in Hue's immutable manifest. */
 export interface CaseFile {
   /** Hue artifact identity of the pinned bytes. */
@@ -363,6 +369,10 @@ export interface ScorerVersion {
   /** The pinned definition. */
   definition: ScorerDefinition;
 }
+/** An evaluator and its published versions. */
+export type Evaluator = Omit<Scorer, "versions"> & { versions?: EvaluatorVersion[] };
+/** An immutable published evaluator definition. */
+export type EvaluatorVersion = ScorerVersion & { evaluatorId: string };
 /** Final state of a target execution. */
 export type TerminalState = "succeeded" | "error" | "cancelled";
 /** One attempt to run the target for a case. */

@@ -769,6 +769,109 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("product registry methods keep v1 paths and leave customer fields untouched", async () => {
+    const setId = randomUUID();
+    const setVersionId = randomUUID();
+    const caseId = randomUUID();
+    const evaluatorId = randomUUID();
+    const evaluatorVersionId = randomUUID();
+    const paths: string[] = [];
+    const setVersion = {
+      id: setVersionId,
+      datasetId: setId,
+      version: 1,
+      revision: 1,
+      frozenAt: null,
+      contentDigest: null,
+    };
+    const set = { id: setId, name: "Set", slug: "set", versions: [setVersion] };
+    const evalCase = {
+      id: caseId,
+      datasetVersionId: setVersionId,
+      externalKey: "one",
+      inputs: { datasetId: "customer-input" },
+      metadata: { scorerId: "customer-metadata" },
+    };
+    const evaluatorVersion = {
+      id: evaluatorVersionId,
+      scorerId: evaluatorId,
+      contentDigest: digest,
+      definition: { ...builtins.exactMatch(), scorerId: "customer-definition" },
+    };
+    const evaluator = {
+      id: evaluatorId,
+      name: "Exact",
+      slug: "exact",
+      versions: [evaluatorVersion],
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
+        const path = new URL(request.url).pathname.replace("/api/v1", "");
+        paths.push(`${request.method} ${path}`);
+        if (path === "/datasets")
+          return Response.json(request.method === "GET" ? { items: [set], nextCursor: null } : set);
+        if (path === `/datasets/${setId}`) return Response.json(set);
+        if (path === `/datasets/${setId}/versions`) return Response.json(setVersion);
+        if (path === `/dataset-versions/${setVersionId}`) return Response.json(setVersion);
+        if (path === `/dataset-versions/${setVersionId}/cases`)
+          return Response.json(
+            request.method === "GET"
+              ? { items: [evalCase], nextCursor: null }
+              : { item: evalCase, version: setVersion },
+          );
+        if (path === `/dataset-versions/${setVersionId}/freeze`)
+          return Response.json({ ...setVersion, frozenAt: new Date().toISOString() });
+        if (path === "/scorers")
+          return Response.json(
+            request.method === "GET" ? { items: [evaluator], nextCursor: null } : evaluator,
+          );
+        if (path === `/scorers/${evaluatorId}`) return Response.json(evaluator);
+        if (path === `/scorers/${evaluatorId}/versions`) return Response.json(evaluatorVersion);
+        if (path === `/scorer-versions/${evaluatorVersionId}`)
+          return Response.json(evaluatorVersion);
+        return new Response(null, { status: 404 });
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    try {
+      expect((await client.createEvalSet({ name: "Set", slug: "set" })).versions[0].evalSetId).toBe(
+        setId,
+      );
+      expect((await client.getEvalSet(setId)).versions[0].evalSetId).toBe(setId);
+      expect((await client.listEvalSets()).items[0].id).toBe(setId);
+      expect((await client.createEvalSetVersion(setId)).evalSetId).toBe(setId);
+      expect((await client.getEvalSetVersion(setVersionId)).evalSetId).toBe(setId);
+      const listedCase = (await client.listEvalSetCases(setVersionId)).items[0];
+      expect(listedCase.evalSetVersionId).toBe(setVersionId);
+      expect(listedCase.inputs).toEqual({ datasetId: "customer-input" });
+      const added = await client.addEvalSetCase(setVersionId, {
+        expectedRevision: 1,
+        externalKey: "one",
+        inputs: { datasetId: "customer-input" },
+      });
+      expect(added.item.evalSetVersionId).toBe(setVersionId);
+      expect(added.version.evalSetId).toBe(setId);
+      expect((await client.freezeEvalSetVersion(setVersionId, 1)).frozenAt).toBeTruthy();
+      expect((await client.createEvaluator({ name: "Exact", slug: "exact" })).id).toBe(evaluatorId);
+      expect((await client.getEvaluator(evaluatorId)).versions?.[0].evaluatorId).toBe(evaluatorId);
+      expect((await client.listEvaluators()).items[0].id).toBe(evaluatorId);
+      const published = await client.publishEvaluatorVersion(evaluatorId, builtins.exactMatch());
+      expect(published.evaluatorId).toBe(evaluatorId);
+      expect(published.definition).toHaveProperty("scorerId", "customer-definition");
+      expect((await client.getEvaluatorVersion(evaluatorVersionId)).evaluatorId).toBe(evaluatorId);
+      expect(
+        paths.every((path) => !path.includes("eval-sets") && !path.includes("evaluators")),
+      ).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
   test("two configurations complete and rescore frozen subjects without invoking targets", async () => {
     const f = fixture();
     let calls = 0;
