@@ -360,7 +360,12 @@ export class EvaluationClient {
   async addEvalSetCase(
     id: string,
     input: CaseWrite,
-  ): Promise<{ item: EvalSetCase; version: EvalSetVersion }> {
+  ): Promise<{
+    /** The stored case. */
+    item: EvalSetCase;
+    /** The version with its new revision. */
+    version: EvalSetVersion;
+  }> {
     return productRegistryFields(await this.addCase(id, input));
   }
   /** Freezes a draft eval set version at its expected revision. */
