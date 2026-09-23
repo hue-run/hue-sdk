@@ -10,6 +10,13 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- `hue login`, `hue eval`, the evaluation guides and the Hue skill name Hue's consolidated access
+  presets: **Read and write** replaces **Tracing and evaluations** and **Coding agent (read +
+  evaluations)**, and **Read** replaces **Coding agent (read-only)**. **Tracing only** is unchanged.
+  Existing keys keep their access; only the names printed in prompts and errors change.
+
 ### [0.5.0] - 2026-09-22
 
 #### Added
@@ -350,6 +357,11 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+#### Changed
+
+- The evaluation guide names Hue's consolidated **Read and write** access preset, which replaces
+  **Tracing and evaluations**. Existing keys keep their access.
+
 ### [0.2.3] - 2026-09-21
 
 #### Added
@@ -444,6 +456,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- Unreleased metadata: name Hue's consolidated access presets. Evaluation workflows use **Read and write** (formerly **Tracing and evaluations**); tracing still uses **Tracing only**. A **Read** key (formerly **Coding agent (read-only)**) cannot send telemetry.
 - 0.4.1, unchanged metadata (2026-09-22): Hue Cloud is invite-only. The one-command onboarding guidance (`setup --agent`, `resume`, `hue claim`) is replaced by an invite-only section: an agent whose user has no Hue project and **Tracing only** key relays the reply from https://docs.hue.run/guides/agent-setup.md and stops. The published CLI is unchanged.
 - 0.4.1 (2026-09-21): when wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` so the span records `mcp.server.name`.
 - 0.2.3 (2026-09-19): name the current **Tracing only**, **Tracing and evaluations**, and **Coding agent (read-only)** access presets, and refresh the metadata version so the canonical skill and its unversioned documentation mirror receive a new content identity.

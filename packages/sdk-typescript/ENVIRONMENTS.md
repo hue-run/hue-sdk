@@ -66,7 +66,7 @@ to the callback and is never written to checkpoints.
 published immutable pins, such as a Scenario's frozen case and Hue-owned outcome checks or a saved
 eval set with explicitly chosen scorer versions. `resolveScenarioPins(client, selector)` reads
 those pins from a Scenario ID, its Hue URL or its name (`listScenarios` and `getScenario` expose
-the underlying reads; a Tracing and evaluations key is required), and `resolveEvalSetPins`
+the underlying reads; a Read and write key is required), and `resolveEvalSetPins`
 resolves an eval set to its latest saved version. `runSimulation` creates the experiment directly
 (`name` defaults to the dataset name, `config` to `{}`) and binds the pins and configuration into
 the checkpoint identity, so resuming with different pins is refused like the other kinds.

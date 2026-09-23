@@ -589,7 +589,7 @@ export class EvaluationClient {
       state: "completed" | "attention";
     }>("POST", "/local-agent-worker/runs/complete", input);
   }
-  /** Lists Scenarios (draft and published) of the project; requires a Tracing and evaluations key. */
+  /** Lists Scenarios (draft and published) of the project; requires a Read and write key. */
   listCaseConversions(page?: PageOptions) {
     return this.request<Page<CaseConversionSummary>>("GET", `/case-conversions${this.page(page)}`);
   }

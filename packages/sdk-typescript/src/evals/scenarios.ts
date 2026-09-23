@@ -31,7 +31,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Scenarios listed while resolving a name; bounds the registry reads of one selection. */
 const MAX_LISTED = 200;
 
-/** Lists Scenarios of the project; requires a Tracing and evaluations key. */
+/** Lists Scenarios of the project; requires a Read and write key. */
 export function listScenarios(
   client: Pick<EvaluationClient, "listCaseConversions">,
   page?: PageOptions,
@@ -39,7 +39,7 @@ export function listScenarios(
   return client.listCaseConversions(page);
 }
 
-/** Reads one Scenario with its publication pins; requires a Tracing and evaluations key. */
+/** Reads one Scenario with its publication pins; requires a Read and write key. */
 export function getScenario(
   client: Pick<EvaluationClient, "getCaseConversion">,
   id: string,

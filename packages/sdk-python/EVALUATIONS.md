@@ -2,7 +2,7 @@
 
 `hue_sdk.evals` adds a project-key HTTP client, local experiment runner, built-in scorers, explicit Python scorer declarations, and historical rescoring. Dataset versions and scorer versions must be frozen/published before execution. The runner reads their pinned IDs and digests from Hue; it never resolves mutable “latest” definitions while running.
 
-Create a **Tracing and evaluations** project service key under **Settings → Integrations & API keys** and expose it to this server-side process as `HUE_API_KEY`. A **Tracing only** key cannot author datasets or evaluation runs.
+Create a **Read and write** project service key under **Settings → Integrations & API keys** and expose it to this server-side process as `HUE_API_KEY`. A **Tracing only** key cannot author datasets or evaluation runs.
 
 ```python
 import os
