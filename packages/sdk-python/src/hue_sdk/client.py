@@ -162,10 +162,12 @@ class HueSpan:
         operation: str | None = None,
         provider: str | None = None,
         model: str | None = None,
+        system_instructions: Any = _MISSING,
     ) -> None:
         """Emit a standard GenAI details log correlated to this span, even outside its scope.
 
         Use this instead of repeating identical content in both logs and span attributes.
+        ``system_instructions`` are the instructions sent separately from the messages.
         The body is structured: an explicit ``None`` field keeps its key with an empty value,
         distinct from an absent field. ``gen_ai.operation.name``, ``gen_ai.provider.name`` and
         ``gen_ai.request.model`` come from the keywords or the enclosing ``model()`` block, and
@@ -175,7 +177,9 @@ class HueSpan:
         if not self._client._active or not self._client.capture_content:
             return
         self._client._instrument(
-            lambda: self._log_inference(input, output, operation, provider, model)
+            lambda: self._log_inference(
+                input, output, operation, provider, model, system_instructions
+            )
         )
 
     def _log_inference(
@@ -185,6 +189,7 @@ class HueSpan:
         operation: str | None,
         provider: str | None,
         model: str | None,
+        system_instructions: Any,
     ) -> None:
         attributes = dict(self._record_attributes)
         for key, label in (
@@ -204,6 +209,7 @@ class HueSpan:
         for key, value in (
             ("gen_ai.input.messages", input),
             ("gen_ai.output.messages", output),
+            ("gen_ai.system_instructions", system_instructions),
         ):
             if value is not _MISSING:
                 # Bound and redact each field as JSON, then send the structure rather than its text.
@@ -544,7 +550,15 @@ class Hue:
         provider: str,
         operation: str = "chat",
         name: str | None = None,
+        system_instructions: Any = _MISSING,
+        tools: Any = _MISSING,
     ) -> Iterator[HueSpan]:
+        """A GenAI client span for one direct provider call.
+
+        ``system_instructions`` and ``tools`` are recorded as ``gen_ai.system_instructions`` and
+        ``gen_ai.tool.definitions`` when content is captured, like ``set_input``: any JSON value,
+        ideally in the GenAI semantic-convention shapes.
+        """
         model = self._metadata_string(model, "unknown")
         operation = self._metadata_string(operation, "chat")
         provider = self._metadata_string(provider, "unknown")
@@ -574,6 +588,12 @@ class Hue:
                 },
                 _category="model",
             ) as span:
+                for key, value in (
+                    ("gen_ai.system_instructions", system_instructions),
+                    ("gen_ai.tool.definitions", tools),
+                ):
+                    if value is not _MISSING:
+                        span._set_content(key, value)
                 yield span
         finally:
             if token is not None:

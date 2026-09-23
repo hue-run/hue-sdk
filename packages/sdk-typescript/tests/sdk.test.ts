@@ -232,6 +232,84 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test.each([true, false])(
+    "model helper records system instructions and tool definitions as content (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "model-instructions",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      const systemInstructions = [{ type: "text", content: "Answer in one sentence." }];
+      const tools = [
+        {
+          type: "function",
+          name: "lookup",
+          description: "Look up an order",
+          parameters: { type: "object", properties: { id: { type: "string" } } },
+        },
+      ];
+      try {
+        const answer = await hue.model(
+          "synthetic-model",
+          () => {
+            hue.recordMessages({
+              systemInstructions,
+              output: [{ role: "assistant", parts: [{ type: "text", content: "Shipped." }] }],
+            });
+            return "Shipped.";
+          },
+          { provider: "synthetic", systemInstructions, tools },
+        );
+        expect(answer).toBe("Shipped.");
+        // A value that is not JSON is omitted and counted; the call still runs.
+        expect(
+          await hue.model("synthetic-model", () => "ran", {
+            provider: "synthetic",
+            name: "invalid",
+            tools: new Date(0),
+          }),
+        ).toBe("ran");
+        const result = await hue.flushSafe();
+        expect(result.report.instrumentationFailures).toBe(captureContent ? 1 : 0);
+        const spans = endpoint.requests
+          .filter((request) => request.signal === "traces")
+          .flatMap((request) => request.records);
+        const model = spans.find((span) => span.name === "chat synthetic-model")!;
+        const invalid = spans.find((span) => span.name === "invalid")!;
+        expect(attr(invalid, "gen_ai.tool.definitions")).toBeUndefined();
+        const logs = endpoint.requests
+          .filter((request) => request.signal === "logs")
+          .flatMap((request) => request.records);
+        if (!captureContent) {
+          expect(attr(model, "gen_ai.system_instructions")).toBeUndefined();
+          expect(attr(model, "gen_ai.tool.definitions")).toBeUndefined();
+          expect(logs).toHaveLength(0);
+          return;
+        }
+        expect(JSON.parse(attr(model, "gen_ai.system_instructions")!.stringValue!)).toEqual(
+          systemInstructions,
+        );
+        expect(JSON.parse(attr(model, "gen_ai.tool.definitions")!.stringValue!)).toEqual(tools);
+        const [log] = logs;
+        const body = Object.fromEntries(
+          log.body!.kvlistValue!.values.map((item) => [item.key, item.value]),
+        );
+        expect(
+          body["gen_ai.system_instructions"].arrayValue!.values[0].kvlistValue!.values,
+        ).toContainEqual({ key: "content", value: { stringValue: "Answer in one sentence." } });
+        expect(Object.keys(body).sort()).toEqual([
+          "gen_ai.output.messages",
+          "gen_ai.system_instructions",
+        ]);
+      } finally {
+        await hue.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
   test("helpers accept interface-typed values without casts and omit non-JSON values", async () => {
     interface ToolInput {
       city: string;
