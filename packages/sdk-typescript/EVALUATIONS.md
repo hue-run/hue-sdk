@@ -79,6 +79,16 @@ the existing v1 fields. Evaluator versions include `evaluatorId` when the server
 supplies their owning identity; older v1 responses may omit it. They use the existing v1 paths;
 the earlier method names remain callable for existing integrations.
 
+For new run and scoring code, use `createRun`, `getRun`, `listRunItems`,
+`getRunCase`, `startRunExecution`, `getRunExecution`,
+`completeRunExecution`, and `finishRun`. Use `createScoring`, `getScoring`,
+`listScorings`, `listScoringItems`, `getScoringSubject`,
+`submitScoringResults`, `listScoringResults`, and `getScoringResult` to score
+saved subjects. `createRun` accepts `evalSetVersionId` and
+`evaluatorVersionIds`; `createScoring` and `submitScoringResults` use evaluator
+version IDs. A run ID and a scoring ID identify different records. The methods
+use the existing v1 paths and leave existing runner entry points callable.
+
 Create another experiment with the same frozen version and different `config` to compare configurations. The runner reads the exact experiment case/version and scorer definitions; it never resolves a mutable latest version. `rescore` accepts an existing evaluation-run ID and has no target callback. Subject IDs refer to immutable saved outputs and trace evidence.
 
 `rescore` preserves terminal scores already recorded for each item and evaluator version,

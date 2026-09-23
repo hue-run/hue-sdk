@@ -481,6 +481,30 @@ export interface Experiment {
     cancelled: number;
   };
 }
+/** A run over a frozen eval set version and configuration. */
+export type Run = Experiment & {
+  /** Frozen eval set version under test. */
+  evalSetVersionId: string;
+  /** Scoring pass created for this run. */
+  scoring: Scoring;
+};
+/** One frozen case in a run. */
+export type RunCase = ExperimentCase & {
+  /** Source eval set version ID. */
+  evalSetVersionId: string;
+};
+/** A scoring pass over saved subjects with pinned evaluators. */
+export type Scoring = EvaluationRun & {
+  /** Evaluator versions pinned to this scoring pass. */
+  evaluatorVersions: EvaluatorVersion[];
+  /** Linked run ID, or null for standalone scoring. */
+  runId?: string | null;
+};
+/** One row in the project's scoring list. */
+export type ScoringSummary = EvaluationRunSummary & {
+  /** Linked run ID, or null for standalone scoring. */
+  runId: string | null;
+};
 /** A sanitized error type with an optional bounded message. */
 export interface TypedError {
   /** Stable error type. */
@@ -591,6 +615,13 @@ export interface Subject {
   /** The target's declared primary generated artifact, or `null`. */
   primaryArtifactId?: string | null;
 }
+/** An immutable saved subject with product-named source fields. */
+export type ScoringSubject = Subject & {
+  /** Source eval set version ID. */
+  evalSetVersionId: string;
+  /** Source run ID. */
+  runId: string;
+};
 /** A reported metric value. */
 export interface Metric {
   /** Declared metric name. */
@@ -632,6 +663,27 @@ export type Result = Score & {
   scorerVersionId: string;
   /** Source digest of the local scorer, for `local_code` pins. */
   sourceDigest?: string;
+};
+/** A score uploaded through the product-named scoring method. */
+export type ScoringResultInput = Score & {
+  /** Scoring item this result belongs to. */
+  evaluationItemId: string;
+  /** Evaluator version that produced the score. */
+  evaluatorVersionId: string;
+  /** Source digest for a local code evaluator. */
+  sourceDigest?: string;
+};
+/** A result as listed by {@link EvaluationClient.listScoringResults}. */
+export type ScoringResultSummary = ResultSummary & {
+  /** Evaluator version that produced this result. */
+  evaluatorVersionId: string;
+};
+/** A full stored result from {@link EvaluationClient.getScoringResult}. */
+export type StoredScoringResult = StoredResult & {
+  /** Scoring pass containing this result. */
+  scoringId: string;
+  /** Evaluator version that produced this result. */
+  evaluatorVersionId: string;
 };
 /** What a local scorer callback receives. */
 export interface ScoreContext {

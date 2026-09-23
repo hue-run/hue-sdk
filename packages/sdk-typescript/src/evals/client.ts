@@ -47,13 +47,21 @@ import type {
   RegistryPageOptions,
   Result,
   ResultSummary,
+  Run,
+  RunCase,
   Scorer,
   ScorerDefinition,
   ScorerVersion,
+  Scoring,
+  ScoringResultInput,
+  ScoringResultSummary,
+  ScoringSubject,
+  ScoringSummary,
   SimulationMcpCapability,
   StartExecution,
   Subject,
   StoredResult,
+  StoredScoringResult,
 } from "./types.js";
 
 /** Connection options for {@link createEvaluationClient}. */
@@ -102,6 +110,58 @@ function productRegistryFields<T>(value: unknown): T {
       result[product] = result[legacy];
     }
   }
+  return result as T;
+}
+
+const runResponseAliases = [
+  ["datasetId", "evalSetId"],
+  ["datasetName", "evalSetName"],
+  ["datasetDisplayName", "evalSetDisplayName"],
+  ["datasetVersion", "evalSetVersion"],
+  ["datasetVersionId", "evalSetVersionId"],
+  ["datasetVersionIds", "evalSetVersionIds"],
+  ["scorerId", "evaluatorId"],
+  ["scorerName", "evaluatorName"],
+  ["scorerVersion", "evaluatorVersion"],
+  ["scorerVersionId", "evaluatorVersionId"],
+  ["scorerVersionIds", "evaluatorVersionIds"],
+  ["scorerVersions", "evaluatorVersions"],
+  ["evaluationRunId", "scoringId"],
+] as const;
+const runResponseEnvelopes = new Set([
+  "items",
+  "item",
+  "versions",
+  "version",
+  "scorerVersions",
+  "evaluatorVersions",
+]);
+
+function productRunFields<T>(value: unknown, kind: "run" | "scoring" | "result"): T {
+  if (Array.isArray(value)) return value.map((item) => productRunFields(item, kind)) as T;
+  if (value === null || typeof value !== "object") return value as T;
+  const result: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of runResponseEnvelopes) {
+    if (Object.hasOwn(result, key)) result[key] = productRunFields(result[key], kind);
+  }
+  for (const key of ["evaluation", "scoring"] as const) {
+    if (Object.hasOwn(result, key)) result[key] = productRunFields(result[key], "scoring");
+  }
+  const identityAlias: readonly [string, string] =
+    kind === "result" ? ["runId", "scoringId"] : ["experimentId", "runId"];
+  const aliases: readonly (readonly [string, string])[] = [...runResponseAliases, identityAlias];
+  for (const [legacy, product] of aliases) {
+    if (Object.hasOwn(result, legacy)) {
+      if (
+        Object.hasOwn(result, product) &&
+        JSON.stringify(result[legacy]) !== JSON.stringify(result[product])
+      )
+        throw new HueApiError();
+      result[product] = result[legacy];
+    }
+  }
+  if (Object.hasOwn(result, "evaluation") && !Object.hasOwn(result, "scoring"))
+    result.scoring = result.evaluation;
   return result as T;
 }
 /**
@@ -616,6 +676,108 @@ export class EvaluationClient {
   /** Reads a full stored result. */
   getResult(id: string) {
     return this.request<StoredResult>("GET", `/evaluation-results/${uuid(id)}`);
+  }
+  /** Creates a run using product request fields on the existing v1 path. */
+  async createRun(input: {
+    idempotencyKey: string;
+    name: string;
+    evalSetVersionId: string;
+    evaluatorVersionIds: string[];
+    config: JsonValue;
+  }): Promise<{
+    /** Run ID. */
+    id: string;
+    /** ID of the run's scoring pass. */
+    scoringId: string;
+    /** Existing v1 field for the scoring pass ID. */
+    evaluationRunId: string;
+  }> {
+    return productRunFields(await this.request("POST", "/experiments", input), "run");
+  }
+  /** Reads a run with its scoring progress. */
+  async getRun(id: string): Promise<Run> {
+    return productRunFields(await this.getExperiment(id), "run");
+  }
+  /** Lists a run's cases with their latest executions. */
+  async listRunItems(id: string, page?: PageOptions): Promise<Page<ExperimentItem>> {
+    return productRunFields(await this.listExperimentItems(id, page), "run");
+  }
+  /** Reads one frozen case of a run. */
+  async getRunCase(id: string, caseId: string): Promise<RunCase> {
+    return productRunFields(await this.getExperimentCase(id, caseId), "run");
+  }
+  /** Starts or replays a target execution for a run case. */
+  async startRunExecution(id: string, caseId: string, input: StartExecution): Promise<Execution> {
+    return productRunFields(await this.startExecution(id, caseId, input), "run");
+  }
+  /** Reads one run execution. */
+  async getRunExecution(id: string): Promise<Execution> {
+    return productRunFields(await this.getExecution(id), "run");
+  }
+  /** Saves a run execution's outcome. */
+  async completeRunExecution(id: string, input: CompleteExecution): Promise<Completion> {
+    return productRunFields(await this.completeExecution(id, input), "run");
+  }
+  /** Marks a run finished. */
+  async finishRun(
+    id: string,
+    idempotencyKey: string,
+  ): Promise<{
+    /** Run ID. */
+    id: string;
+    /** When the run finished. */
+    finishedAt: string;
+  }> {
+    return productRunFields(await this.finishExperiment(id, idempotencyKey), "run");
+  }
+  /** Creates a standalone scoring pass over saved subjects. */
+  async createScoring(input: {
+    idempotencyKey: string;
+    name: string;
+    subjectIds: string[];
+    evaluatorVersionIds: string[];
+  }): Promise<{
+    /** Scoring pass ID. */
+    id: string;
+  }> {
+    return productRunFields(await this.request("POST", "/evaluation-runs", input), "scoring");
+  }
+  /** Reads a scoring pass and its pinned evaluators. */
+  async getScoring(id: string): Promise<Scoring> {
+    return productRunFields(await this.getEvaluationRun(id), "scoring");
+  }
+  /** Lists scoring passes in the project. */
+  async listScorings(page?: PageOptions): Promise<Page<ScoringSummary>> {
+    return productRunFields(await this.listEvaluationRuns(page), "scoring");
+  }
+  /** Lists the subjects of a scoring pass. */
+  async listScoringItems(id: string, page?: PageOptions): Promise<Page<EvaluationItem>> {
+    return productRunFields(await this.listEvaluationItems(id, page), "scoring");
+  }
+  /** Reads a saved subject with product-named source fields. */
+  async getScoringSubject(id: string): Promise<ScoringSubject> {
+    return productRunFields(await this.getSubject(id), "run");
+  }
+  /** Uploads evaluator results for a scoring pass using product request fields. */
+  async submitScoringResults(
+    id: string,
+    input: { idempotencyKey: string; results: ScoringResultInput[] },
+  ): Promise<{
+    /** Stored result IDs, in input order. */
+    ids: string[];
+  }> {
+    return productRunFields(
+      await this.request("POST", `/evaluation-runs/${uuid(id)}/results`, input),
+      "result",
+    );
+  }
+  /** Lists result summaries for a scoring pass. */
+  async listScoringResults(id: string, page?: PageOptions): Promise<Page<ScoringResultSummary>> {
+    return productRunFields(await this.listResults(id, page), "result");
+  }
+  /** Reads a stored evaluator result. */
+  async getScoringResult(id: string): Promise<StoredScoringResult> {
+    return productRunFields(await this.getResult(id), "result");
   }
   /** Dispatches hosted judge jobs for `llm_judge` pins; check {@link getJudgeBudget} first. */
   createJudgeJobs(
