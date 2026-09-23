@@ -49,6 +49,50 @@ def _product_registry_fields(value: Any) -> Any:
     return result
 
 
+_RUN_FIELD_ALIASES = (
+    ("datasetId", "evalSetId"),
+    ("datasetName", "evalSetName"),
+    ("datasetDisplayName", "evalSetDisplayName"),
+    ("datasetVersion", "evalSetVersion"),
+    ("datasetVersionId", "evalSetVersionId"),
+    ("datasetVersionIds", "evalSetVersionIds"),
+    ("scorerId", "evaluatorId"),
+    ("scorerName", "evaluatorName"),
+    ("scorerVersion", "evaluatorVersion"),
+    ("scorerVersionId", "evaluatorVersionId"),
+    ("scorerVersionIds", "evaluatorVersionIds"),
+    ("scorerVersions", "evaluatorVersions"),
+    ("evaluationRunId", "scoringId"),
+)
+_RUN_ENVELOPES = frozenset(
+    ("items", "item", "versions", "version", "scorerVersions", "evaluatorVersions")
+)
+
+
+def _product_run_fields(value: Any, kind: str) -> Any:
+    """Name Hue run/scoring envelopes without changing customer JSON fields."""
+    if isinstance(value, list):
+        return [_product_run_fields(item, kind) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = dict(value)
+    for key in _RUN_ENVELOPES & result.keys():
+        result[key] = _product_run_fields(result[key], kind)
+    for key in ("evaluation", "scoring"):
+        if key in result:
+            result[key] = _product_run_fields(result[key], "scoring")
+    identity_alias = ("runId", "scoringId") if kind == "result" else ("experimentId", "runId")
+    aliases = (*_RUN_FIELD_ALIASES, identity_alias)
+    for legacy, product in aliases:
+        if legacy in result:
+            if product in result and result[product] != result[legacy]:
+                raise HueApiError()
+            result[product] = result[legacy]
+    if "evaluation" in result and "scoring" not in result:
+        result["scoring"] = result["evaluation"]
+    return result
+
+
 class EvaluationClient:
     """Project-key v1 client. Mutations never retry implicitly; retain their idempotency keys.
 
@@ -401,6 +445,136 @@ class EvaluationClient:
 
     def get_result(self, result_id: str) -> dict[str, Any]:
         return self._request("GET", f"/evaluation-results/{uuid(result_id)}")
+
+    def create_run(
+        self,
+        *,
+        idempotency_key: str,
+        name: str,
+        eval_set_version_id: str,
+        evaluator_version_ids: list[str],
+        config: Any,
+    ) -> dict[str, Any]:
+        return _product_run_fields(
+            self._request(
+                "POST",
+                "/experiments",
+                {
+                    "idempotencyKey": idempotency_key,
+                    "name": name,
+                    "evalSetVersionId": uuid(eval_set_version_id),
+                    "evaluatorVersionIds": [uuid(i) for i in evaluator_version_ids],
+                    "config": config,
+                },
+            ),
+            "run",
+        )
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        return _product_run_fields(self.get_experiment(run_id), "run")
+
+    def list_run_items(
+        self, run_id: str, *, after: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        return _product_run_fields(
+            self.list_experiment_items(run_id, after=after, limit=limit), "run"
+        )
+
+    def get_run_case(self, run_id: str, case_id: str) -> dict[str, Any]:
+        return _product_run_fields(self.get_experiment_case(run_id, case_id), "run")
+
+    def start_run_execution(
+        self,
+        run_id: str,
+        case_id: str,
+        *,
+        idempotency_key: str,
+        trace_external_id: str | None = None,
+        previous_execution_id: str | None = None,
+        allow_uncertain_retry: bool = False,
+    ) -> dict[str, Any]:
+        return _product_run_fields(
+            self.start_execution(
+                run_id,
+                case_id,
+                idempotency_key=idempotency_key,
+                trace_external_id=trace_external_id,
+                previous_execution_id=previous_execution_id,
+                allow_uncertain_retry=allow_uncertain_retry,
+            ),
+            "run",
+        )
+
+    def get_run_execution(self, execution_id: str) -> dict[str, Any]:
+        return _product_run_fields(self.get_execution(execution_id), "run")
+
+    def complete_run_execution(self, execution_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return _product_run_fields(self.complete_execution(execution_id, payload), "run")
+
+    def finish_run(self, run_id: str, idempotency_key: str) -> dict[str, Any]:
+        return _product_run_fields(self.finish_experiment(run_id, idempotency_key), "run")
+
+    def create_scoring(
+        self,
+        *,
+        idempotency_key: str,
+        name: str,
+        subject_ids: list[str],
+        evaluator_version_ids: list[str],
+    ) -> dict[str, Any]:
+        return _product_run_fields(
+            self._request(
+                "POST",
+                "/evaluation-runs",
+                {
+                    "idempotencyKey": idempotency_key,
+                    "name": name,
+                    "subjectIds": [uuid(i) for i in subject_ids],
+                    "evaluatorVersionIds": [uuid(i) for i in evaluator_version_ids],
+                },
+            ),
+            "scoring",
+        )
+
+    def get_scoring(self, scoring_id: str) -> dict[str, Any]:
+        return _product_run_fields(self.get_evaluation_run(scoring_id), "scoring")
+
+    def list_scorings(self, *, after: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return _product_run_fields(
+            self._request("GET", f"/evaluation-runs{self._page(after, limit)}"), "scoring"
+        )
+
+    def list_scoring_items(
+        self, scoring_id: str, *, after: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        return _product_run_fields(
+            self.list_evaluation_items(scoring_id, after=after, limit=limit), "scoring"
+        )
+
+    def get_scoring_subject(self, subject_id: str) -> dict[str, Any]:
+        return _product_run_fields(self.get_subject(subject_id), "run")
+
+    def submit_scoring_results(
+        self, scoring_id: str, *, idempotency_key: str, results: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return _product_run_fields(
+            self._request(
+                "POST",
+                f"/evaluation-runs/{uuid(scoring_id)}/results",
+                {"idempotencyKey": idempotency_key, "results": results},
+            ),
+            "result",
+        )
+
+    def list_scoring_results(
+        self, scoring_id: str, *, after: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        return _product_run_fields(
+            self.list_results(scoring_id, after=after, limit=limit), "result"
+        )
+
+    def get_scoring_result(self, result_id: str) -> dict[str, Any]:
+        return _product_run_fields(self.get_result(result_id), "result")
 
     def create_judge_jobs(
         self, run_id: str, *, idempotency_key: str, jobs: list[dict[str, str]]

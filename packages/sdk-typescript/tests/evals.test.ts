@@ -876,6 +876,215 @@ describe("installed evaluation API and runner contract", () => {
       server.stop(true);
     }
   });
+  test("product run and scoring methods keep v1 paths and distinct IDs", async () => {
+    const runId = randomUUID();
+    const scoringId = randomUUID();
+    const evalSetVersionId = randomUUID();
+    const evaluatorId = randomUUID();
+    const evaluatorVersionId = randomUUID();
+    const caseId = randomUUID();
+    const itemId = randomUUID();
+    const subjectId = randomUUID();
+    const resultId = randomUUID();
+    const executionId = randomUUID();
+    const calls: { method: string; path: string; body: Record<string, unknown> }[] = [];
+    const scoring = {
+      id: scoringId,
+      name: "Scoring",
+      scorerVersions: [
+        {
+          id: evaluatorVersionId,
+          scorerId: evaluatorId,
+          contentDigest: digest,
+          definition: { scorerId: "customer-definition" },
+        },
+      ],
+      itemCount: 1,
+      scores: { scored: 0, error: 0, skipped: 0, pending: 1 },
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
+        const path = new URL(request.url).pathname.replace("/api/v1", "");
+        const body =
+          request.method === "GET" ? {} : ((await request.json()) as Record<string, unknown>);
+        calls.push({ method: request.method, path, body });
+        if (path === "/experiments")
+          return Response.json({ id: runId, evaluationRunId: scoringId });
+        if (path === `/experiments/${runId}`)
+          return Response.json({
+            id: runId,
+            name: "Run",
+            datasetVersionId: evalSetVersionId,
+            config: { experimentId: "customer-config" },
+            evaluation: scoring,
+          });
+        if (path === `/experiments/${runId}/items`)
+          return Response.json({
+            items: [{ id: itemId, externalKey: "one", execution: null }],
+            nextCursor: null,
+          });
+        if (path === `/experiments/${runId}/items/${caseId}`)
+          return Response.json({
+            id: caseId,
+            datasetVersionId: evalSetVersionId,
+            inputs: { datasetVersionId: "customer-input" },
+            metadata: {},
+          });
+        if (
+          path === `/experiments/${runId}/items/${caseId}/start` ||
+          path === `/experiment-executions/${executionId}`
+        )
+          return Response.json({
+            id: executionId,
+            state: "started",
+            attempt: 1,
+            traceExternalId: null,
+          });
+        if (path === `/experiment-executions/${executionId}/complete`)
+          return Response.json({
+            executionId,
+            subjectId,
+            traceSnapshotId: null,
+            evaluationItemId: itemId,
+          });
+        if (path === `/experiments/${runId}/finish`)
+          return Response.json({ id: runId, finishedAt: new Date().toISOString() });
+        if (path === "/evaluation-runs")
+          return Response.json(
+            request.method === "GET"
+              ? {
+                  items: [{ id: scoringId, experimentId: runId, name: "Scoring" }],
+                  nextCursor: null,
+                }
+              : { id: scoringId },
+          );
+        if (path === `/evaluation-runs/${scoringId}`) return Response.json(scoring);
+        if (path === `/evaluation-runs/${scoringId}/items`)
+          return Response.json({ items: [{ id: itemId, subjectId }], nextCursor: null });
+        if (path === `/evaluation-runs/${scoringId}/results`)
+          return Response.json(
+            request.method === "GET"
+              ? {
+                  items: [{ id: resultId, itemId, scorerVersionId: evaluatorVersionId }],
+                  nextCursor: null,
+                }
+              : { ids: [resultId] },
+          );
+        if (path === `/evaluation-results/${resultId}`)
+          return Response.json({
+            id: resultId,
+            itemId,
+            runId: scoringId,
+            scorerVersionId: evaluatorVersionId,
+            state: "scored",
+            metrics: [],
+            explanation: null,
+            evidence: { runId: "customer-evidence" },
+            error: null,
+            sourceDigest: null,
+          });
+        if (path === `/evaluation-subjects/${subjectId}`)
+          return Response.json({
+            id: subjectId,
+            experimentId: runId,
+            datasetVersionId: evalSetVersionId,
+            inputs: { experimentId: "customer-subject" },
+          });
+        return new Response(null, { status: 404 });
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    try {
+      expect(
+        (
+          await client.createRun({
+            idempotencyKey: randomUUID(),
+            name: "Run",
+            evalSetVersionId,
+            evaluatorVersionIds: [evaluatorVersionId],
+            config: { experimentId: "customer-config" },
+          })
+        ).scoringId,
+      ).toBe(scoringId);
+      expect(calls.at(-1)?.body).toMatchObject({
+        evalSetVersionId,
+        evaluatorVersionIds: [evaluatorVersionId],
+        config: { experimentId: "customer-config" },
+      });
+      const run = await client.getRun(runId);
+      expect(run.evalSetVersionId).toBe(evalSetVersionId);
+      expect(run.scoring.evaluatorVersions[0].evaluatorId).toBe(evaluatorId);
+      expect(run.config).toEqual({ experimentId: "customer-config" });
+      expect((await client.listRunItems(runId)).items[0].id).toBe(itemId);
+      expect((await client.getRunCase(runId, caseId)).inputs).toEqual({
+        datasetVersionId: "customer-input",
+      });
+      expect(
+        (await client.startRunExecution(runId, caseId, { idempotencyKey: randomUUID() })).id,
+      ).toBe(executionId);
+      expect((await client.getRunExecution(executionId)).id).toBe(executionId);
+      expect(
+        (
+          await client.completeRunExecution(executionId, {
+            idempotencyKey: randomUUID(),
+            state: "succeeded",
+          })
+        ).subjectId,
+      ).toBe(subjectId);
+      expect((await client.finishRun(runId, randomUUID())).id).toBe(runId);
+      expect(
+        (
+          await client.createScoring({
+            idempotencyKey: randomUUID(),
+            name: "Scoring",
+            subjectIds: [subjectId],
+            evaluatorVersionIds: [evaluatorVersionId],
+          })
+        ).id,
+      ).toBe(scoringId);
+      expect(calls.at(-1)?.body).toHaveProperty("evaluatorVersionIds", [evaluatorVersionId]);
+      expect((await client.getScoring(scoringId)).evaluatorVersions[0].evaluatorId).toBe(
+        evaluatorId,
+      );
+      expect((await client.listScorings()).items[0].runId).toBe(runId);
+      expect((await client.listScoringItems(scoringId)).items[0].subjectId).toBe(subjectId);
+      expect((await client.getScoringSubject(subjectId)).runId).toBe(runId);
+      expect(
+        (
+          await client.submitScoringResults(scoringId, {
+            idempotencyKey: randomUUID(),
+            results: [
+              {
+                evaluationItemId: itemId,
+                evaluatorVersionId,
+                state: "scored",
+                metrics: [],
+                evidence: { scorerVersionId: "customer-evidence" },
+              },
+            ],
+          })
+        ).ids,
+      ).toEqual([resultId]);
+      expect(calls.at(-1)?.body).toHaveProperty("results.0.evaluatorVersionId", evaluatorVersionId);
+      expect((await client.listScoringResults(scoringId)).items[0].evaluatorVersionId).toBe(
+        evaluatorVersionId,
+      );
+      const stored = await client.getScoringResult(resultId);
+      expect(stored.scoringId).toBe(scoringId);
+      expect(stored.evidence).toEqual({ runId: "customer-evidence" });
+      expect(
+        calls.every(({ path }) => !path.includes("/runs") && !path.includes("/scorings")),
+      ).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
   test("two configurations complete and rescore frozen subjects without invoking targets", async () => {
     const f = fixture();
     let calls = 0;

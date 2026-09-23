@@ -42,6 +42,16 @@ existing v1 fields. Evaluator versions include `evaluatorId` when the server
 supplies their owning identity; older v1 responses may omit it. These methods use the existing
 v1 paths; earlier method names remain callable for existing integrations.
 
+For new run and scoring code, use `create_run`, `get_run`, `list_run_items`,
+`get_run_case`, `start_run_execution`, `get_run_execution`,
+`complete_run_execution`, and `finish_run`. Use `create_scoring`,
+`get_scoring`, `list_scorings`, `list_scoring_items`, `get_scoring_subject`,
+`submit_scoring_results`, `list_scoring_results`, and `get_scoring_result` to
+score saved subjects. `create_run` accepts `eval_set_version_id` and
+`evaluator_version_ids`; scoring writes use evaluator version IDs. A run ID and
+a scoring ID identify different records. These methods use the existing v1
+paths and leave existing runner entry points callable.
+
 `builtin_scorers.exact_match()`, `builtin_scorers.includes(case_sensitive=True)` and `builtin_scorers.json_schema(schema)` return publishable declarations. Exact match preserves JSON types (`False` differs from `0`), object key order is irrelevant, and equivalent JSON numbers compare equally. Missing output/reference produces a skipped score, never zero. `None` is present JSON null; the exported `MISSING` sentinel represents intentional absence.
 
 `define_local_scorer(source=..., entrypoint=..., metrics=..., score=...)` hashes explicitly supplied source text or bytes. The binding must match the pinned language, source digest, entry point and complete metric definition. This is a caller declaration, not independent attestation of closures or installed dependencies. Callbacks receive a private `ScoreContext` copy with `inputs`, optional `output`/`expected`, `has_output`/`has_expected`, `metadata`, and `execution_state`. They return `state` (`scored`, `error`, `skipped`), typed `metrics` and meaningful explanation/evidence. A false quality verdict remains a scored result; invalid callback results and exceptions become typed scorer errors.
