@@ -12,6 +12,12 @@ refuses to publish a version without a matching entry below.
 
 #### Changed
 
+- `hue login` asks for one **Read and write** key and stores it as both `HUE_API_KEY` and
+  `HUE_MCP_KEY` (with `HUE_BASE_URL` and `HUE_MCP_URL`) in a single write. It checks evaluation
+  access with `GET /api/v1/datasets`, so a **Read** or **Tracing only** key is refused before
+  anything is stored instead of failing later in `hue eval`. `--keys evaluations` and
+  `--keys coding-agent` still store one variable each; `--keys coding-agent` accepts a **Read**
+  key.
 - `hue login`, `hue eval`, the evaluation guides and the Hue skill name Hue's consolidated access
   presets: **Read and write** replaces **Tracing and evaluations** and **Coding agent (read +
   evaluations)**, and **Read** replaces **Coding agent (read-only)**. **Tracing only** is unchanged.

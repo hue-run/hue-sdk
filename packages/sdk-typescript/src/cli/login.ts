@@ -41,31 +41,32 @@ const KEY_KINDS: Record<
   {
     variable: "HUE_API_KEY" | "HUE_MCP_KEY";
     urlVariable: "HUE_BASE_URL" | "HUE_MCP_URL";
-    preset: string;
   }
 > = {
   evaluations: {
     variable: "HUE_API_KEY",
     urlVariable: "HUE_BASE_URL",
-    preset: "Read and write",
   },
   "coding-agent": {
     variable: "HUE_MCP_KEY",
     urlVariable: "HUE_MCP_URL",
-    preset: "Read and write",
   },
 };
+/** Settings preset that authorizes both evaluations and the coding agent's MCP reads and writes. */
+const KEY_PRESET = "Read and write";
 
 export const LOGIN_USAGE = `Usage: hue login [--origin URL] [--env-file PATH] [--keys evaluations|coding-agent|both]
                  [--no-browser] [--force] [--gitignore]
 
-Store keys you created in Hue in a private env file. Each key is validated against Hue before it
-is stored; key values are never printed.
+Store the key you created in Hue in a private env file. By default one "Read and write" key serves
+both evaluations (HUE_API_KEY) and your coding agent (HUE_MCP_KEY); it is validated against Hue
+before it is stored, and key values are never printed.
 
 Options:
   --origin URL     Hue origin (default ${DEFAULT_ORIGIN})
   --env-file PATH  Env file to write (default ${DEFAULT_ENV_FILE} in the current directory)
-  --keys KIND      evaluations (HUE_API_KEY), coding-agent (HUE_MCP_KEY) or both (default both)
+  --keys KIND      evaluations (HUE_API_KEY), coding-agent (HUE_MCP_KEY) or both from one key
+                   (default both)
   --no-browser     Do not open the key settings page in a browser
   --force          Replace an existing different value in the env file
   --gitignore      Add the env file to .gitignore when a git repository does not ignore it
@@ -249,7 +250,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 type KeyCheck = { ok: true; detail: string } | { ok: false; rejected: boolean; detail: string };
 
-/** Mirrors `checkConnection()`: `GET /api/v1/projects/current` with the key, no redirects. */
+/**
+ * Mirrors `checkConnection()` with `GET /api/v1/projects/current`, then confirms evaluation access
+ * with `GET /api/v1/datasets`. No redirects are followed.
+ */
 async function checkEvaluationsKey(
   fetchImpl: typeof fetch,
   origin: string,
@@ -282,13 +286,41 @@ async function checkEvaluationsKey(
       detail: `Hue answered HTTP ${response.status} while checking the evaluations key.`,
     };
   }
+  let projectName: string;
   try {
     const project: unknown = JSON.parse(await readBoundedText(response));
     if (!isRecord(project) || typeof project.name !== "string") throw new Error("Invalid project");
-    return { ok: true, detail: project.name };
+    projectName = project.name;
   } catch {
     return { ok: false, rejected: false, detail: "Hue returned an unexpected project response." };
   }
+  // Every valid key reaches the project check; only a key with write access can list eval sets,
+  // so a Read or Tracing only key is refused here instead of failing later in `hue eval`.
+  let evaluations: Response;
+  try {
+    evaluations = await fetchImpl(`${origin}/api/v1/datasets`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MILLIS),
+    });
+  } catch {
+    return { ok: false, rejected: false, detail: `Could not reach ${origin}.` };
+  }
+  await evaluations.body?.cancel();
+  if (evaluations.status === 401 || evaluations.status === 403)
+    return {
+      ok: false,
+      rejected: true,
+      detail: `This key cannot use evaluations (HTTP ${evaluations.status}); it is a Read or Tracing only key.`,
+    };
+  if (!evaluations.ok)
+    return {
+      ok: false,
+      rejected: false,
+      detail: `Hue answered HTTP ${evaluations.status} while checking evaluation access.`,
+    };
+  return { ok: true, detail: projectName };
 }
 
 /** Reads JSON-RPC messages from a JSON body or a `text/event-stream` body. */
@@ -616,6 +648,9 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   if (keysOption !== "evaluations" && keysOption !== "coding-agent" && keysOption !== "both")
     return fail(`--keys must be evaluations, coding-agent or both.\n\n${LOGIN_USAGE}`, 2);
   const kinds: KeyKind[] = keysOption === "both" ? ["evaluations", "coding-agent"] : [keysOption];
+  // Every requested variable comes from one pasted key: the same "Read and write" preset serves
+  // evaluations and the coding agent, so asking twice would only add a step.
+  const variables = kinds.map((kind) => KEY_KINDS[kind].variable).join(" and ");
   const origin = parseHueOrigin(parsed.values.origin ?? DEFAULT_ORIGIN);
   if (!origin)
     return fail(
@@ -634,9 +669,9 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   }
 
   const settingsUrl = `${origin}${KEY_SETTINGS_PATH}`;
-  out("Hue keys are created in the app; this command validates and stores them locally.");
-  out(`Create keys at: ${settingsUrl}`);
-  for (const kind of kinds) out(`  ${KEY_KINDS[kind].variable}: a "${KEY_KINDS[kind].preset}" key`);
+  out("Hue keys are created in the app; this command validates and stores one locally.");
+  out(`Create a "${KEY_PRESET}" key at: ${settingsUrl}`);
+  out(`  It is stored as ${variables}.`);
   if (!parsed.values["no-browser"] && isTTY(stdout)) {
     const opened = await openBrowser(settingsUrl).catch(() => false);
     if (opened) out("Opened the key settings page in your browser.");
@@ -648,43 +683,37 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   }
 
   const stored: KeyKind[] = [];
-  // A key written before a later prompt fails still has to reach the ignore protection below, so
-  // the loop records why it stopped instead of returning past it.
+  // Validation and the write record why they stopped instead of returning, so a key that did land
+  // in the file still reaches the ignore protection below.
   let failure: { message: string; code?: number } | undefined;
   const prompter = isTTY(stdin)
     ? createTerminalPrompter(stdin, stdout)
     : createLinePrompter(stdin, stdout);
-  const nothingElse = () => (stored.length ? "No further key was stored." : "Nothing was stored.");
   try {
+    const answer = await prompter.ask(`Paste the "${KEY_PRESET}" key (${variables}): `);
+    const value = answer?.trim() ?? "";
+    const reason = answer === null ? null : invalidKeyReason(value);
+    const updates: Record<string, string> = {};
     for (const kind of kinds) {
-      const { variable, urlVariable, preset } = KEY_KINDS[kind];
-      const urlValue = kind === "evaluations" ? origin : mcpUrl;
-      const answer = await prompter.ask(`Paste the "${preset}" key (${variable}): `);
-      if (answer === null) {
-        failure = { message: `No ${variable} was entered; input ended.` };
-        break;
+      const { variable, urlVariable } = KEY_KINDS[kind];
+      updates[variable] = value;
+      updates[urlVariable] = kind === "evaluations" ? origin : mcpUrl;
+    }
+    if (answer === null) failure = { message: `No key was entered; input ended.` };
+    else if (reason)
+      failure = {
+        message: `${reason} Create a "${KEY_PRESET}" key at ${settingsUrl} and paste it.`,
+      };
+    else if (!parsed.values.force) {
+      for (const [name, next] of Object.entries(updates)) {
+        const current = readEnvValue(envFile.text, name);
+        if (current !== undefined && current !== next)
+          failure ??= {
+            message: `${name} in ${envDisplay} already has a different value; rerun with --force to replace it.`,
+          };
       }
-      const value = answer.trim();
-      const reason = invalidKeyReason(value);
-      if (reason) {
-        failure = {
-          message: `${reason} Create a "${preset}" key at ${settingsUrl} and paste it.`,
-        };
-        break;
-      }
-      if (!parsed.values.force) {
-        for (const [name, next] of [
-          [variable, value],
-          [urlVariable, urlValue],
-        ] as const) {
-          const current = readEnvValue(envFile.text, name);
-          if (current !== undefined && current !== next)
-            failure ??= {
-              message: `${name} in ${envDisplay} already has a different value; rerun with --force to replace it.`,
-            };
-        }
-        if (failure) break;
-      }
+    }
+    for (const kind of failure ? [] : kinds) {
       const check =
         kind === "evaluations"
           ? await checkEvaluationsKey(fetchImpl, origin, value)
@@ -692,31 +721,35 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
       if (!check.ok) {
         failure = {
           message: check.rejected
-            ? `${check.detail} Create a "${preset}" key at ${settingsUrl} and try again.`
-            : `${check.detail} ${nothingElse()}`,
+            ? `${check.detail} Create a "${KEY_PRESET}" key at ${settingsUrl} and try again. Nothing was stored.`
+            : `${check.detail} Nothing was stored.`,
         };
         break;
       }
       out(
         kind === "evaluations"
-          ? `Evaluations key accepted for project "${check.detail}".`
-          : `Coding-agent key accepted; the Hue MCP server lists ${check.detail} tools.`,
+          ? `Evaluations access accepted for project "${check.detail}".`
+          : `Coding-agent access accepted; the Hue MCP server lists ${check.detail} tools.`,
       );
-      const text = mergeEnvText(envFile.text, { [variable]: value, [urlVariable]: urlValue });
+    }
+    if (!failure) {
+      const text = mergeEnvText(envFile.text, updates);
       try {
         await writePrivateFile(envPath, text, 0o600);
+        envFile = { text, exists: true };
+        stored.push(...kinds);
+        const urls = kinds.map((kind) => KEY_KINDS[kind].urlVariable).join(" and ");
+        out(
+          `Stored the key (${value.length} chars) as ${variables}, with ${urls}, in ${envDisplay}.`,
+        );
       } catch (error) {
         failure = { message: `Could not write ${envDisplay}: ${(error as Error).message}` };
-        break;
       }
-      envFile = { text, exists: true };
-      stored.push(kind);
-      out(`Stored ${variable} (${value.length} chars) and ${urlVariable} in ${envDisplay}.`);
     }
   } catch (error) {
     failure =
       error instanceof PromptInterrupted
-        ? { message: `Interrupted; ${nothingElse().toLowerCase()}`, code: 130 }
+        ? { message: "Interrupted; nothing was stored.", code: 130 }
         : { message: `hue login failed: ${(error as Error).message}` };
   } finally {
     prompter.close();
