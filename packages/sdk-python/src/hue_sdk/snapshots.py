@@ -7,6 +7,8 @@ owned record, so later changes by a caller or another processor cannot grow it.
 
 from __future__ import annotations
 
+import os
+import threading
 from collections.abc import Mapping, Sequence
 from copy import copy
 from math import isfinite
@@ -17,15 +19,33 @@ from opentelemetry.context import Context
 from opentelemetry.sdk._logs import ReadableLogRecord, ReadWriteLogRecord
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan
+from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
-from opentelemetry.trace import Link, Status
+from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
-from .transport import MAX_REQUEST_BYTES
+from .transport import (
+    MAX_REQUEST_BYTES,
+    PENDING_PARENT_KEY,
+    PENDING_SPAN_TYPE,
+    PENDING_SPAN_TYPE_KEY,
+    PendingSpan,
+)
 
 MAX_CONTENT_SNAPSHOT_BYTES = 1_048_576
 MAX_CONTENT_SNAPSHOT_DEPTH = 64
 MAX_CONTENT_SNAPSHOT_NODES = 65_536
 MAX_CONTENT_INTEGER_BITS = 14_000
+MAX_PLACEHOLDER_VALUE_BYTES = 65_536
+# Reserved for placeholders: a finished span must never read as one.
+_PENDING_MARKERS = (PENDING_SPAN_TYPE_KEY, PENDING_PARENT_KEY)
+# Large and rarely useful while a span runs; the finished span still carries them. Copied
+# markers would misplace the placeholder.
+_PLACEHOLDER_OMITTED_KEYS = (
+    "gen_ai.tool.definitions",
+    "gen_ai.system_instructions",
+    *_PENDING_MARKERS,
+)
+_span_ids = RandomIdGenerator()
 
 
 class _ContentBudget:
@@ -207,7 +227,8 @@ class _ValueBudget:
             return tuple(self.value(item, depth + 1) for item in value)
         raise ValueError("Unsupported telemetry snapshot value.")
 
-    def attributes(self, values: Any, dropped: int = 0) -> BoundedAttributes:
+    def permitted(self, values: Any) -> Any:
+        """Apply the content policy: metadata-only mode drops recognized content keys."""
         source = values or {}
         if not self.capture_content and isinstance(source, Mapping):
             source = {
@@ -215,8 +236,11 @@ class _ValueBudget:
                 for key, item in source.items()
                 if not (isinstance(key, str) and is_content_key(key))
             }
+        return source
+
+    def attributes(self, values: Any, dropped: int = 0) -> BoundedAttributes:
         result = BoundedAttributes(
-            attributes=self.value(source), immutable=True, extended_attributes=True
+            attributes=self.value(self.permitted(values)), immutable=True, extended_attributes=True
         )
         result.dropped += dropped
         return result
@@ -240,12 +264,16 @@ class _ValueBudget:
 class _SpanSnapshot(ReadableSpan):
     def __init__(self, span: ReadableSpan, capture_content: bool = True) -> None:
         budget = _ValueBudget(capture_content)
+        attributes: Any = span.attributes
+        if attributes and any(key in attributes for key in _PENDING_MARKERS):
+            # Placeholder markers are reserved: a finished span must never read as one.
+            attributes = {k: v for k, v in attributes.items() if k not in _PENDING_MARKERS}
         super().__init__(
             name=budget.value(span.name),
             context=span.context,
             parent=span.parent,
             resource=budget.resource(span.resource),
-            attributes=budget.attributes(span.attributes, span.dropped_attributes),
+            attributes=budget.attributes(attributes, span.dropped_attributes),
             events=tuple(
                 Event(
                     budget.value(event.name),
@@ -282,6 +310,114 @@ class _SpanSnapshot(ReadableSpan):
 
 def snapshot_span(span: ReadableSpan, capture_content: bool = True) -> ReadableSpan:
     return _SpanSnapshot(span, capture_content)
+
+
+# The export worker holds an application span's lock while it copies attributes. A fork waits
+# for that copy, so no child process inherits a span lock held by a thread it does not have.
+_FORK_GUARD = threading.Lock()
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_FORK_GUARD.acquire,
+        after_in_parent=_FORK_GUARD.release,
+        after_in_child=_FORK_GUARD.release,
+    )
+
+
+def _live_attributes(span: ReadableSpan) -> dict[str, Any]:
+    """Copy an open span's attributes while its application thread may still set more.
+
+    The SDK span lock guards ``set_attribute``/``set_attributes``, so holding it makes the
+    key listing and value reads one consistent view even while limits evict keys.
+    """
+    lock = getattr(span, "_lock", None)
+    if lock is None:
+        return dict(span.attributes or {})
+    with _FORK_GUARD, lock:
+        return dict(span.attributes or {})
+
+
+def _placeholder_omits(key: str) -> bool:
+    return any(
+        key == omitted or key.startswith(omitted + ".") for omitted in _PLACEHOLDER_OMITTED_KEYS
+    )
+
+
+def _value_bytes(value: Any, limit: int) -> int:
+    """Conservative serialized size of an attribute value, stopping past ``limit``."""
+    if isinstance(value, (str, bytes)):
+        if len(value) > limit:
+            return len(value)
+        return len(value.encode("utf-8")) if isinstance(value, str) else len(value)
+    if isinstance(value, Mapping):
+        total = 0
+        for key, item in value.items():
+            total += len(key) + _value_bytes(item, limit - total)
+            if total > limit:
+                break
+        return total
+    if isinstance(value, Sequence):
+        total = 0
+        for item in value:
+            total += _value_bytes(item, limit - total)
+            if total > limit:
+                break
+        return total
+    return 8
+
+
+def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> PendingSpan:
+    """Announce a still-open span with Hue's placeholder shape.
+
+    The placeholder is a new child of the real span that ends at 0 and carries the real
+    span's current attributes under the same content policy as finished spans, minus tool
+    definitions, system instructions and any value over 64 KiB. The markers are written
+    last, so no span attribute or redactor can replace them.
+    """
+    budget = _ValueBudget(capture_content)
+    context = span.context
+    if context is None:
+        raise ValueError("A placeholder needs the span's context.")
+    real_parent = span.parent
+    attributes = budget.value(
+        {
+            key: value
+            for key, value in budget.permitted(_live_attributes(span)).items()
+            if isinstance(key, str)
+            and not _placeholder_omits(key)
+            and _value_bytes(value, MAX_PLACEHOLDER_VALUE_BYTES) <= MAX_PLACEHOLDER_VALUE_BYTES
+        }
+    )
+    attributes[PENDING_SPAN_TYPE_KEY] = PENDING_SPAN_TYPE
+    if real_parent is not None and real_parent.is_valid:
+        attributes[PENDING_PARENT_KEY] = format_span_id(real_parent.span_id)
+    return PendingSpan(
+        source=span,
+        name=budget.value(span.name),
+        context=SpanContext(
+            context.trace_id,
+            _span_ids.generate_span_id(),
+            False,
+            context.trace_flags,
+            context.trace_state,
+        ),
+        # Hue re-keys the placeholder as the real span, so the record's flags describe the
+        # real span's own parent.
+        parent=SpanContext(
+            context.trace_id,
+            context.span_id,
+            bool(real_parent is not None and real_parent.is_remote),
+            context.trace_flags,
+            context.trace_state,
+        ),
+        resource=budget.resource(span.resource),
+        attributes=BoundedAttributes(
+            attributes=attributes, immutable=True, extended_attributes=True
+        ),
+        kind=span.kind,
+        start_time=span.start_time,
+        end_time=0,
+        instrumentation_scope=budget.scope(span.instrumentation_scope),
+    )
 
 
 def snapshot_log(log_record: ReadWriteLogRecord, capture_content: bool = True) -> ReadableLogRecord:

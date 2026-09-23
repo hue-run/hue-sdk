@@ -10,6 +10,7 @@ The published releases are TypeScript `0.6.0` and Python `0.3.0`. See [VERSIONIN
 | Python tracing and evaluations | Python 3.10 and 3.14 with OpenTelemetry 1.44.0, the certified combination recorded in `uv.lock`; Python 3.10 and 3.12 with OpenTelemetry 1.40.0, the declared floor | `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as `>=1.40,<2`; other releases inside the range are accepted by the resolver but not individually certified; new 1.x releases are adopted through a `uv.lock` bump once the frozen CI jobs pass. Local evaluation checkpoints require POSIX filesystem behavior. |
 | Python OpenAI instrumentation | OpenAI 3.14.0 and OpenInference OpenAI 0.1.60, using a synthetic HTTP streaming provider | Configure the instrumentor's own content controls. This does not certify every provider API. |
 | Direct OpenTelemetry export | OTLP HTTP protobuf/JSON traces and correlated logs, including gzip | No Hue package or model wrapper required; metrics and OTLP gRPC ingestion are not supported. |
+| Live spans (unreleased) | Placeholders for running Hue and AI spans, sent by the Hue transports | Requires a Hue deployment that answers trace exports with `Hue-Pending-Spans: 1` (app.hue.run does). A receiver without that header, an older Hue or a generic collector, gets placeholders only in the first export that carries them: the SDK then records one warning and switches live spans off for that client. Turn `liveSpans` / `live_spans` off to send none at all. |
 
 ## Existing dependencies
 

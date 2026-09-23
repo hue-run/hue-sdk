@@ -78,7 +78,16 @@ if (!values.archive && !values["registry-version"]) {
   run("bun", ["--no-env-file", "run", "build"], staging);
   // stripInternal must keep the transport's @internal mutators out of the published declarations.
   const transportTypes = readFileSync(join(staging, "dist", "transport.d.ts"), "utf8");
-  for (const member of ["finish", "acceptedRecords", "issue", "instrumentationFailure"]) {
+  for (const member of [
+    "finish",
+    "acceptedRecords",
+    "issue",
+    "instrumentationFailure",
+    "placeholderMarkers",
+    "placeholderSettled",
+    "sendsPlaceholders",
+    "rejectPlaceholders",
+  ]) {
     if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
       throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);
   }
@@ -430,6 +439,7 @@ run(
 );
 const installedPackageTests = [
   "sdk.test.ts",
+  "live-spans.test.ts",
   "evals.test.ts",
   "scorer-publication.test.ts",
   "attempt.test.ts",

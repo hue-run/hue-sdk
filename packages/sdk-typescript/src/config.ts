@@ -2,6 +2,8 @@ import type { HueOptions, SharedHueOptions } from "./types.js";
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 export const MAX_CONTENT_BYTES = 256 * 1024;
+/** Instrumentation scope of the client's own tracer and logger. */
+export const HUE_SCOPE = "@hue-run/sdk";
 
 /** Loopback hostnames that may use plain HTTP without opting in. */
 export function isLoopbackHost(hostname: string): boolean {
@@ -18,7 +20,10 @@ export function isInsecureOrigin(baseUrl: string): boolean {
 // API reference must not reference a name that is not part of the public entry points.
 export function validateOptions(options: HueOptions): HueOptions &
   Required<
-    Pick<SharedHueOptions, "captureContent" | "baseUrl" | "timeoutMillis" | "maxQueueBytes">
+    Pick<
+      SharedHueOptions,
+      "captureContent" | "baseUrl" | "timeoutMillis" | "maxQueueBytes" | "liveSpans"
+    >
   > & {
     /** Project key after validation; empty for a disabled client. */
     apiKey: string;
@@ -43,6 +48,7 @@ export function validateOptions(options: HueOptions): HueOptions &
       baseUrl: "https://app.hue.run",
       timeoutMillis: 10000,
       maxQueueBytes: 8 * 1024 * 1024,
+      liveSpans: false,
     };
   }
   if (typeof options.captureContent !== "boolean")
@@ -100,5 +106,9 @@ export function validateOptions(options: HueOptions): HueOptions &
     maxQueueBytes > 64 * 1024 * 1024
   )
     throw new TypeError("maxQueueBytes must be 1024–67108864");
-  return { ...options, baseUrl: url.origin, timeoutMillis, maxQueueBytes };
+  if (options.liveSpans !== undefined && typeof options.liveSpans !== "boolean")
+    throw new TypeError("liveSpans must be a boolean");
+  // Setup credentials send installer telemetry only, never in-progress placeholders.
+  const liveSpans = options.liveSpans !== false && !options.apiKey.startsWith("hue_setup_");
+  return { ...options, baseUrl: url.origin, timeoutMillis, maxQueueBytes, liveSpans };
 }

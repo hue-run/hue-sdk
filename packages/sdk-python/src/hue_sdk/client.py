@@ -26,7 +26,7 @@ from opentelemetry.util.types import AttributeValue
 
 from ._otel_compat import encode_logs
 from ._version import __version__
-from .processors import BoundedLogProcessor, BoundedSpanProcessor
+from .processors import HUE_TRACER_SCOPE, BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
 from .snapshots import snapshot_content
 from .transport import (
@@ -221,6 +221,8 @@ class Hue:
     providers. A provider Hue creates for the other signal shares the borrowed provider's
     resource, so spans and correlated logs report one ``service.name``; ``service_name``
     applies only when Hue creates both providers.
+    ``live_spans`` announces Hue helper and AI spans with placeholders while they run;
+    setup keys (``hue_setup_…``) never send them.
     """
 
     enabled: bool
@@ -244,9 +246,12 @@ class Hue:
         enabled: bool = True,
         max_queue_size: int = 2048,
         max_queue_bytes: int = 8 * 1024 * 1024,
+        live_spans: bool = True,
     ) -> None:
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be True or False.")
+        if not isinstance(live_spans, bool):
+            raise TypeError("live_spans must be True or False.")
         self.enabled = enabled
         self._pid = os.getpid()
         if enabled:
@@ -291,13 +296,21 @@ class Hue:
             self._owns_provider = False
             self._owns_logger_provider = False
             self.tracer_provider = trace.NoOpTracerProvider()
-            self.tracer = self.tracer_provider.get_tracer("hue-run")
+            self.tracer = self.tracer_provider.get_tracer(HUE_TRACER_SCOPE)
             self.logger_provider = NoOpLoggerProvider()
             self._logger = self.logger_provider.get_logger("hue-run")
             return
+        # Setup credentials accept metadata spans only; they never announce live spans.
+        if isinstance(api_key, str) and api_key.startswith("hue_setup_"):
+            live_spans = False
         try:
             self._setup(
-                service_name, tracer_provider, logger_provider, max_queue_size, max_queue_bytes
+                service_name,
+                tracer_provider,
+                logger_provider,
+                max_queue_size,
+                max_queue_bytes,
+                live_spans,
             )
         except Exception:
             self._closed = True
@@ -318,6 +331,7 @@ class Hue:
         logger_provider: LoggerProvider | None,
         max_queue_size: int,
         max_queue_bytes: int,
+        live_spans: bool,
     ) -> None:
         self._owns_provider = tracer_provider is None
         self._owns_logger_provider = logger_provider is None
@@ -351,6 +365,7 @@ class Hue:
             max_queue_size,
             max_queue_bytes,
             capture_content=self.capture_content,
+            live_spans=live_spans,
         )
         self._log_processor = BoundedLogProcessor(
             self._log_exporter,
@@ -361,7 +376,7 @@ class Hue:
         )
         sdk_tracer_provider.add_span_processor(self._span_processor)
         sdk_logger_provider.add_log_record_processor(self._log_processor)
-        self.tracer = self.tracer_provider.get_tracer("hue-run", __version__)
+        self.tracer = self.tracer_provider.get_tracer(HUE_TRACER_SCOPE, __version__)
         self._logger = self.logger_provider.get_logger("hue-run", __version__)
 
     def __repr__(self) -> str:
@@ -656,6 +671,7 @@ class Hue:
             queued_trace_bytes=span_bytes,
             queued_log_bytes=log_bytes,
             instrumentation_failures=issues,
+            live_spans_rejected=self._span_exporter.live_spans_rejected,
         )
 
     def verify_trace(

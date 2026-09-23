@@ -17,6 +17,9 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTrace
 class Receiver:
     url: str = ""
     delay_seconds: float = 0
+    # A receiver that predates live spans (an older Hue or a generic collector) omits the
+    # Hue-Pending-Spans header from its default trace acknowledgements.
+    legacy: bool = False
     requests: list[tuple[str, dict[str, str], bytes]] = field(default_factory=list)
     replies: deque[tuple[int, bytes, dict[str, str]]] = field(default_factory=deque)
     lock: Lock = field(default_factory=Lock)
@@ -90,6 +93,9 @@ def receiver():
                     )
                 else:
                     status, result, headers = 200, b"", {"Content-Type": "application/x-protobuf"}
+                    if self.path.endswith("/traces") and not state.legacy:
+                        # A current Hue marks every trace acknowledgement this way.
+                        headers["Hue-Pending-Spans"] = "1"
             time.sleep(state.delay_seconds)
             self.send_response(status)
             for key, value in headers.items():
