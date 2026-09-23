@@ -385,8 +385,8 @@ export type Evaluator = Omit<Scorer, "versions"> & {
 };
 /** An immutable published evaluator definition. */
 export type EvaluatorVersion = ScorerVersion & {
-  /** Owning evaluator ID. */
-  evaluatorId: string;
+  /** Owning evaluator ID when the server supplies it; older v1 responses may omit it. */
+  evaluatorId?: string;
 };
 /** Final state of a target execution. */
 export type TerminalState = "succeeded" | "error" | "cancelled";

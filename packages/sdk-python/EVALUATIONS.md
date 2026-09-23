@@ -37,8 +37,9 @@ For new registry code, use `create_eval_set`, `get_eval_set`, `list_eval_sets`,
 `add_eval_set_case`, and `freeze_eval_set_version`. Evaluators use
 `create_evaluator`, `get_evaluator`, `list_evaluators`,
 `publish_evaluator_version`, and `get_evaluator_version`. Their dictionaries
-include product fields such as `evalSetId`, `evalSetVersionId`, and
-`evaluatorId` alongside the existing v1 fields. These methods use the existing
+include product fields such as `evalSetId` and `evalSetVersionId` alongside the
+existing v1 fields. Evaluator versions include `evaluatorId` when the server
+supplies their owning identity; older v1 responses may omit it. These methods use the existing
 v1 paths; earlier method names remain callable for existing integrations.
 
 `builtin_scorers.exact_match()`, `builtin_scorers.includes(case_sensitive=True)` and `builtin_scorers.json_schema(schema)` return publishable declarations. Exact match preserves JSON types (`False` differs from `0`), object key order is irrelevant, and equivalent JSON numbers compare equally. Missing output/reference produces a skipped score, never zero. `None` is present JSON null; the exported `MISSING` sentinel represents intentional absence.

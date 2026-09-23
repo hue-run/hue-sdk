@@ -746,6 +746,10 @@ describe("installed evaluation API and runner contract", () => {
       expect(
         (await f.client.publishScorerVersion(scorer.id, builtins.exactMatch())).definition,
       ).toEqual(builtins.exactMatch());
+      // An older compatible v1 response does not promise its owning evaluator ID.
+      expect(
+        (await f.client.publishEvaluatorVersion(scorer.id, builtins.exactMatch())).evaluatorId,
+      ).toBeUndefined();
       expect(() => f.client.getExperiment("../../secret")).toThrow("UUID");
       await expect(
         f.client.addCase(dataset.versions[0].id, {
