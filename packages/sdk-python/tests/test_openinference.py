@@ -156,7 +156,11 @@ def test_openinference_responses_hosted_mcp_tool_exports_without_credentials(
     assert b"synthetic-oauth-token" not in telemetry
     assert b"synthetic-header-secret" not in telemetry
     if not capture_content:
+        # The instrumentor recorded the tool; metadata-only export keeps only its summary.
         assert "llm.tools.0.tool.json_schema" not in attributes
+        names = next(item.value for item in span.attributes if item.key == "hue.tool.names")
+        assert [value.string_value for value in names.array_value.values] == ["mcp"]
+        assert len(attributes["hue.tool.definitions.sha256"]) == 64
         return
     # The response echoes the tool with every field, so compare the fields that were sent.
     schema = json.loads(attributes["llm.tools.0.tool.json_schema"])

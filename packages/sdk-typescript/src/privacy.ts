@@ -4,7 +4,7 @@ import type { ReadableLogRecord } from "@opentelemetry/sdk-logs";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import type { HueOptions } from "./types.js";
 import { MAX_BODY_BYTES, MAX_CONTENT_BYTES } from "./config.js";
-import { scrubToolCredentials } from "./tool-definitions.js";
+import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions.js";
 
 /** Attribute keys (and their dotted children) removed in metadata-only mode. */
 export const contentPrefixes = [
@@ -123,8 +123,10 @@ function attributes<T extends Record<string, unknown>>(
   path: string,
   budget: RedactionBudget,
 ): T {
+  // Metadata-only export summarizes the tool definitions it removes by name and digest.
+  const summarized = options.captureContent ? source : withToolCatalogSummary(source);
   return Object.fromEntries(
-    Object.entries(source).flatMap(([key, value]) =>
+    Object.entries(summarized).flatMap(([key, value]) =>
       !options.captureContent && isContentKey(key)
         ? []
         : [[key, redactValue(scrubToolCredentials(key, value), `${path}.${key}`, options, budget)]],

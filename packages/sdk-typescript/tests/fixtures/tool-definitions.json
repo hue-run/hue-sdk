@@ -1,0 +1,45 @@
+{
+  "definitions": [
+    {
+      "type": "provider",
+      "name": "gmail",
+      "id": "openai.mcp",
+      "args": {
+        "serverLabel": "gmail",
+        "serverUrl": "https://mcp.example.test/gmail",
+        "authorization": "synthetic-oauth-token",
+        "headers": { "X-Api-Key": "synthetic-header-secret" },
+        "allowedTools": ["create_draft", "search_threads"]
+      }
+    },
+    {
+      "type": "function",
+      "name": "fetch_page",
+      "description": "Fetch a page — résumé ✓ \"quoted\"\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string", "maxLength": 2048 },
+          "headers": { "type": "object" },
+          "timeout": { "type": "number", "minimum": 0.5, "maximum": 1.0, "default": 1e-7 },
+          "retries": { "type": "integer", "maximum": 100, "multipleOf": 1e21 },
+          "offset": { "type": "integer", "maximum": 12345678901234567890, "minimum": -0.0 }
+        },
+        "required": ["url"]
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "lookup",
+        "parameters": {
+          "type": "object",
+          "properties": { "～": {}, "😀": {}, "é": {}, "z": {}, "A": {} }
+        }
+      }
+    },
+    { "type": "web_search_preview" }
+  ],
+  "names": ["gmail", "fetch_page", "lookup", "web_search_preview"],
+  "sha256": "e9b3dfc8a94d544d0f9d14012d868d73bb1a86d8f2e3b5f5813322df270a54c3"
+}

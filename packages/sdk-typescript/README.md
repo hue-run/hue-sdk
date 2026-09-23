@@ -256,6 +256,16 @@ object keep their schemas, so a tool that takes a `headers` argument is still de
 definition nested more than 256 levels deep rejects its record. Sensitive `default`, `const`,
 `examples` and `enum` values under credential-named schema parameters are redacted too.
 
+With `captureContent: false`, export removes tool definitions but keeps a summary of them on the
+same record: `hue.tool.names` lists each definition's `name` (Chat Completions `function.name`,
+or the `type` of an unnamed built-in tool such as `mcp`) in order, and
+`hue.tool.definitions.sha256` is the lowercase hex SHA-256 of the
+[RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) canonical JSON of the credential-scrubbed
+definition list. The digest is the same in both SDKs and does not change when a credential
+rotates. Only definitions another integration recorded can be summarized: `hueTelemetry(hue)` with
+`captureContent: false` records none, whereas an application whose AI SDK integration records
+inputs and exports through Hue's attached processors gets the summary.
+
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
 application error marks the span with `error.type` (the error's `name`), an ERROR status and an
