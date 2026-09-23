@@ -201,6 +201,9 @@ class HueSpan:
         byte_size: int | None,
         name: str | None,
     ) -> None:
+        # Nothing to attach to: report once, before hashing or validating anything.
+        if not self.otel_span.is_recording():
+            raise ValueError("File records require a recording span.")
         if role not in _FILE_ROLES:
             raise ValueError("Invalid file role.")
         if not _is_text_label(media_type):
@@ -237,8 +240,6 @@ class HueSpan:
                 attributes["hue.file.name"] = name
             else:
                 self._client._record_issue()
-        if not self.otel_span.is_recording():
-            raise ValueError("File records require a recording span.")
         self.otel_span.add_event("hue.file", attributes)
 
     def log_inference(

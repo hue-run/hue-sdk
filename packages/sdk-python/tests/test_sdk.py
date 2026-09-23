@@ -251,6 +251,29 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
     assert body.encode() not in telemetry
 
 
+def test_record_file_on_an_ended_span_counts_once_without_hashing(receiver, monkeypatch):
+    import hue_sdk.client as client_module
+
+    hashed: list[bytes] = []
+    real_sha256 = hashlib.sha256
+
+    def counting(data=b"", *args, **kwargs):
+        hashed.append(bytes(data))
+        return real_sha256(data, *args, **kwargs)
+
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.span("request") as span:
+            pass
+        monkeypatch.setattr(client_module.hashlib, "sha256", counting)
+        # The span has ended: one counted omission, and the bytes are never hashed.
+        span.record_file(role="input", media_type="text/plain", data=b"bytes", name=" ")
+        assert hue.export_status.instrumentation_failures == 1
+        assert hashed == []
+        hue.force_flush()
+    (request,) = receiver.spans()
+    assert [event.name for event in request.events] == []
+
+
 def test_disabled_client_does_not_count_invalid_mcp(receiver):
     hue = Hue(receiver.url, KEY, capture_content=False, enabled=False)
     with hue.tool("get_thread", mcp={"name": ""}):
