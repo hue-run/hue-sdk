@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import random
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -93,8 +95,22 @@ def _product_run_fields(value: Any, kind: str) -> Any:
     return result
 
 
+def _short_retry_after(response: requests.Response) -> int | None:
+    # Hue sends a short Retry-After only when it refused the request before acting on it, such as
+    # a busy key check, so repeating any method is safe.
+    header = response.headers.get("Retry-After", "")
+    if response.status_code not in (429, 503) or not (header.isascii() and header.isdigit()):
+        return None
+    seconds = int(header)
+    return seconds if seconds <= 5 else None
+
+
 class EvaluationClient:
     """Project-key v1 client. Mutations never retry implicitly; retain their idempotency keys.
+
+    The one exception is a request Hue refused before acting on it with a short ``Retry-After``
+    (HTTP 503 or 429, at most 5 seconds), such as a busy key check; it is sent again up to four
+    times.
 
     ``EvaluationClient(api_key=...)`` uses Hue Cloud. ``base_url`` overrides the origin;
     existing ``EvaluationClient(base_url, api_key)`` calls remain supported, and a bare key
@@ -131,30 +147,36 @@ class EvaluationClient:
     def _request(self, method: str, path: str, body: Any = MISSING) -> Any:
         payload = None if body is MISSING else encode(json_value(body, 1024 * 1024))
         try:
-            with requests.request(
-                method,
-                f"{self.base_url}/api/v1{path}",
-                data=payload,
-                headers={
-                    **self._headers,
-                    **({"Content-Type": "application/json"} if payload is not None else {}),
-                },
-                timeout=self._timeout,
-                allow_redirects=False,
-                stream=True,
-            ) as response:
-                if not 200 <= response.status_code < 300:
-                    raise HueApiError(response.status_code)
-                chunks: list[bytes] = []
-                size = 0
-                for chunk in response.iter_content(chunk_size=8192):
-                    size += len(chunk)
-                    if size > 4 * 1024 * 1024:
-                        raise HueApiError()
-                    chunks.append(chunk)
-                return json.loads(
-                    b"".join(chunks).decode("utf-8"), parse_constant=_invalid_constant
-                )
+            attempt = 1
+            while True:
+                with requests.request(
+                    method,
+                    f"{self.base_url}/api/v1{path}",
+                    data=payload,
+                    headers={
+                        **self._headers,
+                        **({"Content-Type": "application/json"} if payload is not None else {}),
+                    },
+                    timeout=self._timeout,
+                    allow_redirects=False,
+                    stream=True,
+                ) as response:
+                    delay = _short_retry_after(response) if attempt < 5 else None
+                    if delay is None:
+                        if not 200 <= response.status_code < 300:
+                            raise HueApiError(response.status_code)
+                        chunks: list[bytes] = []
+                        size = 0
+                        for chunk in response.iter_content(chunk_size=8192):
+                            size += len(chunk)
+                            if size > 4 * 1024 * 1024:
+                                raise HueApiError()
+                            chunks.append(chunk)
+                        return json.loads(
+                            b"".join(chunks).decode("utf-8"), parse_constant=_invalid_constant
+                        )
+                time.sleep(delay * (1 + random.random() / 2))
+                attempt += 1
         except HueApiError:
             raise
         except (requests.RequestException, ValueError, UnicodeError, RecursionError):

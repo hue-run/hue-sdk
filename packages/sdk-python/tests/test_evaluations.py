@@ -336,6 +336,59 @@ def options(receiver, tmp_path, target, *, persist=True, evidence=None):
     )
 
 
+def test_short_retry_after_refusals_are_sent_again_and_others_fail_at_once():
+    calls: list[str] = []
+    busy = {"remaining": 2}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = urlsplit(self.path).path
+            calls.append(path)
+            if path.endswith("/projects/current") and busy["remaining"] > 0:
+                busy["remaining"] -= 1
+                self.reply(503, {"error": "busy"}, {"Retry-After": "0"})
+            elif path.endswith("/projects/current"):
+                self.reply(200, {"id": "synthetic-project"})
+            elif path.endswith("/datasets"):
+                self.reply(503, {"error": "busy"}, {"Retry-After": "60"})
+            else:
+                self.reply(503, {"error": "unavailable"})
+
+        def reply(self, status, value, headers=None):
+            payload = json.dumps(value).encode()
+            self.send_response(status)
+            for name, header in (headers or {}).items():
+                self.send_header(name, header)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = EvaluationClient(f"http://127.0.0.1:{server.server_port}", "synthetic-key")
+        assert client.check_connection() == {"id": "synthetic-project"}
+        assert calls == ["/api/v1/projects/current"] * 3
+        for refused in (client.list_datasets, lambda: client.get_dataset(str(uuid4()))):
+            with pytest.raises(HueApiError) as failure:
+                refused()
+            assert failure.value.status == 503
+        busy["remaining"] = 10
+        calls.clear()
+        with pytest.raises(HueApiError):
+            client.check_connection()
+        assert len(calls) == 5
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
 def test_product_registry_methods_use_v1_paths_and_preserve_customer_fields(evaluation_receiver):
     receiver = evaluation_receiver
     client = EvaluationClient(receiver.url, "synthetic-key")

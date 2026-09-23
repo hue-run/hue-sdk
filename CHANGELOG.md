@@ -398,6 +398,12 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+#### Fixed
+
+- `EvaluationClient` sends a request again, up to four times, when Hue refused it before acting on
+  it with a short `Retry-After` (HTTP 503 or 429, at most 5 seconds). Hue does this when its key
+  check is busy, which parallel cases can trigger; such requests previously failed the run.
+
 ### [0.3.0] - 2026-09-23
 
 #### Added
