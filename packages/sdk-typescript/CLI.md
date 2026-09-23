@@ -339,8 +339,8 @@ the same version to `latest`, and clean-project literal `@latest` smoke remain s
 and prints Hue's verdicts. It is the command-line form of `runSimulation()` (one-shot) and
 `runLocalAgent()` (worker): the agent, its prompts and its provider credentials stay in the local
 process, Hue creates one isolated simulated world per case, and Hue-owned outcome checks grade
-the sealed world. Hue never executes the agent. `HUE_API_KEY` must be a **Tracing and
-evaluations** project key (a **Tracing only** key cannot read Scenarios or create experiments);
+the sealed world. Hue never executes the agent. `HUE_API_KEY` must be a **Read and
+write** project key (a **Read** or **Tracing only** key cannot read Scenarios or create experiments);
 the CLI never prints it. The optional `zod` peer of `@hue-run/sdk/evals` must be installed.
 
 Write an adapter module that hands the case inputs and the world's tools or MCP connection to
