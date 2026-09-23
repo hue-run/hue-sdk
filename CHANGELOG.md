@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.5.1] - 2026-09-23
+
 #### Changed
 
 - `hue login` asks for one **Read and write** key and stores it as both `HUE_API_KEY` and
