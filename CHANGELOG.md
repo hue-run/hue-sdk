@@ -10,6 +10,22 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.6.0] - 2026-09-23
+
+#### Added
+
+- Product-named eval set, evaluator, run and scoring methods on `EvaluationClient`, using the
+  existing v1 paths. Responses retain both field names, and a run ID remains distinct from its
+  scoring ID. Existing client methods and local runners remain callable.
+- `hue eval --case` selects a published case by name, ID or URL; `--scenario` remains an alias for
+  existing scripts.
+
+#### Deprecated
+
+- Older low-level evaluation client method names and the `--scenario` CLI flag now have product
+  replacements. They remain supported for at least two subsequent `0.MINOR` releases. The v1
+  response aliases remain available while the server compatibility window is open.
+
 ### [0.5.1] - 2026-09-23
 
 #### Changed
@@ -364,6 +380,20 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+### [0.3.0] - 2026-09-23
+
+#### Added
+
+- Product-named eval set, evaluator, run and scoring methods on `EvaluationClient`, using the
+  existing v1 paths. Responses retain both field names, and a run ID remains distinct from its
+  scoring ID. Existing client methods and local runners remain callable.
+
+#### Deprecated
+
+- Older low-level evaluation client method names now have product replacements. They remain
+  supported for at least two subsequent `0.MINOR` releases. The v1 response aliases remain
+  available while the server compatibility window is open.
 
 #### Changed
 

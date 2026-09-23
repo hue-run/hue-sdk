@@ -57,7 +57,7 @@ Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: f
 the same provider-aware world lifecycle and uncertainty rules. A matching Hue API deployment is
 required. Public package tests exercise local control-plane responses and connection-bundle
 handling; they do not call an issued provider facade. These tests do not call the official Gmail
-service or establish universal Gmail or Slack parity. Python remains at `0.2.3` and does not
+service or establish universal Gmail or Slack parity. Python does not
 include a native local-worker implementation.
 
 ## Scorer forward compatibility
