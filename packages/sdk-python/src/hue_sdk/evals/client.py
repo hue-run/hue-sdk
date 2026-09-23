@@ -51,8 +51,14 @@ def _product_registry_fields(value: Any) -> Any:
 
 _RUN_FIELD_ALIASES = (
     ("datasetId", "evalSetId"),
+    ("datasetName", "evalSetName"),
+    ("datasetDisplayName", "evalSetDisplayName"),
+    ("datasetVersion", "evalSetVersion"),
     ("datasetVersionId", "evalSetVersionId"),
+    ("datasetVersionIds", "evalSetVersionIds"),
     ("scorerId", "evaluatorId"),
+    ("scorerName", "evaluatorName"),
+    ("scorerVersion", "evaluatorVersion"),
     ("scorerVersionId", "evaluatorVersionId"),
     ("scorerVersionIds", "evaluatorVersionIds"),
     ("scorerVersions", "evaluatorVersions"),
