@@ -232,18 +232,21 @@ class _ValueBudget:
     def permitted(self, values: Any) -> Any:
         """Apply the content policy: metadata-only mode drops recognized content keys."""
         source = values or {}
-        if isinstance(source, Mapping):
+        if not self.capture_content and isinstance(source, Mapping):
             source = {
-                key: scrub_tool_credentials(key, item) if isinstance(key, str) else item
+                key: item
                 for key, item in source.items()
-                if self.capture_content or not (isinstance(key, str) and is_content_key(key))
+                if not (isinstance(key, str) and is_content_key(key))
             }
         return source
 
     def attributes(self, values: Any, dropped: int = 0) -> BoundedAttributes:
-        result = BoundedAttributes(
-            attributes=self.value(self.permitted(values)), immutable=True, extended_attributes=True
-        )
+        # Scrub the copy admission already bounded, so the application thread never parses
+        # more than one record's budget of tool-definition JSON.
+        copied = self.value(self.permitted(values))
+        if isinstance(copied, dict):
+            copied = {key: scrub_tool_credentials(key, item) for key, item in copied.items()}
+        result = BoundedAttributes(attributes=copied, immutable=True, extended_attributes=True)
         result.dropped += dropped
         return result
 

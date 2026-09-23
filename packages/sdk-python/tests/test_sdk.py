@@ -725,6 +725,30 @@ def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
     assert b"synthetic-header-secret" not in telemetry
 
 
+def test_oversized_tool_definition_is_dropped_without_being_parsed(receiver, monkeypatch):
+    from hue_sdk import _tool_definitions
+
+    parsed: list[int] = []
+    original = _tool_definitions._parse
+    monkeypatch.setattr(
+        _tool_definitions, "_parse", lambda text: parsed.append(len(text)) or original(text)
+    )
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        tracer = provider.get_tracer("third-party")
+        oversized = tracer.start_span("oversized")
+        # Larger than one export request: admission drops the record before the scrub runs.
+        oversized.set_attribute("input.value", json.dumps({"tools": [], "input": "x" * 1_100_000}))
+        oversized.end()
+        small = tracer.start_span("small")
+        small.set_attribute("input.value", json.dumps({"tools": [{"authorization": "secret"}]}))
+        small.end()
+        assert not hue.force_flush()
+        assert hue.export_status.dropped_trace_records == 1
+    assert [span.name for span in receiver.spans()] == ["small"]
+    assert parsed and max(parsed) < 1_000
+
+
 def test_tool_definition_too_deeply_nested_to_inspect_drops_its_record(receiver):
     provider = TracerProvider()
     with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
