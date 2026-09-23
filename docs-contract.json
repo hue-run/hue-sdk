@@ -33,8 +33,8 @@
       },
       {
         "boundary": "Requires a Hue deployment that answers trace exports with `Hue-Pending-Spans: 1` (app.hue.run does). A receiver without that header, an older Hue or a generic collector, gets placeholders only in the first export that carries them: the SDK then records one warning and switches live spans off for that client. Turn `liveSpans` / `live_spans` off to send none at all.",
-        "path": "Live spans (unreleased)",
-        "verifiedSupport": "Placeholders for running Hue and AI spans, sent by the Hue transports"
+        "path": "Live spans",
+        "verifiedSupport": "Placeholders for running Hue and AI spans, sent by the Hue transports from TypeScript `0.7.0` and Python `0.4.0`"
       }
     ],
     "sections": [
@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:30852c5ff0813b5c309f089583414c57a66cba0b8ed4233946255cc6c46046fa",
+    "sha256": "sha256:8ae6770dcb1f2c702cac414e823dc6ccfdae9852bd6009f9f64b013df64f8880",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
