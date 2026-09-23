@@ -43,9 +43,12 @@ def evaluation_receiver():
         project_id=str(uuid4()),
         experiment_id=str(uuid4()),
         version_id=str(uuid4()),
+        dataset_id=str(uuid4()),
         case_id=str(uuid4()),
         run_id=str(uuid4()),
         scorer_id=str(uuid4()),
+        evaluator_id=str(uuid4()),
+        evaluator_version_id=str(uuid4()),
         execution=None,
         completion=None,
         subject=None,
@@ -69,8 +72,66 @@ def evaluation_receiver():
     ]
 
     def dispatch(method, path, body):
+        registry_version = {
+            "id": state.version_id,
+            "datasetId": state.dataset_id,
+            "version": 1,
+            "revision": 1,
+            "frozenAt": None,
+            "contentDigest": None,
+        }
+        registry_set = {
+            "id": state.dataset_id,
+            "name": "Synthetic set",
+            "slug": "synthetic-set",
+            "versions": [registry_version],
+        }
+        registry_case = {
+            "id": state.case_id,
+            "datasetVersionId": state.version_id,
+            "externalKey": "one",
+            "inputs": {"datasetId": "customer-input"},
+            "metadata": {"scorerId": "customer-metadata"},
+        }
+        evaluator_version = {
+            "id": state.evaluator_version_id,
+            "scorerId": state.evaluator_id,
+            "contentDigest": "b" * 64,
+            "definition": {"kind": "builtin", "scorerId": "customer-definition"},
+        }
+        evaluator = {
+            "id": state.evaluator_id,
+            "name": "Synthetic evaluator",
+            "slug": "synthetic-evaluator",
+            "versions": [evaluator_version],
+        }
         if "/otlp/" in path:
             return (400, {}) if state.fail_otlp else (200, b"")
+        if path.endswith("/datasets"):
+            return 200, {
+                "items": [registry_set],
+                "nextCursor": None,
+            } if method == "GET" else registry_set
+        if path.endswith(f"/datasets/{state.dataset_id}"):
+            return 200, registry_set
+        if path.endswith(f"/datasets/{state.dataset_id}/versions"):
+            return 200, registry_version
+        if path.endswith(f"/dataset-versions/{state.version_id}/cases"):
+            return (
+                (200, {"items": [registry_case], "nextCursor": None})
+                if method == "GET"
+                else (200, {"item": registry_case, "version": registry_version})
+            )
+        if path.endswith(f"/dataset-versions/{state.version_id}/freeze"):
+            return 200, {**registry_version, "frozenAt": "2026-09-15T00:00:00Z"}
+        if path.endswith("/scorers"):
+            return 200, {"items": [evaluator], "nextCursor": None} if method == "GET" else evaluator
+        if path.endswith(f"/scorers/{state.evaluator_id}"):
+            return 200, evaluator
+        if path.endswith(f"/scorers/{state.evaluator_id}/versions"):
+            return 200, evaluator_version
+        if path.endswith(f"/scorer-versions/{state.evaluator_version_id}"):
+            return 200, evaluator_version
         if path.endswith("/projects/current"):
             return 200, {
                 "id": state.project_id,
@@ -90,6 +151,7 @@ def evaluation_receiver():
         if path.endswith(f"/dataset-versions/{state.version_id}"):
             return 200, {
                 "id": state.version_id,
+                "datasetId": state.dataset_id,
                 "frozenAt": "2026-09-15T00:00:00Z",
                 "contentDigest": "a" * 64,
             }
@@ -230,6 +292,50 @@ def options(receiver, tmp_path, target, *, persist=True, evidence=None):
         checkpoint_directory=tmp_path / "checkpoints",
         persist_result_content=persist,
         trace_evidence=evidence or TraceEvidence("required"),
+    )
+
+
+def test_product_registry_methods_use_v1_paths_and_preserve_customer_fields(evaluation_receiver):
+    receiver = evaluation_receiver
+    client = EvaluationClient(receiver.url, "synthetic-key")
+    created = client.create_eval_set(name="Synthetic set", slug="synthetic-set")
+    assert created["versions"][0]["evalSetId"] == receiver.dataset_id
+    assert (
+        client.get_eval_set(receiver.dataset_id)["versions"][0]["evalSetId"] == receiver.dataset_id
+    )
+    assert client.list_eval_sets()["items"][0]["id"] == receiver.dataset_id
+    assert client.create_eval_set_version(receiver.dataset_id)["evalSetId"] == receiver.dataset_id
+    assert client.get_eval_set_version(receiver.version_id)["evalSetId"] == receiver.dataset_id
+    listed = client.list_eval_set_cases(receiver.version_id)["items"][0]
+    assert listed["evalSetVersionId"] == receiver.version_id
+    assert listed["inputs"] == {"datasetId": "customer-input"}
+    added = client.add_eval_set_case(
+        receiver.version_id,
+        expected_revision=1,
+        external_key="one",
+        inputs={"datasetId": "customer-input"},
+    )
+    assert added["item"]["evalSetVersionId"] == receiver.version_id
+    assert added["version"]["evalSetId"] == receiver.dataset_id
+    assert client.freeze_eval_set_version(receiver.version_id, 1)["frozenAt"]
+    assert (
+        client.create_evaluator(name="Synthetic evaluator", slug="synthetic-evaluator")["id"]
+        == receiver.evaluator_id
+    )
+    assert (
+        client.get_evaluator(receiver.evaluator_id)["versions"][0]["evaluatorId"]
+        == receiver.evaluator_id
+    )
+    assert client.list_evaluators()["items"][0]["id"] == receiver.evaluator_id
+    published = client.publish_evaluator_version(receiver.evaluator_id, builtins.exact_match())
+    assert published["evaluatorId"] == receiver.evaluator_id
+    assert published["definition"]["scorerId"] == "customer-definition"
+    assert (
+        client.get_evaluator_version(receiver.evaluator_version_id)["evaluatorId"]
+        == receiver.evaluator_id
+    )
+    assert all(
+        "/eval-sets" not in path and "/evaluators" not in path for _, path, _ in receiver.requests
     )
 
 
@@ -733,6 +839,7 @@ from hue_sdk import Hue
 from hue_sdk.evals import EvaluationClient, TraceEvidence, run_experiment, builtins, score_locally
 assert os.environ['CONSUMER'] in hue_sdk.__file__
 client = EvaluationClient(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'])
+assert client.get_eval_set_version(os.environ['VERSION'])['evalSetId'] == os.environ['DATASET']
 with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=False) as hue:
     report = run_experiment(client=client, hue=hue, experiment_id=os.environ['EXPERIMENT'],
         target=lambda inputs, context: None, checkpoint_directory='checkpoints',
@@ -752,6 +859,8 @@ print('installed evaluation wheel passed')
             "HUE_BASE_URL": evaluation_receiver.url,
             "HUE_API_KEY": "synthetic-wheel-key",
             "EXPERIMENT": evaluation_receiver.experiment_id,
+            "VERSION": evaluation_receiver.version_id,
+            "DATASET": evaluation_receiver.dataset_id,
             "CONSUMER": str(consumer),
         },
         check=True,

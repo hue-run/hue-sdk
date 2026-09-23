@@ -23,6 +23,32 @@ class HueApiError(RuntimeError):
         )
 
 
+_REGISTRY_FIELD_ALIASES = (
+    ("datasetId", "evalSetId"),
+    ("datasetVersionId", "evalSetVersionId"),
+    ("scorerId", "evaluatorId"),
+    ("scorerVersionId", "evaluatorVersionId"),
+)
+_REGISTRY_ENVELOPES = frozenset(("items", "item", "versions", "version"))
+
+
+def _product_registry_fields(value: Any) -> Any:
+    """Add product names only to Hue envelopes, leaving customer JSON untouched."""
+    if isinstance(value, list):
+        return [_product_registry_fields(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = dict(value)
+    for key in _REGISTRY_ENVELOPES & result.keys():
+        result[key] = _product_registry_fields(result[key])
+    for legacy, product in _REGISTRY_FIELD_ALIASES:
+        if legacy in result:
+            if product in result and result[product] != result[legacy]:
+                raise HueApiError()
+            result[product] = result[legacy]
+    return result
+
+
 class EvaluationClient:
     """Project-key v1 client. Mutations never retry implicitly; retain their idempotency keys.
 
@@ -178,6 +204,75 @@ class EvaluationClient:
 
     def get_scorer_version(self, version_id: str) -> dict[str, Any]:
         return self._request("GET", f"/scorer-versions/{uuid(version_id)}")
+
+    def create_eval_set(self, *, name: str, slug: str, description: str = "") -> dict[str, Any]:
+        return _product_registry_fields(
+            self.create_dataset(name=name, slug=slug, description=description)
+        )
+
+    def get_eval_set(self, eval_set_id: str) -> dict[str, Any]:
+        return _product_registry_fields(self.get_dataset(eval_set_id))
+
+    def list_eval_sets(self, *, after: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return _product_registry_fields(self.list_datasets(after=after, limit=limit))
+
+    def create_eval_set_version(
+        self, eval_set_id: str, *, from_version_id: str | None = None
+    ) -> dict[str, Any]:
+        return _product_registry_fields(
+            self.create_dataset_version(eval_set_id, from_version_id=from_version_id)
+        )
+
+    def get_eval_set_version(self, version_id: str) -> dict[str, Any]:
+        return _product_registry_fields(self.get_dataset_version(version_id))
+
+    def list_eval_set_cases(
+        self, version_id: str, *, after: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        return _product_registry_fields(self.list_cases(version_id, after=after, limit=limit))
+
+    def add_eval_set_case(
+        self,
+        version_id: str,
+        *,
+        expected_revision: int,
+        external_key: str,
+        inputs: Any,
+        expected: Any = MISSING,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return _product_registry_fields(
+            self.add_case(
+                version_id,
+                expected_revision=expected_revision,
+                external_key=external_key,
+                inputs=inputs,
+                expected=expected,
+                metadata=metadata,
+            )
+        )
+
+    def freeze_eval_set_version(self, version_id: str, expected_revision: int) -> dict[str, Any]:
+        return _product_registry_fields(self.freeze_dataset_version(version_id, expected_revision))
+
+    def create_evaluator(self, *, name: str, slug: str, description: str = "") -> dict[str, Any]:
+        return _product_registry_fields(
+            self.create_scorer(name=name, slug=slug, description=description)
+        )
+
+    def get_evaluator(self, evaluator_id: str) -> dict[str, Any]:
+        return _product_registry_fields(self.get_scorer(evaluator_id))
+
+    def list_evaluators(self, *, after: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return _product_registry_fields(self.list_scorers(after=after, limit=limit))
+
+    def publish_evaluator_version(
+        self, evaluator_id: str, definition: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _product_registry_fields(self.publish_scorer_version(evaluator_id, definition))
+
+    def get_evaluator_version(self, version_id: str) -> dict[str, Any]:
+        return _product_registry_fields(self.get_scorer_version(version_id))
 
     def create_experiment(
         self,

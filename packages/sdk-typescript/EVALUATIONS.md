@@ -70,6 +70,15 @@ try {
 }
 ```
 
+For new registry code, use `createEvalSet`, `getEvalSet`, `listEvalSets`,
+`createEvalSetVersion`, `getEvalSetVersion`, `listEvalSetCases`, `addEvalSetCase`,
+and `freezeEvalSetVersion`. Evaluators use `createEvaluator`, `getEvaluator`,
+`listEvaluators`, `publishEvaluatorVersion`, and `getEvaluatorVersion`. These
+methods return product fields such as `evalSetId` and `evalSetVersionId` alongside
+the existing v1 fields. Evaluator versions include `evaluatorId` when the server
+supplies their owning identity; older v1 responses may omit it. They use the existing v1 paths;
+the earlier method names remain callable for existing integrations.
+
 Create another experiment with the same frozen version and different `config` to compare configurations. The runner reads the exact experiment case/version and scorer definitions; it never resolves a mutable latest version. `rescore` accepts an existing evaluation-run ID and has no target callback. Subject IDs refer to immutable saved outputs and trace evidence.
 
 `rescore` preserves terminal scores already recorded for each item and evaluator version,
