@@ -49,6 +49,7 @@ def evaluation_receiver():
         scorer_id=str(uuid4()),
         evaluator_id=str(uuid4()),
         evaluator_version_id=str(uuid4()),
+        result_id=str(uuid4()),
         execution=None,
         completion=None,
         subject=None,
@@ -68,7 +69,12 @@ def evaluation_receiver():
         lock=Lock(),
     )
     state.versions = [
-        {"id": state.scorer_id, "contentDigest": "b" * 64, "definition": builtins.exact_match()}
+        {
+            "id": state.scorer_id,
+            "scorerId": state.evaluator_id,
+            "contentDigest": "b" * 64,
+            "definition": builtins.exact_match(),
+        }
     ]
 
     def dispatch(method, path, body):
@@ -139,6 +145,8 @@ def evaluation_receiver():
                 "name": "Synthetic",
                 "slug": "synthetic",
             }
+        if path.endswith("/experiments") and method == "POST":
+            return 200, {"id": state.experiment_id, "evaluationRunId": state.run_id}
         if path.endswith(f"/experiments/{state.experiment_id}"):
             return 200, {
                 "id": state.experiment_id,
@@ -198,6 +206,8 @@ def evaluation_receiver():
                 state.execution["state"] = body["state"]
                 state.subject = {
                     "id": state.completion["subjectId"],
+                    "experimentId": state.experiment_id,
+                    "datasetVersionId": state.version_id,
                     "inputs": "sensitive-input",
                     "hasOutput": "output" in body,
                     **({"output": body["output"]} if "output" in body else {}),
@@ -214,6 +224,17 @@ def evaluation_receiver():
             return 200, state.completion
         if "/experiment-executions/" in path:
             return 200, state.execution
+        if path.endswith("/results") and method == "GET":
+            return 200, {
+                "items": [
+                    {
+                        "id": state.result_id,
+                        "itemId": state.case_id,
+                        "scorerVersionId": state.scorer_id,
+                    }
+                ],
+                "nextCursor": None,
+            }
         if path.endswith("/results"):
             key = body["idempotencyKey"]
             if key not in state.scores:
@@ -229,6 +250,26 @@ def evaluation_receiver():
         if path.endswith("/evaluation-runs") and method == "POST":
             state.historical = {"id": str(uuid4()), "itemId": str(uuid4())}
             return 200, {"id": state.historical["id"]}
+        if path.endswith("/evaluation-runs") and method == "GET":
+            return 200, {
+                "items": [
+                    {
+                        "id": state.historical["id"] if state.historical else state.run_id,
+                        "experimentId": state.experiment_id,
+                    }
+                ],
+                "nextCursor": None,
+            }
+        if path.endswith(f"/evaluation-results/{state.result_id}"):
+            return 200, {
+                "id": state.result_id,
+                "itemId": state.case_id,
+                "runId": state.historical["id"] if state.historical else state.run_id,
+                "scorerVersionId": state.scorer_id,
+                "state": "scored",
+                "metrics": [],
+                "evidence": {"runId": "customer-evidence"},
+            }
         if "/evaluation-subjects/" in path:
             return 200, state.subject
         if state.historical and f"/evaluation-runs/{state.historical['id']}" in path:
@@ -336,6 +377,80 @@ def test_product_registry_methods_use_v1_paths_and_preserve_customer_fields(eval
     )
     assert all(
         "/eval-sets" not in path and "/evaluators" not in path for _, path, _ in receiver.requests
+    )
+
+
+def test_product_run_and_scoring_methods_keep_distinct_ids(evaluation_receiver):
+    receiver = evaluation_receiver
+    client = EvaluationClient(receiver.url, "synthetic-key")
+    created = client.create_run(
+        idempotency_key=str(uuid4()),
+        name="Run",
+        eval_set_version_id=receiver.version_id,
+        evaluator_version_ids=[receiver.scorer_id],
+        config={"experimentId": "customer-config"},
+    )
+    assert created["scoringId"] == receiver.run_id
+    body = json.loads(receiver.requests[-1][2])
+    assert body["evalSetVersionId"] == receiver.version_id
+    assert body["evaluatorVersionIds"] == [receiver.scorer_id]
+    assert body["config"] == {"experimentId": "customer-config"}
+    run = client.get_run(receiver.experiment_id)
+    assert run["evalSetVersionId"] == receiver.version_id
+    assert run["scoring"]["evaluatorVersions"][0]["evaluatorId"] == receiver.evaluator_id
+    assert run["config"] == {"answer": None}
+    assert client.list_run_items(receiver.experiment_id)["items"][0]["id"] == receiver.case_id
+    case = client.get_run_case(receiver.experiment_id, receiver.case_id)
+    assert case["evalSetVersionId"] == receiver.version_id
+    assert case["inputs"] == "sensitive-input"
+    execution = client.start_run_execution(
+        receiver.experiment_id, receiver.case_id, idempotency_key=str(uuid4())
+    )
+    assert client.get_run_execution(execution["id"])["id"] == execution["id"]
+    completion = client.complete_run_execution(
+        execution["id"], {"idempotencyKey": str(uuid4()), "state": "succeeded"}
+    )
+    assert completion["subjectId"] == receiver.subject["id"]
+    assert client.finish_run(receiver.experiment_id, str(uuid4()))["id"] == receiver.experiment_id
+    scoring = client.create_scoring(
+        idempotency_key=str(uuid4()),
+        name="Scoring",
+        subject_ids=[receiver.subject["id"]],
+        evaluator_version_ids=[receiver.scorer_id],
+    )
+    assert json.loads(receiver.requests[-1][2])["evaluatorVersionIds"] == [receiver.scorer_id]
+    assert (
+        client.get_scoring(scoring["id"])["evaluatorVersions"][0]["evaluatorId"]
+        == receiver.evaluator_id
+    )
+    assert client.list_scorings()["items"][0]["runId"] == receiver.experiment_id
+    assert (
+        client.list_scoring_items(scoring["id"])["items"][0]["subjectId"] == receiver.subject["id"]
+    )
+    subject = client.get_scoring_subject(receiver.subject["id"])
+    assert subject["runId"] == receiver.experiment_id
+    assert subject["evalSetVersionId"] == receiver.version_id
+    result = {
+        "evaluationItemId": receiver.case_id,
+        "evaluatorVersionId": receiver.scorer_id,
+        "state": "scored",
+        "metrics": [],
+        "evidence": {"runId": "customer-evidence"},
+    }
+    assert client.submit_scoring_results(
+        scoring["id"], idempotency_key=str(uuid4()), results=[result]
+    )["ids"]
+    assert json.loads(receiver.requests[-1][2])["results"] == [result]
+    assert (
+        client.list_scoring_results(scoring["id"])["items"][0]["evaluatorVersionId"]
+        == receiver.scorer_id
+    )
+    stored = client.get_scoring_result(receiver.result_id)
+    assert stored["scoringId"] == scoring["id"]
+    assert stored["evidence"] == {"runId": "customer-evidence"}
+    assert all(
+        "/api/v1/runs" not in path and "/api/v1/scorings" not in path
+        for _, path, _ in receiver.requests
     )
 
 
@@ -840,6 +955,9 @@ from hue_sdk.evals import EvaluationClient, TraceEvidence, run_experiment, built
 assert os.environ['CONSUMER'] in hue_sdk.__file__
 client = EvaluationClient(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'])
 assert client.get_eval_set_version(os.environ['VERSION'])['evalSetId'] == os.environ['DATASET']
+assert client.get_run(os.environ['EXPERIMENT'])['evalSetVersionId'] == os.environ['VERSION']
+assert client.create_run(idempotency_key='installed-run', name='Installed run',
+    eval_set_version_id=os.environ['VERSION'], evaluator_version_ids=[], config={})['scoringId']
 with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=False) as hue:
     report = run_experiment(client=client, hue=hue, experiment_id=os.environ['EXPERIMENT'],
         target=lambda inputs, context: None, checkpoint_directory='checkpoints',
