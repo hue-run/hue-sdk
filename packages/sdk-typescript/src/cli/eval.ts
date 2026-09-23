@@ -78,10 +78,11 @@ type LoadedAdapter = (
 
 const USAGE = `Usage: hue eval [adapter-file] [options]
 
-Run a local agent against a Hue Scenario or eval set, then print Hue's verdicts.
+Run a local agent against a published case or eval set, then print Hue's verdicts.
 
 Selection (exactly one, not used with --worker):
-  --scenario <name|id|url>        Published Scenario to run
+  --case <name|id|url>            Published case to run
+  --scenario <name|id|url>        Legacy alias for --case
   --set <name|id|url>             Saved eval set; requires --scorer or --scorer-version
   --set-version <n>               Saved version number of the eval set (default: latest saved)
   --dataset-version <id>          Frozen dataset version; requires --scorer or --scorer-version
@@ -111,7 +112,7 @@ Connection:
   --origin <url>                  Hue origin (default: HUE_BASE_URL or https://app.hue.run)
 
 Output and limits:
-  --name <run name>               Experiment name (default: <scenario> · <agent key> · <revision>)
+  --name <run name>               Run name (default: <case> · <agent key> · <revision>)
   --baseline <experiment id|url>  Compare verdicts with a previous experiment
   --json                          Print one JSON document on stdout; progress goes to stderr
   --content                       Capture telemetry content; one-shot also persists
@@ -151,6 +152,7 @@ function parse(argv: string[]) {
       allowPositionals: true,
       strict: true,
       options: {
+        case: { type: "string" },
         scenario: { type: "string" },
         set: { type: "string" },
         "set-version": { type: "string" },
@@ -626,15 +628,16 @@ async function resolveSelection(
   const extra = [...(values["scorer-version"] ?? [])];
   for (const selector of values.scorer ?? [])
     extra.push(await resolveScorerVersion(client, selector));
-  if (values.scenario) {
+  const caseSelector = values.case ?? values.scenario;
+  if (caseSelector) {
     if (values["set-version"]) throw new UsageError("--set-version applies to --set only");
-    const pins = await resolveScenarioPins(client, values.scenario);
+    const pins = await resolveScenarioPins(client, caseSelector);
     pins.scorerVersionIds = [...new Set([...pins.scorerVersionIds, ...extra])];
     return pins;
   }
   if (!extra.length)
     throw new UsageError(
-      `${values.set ? "--set" : "--dataset-version"} needs at least one --scorer or --scorer-version; use --scenario for published pins`,
+      `${values.set ? "--set" : "--dataset-version"} needs at least one --scorer or --scorer-version; use --case for published pins`,
     );
   if (values.set) {
     const pins = await resolveEvalSetPins(client, values.set, { scorerVersionIds: extra });
@@ -1144,13 +1147,13 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     const adapterFile = positionals[0];
     if ((adapterFile ? 1 : 0) + (values.command ? 1 : 0) !== 1)
       throw new UsageError("Pass exactly one agent: an adapter file or --command");
-    const selections = [values.scenario, values.set, values["dataset-version"]].filter(
+    const selections = [values.case, values.scenario, values.set, values["dataset-version"]].filter(
       (value) => value !== undefined,
     ).length;
     if (values.worker && selections)
       throw new UsageError("--worker takes no selection; Hue chooses the run to execute");
     if (!values.worker && selections !== 1)
-      throw new UsageError("Pass exactly one of --scenario, --set or --dataset-version");
+      throw new UsageError("Pass exactly one of --case, --set or --dataset-version");
     if (values["env-file"]) {
       try {
         process.loadEnvFile(resolve(values["env-file"]));
