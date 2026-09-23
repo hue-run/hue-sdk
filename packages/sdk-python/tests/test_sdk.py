@@ -152,6 +152,26 @@ def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
     assert "mcp.server.name" not in attrs(unlabeled)
 
 
+def test_context_records_the_workspace_on_nested_helpers(receiver):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.context(workspace_id="workspace-1", user_id="user-1"):
+            with hue.span("request"):
+                with hue.model("synthetic-model", provider="synthetic"):
+                    pass
+                with hue.tool("lookup"):
+                    pass
+                with hue.context(workspace_id="workspace-2"), hue.span("other-workspace"):
+                    pass
+        with hue.span("unscoped"):
+            pass
+        assert hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    for name in ("request", "chat synthetic-model", "execute_tool lookup"):
+        assert spans[name]["hue.workspace.id"].string_value == "workspace-1"
+        assert spans[name]["user.id"].string_value == "user-1"
+    assert spans["other-workspace"]["hue.workspace.id"].string_value == "workspace-2"
+    assert spans["other-workspace"]["user.id"].string_value == "user-1"
+    assert "hue.workspace.id" not in spans["unscoped"]
 def test_tool_records_the_hue_provider_and_surface(receiver):
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.tool(

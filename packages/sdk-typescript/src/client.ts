@@ -47,6 +47,7 @@ interface LocalContext {
   context: Context;
   sessionId?: string;
   userId?: string;
+  workspaceId?: string;
   /** Request metadata of the enclosing `model()` call, copied onto message records. */
   model?: { operation: string; provider: string; requestModel: string };
 }
@@ -89,7 +90,7 @@ function identifier(value: string | undefined): string | undefined {
     value.includes("\u0000") ||
     !value.isWellFormed()
   )
-    throw new TypeError("Session/user identifiers must contain 1–4096 valid characters");
+    throw new TypeError("Session/user/workspace identifiers must contain 1–4096 valid characters");
   return value;
 }
 
@@ -168,6 +169,7 @@ class ContextualTracer implements Tracer {
               ...options.attributes,
               ...(active?.sessionId ? { "gen_ai.conversation.id": active.sessionId } : {}),
               ...(active?.userId ? { "user.id": active.userId } : {}),
+              ...(active?.workspaceId ? { "hue.workspace.id": active.workspaceId } : {}),
             },
           },
           parent ?? active?.context ?? context.active(),
@@ -351,6 +353,7 @@ export class HueClient {
           context: options.parentContext ?? inherited?.context ?? context.active(),
           sessionId: identifier(options.sessionId ?? inherited?.sessionId),
           userId: identifier(options.userId ?? inherited?.userId),
+          workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
           model: inherited?.model,
         };
         span = this.storage.run(active, () =>
@@ -494,6 +497,7 @@ export class HueClient {
     const {
       sessionId,
       userId,
+      workspaceId,
       parentContext,
       input,
       systemInstructions,
@@ -518,6 +522,7 @@ export class HueClient {
       {
         sessionId,
         userId,
+        workspaceId,
         parentContext,
         kind: SpanKind.CLIENT,
         attributes: {

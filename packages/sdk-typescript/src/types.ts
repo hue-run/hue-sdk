@@ -160,6 +160,11 @@ export interface SpanOptions {
   sessionId?: string;
   /** Recorded as `user.id` on this span and inherited by nested helper spans. */
   userId?: string;
+  /**
+   * The application workspace or tenant the work runs in, recorded as `hue.workspace.id` on this
+   * span and inherited by nested helper spans.
+   */
+  workspaceId?: string;
   /** Recorded as `input.value` when `captureContent` is true; any JSON-encodable value. */
   input?: unknown;
   /** Explicit parent context, for example from {@link HueClient.extract}. */
@@ -233,7 +238,7 @@ export interface TokenUsage {
  * apply to a client span. `input` is recorded as `gen_ai.input.messages`.
  */
 export interface ModelOptions
-  extends Pick<SpanOptions, "sessionId" | "userId" | "input" | "parentContext"> {
+  extends Pick<SpanOptions, "sessionId" | "userId" | "workspaceId" | "input" | "parentContext"> {
   /** Provider identifier recorded as `gen_ai.provider.name`, for example "openai". */
   provider: string;
   /** Recorded as `gen_ai.operation.name`; defaults to "chat". */

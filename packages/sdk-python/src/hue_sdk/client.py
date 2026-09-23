@@ -568,9 +568,17 @@ class Hue:
 
     @contextmanager
     def context(
-        self, *, session_id: str | None = None, user_id: str | None = None
+        self,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> Iterator[None]:
-        """Task-local attributes inherited by nested Hue helpers; no global baggage changes."""
+        """Task-local attributes inherited by nested Hue helpers; no global baggage changes.
+
+        ``workspace_id`` is the application workspace or tenant the work runs in, recorded as
+        ``hue.workspace.id``.
+        """
         if not self._active:
             yield
             return
@@ -581,6 +589,8 @@ class Hue:
                 attributes["gen_ai.conversation.id"] = session_id
             if user_id is not None:
                 attributes["user.id"] = user_id
+            if workspace_id is not None:
+                attributes["hue.workspace.id"] = workspace_id
             token = self._context_attributes.set(attributes)
         except Exception:
             self._record_issue()
