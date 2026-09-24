@@ -25,9 +25,9 @@ function aiMajor(): number | undefined {
 
 /**
  * Per-call telemetry for AI SDK 7: pass as an agent's or generation call's `telemetry` option.
- * Spans come from Hue's tracer, so they parent under `withSpan` and inherit session/user
- * identifiers; prompt and response recording follow `captureContent`. It does not change global
- * AI SDK integrations.
+ * Spans come from Hue's tracer, so they parent under `withSpan` and inherit session, user and
+ * workspace identifiers; prompt and response recording follow `captureContent`. It does not
+ * change global AI SDK integrations.
  *
  * @throws TypeError when the client is enabled and the installed `ai` major version is below 7;
  * AI SDK 6 applications use `hueExperimentalTelemetry` from `@hue-run/sdk` instead.

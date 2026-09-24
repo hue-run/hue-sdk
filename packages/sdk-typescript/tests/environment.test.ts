@@ -140,13 +140,14 @@ describe("environment HTTP client", () => {
   });
 
   test("bindEnvironmentTools stamps catalog MCP identity on the tool span", async () => {
-    const recorded: Array<{ name: string; mcp?: { name?: string; version?: string } }> = [];
+    type Mcp = { name?: string; version?: string; provider?: string; surface?: string };
+    const recorded: Array<{ name: string; mcp?: Mcp }> = [];
     const hue = {
       tool: async (
         name: string,
         _input: unknown,
         execute: () => Promise<{ status: "ok" }>,
-        options: { mcp?: { name?: string; version?: string } } = {},
+        options: { mcp?: Mcp } = {},
       ) => {
         recorded.push({ name, ...(options.mcp === undefined ? {} : { mcp: options.mcp }) });
         return execute();
@@ -170,12 +171,22 @@ describe("environment HTTP client", () => {
               required: [],
               additionalProperties: false,
             },
-            mcp: { name: "gmail", version: "1" },
+            mcp: {
+              name: "gmail",
+              version: "1",
+              provider: "google.gmail",
+              surface: "google.gmail/mcp",
+            },
           },
         ],
       } as never,
     });
     await tools.get_thread!.execute({ thread_id: "t1" });
-    expect(recorded).toEqual([{ name: "get_thread", mcp: { name: "gmail", version: "1" } }]);
+    expect(recorded).toEqual([
+      {
+        name: "get_thread",
+        mcp: { name: "gmail", version: "1", provider: "google.gmail", surface: "google.gmail/mcp" },
+      },
+    ]);
   });
 });

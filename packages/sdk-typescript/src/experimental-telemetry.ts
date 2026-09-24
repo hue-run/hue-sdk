@@ -3,8 +3,9 @@ import type { ExperimentalTelemetrySettings } from "./types.js";
 
 /**
  * Per-call telemetry for AI SDK 6: pass as `experimental_telemetry`. Spans are created with Hue's
- * tracer, so they parent under `withSpan` and inherit session/user identifiers, and prompt/response
- * recording follows `captureContent`. AI SDK 7 applications use `hueTelemetry` from `@hue-run/sdk/ai-sdk`.
+ * tracer, so they parent under `withSpan` and inherit session, user and workspace identifiers, and
+ * prompt/response recording follows `captureContent`. AI SDK 7 applications use `hueTelemetry`
+ * from `@hue-run/sdk/ai-sdk`.
  */
 export function hueExperimentalTelemetry(hue: HueClient): ExperimentalTelemetrySettings {
   return {

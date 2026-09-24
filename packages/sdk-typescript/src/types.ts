@@ -160,6 +160,11 @@ export interface SpanOptions {
   sessionId?: string;
   /** Recorded as `user.id` on this span and inherited by nested helper spans. */
   userId?: string;
+  /**
+   * The application workspace or tenant the work runs in, recorded as `hue.workspace.id` on this
+   * span and inherited by nested helper spans.
+   */
+  workspaceId?: string;
   /** Recorded as `input.value` when `captureContent` is true; any JSON-encodable value. */
   input?: unknown;
   /** Explicit parent context, for example from {@link HueClient.extract}. */
@@ -167,14 +172,19 @@ export interface SpanOptions {
 }
 
 /**
- * MCP `initialize` `serverInfo` for {@link HueClient.tool}. Pass
- * `client.getServerVersion()` after connect; any MCP server works.
+ * MCP `initialize` `serverInfo` for {@link HueClient.tool}, plus the Hue provider and surface
+ * when the tool came from one. Pass `client.getServerVersion()` after connect; any MCP server
+ * works.
  */
 export interface McpServerInfo {
   /** `serverInfo.name` from MCP initialize, recorded as `mcp.server.name`. */
   name?: string;
   /** `serverInfo.version` from MCP initialize, recorded as `mcp.server.version`. */
   version?: string;
+  /** Hue provider id such as `google.gmail`, recorded as `hue.mcp.provider`. */
+  provider?: string;
+  /** Hue surface such as `google.gmail/mcp`, recorded as `hue.mcp.surface`. */
+  surface?: string;
 }
 
 /**
@@ -224,6 +234,29 @@ export interface ProviderToolCallOptions extends Pick<SpanOptions, "parentContex
   servers?: Record<string, HostedServerInfo>;
 }
 
+/**
+ * A file the traced work read, received or produced, for {@link HueClient.recordFile}. Files are
+ * linked by content hash; their bytes are never exported.
+ */
+export interface FileRecord {
+  /**
+   * `input` was given to the agent, `attachment` arrived from a tool or message, and `output` was
+   * produced by the agent.
+   */
+  role: "input" | "attachment" | "output";
+  /** Media type, for example `application/pdf`. */
+  mediaType: string;
+  /** Hex SHA-256 of the file's bytes; computed from `data` when omitted. */
+  sha256?: string;
+  /** The file's bytes, only hashed and measured, never exported; a string is hashed as UTF-8.
+   * Data larger than 25 MiB is omitted and counted as an instrumentation failure. */
+  data?: Uint8Array | string;
+  /** Size in bytes; computed from `data` when omitted. */
+  byteSize?: number;
+  /** File name, recorded as `hue.file.name` only when `captureContent` is true. */
+  name?: string;
+}
+
 /** Provider-reported token counts for {@link HueSpan.setUsage}. */
 export interface TokenUsage {
   /** Provider-reported prompt tokens (`gen_ai.usage.input_tokens`). */
@@ -237,13 +270,25 @@ export interface TokenUsage {
  * apply to a client span. `input` is recorded as `gen_ai.input.messages`.
  */
 export interface ModelOptions
-  extends Pick<SpanOptions, "sessionId" | "userId" | "input" | "parentContext"> {
+  extends Pick<SpanOptions, "sessionId" | "userId" | "workspaceId" | "input" | "parentContext"> {
   /** Provider identifier recorded as `gen_ai.provider.name`, for example "openai". */
   provider: string;
   /** Recorded as `gen_ai.operation.name`; defaults to "chat". */
   operation?: string;
   /** Span name; defaults to "{operation} {model}". */
   name?: string;
+  /**
+   * System instructions sent separately from the chat history, recorded as
+   * `gen_ai.system_instructions` when `captureContent` is true. Any JSON-encodable value, ideally
+   * GenAI semantic-convention parts such as `[{ type: "text", content: "..." }]`.
+   */
+  systemInstructions?: unknown;
+  /**
+   * Tool definitions offered to the model, recorded as `gen_ai.tool.definitions` when
+   * `captureContent` is true. Any JSON-encodable value, ideally the GenAI shape
+   * `[{ type: "function", name, description, parameters }]`.
+   */
+  tools?: unknown;
 }
 
 /** Value for AI SDK 6's `experimental_telemetry` option; AI SDK 7 uses `hueTelemetry` instead. */

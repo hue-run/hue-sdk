@@ -375,7 +375,8 @@ hue eval --worker ./hue-agent.ts --agent-key support-agent --env-file .env.hue
 
 The one-shot mode resolves the selection (`--case` by name, ID or URL; `--set` by name, ID or
 URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
-creates a fresh run from those immutable pins named `<case> · <agent key> · <revision>`
+creates a fresh run from those immutable pins named `<agent key> @ <revision>` (a commit hash is
+shortened to 7 characters)
 (`--name` overrides), prints `Run: <url>` and `Experiment: <id>` as soon as the experiment exists,
 one line per case event (world created, agent started, world sealed), then
 `Waiting for Hue checks...` and a table with one row per case: boolean metrics as `PASS`/`FAIL`,

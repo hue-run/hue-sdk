@@ -183,7 +183,8 @@ await client.finishRun(run.id, { idempotencyKey: randomUUID(), status: "complete
 ```
 
 Each bound call is an ordinary `hue.tool` span. When the catalog names an MCP server, the span
-also carries `mcp.server.name`. Wrap any MCP client the same way, using `serverInfo` from
+also carries `mcp.server.name`, plus `hue.mcp.provider` and `hue.mcp.surface` when the catalog
+entry includes them. Wrap any MCP client the same way, using `serverInfo` from
 `initialize` — this is not specific to Hue-hosted Gmail or Slack:
 
 ```ts

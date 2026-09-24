@@ -15,3 +15,10 @@ server (`mcp_list_tools`, a successful and a failed `mcp_call`), built-in tool c
 approval request, and an Anthropic Messages pair with `server_tool_use` and `mcp_tool_use` blocks
 and their results, including an error. Credentials are placeholders. Both SDK suites record it
 through their hosted-call recorder and assert the same spans.
+# Tool-definition digest fixture
+
+`tool-definitions.json` is synthetic: a hosted MCP provider tool with placeholder credentials,
+function tools in the AI SDK and Chat Completions shapes, and an unnamed built-in tool. Its
+numbers, strings and keys exercise RFC 8785 canonicalization (floats, a large integer, negative
+zero, U+2028/U+2029 and non-ASCII keys). `names` and `sha256` are the `hue.tool.names` and `hue.tool.definitions.sha256`
+both SDKs must derive from `definitions`; the Python suite reads the same file.

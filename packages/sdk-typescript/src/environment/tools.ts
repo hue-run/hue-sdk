@@ -32,8 +32,8 @@ export interface BindEnvironmentToolsOptions {
 /**
  * Binds a run's generated catalog to plain local callables without changing the agent
  * framework. Each call is recorded through {@link HueClient.tool}. Catalog entries that
- * include `mcp` stamp `mcp.server.name` / `mcp.server.version` so a generic verb is
- * attributed to that MCP server.
+ * include `mcp` stamp `mcp.server.name` / `mcp.server.version` and `hue.mcp.provider` /
+ * `hue.mcp.surface` so a generic verb is attributed to that MCP server and Hue surface.
  */
 export function bindEnvironmentTools(
   options: BindEnvironmentToolsOptions,
