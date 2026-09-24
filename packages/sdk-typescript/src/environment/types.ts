@@ -318,6 +318,11 @@ export interface WorldSurface {
   /** Alias-host URL, or null while unavailable. */
   alias: string | null;
 }
+/** The headers an MCP client sends the mirror. */
+export interface WorldMcpHeaders {
+  /** `Bearer <world token>`. */
+  Authorization: string;
+}
 /** One MCP server entry of the common `mcpServers` configuration shape. */
 export interface WorldMcpServer {
   /** Transport; the mirrors serve Streamable HTTP. */
@@ -325,7 +330,16 @@ export interface WorldMcpServer {
   /** Mirror URL of the MCP surface. */
   url: string;
   /** The world token as a bearer. */
-  headers: { Authorization: string };
+  headers: WorldMcpHeaders;
+}
+/** The `{ url, token, expiresAt }` shape the retired `hue_sim_` capability had. */
+export interface LegacyMcpCapability {
+  /** MCP endpoint: the world's first MCP mirror. */
+  url: string;
+  /** The world token. */
+  token: string;
+  /** The world deadline as an ISO timestamp. */
+  expiresAt: string;
 }
 /** The common `mcpServers` shape, one server per MCP surface of each provider instance. */
 export interface WorldMcpConfig {

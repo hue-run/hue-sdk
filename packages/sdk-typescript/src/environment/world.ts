@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { EnvironmentRun, WorldHandoff, WorldMcpServer } from "./types.js";
+import type { EnvironmentRun, LegacyMcpCapability, WorldHandoff, WorldMcpServer } from "./types.js";
 
 /**
  * The world an agent acts on through provider mirrors, read from a create or replay response.
@@ -60,6 +60,7 @@ export function stripHueControlPlaneCredentials(
   return child;
 }
 
+/** Options for {@link agentEnvironment}. */
 export interface AgentEnvironmentOptions {
   /** The environment to start from; defaults to this process's. */
   parent?: Record<string, string | undefined>;
@@ -102,17 +103,17 @@ export function agentEnvironment(
 /** The `{ url, token, expiresAt }` shape the `hue_sim_` capability had, projected from the
  * world's first MCP mirror so an adapter written for the bridge keeps working through the
  * compatibility release. Undefined for a world without an MCP surface. */
-export function legacyMcpCapability(
-  world: WorldHandoff,
-): { url: string; token: string; expiresAt: string } | undefined {
+export function legacyMcpCapability(world: WorldHandoff): LegacyMcpCapability | undefined {
   const server: WorldMcpServer | undefined = Object.values(world.mcpConfig.mcpServers)[0];
   if (!server) return undefined;
   return { url: server.url, token: world.token, expiresAt: world.expiresAt };
 }
 
+/** The owner-only `mcpServers` file {@link writeMcpConfig} wrote. */
 export interface McpConfigFile {
   /** The owner-only file; pass its path to the harness and dispose after the run. */
   path: string;
+  /** Removes the file and its private directory; safe to call twice. */
   dispose(): Promise<void>;
 }
 
