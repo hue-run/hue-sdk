@@ -243,7 +243,9 @@ class HueSpan:
             digest, size = computed, len(content)
         if not isinstance(digest, str) or not _SHA256.match(digest):
             raise ValueError("A file needs a SHA-256 digest or its data.")
-        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
+        if size is not None and (
+            isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > 2**63 - 1
+        ):
             raise ValueError("Invalid file size.")
         attributes: dict[str, AttributeValue] = {
             "hue.file.sha256": digest,

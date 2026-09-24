@@ -217,8 +217,9 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
             span.record_file(role="input", media_type="text/plain", sha256="not-a-digest")
             span.record_file(role="input", media_type="text/plain", data=body, sha256="0" * 64)
             span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=-1)
+            span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=2**63)
             span.record_file(role="input", media_type="", sha256=digest)
-        assert hue.export_status.instrumentation_failures == (6 if capture_content else 5)
+        assert hue.export_status.instrumentation_failures == (7 if capture_content else 6)
         hue.force_flush()
     (request,) = receiver.spans()
     files = [
