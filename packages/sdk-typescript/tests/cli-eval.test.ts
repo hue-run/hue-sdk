@@ -636,12 +636,29 @@ spawn(
 setTimeout(() => {}, 60_000);
 `;
 
+/** Never answers and ignores SIGTERM; records its pid so a test can see whether it survived. */
+const stubbornSource = `import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+writeFileSync(process.env.HUE_TEST_SURVIVOR, String(process.pid));
+setInterval(() => {}, 1_000);
+`;
+
 async function workspace() {
   const directory = await mkdtemp(join(tmpdir(), "hue-cli-eval-"));
   await writeFile(join(directory, "hue-agent.ts"), adapterSource);
   await writeFile(join(directory, "agent-command.mjs"), commandSource);
   await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
+  await writeFile(join(directory, "agent-stubborn.mjs"), stubbornSource);
   return directory;
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function expectNoSecrets(result: { stdout: string; stderr: string }) {
@@ -1000,6 +1017,54 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT * 2,
   );
+
+  for (const [form, command] of [
+    ["x; y", `${process.execPath} agent-stubborn.mjs >/dev/null 2>&1; true`],
+    ["a | b", `${process.execPath} agent-stubborn.mjs 2>/dev/null | cat >/dev/null`],
+  ] as const) {
+    test(
+      `a timed-out compound --command (${form}) leaves no agent that ignores SIGTERM`,
+      async () => {
+        const f = hueStandIn();
+        const cwd = await workspace();
+        const survivor = join(cwd, "survivor.txt");
+        let pid: number | undefined;
+        try {
+          const result = await hue(
+            [
+              "--scenario",
+              "Refund flow",
+              "--command",
+              command,
+              "--origin",
+              f.baseUrl,
+              "--timeout",
+              "1",
+              "--wait",
+              "0",
+            ],
+            { cwd, env: { HUE_TEST_SURVIVOR: survivor } },
+          );
+          expect(result.status).toBe(1);
+          expectNoSecrets(result);
+          expect(f.calls.completions).toEqual([
+            expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+          ]);
+          pid = Number(await readFile(survivor, "utf8"));
+          // The shell exits on SIGTERM; the agent it started does not, and would keep its world
+          // token. It is killed after the grace, before the case is failed; allow for reaping.
+          for (let waited = 0; alive(pid) && waited < 2_000; waited += 50)
+            await new Promise((done) => setTimeout(done, 50));
+          expect(alive(pid)).toBe(false);
+        } finally {
+          if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT * 2,
+    );
+  }
 
   test(
     "an interrupt while waiting for Hue's checks exits 130 without a verdict",

@@ -753,6 +753,64 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("a 5 MiB inline file exports as its digest within the default queue budget", async () => {
+    // Base64 makes the file about 6.7 M characters, charged at two bytes each: without hashing
+    // at admission the span would exceed the default 8 MiB queue and be dropped.
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "inline-files-budget",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const file = Uint8Array.from({ length: 5 * 1024 * 1024 }, (_, index) => (index * 31) % 256);
+    const base64 = Buffer.from(file).toString("base64");
+    const digest = createHash("sha256").update(file).digest("hex");
+    const messages = JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: "Summarize the attachment" },
+          { type: "blob", modality: "document", mime_type: "application/pdf", content: base64 },
+        ],
+      },
+    ]);
+    try {
+      const span = hue.tracer.startSpan("large-file");
+      span.setAttribute("gen_ai.input.messages", messages);
+      span.addEvent("messages", { "gen_ai.input.messages": messages });
+      span.end();
+      // Strict flush: the span was admitted and accepted, not dropped for its size.
+      await hue.flush();
+      const record = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((candidate) => candidate.name === "large-file")!;
+      expect(record).toBeDefined();
+      const expected = [
+        { type: "text", content: "Summarize the attachment" },
+        {
+          type: "blob",
+          modality: "document",
+          mime_type: "application/pdf",
+          sha256: digest,
+          size: file.byteLength,
+        },
+      ];
+      expect(JSON.parse(attr(record, "gen_ai.input.messages")!.stringValue!)[0].parts).toEqual(
+        expected,
+      );
+      const event = record.events!.find((candidate) => candidate.name === "messages")!;
+      const eventMessages = event.attributes!.find(
+        (attribute) => attribute.key === "gen_ai.input.messages",
+      )!;
+      expect(JSON.parse(eventMessages.value.stringValue!)[0].parts).toEqual(expected);
+      expect(hue.transport.getReport()).toMatchObject({ droppedSpans: 0, failedSpans: 0 });
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
   test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
     const endpoint = receiver();
     const transport = createHueTransport({

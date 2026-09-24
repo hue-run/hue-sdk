@@ -309,8 +309,10 @@ const COMMAND_KILL_GRACE_MS = 5_000;
 /**
  * Spawns the agent command once in its own process group and returns its trimmed stdout. A
  * timeout or Ctrl+C stops the agent the shell started, not only the shell: a survivor would still
- * hold a world token and could write after Hue recorded the case as failed. Windows has no
- * process group to signal, so the child alone is stopped there.
+ * hold a world token and could write after Hue recorded the case as failed. The group is signalled
+ * even once the shell has exited, since a compound command's agent can outlive it, and a stopped
+ * command settles only when nothing in the group is left. Windows has no process group to signal,
+ * so the child alone is stopped there.
  */
 function spawnAgentCommand(
   command: string,
@@ -335,31 +337,55 @@ function spawnAgentCommand(
     let size = 0;
     let timedOut = false;
     let oversized = false;
-    let escalation: NodeJS.Timeout | undefined;
-    const signalTree = (signal: NodeJS.Signals) => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
+    let stopping = false;
+    let stopped = false;
+    let poll: NodeJS.Timeout | undefined;
+    let closed: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    /** Whether anything the command started is left: its whole group, or the child alone. */
+    const running = () => {
+      if (!group || child.pid === undefined)
+        return child.exitCode === null && child.signalCode === null;
       try {
-        if (group && child.pid !== undefined) process.kill(-child.pid, signal);
-        else child.kill(signal);
-      } catch {
-        // The group is already gone; nothing is left to stop.
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
       }
     };
-    const stop = (signal: NodeJS.Signals) => {
-      signalTree(signal);
-      escalation ??= setTimeout(() => signalTree("SIGKILL"), COMMAND_KILL_GRACE_MS).unref();
+    const signalTree = (signal: NodeJS.Signals) => {
+      try {
+        if (group && child.pid !== undefined) process.kill(-child.pid, signal);
+        else if (running()) child.kill(signal);
+      } catch {
+        // ESRCH: the group is already gone; nothing is left to stop.
+      }
+    };
+    /** SIGTERM, then SIGKILL for whatever is still running when the grace ends. */
+    const stop = () => {
+      if (stopping) return;
+      stopping = true;
+      clearTimeout(timer);
+      signalTree("SIGTERM");
+      const deadline = Date.now() + COMMAND_KILL_GRACE_MS;
+      poll = setInterval(() => {
+        if (running() && Date.now() < deadline) return;
+        clearInterval(poll);
+        if (running()) signalTree("SIGKILL");
+        stopped = true;
+        settle();
+      }, 50);
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      stop("SIGTERM");
+      stop();
     }, options.timeoutSeconds * 1000);
-    const cancel = () => stop("SIGTERM");
+    const cancel = () => stop();
     options.signal?.addEventListener("abort", cancel, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.byteLength;
       if (size > 4 * 1024 * 1024) {
         oversized = true;
-        stop("SIGTERM");
+        stop();
         return;
       }
       chunks.push(chunk);
@@ -369,14 +395,16 @@ function spawnAgentCommand(
     else child.stdin.end();
     child.on("error", (error) => {
       clearTimeout(timer);
-      clearTimeout(escalation);
+      clearInterval(poll);
       options.signal?.removeEventListener("abort", cancel);
       reject(new Error(`Unable to start the agent command: ${error.message}`));
     });
-    child.on("close", (code, signal) => {
+    /** Settles once the shell's output closed and, after a stop, once its group is gone. */
+    const settle = () => {
+      if (!closed || (stopping && !stopped)) return;
       clearTimeout(timer);
-      clearTimeout(escalation);
       options.signal?.removeEventListener("abort", cancel);
+      const { code, signal } = closed;
       if (options.signal?.aborted) return reject(new TargetCancelledError());
       if (timedOut)
         return reject(
@@ -392,6 +420,10 @@ function spawnAgentCommand(
           ),
         );
       resolvePromise(Buffer.concat(chunks).toString("utf8").trim());
+    };
+    child.on("close", (code, signal) => {
+      closed = { code, signal };
+      settle();
     });
   });
 }
