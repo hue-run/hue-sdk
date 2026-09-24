@@ -100,13 +100,20 @@ function scrubNode(
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
+      if (credentialParameter && ["default", "const", "examples", "enum"].includes(key)) {
+        state.changed = true;
+        return [key, REDACTED];
+      }
       if (!parameters && item !== null && isCredentialKey(key)) {
         state.changed = true;
         return [key, REDACTED];
       }
       if (!parameters && typeof item === "string" && isUrlKey(key))
         return [key, scrubUrl(item, state)];
-      return [key, scrubNode(item, state, depth + 1, key === "properties")];
+      return [
+        key,
+        scrubNode(item, state, depth + 1, key === "properties", parameters && isCredentialKey(key)),
+      ];
     }),
   );
 }

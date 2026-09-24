@@ -67,3 +67,35 @@ test("scrubs generic credentials and URL userinfo/query values without changing 
     ),
   ).toBe(JSON.stringify({ server_url: "[redacted]" }));
 });
+
+test("scrubs credential values embedded in JSON Schema parameter metadata", () => {
+  const output = JSON.parse(
+    scrubToolCredentials(
+      "gen_ai.tool.definitions",
+      JSON.stringify({
+        type: "function",
+        parameters: {
+          type: "object",
+          properties: {
+            authorization: {
+              type: "string",
+              default: "synthetic-default",
+              const: "synthetic-const",
+              examples: ["synthetic-example"],
+              enum: ["synthetic-enum"],
+              description: "The authorization argument is retained.",
+            },
+          },
+        },
+      }),
+    ) as string,
+  );
+  expect(output.parameters.properties.authorization).toEqual({
+    type: "string",
+    default: "[redacted]",
+    const: "[redacted]",
+    examples: "[redacted]",
+    enum: "[redacted]",
+    description: "The authorization argument is retained.",
+  });
+});
