@@ -18,7 +18,7 @@ import {
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { OpenTelemetry } from "@ai-sdk/otel";
-import { generateText, streamText } from "ai";
+import { generateText, jsonSchema, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import sdkPackage from "@hue-run/sdk/package.json" with { type: "json" };
@@ -772,6 +772,150 @@ describe("Hue SDK contract", () => {
       }
     },
   );
+  test("export replaces hosted-tool credentials in tool definitions before redact", async () => {
+    const endpoint = receiver();
+    const seen: string[] = [];
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "tool-credentials",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      redact: (value) => {
+        seen.push(value);
+        return value;
+      },
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    // OpenAI Responses hosted MCP tool as OpenInference records it, and a function tool whose
+    // parameters are named like credentials: parameter schemas are not credentials.
+    const hostedMcp = {
+      type: "mcp",
+      server_label: "gmail",
+      server_url: "https://mcp.example.test/gmail",
+      authorization: "synthetic-oauth-token",
+      headers: { "X-Api-Key": "synthetic-header-secret" },
+      require_approval: "never",
+    };
+    const fetchPage = JSON.stringify({
+      type: "function",
+      function: {
+        name: "fetch_page",
+        parameters: {
+          type: "object",
+          properties: { headers: { type: "object" }, api_key: { type: "string" } },
+          required: ["headers"],
+        },
+      },
+    });
+    try {
+      const span = tracerProvider.getTracer("third-party").startSpan("external");
+      span.setAttribute("llm.tools.0.tool.json_schema", JSON.stringify(hostedMcp));
+      span.setAttribute("llm.tools.1.tool.json_schema", fetchPage);
+      span.setAttribute(
+        "input.value",
+        JSON.stringify({ model: "synthetic-model", input: "Synthetic prompt", tools: [hostedMcp] }),
+      );
+      // Anthropic's MCP connector and AI SDK 6's per-tool JSON strings.
+      span.setAttribute(
+        "llm.invocation_parameters",
+        JSON.stringify({
+          max_tokens: 100,
+          mcp_servers: [
+            {
+              type: "url",
+              url: "https://mcp.example.test/slack",
+              name: "slack",
+              authorization_token: "synthetic-oauth-token",
+            },
+          ],
+        }),
+      );
+      span.setAttribute("ai.prompt.tools", [
+        JSON.stringify({
+          type: "provider",
+          name: "gmail",
+          id: "openai.mcp",
+          args: { serverLabel: "gmail", authorization: "synthetic-oauth-token" },
+        }),
+        "not JSON: authorization",
+      ]);
+      span.setAttribute("gen_ai.tool.definitions", "not JSON: authorization");
+      span.setAttribute("output.value", "The authorization field was set.");
+      span.end();
+      await hue.flush();
+      const record = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((candidate) => candidate.name === "external")!;
+      const text = (key: string) => attr(record, key)!.stringValue!;
+      expect(JSON.parse(text("llm.tools.0.tool.json_schema"))).toEqual({
+        ...hostedMcp,
+        authorization: "[redacted]",
+        headers: "[redacted]",
+      });
+      expect(text("llm.tools.1.tool.json_schema")).toBe(fetchPage);
+      expect(JSON.parse(text("input.value"))).toEqual({
+        model: "synthetic-model",
+        input: "Synthetic prompt",
+        tools: [{ ...hostedMcp, authorization: "[redacted]", headers: "[redacted]" }],
+      });
+      expect(JSON.parse(text("llm.invocation_parameters")).mcp_servers[0].authorization_token).toBe(
+        "[redacted]",
+      );
+      const promptTools = attr(record, "ai.prompt.tools")!.arrayValue!.values;
+      expect(JSON.parse(promptTools[0].stringValue!).args).toEqual({
+        serverLabel: "gmail",
+        authorization: "[redacted]",
+      });
+      expect(promptTools[1].stringValue).toBe("not JSON: authorization");
+      expect(text("gen_ai.tool.definitions")).toBe("not JSON: authorization");
+      expect(text("output.value")).toBe("The authorization field was set.");
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      for (const secret of ["synthetic-oauth-token", "synthetic-header-secret"]) {
+        expect(raw).not.toContain(secret);
+        // The caller's redact runs after the scrub and never sees the credential either.
+        expect(seen.some((value) => value.includes(secret))).toBe(false);
+      }
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("a tool definition too deeply nested to inspect rejects its record", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "tool-credentials-depth",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    try {
+      const span = tracerProvider.getTracer("third-party").startSpan("deep");
+      span.setAttribute(
+        "gen_ai.tool.definitions",
+        `${'{"a":'.repeat(300)}{"authorization":"synthetic-oauth-token"}${"}".repeat(300)}`,
+      );
+      span.end();
+      await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+      expect(endpoint.requests).toHaveLength(0);
+      expect(transport.getIssues()).toContainEqual(
+        expect.objectContaining({ kind: "invalid", count: 1 }),
+      );
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test.each([
     ["client", "traces"],
     ["transport", "traces"],
@@ -1545,6 +1689,95 @@ describe("Vercel AI SDK integration", () => {
       await endpoint.server.stop(true);
     }
   });
+
+  test.each([true, false])(
+    "AI SDK 7 tool definitions export without hosted MCP credentials (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "tool-definitions",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      try {
+        const result = await generateText({
+          model: new MockLanguageModelV4({
+            doGenerate: async () => ({
+              content: [{ type: "text", text: "Draft ready" }],
+              finishReason: { unified: "stop", raw: "stop" },
+              usage,
+              warnings: [],
+            }),
+          }),
+          prompt: "Synthetic prompt",
+          tools: {
+            // The shape `openai.tools.mcp({...})` returns: a provider-executed tool whose
+            // arguments carry the MCP server's credentials.
+            gmail: {
+              type: "provider",
+              id: "openai.mcp",
+              isProviderExecuted: true,
+              inputSchema: jsonSchema({ type: "object" }),
+              args: {
+                serverLabel: "gmail",
+                serverUrl: "https://mcp.example.test/gmail",
+                authorization: "synthetic-oauth-token",
+                headers: { "X-Api-Key": "synthetic-header-secret" },
+                allowedTools: ["create_draft"],
+              },
+            },
+            fetch_page: tool({
+              description: "Fetch a page",
+              inputSchema: jsonSchema({
+                type: "object",
+                properties: { headers: { type: "object" }, url: { type: "string" } },
+              }),
+            }),
+          },
+          telemetry: hueTelemetry(hue),
+        });
+        expect(result.text).toBe("Draft ready");
+        await hue.flush();
+        const spans = endpoint.requests.flatMap((request) => request.records);
+        const definitions = spans.flatMap((span) => {
+          const value = attr(span, "gen_ai.tool.definitions")?.stringValue;
+          return value === undefined ? [] : [JSON.parse(value) as Record<string, unknown>[]];
+        });
+        const raw = endpoint.requests.map((request) => request.raw).join(" ");
+        expect(raw).not.toContain("synthetic-oauth-token");
+        expect(raw).not.toContain("synthetic-header-secret");
+        if (!captureContent) {
+          expect(definitions).toEqual([]);
+          return;
+        }
+        expect(definitions).toHaveLength(1);
+        const [gmail, fetchPage] = [
+          definitions[0].find((definition) => definition.name === "gmail"),
+          definitions[0].find((definition) => definition.name === "fetch_page"),
+        ];
+        expect(gmail).toEqual({
+          type: "provider",
+          name: "gmail",
+          id: "openai.mcp",
+          args: {
+            serverLabel: "gmail",
+            serverUrl: "https://mcp.example.test/gmail",
+            authorization: "[redacted]",
+            headers: "[redacted]",
+            allowedTools: ["create_draft"],
+          },
+        });
+        // A parameter named `headers` is part of the tool's schema, not a credential.
+        expect(fetchPage?.inputSchema).toMatchObject({
+          properties: { headers: { type: "object" }, url: { type: "string" } },
+        });
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+  );
 
   test("provider failure becomes an error span and missing token usage stays absent", async () => {
     const endpoint = receiver();
