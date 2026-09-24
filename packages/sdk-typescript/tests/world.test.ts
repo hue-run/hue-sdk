@@ -4,7 +4,11 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHue } from "../src/index.js";
 import { createEvaluationClient } from "../src/evals.js";
-import { caseTraceparent, runEnvironmentTarget } from "../src/evals/environment-target.js";
+import {
+  caseTraceparent,
+  createWorldForExecution,
+  runEnvironmentTarget,
+} from "../src/evals/environment-target.js";
 import {
   agentEnvironment,
   createEnvironmentClient,
@@ -317,6 +321,47 @@ describe("case trace context", () => {
     expect(caseTraceparent({ ...ids, span: { spanContext: () => ({ traceFlags: 1 }) } })).toBe(
       `00-${ids.traceId}-${ids.spanId}-01`,
     );
+  });
+});
+
+describe("world creation on a deployment whose gateway is off", () => {
+  test("repeats the create once without the World API fields when the legacy create refuses them", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const legacy = gatewayRun();
+    delete legacy.token;
+    delete legacy.env;
+    delete legacy.mcpConfig;
+    delete legacy.surfaces;
+    const api = worldApi({
+      create: (body) => {
+        bodies.push(body);
+        return "traceparent" in body || "agentRevision" in body
+          ? Response.json({ error: "Invalid request" }, { status: 400 })
+          : Response.json(legacy, { status: 201 });
+      },
+    });
+    const client = createEnvironmentClient({ apiKey: key, baseUrl: api.baseUrl });
+    const input = {
+      idempotencyKey: `execution:${executionId}`,
+      environmentVersionId: versionId,
+      executionId,
+      traceparent: `00-${"1".repeat(32)}-${"2".repeat(16)}-01`,
+      agentRevision: "agent@1",
+    };
+    const run = await createWorldForExecution(client, input);
+    expect(run.token).toBeUndefined();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({ traceparent: input.traceparent, agentRevision: "agent@1" });
+    expect(bodies[1]).not.toHaveProperty("traceparent");
+    expect(bodies[1]).not.toHaveProperty("agentRevision");
+    const refusing = worldApi({
+      create: () => Response.json({ error: "Invalid request" }, { status: 400 }),
+    });
+    const once = createEnvironmentClient({ apiKey: key, baseUrl: refusing.baseUrl });
+    await expect(
+      createWorldForExecution(once, { idempotencyKey: "k", environmentVersionId: versionId }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(refusing.requests).toHaveLength(1);
   });
 });
 

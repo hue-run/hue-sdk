@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import type { EnvironmentClient } from "../environment/client.js";
+import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
 import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
 import type { EnvironmentRun, WorldHandoff } from "../environment/types.js";
 import { legacyMcpCapability, worldHandoff } from "../environment/world.js";
@@ -207,6 +207,30 @@ export function caseTraceparent(span: {
   return `00-${span.traceId}-${span.spanId}-${(flags & 0xff).toString(16).padStart(2, "0")}`;
 }
 
+/**
+ * Creates the world with the World API fields; a deployment whose simulation gateway is off
+ * refuses them on the legacy create (400), so the create is repeated once without them and the
+ * world is the legacy kind. The stable idempotency key makes the repeat a replay, never a
+ * second world.
+ */
+export async function createWorldForExecution(
+  client: Pick<EnvironmentClient, "createRun">,
+  input: Parameters<EnvironmentClient["createRun"]>[0],
+): Promise<EnvironmentRun> {
+  try {
+    return await client.createRun(input);
+  } catch (error) {
+    const { traceparent, agentRevision, ...legacy } = input;
+    if (
+      !(error instanceof HueEnvironmentError) ||
+      error.status !== 400 ||
+      (traceparent === undefined && agentRevision === undefined)
+    )
+      throw error;
+    return client.createRun(legacy);
+  }
+}
+
 /** One authoritative environment/provider lifecycle shared by direct simulations and
  * outbound local workers. Credential-bearing connections stay in this call frame and
  * are never returned to either runner's checkpoint state.
@@ -220,7 +244,7 @@ export async function runEnvironmentTarget(
     throw new Error("The simulation case has no pinned environment version");
   // One stable idempotency key per case attempt: a replay after a lost acknowledgement gets
   // the same world and the same token.
-  const run: EnvironmentRun = await options.environmentClient.createRun({
+  const run: EnvironmentRun = await createWorldForExecution(options.environmentClient, {
     idempotencyKey: `execution:${context.executionId}`,
     environmentVersionId,
     executionId: context.executionId,
