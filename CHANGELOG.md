@@ -566,6 +566,15 @@ No registry release is claimed until publication and registry acceptance complet
   window passes, and the wait ends on time with `EnvironmentSealTimeoutError`.
 - The `wait_for_seal` docstring names `EnvironmentSealTimeoutError`, which keeps `status=None`
   like a connection failure, so callers check for it before `status`.
+- A tool definition containing an integer longer than CPython's `int()` digit limit (about 4,300
+  digits) failed to parse, so it was exported with its credentials unscrubbed and without a
+  metadata-only summary. Such an integer is now read as JavaScript reads it, the definition is
+  scrubbed, and a non-finite number is written as `null`, as `JSON.stringify` writes it.
+- A scrubbed `url` or `server_url` with an `http`, `https`, `ws`, `wss` or `ftp` scheme is
+  serialized as WHATWG `URL` does (lowercase scheme and host, IDN hosts in Punycode, default
+  ports dropped, the path percent-encoded and its dot segments resolved, query names encoded as
+  `URLSearchParams` encodes them), and a URL WHATWG refuses becomes `[redacted]`. The exported
+  text and `hue.tool.definitions.sha256` now match the TypeScript SDK's for these URLs.
 
 ### [0.6.0] - 2026-09-24
 

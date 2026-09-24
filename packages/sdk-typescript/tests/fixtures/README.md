@@ -24,3 +24,12 @@ function tools in the AI SDK and Chat Completions shapes, and an unnamed built-i
 numbers, strings and keys exercise RFC 8785 canonicalization (floats, a large integer, negative
 zero, U+2028/U+2029 and non-ASCII keys). `names` and `sha256` are the `hue.tool.names` and `hue.tool.definitions.sha256`
 both SDKs must derive from `definitions`; the Python suite reads the same file.
+
+`tool-definition-urls.json` holds URLs a hosted tool definition can carry, each with the text
+the TypeScript SDK exports once userinfo, query values and the fragment are removed: WHATWG `URL`
+serialization of IDN hosts, percent-encoding, dot segments, default ports, trailing dots, IPv4
+and IPv6 forms, and URLs it refuses. `sha256` is the catalog digest of one `mcp` definition per
+URL; `bigInteger` is a definition whose integer is longer than CPython's `int()` digit limit.
+Both suites check the file. It was generated from the TypeScript SDK under Bun, and Node gives
+the same text for every URL in it.
+

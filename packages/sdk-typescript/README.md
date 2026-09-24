@@ -306,12 +306,17 @@ an OpenAI hosted MCP tool. Before export, and before `redact`, Hue replaces the 
 credential-like fields including `authorization`, `authorization_token`, `headers`, `api_key`,
 `access_token`, `x-api-key`, and keys ending in `token`, `secret`, `password`, `apikey` or
 `credential` (case-insensitively, ignoring `-` and `_`) with `"[redacted]"` in recorded tool definitions
-(`gen_ai.tool.definitions`, `ai.prompt.tools`, `llm.tools.*.tool.json_schema`) and in the `tools`
-and `mcp_servers` entries of a raw provider request or response recorded as `input.value`,
-`output.value` or `llm.invocation_parameters`. Parameters named in a JSON Schema `properties`
+(`gen_ai.tool.definitions`, `ai.prompt.tools`, `llm.tools.*.tool.json_schema`) and in the
+top-level `tools` and `mcp_servers` entries of any JSON object recorded as `input.value`,
+`output.value` or `llm.invocation_parameters`, whether or not it is a provider request; nothing
+else in that object changes. Parameters named in a JSON Schema `properties`
 object keep their schemas, so a tool that takes a `headers` argument is still described. A
 definition nested more than 256 levels deep rejects its record. Sensitive `default`, `const`,
-`examples` and `enum` values under credential-named schema parameters are redacted too.
+`examples` and `enum` values under credential-named schema parameters are redacted too. A `url`
+or `server_url` field (named like the credential fields, so `serverUrl` too) loses its userinfo
+and fragment, and each query value becomes `[redacted]` under its original name; the result is
+serialized as WHATWG `URL` does (lowercase scheme and host, IDN hosts in Punycode, default ports
+dropped, dot segments resolved). A value that is not an absolute URL becomes `"[redacted]"`.
 
 With `captureContent: false`, export removes tool definitions but keeps a summary of them on the
 same record: `hue.tool.names` lists each definition's `name` (Chat Completions `function.name`,
