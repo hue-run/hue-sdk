@@ -170,8 +170,9 @@ await hue.withSpan("review contract", async () => {
 });
 ```
 
-`data` is hashed and measured locally and never exported; pass `sha256` (and `byteSize`) instead
-when you already have them. The event carries `hue.file.sha256`, `hue.file.role` (`input`,
+`data` up to 25 MiB is hashed and measured locally and never exported; larger data is omitted and
+counted as an instrumentation failure, so pass `sha256` (and `byteSize`) instead when you already
+have them. The event carries `hue.file.sha256`, `hue.file.role` (`input`,
 `attachment` or `output`), `hue.file.media_type` and `hue.file.size`. It is metadata, so it is
 recorded in both capture modes, while `hue.file.name` is recorded only when `captureContent` is
 true. An invalid record, or one without an active span, is omitted and counted as an

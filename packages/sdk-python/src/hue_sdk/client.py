@@ -46,6 +46,17 @@ Redactor = Callable[[str, Any], Any]
 _MISSING = object()
 _FILE_ROLES = frozenset({"input", "attachment", "output"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_FILE_DATA_BYTES = 25 * 1024 * 1024
+
+
+def _utf8_byte_size(value: str, limit: int) -> int:
+    """Count UTF-8 bytes in bounded chunks, stopping after ``limit``."""
+    total = 0
+    for offset in range(0, len(value), 8192):
+        total += len(value[offset : offset + 8192].encode("utf-8"))
+        if total > limit:
+            return total
+    return total
 
 
 def _is_label(value: Any) -> bool:
@@ -212,8 +223,12 @@ class HueSpan:
         size = byte_size
         if data is not None:
             if isinstance(data, str):
+                if _utf8_byte_size(data, _MAX_FILE_DATA_BYTES) > _MAX_FILE_DATA_BYTES:
+                    raise ValueError("File data exceeds Hue's 25 MiB limit.")
                 content = data.encode("utf-8")
             elif isinstance(data, (bytes, bytearray, memoryview)):
+                if memoryview(data).nbytes > _MAX_FILE_DATA_BYTES:
+                    raise ValueError("File data exceeds Hue's 25 MiB limit.")
                 content = bytes(data)
             else:
                 raise ValueError("File data must be bytes or a string.")

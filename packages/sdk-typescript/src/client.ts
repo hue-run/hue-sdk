@@ -24,6 +24,7 @@ import { encodeContent, noopSpan, safeSpan } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
+import { MAX_FILE_DATA_BYTES } from "./config.js";
 import type {
   ExportReport,
   FileRecord,
@@ -671,9 +672,19 @@ export class HueClient {
       if (data !== undefined) {
         const bytes =
           typeof data === "string"
-            ? Buffer.from(data, "utf8")
+            ? (() => {
+                // Buffer.byteLength measures UTF-8 without allocating the copy that hashing would
+                // otherwise require. Reject before Buffer.from/createHash can retain large input.
+                if (Buffer.byteLength(data, "utf8") > MAX_FILE_DATA_BYTES)
+                  throw new RangeError("File data exceeds Hue's 25 MiB limit");
+                return Buffer.from(data, "utf8");
+              })()
             : data instanceof Uint8Array
-              ? data
+              ? data.byteLength <= MAX_FILE_DATA_BYTES
+                ? data
+                : (() => {
+                    throw new RangeError("File data exceeds Hue's 25 MiB limit");
+                  })()
               : undefined;
         if (!bytes) throw new TypeError("File data must be bytes or a string");
         const digest = createHash("sha256").update(bytes).digest("hex");

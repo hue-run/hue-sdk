@@ -594,6 +594,35 @@ describe("Hue SDK contract", () => {
       }
     },
   );
+  test("recordFile rejects oversized data before hashing or exporting it", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "files-limit",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const oversized = new Uint8Array(25 * 1024 * 1024 + 1);
+    try {
+      await hue.withSpan("request", () => {
+        hue.recordFile({ role: "input", mediaType: "application/octet-stream", data: oversized });
+        hue.recordFile({
+          role: "input",
+          mediaType: "text/plain",
+          data: "x".repeat(25 * 1024 * 1024 + 1),
+        });
+      });
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(2);
+      const request = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((span) => span.name === "request")!;
+      expect(request.events ?? []).toEqual([]);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({

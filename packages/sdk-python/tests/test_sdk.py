@@ -274,6 +274,36 @@ def test_record_file_on_an_ended_span_counts_once_without_hashing(receiver, monk
     assert [event.name for event in request.events] == []
 
 
+def test_record_file_rejects_oversized_data_before_hashing_or_exporting(receiver, monkeypatch):
+    from hue_sdk.client import _MAX_FILE_DATA_BYTES
+
+    hashed: list[bytes] = []
+    real_sha256 = hashlib.sha256
+
+    def counting(data=b"", *args, **kwargs):
+        hashed.append(bytes(data))
+        return real_sha256(data, *args, **kwargs)
+
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.span("request") as span:
+            monkeypatch.setattr("hue_sdk.client.hashlib.sha256", counting)
+            span.record_file(
+                role="input",
+                media_type="application/octet-stream",
+                data=bytes(_MAX_FILE_DATA_BYTES + 1),
+            )
+            span.record_file(
+                role="input",
+                media_type="text/plain",
+                data="x" * (_MAX_FILE_DATA_BYTES + 1),
+            )
+            assert hue.export_status.instrumentation_failures == 2
+            assert hashed == []
+        hue.force_flush()
+    (request,) = receiver.spans()
+    assert [event.name for event in request.events] == []
+
+
 def test_disabled_client_does_not_count_invalid_mcp(receiver):
     hue = Hue(receiver.url, KEY, capture_content=False, enabled=False)
     with hue.tool("get_thread", mcp={"name": ""}):

@@ -211,7 +211,8 @@ export interface FileRecord {
   mediaType: string;
   /** Hex SHA-256 of the file's bytes; computed from `data` when omitted. */
   sha256?: string;
-  /** The file's bytes, only hashed and measured, never exported; a string is hashed as UTF-8. */
+  /** The file's bytes, only hashed and measured, never exported; a string is hashed as UTF-8.
+   * Data larger than 25 MiB is omitted and counted as an instrumentation failure. */
   data?: Uint8Array | string;
   /** Size in bytes; computed from `data` when omitted. */
   byteSize?: number;
