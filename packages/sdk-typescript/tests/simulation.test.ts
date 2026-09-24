@@ -1477,7 +1477,7 @@ test("simulation candidates cannot read grading references or mutate pinned case
       traceEvidence: { mode: "required" },
       target: async (inputs, context) => {
         expect(Object.keys(context.item).sort()).toEqual(["externalKey", "id"]);
-        expect(Object.keys(context.mcp).sort()).toEqual(["expiresAt", "token", "url"]);
+        expect(Object.keys(context.mcp!).sort()).toEqual(["expiresAt", "token", "url"]);
         expect(JSON.stringify(context)).not.toContain("evaluator-private");
         (inputs as { task: string }).task = "changed";
         (context.config as { settings: { temperature: number } }).settings.temperature = 1;

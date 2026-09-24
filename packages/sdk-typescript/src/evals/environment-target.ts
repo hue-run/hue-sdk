@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import type { EnvironmentClient } from "../environment/client.js";
+import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
 import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
-import type { EnvironmentRun } from "../environment/types.js";
+import type { EnvironmentRun, WorldHandoff } from "../environment/types.js";
+import { legacyMcpCapability, worldHandoff } from "../environment/world.js";
 import type { HueSpan } from "../types.js";
 import {
   actualAgentManifestV2,
@@ -111,8 +112,16 @@ export interface EnvironmentTargetContext {
   executionId: string;
   environmentRunId: string;
   trace: { traceId: string; spanId: string };
+  /** Hue-native tools of a world created while the gateway was off; empty for a gateway
+   * world, whose calls go to the provider mirrors in `world`. */
   tools: Record<string, EnvironmentTool>;
-  mcp: SimulationMcpCapability;
+  /** The mirror URLs, world token, environment carriers and MCP configuration of a gateway
+   * world. Absent for a world created while the gateway was off. */
+  world?: WorldHandoff;
+  /** One MCP endpoint and bearer: for a gateway world, its first MCP mirror with the world
+   * token; otherwise the deprecated execution-scoped `hue_sim_` capability. Absent when a
+   * gateway world has no MCP surface. */
+  mcp?: SimulationMcpCapability;
   connectionBundle?: AttemptConnectionBundleV2;
   signal?: AbortSignal;
 }
@@ -133,6 +142,12 @@ export interface RunEnvironmentTargetOptions {
   requested?: PinnedAttemptV2;
   maxSteps?: number;
   ttlSeconds?: number;
+  /** The agent revision under test, sent on create for the world's fingerprint. */
+  agentRevision?: string;
+  /** Emit a one-time `DeprecationWarning` when a legacy path (Hue-native tools, the `hue_sim_`
+   * capability, the provider facade) is used; on by default. A harness that adapts to whatever
+   * the deployment serves, such as `hue eval`, turns it off. */
+  deprecationWarnings?: boolean;
   signal?: AbortSignal;
   onProgress?(event: EnvironmentTargetProgress): void | Promise<void>;
   target(
@@ -154,9 +169,109 @@ async function seal(
       status,
     });
   } catch (error) {
+    // A gateway world answers 409 once it is completing, sealed or expired: each is the
+    // outcome the caller wanted or the one it can no longer change.
     const recovered = await client.getRun(runId).catch(() => undefined);
-    if (recovered?.status !== status && recovered?.status !== "expired")
+    if (
+      recovered?.status !== status &&
+      recovered?.status !== "expired" &&
+      !(recovered?.status === "open" && recovered.lifecycle === "completing")
+    )
       throw new TargetOutcomeUncertainError(executionId, { cause: error });
+  }
+}
+
+const deprecations = new Set<string>();
+/** One warning per process per legacy path. */
+function warnDeprecated(code: string, message: string) {
+  if (deprecations.has(code)) return;
+  deprecations.add(code);
+  process.emitWarning(message, { type: "DeprecationWarning", code });
+}
+
+/** The W3C context of the case span, sent on create so the world span parents on it. The
+ * flags are the span's own: an unsampled case span is not exported, and the World API must not
+ * be told otherwise. */
+export function caseTraceparent(span: {
+  traceId: string;
+  spanId: string;
+  span?: { spanContext?(): { traceFlags?: number } };
+}): string {
+  let flags = 1;
+  try {
+    const context = span.span?.spanContext?.();
+    if (context && typeof context.traceFlags === "number") flags = context.traceFlags;
+  } catch {
+    // A span that cannot report its context is treated as sampled, as before.
+  }
+  return `00-${span.traceId}-${span.spanId}-${(flags & 0xff).toString(16).padStart(2, "0")}`;
+}
+
+/** What a deployment's credential-free gateway health said: `on` (200 with
+ * `gateway: "simulation"`), `off` (the empty 404 the disabled handler answers, with no
+ * `x-hue-diagnostic`), or `unknown` for anything else. */
+export type GatewayState = "on" | "off" | "unknown";
+
+const gatewayStates = new Map<string, Promise<GatewayState>>();
+/**
+ * Whether the deployment serves the simulation gateway, from its credential-free health
+ * endpoint: 200 with `gateway: "simulation"` is on, the disabled handler's empty 404 (no
+ * `x-hue-diagnostic`) is off, and anything else (a network failure, a timeout, a redirect, a
+ * refusal carrying a diagnostic, another status or body) is unknown. Probed only after a create
+ * was refused; on and off are remembered per origin, unknown is probed again next time.
+ */
+export function gatewayState(
+  baseUrl: string,
+  fetchImpl: (url: string, init?: RequestInit) => Promise<Response> = fetch,
+): Promise<GatewayState> {
+  const origin = new URL(baseUrl).origin;
+  const remembered = gatewayStates.get(origin);
+  if (remembered) return remembered;
+  const probe: Promise<GatewayState> = fetchImpl(
+    `${origin}/api/sim/gmailmcp.googleapis.com/_hue/health`,
+    { redirect: "error", signal: AbortSignal.timeout(5_000) },
+  )
+    .then(async (response): Promise<GatewayState> => {
+      if (response.status === 404)
+        return response.headers.has("x-hue-diagnostic") ? "unknown" : "off";
+      if (!response.ok) return "unknown";
+      const body = (await response.json()) as { gateway?: unknown };
+      return body.gateway === "simulation" ? "on" : "unknown";
+    })
+    .catch((): GatewayState => "unknown");
+  gatewayStates.set(origin, probe);
+  void probe.then((state) => {
+    if (state === "unknown" && gatewayStates.get(origin) === probe) gatewayStates.delete(origin);
+  });
+  return probe;
+}
+
+/**
+ * Creates the world with the World API fields. An older deployment whose simulation gateway is
+ * off refuses them on the legacy create (400); when the deployment's health says the gateway is
+ * off, the create is repeated once without them and the world is the legacy kind. A 400 from a
+ * deployment with the gateway on is a real refusal (a trace context that does not match the
+ * execution, for one) and is raised as it is, and so is a 400 whose deployment's health is
+ * unknown (unreachable, a timeout): the fields are never dropped on a guess. The stable
+ * idempotency key makes a repeat a replay, never a second world.
+ */
+export async function createWorldForExecution(
+  client: Pick<EnvironmentClient, "createRun" | "baseUrl">,
+  input: Parameters<EnvironmentClient["createRun"]>[0],
+  options: { gatewayState?: (baseUrl: string) => Promise<GatewayState> } = {},
+): Promise<EnvironmentRun> {
+  try {
+    return await client.createRun(input);
+  } catch (error) {
+    const { traceparent, agentRevision, ...legacy } = input;
+    if (
+      !(error instanceof HueEnvironmentError) ||
+      error.status !== 400 ||
+      (traceparent === undefined && agentRevision === undefined) ||
+      (await (options.gatewayState ?? gatewayState)(client.baseUrl)) !== "off"
+    )
+      throw error;
+    return client.createRun(legacy);
   }
 }
 
@@ -171,27 +286,47 @@ export async function runEnvironmentTarget(
   const environmentVersionId = context.item.environmentVersionId;
   if (!environmentVersionId)
     throw new Error("The simulation case has no pinned environment version");
-  const run: EnvironmentRun = await options.environmentClient.createRun({
+  // One stable idempotency key per case attempt: a replay after a lost acknowledgement gets
+  // the same world and the same token.
+  const run: EnvironmentRun = await createWorldForExecution(options.environmentClient, {
     idempotencyKey: `execution:${context.executionId}`,
     environmentVersionId,
     executionId: context.executionId,
     maxSteps: options.maxSteps,
     ttlSeconds: options.ttlSeconds,
+    traceparent: caseTraceparent(context.span),
+    agentRevision: options.agentRevision,
   });
+  const world = worldHandoff(run);
   const progress = (event: EnvironmentTargetProgress) => options.onProgress?.(event);
   let finalized = false;
   try {
     await progress({ type: "world_created", environmentRunId: run.id });
     if (options.signal?.aborted) throw new TargetCancelledError();
-    const tools = bindEnvironmentTools({
-      hue: options.hue,
-      client: options.environmentClient,
-      run,
-      parentContext: context.span.context,
-    });
+    // A gateway world refuses Hue-native actions (409 simulation_world); its agent reaches
+    // the provider mirrors in `world` instead.
+    const tools = world
+      ? {}
+      : bindEnvironmentTools({
+          hue: options.hue,
+          client: options.environmentClient,
+          run,
+          parentContext: context.span.context,
+        });
+    const warn = options.deprecationWarnings ?? true;
+    if (!world && warn)
+      warnDeprecated(
+        "HUE_NATIVE_SIMULATION_TOOLS",
+        "Hue-native simulation tools and the hue_sim_ MCP capability are deprecated; worlds created through the simulation gateway hand the agent provider mirrors and a world token (context.world).",
+      );
     let connectionBundle: AttemptConnectionBundleV2 | undefined;
-    let mcp: SimulationMcpCapability;
-    if (options.requested) {
+    let mcp: SimulationMcpCapability | undefined;
+    if (options.requested && !world) {
+      if (warn)
+        warnDeprecated(
+          "HUE_PROVIDER_FACADE",
+          "The provider facade (prepareAttempt) is deprecated; worlds created through the simulation gateway hand the agent provider mirrors and a world token (context.world).",
+        );
       const actualManifest = actualAgentManifestV2.parse(
         typeof options.requested.actualAgentManifest === "function"
           ? await options.requested.actualAgentManifest({
@@ -245,6 +380,15 @@ export async function runEnvironmentTarget(
       );
       if (!projected) throw new TypeError("The prepared attempt has no selected MCP surface");
       mcp = projected;
+    } else if (world) {
+      // A gateway world is served by the provider mirrors; the facade's attempt preflight
+      // belongs to the legacy transport and is not run for it.
+      if (options.requested && warn)
+        warnDeprecated(
+          "HUE_PROVIDER_FACADE_IGNORED",
+          "Provider-profile options (requestedProviders, mcpSurface, actualAgentManifest) are ignored for a world the simulation gateway serves; the agent receives the provider mirrors in context.world.",
+        );
+      mcp = legacyMcpCapability(world);
     } else {
       mcp = await options.client.createSimulationMcpCapability({
         runId: run.id,
@@ -260,7 +404,8 @@ export async function runEnvironmentTarget(
       environmentRunId: run.id,
       trace: { traceId: context.span.traceId, spanId: context.span.spanId },
       tools,
-      mcp,
+      ...(world ? { world } : {}),
+      ...(mcp ? { mcp } : {}),
       ...(connectionBundle ? { connectionBundle } : {}),
       signal: options.signal,
     });

@@ -20,6 +20,8 @@ import type {
   SealedRun,
   StepPage,
   StepPageOptions,
+  WorldEvidence,
+  WorldEvidenceOptions,
 } from "./types.js";
 
 /** Connection and retry options for {@link createEnvironmentClient}. */
@@ -38,6 +40,8 @@ export class HueEnvironmentError extends Error {
   constructor(
     /** HTTP status when Hue answered; absent for transport, timeout or parse failure. */
     readonly status?: number,
+    /** Hue's `Retry-After` in milliseconds, bounded, when a 429 or 503 carried one. */
+    readonly retryAfterMs?: number,
   ) {
     super(
       status
@@ -49,6 +53,22 @@ export class HueEnvironmentError extends Error {
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+/** A `Retry-After` longer than this waits this long: Hue asks for a second, never minutes. */
+const MAX_RETRY_AFTER_MS = 10_000;
+const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
+/** Version 00 with real identifiers: an all-zero trace or span ID is invalid, and Hue refuses it. */
+function validTraceparent(value: string) {
+  if (!TRACEPARENT.test(value)) return false;
+  const [, traceId, spanId] = value.split("-");
+  return !/^0+$/.test(traceId!) && !/^0+$/.test(spanId!);
+}
+
+/** Whole seconds only, as Hue sends them; a date or garbage is ignored. */
+function retryAfterMillis(response: Response): number | undefined {
+  const header = response.headers.get("retry-after");
+  if (header === null || !/^\d{1,6}$/.test(header.trim())) return undefined;
+  return Math.min(Number(header.trim()) * 1000, MAX_RETRY_AFTER_MS);
+}
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const REQUEST_BOUNDS: JsonBounds = { ...valueBounds, bytes: 1024 * 1024 };
 /** The server bounds JSON inside each entity independently, then permits the parsed
@@ -98,7 +118,10 @@ export class EnvironmentClient {
     }
     if (!response.ok) {
       await response.body?.cancel();
-      throw new HueEnvironmentError(response.status);
+      throw new HueEnvironmentError(
+        response.status,
+        response.status === 429 || response.status === 503 ? retryAfterMillis(response) : undefined,
+      );
     }
     try {
       const reader = response.body?.getReader();
@@ -142,8 +165,10 @@ export class EnvironmentClient {
         if (!(error instanceof HueEnvironmentError)) throw error;
         const recoverable = error.status === undefined || RETRYABLE.has(error.status);
         if (!recoverable || attempt >= this.maxAttempts) throw error;
+        // Hue's admission refusals say how long to wait; anything else backs off.
         const backoff = Math.min(100 * 2 ** (attempt - 1), 2000);
-        await new Promise((resolve) => setTimeout(resolve, backoff + Math.random() * backoff));
+        const wait = error.retryAfterMs ?? backoff + Math.random() * backoff;
+        await new Promise((resolve) => setTimeout(resolve, wait));
       }
     }
   }
@@ -218,6 +243,15 @@ export class EnvironmentClient {
       throw new RangeError("ttlSeconds must be 1–86400");
     if (input.seed !== undefined && !/^[a-f0-9]{32}$/.test(input.seed))
       throw new TypeError("Seed must be 32 lowercase hexadecimal characters");
+    if (input.traceparent !== undefined && !validTraceparent(input.traceparent))
+      throw new TypeError("traceparent must be a version-00 W3C trace context");
+    if (
+      input.agentRevision !== undefined &&
+      (typeof input.agentRevision !== "string" ||
+        input.agentRevision.length < 1 ||
+        input.agentRevision.length > 256)
+    )
+      throw new RangeError("agentRevision must be 1–256 characters");
     return this.request<EnvironmentRun>("POST", "/environment-runs", {
       ...input,
       environmentVersionId: uuid(input.environmentVersionId),
@@ -269,6 +303,21 @@ export class EnvironmentClient {
   /** Seals a world as completed or abandoned and freezes its evidence. */
   finishRun(runId: string, input: FinishRunInput) {
     return this.request<SealedRun>("POST", `/environment-runs/${uuid(runId)}/finish`, input);
+  }
+  /** Reads a sealed world's evaluator-only evidence with the project key; a world token never
+   * can. An open world answers 409 until it is sealed. */
+  getEvidence(runId: string, options: WorldEvidenceOptions = {}) {
+    const query = new URLSearchParams();
+    if (options.section !== undefined) {
+      if (!["all", "start", "end", "diff", "ledger"].includes(options.section))
+        throw new TypeError("Evidence section must be all, start, end, diff or ledger");
+      query.set("section", options.section);
+    }
+    if (options.bodies !== undefined) query.set("bodies", options.bodies ? "true" : "false");
+    return this.request<WorldEvidence>(
+      "GET",
+      `/environment-runs/${uuid(runId)}/evidence${query.size ? `?${query}` : ""}`,
+    );
   }
 }
 /** Creates a typed simulated-environment client. */
