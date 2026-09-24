@@ -1,4 +1,5 @@
 import type { HostedToolProvider } from "./types.js";
+import { MAX_CONTENT_BYTES } from "./config.js";
 
 // Provider-executed ("hosted") tool calls found in a model provider's response: OpenAI Responses
 // output items and Anthropic Messages content blocks. The provider ran these tools itself, so no
@@ -33,13 +34,20 @@ export interface HostedToolActivity {
 }
 
 type Item = Record<string, unknown>;
+const MAX_PROVIDER_ITEMS = 128;
+const MAX_PROVIDER_DEFINITIONS = 512;
+const MAX_PROVIDER_SERVERS = 512;
 
 function isItem(value: unknown): value is Item {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function text(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== "" && value.length <= 256
+  return typeof value === "string" &&
+    value.trim() !== "" &&
+    value.length <= 256 &&
+    !value.includes("\u0000") &&
+    value.isWellFormed()
     ? value
     : undefined;
 }
@@ -47,6 +55,7 @@ function text(value: unknown): string | undefined {
 /** MCP arguments arrive as a JSON string; record the structure when it parses, else the text. */
 function jsonArguments(value: unknown): unknown {
   if (typeof value !== "string") return value;
+  if (Buffer.byteLength(value, "utf8") > MAX_CONTENT_BYTES) return undefined;
   try {
     return JSON.parse(value) as unknown;
   } catch {
@@ -56,7 +65,10 @@ function jsonArguments(value: unknown): unknown {
 
 /** OpenAI Responses `output` items. Built-in tools are named by their kind; MCP calls by tool. */
 function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
-  for (const item of items) {
+  const count = Math.min(items.length, MAX_PROVIDER_ITEMS);
+  activity.skipped += items.length - count;
+  for (let index = 0; index < count; index++) {
+    const item = items[index];
     if (!isItem(item)) continue;
     const callId = text(item.id);
     switch (item.type) {
@@ -82,15 +94,23 @@ function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
           activity.skipped++;
           break;
         }
-        activity.listings.push({
-          server,
-          definitions: item.tools.filter(isItem).map((tool) => ({
+        const definitions: Record<string, unknown>[] = [];
+        const definitionCount = Math.min(item.tools.length, MAX_PROVIDER_DEFINITIONS);
+        activity.skipped += item.tools.length - definitionCount;
+        for (let index = 0; index < definitionCount; index++) {
+          const tool = item.tools[index];
+          if (!isItem(tool)) continue;
+          definitions.push({
             type: "function",
             ...(tool.name !== undefined ? { name: tool.name } : {}),
             ...(tool.description !== undefined ? { description: tool.description } : {}),
             ...(tool.input_schema !== undefined ? { parameters: tool.input_schema } : {}),
             ...(tool.annotations !== undefined ? { annotations: tool.annotations } : {}),
-          })),
+          });
+        }
+        activity.listings.push({
+          server,
+          definitions,
           ...(item.error !== undefined && item.error !== null ? { errorType: "mcp_error" } : {}),
         });
         break;
@@ -134,7 +154,10 @@ function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
 /** Anthropic Messages `content` blocks: a use block paired with the result block that names it. */
 function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
   const results = new Map<string, Item>();
-  for (const block of blocks)
+  const count = Math.min(blocks.length, MAX_PROVIDER_ITEMS);
+  activity.skipped += blocks.length - count;
+  for (let index = 0; index < count; index++) {
+    const block = blocks[index];
     if (
       isItem(block) &&
       typeof block.type === "string" &&
@@ -142,7 +165,9 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
       typeof block.tool_use_id === "string"
     )
       results.set(block.tool_use_id, block);
-  for (const block of blocks) {
+  }
+  for (let index = 0; index < count; index++) {
+    const block = blocks[index];
     if (!isItem(block) || (block.type !== "mcp_tool_use" && block.type !== "server_tool_use"))
       continue;
     const name = text(block.name);
@@ -202,7 +227,9 @@ export function hostedServerAddresses(
   if (!isItem(request)) return addresses;
   const entries = request[provider === "openai" ? "tools" : "mcp_servers"];
   if (!Array.isArray(entries)) return addresses;
-  for (const entry of entries) {
+  const count = Math.min(entries.length, MAX_PROVIDER_SERVERS);
+  for (let index = 0; index < count; index++) {
+    const entry = entries[index];
     if (!isItem(entry)) continue;
     const label = text(provider === "openai" ? entry.server_label : entry.name);
     const url = provider === "openai" ? entry.server_url : entry.url;
