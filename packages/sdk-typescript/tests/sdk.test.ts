@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { context, trace, type TraceState } from "@opentelemetry/api";
@@ -17,7 +18,8 @@ import {
   type ExportIssue,
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
-import { generateText, streamText } from "ai";
+import { OpenTelemetry } from "@ai-sdk/otel";
+import { generateText, jsonSchema, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import sdkPackage from "@hue-run/sdk/package.json" with { type: "json" };
@@ -231,6 +233,84 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test.each([true, false])(
+    "model helper records system instructions and tool definitions as content (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "model-instructions",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      const systemInstructions = [{ type: "text", content: "Answer in one sentence." }];
+      const tools = [
+        {
+          type: "function",
+          name: "lookup",
+          description: "Look up an order",
+          parameters: { type: "object", properties: { id: { type: "string" } } },
+        },
+      ];
+      try {
+        const answer = await hue.model(
+          "synthetic-model",
+          () => {
+            hue.recordMessages({
+              systemInstructions,
+              output: [{ role: "assistant", parts: [{ type: "text", content: "Shipped." }] }],
+            });
+            return "Shipped.";
+          },
+          { provider: "synthetic", systemInstructions, tools },
+        );
+        expect(answer).toBe("Shipped.");
+        // A value that is not JSON is omitted and counted; the call still runs.
+        expect(
+          await hue.model("synthetic-model", () => "ran", {
+            provider: "synthetic",
+            name: "invalid",
+            tools: new Date(0),
+          }),
+        ).toBe("ran");
+        const result = await hue.flushSafe();
+        expect(result.report.instrumentationFailures).toBe(captureContent ? 1 : 0);
+        const spans = endpoint.requests
+          .filter((request) => request.signal === "traces")
+          .flatMap((request) => request.records);
+        const model = spans.find((span) => span.name === "chat synthetic-model")!;
+        const invalid = spans.find((span) => span.name === "invalid")!;
+        expect(attr(invalid, "gen_ai.tool.definitions")).toBeUndefined();
+        const logs = endpoint.requests
+          .filter((request) => request.signal === "logs")
+          .flatMap((request) => request.records);
+        if (!captureContent) {
+          expect(attr(model, "gen_ai.system_instructions")).toBeUndefined();
+          expect(attr(model, "gen_ai.tool.definitions")).toBeUndefined();
+          expect(logs).toHaveLength(0);
+          return;
+        }
+        expect(JSON.parse(attr(model, "gen_ai.system_instructions")!.stringValue!)).toEqual(
+          systemInstructions,
+        );
+        expect(JSON.parse(attr(model, "gen_ai.tool.definitions")!.stringValue!)).toEqual(tools);
+        const [log] = logs;
+        const body = Object.fromEntries(
+          log.body!.kvlistValue!.values.map((item) => [item.key, item.value]),
+        );
+        expect(
+          body["gen_ai.system_instructions"].arrayValue!.values[0].kvlistValue!.values,
+        ).toContainEqual({ key: "content", value: { stringValue: "Answer in one sentence." } });
+        expect(Object.keys(body).sort()).toEqual([
+          "gen_ai.output.messages",
+          "gen_ai.system_instructions",
+        ]);
+      } finally {
+        await hue.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
   test("helpers accept interface-typed values without casts and omit non-JSON values", async () => {
     interface ToolInput {
       city: string;
@@ -342,6 +422,380 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("workspaceId is recorded as hue.workspace.id and inherited like the user", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "workspace",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan(
+        "request",
+        async () => {
+          await hue.tool("lookup", null, () => "ok");
+          await hue.model("synthetic-model", () => "ok", { provider: "synthetic" });
+          await generateText({
+            model: new MockLanguageModelV4({
+              doGenerate: async () => ({
+                content: [{ type: "text", text: "ok" }],
+                finishReason: { unified: "stop", raw: "stop" },
+                usage,
+                warnings: [],
+              }),
+            }),
+            prompt: "Synthetic prompt",
+            telemetry: hueTelemetry(hue),
+          });
+          await hue.withSpan("other-workspace", () => undefined, { workspaceId: "workspace-2" });
+        },
+        { workspaceId: "workspace-1", userId: "user-1" },
+      );
+      await hue.withSpan("unscoped", () => undefined);
+      await hue.model("synthetic-model", () => "ok", {
+        provider: "synthetic",
+        name: "direct-model",
+        workspaceId: "workspace-3",
+      });
+      expect(await hue.withSpan("blank", () => "ran", { workspaceId: "" })).toBe("ran");
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(1);
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const workspace = (name: string) =>
+        attr(spans.find((span) => span.name === name)!, "hue.workspace.id")?.stringValue;
+      const request = spans.find((span) => span.name === "request")!;
+      const scoped = spans.filter(
+        (span) => span.traceId === request.traceId && span.name !== "other-workspace",
+      );
+      expect(scoped.map((span) => span.name)).toEqual(
+        expect.arrayContaining(["request", "execute_tool lookup", "chat synthetic-model"]),
+      );
+      expect(scoped.length).toBeGreaterThan(4);
+      for (const span of scoped) {
+        expect(attr(span, "hue.workspace.id")?.stringValue).toBe("workspace-1");
+        expect(attr(span, "user.id")?.stringValue).toBe("user-1");
+      }
+      expect(workspace("other-workspace")).toBe("workspace-2");
+      expect(workspace("unscoped")).toBeUndefined();
+      expect(workspace("direct-model")).toBe("workspace-3");
+      expect(spans.some((span) => span.name === "blank")).toBe(false);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("tool records the Hue provider and surface and drops blank or invalid labels", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "mcp-tool-surface",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.tool("labeled", {}, () => "ok", {
+        mcp: { name: "gmail", provider: "google.gmail", surface: "google.gmail/mcp" },
+      });
+      await hue.tool("blank", {}, () => "ok", {
+        mcp: { name: "gmail", provider: " ", surface: "" },
+      });
+      await hue.tool("invalid", {}, () => "ok", {
+        mcp: {
+          name: "gmail",
+          provider: "google\u0000gmail",
+          surface: "\ud800",
+          version: 3 as unknown as string,
+        },
+      });
+      await hue.tool("oversized", {}, () => "ok", {
+        mcp: { provider: "p".repeat(257), surface: "s".repeat(256) },
+      });
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(6);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const span = (name: string) =>
+        spans.find((record) => record.name === `execute_tool ${name}`)!;
+      expect(attr(span("labeled"), "hue.mcp.provider")?.stringValue).toBe("google.gmail");
+      expect(attr(span("labeled"), "hue.mcp.surface")?.stringValue).toBe("google.gmail/mcp");
+      expect(attr(span("labeled"), "mcp.server.name")?.stringValue).toBe("gmail");
+      for (const name of ["blank", "invalid"]) {
+        expect(attr(span(name), "mcp.server.name")?.stringValue).toBe("gmail");
+        expect(attr(span(name), "mcp.server.version")).toBeUndefined();
+        expect(attr(span(name), "hue.mcp.provider")).toBeUndefined();
+        expect(attr(span(name), "hue.mcp.surface")).toBeUndefined();
+      }
+      expect(attr(span("oversized"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("oversized"), "hue.mcp.surface")?.stringValue).toBe("s".repeat(256));
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("tool source labels use UTF-16 length like Python and Fern", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "mcp-tool-source-unicode",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const accepted = "😀".repeat(128); // 256 UTF-16 code units: the inclusive limit.
+    const rejected = "😀".repeat(129);
+    try {
+      await hue.tool("accepted", {}, () => "ok", {
+        mcp: { provider: accepted, surface: accepted },
+      });
+      await hue.tool("rejected", {}, () => "ok", {
+        mcp: { provider: rejected, surface: rejected },
+      });
+      await hue.tool("nul", {}, () => "ok", {
+        mcp: { provider: "\u0000bad", surface: "\u0000bad" },
+      });
+      expect((await hue.flushSafe()).report.instrumentationFailures).toBe(4);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const span = (name: string) =>
+        spans.find((record) => record.name === `execute_tool ${name}`)!;
+      expect(attr(span("accepted"), "hue.mcp.provider")?.stringValue).toBe(accepted);
+      expect(attr(span("accepted"), "hue.mcp.surface")?.stringValue).toBe(accepted);
+      expect(attr(span("rejected"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("rejected"), "hue.mcp.surface")).toBeUndefined();
+      expect(attr(span("nul"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("nul"), "hue.mcp.surface")).toBeUndefined();
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "inline-files-export",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    const image = Uint8Array.from({ length: 100 * 1024 }, (_, index) => (index * 7) % 256);
+    const imageBase64 = Buffer.from(image).toString("base64");
+    const imageDigest = createHash("sha256").update(image).digest("hex");
+    const text = `${"line\n".repeat(20000)}end`;
+    const textDigest = createHash("sha256").update(text, "utf8").digest("hex");
+    const asciiText = "A".repeat(64 * 1024 + 4);
+    const asciiDigest = createHash("sha256").update(asciiText, "utf8").digest("hex");
+    try {
+      const span = tracerProvider.getTracer("third-party").startSpan("external");
+      // AI SDK 6 file parts: the large image is hashed, its other fields kept; small data stays.
+      span.setAttribute(
+        "ai.prompt.messages",
+        JSON.stringify([
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this" },
+              { type: "file", mediaType: "image/png", filename: "chart.png", data: imageBase64 },
+              { type: "file", mediaType: "text/plain", data: "c21hbGw=" },
+            ],
+          },
+        ]),
+      );
+      // GenAI blob parts: text content is hashed as UTF-8, a data: URL is decoded first.
+      span.setAttribute(
+        "gen_ai.output.messages",
+        JSON.stringify([
+          {
+            role: "assistant",
+            parts: [
+              { type: "blob", modality: "document", mime_type: "text/plain", content: text },
+              { type: "blob", modality: "document", mime_type: "text/plain", content: asciiText },
+              {
+                type: "blob",
+                modality: "image",
+                mime_type: "image/png",
+                content: `data:image/png;base64,${imageBase64}`,
+              },
+            ],
+            finish_reason: "stop",
+          },
+        ]),
+      );
+      // Not a message attribute: left alone even though it carries the same part.
+      span.setAttribute(
+        "input.value",
+        JSON.stringify({ parts: [{ type: "blob", content: imageBase64 }] }),
+      );
+      span.end();
+      await hue.flush();
+      const record = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((candidate) => candidate.name === "external")!;
+      const prompt = JSON.parse(attr(record, "ai.prompt.messages")!.stringValue!);
+      expect(prompt[0].content).toEqual([
+        { type: "text", text: "Describe this" },
+        {
+          type: "file",
+          mediaType: "image/png",
+          filename: "chart.png",
+          sha256: imageDigest,
+          size: image.byteLength,
+        },
+        { type: "file", mediaType: "text/plain", data: "c21hbGw=" },
+      ]);
+      const output = JSON.parse(attr(record, "gen_ai.output.messages")!.stringValue!);
+      expect(output[0].parts).toEqual([
+        {
+          type: "blob",
+          modality: "document",
+          mime_type: "text/plain",
+          sha256: textDigest,
+          size: Buffer.byteLength(text),
+        },
+        {
+          type: "blob",
+          modality: "document",
+          mime_type: "text/plain",
+          sha256: asciiDigest,
+          size: Buffer.byteLength(asciiText),
+        },
+        {
+          type: "blob",
+          modality: "image",
+          mime_type: "image/png",
+          sha256: imageDigest,
+          size: image.byteLength,
+        },
+      ]);
+      expect(attr(record, "input.value")?.stringValue).toContain(imageBase64);
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test.each([true, false])(
+    "recordFile links a file by content hash without exporting its bytes (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "files",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      const body = "synthetic-file-body";
+      const digest = createHash("sha256").update(body).digest("hex");
+      const pdf = "AB".repeat(32);
+      try {
+        await hue.withSpan("request", () => {
+          hue.recordFile({
+            role: "input",
+            mediaType: "text/plain",
+            data: Buffer.from(body),
+            name: "notes.txt",
+          });
+          hue.recordFile({
+            role: "output",
+            mediaType: "application/pdf",
+            sha256: pdf,
+            byteSize: 2048,
+          });
+          // A string is hashed as UTF-8; a blank name is omitted (and counted when captured).
+          hue.recordFile({ role: "attachment", mediaType: "text/plain", data: body, name: " " });
+          // Each of these is omitted and counted; the callback keeps running.
+          hue.recordFile({ role: "draft" as never, mediaType: "text/plain", data: body });
+          hue.recordFile({ role: "input", mediaType: "text/plain", sha256: "not-a-digest" });
+          hue.recordFile({
+            role: "input",
+            mediaType: "text/plain",
+            data: body,
+            sha256: "0".repeat(64),
+          });
+          hue.recordFile({ role: "input", mediaType: "text/plain", sha256: digest, byteSize: -1 });
+          hue.recordFile({ role: "input", mediaType: "", sha256: digest });
+        });
+        // Outside any span there is nothing to attach the event to.
+        hue.recordFile({ role: "input", mediaType: "text/plain", data: body });
+        const result = await hue.flushSafe();
+        expect(result.report.instrumentationFailures).toBe(captureContent ? 7 : 6);
+        const request = endpoint.requests
+          .flatMap((request) => request.records)
+          .find((span) => span.name === "request")!;
+        const files = (request.events ?? [])
+          .filter((event) => event.name === "hue.file")
+          .map((event) =>
+            Object.fromEntries(
+              (event.attributes ?? []).map((item) => [
+                item.key,
+                item.value.stringValue ?? Number(item.value.intValue),
+              ]),
+            ),
+          );
+        expect(files).toEqual([
+          {
+            "hue.file.sha256": digest,
+            "hue.file.role": "input",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": body.length,
+            ...(captureContent ? { "hue.file.name": "notes.txt" } : {}),
+          },
+          {
+            "hue.file.sha256": pdf.toLowerCase(),
+            "hue.file.role": "output",
+            "hue.file.media_type": "application/pdf",
+            "hue.file.size": 2048,
+          },
+          {
+            "hue.file.sha256": digest,
+            "hue.file.role": "attachment",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": body.length,
+          },
+        ]);
+        expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain(body);
+      } finally {
+        await hue.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
+  test("recordFile rejects oversized data before hashing or exporting it", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "files-limit",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const oversized = new Uint8Array(25 * 1024 * 1024 + 1);
+    try {
+      await hue.withSpan("request", () => {
+        hue.recordFile({ role: "input", mediaType: "application/octet-stream", data: oversized });
+        hue.recordFile({
+          role: "input",
+          mediaType: "text/plain",
+          data: "x".repeat(25 * 1024 * 1024 + 1),
+        });
+      });
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(2);
+      const request = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((span) => span.name === "request")!;
+      expect(request.events ?? []).toEqual([]);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({
@@ -685,6 +1139,150 @@ describe("Hue SDK contract", () => {
       }
     },
   );
+  test("export replaces hosted-tool credentials in tool definitions before redact", async () => {
+    const endpoint = receiver();
+    const seen: string[] = [];
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "tool-credentials",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      redact: (value) => {
+        seen.push(value);
+        return value;
+      },
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    // OpenAI Responses hosted MCP tool as OpenInference records it, and a function tool whose
+    // parameters are named like credentials: parameter schemas are not credentials.
+    const hostedMcp = {
+      type: "mcp",
+      server_label: "gmail",
+      server_url: "https://mcp.example.test/gmail",
+      authorization: "synthetic-oauth-token",
+      headers: { "X-Api-Key": "synthetic-header-secret" },
+      require_approval: "never",
+    };
+    const fetchPage = JSON.stringify({
+      type: "function",
+      function: {
+        name: "fetch_page",
+        parameters: {
+          type: "object",
+          properties: { headers: { type: "object" }, api_key: { type: "string" } },
+          required: ["headers"],
+        },
+      },
+    });
+    try {
+      const span = tracerProvider.getTracer("third-party").startSpan("external");
+      span.setAttribute("llm.tools.0.tool.json_schema", JSON.stringify(hostedMcp));
+      span.setAttribute("llm.tools.1.tool.json_schema", fetchPage);
+      span.setAttribute(
+        "input.value",
+        JSON.stringify({ model: "synthetic-model", input: "Synthetic prompt", tools: [hostedMcp] }),
+      );
+      // Anthropic's MCP connector and AI SDK 6's per-tool JSON strings.
+      span.setAttribute(
+        "llm.invocation_parameters",
+        JSON.stringify({
+          max_tokens: 100,
+          mcp_servers: [
+            {
+              type: "url",
+              url: "https://mcp.example.test/slack",
+              name: "slack",
+              authorization_token: "synthetic-oauth-token",
+            },
+          ],
+        }),
+      );
+      span.setAttribute("ai.prompt.tools", [
+        JSON.stringify({
+          type: "provider",
+          name: "gmail",
+          id: "openai.mcp",
+          args: { serverLabel: "gmail", authorization: "synthetic-oauth-token" },
+        }),
+        "not JSON: authorization",
+      ]);
+      span.setAttribute("gen_ai.tool.definitions", "not JSON: authorization");
+      span.setAttribute("output.value", "The authorization field was set.");
+      span.end();
+      await hue.flush();
+      const record = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((candidate) => candidate.name === "external")!;
+      const text = (key: string) => attr(record, key)!.stringValue!;
+      expect(JSON.parse(text("llm.tools.0.tool.json_schema"))).toEqual({
+        ...hostedMcp,
+        authorization: "[redacted]",
+        headers: "[redacted]",
+      });
+      expect(text("llm.tools.1.tool.json_schema")).toBe(fetchPage);
+      expect(JSON.parse(text("input.value"))).toEqual({
+        model: "synthetic-model",
+        input: "Synthetic prompt",
+        tools: [{ ...hostedMcp, authorization: "[redacted]", headers: "[redacted]" }],
+      });
+      expect(JSON.parse(text("llm.invocation_parameters")).mcp_servers[0].authorization_token).toBe(
+        "[redacted]",
+      );
+      const promptTools = attr(record, "ai.prompt.tools")!.arrayValue!.values;
+      expect(JSON.parse(promptTools[0].stringValue!).args).toEqual({
+        serverLabel: "gmail",
+        authorization: "[redacted]",
+      });
+      expect(promptTools[1].stringValue).toBe("not JSON: authorization");
+      expect(text("gen_ai.tool.definitions")).toBe("not JSON: authorization");
+      expect(text("output.value")).toBe("The authorization field was set.");
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      for (const secret of ["synthetic-oauth-token", "synthetic-header-secret"]) {
+        expect(raw).not.toContain(secret);
+        // The caller's redact runs after the scrub and never sees the credential either.
+        expect(seen.some((value) => value.includes(secret))).toBe(false);
+      }
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("a tool definition too deeply nested to inspect rejects its record", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "tool-credentials-depth",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    try {
+      const span = tracerProvider.getTracer("third-party").startSpan("deep");
+      span.setAttribute(
+        "gen_ai.tool.definitions",
+        `${'{"a":'.repeat(300)}{"authorization":"synthetic-oauth-token"}${"}".repeat(300)}`,
+      );
+      span.end();
+      await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+      expect(endpoint.requests).toHaveLength(0);
+      expect(transport.getIssues()).toContainEqual(
+        expect.objectContaining({ kind: "invalid", count: 1 }),
+      );
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test.each([
     ["client", "traces"],
     ["transport", "traces"],
@@ -1323,6 +1921,285 @@ describe("Vercel AI SDK integration", () => {
       }
     },
   );
+
+  // Content as @ai-sdk/openai 4.0.66 maps an OpenAI Responses `mcp_call` item: a provider-executed
+  // `mcp.<name>` call plus a result naming the server only in `serverLabel`.
+  const hostedMcpModel = (
+    error?: string | { code: number; message: string },
+    serverLabel: string | undefined = "gmail",
+  ) =>
+    new MockLanguageModelV4({
+      provider: "openai.responses",
+      modelId: "synthetic-model",
+      doGenerate: async () => ({
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "mcp_synthetic",
+            toolName: "mcp.create_draft",
+            input: '{"to":"synthetic@example.test"}',
+            providerExecuted: true,
+            dynamic: true,
+          },
+          {
+            type: "tool-result",
+            toolCallId: "mcp_synthetic",
+            toolName: "mcp.create_draft",
+            result: {
+              type: "call",
+              ...(serverLabel === undefined ? {} : { serverLabel }),
+              name: "create_draft",
+              arguments: '{"to":"synthetic@example.test"}',
+              ...(error === undefined ? { output: "Synthetic draft saved" } : { error }),
+            },
+            providerMetadata: { openai: { itemId: "mcp_synthetic" } },
+          },
+          { type: "text", text: "Synthetic hosted answer" },
+        ],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage,
+        warnings: [],
+      }),
+    });
+
+  test.each([
+    { captureContent: true, error: undefined },
+    { captureContent: false, error: undefined },
+    { captureContent: true, error: { code: -32000, message: "Synthetic MCP failure" } },
+    { captureContent: false, error: "Synthetic MCP failure" },
+  ])(
+    "hosted MCP extension spans carry the server label (%o)",
+    async ({ captureContent, error }) => {
+      const endpoint = receiver();
+      const transport = createHueTransport({
+        apiKey,
+        serviceName: "hosted-mcp",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      // The application records AI SDK content; Hue's export path applies captureContent.
+      const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+      try {
+        await generateText({
+          model: hostedMcpModel(error),
+          prompt: "Synthetic hosted request",
+          telemetry: {
+            recordInputs: true,
+            recordOutputs: true,
+            integrations: [new OpenTelemetry({ tracer: tracerProvider.getTracer("app") })],
+          },
+        });
+        await tracerProvider.forceFlush();
+        await transport.flush();
+        const spans = endpoint.requests.flatMap((request) => request.records);
+        const tool = spans.find((span) => span.name === "execute_tool mcp.create_draft")!;
+        expect(attr(tool, "gen_ai.tool.type")?.stringValue).toBe("extension");
+        expect(attr(tool, "mcp.server.name")?.stringValue).toBe("gmail");
+        if (error === undefined) {
+          expect(attr(tool, "error.type")).toBeUndefined();
+          expect(tool.status?.code ?? 0).toBe(0);
+        } else {
+          expect(attr(tool, "error.type")?.stringValue).toBe("mcp_error");
+          expect(tool.status?.code).toBe(2);
+          expect(tool.status?.message).toBeUndefined();
+        }
+        const others = spans.filter((span) => span !== tool);
+        expect(others.every((span) => attr(span, "mcp.server.name") === undefined)).toBe(true);
+        const raw = endpoint.requests.map((request) => request.raw).join(" ");
+        if (captureContent) {
+          expect(attr(tool, "gen_ai.tool.call.result")?.stringValue).toContain('"serverLabel"');
+        } else {
+          expect(attr(tool, "gen_ai.tool.call.result")).toBeUndefined();
+          expect(attr(tool, "gen_ai.tool.call.arguments")).toBeUndefined();
+          expect(raw).not.toContain("synthetic@example.test");
+          expect(raw).not.toContain("Synthetic draft saved");
+          expect(raw).not.toContain("Synthetic MCP failure");
+        }
+      } finally {
+        await tracerProvider.shutdown();
+        await transport.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+  );
+
+  test("hosted MCP errors stay failed when the server label is malformed", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "hosted-mcp-invalid-label",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    try {
+      await generateText({
+        model: hostedMcpModel({ code: -32000, message: "Synthetic MCP failure" }, "\u0000bad"),
+        prompt: "Synthetic hosted request",
+        telemetry: {
+          recordInputs: true,
+          recordOutputs: true,
+          integrations: [new OpenTelemetry({ tracer: tracerProvider.getTracer("app") })],
+        },
+      });
+      await tracerProvider.forceFlush();
+      await transport.flush();
+      const tool = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((span) => span.name === "execute_tool mcp.create_draft")!;
+      expect(attr(tool, "mcp.server.name")).toBeUndefined();
+      expect(attr(tool, "error.type")?.stringValue).toBe("mcp_error");
+      expect(tool.status?.code).toBe(2);
+    } finally {
+      await tracerProvider.shutdown();
+      await transport.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test.each([true, false])(
+    "AI SDK 7 tool definitions export without hosted MCP credentials (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "tool-definitions",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      try {
+        const result = await generateText({
+          model: new MockLanguageModelV4({
+            doGenerate: async () => ({
+              content: [{ type: "text", text: "Draft ready" }],
+              finishReason: { unified: "stop", raw: "stop" },
+              usage,
+              warnings: [],
+            }),
+          }),
+          prompt: "Synthetic prompt",
+          tools: {
+            // The shape `openai.tools.mcp({...})` returns: a provider-executed tool whose
+            // arguments carry the MCP server's credentials.
+            gmail: {
+              type: "provider",
+              id: "openai.mcp",
+              isProviderExecuted: true,
+              inputSchema: jsonSchema({ type: "object" }),
+              args: {
+                serverLabel: "gmail",
+                serverUrl: "https://mcp.example.test/gmail",
+                authorization: "synthetic-oauth-token",
+                headers: { "X-Api-Key": "synthetic-header-secret" },
+                allowedTools: ["create_draft"],
+              },
+            },
+            fetch_page: tool({
+              description: "Fetch a page",
+              inputSchema: jsonSchema({
+                type: "object",
+                properties: { headers: { type: "object" }, url: { type: "string" } },
+              }),
+            }),
+          },
+          telemetry: hueTelemetry(hue),
+        });
+        expect(result.text).toBe("Draft ready");
+        await hue.flush();
+        const spans = endpoint.requests.flatMap((request) => request.records);
+        const definitions = spans.flatMap((span) => {
+          const value = attr(span, "gen_ai.tool.definitions")?.stringValue;
+          return value === undefined ? [] : [JSON.parse(value) as Record<string, unknown>[]];
+        });
+        const raw = endpoint.requests.map((request) => request.raw).join(" ");
+        expect(raw).not.toContain("synthetic-oauth-token");
+        expect(raw).not.toContain("synthetic-header-secret");
+        if (!captureContent) {
+          expect(definitions).toEqual([]);
+          return;
+        }
+        expect(definitions).toHaveLength(1);
+        const [gmail, fetchPage] = [
+          definitions[0].find((definition) => definition.name === "gmail"),
+          definitions[0].find((definition) => definition.name === "fetch_page"),
+        ];
+        expect(gmail).toEqual({
+          type: "provider",
+          name: "gmail",
+          id: "openai.mcp",
+          args: {
+            serverLabel: "gmail",
+            serverUrl: "https://mcp.example.test/gmail",
+            authorization: "[redacted]",
+            headers: "[redacted]",
+            allowedTools: ["create_draft"],
+          },
+        });
+        // A parameter named `headers` is part of the tool's schema, not a credential.
+        expect(fetchPage?.inputSchema).toMatchObject({
+          properties: { headers: { type: "object" }, url: { type: "string" } },
+        });
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+  );
+
+  test("a large inline file in AI SDK 7 messages exports as its digest instead of rejecting the span", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "inline-files",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const pdf = Uint8Array.from({ length: 300 * 1024 }, (_, index) => index % 251);
+    const digest = createHash("sha256").update(pdf).digest("hex");
+    try {
+      await generateText({
+        model: new MockLanguageModelV4({
+          doGenerate: async () => ({
+            content: [{ type: "text", text: "Summary" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          }),
+        }),
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Summarize the contract" },
+              { type: "file", data: pdf, mediaType: "application/pdf" },
+            ],
+          },
+        ],
+        telemetry: hueTelemetry(hue),
+      });
+      // Strict flush: every span, including the ones that inlined the file, was accepted.
+      await hue.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const chat = spans.find((span) => span.name === "chat mock-model-id")!;
+      const [message] = JSON.parse(attr(chat, "gen_ai.input.messages")!.stringValue!) as {
+        parts: Record<string, unknown>[];
+      }[];
+      expect(message.parts[0]).toEqual({ type: "text", content: "Summarize the contract" });
+      expect(message.parts[1]).toMatchObject({
+        type: "blob",
+        mime_type: "application/pdf",
+        sha256: digest,
+        size: pdf.byteLength,
+      });
+      expect(message.parts[1].content).toBeUndefined();
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      expect(raw).not.toContain(Buffer.from(pdf).toString("base64").slice(0, 64));
+      expect(hue.transport.getReport().failedSpans).toBe(0);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
 
   test("provider failure becomes an error span and missing token usage stays absent", async () => {
     const endpoint = receiver();

@@ -23,6 +23,8 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
+from ._inline_files import hash_inline_files
+from ._tool_definitions import scrub_tool_credentials, with_tool_catalog_summary
 from .transport import (
     MAX_REQUEST_BYTES,
     PENDING_PARENT_KEY,
@@ -231,17 +233,24 @@ class _ValueBudget:
         """Apply the content policy: metadata-only mode drops recognized content keys."""
         source = values or {}
         if not self.capture_content and isinstance(source, Mapping):
+            # Summarize the tool definitions metadata-only export removes by name and digest.
+            source = with_tool_catalog_summary(source)
+        if isinstance(source, Mapping):
+            # Large inline files shrink to their digest before the budget, so the span survives.
             source = {
-                key: item
+                key: hash_inline_files(key, item) if isinstance(key, str) else item
                 for key, item in source.items()
-                if not (isinstance(key, str) and is_content_key(key))
+                if self.capture_content or not (isinstance(key, str) and is_content_key(key))
             }
         return source
 
     def attributes(self, values: Any, dropped: int = 0) -> BoundedAttributes:
-        result = BoundedAttributes(
-            attributes=self.value(self.permitted(values)), immutable=True, extended_attributes=True
-        )
+        # Scrub the copy admission already bounded, so the application thread never parses
+        # more than one record's budget of tool-definition JSON.
+        copied = self.value(self.permitted(values))
+        if isinstance(copied, dict):
+            copied = {key: scrub_tool_credentials(key, item) for key, item in copied.items()}
+        result = BoundedAttributes(attributes=copied, immutable=True, extended_attributes=True)
         result.dropped += dropped
         return result
 
@@ -378,7 +387,7 @@ def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> P
     if context is None:
         raise ValueError("A placeholder needs the span's context.")
     real_parent = span.parent
-    attributes = budget.value(
+    copied = budget.value(
         {
             key: value
             for key, value in budget.permitted(_live_attributes(span)).items()
@@ -387,6 +396,7 @@ def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> P
             and _value_bytes(value, MAX_PLACEHOLDER_VALUE_BYTES) <= MAX_PLACEHOLDER_VALUE_BYTES
         }
     )
+    attributes = {key: scrub_tool_credentials(key, value) for key, value in copied.items()}
     attributes[PENDING_SPAN_TYPE_KEY] = PENDING_SPAN_TYPE
     if real_parent is not None and real_parent.is_valid:
         attributes[PENDING_PARENT_KEY] = format_span_id(real_parent.span_id)

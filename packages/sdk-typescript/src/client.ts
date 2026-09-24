@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import {
   context,
   isSpanContextValid,
@@ -19,12 +20,15 @@ import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
 import { HUE_SCOPE } from "./config.js";
+import { hostedServerAddresses, hostedToolActivity, hostedToolProvider } from "./provider-tools.js";
 import { encodeContent, noopSpan, safeSpan } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
+import { MAX_FILE_DATA_BYTES } from "./config.js";
 import type {
   ExportReport,
+  FileRecord,
   FlushableLoggerProvider,
   FlushableTracerProvider,
   HueOptions,
@@ -32,6 +36,7 @@ import type {
   ModelOptions,
   ProjectConnection,
   SpanOptions,
+  ProviderToolCallOptions,
   TokenUsage,
   ToolOptions,
   VerifyTraceOptions,
@@ -44,6 +49,7 @@ interface LocalContext {
   context: Context;
   sessionId?: string;
   userId?: string;
+  workspaceId?: string;
   /** Request metadata of the enclosing `model()` call, copied onto message records. */
   model?: { operation: string; provider: string; requestModel: string };
 }
@@ -86,13 +92,35 @@ function identifier(value: string | undefined): string | undefined {
     value.includes("\u0000") ||
     !value.isWellFormed()
   )
-    throw new TypeError("Session/user identifiers must contain 1–4096 valid characters");
+    throw new TypeError("Session/user/workspace identifiers must contain 1–4096 valid characters");
   return value;
 }
 
 /** A usable metadata label: a non-blank string of at most 256 characters. */
 function isLabel(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "" && value.length <= 256;
+  return (
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    value.length <= 256 &&
+    !value.includes("\u0000") &&
+    value.isWellFormed()
+  );
+}
+
+/** A source label uses the stricter wire-safe validation without changing existing labels. */
+function isSourceLabel(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    value.length <= 256 &&
+    !value.includes("\u0000") &&
+    value.isWellFormed()
+  );
+}
+
+/** A label that is also free of NUL and unpaired surrogates, which export would reject. */
+function isTextLabel(value: unknown): value is string {
+  return isLabel(value) && !value.includes("\u0000") && value.isWellFormed();
 }
 
 type Outcome<T> = { value: T } | { error: unknown };
@@ -149,6 +177,7 @@ class ContextualTracer implements Tracer {
               ...options.attributes,
               ...(active?.sessionId ? { "gen_ai.conversation.id": active.sessionId } : {}),
               ...(active?.userId ? { "user.id": active.userId } : {}),
+              ...(active?.workspaceId ? { "hue.workspace.id": active.workspaceId } : {}),
             },
           },
           parent ?? active?.context ?? context.active(),
@@ -332,6 +361,7 @@ export class HueClient {
           context: options.parentContext ?? inherited?.context ?? context.active(),
           sessionId: identifier(options.sessionId ?? inherited?.sessionId),
           userId: identifier(options.userId ?? inherited?.userId),
+          workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
           model: inherited?.model,
         };
         span = this.storage.run(active, () =>
@@ -399,7 +429,8 @@ export class HueClient {
    * `options.callId` is recorded as `gen_ai.tool.call.id`, like the Python `call_id=` keyword.
    * `options.mcp` records the MCP `initialize` `serverInfo` as `mcp.server.name` /
    * `mcp.server.version` so a generic tool name can be attributed to the server that
-   * handled it. Pass `client.getServerVersion()`.
+   * handled it. Pass `client.getServerVersion()`. `mcp.provider` / `mcp.surface` record the Hue
+   * provider and surface as `hue.mcp.provider` / `hue.mcp.surface`.
    */
   async tool<T>(
     name: string,
@@ -411,15 +442,21 @@ export class HueClient {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": name,
     };
-    const stamp = (key: string, value: unknown) => {
+    const stamp = (
+      key: string,
+      value: unknown,
+      valid: (value: unknown) => value is string = isLabel,
+    ) => {
       if (value === undefined) return;
       // A blank or non-string label is omitted and counted; the tool call itself still runs.
-      if (isLabel(value)) attributes[key] = value;
+      if (valid(value)) attributes[key] = value;
       else if (this.enabled && !this.closed) this.transport.instrumentationFailure();
     };
     stamp("gen_ai.tool.call.id", options.callId);
     stamp("mcp.server.name", options.mcp?.name);
     stamp("mcp.server.version", options.mcp?.version);
+    stamp("hue.mcp.provider", options.mcp?.provider, isSourceLabel);
+    stamp("hue.mcp.surface", options.mcp?.surface, isSourceLabel);
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {
@@ -441,7 +478,8 @@ export class HueClient {
    * `gen_ai.request.model` and `gen_ai.provider.name`. The argument order matches `withSpan`. The
    * handle's `setInput`/`setOutput` record `gen_ai.input.messages` / `gen_ai.output.messages`,
    * which should use the GenAI semantic-convention message shape; `recordMessages` inside the
-   * callback inherits the request metadata.
+   * callback inherits the request metadata. `options.systemInstructions` and `options.tools` are
+   * recorded as `gen_ai.system_instructions` and `gen_ai.tool.definitions`, content like `input`.
    */
   async model<T>(
     model: string,
@@ -464,7 +502,15 @@ export class HueClient {
         ? `${operation} ${requestModel}`
         : label(options.name, `${operation} ${requestModel}`);
     const metadata = { operation, provider, requestModel };
-    const { sessionId, userId, parentContext, input }: Partial<ModelOptions> = options ?? {};
+    const {
+      sessionId,
+      userId,
+      workspaceId,
+      parentContext,
+      input,
+      systemInstructions,
+      tools,
+    }: Partial<ModelOptions> = options ?? {};
     return this.withSpan(
       name,
       (span) => {
@@ -474,6 +520,9 @@ export class HueClient {
           setOutput: (value) => this.setContent(span.span, "gen_ai.output.messages", value),
         };
         if (input !== undefined) handle.setInput(input);
+        if (systemInstructions !== undefined)
+          this.setContent(span.span, "gen_ai.system_instructions", systemInstructions);
+        if (tools !== undefined) this.setContent(span.span, "gen_ai.tool.definitions", tools);
         // recordMessages inside the callback copies this request metadata onto its log record.
         const store = this.storage.getStore() ?? { context: span.context };
         return this.storage.run({ ...store, model: metadata }, () => callback(handle));
@@ -481,6 +530,7 @@ export class HueClient {
       {
         sessionId,
         userId,
+        workspaceId,
         parentContext,
         kind: SpanKind.CLIENT,
         attributes: {
@@ -563,6 +613,8 @@ export class HueClient {
       input?: unknown;
       /** Output messages, ideally in the GenAI semantic-convention shape; any JSON-encodable value. */
       output?: unknown;
+      /** System instructions sent separately from the messages, as `gen_ai.system_instructions`. */
+      systemInstructions?: unknown;
       /** `gen_ai.operation.name` for the record; defaults to the enclosing `model()` span's value. */
       operation?: string;
       /** `gen_ai.provider.name` for the record; defaults to the enclosing `model()` span's value. */
@@ -581,6 +633,8 @@ export class HueClient {
       const body: Record<string, unknown> = {};
       if (messages.input !== undefined) body["gen_ai.input.messages"] = messages.input;
       if (messages.output !== undefined) body["gen_ai.output.messages"] = messages.output;
+      if (messages.systemInstructions !== undefined)
+        body["gen_ai.system_instructions"] = messages.systemInstructions;
       // Request metadata is inherited only when the record correlates with the enclosing helper
       // scope; an unrelated explicit context carries caller-supplied values alone.
       const enclosing =
@@ -606,6 +660,165 @@ export class HueClient {
       });
     } catch {
       this.transport.instrumentationFailure("logs");
+    }
+  }
+
+  /**
+   * Records the tools a model provider executed itself while producing `response`, which no
+   * `hue.tool()` call saw: OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call` and
+   * `code_interpreter_call` items, and Anthropic Messages `mcp_tool_use` / `server_tool_use`
+   * blocks with their result blocks. Each becomes an `execute_tool {name}` child span of the active
+   * (or given) context with `gen_ai.tool.type` `extension` and `gen_ai.tool.call.id`; MCP calls add
+   * `mcp.server.name` (the provider's label, or the `servers` entry for it). Arguments and results
+   * follow `captureContent`; a failed call carries `error.type` and ERROR status. An OpenAI
+   * `mcp_list_tools` item becomes a `tools/list` child span carrying that server's tools as
+   * `gen_ai.tool.definitions`. Call it inside `hue.model()` so the spans nest under the model call
+   * and `provider` defaults to its provider; pass `request` to record each server's host as
+   * `server.address`. The spans have no duration of their own: the provider ran the tools inside
+   * the model request. Unreadable items are skipped and counted; nothing is thrown.
+   */
+  recordProviderToolCalls(response: unknown, options: ProviderToolCallOptions = {}): void {
+    if (!this.enabled || this.closed) return;
+    try {
+      const store = this.storage.getStore();
+      const provider = options.provider ?? hostedToolProvider(store?.model?.provider);
+      if (provider === undefined) throw new TypeError("Unknown provider for hosted tool calls");
+      const parent = options.parentContext ?? store?.context ?? context.active();
+      const addresses = hostedServerAddresses(provider, options.request);
+      const activity = hostedToolActivity(provider, response);
+      if (activity.skipped > 0)
+        this.transport.instrumentationFailure("traces", undefined, activity.skipped);
+      const server = (label: string | undefined): Attributes => {
+        const attributes: Attributes = {};
+        if (label === undefined) return attributes;
+        const info = options.servers?.[label];
+        for (const [key, value] of [
+          ["mcp.server.name", info?.name ?? label],
+          ["mcp.server.version", info?.version],
+          ["hue.mcp.provider", info?.provider],
+          ["hue.mcp.surface", info?.surface],
+        ] as const) {
+          if (value === undefined) continue;
+          if (isLabel(value)) attributes[key] = value;
+          else this.transport.instrumentationFailure();
+        }
+        const address = addresses.get(label);
+        if (address !== undefined) attributes["server.address"] = address;
+        return attributes;
+      };
+      const fail = (span: Span, type: string) => {
+        span.setAttribute("error.type", type);
+        span.setStatus({ code: SpanStatusCode.ERROR });
+      };
+      for (const call of activity.calls) {
+        const span = this.tracer.startSpan(
+          `execute_tool ${call.name}`,
+          {
+            kind: SpanKind.INTERNAL,
+            attributes: {
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": call.name,
+              "gen_ai.tool.type": "extension",
+              ...(call.callId === undefined ? {} : { "gen_ai.tool.call.id": call.callId }),
+              ...server(call.server),
+            },
+          },
+          parent,
+        );
+        if (call.arguments !== undefined)
+          this.setContent(span, "gen_ai.tool.call.arguments", call.arguments);
+        if (call.result !== undefined)
+          this.setContent(span, "gen_ai.tool.call.result", call.result);
+        if (call.errorType !== undefined) fail(span, call.errorType);
+        span.end();
+      }
+      for (const listing of activity.listings) {
+        const span = this.tracer.startSpan(
+          "tools/list",
+          {
+            kind: SpanKind.INTERNAL,
+            attributes: { "mcp.method.name": "tools/list", ...server(listing.server) },
+          },
+          parent,
+        );
+        this.setContent(span, "gen_ai.tool.definitions", listing.definitions);
+        if (listing.errorType !== undefined) fail(span, listing.errorType);
+        span.end();
+      }
+    } catch {
+      this.transport.instrumentationFailure();
+    }
+  }
+
+  /**
+   * Adds a `hue.file` event to the active (or given) span for a file the work read, received or
+   * produced: `hue.file.sha256`, `hue.file.role`, `hue.file.media_type`, `hue.file.size` when known
+   * and, when `captureContent` is true, `hue.file.name`. `data` is hashed and measured locally and
+   * never exported. The event is metadata, so it is recorded in both capture modes. An invalid
+   * record, or one without an active span, is omitted and counted, never thrown; an invalid name
+   * alone is omitted and counted while the rest is recorded.
+   */
+  recordFile(file: FileRecord, explicitContext?: Context): void {
+    if (!this.enabled || this.closed) return;
+    try {
+      const span = trace.getSpan(
+        explicitContext ?? this.storage.getStore()?.context ?? context.active(),
+      );
+      if (!span?.isRecording()) throw new Error("File records require an active span");
+      const { role, mediaType, data, name } = file;
+      if (role !== "input" && role !== "attachment" && role !== "output")
+        throw new TypeError("Invalid file role");
+      if (!isTextLabel(mediaType)) throw new TypeError("Invalid media type");
+      let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
+      let byteSize = file.byteSize;
+      if (data !== undefined) {
+        const bytes =
+          typeof data === "string"
+            ? (() => {
+                // Buffer.byteLength measures UTF-8 without allocating the copy that hashing would
+                // otherwise require. Reject before Buffer.from/createHash can retain large input.
+                if (
+                  data.length > MAX_FILE_DATA_BYTES ||
+                  Buffer.byteLength(data, "utf8") > MAX_FILE_DATA_BYTES
+                )
+                  throw new RangeError("File data exceeds Hue's 25 MiB limit");
+                return Buffer.from(data, "utf8");
+              })()
+            : data instanceof Uint8Array
+              ? data.byteLength <= MAX_FILE_DATA_BYTES
+                ? data
+                : (() => {
+                    throw new RangeError("File data exceeds Hue's 25 MiB limit");
+                  })()
+              : undefined;
+        if (!bytes) throw new TypeError("File data must be bytes or a string");
+        const digest = createHash("sha256").update(bytes).digest("hex");
+        // A caller-supplied digest or size must describe the same bytes.
+        if (
+          (sha256 !== undefined && sha256 !== digest) ||
+          (byteSize !== undefined && byteSize !== bytes.byteLength)
+        )
+          throw new TypeError("File digest or size does not match its data");
+        sha256 = digest;
+        byteSize = bytes.byteLength;
+      }
+      if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256))
+        throw new TypeError("A file needs a SHA-256 digest or its data");
+      if (byteSize !== undefined && (!Number.isSafeInteger(byteSize) || byteSize < 0))
+        throw new TypeError("Invalid file size");
+      const attributes: Attributes = {
+        "hue.file.sha256": sha256,
+        "hue.file.role": role,
+        "hue.file.media_type": mediaType,
+      };
+      if (byteSize !== undefined) attributes["hue.file.size"] = byteSize;
+      if (this.captureContent && name !== undefined) {
+        if (isTextLabel(name)) attributes["hue.file.name"] = name;
+        else this.transport.instrumentationFailure();
+      }
+      span.addEvent("hue.file", attributes);
+    } catch {
+      this.transport.instrumentationFailure();
     }
   }
 

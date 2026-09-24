@@ -96,3 +96,79 @@ def test_openinference_official_openai_stream_exports_to_hue(
         assert b"private-prompt" in telemetry and b"private-answer" in telemetry
     else:
         assert b"private-prompt" not in telemetry and b"private-answer" not in telemetry
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_openinference_responses_hosted_mcp_tool_exports_without_credentials(
+    receiver, capture_content
+):
+    openai = pytest.importorskip("openai")
+    instrumentation = pytest.importorskip("openinference.instrumentation")
+    adapter = pytest.importorskip("openinference.instrumentation.openai")
+    hosted_mcp = {
+        "type": "mcp",
+        "server_label": "gmail",
+        "server_url": "https://mcp.example.test/gmail",
+        "authorization": "synthetic-oauth-token",
+        "headers": {"X-Api-Key": "synthetic-header-secret"},
+        "require_approval": "never",
+    }
+    response = {
+        "id": "resp_synthetic",
+        "object": "response",
+        "created_at": 1,
+        "model": "synthetic-model",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_synthetic",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Draft ready", "annotations": []}],
+            }
+        ],
+        "tools": [hosted_mcp],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+    }
+    receiver.reply(200, json.dumps(response).encode(), **{"Content-Type": "application/json"})
+    instrumentor = adapter.OpenAIInstrumentor()
+    with Hue(receiver.url, "synthetic-hue-key", capture_content=capture_content) as hue:
+        instrumentor.instrument(
+            tracer_provider=hue.tracer_provider,
+            config=instrumentation.TraceConfig(enable_genai_semconv=True),
+        )
+        try:
+            with openai.OpenAI(
+                api_key="synthetic-provider-key", base_url=receiver.url + "/v1"
+            ) as provider:
+                result = provider.responses.create(
+                    model="synthetic-model", input="Synthetic prompt", tools=[hosted_mcp]
+                )
+                assert result.output_text == "Draft ready"
+            assert hue.force_flush()
+        finally:
+            instrumentor.uninstrument()
+    (span,) = receiver.spans()
+    attributes = {item.key: item.value.string_value for item in span.attributes}
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert b"synthetic-oauth-token" not in telemetry
+    assert b"synthetic-header-secret" not in telemetry
+    if not capture_content:
+        # The instrumentor recorded the tool; metadata-only export keeps only its summary.
+        assert "llm.tools.0.tool.json_schema" not in attributes
+        names = next(item.value for item in span.attributes if item.key == "hue.tool.names")
+        assert [value.string_value for value in names.array_value.values] == ["mcp"]
+        assert len(attributes["hue.tool.definitions.sha256"]) == 64
+        return
+    # The response echoes the tool with every field, so compare the fields that were sent.
+    schema = json.loads(attributes["llm.tools.0.tool.json_schema"])
+    assert schema["authorization"] == schema["headers"] == "[redacted]"
+    assert schema["server_label"] == "gmail"
+    assert schema["server_url"] == "https://mcp.example.test/gmail"
+    # OpenInference also records the raw request; only its tool entries change.
+    request = json.loads(attributes["input.value"])
+    assert request["input"] == "Synthetic prompt"
+    assert request["tools"][0]["authorization"] == "[redacted]"
+    assert request["tools"][0]["server_url"] == "https://mcp.example.test/gmail"

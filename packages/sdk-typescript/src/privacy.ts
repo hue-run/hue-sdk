@@ -1,8 +1,11 @@
+import { SpanStatusCode, type Attributes } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord } from "@opentelemetry/sdk-logs";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import type { HueOptions } from "./types.js";
 import { MAX_BODY_BYTES, MAX_CONTENT_BYTES } from "./config.js";
+import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions.js";
+import { hashInlineFiles } from "./inline-files.js";
 
 /** Attribute keys (and their dotted children) removed in metadata-only mode. */
 export const contentPrefixes = [
@@ -121,11 +124,23 @@ function attributes<T extends Record<string, unknown>>(
   path: string,
   budget: RedactionBudget,
 ): T {
+  // Metadata-only export summarizes the tool definitions it removes by name and digest.
+  const summarized = options.captureContent ? source : withToolCatalogSummary(source);
   return Object.fromEntries(
-    Object.entries(source).flatMap(([key, value]) =>
+    Object.entries(summarized).flatMap(([key, value]) =>
       !options.captureContent && isContentKey(key)
         ? []
-        : [[key, redactValue(value, `${path}.${key}`, options, budget)]],
+        : [
+            [
+              key,
+              redactValue(
+                scrubToolCredentials(key, hashInlineFiles(key, value)),
+                `${path}.${key}`,
+                options,
+                budget,
+              ),
+            ],
+          ],
     ),
   ) as T;
 }
@@ -149,12 +164,51 @@ function redactResource(
   return result;
 }
 
+/**
+ * Server identity and failure of an AI SDK 7 provider-executed (`extension`) tool span, read from
+ * its recorded result before content is stripped. OpenAI hosted MCP results carry
+ * `{ type: "call", serverLabel, name, arguments, output?, error? }`; nothing else names the server.
+ */
+function hostedMcpCall(attributes: Attributes): { serverName?: string; failed: boolean } {
+  const result = attributes["gen_ai.tool.call.result"];
+  if (attributes["gen_ai.tool.type"] !== "extension" || typeof result !== "string")
+    return { failed: false };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result);
+  } catch {
+    return { failed: false };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return { failed: false };
+  const { type, serverLabel, error } = parsed as {
+    type?: unknown;
+    serverLabel?: unknown;
+    error?: unknown;
+  };
+  if (type !== "call") return { failed: false };
+  const valid =
+    typeof serverLabel === "string" &&
+    serverLabel.trim() !== "" &&
+    serverLabel.length <= 256 &&
+    !serverLabel.includes("\u0000") &&
+    serverLabel.isWellFormed();
+  return { ...(valid ? { serverName: serverLabel } : {}), failed: error != null };
+}
+
 export function redactSpan(
   span: ReadableSpan,
   options: HueOptions,
   cache: ResourceCache,
 ): ReadableSpan {
   const budget = { bytes: 0, nodes: 0 };
+  // Derived before metadata-only stripping so the identity survives without the result itself.
+  const hosted = hostedMcpCall(span.attributes);
+  const source: Attributes = {
+    ...(hosted.serverName === undefined ? {} : { "mcp.server.name": hosted.serverName }),
+    ...(hosted.failed ? { "error.type": "mcp_error" } : {}),
+    ...span.attributes,
+  };
   return {
     name: span.name,
     kind: span.kind,
@@ -165,12 +219,17 @@ export function redactSpan(
     duration: span.duration,
     ended: span.ended,
     status: {
-      code: span.status.code,
-      ...(options.captureContent && span.status.message !== undefined
+      code:
+        hosted.failed && span.status.code === SpanStatusCode.UNSET
+          ? SpanStatusCode.ERROR
+          : span.status.code,
+      ...(options.captureContent &&
+      span.status.message !== undefined &&
+      !(hosted.failed && span.status.code === SpanStatusCode.UNSET)
         ? { message: String(redactValue(span.status.message, "status.message", options, budget)) }
         : {}),
     },
-    attributes: attributes(span.attributes, options, "attributes", budget),
+    attributes: attributes(source, options, "attributes", budget),
     events: span.events
       .filter(
         (event) =>

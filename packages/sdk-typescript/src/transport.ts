@@ -439,8 +439,10 @@ export class HueTransport {
   instrumentationFailure(
     signal: Signal = "traces",
     message = "Telemetry capture or instrumentation failed; application execution was preserved",
+    count = 1,
   ): void {
-    this.instrumentationFailures++;
+    if (!Number.isSafeInteger(count) || count < 1) return;
+    this.instrumentationFailures += count;
     this.issue(signal, "invalid", 0, message);
   }
 

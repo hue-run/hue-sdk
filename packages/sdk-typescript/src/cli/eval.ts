@@ -123,7 +123,7 @@ Connection:
   --origin <url>                  Hue origin (default: HUE_BASE_URL or https://app.hue.run)
 
 Output and limits:
-  --name <run name>               Run name (default: <case> · <agent key> · <revision>)
+  --name <run name>               Run name (default: <agent key> @ <revision>, hashes shortened)
   --baseline <experiment id|url>  Compare verdicts with a previous experiment
   --json                          Print one JSON document on stdout; progress goes to stderr
   --content                       Capture telemetry content; one-shot also persists
@@ -252,6 +252,13 @@ function derivedAgentKey(adapterFile: string | undefined, command: string | unde
     names[0] ??
     "";
   return slug(basename(script, extname(script)));
+}
+
+function defaultRunName(agent: { key: string; revision: string }): string {
+  const revision = /^[0-9a-f]{12,64}$/i.test(agent.revision)
+    ? agent.revision.slice(0, 7)
+    : agent.revision;
+  return `${agent.key} @ ${revision}`;
 }
 
 function gitRevision(): string | undefined {
@@ -862,7 +869,7 @@ async function runOnce(
     const frozen = await client.freezeDatasetVersion(pins.datasetVersionId, pins.revision);
     output.log(`Saved "${pins.name}" version ${frozen.version}.`);
   }
-  const runName = values.name ?? `${pins.name} · ${agent.key} · ${agent.revision}`;
+  const runName = values.name ?? defaultRunName(agent);
   const project = await client.checkConnection();
   if (await detectDirect(client, pins, mode))
     return runDirect(

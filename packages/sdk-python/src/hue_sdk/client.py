@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -48,6 +50,21 @@ from .transport import (
 
 Redactor = Callable[[str, Any], Any]
 _MISSING = object()
+_FILE_ROLES = frozenset({"input", "attachment", "output"})
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_FILE_DATA_BYTES = 25 * 1024 * 1024
+
+
+def _utf8_byte_size(value: str, limit: int) -> int:
+    """Count UTF-8 bytes in bounded chunks, stopping after ``limit``."""
+    if len(value) > limit:
+        return limit + 1
+    total = 0
+    for offset in range(0, len(value), 8192):
+        total += len(value[offset : offset + 8192].encode("utf-8"))
+        if total > limit:
+            return total
+    return total
 
 
 def _is_label(value: Any) -> bool:
@@ -58,6 +75,40 @@ def _is_label(value: Any) -> bool:
         return len(value.encode("utf-16-le")) // 2 <= 256
     except UnicodeEncodeError:
         return False
+
+
+def _is_source_label(value: Any) -> bool:
+    """A source label that is UTF-16 bounded and safe to export."""
+    if type(value) is not str or not value.strip() or "\x00" in value:
+        return False
+    try:
+        return len(value.encode("utf-16-le")) // 2 <= 256 and value.encode("utf-8") is not None
+    except UnicodeEncodeError:
+        return False
+
+
+def _identifier(value: Any) -> str:
+    """Validate a workspace identifier with TypeScript/Fern's UTF-16 limit."""
+    if type(value) is not str or not value or "\x00" in value:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.")
+    try:
+        units = len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as error:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.") from error
+    if units > 4096:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.")
+    return value
+
+
+def _is_text_label(value: Any) -> bool:
+    """A label that is also free of NUL and unpaired surrogates, so it can be exported."""
+    if not _is_label(value) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 class ProjectValidationError(RuntimeError):
@@ -261,6 +312,87 @@ class HueSpan:
                     child.set_attribute("error.type", listing.error_type)
                     child.otel_span.set_status(Status(StatusCode.ERROR))
 
+    def record_file(
+        self,
+        *,
+        role: str,
+        media_type: str,
+        sha256: str | None = None,
+        data: bytes | bytearray | memoryview | str | None = None,
+        byte_size: int | None = None,
+        name: str | None = None,
+    ) -> None:
+        """Add a ``hue.file`` event for a file the work read, received or produced.
+
+        ``role`` is ``input`` (given to the agent), ``attachment`` (from a tool or message) or
+        ``output`` (produced by the agent). ``data`` is hashed and measured locally and never
+        exported; a ``str`` is hashed as UTF-8. The event carries ``hue.file.sha256``,
+        ``hue.file.role``, ``hue.file.media_type``, ``hue.file.size`` when known and, when
+        content is captured, ``hue.file.name``. An invalid record is omitted and counted; an
+        invalid name alone is omitted and counted while the rest is recorded.
+        """
+        if not self._client._active:
+            return
+        self._client._instrument(
+            lambda: self._record_file(role, media_type, sha256, data, byte_size, name)
+        )
+
+    def _record_file(
+        self,
+        role: str,
+        media_type: str,
+        sha256: str | None,
+        data: bytes | bytearray | memoryview | str | None,
+        byte_size: int | None,
+        name: str | None,
+    ) -> None:
+        # Nothing to attach to: report once, before hashing or validating anything.
+        if not self.otel_span.is_recording():
+            raise ValueError("File records require a recording span.")
+        if role not in _FILE_ROLES:
+            raise ValueError("Invalid file role.")
+        if not _is_text_label(media_type):
+            raise ValueError("Invalid media type.")
+        digest = sha256.lower() if isinstance(sha256, str) else sha256
+        size = byte_size
+        if data is not None:
+            if isinstance(data, str):
+                if _utf8_byte_size(data, _MAX_FILE_DATA_BYTES) > _MAX_FILE_DATA_BYTES:
+                    raise ValueError("File data exceeds Hue's 25 MiB limit.")
+                content = data.encode("utf-8")
+            elif isinstance(data, (bytes, bytearray, memoryview)):
+                if memoryview(data).nbytes > _MAX_FILE_DATA_BYTES:
+                    raise ValueError("File data exceeds Hue's 25 MiB limit.")
+                content = bytes(data)
+            else:
+                raise ValueError("File data must be bytes or a string.")
+            computed = hashlib.sha256(content).hexdigest()
+            # A caller-supplied digest or size must describe the same bytes.
+            if (digest is not None and digest != computed) or (
+                size is not None and size != len(content)
+            ):
+                raise ValueError("File digest or size does not match its data.")
+            digest, size = computed, len(content)
+        if not isinstance(digest, str) or not _SHA256.match(digest):
+            raise ValueError("A file needs a SHA-256 digest or its data.")
+        if size is not None and (
+            isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > 2**63 - 1
+        ):
+            raise ValueError("Invalid file size.")
+        attributes: dict[str, AttributeValue] = {
+            "hue.file.sha256": digest,
+            "hue.file.role": role,
+            "hue.file.media_type": media_type,
+        }
+        if size is not None:
+            attributes["hue.file.size"] = size
+        if self._client.capture_content and name is not None:
+            if _is_text_label(name):
+                attributes["hue.file.name"] = name
+            else:
+                self._client._record_issue()
+        self.otel_span.add_event("hue.file", attributes)
+
     def log_inference(
         self,
         *,
@@ -269,10 +401,12 @@ class HueSpan:
         operation: str | None = None,
         provider: str | None = None,
         model: str | None = None,
+        system_instructions: Any = _MISSING,
     ) -> None:
         """Emit a standard GenAI details log correlated to this span, even outside its scope.
 
         Use this instead of repeating identical content in both logs and span attributes.
+        ``system_instructions`` are the instructions sent separately from the messages.
         The body is structured: an explicit ``None`` field keeps its key with an empty value,
         distinct from an absent field. ``gen_ai.operation.name``, ``gen_ai.provider.name`` and
         ``gen_ai.request.model`` come from the keywords or the enclosing ``model()`` block, and
@@ -282,7 +416,9 @@ class HueSpan:
         if not self._client._active or not self._client.capture_content:
             return
         self._client._instrument(
-            lambda: self._log_inference(input, output, operation, provider, model)
+            lambda: self._log_inference(
+                input, output, operation, provider, model, system_instructions
+            )
         )
 
     def _log_inference(
@@ -292,6 +428,7 @@ class HueSpan:
         operation: str | None,
         provider: str | None,
         model: str | None,
+        system_instructions: Any,
     ) -> None:
         attributes = dict(self._record_attributes)
         for key, label in (
@@ -311,6 +448,7 @@ class HueSpan:
         for key, value in (
             ("gen_ai.input.messages", input),
             ("gen_ai.output.messages", output),
+            ("gen_ai.system_instructions", system_instructions),
         ):
             if value is not _MISSING:
                 # Bound and redact each field as JSON, then send the structure rather than its text.
@@ -503,16 +641,11 @@ class Hue:
     def _active(self) -> bool:
         return self.enabled and not self._closed and self._pid == os.getpid()
 
-    def _record_issues(self, count: int = 1) -> None:
+    def _record_issue(self) -> None:
         if self._pid != os.getpid():
             return
-        if count < 1:
-            return
         with self._issues_lock:
-            self._issues += count
-
-    def _record_issue(self) -> None:
-        self._record_issues()
+            self._issues += 1
 
     def _instrument(self, action: Callable[[], Any]) -> None:
         if not self._active:
@@ -565,9 +698,17 @@ class Hue:
 
     @contextmanager
     def context(
-        self, *, session_id: str | None = None, user_id: str | None = None
+        self,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> Iterator[None]:
-        """Task-local attributes inherited by nested Hue helpers; no global baggage changes."""
+        """Task-local attributes inherited by nested Hue helpers; no global baggage changes.
+
+        ``workspace_id`` is the application workspace or tenant the work runs in, recorded as
+        ``hue.workspace.id``.
+        """
         if not self._active:
             yield
             return
@@ -578,6 +719,13 @@ class Hue:
                 attributes["gen_ai.conversation.id"] = session_id
             if user_id is not None:
                 attributes["user.id"] = user_id
+            if workspace_id is not None:
+                try:
+                    attributes["hue.workspace.id"] = _identifier(workspace_id)
+                except Exception:
+                    # An invalid nested override must not inherit the outer tenant identifier.
+                    attributes.pop("hue.workspace.id", None)
+                    self._record_issue()
             token = self._context_attributes.set(attributes)
         except Exception:
             self._record_issue()
@@ -656,7 +804,15 @@ class Hue:
         provider: str,
         operation: str = "chat",
         name: str | None = None,
+        system_instructions: Any = _MISSING,
+        tools: Any = _MISSING,
     ) -> Iterator[HueSpan]:
+        """A GenAI client span for one direct provider call.
+
+        ``system_instructions`` and ``tools`` are recorded as ``gen_ai.system_instructions`` and
+        ``gen_ai.tool.definitions`` when content is captured, like ``set_input``: any JSON value,
+        ideally in the GenAI semantic-convention shapes.
+        """
         model = self._metadata_string(model, "unknown")
         operation = self._metadata_string(operation, "chat")
         provider = self._metadata_string(provider, "unknown")
@@ -686,6 +842,12 @@ class Hue:
                 },
                 _category="model",
             ) as span:
+                for key, value in (
+                    ("gen_ai.system_instructions", system_instructions),
+                    ("gen_ai.tool.definitions", tools),
+                ):
+                    if value is not _MISSING:
+                        span._set_content(key, value)
                 yield span
         finally:
             if token is not None:
@@ -711,14 +873,16 @@ class Hue:
             attributes["gen_ai.tool.call.id"] = self._metadata_string(call_id, "unknown")
         if mcp is not None:
             if isinstance(mcp, Mapping):
-                for key, field in (
-                    ("mcp.server.name", "name"),
-                    ("mcp.server.version", "version"),
+                for key, field, valid in (
+                    ("mcp.server.name", "name", _is_label),
+                    ("mcp.server.version", "version", _is_label),
+                    ("hue.mcp.provider", "provider", _is_source_label),
+                    ("hue.mcp.surface", "surface", _is_source_label),
                 ):
                     value = mcp.get(field)
                     if value is None:
                         continue
-                    if _is_label(value):
+                    if valid(value):
                         attributes[key] = value
                     elif self._active:
                         self._record_issue()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import re
 import time
@@ -82,6 +84,56 @@ def test_actual_trace_log_correlation_and_content(receiver):
         assert headers["Authorization"] == f"Bearer {KEY}"
         if path.endswith(("/traces", "/logs")):
             assert headers["Content-Type"] == "application/x-protobuf"
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_model_records_system_instructions_and_tool_definitions(receiver, capture_content):
+    system_instructions = [{"type": "text", "content": "Answer in one sentence."}]
+    tools = [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Look up an order",
+            "parameters": {"type": "object", "properties": {"id": {"type": "string"}}},
+        }
+    ]
+    with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
+        with hue.model(
+            "synthetic-model",
+            provider="synthetic",
+            system_instructions=system_instructions,
+            tools=tools,
+        ) as model:
+            model.log_inference(
+                system_instructions=system_instructions,
+                output=[{"role": "assistant", "parts": [{"type": "text", "content": "Shipped."}]}],
+            )
+        # A value that is not JSON is omitted and counted; the block still runs.
+        with hue.model("synthetic-model", provider="synthetic", name="invalid", tools={1j}):
+            pass
+        assert hue.export_status.instrumentation_failures == (1 if capture_content else 0)
+        hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    model_attributes, invalid = spans["chat synthetic-model"], spans["invalid"]
+    assert "gen_ai.tool.definitions" not in invalid
+    if not capture_content:
+        assert "gen_ai.system_instructions" not in model_attributes
+        assert "gen_ai.tool.definitions" not in model_attributes
+        assert receiver.logs() == []
+        return
+    assert (
+        json.loads(model_attributes["gen_ai.system_instructions"].string_value)
+        == system_instructions
+    )
+    assert json.loads(model_attributes["gen_ai.tool.definitions"].string_value) == tools
+    (log,) = receiver.logs()
+    body = body_of(log)
+    assert set(body) == {"gen_ai.output.messages", "gen_ai.system_instructions"}
+    (part,) = body["gen_ai.system_instructions"].array_value.values
+    assert {entry.key: entry.value.string_value for entry in part.kvlist_value.values} == {
+        "type": "text",
+        "content": "Answer in one sentence.",
+    }
 
 
 def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
@@ -270,6 +322,196 @@ def test_provider_tool_recorder_uses_span_metadata_after_model_scope_exits(recei
             pass
         span.record_provider_tool_calls({"output": []})
         assert hue.export_status.instrumentation_failures == 0
+
+
+def test_context_records_the_workspace_on_nested_helpers(receiver):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.context(workspace_id="workspace-1", user_id="user-1"):
+            with hue.span("request"):
+                with hue.model("synthetic-model", provider="synthetic"):
+                    pass
+                with hue.tool("lookup"):
+                    pass
+                with hue.context(workspace_id="workspace-2"), hue.span("other-workspace"):
+                    pass
+        with hue.span("unscoped"):
+            pass
+        assert hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    for name in ("request", "chat synthetic-model", "execute_tool lookup"):
+        assert spans[name]["hue.workspace.id"].string_value == "workspace-1"
+        assert spans[name]["user.id"].string_value == "user-1"
+    assert spans["other-workspace"]["hue.workspace.id"].string_value == "workspace-2"
+    assert spans["other-workspace"]["user.id"].string_value == "user-1"
+    assert "hue.workspace.id" not in spans["unscoped"]
+
+
+def test_tool_records_the_hue_provider_and_surface(receiver):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.tool(
+            "labeled",
+            mcp={"name": "gmail", "provider": "google.gmail", "surface": "google.gmail/mcp"},
+        ):
+            pass
+        with hue.tool("blank", mcp={"name": "gmail", "provider": " ", "surface": ""}):
+            pass
+        with hue.tool(
+            "invalid",
+            mcp={"name": "gmail", "provider": "google\x00gmail", "surface": "\ud800", "version": 3},
+        ):
+            pass
+        with hue.tool("oversized", mcp={"provider": "p" * 257, "surface": "s" * 256}):
+            pass
+        assert hue.export_status.instrumentation_failures == 6
+        hue.force_flush()
+    spans = {span.name.removeprefix("execute_tool "): attrs(span) for span in receiver.spans()}
+    assert spans["labeled"]["hue.mcp.provider"].string_value == "google.gmail"
+    assert spans["labeled"]["hue.mcp.surface"].string_value == "google.gmail/mcp"
+    assert spans["labeled"]["mcp.server.name"].string_value == "gmail"
+    for name in ("blank", "invalid"):
+        assert spans[name]["mcp.server.name"].string_value == "gmail"
+        assert "mcp.server.version" not in spans[name]
+        assert "hue.mcp.provider" not in spans[name]
+        assert "hue.mcp.surface" not in spans[name]
+    assert "hue.mcp.provider" not in spans["oversized"]
+    assert spans["oversized"]["hue.mcp.surface"].string_value == "s" * 256
+
+
+def test_tool_source_labels_use_utf16_length_like_typescript_and_fern(receiver):
+    accepted = "😀" * 128  # 256 UTF-16 code units: the inclusive limit.
+    rejected = "😀" * 129
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.tool("accepted", mcp={"provider": accepted, "surface": accepted}):
+            pass
+        with hue.tool("rejected", mcp={"provider": rejected, "surface": rejected}):
+            pass
+        assert hue.export_status.instrumentation_failures == 2
+        hue.force_flush()
+    spans = {span.name.removeprefix("execute_tool "): attrs(span) for span in receiver.spans()}
+    assert spans["accepted"]["hue.mcp.provider"].string_value == accepted
+    assert spans["accepted"]["hue.mcp.surface"].string_value == accepted
+    assert "hue.mcp.provider" not in spans["rejected"]
+    assert "hue.mcp.surface" not in spans["rejected"]
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver, capture_content):
+    body = "synthetic-file-body"
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    pdf = "AB" * 32
+    with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
+        with hue.span("request") as span:
+            span.record_file(
+                role="input", media_type="text/plain", data=body.encode(), name="notes.txt"
+            )
+            span.record_file(
+                role="output", media_type="application/pdf", sha256=pdf, byte_size=2048
+            )
+            # A str is hashed as UTF-8; a blank name is omitted (and counted when captured).
+            span.record_file(role="attachment", media_type="text/plain", data=body, name=" ")
+            # Each of these is omitted and counted; the block keeps running.
+            span.record_file(role="draft", media_type="text/plain", data=body)
+            span.record_file(role="input", media_type="text/plain", sha256="not-a-digest")
+            span.record_file(role="input", media_type="text/plain", data=body, sha256="0" * 64)
+            span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=-1)
+            span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=2**63)
+            span.record_file(role="input", media_type="", sha256=digest)
+        assert hue.export_status.instrumentation_failures == (7 if capture_content else 6)
+        hue.force_flush()
+    (request,) = receiver.spans()
+    files = [
+        {item.key: item.value.string_value or item.value.int_value for item in event.attributes}
+        for event in request.events
+        if event.name == "hue.file"
+    ]
+    assert files == [
+        {
+            "hue.file.sha256": digest,
+            "hue.file.role": "input",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": len(body),
+            **({"hue.file.name": "notes.txt"} if capture_content else {}),
+        },
+        {
+            "hue.file.sha256": pdf.lower(),
+            "hue.file.role": "output",
+            "hue.file.media_type": "application/pdf",
+            "hue.file.size": 2048,
+        },
+        {
+            "hue.file.sha256": digest,
+            "hue.file.role": "attachment",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": len(body),
+        },
+    ]
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert body.encode() not in telemetry
+
+
+def test_record_file_on_an_ended_span_counts_once_without_hashing(receiver, monkeypatch):
+    import hue_sdk.client as client_module
+
+    hashed: list[bytes] = []
+    real_sha256 = hashlib.sha256
+
+    def counting(data=b"", *args, **kwargs):
+        hashed.append(bytes(data))
+        return real_sha256(data, *args, **kwargs)
+
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.span("request") as span:
+            pass
+        monkeypatch.setattr(client_module.hashlib, "sha256", counting)
+        # The span has ended: one counted omission, and the bytes are never hashed.
+        span.record_file(role="input", media_type="text/plain", data=b"bytes", name=" ")
+        assert hue.export_status.instrumentation_failures == 1
+        assert hashed == []
+        hue.force_flush()
+    (request,) = receiver.spans()
+    assert [event.name for event in request.events] == []
+
+
+def test_record_file_rejects_oversized_data_before_hashing_or_exporting(receiver, monkeypatch):
+    from hue_sdk.client import _MAX_FILE_DATA_BYTES
+
+    hashed: list[bytes] = []
+    real_sha256 = hashlib.sha256
+
+    def counting(data=b"", *args, **kwargs):
+        hashed.append(bytes(data))
+        return real_sha256(data, *args, **kwargs)
+
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.span("request") as span:
+            monkeypatch.setattr("hue_sdk.client.hashlib.sha256", counting)
+            span.record_file(
+                role="input",
+                media_type="application/octet-stream",
+                data=bytes(_MAX_FILE_DATA_BYTES + 1),
+            )
+            span.record_file(
+                role="input",
+                media_type="text/plain",
+                data="x" * (_MAX_FILE_DATA_BYTES + 1),
+            )
+            assert hue.export_status.instrumentation_failures == 2
+            assert hashed == []
+        hue.force_flush()
+    (request,) = receiver.spans()
+    assert [event.name for event in request.events] == []
+
+
+@pytest.mark.parametrize("workspace_id", [123, "", "\x00bad", "\ud800", "😀" * 2049])
+def test_context_rejects_invalid_workspace_identifiers(receiver, workspace_id):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.context(workspace_id=workspace_id):
+            with hue.span("request"):
+                pass
+        assert hue.export_status.instrumentation_failures == 1
+        hue.force_flush()
+    span = next(span for span in receiver.spans() if span.name == "request")
+    assert "hue.workspace.id" not in attrs(span)
 
 
 def test_disabled_client_does_not_count_invalid_mcp(receiver):
@@ -764,6 +1006,362 @@ def test_content_prefixes_list_every_recognized_key_identically_to_typescript():
     block = re.search(r"export const contentPrefixes = \[(.*?)\];", typescript.read_text(), re.S)
     assert block is not None
     assert tuple(re.findall(r'"([^"]+)"', block.group(1))) == CONTENT_PREFIXES
+
+
+def test_large_inline_files_in_messages_export_as_their_digest(receiver):
+    image = bytes((index * 7) % 256 for index in range(100 * 1024))
+    image_base64 = base64.b64encode(image).decode()
+    image_digest = hashlib.sha256(image).hexdigest()
+    # Beyond the 1 MiB snapshot budget: dropped whole before, exported as a digest now.
+    document = bytes((index * 13) % 256 for index in range(2 * 1024 * 1024))
+    document_digest = hashlib.sha256(document).hexdigest()
+    text = "line\n" * 20000 + "end"
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("external")
+        span.set_attribute(
+            "gen_ai.input.messages",
+            json.dumps(
+                [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"type": "text", "content": "Summarize the contract"},
+                            {
+                                "type": "blob",
+                                "modality": "document",
+                                "mime_type": "application/pdf",
+                                "content": base64.b64encode(document).decode(),
+                            },
+                            {"type": "blob", "modality": "text", "content": "c21hbGw="},
+                        ],
+                    }
+                ]
+            ),
+        )
+        # AI SDK 6 file parts: a data: URL is decoded, text content is hashed as UTF-8.
+        span.set_attribute(
+            "ai.prompt.messages",
+            json.dumps(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "file",
+                                "mediaType": "image/png",
+                                "filename": "chart.png",
+                                "data": f"data:image/png;base64,{image_base64}",
+                            },
+                            {"type": "file", "mediaType": "text/plain", "data": text},
+                        ],
+                    }
+                ]
+            ),
+        )
+        # Not a message attribute: left alone even though it carries the same part.
+        span.set_attribute(
+            "input.value", json.dumps({"parts": [{"type": "blob", "content": image_base64}]})
+        )
+        span.end()
+        assert hue.force_flush()
+    (exported,) = receiver.spans()
+    values = attrs(exported)
+    (message,) = json.loads(values["gen_ai.input.messages"].string_value)
+    assert message["parts"] == [
+        {"type": "text", "content": "Summarize the contract"},
+        {
+            "type": "blob",
+            "modality": "document",
+            "mime_type": "application/pdf",
+            "sha256": document_digest,
+            "size": len(document),
+        },
+        {"type": "blob", "modality": "text", "content": "c21hbGw="},
+    ]
+    (prompt,) = json.loads(values["ai.prompt.messages"].string_value)
+    assert prompt["content"] == [
+        {
+            "type": "file",
+            "mediaType": "image/png",
+            "filename": "chart.png",
+            "sha256": image_digest,
+            "size": len(image),
+        },
+        {
+            "type": "file",
+            "mediaType": "text/plain",
+            "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "size": len(text.encode()),
+        },
+    ]
+    assert image_base64 in values["input.value"].string_value
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert base64.b64encode(document)[:64] not in telemetry
+
+
+def test_long_ascii_text_is_hashed_as_utf8_not_guessed_as_base64():
+    from hue_sdk._inline_files import hash_inline_files
+
+    content = "A" * (64 * 1024 + 4)
+    value = json.dumps(
+        [{"type": "file", "mediaType": "text/plain", "data": content}], separators=(",", ":")
+    )
+    [file] = json.loads(hash_inline_files("ai.prompt.messages", value))
+    assert file == {
+        "type": "file",
+        "mediaType": "text/plain",
+        "sha256": hashlib.sha256(content.encode()).hexdigest(),
+        "size": len(content.encode()),
+    }
+
+
+def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
+    hosted_mcp = {
+        "type": "mcp",
+        "server_label": "gmail",
+        "server_url": "https://mcp.example.test/gmail",
+        "authorization": "synthetic-oauth-token",
+        "headers": {"X-Api-Key": "synthetic-header-secret"},
+        "require_approval": "never",
+    }
+    # A function tool whose parameters are named like credentials: parameter schemas are kept.
+    fetch_page = json.dumps(
+        {
+            "type": "function",
+            "name": "fetch_page",
+            "parameters": {
+                "type": "object",
+                "properties": {"headers": {"type": "object"}, "api_key": {"type": "string"}},
+                "required": ["headers"],
+            },
+        }
+    )
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("external")
+        span.set_attribute("llm.tools.0.tool.json_schema", json.dumps(hosted_mcp))
+        span.set_attribute("llm.tools.1.tool.json_schema", fetch_page)
+        span.set_attribute(
+            "gen_ai.tool.definitions",
+            json.dumps(
+                [
+                    {
+                        "type": "provider",
+                        "name": "gmail",
+                        "id": "openai.mcp",
+                        "args": {"serverLabel": "gmail", "authorization": "synthetic-oauth-token"},
+                    }
+                ]
+            ),
+        )
+        span.set_attribute(
+            "llm.invocation_parameters",
+            json.dumps(
+                {
+                    "max_tokens": 100,
+                    "mcp_servers": [
+                        {
+                            "type": "url",
+                            "url": "https://mcp.example.test/slack",
+                            "name": "slack",
+                            "authorization_token": "synthetic-oauth-token",
+                        }
+                    ],
+                }
+            ),
+        )
+        span.set_attribute("ai.prompt.tools", ["not JSON: authorization"])
+        span.set_attribute("output.value", "The authorization field was set.")
+        span.end()
+        assert hue.force_flush()
+    (exported,) = receiver.spans()
+    values = attrs(exported)
+    assert json.loads(values["llm.tools.0.tool.json_schema"].string_value) == {
+        **hosted_mcp,
+        "authorization": "[redacted]",
+        "headers": "[redacted]",
+    }
+    assert values["llm.tools.1.tool.json_schema"].string_value == fetch_page
+    assert json.loads(values["gen_ai.tool.definitions"].string_value)[0]["args"] == {
+        "serverLabel": "gmail",
+        "authorization": "[redacted]",
+    }
+    parameters = json.loads(values["llm.invocation_parameters"].string_value)
+    assert parameters["mcp_servers"][0]["authorization_token"] == "[redacted]"
+    assert parameters["max_tokens"] == 100
+    assert values["ai.prompt.tools"].array_value.values[0].string_value == (
+        "not JSON: authorization"
+    )
+    assert values["output.value"].string_value == "The authorization field was set."
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert b"synthetic-oauth-token" not in telemetry
+    assert b"synthetic-header-secret" not in telemetry
+
+
+def test_oversized_tool_definition_is_dropped_without_being_parsed(receiver, monkeypatch):
+    from hue_sdk import _tool_definitions
+
+    parsed: list[int] = []
+    original = _tool_definitions._parse
+    monkeypatch.setattr(
+        _tool_definitions, "_parse", lambda text: parsed.append(len(text)) or original(text)
+    )
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        tracer = provider.get_tracer("third-party")
+        oversized = tracer.start_span("oversized")
+        # Larger than one export request: admission drops the record before the scrub runs.
+        oversized.set_attribute("input.value", json.dumps({"tools": [], "input": "x" * 1_100_000}))
+        oversized.end()
+        small = tracer.start_span("small")
+        small.set_attribute("input.value", json.dumps({"tools": [{"authorization": "secret"}]}))
+        small.end()
+        assert not hue.force_flush()
+        assert hue.export_status.dropped_trace_records == 1
+    assert [span.name for span in receiver.spans()] == ["small"]
+    assert parsed and max(parsed) < 1_000
+
+
+def test_tool_definition_too_deeply_nested_to_inspect_drops_its_record(receiver):
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("deep")
+        span.set_attribute(
+            "gen_ai.tool.definitions",
+            '{"a":' * 300 + '{"authorization":"synthetic-oauth-token"}' + "}" * 300,
+        )
+        span.end()
+        assert not hue.force_flush()
+        assert hue.export_status.dropped_trace_records == 1
+    assert receiver.spans() == []
+
+
+TOOL_DEFINITIONS_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "packages"
+    / "sdk-typescript"
+    / "tests"
+    / "fixtures"
+    / "tool-definitions.json"
+)
+
+
+def test_tool_catalog_digest_is_identical_to_typescript(receiver):
+    if not TOOL_DEFINITIONS_FIXTURE.is_file():
+        pytest.skip("TypeScript fixtures are not part of this checkout")
+    fixture = json.loads(TOOL_DEFINITIONS_FIXTURE.read_text(encoding="utf-8"))
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=False, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("fixture")
+        span.set_attribute("gen_ai.tool.definitions", json.dumps(fixture["definitions"]))
+        span.end()
+        assert hue.force_flush()
+    (exported,) = receiver.spans()
+    values = attrs(exported)
+    assert [item.string_value for item in values["hue.tool.names"].array_value.values] == (
+        fixture["names"]
+    )
+    assert values["hue.tool.definitions.sha256"].string_value == fixture["sha256"]
+    assert "gen_ai.tool.definitions" not in values
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_metadata_only_export_summarizes_the_tool_definitions_it_removes(
+    receiver, capture_content, monkeypatch
+):
+    from hue_sdk import _tool_definitions
+
+    parsed: list[int] = []
+    original = _tool_definitions._parse
+    monkeypatch.setattr(
+        _tool_definitions,
+        "_parse",
+        lambda text, **options: parsed.append(len(text)) or original(text, **options),
+    )
+    definitions = [
+        {
+            "type": "provider",
+            "name": "gmail",
+            "id": "openai.mcp",
+            "args": {"serverLabel": "gmail", "authorization": "synthetic-oauth-token"},
+        },
+        {"type": "function", "name": "fetch_page", "description": "Fetch a page"},
+    ]
+    rotated = json.loads(json.dumps(definitions))
+    rotated[0]["args"]["authorization"] = "rotated-oauth-token"
+    provider = TracerProvider()
+    tracer = provider.get_tracer("third-party")
+
+    def record(name, attributes):
+        span = tracer.start_span(name)
+        for key, value in attributes.items():
+            span.set_attribute(key, value)
+        span.end()
+
+    with Hue(receiver.url, KEY, capture_content=capture_content, tracer_provider=provider) as hue:
+        record("definitions", {"gen_ai.tool.definitions": json.dumps(definitions)})
+        # Rotated credentials, reordered keys and whitespace describe the same catalog.
+        record(
+            "rotated",
+            {"gen_ai.tool.definitions": json.dumps(rotated, indent=2, sort_keys=True)},
+        )
+        # OpenInference numbers each tool; index 10 sorts after 9.
+        record(
+            "openinference",
+            {
+                f"llm.tools.{index}.tool.json_schema": json.dumps(
+                    {"type": "function", "function": {"name": f"tool_{index}"}}
+                )
+                for index in (10, 2, 0, 9, 1, 3, 4, 5, 6, 7, 8)
+            },
+        )
+        record(
+            "ai-sdk-6", {"ai.prompt.tools": [json.dumps({"type": "function", "name": "lookup"})]}
+        )
+        record("not-json", {"gen_ai.tool.definitions": "not JSON"})
+        if not capture_content:
+            # Longer than one export request: removed without being parsed or summarized.
+            oversized = [{"type": "function", "name": "big", "description": "x" * 1_100_000}]
+            record("oversized", {"gen_ai.tool.definitions": json.dumps(oversized)})
+        record(
+            "preset",
+            {
+                "gen_ai.tool.definitions": json.dumps([{"type": "function", "name": "lookup"}]),
+                "hue.tool.names": ["application-set"],
+            },
+        )
+        assert hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+
+    def names(name):
+        value = spans[name].get("hue.tool.names")
+        return None if value is None else [item.string_value for item in value.array_value.values]
+
+    def digest(name):
+        value = spans[name].get("hue.tool.definitions.sha256")
+        return None if value is None else value.string_value
+
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert b"synthetic-oauth-token" not in telemetry
+    assert names("preset") == ["application-set"]
+    if capture_content:
+        # Content mode exports the scrubbed definitions themselves and adds no summary.
+        assert all(digest(name) is None for name in ("definitions", "openinference", "ai-sdk-6"))
+        return
+    assert names("definitions") == ["gmail", "fetch_page"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest("definitions") or "")
+    assert digest("rotated") == digest("definitions")
+    assert names("openinference") == [f"tool_{index}" for index in range(11)]
+    assert names("ai-sdk-6") == ["lookup"]
+    assert digest("not-json") is None and names("not-json") is None
+    assert digest("oversized") is None and names("oversized") is None
+    assert max(parsed) < 1_000_000
+    assert re.fullmatch(r"[0-9a-f]{64}", digest("preset") or "")
+    for values in spans.values():
+        assert not any(key.startswith("llm.tools.") for key in values)
+        assert "gen_ai.tool.definitions" not in values and "ai.prompt.tools" not in values
+    assert b"Fetch a page" not in telemetry
 
 
 @pytest.mark.parametrize("capture_content", [True, False])
