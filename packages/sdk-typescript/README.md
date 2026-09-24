@@ -253,8 +253,8 @@ credential-like fields including `authorization`, `authorization_token`, `header
 and `mcp_servers` entries of a raw provider request or response recorded as `input.value`,
 `output.value` or `llm.invocation_parameters`. Parameters named in a JSON Schema `properties`
 object keep their schemas, so a tool that takes a `headers` argument is still described. A
-definition nested more than 256 levels deep rejects its record. Credentials elsewhere, for example
-in a schema `default`, still need `redact`.
+definition nested more than 256 levels deep rejects its record. Sensitive `default`, `const`,
+`examples` and `enum` values under credential-named schema parameters are redacted too.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
