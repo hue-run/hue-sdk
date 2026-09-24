@@ -168,8 +168,8 @@ function hostedMcpCall(attributes: Attributes): { serverName?: string; failed: b
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
     return { failed: false };
   const { serverLabel, error } = parsed as { serverLabel?: unknown; error?: unknown };
-  if (typeof serverLabel !== "string") return { failed: false };
   const valid =
+    typeof serverLabel === "string" &&
     serverLabel.trim() !== "" &&
     serverLabel.length <= 256 &&
     !serverLabel.includes("\u0000") &&

@@ -1413,7 +1413,10 @@ describe("Vercel AI SDK integration", () => {
 
   // Content as @ai-sdk/openai 4.0.66 maps an OpenAI Responses `mcp_call` item: a provider-executed
   // `mcp.<name>` call plus a result naming the server only in `serverLabel`.
-  const hostedMcpModel = (error?: string | { code: number; message: string }) =>
+  const hostedMcpModel = (
+    error?: string | { code: number; message: string },
+    serverLabel: string | undefined = "gmail",
+  ) =>
     new MockLanguageModelV4({
       provider: "openai.responses",
       modelId: "synthetic-model",
@@ -1433,7 +1436,7 @@ describe("Vercel AI SDK integration", () => {
             toolName: "mcp.create_draft",
             result: {
               type: "call",
-              serverLabel: "gmail",
+              ...(serverLabel === undefined ? {} : { serverLabel }),
               name: "create_draft",
               arguments: '{"to":"synthetic@example.test"}',
               ...(error === undefined ? { output: "Synthetic draft saved" } : { error }),
@@ -1508,6 +1511,40 @@ describe("Vercel AI SDK integration", () => {
       }
     },
   );
+
+  test("hosted MCP errors stay failed when the server label is malformed", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "hosted-mcp-invalid-label",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    try {
+      await generateText({
+        model: hostedMcpModel({ code: -32000, message: "Synthetic MCP failure" }, "\u0000bad"),
+        prompt: "Synthetic hosted request",
+        telemetry: {
+          recordInputs: true,
+          recordOutputs: true,
+          integrations: [new OpenTelemetry({ tracer: tracerProvider.getTracer("app") })],
+        },
+      });
+      await tracerProvider.forceFlush();
+      await transport.flush();
+      const tool = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((span) => span.name === "execute_tool mcp.create_draft")!;
+      expect(attr(tool, "mcp.server.name")).toBeUndefined();
+      expect(attr(tool, "error.type")?.stringValue).toBe("mcp_error");
+      expect(tool.status?.code).toBe(2);
+    } finally {
+      await tracerProvider.shutdown();
+      await transport.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
 
   test("provider failure becomes an error span and missing token usage stays absent", async () => {
     const endpoint = receiver();
