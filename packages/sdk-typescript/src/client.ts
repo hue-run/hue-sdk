@@ -92,7 +92,13 @@ function identifier(value: string | undefined): string | undefined {
 
 /** A usable metadata label: a non-blank string of at most 256 characters. */
 function isLabel(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "" && value.length <= 256;
+  return (
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    value.length <= 256 &&
+    !value.includes("\u0000") &&
+    value.isWellFormed()
+  );
 }
 
 /** A source label uses the stricter wire-safe validation without changing existing labels. */
