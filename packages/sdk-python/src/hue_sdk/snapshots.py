@@ -23,6 +23,7 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
+from ._inline_files import hash_inline_files
 from ._tool_definitions import scrub_tool_credentials, with_tool_catalog_summary
 from .transport import (
     MAX_REQUEST_BYTES,
@@ -234,10 +235,12 @@ class _ValueBudget:
         if not self.capture_content and isinstance(source, Mapping):
             # Summarize the tool definitions metadata-only export removes by name and digest.
             source = with_tool_catalog_summary(source)
+        if isinstance(source, Mapping):
+            # Large inline files shrink to their digest before the budget, so the span survives.
             source = {
-                key: item
+                key: hash_inline_files(key, item) if isinstance(key, str) else item
                 for key, item in source.items()
-                if not (isinstance(key, str) and is_content_key(key))
+                if self.capture_content or not (isinstance(key, str) and is_content_key(key))
             }
         return source
 
