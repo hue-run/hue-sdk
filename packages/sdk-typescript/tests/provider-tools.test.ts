@@ -84,3 +84,17 @@ test("counts sparse provider tails without scanning array holes", () => {
   expect(activity.calls).toEqual([]);
   expect(activity.skipped).toBe(1);
 });
+
+test("bounds Anthropic error codes to safe metadata labels", () => {
+  const activity = hostedToolActivity("anthropic", {
+    content: [
+      { type: "mcp_tool_use", id: "call", name: "tool", input: {} },
+      {
+        type: "mcp_tool_result",
+        tool_use_id: "call",
+        content: { type: "mcp_tool_result_error", error_code: "SECRET-" + "x".repeat(256) },
+      },
+    ],
+  });
+  expect(activity.calls[0]?.errorType).toBe("error");
+});

@@ -78,6 +78,10 @@ function text(value: unknown): string | undefined {
     : undefined;
 }
 
+function errorCode(value: unknown): string {
+  return typeof value === "string" && /^[a-z0-9_]{1,64}$/.test(value) ? value : "error";
+}
+
 /** MCP arguments arrive as a JSON string; record the structure when it parses, else the text. */
 function jsonArguments(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -214,7 +218,7 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
     let errorType: string | undefined;
     if (result?.is_error === true) errorType = "mcp_error";
     else if (isItem(content) && typeof content.type === "string" && content.type.endsWith("_error"))
-      errorType = text(content.error_code) ?? "error";
+      errorType = errorCode(content.error_code);
     activity.calls.push({
       name,
       callId,
