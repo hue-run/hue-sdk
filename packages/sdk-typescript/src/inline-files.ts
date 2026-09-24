@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { MAX_BODY_BYTES } from "./config.js";
 
-/** Inline file content longer than this many characters is exported as its digest instead. */
+/** Inline file content larger than this many UTF-8 bytes is exported as its digest instead. */
 export const INLINE_FILE_LIMIT = 64 * 1024;
+const MAX_INLINE_FILE_TEXT = 8 * MAX_BODY_BYTES;
 
 /** Message attributes whose JSON can inline files: GenAI blob parts and AI SDK 6 file parts. */
 const messageKeys = new Set([
@@ -14,14 +16,24 @@ const messageKeys = new Set([
 const base64 = /^[A-Za-z0-9+/]*={0,2}$/;
 const base64DataUrl = /^data:[^,]*;base64,/;
 
+function binaryMimeType(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    !/^text\//i.test(value) &&
+    value.toLowerCase() !== "application/json"
+  );
+}
+
 /**
  * The bytes an inline file part carries: base64 (plain or as a `data:` URL) is decoded, and
  * anything else, such as a text file's content, is taken as UTF-8.
  */
-function fileBytes(content: string): Buffer {
+function fileBytes(content: string, mimeType: unknown): Buffer {
   const prefix = base64DataUrl.exec(content)?.[0].length ?? 0;
   const payload = content.slice(prefix);
-  return payload.length % 4 === 0 && base64.test(payload)
+  return (prefix > 0 || binaryMimeType(mimeType)) &&
+    payload.length % 4 === 0 &&
+    base64.test(payload)
     ? Buffer.from(payload, "base64")
     : Buffer.from(content, "utf8");
 }
@@ -42,8 +54,13 @@ function hashNode(value: unknown, state: HashState, depth: number): unknown {
   const part = value as Record<string, unknown>;
   const key = contentKey(part);
   const inline = key === undefined ? undefined : part[key];
-  if (key !== undefined && typeof inline === "string" && inline.length > INLINE_FILE_LIMIT) {
-    const bytes = fileBytes(inline);
+  const mimeType = part.mime_type ?? part.mediaType;
+  if (
+    key !== undefined &&
+    typeof inline === "string" &&
+    Buffer.byteLength(inline, "utf8") > INLINE_FILE_LIMIT
+  ) {
+    const bytes = fileBytes(inline, mimeType);
     const { [key]: _omitted, ...rest } = part;
     state.changed = true;
     return {
@@ -68,7 +85,8 @@ export function hashInlineFiles(key: string, value: unknown): unknown {
   if (
     !messageKeys.has(key) ||
     typeof value !== "string" ||
-    value.length <= INLINE_FILE_LIMIT ||
+    Buffer.byteLength(value, "utf8") <= INLINE_FILE_LIMIT ||
+    Buffer.byteLength(value, "utf8") > MAX_INLINE_FILE_TEXT ||
     !(value.includes('"blob"') || value.includes('"file"'))
   )
     return value;

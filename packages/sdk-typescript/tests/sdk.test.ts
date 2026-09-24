@@ -19,6 +19,7 @@ import {
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { OpenTelemetry } from "@ai-sdk/otel";
+import { hashInlineFiles } from "../src/inline-files.js";
 import { generateText, jsonSchema, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
@@ -505,6 +506,9 @@ describe("Hue SDK contract", () => {
       expect(attr(span("nul"), "hue.mcp.surface")).toBeUndefined();
     } finally {
       await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
     const endpoint = receiver();
     const transport = createHueTransport({
@@ -604,6 +608,7 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+<<<<<<< HEAD
   test.each([true, false])(
     "recordFile links a file by content hash without exporting its bytes (captureContent=%p)",
     async (captureContent) => {
@@ -718,6 +723,21 @@ describe("Hue SDK contract", () => {
       await hue.shutdown();
       endpoint.server.stop(true);
     }
+  });
+
+  test("hashes long text files as UTF-8 instead of guessing plain text is base64", () => {
+    const content = "A".repeat(64 * 1024 + 4);
+    const value = JSON.stringify([{ type: "file", mediaType: "text/plain", data: content }]);
+    const [file] = JSON.parse(hashInlineFiles("ai.prompt.messages", value)) as {
+      size: number;
+      sha256: string;
+    }[];
+    expect(file).toEqual({
+      type: "file",
+      mediaType: "text/plain",
+      sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+      size: Buffer.byteLength(content, "utf8"),
+    });
   });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.

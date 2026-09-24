@@ -1136,6 +1136,22 @@ def test_metadata_only_export_summarizes_the_tool_definitions_it_removes(
     assert base64.b64encode(document)[:64] not in telemetry
 
 
+def test_long_ascii_text_is_hashed_as_utf8_not_guessed_as_base64():
+    from hue_sdk._inline_files import hash_inline_files
+
+    content = "A" * (64 * 1024 + 4)
+    value = json.dumps(
+        [{"type": "file", "mediaType": "text/plain", "data": content}], separators=(",", ":")
+    )
+    [file] = json.loads(hash_inline_files("ai.prompt.messages", value))
+    assert file == {
+        "type": "file",
+        "mediaType": "text/plain",
+        "sha256": hashlib.sha256(content.encode()).hexdigest(),
+        "size": len(content.encode()),
+    }
+
+
 @pytest.mark.parametrize("capture_content", [True, False])
 def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver, capture_content):
     from hue_sdk.snapshots import CONTENT_PREFIXES
