@@ -49,6 +49,7 @@ import {
   type VerdictComparison,
 } from "../evals/verdicts.js";
 import type { JsonValue } from "../types.js";
+import { envFileArgument, envFileOptions } from "./env-file.js";
 
 /** Adapter contract: the module's `default` or `runMyAgent` export. */
 export type EvalAdapter = (
@@ -120,6 +121,7 @@ Modes:
 
 Connection:
   --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first
+  --env-path <path>               Same as --env-file
   --origin <url>                  Hue origin (default: HUE_BASE_URL or https://app.hue.run)
 
 Output and limits:
@@ -178,7 +180,7 @@ function parse(argv: string[]) {
         "agent-key": { type: "string" },
         "agent-name": { type: "string" },
         revision: { type: "string" },
-        "env-file": { type: "string" },
+        ...envFileOptions,
         origin: { type: "string" },
         name: { type: "string" },
         baseline: { type: "string" },
@@ -1226,12 +1228,18 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       throw new UsageError("--worker takes no selection; Hue chooses the run to execute");
     if (!values.worker && selections !== 1)
       throw new UsageError("Pass exactly one of --case, --set or --dataset-version");
-    if (values["env-file"]) {
+    let envFile: string | undefined;
+    try {
+      envFile = envFileArgument(values, process.cwd());
+    } catch (error) {
+      throw new UsageError((error as Error).message);
+    }
+    if (envFile) {
       try {
-        process.loadEnvFile(resolve(values["env-file"]));
+        process.loadEnvFile(resolve(envFile));
       } catch (error) {
         throw new UsageError(
-          `Unable to load ${values["env-file"]}: ${error instanceof Error ? error.message : String(error)}`,
+          `Unable to load ${envFile}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }

@@ -3,7 +3,8 @@ import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 
 const { values } = parseArgs({
@@ -297,6 +298,66 @@ if (
   removedConnectEvents[0]?.event !== "run.failed"
 )
   throw new Error("Installed hue CLI still accepts the removed connect command");
+// Node 22 and 24 read --env-file from the whole command line and exit before the CLI runs when that
+// file is missing, so the installed `hue login` must create a new env file through --env-path.
+{
+  const loginKey = `hue_live_package_check_${"k".repeat(24)}`;
+  const standIn = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.headers.authorization !== `Bearer ${loginKey}`) {
+      response.statusCode = 401;
+      response.end("{}");
+    } else if (request.url === "/api/v1/projects/current") {
+      response.end(
+        JSON.stringify({ id: "p", name: "Package check", slug: "p", organizationId: "o" }),
+      );
+    } else if (request.url === "/api/v1/datasets") {
+      response.end(JSON.stringify({ items: [], nextCursor: null }));
+    } else if (request.url === "/api/mcp") {
+      response.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [{ name: "get_project_context" }] },
+        }),
+      );
+    } else {
+      response.statusCode = 404;
+      response.end("{}");
+    }
+  });
+  await new Promise((listening) => standIn.listen(0, "127.0.0.1", listening));
+  const loginDirectory = await mkdtemp(join(destination, "login-"));
+  const login = await new Promise((finished, failed) => {
+    const child = spawn(
+      join(minimal, "node_modules", ".bin", "hue"),
+      [
+        "login",
+        "--origin",
+        `http://127.0.0.1:${standIn.address().port}`,
+        "--env-path",
+        ".env.local",
+        "--no-browser",
+      ],
+      { cwd: loginDirectory, env: process.env, stdio: ["pipe", "ignore", "pipe"] },
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", failed);
+    child.on("close", (status) => finished({ status, stderr }));
+    child.stdin.end(`${loginKey}\n`);
+  });
+  standIn.close();
+  const stored = await readFile(join(loginDirectory, ".env.local"), "utf8").catch(() => "");
+  if (
+    login.status !== 0 ||
+    !stored.includes(`HUE_API_KEY=${loginKey}\n`) ||
+    !stored.includes(`HUE_MCP_KEY=${loginKey}\n`)
+  )
+    throw new Error(
+      `Installed hue login --env-path did not create a new env file: ${login.stderr}`,
+    );
+}
 // Evaluation/simulation users install the optional validation peer. Ajv remains separately
 // optional: without it the JSON Schema scorer reports a typed error instead of crashing.
 const evaluation = join(destination, "evaluation-consumer");
