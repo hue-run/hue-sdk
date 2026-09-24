@@ -272,6 +272,8 @@ world token, so an adapter that read `HUE_MCP_URL` and `HUE_MCP_TOKEN` keeps wor
 no Hue-native `tools` (Hue refuses them); a world created while the gateway is off keeps its tools
 and the `hue_sim_` capability and emits a one-time `DeprecationWarning`.
 
+A refusal such as 409 `simulation_gateway_required` exposes its validated server code as `HueEnvironmentError.diagnostic`.
+
 `agentEnvironment` removes Hue control-plane credentials from the child by default: `HUE_API_KEY`,
 `HUE_MCP_KEY` and any variable whose value is a `hue_sk_`, `hue_mcp_` or `hue_attempt_`
 credential. Pass `includeHueCredentials: true` only for an agent that must call Hue's own API.

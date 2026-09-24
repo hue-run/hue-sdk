@@ -362,6 +362,55 @@ describe("environment client World API", () => {
     const wait = new HueEnvironmentError(503, 1000);
     expect(wait.retryAfterMs).toBe(1000);
   }, 10_000);
+
+  test("a refusal carries the server diagnostic code; invalid values are dropped", async () => {
+    const refusal = async (diagnostic?: string) => {
+      const api = worldApi({
+        create: () =>
+          Response.json(
+            { error: "refused" },
+            {
+              status: 409,
+              headers: diagnostic === undefined ? {} : { "x-hue-diagnostic": diagnostic },
+            },
+          ),
+      });
+      const client = createEnvironmentClient({ apiKey: key, baseUrl: api.baseUrl });
+      return client.createRun({ idempotencyKey: "k", environmentVersionId: versionId }).then(
+        () => null,
+        (error: unknown) => error as HueEnvironmentError,
+      );
+    };
+    const typed = await refusal("simulation_gateway_required");
+    expect(typed).toBeInstanceOf(HueEnvironmentError);
+    expect(typed).toMatchObject({ status: 409, diagnostic: "simulation_gateway_required" });
+    expect(typed!.message).toBe(
+      "Hue environment request failed (HTTP 409, simulation_gateway_required)",
+    );
+    const boundary = await refusal("a".repeat(64));
+    expect(boundary).toMatchObject({ status: 409, diagnostic: "a".repeat(64) });
+    for (const hostile of ["Simulation-Gateway", "a b", "x".repeat(65), "<script>"]) {
+      const dropped = await refusal(hostile);
+      expect(dropped).toMatchObject({ status: 409, diagnostic: undefined });
+      expect(dropped!.message).toBe("Hue environment request failed (HTTP 409)");
+    }
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      ok: false,
+      status: 409,
+      headers: { get: () => "\u0000" },
+      body: null,
+    })) as typeof fetch;
+    try {
+      const client = createEnvironmentClient({ apiKey: key, baseUrl: "https://app.hue.test" });
+      await expect(
+        client.createRun({ idempotencyKey: "k", environmentVersionId: versionId }),
+      ).rejects.toMatchObject({ status: 409, diagnostic: undefined });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(await refusal()).toMatchObject({ status: 409, diagnostic: undefined });
+  });
 });
 
 describe("case trace context", () => {

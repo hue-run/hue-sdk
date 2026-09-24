@@ -231,6 +231,30 @@ def test_retry_after_is_honored_and_bounded(receiver, backoff):
     with pytest.raises(HueEnvironmentError) as refused:
         client.finish_run(RUN_ID, idempotency_key="f", status="completed")
     assert refused.value.status == 409 and refused.value.retry_after is None
+    assert refused.value.diagnostic is None
+
+
+def test_refusal_carries_the_diagnostic_code_and_drops_anything_else(receiver):
+    client = EnvironmentClient(receiver.url, KEY, max_attempts=1)
+    reply(
+        receiver,
+        {"error": "refused"},
+        status=409,
+        **{"X-Hue-Diagnostic": "simulation_gateway_required"},
+    )
+    with pytest.raises(HueEnvironmentError) as typed:
+        client.create_run(idempotency_key="k", environment_version_id=VERSION_ID)
+    assert typed.value.status == 409
+    assert typed.value.diagnostic == "simulation_gateway_required"
+    assert str(typed.value) == (
+        "Hue environment request failed (HTTP 409, simulation_gateway_required)."
+    )
+    for hostile in ("Simulation-Gateway", "a b", "x" * 65, "<script>", "\x00"):
+        reply(receiver, {"error": "refused"}, status=409, **{"X-Hue-Diagnostic": hostile})
+        with pytest.raises(HueEnvironmentError) as dropped:
+            client.create_run(idempotency_key="k", environment_version_id=VERSION_ID)
+        assert dropped.value.diagnostic is None
+        assert str(dropped.value) == "Hue environment request failed (HTTP 409)."
 
 
 def test_wait_for_seal_reads_past_completion_grace(monkeypatch):
