@@ -137,3 +137,27 @@ def test_scrubs_url_fragments_schema_defaults_and_huge_integer_digest_inputs():
     source = {"gen_ai.tool.definitions": json.dumps([{"name": "big", "value": 10**4000}])}
     summary = with_tool_catalog_summary(source)
     assert summary["hue.tool.definitions.sha256"]
+
+
+def test_scrubs_nested_credential_schema_metadata():
+    output = json.loads(
+        scrub_tool_credentials(
+            "gen_ai.tool.definitions",
+            json.dumps(
+                {
+                    "type": "function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "authorization": {
+                                "anyOf": [{"type": "string", "default": "synthetic-default"}]
+                            }
+                        },
+                    },
+                }
+            ),
+        )
+    )
+    assert output["parameters"]["properties"]["authorization"]["anyOf"][0]["default"] == (
+        "[redacted]"
+    )
