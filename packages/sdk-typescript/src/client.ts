@@ -96,19 +96,8 @@ function identifier(value: string | undefined): string | undefined {
   return value;
 }
 
-/** A usable metadata label: a non-blank string of at most 256 characters. */
+/** A usable metadata label: non-blank, at most 256 UTF-16 code units, with no NUL or unpaired surrogate. */
 function isLabel(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.trim() !== "" &&
-    value.length <= 256 &&
-    !value.includes("\u0000") &&
-    value.isWellFormed()
-  );
-}
-
-/** A source label is validated independently so provider metadata remains wire-safe. */
-function isSourceLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.trim() !== "" &&
@@ -450,8 +439,8 @@ export class HueClient {
     stamp("gen_ai.tool.call.id", options.callId);
     stamp("mcp.server.name", options.mcp?.name);
     stamp("mcp.server.version", options.mcp?.version);
-    stamp("hue.mcp.provider", options.mcp?.provider, isSourceLabel);
-    stamp("hue.mcp.surface", options.mcp?.surface, isSourceLabel);
+    stamp("hue.mcp.provider", options.mcp?.provider);
+    stamp("hue.mcp.surface", options.mcp?.surface);
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {

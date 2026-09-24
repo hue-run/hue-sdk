@@ -204,6 +204,21 @@ describe("Hue SDK contract", () => {
         request: Record<string, unknown>;
         response: { content: Record<string, unknown>[] };
       };
+      const openaiRequest = structuredClone(openai.request);
+      const anthropicRequest = structuredClone(anthropic.request);
+      const openaiTools = openaiRequest.tools as Record<string, unknown>[];
+      openaiTools[0] = {
+        ...openaiTools[0],
+        headers: { Authorization: "Bearer synthetic-header-token" },
+        server_url:
+          "https://synthetic-user:synthetic-pass@mcp.example.test/gmail/mcp?token=synthetic-query-token",
+      };
+      const anthropicServers = anthropicRequest.mcp_servers as Record<string, unknown>[];
+      anthropicServers[0] = {
+        ...anthropicServers[0],
+        headers: { Authorization: "Bearer synthetic-header-token" },
+        url: "https://synthetic-user:synthetic-pass@mcp.example.test/slack/mcp?token=synthetic-query-token",
+      };
       try {
         await hue.model(
           "synthetic-model",
@@ -222,13 +237,18 @@ describe("Hue SDK contract", () => {
             });
             hue.recordProviderToolCalls(response, {
               provider: "openai",
-              request: openai.request,
-              // An object with no own `constructor` key must not resolve Object.prototype.
-              servers: {},
+              request: openaiRequest,
+              servers: {
+                gmail: {
+                  version: "1.0",
+                  provider: "google.gmail",
+                  surface: "google.gmail/mcp",
+                },
+              },
             });
             hue.recordProviderToolCalls(anthropic.response, {
               provider: "anthropic",
-              request: anthropic.request,
+              request: anthropicRequest,
             });
           },
           { provider: "openai" },
@@ -243,6 +263,9 @@ describe("Hue SDK contract", () => {
         expect(listing.parentSpanId).toBe(model.spanId);
         expect(attr(listing, "mcp.method.name")?.stringValue).toBe("tools/list");
         expect(attr(listing, "mcp.server.name")?.stringValue).toBe("gmail");
+        expect(attr(listing, "mcp.server.version")?.stringValue).toBe("1.0");
+        expect(attr(listing, "hue.mcp.provider")?.stringValue).toBe("google.gmail");
+        expect(attr(listing, "hue.mcp.surface")?.stringValue).toBe("google.gmail/mcp");
         expect(attr(listing, "server.address")?.stringValue).toBe("mcp.example.test");
         const byName = Object.fromEntries(tools.map((span) => [span.name, span]));
         expect(
@@ -272,7 +295,14 @@ describe("Hue SDK contract", () => {
           false,
         );
         const raw = endpoint.requests.map((request) => request.raw).join(" ");
-        expect(raw).not.toContain("synthetic-oauth-token");
+        for (const secret of [
+          "synthetic-oauth-token",
+          "synthetic-header-token",
+          "synthetic-query-token",
+          "synthetic-user",
+          "synthetic-pass",
+        ])
+          expect(raw).not.toContain(secret);
         if (captureContent) {
           expect(raw).toContain("private-provider-content");
           expect(attr(listing, "gen_ai.tool.definitions")).toBeDefined();
@@ -287,12 +317,17 @@ describe("Hue SDK contract", () => {
           ).toBeDefined();
         } else {
           expect(raw).not.toContain("private-provider-content");
+          for (const privateValue of ["Create a draft", "Update posted", "channel_not_found"])
+            expect(raw).not.toContain(privateValue);
+          expect(raw).not.toContain('"threads"');
           for (const span of [listing, ...tools]) {
             expect(attr(span, "gen_ai.tool.call.arguments")).toBeUndefined();
             expect(attr(span, "gen_ai.tool.call.result")).toBeUndefined();
             expect(attr(span, "gen_ai.tool.definitions")).toBeUndefined();
           }
         }
+        hue.recordProviderToolCalls(openai.response);
+        expect((await hue.flushSafe()).report.instrumentationFailures).toBe(1);
       } finally {
         await hue.shutdown();
         endpoint.server.stop(true);

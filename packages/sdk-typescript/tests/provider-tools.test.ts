@@ -51,7 +51,7 @@ test("does not export an Anthropic use block without its bounded result", () => 
     ],
   });
   expect(activity.calls).toEqual([]);
-  expect(activity.skipped).toBe(2);
+  expect(activity.skipped).toBe(1);
 });
 
 test("does not count truncated messages and reasoning as invalid provider tools", () => {
@@ -61,6 +61,26 @@ test("does not count truncated messages and reasoning as invalid provider tools"
       { type: "mcp_call", id: "call-after-content", name: "tool", arguments: "{}" },
     ],
   });
+  expect(activity.calls).toEqual([]);
+  expect(activity.skipped).toBe(1);
+});
+
+test("does not count an Anthropic text tail as provider tools", () => {
+  const activity = hostedToolActivity("anthropic", {
+    content: [
+      ...Array.from({ length: 256 }, () => ({ type: "text", text: "harmless response" })),
+      { type: "mcp_tool_use", id: "late", name: "tool", input: {} },
+    ],
+  });
+  expect(activity.calls).toEqual([]);
+  expect(activity.skipped).toBe(1);
+});
+
+test("counts sparse provider tails without scanning array holes", () => {
+  const output: unknown[] = [];
+  output.length = 2 ** 32 - 1;
+  output[2 ** 32 - 2] = { type: "mcp_call", id: "late", name: "tool" };
+  const activity = hostedToolActivity("openai", { output });
   expect(activity.calls).toEqual([]);
   expect(activity.skipped).toBe(1);
 });

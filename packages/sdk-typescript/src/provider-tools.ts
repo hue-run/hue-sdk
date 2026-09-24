@@ -44,25 +44,26 @@ function isItem(value: unknown): value is Item {
 
 /** Only provider-executed tool items contribute to invalid-item diagnostics when a response is
  * truncated; messages and reasoning are harmless response content. */
-function isProviderToolItem(value: unknown): boolean {
+function isProviderToolItem(provider: HostedToolProvider, value: unknown): boolean {
   if (!isItem(value) || typeof value.type !== "string") return false;
-  return (
-    value.type === "mcp_call" ||
-    value.type === "mcp_list_tools" ||
-    value.type === "web_search_call" ||
-    value.type === "file_search_call" ||
-    value.type === "code_interpreter_call" ||
-    value.type === "mcp_tool_use" ||
-    value.type === "server_tool_use" ||
-    value.type === "mcp_tool_result" ||
-    value.type === "server_tool_result"
-  );
+  if (provider === "openai")
+    return (
+      value.type === "mcp_call" ||
+      value.type === "mcp_list_tools" ||
+      value.type === "web_search_call" ||
+      value.type === "file_search_call" ||
+      value.type === "code_interpreter_call"
+    );
+  return value.type === "mcp_tool_use" || value.type === "server_tool_use";
 }
 
-function countProviderToolItems(items: unknown[], start = 0): number {
+function countProviderToolItems(provider: HostedToolProvider, items: unknown[], start = 0): number {
   let count = 0;
-  for (let index = start; index < items.length; index++) {
-    if (isProviderToolItem(items[index])) count++;
+  for (const key of Object.keys(items)) {
+    const index = Number(key);
+    if (!Number.isInteger(index) || index < start || index >= items.length || String(index) !== key)
+      continue;
+    if (isProviderToolItem(provider, items[index])) count++;
   }
   return count;
 }
@@ -91,7 +92,7 @@ function jsonArguments(value: unknown): unknown {
 /** OpenAI Responses `output` items. Built-in tools are named by their kind; MCP calls by tool. */
 function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
   const count = Math.min(items.length, MAX_PROVIDER_ITEMS);
-  activity.skipped += countProviderToolItems(items, count);
+  activity.skipped += countProviderToolItems("openai", items, count);
   for (let index = 0; index < count; index++) {
     const item = items[index];
     if (!isItem(item)) continue;
@@ -181,7 +182,7 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
   const results = new Map<string, Item>();
   const count = Math.min(blocks.length, MAX_PROVIDER_ITEMS);
   const truncated = blocks.length > MAX_PROVIDER_ITEMS;
-  activity.skipped += countProviderToolItems(blocks, count);
+  activity.skipped += countProviderToolItems("anthropic", blocks, count);
   for (let index = 0; index < count; index++) {
     const block = blocks[index];
     if (
