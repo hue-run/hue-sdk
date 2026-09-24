@@ -7,6 +7,7 @@ import { createEvaluationClient } from "../src/evals.js";
 import {
   caseTraceparent,
   createWorldForExecution,
+  gatewayState,
   runEnvironmentTarget,
 } from "../src/evals/environment-target.js";
 import {
@@ -349,7 +350,7 @@ describe("world creation on a deployment whose gateway is off", () => {
       agentRevision: "agent@1",
     };
     // The deployment's health says the gateway is off, so the refusal is the legacy body's.
-    const run = await createWorldForExecution(client, input, { gatewayEnabled: async () => false });
+    const run = await createWorldForExecution(client, input, { gatewayState: async () => "off" });
     expect(run.token).toBeUndefined();
     expect(bodies).toHaveLength(2);
     expect(bodies[0]).toMatchObject({ traceparent: input.traceparent, agentRevision: "agent@1" });
@@ -365,9 +366,49 @@ describe("world creation on a deployment whose gateway is off", () => {
     expect(refusing.requests).toHaveLength(1);
     // With the gateway on, a 400 (a trace context that does not match the execution) stands.
     await expect(
-      createWorldForExecution(once, input, { gatewayEnabled: async () => true }),
+      createWorldForExecution(once, input, { gatewayState: async () => "on" }),
     ).rejects.toMatchObject({ status: 400 });
     expect(refusing.requests).toHaveLength(2);
+    // With the health unknown (unreachable, a timeout), the fields are not dropped on a guess.
+    await expect(
+      createWorldForExecution(once, input, { gatewayState: async () => "unknown" }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(refusing.requests).toHaveLength(3);
+  });
+
+  test("the health probe remembers on and off per origin and probes again after an unknown answer", async () => {
+    const answers: Array<() => Response> = [];
+    const calls: string[] = [];
+    const fetchStub = (url: string) => {
+      calls.push(url);
+      return Promise.resolve().then(answers.shift()!);
+    };
+    const one = "https://one.hue.test/api/v1";
+    // A network failure, then a refusal carrying a diagnostic: neither says the gateway is off.
+    answers.push(() => {
+      throw new TypeError("fetch failed");
+    });
+    expect(await gatewayState(one, fetchStub)).toBe("unknown");
+    answers.push(
+      () =>
+        new Response(null, { status: 404, headers: { "x-hue-diagnostic": "host_not_allowed" } }),
+    );
+    expect(await gatewayState(one, fetchStub)).toBe("unknown");
+    // The disabled handler's empty 404 does, and is remembered for the origin.
+    answers.push(() => new Response(null, { status: 404 }));
+    expect(await gatewayState(one, fetchStub)).toBe("off");
+    expect(await gatewayState("https://one.hue.test/elsewhere", fetchStub)).toBe("off");
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toBe("https://one.hue.test/api/sim/gmailmcp.googleapis.com/_hue/health");
+    // The gateway's health is on; a health without the gateway marker is not.
+    answers.push(() => Response.json({ status: "ok", gateway: "simulation" }));
+    expect(await gatewayState("https://two.hue.test", fetchStub)).toBe("on");
+    expect(await gatewayState("https://two.hue.test", fetchStub)).toBe("on");
+    answers.push(() => Response.json({ status: "ok" }));
+    expect(await gatewayState("https://three.hue.test", fetchStub)).toBe("unknown");
+    answers.push(() => new Response("busy", { status: 503 }));
+    expect(await gatewayState("https://three.hue.test", fetchStub)).toBe("unknown");
+    expect(calls).toHaveLength(6);
   });
 });
 
