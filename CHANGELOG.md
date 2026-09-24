@@ -20,9 +20,10 @@ refuses to publish a version without a matching entry below.
   if a receiver without that header gets placeholders, their rejections are credited to them, one
   `warning` issue is recorded and live spans switch off for that client. Placeholders may use up
   to a quarter of the export queue, and placeholder warnings carry a nonzero `count`.
-  Migration: set `liveSpans: false` for the previous wire behavior. Scrubbing or filtering in a
-  wrapping processor's `onEnd` does not apply to placeholders; use `redact` or `liveSpans: false`.
-  **Wire**
+  Migration: set `liveSpans: false` for the previous wire behavior. A wrapping processor that
+  forwards `onStart` but scrubs, renames or drops spans in `onEnd` does not change their
+  placeholders; scrub with `redact`, do not forward `onStart` for spans you filter, or set
+  `liveSpans: false`. **Wire**
 - A finished span no longer carries `hue.span_type` or `hue.pending_parent_id` attributes set by
   the application; Hue reserves them for placeholders. Migration: rename application attributes
   that use those keys. **Wire**
@@ -421,7 +422,9 @@ No registry release is claimed until publication and registry acceptance complet
   without that header gets placeholders, their rejections are credited to them,
   `ExportStatus.live_spans_rejected` is set and live spans switch off for that client.
   Placeholders may use up to a quarter of the export queue. Migration: pass `live_spans=False`
-  for the previous wire behavior. **Wire**
+  for the previous wire behavior. A processor wrapper that forwards `on_start` but scrubs,
+  renames or drops spans in `on_end` does not change their placeholders; do not forward
+  `on_start` for spans you filter, or pass `live_spans=False`. **Wire**
 - A finished span no longer carries `hue.span_type` or `hue.pending_parent_id` attributes set by
   the application; Hue reserves them for placeholders. Migration: rename application attributes
   that use those keys. **Wire**

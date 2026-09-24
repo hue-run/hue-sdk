@@ -378,7 +378,8 @@ short span may send none and appear in Hue only when it finishes.
   attributes, renames the span or drops it in `onEnd`, a placeholder exported while the span is
   still open is sent anyway: it has the span's original name, and its attributes as set on the span
   with `captureContent` and `redact` applied. Scrub with `redact`, which applies to placeholders
-  too, or before the value is set on the span, or turn live spans off with `liveSpans: false`.
+  too, or before the value is set on the span; do not forward `onStart` for spans you rename or
+  drop; or turn live spans off with `liveSpans: false`.
 - Placeholders are advisory. They are queued only while the queue is under a quarter of its
   record and byte budgets, and skipped silently otherwise. While queued they count in
   `pendingSpans` and `pendingBytes`, but never as accepted, rejected, failed or dropped records.
