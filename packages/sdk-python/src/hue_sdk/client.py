@@ -76,6 +76,19 @@ def _is_source_label(value: Any) -> bool:
         return False
 
 
+def _identifier(value: Any) -> str:
+    """Validate a workspace identifier with TypeScript/Fern's UTF-16 limit."""
+    if type(value) is not str or not value or "\x00" in value:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.")
+    try:
+        units = len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as error:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.") from error
+    if units > 4096:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.")
+    return value
+
+
 def _is_text_label(value: Any) -> bool:
     """A label that is also free of NUL and unpaired surrogates, so it can be exported."""
     if not _is_label(value) or "\x00" in value:
