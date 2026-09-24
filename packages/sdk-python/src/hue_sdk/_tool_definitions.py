@@ -69,8 +69,8 @@ class _Scrub:
         """Remove URL userinfo and every query value from a hosted endpoint.
 
         Query parameter names are provider-defined, so retaining values based on a guessed
-        credential-key list could leak a secret under an unfamiliar name. URL fragments are left
-        untouched because they are not sent to the server and are useful for identifying a tool.
+        credential-key list could leak a secret under an unfamiliar name. Fragments can also carry
+        bearer tokens in provider-specific URLs, so they are removed too.
         """
         try:
             parsed = urlsplit(value)
@@ -98,12 +98,24 @@ class _Scrub:
                 [(key, REDACTED) for key, _ in parse_qsl(query, keep_blank_values=True)]
             )
             changed = True
+        fragment = parsed.fragment
+        if fragment:
+            fragment = ""
+            changed = True
         if not changed:
             return value
         self.changed = True
-        return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+        # WHATWG URL serialization inserts a slash for an empty absolute path.
+        path = parsed.path or "/"
+        return urlunsplit((parsed.scheme, netloc, path, query, fragment))
 
-    def node(self, value: Any, depth: int = 0, parameters: bool = False) -> Any:
+    def node(
+        self,
+        value: Any,
+        depth: int = 0,
+        parameters: bool = False,
+        credential_parameter: bool = False,
+    ) -> Any:
         """Replace every credential key's value at any depth.
 
         Keys directly inside a JSON Schema ``properties`` object name tool parameters (a tool
@@ -113,18 +125,26 @@ class _Scrub:
         if depth > _MAX_DEPTH:
             raise ValueError("Tool definition exceeds its nesting limit.")
         if isinstance(value, list):
-            return [self.node(item, depth + 1) for item in value]
+            return [
+                self.node(item, depth + 1, credential_parameter=credential_parameter)
+                for item in value
+            ]
         if not isinstance(value, dict):
             return value
         result = {}
         for key, item in value.items():
-            if not parameters and item is not None and _is_credential_key(key):
+            if credential_parameter and key in {"default", "const", "examples", "enum"}:
+                self.changed = True
+                result[key] = REDACTED
+            elif not parameters and item is not None and _is_credential_key(key):
                 self.changed = True
                 result[key] = REDACTED
             elif not parameters and isinstance(item, str) and _is_url_key(key):
                 result[key] = self.url(item)
             else:
-                result[key] = self.node(item, depth + 1, key == "properties")
+                result[key] = self.node(
+                    item, depth + 1, key == "properties", parameters and _is_credential_key(key)
+                )
         return result
 
 

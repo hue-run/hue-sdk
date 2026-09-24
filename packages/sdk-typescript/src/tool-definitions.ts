@@ -55,6 +55,10 @@ function scrubUrl(value: string, state: ScrubState): string {
     url.search = scrubbed.toString();
     changed = true;
   }
+  if (url.hash) {
+    url.hash = "";
+    changed = true;
+  }
   if (changed) state.changed = true;
   return changed ? url.toString() : value;
 }
@@ -83,9 +87,16 @@ interface ScrubState {
  * `properties` object name tool parameters (a tool may take a `headers` argument), so their
  * schemas are kept and scrubbed like any other value.
  */
-function scrubNode(value: unknown, state: ScrubState, depth: number, parameters: boolean): unknown {
+function scrubNode(
+  value: unknown,
+  state: ScrubState,
+  depth: number,
+  parameters: boolean,
+  credentialParameter = false,
+): unknown {
   if (depth > 256) throw new Error("Tool definition exceeds the supported nesting limit");
-  if (Array.isArray(value)) return value.map((item) => scrubNode(item, state, depth + 1, false));
+  if (Array.isArray(value))
+    return value.map((item) => scrubNode(item, state, depth + 1, false, credentialParameter));
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
