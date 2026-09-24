@@ -561,7 +561,9 @@ function commandAdapter(
     };
     // The token-bearing file is written inside a private directory registered before any of it
     // exists, so a forced exit at any point removes it.
-    const configDirectory = context.world ? mkdtempSync(join(tmpdir(), "hue-mcp-config-")) : undefined;
+    const configDirectory = context.world
+      ? mkdtempSync(join(tmpdir(), "hue-mcp-config-"))
+      : undefined;
     if (configDirectory) mcpConfigDirectories.add(configDirectory);
     try {
       const configFile = context.world
