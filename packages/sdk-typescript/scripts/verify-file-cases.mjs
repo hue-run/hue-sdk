@@ -43,6 +43,16 @@ const version = (definition) => ({ id: randomUUID(), contentDigest: digest, defi
 // The runner hands the target validated JSON as null-prototype objects; compare values only.
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const scratch = await mkdtemp(join(tmpdir(), "hue-files-installed-"));
+/** The bytes of every file under `directory`. */
+async function contents(directory) {
+  const found = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) found.push(...(await contents(path)));
+    else found.push(await readFile(path));
+  }
+  return found;
+}
 let checkpoints = 0;
 const checkpointDirectory = () => join(scratch, `checkpoint-${++checkpoints}`);
 async function body(request) {
@@ -648,12 +658,11 @@ try {
       assert.equal((await stat(path)).mode & 0o077, 0);
     }
     assert.ok((await stat(seen.target.outputDirectory)).isDirectory());
-    // Every pinned input was downloaded once, including the evaluator-only template.
+    // Every pinned input was downloaded; the evaluator-only template twice: checked before the
+    // execution started, then saved for the grader after the target finished.
     assert.deepEqual(
       [...f.calls.downloads].sort(),
-      Object.values(f.inputs)
-        .map((input) => input.id)
-        .sort(),
+      [...Object.values(f.inputs).map((input) => input.id), f.inputs.evaluatorOnly.id].sort(),
     );
     // The generated file was reserved with its verified identity, uploaded and completed.
     assert.equal(f.calls.reserves.length, 1);
@@ -868,6 +877,7 @@ try {
     await worker(world, async (_inputs, _tools, context) => {
       seen.context = context;
       seen.downloads = [...world.calls.downloads];
+      seen.onDisk = await contents(dirname(dirname(context.files[0].path)));
       seen.siblings = (await readdir(dirname(context.files[0].path))).sort();
       seen.modes = await Promise.all(
         context.files.map(async (file) => (await stat(file.path)).mode & 0o777),
@@ -898,12 +908,12 @@ try {
       assert.ok(!path.includes(worldToken));
     }
     assert.deepEqual(seen.modes, [0o600, 0o600]);
-    // The agent's directory holds its two files, and the evaluator's template is downloaded only
-    // after the agent finished.
+    // The agent's directory holds its two files. The evaluator's template was checked before the
+    // execution started, but no copy of it is on disk while the agent runs.
     assert.equal(seen.siblings.length, 2);
     assert.ok(!seen.siblings.some((name) => name.includes("Org.docx")));
-    assert.ok(!seen.downloads.includes(world.inputs.evaluatorOnly.id));
-    assert.ok(world.calls.downloads.includes(world.inputs.evaluatorOnly.id));
+    assert.ok(seen.downloads.includes(world.inputs.evaluatorOnly.id));
+    assert.ok(!seen.onDisk.some((bytes) => bytes.equals(world.inputs.evaluatorOnly.bytes)));
     assert.deepEqual(world.calls.finishes, ["completed"]);
     const completion = world.calls.completions[0];
     assert.equal(completion.state, "succeeded");

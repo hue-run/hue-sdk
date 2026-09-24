@@ -289,8 +289,8 @@ helpers download each agent-visible file (`source`, `attached_template`, `attach
 `original`), verify its size and SHA-256 against the case manifest and hand the verified copies to
 the callback as `context.files` beside `context.world`, in a private directory (mode 0700, files
 0600), with a private `context.outputDirectory`. Evaluator-only files (`org_template`,
-`evaluator_reference`) never reach the agent; a local code evaluator's copies are downloaded after
-the agent finished. Bytes that differ from the manifest raise
+`evaluator_reference`) never reach the agent; a local code evaluator's copies are checked before
+the execution starts but saved only after the agent finished. Bytes that differ from the manifest raise
 `CaseFileError` with code `case_file_mismatch`; a name that is not one safe file name (a path
 separator, `.` or `..`, a control character, a Windows device name such as `CON`, a trailing dot
 or space, more than 255 bytes) raises `case_file_name_refused`. Either stops the run before an

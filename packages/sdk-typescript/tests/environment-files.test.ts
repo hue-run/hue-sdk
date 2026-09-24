@@ -58,8 +58,8 @@ function platform(
   options: {
     /** Name the manifest gives the agent-visible file. */
     sourceName?: string;
-    /** Serve the agent-visible file's bytes altered, with the pinned size. */
-    tamper?: boolean;
+    /** Serve this file's bytes altered, with the pinned size. */
+    tamper?: "source" | "answerKey";
     /** Pin this local scorer instead of the Hue-graded world outcome. */
     scorer?: LocalScorer;
     /** Refuse this many generated-artifact completions with 500 first. */
@@ -222,8 +222,9 @@ function platform(
         const stored = artifacts.get(download[1]!);
         if (!stored?.bytes || stored.state !== "ready") return new Response(null, { status: 404 });
         calls.downloads.push(stored.id);
+        const tampered = options.tamper === "answerKey" ? answerKey : source;
         const bytes =
-          options.tamper && stored.id === source.id
+          options.tamper && stored.id === tampered.id
             ? Buffer.from(stored.bytes).fill(0x41, 0, 8)
             : stored.bytes;
         return new Response(bytes as Uint8Array<ArrayBuffer>, {
@@ -710,10 +711,10 @@ describe("environment target files (environment-files:v1)", () => {
     ]);
     expect(seen!.bytes.equals(f.source.bytes)).toBe(true);
     expect(seen!.modes).toEqual({ file: 0o600, directory: 0o700, output: 0o700 });
-    // The evaluator's file is not on disk while the agent runs: the local scorer's copy is
-    // downloaded after the target finished, apart from the agent's.
+    // The evaluator's file was checked before the execution started but is not on disk while the
+    // agent runs: the local scorer's copy is saved after the target finished, apart from the agent's.
     expect(seen!.siblings).toEqual([basename(context.files[0]!.path)]);
-    expect(seen!.downloads).toEqual([f.source.id]);
+    expect(seen!.downloads).toEqual([f.answerKey.id, f.source.id]);
     expect(seen!.caseFiles.some((file) => file.text === f.answerKey.bytes.toString())).toBe(false);
     expect(dirname(scored!.files![1]!.path)).not.toBe(dirname(context.files[0]!.path));
     expect(JSON.stringify(context)).not.toContain("evaluator-private");
@@ -805,7 +806,7 @@ describe("environment target files (environment-files:v1)", () => {
   }, 30_000);
 
   test("a file whose bytes do not match the manifest fails the case before an execution or world exists", async () => {
-    const f = platform({ tamper: true });
+    const f = platform({ tamper: "source" });
     const experiment = f.enqueue();
     const directory = await mkdtemp(join(tmpdir(), "hue-environment-files-mismatch-"));
     let targets = 0;
@@ -836,6 +837,42 @@ describe("environment target files (environment-files:v1)", () => {
         join(directory, `experiment-${experiment.id}`, "files", `world-case-${f.frozenCase.id}`),
       ),
     ).toBe(false);
+  }, 30_000);
+
+  test("an evaluator-only file that does not match the manifest is refused before the execution too", async () => {
+    const scorer = defineLocalScorer({
+      source: "export default function unused() {}",
+      entrypoint: "unused",
+      metrics: [{ name: "unused", type: "boolean" }],
+      score: () => ({ state: "scored", metrics: [{ name: "unused", value: true }] }),
+    });
+    const f = platform({ scorer, tamper: "answerKey" });
+    f.enqueue();
+    const directory = await mkdtemp(join(tmpdir(), "hue-environment-files-evaluator-"));
+    let targets = 0;
+    try {
+      await expect(
+        worker(f, directory, {
+          scorers: [scorer],
+          target() {
+            targets++;
+            return "unexpected";
+          },
+        }),
+      ).rejects.toMatchObject({
+        name: "CaseFileError",
+        code: "case_file_mismatch",
+        artifactId: f.answerKey.id,
+      });
+    } finally {
+      f.stop();
+    }
+    expect(targets).toBe(0);
+    expect(f.calls.starts).toBe(0);
+    expect(f.calls.worldCreates).toBe(0);
+    expect(await tree(directory)).not.toContainEqual(
+      expect.objectContaining({ text: f.answerKey.bytes.toString() }),
+    );
   }, 30_000);
 
   test("a traversal-like file name is refused before any download", async () => {

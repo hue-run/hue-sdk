@@ -13,6 +13,7 @@ import {
   downloadCaseFiles,
   downloadCaseInputs,
   localOutputFiles,
+  verifyCaseFiles,
   OutputFileError,
   stageOutputFiles,
   targetFileRoles,
@@ -630,15 +631,21 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         // target failures and cannot consume a case's execution slot.
         const targetInputs = json(frozenCase.inputs);
         const targetConfig = json(experiment.config);
-        // Pinned input files are verified on disk before an execution exists for the same reason.
-        // Only the agent-visible ones are: evaluator-only files are downloaded for local scoring
-        // after the target finished, so they are not on disk while it runs.
+        // Pinned input files are verified before an execution exists for the same reason. Only
+        // the agent-visible ones are saved now: evaluator-only files a local code evaluator needs
+        // are checked and dropped, and saved for scoring after the target finished, so they are
+        // not on disk while it runs.
         const caseDirectory = caseDirectoryOf(frozenCase);
-        const agentFiles = (frozenCase.inputFiles ?? []).filter((entry) =>
-          (targetFileRoles as readonly string[]).includes(entry.role),
-        );
+        const isTargetFile = (entry: CaseFile) =>
+          (targetFileRoles as readonly string[]).includes(entry.role);
+        const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
+        const agentFiles = needed.filter(isTargetFile);
         // An agent working in a world receives its files by name: each must be one safe name.
         if (frozenCase.environmentVersionId) assertSafeFileNames(agentFiles);
+        await verifyCaseFiles(
+          options.client,
+          needed.filter((entry) => !isTargetFile(entry)),
+        );
         const inputFiles = agentFiles.length
           ? (await downloadCaseInputs(options.client, agentFiles, caseDirectory)).target
           : [];

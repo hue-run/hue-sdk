@@ -47,9 +47,10 @@ refuses to publish a version without a matching entry below.
 
 - A downloaded pinned file that differs from its manifest now raises `CaseFileError`
   (`case_file_mismatch`) instead of a plain `Error`, for direct cases and `rescore` too.
-- Evaluator-only files for a local code evaluator are downloaded after the target finished, just
-  before scoring, and saved apart from the agent's copies, so they are not on disk while the agent
-  runs. Before, they were downloaded with the agent's files before the execution started.
+- Evaluator-only files for a local code evaluator are still checked before the execution starts,
+  but saved only after the target finished, just before scoring, apart from the agent's copies, so
+  they are not on disk while the agent runs. They are downloaded twice as a result. Before, they
+  were saved with the agent's files before the execution started.
 
 #### Fixed
 

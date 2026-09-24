@@ -323,16 +323,17 @@ The direct callback receives cloned inputs and an allowlisted context of `config
 plus the worker's `signal` when one was supplied. Expected outcomes and case metadata stay with
 grading, as they do for world cases.
 
-Before an execution exists, `runExperiment` downloads the agent-visible pinned input files named by
-the frozen case's `inputFiles` and verifies byte count and SHA-256. A download failure is an SDK
-failure and consumes no execution slot; bytes that differ from the manifest raise `CaseFileError`
-with the stable code `case_file_mismatch`, and a file already saved with the pinned identity is
-reused instead of downloaded again. The target sees only the agent-visible roles — `source`,
+Before an execution exists, `runExperiment` downloads the pinned input files named by the frozen
+case's `inputFiles` and verifies byte count and SHA-256. A download failure is an SDK failure and
+consumes no execution slot; bytes that differ from the manifest raise `CaseFileError` with the
+stable code `case_file_mismatch`, and a file already saved with the pinned identity is reused
+instead of downloaded again. The target sees only the agent-visible roles — `source`,
 `attached_template`, `attached_reference` and `original` — as `context.files`; evaluator-only
 `org_template` and `evaluator_reference` files (an organization's template, a legal corpus, an
-answer key) reach scorers but not the agent. They are downloaded, and verified the same way, only
-when a bound code evaluator runs in this process, after the target finished and before scoring,
-so they are not on disk while the agent runs. An agent running as the same operating-system user
+answer key) reach scorers but not the agent. They are fetched only when a bound code evaluator
+runs in this process: checked with the others before the execution starts but not kept, then
+downloaded again and saved after the target finished, so they are not on disk while the agent
+runs. An agent running as the same operating-system user
 as the runner can still read whatever the runner can; run it under another account when local
 evaluator material must stay out of its reach. Verified copies live under `filesDirectory` (default
 `<checkpointDirectory>/files`, created mode 0700), evaluator-only files apart from the agent's, and

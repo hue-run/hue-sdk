@@ -557,9 +557,15 @@ describe("file-based cases", () => {
       });
       expect(report.subjectIds).toHaveLength(1);
       expect(f.calls.environmentReads).toBe(0);
-      // Every pinned input was downloaded once, including the evaluator-only template.
+      // Every pinned input was downloaded; the evaluator-only template twice: checked before the
+      // execution started, then saved for the grader after the target finished.
       expect([...f.calls.downloads].sort()).toEqual(
-        [f.inputs.source.id, f.inputs.template.id, f.inputs.evaluatorOnly.id].sort(),
+        [
+          f.inputs.source.id,
+          f.inputs.template.id,
+          f.inputs.evaluatorOnly.id,
+          f.inputs.evaluatorOnly.id,
+        ].sort(),
       );
       expect(f.calls.reserves).toBe(2);
       expect(f.calls.uploads).toBe(2);

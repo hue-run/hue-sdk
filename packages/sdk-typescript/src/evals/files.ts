@@ -143,6 +143,29 @@ async function verifiedBytes(path: string, expected: { byteSize: number; sha256:
   return bytes;
 }
 
+/** Download one pinned file and check its size and SHA-256 against the manifest. */
+async function downloadVerified(
+  client: EvaluationClient,
+  file: Pick<SubjectFile, "artifactId" | "filename" | "byteSize" | "sha256">,
+): Promise<Uint8Array> {
+  const bytes = await client.downloadArtifact(file.artifactId);
+  if (bytes.byteLength !== file.byteSize || sha256(bytes) !== file.sha256)
+    throw new CaseFileError(
+      "case_file_mismatch",
+      file.artifactId,
+      `Downloaded file ${quoted(file.filename)} does not match its pinned size and SHA-256`,
+    );
+  return bytes;
+}
+
+/** Check pinned files against the manifest without keeping them: nothing is written to disk. */
+export async function verifyCaseFiles(
+  client: EvaluationClient,
+  files: readonly SubjectFile[],
+): Promise<void> {
+  for (const file of files) await downloadVerified(client, file);
+}
+
 /**
  * Save verified copies of a case's pinned input files under `directory`. A file already
  * present with the pinned identity is reused, so a resumed run does not download again.
@@ -164,16 +187,7 @@ export async function downloadCaseFiles(
     } catch {
       present = false;
     }
-    if (!present) {
-      const bytes = await client.downloadArtifact(file.artifactId);
-      if (bytes.byteLength !== file.byteSize || sha256(bytes) !== file.sha256)
-        throw new CaseFileError(
-          "case_file_mismatch",
-          file.artifactId,
-          `Downloaded file ${quoted(file.filename)} does not match its pinned size and SHA-256`,
-        );
-      await writePrivate(path, bytes);
-    }
+    if (!present) await writePrivate(path, await downloadVerified(client, file));
     saved.push({
       artifactId: file.artifactId,
       role: file.role,
