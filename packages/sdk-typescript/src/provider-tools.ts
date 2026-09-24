@@ -155,6 +155,7 @@ function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
 function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
   const results = new Map<string, Item>();
   const count = Math.min(blocks.length, MAX_PROVIDER_ITEMS);
+  const truncated = blocks.length > MAX_PROVIDER_ITEMS;
   activity.skipped += blocks.length - count;
   for (let index = 0; index < count; index++) {
     const block = blocks[index];
@@ -177,6 +178,12 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
       continue;
     }
     const result = callId === undefined ? undefined : results.get(callId);
+    // When the response was truncated, an unmatched use block may have its result outside the
+    // bounded prefix. Do not export it as a successful call with a missing result.
+    if (truncated && result === undefined) {
+      activity.skipped++;
+      continue;
+    }
     const content = result?.content;
     let errorType: string | undefined;
     if (result?.is_error === true) errorType = "mcp_error";

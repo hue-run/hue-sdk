@@ -15,7 +15,7 @@ test("bounds provider calls, rejects malformed labels, and does not parse oversi
       })),
     ],
   });
-  expect(activity.calls).toHaveLength(128);
+  expect(activity.calls).toHaveLength(127);
   expect(activity.calls[0]).toEqual({
     name: "tool",
     callId: "call-1",
@@ -36,4 +36,20 @@ test("bounds hosted tool definitions per listing", () => {
   });
   expect(activity.listings[0]?.definitions).toHaveLength(512);
   expect(activity.skipped).toBe(1_488);
+});
+
+test("does not export an Anthropic use block without its bounded result", () => {
+  const activity = hostedToolActivity("anthropic", {
+    content: [
+      { type: "mcp_tool_use", id: "call-0", name: "tool", input: {} },
+      ...Array.from({ length: 127 }, (_, index) => ({
+        type: "mcp_tool_result",
+        tool_use_id: `result-${index}`,
+        content: { type: "text", text: "ok" },
+      })),
+      { type: "mcp_tool_result", tool_use_id: "call-0", content: { type: "text", text: "ok" } },
+    ],
+  });
+  expect(activity.calls).toEqual([]);
+  expect(activity.skipped).toBe(2);
 });

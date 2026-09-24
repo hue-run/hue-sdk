@@ -33,6 +33,7 @@ import type {
   ModelOptions,
   ProjectConnection,
   SpanOptions,
+  ProviderToolCallOptions,
   TokenUsage,
   ToolOptions,
   VerifyTraceOptions,
@@ -639,8 +640,8 @@ export class HueClient {
       const parent = options.parentContext ?? store?.context ?? context.active();
       const addresses = hostedServerAddresses(provider, options.request);
       const activity = hostedToolActivity(provider, response);
-      for (let skipped = 0; skipped < activity.skipped; skipped++)
-        this.transport.instrumentationFailure();
+      if (activity.skipped > 0)
+        this.transport.instrumentationFailure("traces", undefined, activity.skipped);
       const server = (label: string | undefined): Attributes => {
         const attributes: Attributes = {};
         if (label === undefined) return attributes;
