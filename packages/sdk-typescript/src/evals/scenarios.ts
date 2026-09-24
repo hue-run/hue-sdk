@@ -11,7 +11,7 @@ export interface ScenarioPins {
   datasetId: string;
   /** Pinned dataset version; frozen only when `saved` is true. */
   datasetVersionId: string;
-  /** Pinned scorer versions; a Scenario pins exactly one. */
+  /** Pinned scorer versions; a Scenario's publication lists them, its outcome scorer first. */
   scorerVersionIds: string[];
   /** Pinned simulated-world version, or `null` when the selection does not pin one. */
   environmentVersionId: string | null;
@@ -151,7 +151,10 @@ async function pinsFromScenario(
     name: dataset.name,
     datasetId: scenario.publication.datasetId,
     datasetVersionId: version.id,
-    scorerVersionIds: [scenario.publication.scorerVersionId],
+    // Publications list every pin, the outcome scorer first; older ones carry the single field.
+    scorerVersionIds: scenario.publication.scorerVersionIds?.length
+      ? [...new Set(scenario.publication.scorerVersionIds)]
+      : [scenario.publication.scorerVersionId],
     environmentVersionId: scenario.publication.environmentVersionId,
     saved: version.frozenAt !== null,
     revision: version.revision,
