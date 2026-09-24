@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -397,7 +398,12 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
             hostname = parsed.hostname
         except (TypeError, UnicodeError, ValueError):
             continue
-        if not hostname or len(hostname) > 253 or "%" in hostname:
+        if (
+            not hostname
+            or len(hostname) > 253
+            or "%" in hostname
+            or any(unicodedata.category(character) in {"Cc", "Cf"} for character in hostname)
+        ):
             continue
         if ":" in hostname:
             if not parsed.netloc.startswith("["):

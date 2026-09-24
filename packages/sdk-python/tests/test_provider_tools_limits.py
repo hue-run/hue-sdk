@@ -154,6 +154,7 @@ def test_provider_server_addresses_reject_unsafe_urls():
         "https://mcp.example.test\uff3csk-live-secret/sse",
         "https://mcp.example.test;sk-live-secret/sse",
         "https://mcp.example.test /sse",
+        "https://mcp.example.test\u200b/sse",
         "https://[fe80::1%25eth0]/sse",
         "https://" + ("a" * 254) + ".test/sse",
         "https://mcp.example.test\ud800/sse",
