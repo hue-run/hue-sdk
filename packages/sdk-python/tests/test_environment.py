@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import stat
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -354,6 +356,48 @@ def test_wait_for_seal_cuts_off_a_read_that_trickles_its_response(receiver, monk
 
     assert time.monotonic() - started < 1.5
     assert len(receiver.requests) == 1
+
+
+def test_wait_for_seal_cuts_off_a_stalled_tls_handshake(monkeypatch):
+    # TLS takes over the connection's socket before its handshake, so a server that trickles
+    # one handshake record must still be cut off when the read's window passes.
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    server = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+
+    def trickle():
+        connection, _ = server.accept()
+        with connection:
+            connection.recv(65536)  # the ClientHello
+            try:
+                # A handshake record header announcing 16 KiB, then its body a byte at a time.
+                connection.sendall(b"\x16\x03\x03\x40\x00")
+                while not stop.wait(0.05):
+                    connection.sendall(b"\x00")
+            except OSError:
+                pass  # The client shut the connection.
+
+    thread = threading.Thread(target=trickle, daemon=True)
+    thread.start()
+    shut_down: list[int] = []
+    real_shut_down = environment_module._shut_down
+    monkeypatch.setattr(
+        environment_module,
+        "_shut_down",
+        lambda sock: (shut_down.append(sock.fileno()), real_shut_down(sock)),
+    )
+    client = EnvironmentClient(f"https://127.0.0.1:{server.getsockname()[1]}", KEY)
+    started = time.monotonic()
+    try:
+        with pytest.raises(EnvironmentSealTimeoutError):
+            client.wait_for_seal(RUN_ID)
+        assert time.monotonic() - started < 1.5
+        # The deadline ended the handshake on a live socket, not one TLS had already detached.
+        assert shut_down and -1 not in shut_down
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        server.close()
 
 
 def test_wait_for_seal_rejects_non_transient_read(monkeypatch):

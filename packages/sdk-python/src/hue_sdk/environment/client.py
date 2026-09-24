@@ -98,7 +98,8 @@ def _invalid_constant(_value: str) -> None:
 class _ReadDeadline:
     """Ends one bounded read by elapsed time. Per-read socket timeouts restart with every byte,
     so a peer that trickles its handshake, headers or body could hold the read far longer; when
-    the window passes, every socket the read opened is shut down and the blocked read fails."""
+    the window passes, every connection the read opened is shut down and the blocked read fails.
+    """
 
     def __init__(self, seconds: float) -> None:
         self._lock = threading.Lock()
@@ -108,31 +109,32 @@ class _ReadDeadline:
         self._timer.daemon = True
         self._timer.start()
 
-    def track(self, sock: object) -> None:
-        if not isinstance(sock, socket.socket):
-            return
+    def track(self, sock: socket.socket) -> None:
+        # Keep a duplicate: TLS detaches the original before its handshake, and shutting the
+        # duplicate down ends every read on the connection, TLS or not.
+        duplicate = sock.dup()
         with self._lock:
-            self._sockets.append(sock)
-            passed = self.passed
-        if passed:
-            _shut_down(sock)
+            self._sockets.append(duplicate)
+            if self.passed:
+                _shut_down(duplicate)
 
     def _pass(self) -> None:
         with self._lock:
             self.passed = True
-            sockets = list(self._sockets)
-        for sock in sockets:
-            _shut_down(sock)
+            for sock in self._sockets:
+                _shut_down(sock)
 
-    def cancel(self) -> None:
+    def close(self) -> None:
         self._timer.cancel()
+        with self._lock:
+            for sock in self._sockets:
+                sock.close()
+            self._sockets.clear()
 
 
 def _shut_down(sock: socket.socket) -> None:
-    # The plain socket's shutdown, even for TLS: it wakes the blocked reader without touching
-    # the TLS state that reader still holds. A socket TLS has since wrapped is already detached.
     try:
-        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+        sock.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
 
@@ -141,7 +143,7 @@ def _shut_down(sock: socket.socket) -> None:
 _read_deadline = threading.local()
 
 
-def _track(sock: object) -> None:
+def _track(sock: socket.socket) -> None:
     deadline: _ReadDeadline | None = getattr(_read_deadline, "current", None)
     if deadline is not None:
         deadline.track(sock)
@@ -159,10 +161,6 @@ class _DeadlineHTTPSConnection(HTTPSConnection):
         sock = super()._new_conn()
         _track(sock)
         return sock
-
-    def connect(self) -> None:
-        super().connect()
-        _track(self.sock)
 
 
 class _DeadlineAdapter(HTTPAdapter):
@@ -265,7 +263,7 @@ class EnvironmentClient:
         finally:
             _read_deadline.current = None
             if deadline is not None:
-                deadline.cancel()
+                deadline.close()
 
     def _request(self, method: str, path: str, body: Any = MISSING) -> Any:
         # Validate/serialize before retrying. Neither caller mutation nor another
