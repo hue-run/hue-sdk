@@ -143,7 +143,10 @@ class _Scrub:
                 result[key] = self.url(item)
             else:
                 result[key] = self.node(
-                    item, depth + 1, key == "properties", parameters and _is_credential_key(key)
+                    item,
+                    depth + 1,
+                    key == "properties",
+                    credential_parameter or (parameters and _is_credential_key(key)),
                 )
         return result
 

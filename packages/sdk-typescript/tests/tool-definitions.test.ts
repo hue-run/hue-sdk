@@ -84,6 +84,7 @@ test("scrubs credential values embedded in JSON Schema parameter metadata", () =
               examples: ["synthetic-example"],
               enum: ["synthetic-enum"],
               description: "The authorization argument is retained.",
+              anyOf: [{ type: "string", default: "synthetic-nested-default" }],
             },
           },
         },
@@ -97,5 +98,6 @@ test("scrubs credential values embedded in JSON Schema parameter metadata", () =
     examples: "[redacted]",
     enum: "[redacted]",
     description: "The authorization argument is retained.",
+    anyOf: [{ type: "string", default: "[redacted]" }],
   });
 });

@@ -112,7 +112,13 @@ function scrubNode(
         return [key, scrubUrl(item, state)];
       return [
         key,
-        scrubNode(item, state, depth + 1, key === "properties", parameters && isCredentialKey(key)),
+        scrubNode(
+          item,
+          state,
+          depth + 1,
+          key === "properties",
+          credentialParameter || (parameters && isCredentialKey(key)),
+        ),
       ];
     }),
   );

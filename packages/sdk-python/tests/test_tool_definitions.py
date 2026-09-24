@@ -63,3 +63,27 @@ def test_scrubs_generic_credentials_and_url_userinfo_query_without_parameter_nam
     assert scrub_tool_credentials(
         "gen_ai.tool.definitions", json.dumps({"server_url": "https://[synthetic-secret"})
     ) == json.dumps({"server_url": "[redacted]"}, separators=(",", ":"))
+
+
+def test_scrubs_nested_credential_schema_metadata():
+    output = json.loads(
+        scrub_tool_credentials(
+            "gen_ai.tool.definitions",
+            json.dumps(
+                {
+                    "type": "function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "authorization": {
+                                "anyOf": [{"type": "string", "default": "synthetic-default"}]
+                            }
+                        },
+                    },
+                }
+            ),
+        )
+    )
+    assert output["parameters"]["properties"]["authorization"]["anyOf"][0]["default"] == (
+        "[redacted]"
+    )
