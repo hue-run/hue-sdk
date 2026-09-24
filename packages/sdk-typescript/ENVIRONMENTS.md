@@ -223,6 +223,7 @@ its own Gmail MCP or REST client, the mirror URL, the world token where the Goog
 import {
   agentEnvironment,
   createEnvironmentClient,
+  isTransientEnvironmentError,
   worldHandoff,
   writeMcpConfig,
 } from "@hue-run/sdk/environment";
@@ -253,9 +254,13 @@ try {
   const sealDeadline = Date.now() + 30_000;
   let sealed = false;
   while (Date.now() < sealDeadline) {
-    if ((await environmentClient.getRun(run.id)).status !== "open") {
-      sealed = true;
-      break;
+    try {
+      if ((await environmentClient.getRun(run.id)).status !== "open") {
+        sealed = true;
+        break;
+      }
+    } catch (error) {
+      if (!isTransientEnvironmentError(error)) throw error; // a refusal such as 404 is final
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }

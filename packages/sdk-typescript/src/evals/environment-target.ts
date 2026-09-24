@@ -153,6 +153,8 @@ export interface RunEnvironmentTargetOptions {
    * the deployment serves, such as `hue eval`, turns it off. */
   deprecationWarnings?: boolean;
   signal?: AbortSignal;
+  /** Test-only: shortens the seal wait. */
+  sealTiming?: Partial<SealTiming>;
   onProgress?(event: EnvironmentTargetProgress): void | Promise<void>;
   target(
     inputs: JsonValue,
@@ -166,12 +168,25 @@ export const MAX_GRACE_WAIT_MS = 10_000;
 export const SEAL_POLL_MS = 250;
 export const SEAL_WAIT_MS = 30_000;
 
+/** The seal wait's bounds. Only tests shorten them; the helpers always use the defaults. */
+export interface SealTiming {
+  maxGraceWaitMs: number;
+  pollMs: number;
+  waitMs: number;
+}
+const SEAL_TIMING: SealTiming = {
+  maxGraceWaitMs: MAX_GRACE_WAIT_MS,
+  pollMs: SEAL_POLL_MS,
+  waitMs: SEAL_WAIT_MS,
+};
+
 /** Finish, then wait for the authoritative run to leave open. */
 async function seal(
   client: EnvironmentClient,
   runId: string,
   executionId: string,
   status: "completed" | "abandoned",
+  timing: SealTiming,
 ): Promise<void> {
   let completingUntil: string | null | undefined;
   try {
@@ -193,7 +208,7 @@ async function seal(
   }
   if (completingUntil !== undefined) {
     try {
-      await awaitSeal(client, runId, completingUntil);
+      await awaitSeal(client, runId, completingUntil, timing);
     } catch (error) {
       throw new TargetOutcomeUncertainError(executionId, { cause: error });
     }
@@ -205,18 +220,21 @@ async function awaitSeal(
   client: EnvironmentClient,
   runId: string,
   completingUntil: string | null,
+  timing: SealTiming,
 ): Promise<void> {
   const graceEnd = Date.parse(completingUntil ?? "");
   let wait = Number.isFinite(graceEnd)
-    ? Math.min(Math.max(0, graceEnd - Date.now()), MAX_GRACE_WAIT_MS)
+    ? Math.min(Math.max(0, graceEnd - Date.now()), timing.maxGraceWaitMs)
     : 0;
-  const deadline = performance.now() + wait + SEAL_WAIT_MS;
+  const deadline = performance.now() + wait + timing.waitMs;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, wait));
     const remaining = deadline - performance.now();
     if (remaining <= 0) throw new Error(`World ${runId} was not sealed after its completion grace`);
+    // The deadline ends the read and the client's retries inside it.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), remaining);
+    wait = timing.pollMs;
     try {
       if ((await client.getRun(runId, { signal: controller.signal })).status !== "open") return;
     } catch (error) {
@@ -225,12 +243,14 @@ async function awaitSeal(
         throw new Error(`World ${runId} was not sealed after its completion grace`, {
           cause: error,
         });
+      // A 429 or 503 that outlasted the client's retries still says how long to wait.
+      wait = Math.max(wait, (error as HueEnvironmentError).retryAfterMs ?? 0);
     } finally {
       clearTimeout(timer);
     }
     if (performance.now() >= deadline)
       throw new Error(`World ${runId} was not sealed after its completion grace`);
-    wait = SEAL_POLL_MS;
+    wait = Math.min(wait, deadline - performance.now());
   }
 }
 
@@ -351,6 +371,7 @@ export async function runEnvironmentTarget(
     agentRevision: options.agentRevision,
   });
   const world = worldHandoff(run);
+  const timing = { ...SEAL_TIMING, ...options.sealTiming };
   const progress = (event: EnvironmentTargetProgress) => options.onProgress?.(event);
   let finalized = false;
   try {
@@ -417,7 +438,7 @@ export async function runEnvironmentTarget(
           : {}),
       });
       if (prepared.status === "environment_incomplete") {
-        await seal(options.environmentClient, run.id, context.executionId, "completed");
+        await seal(options.environmentClient, run.id, context.executionId, "completed", timing);
         finalized = true;
         await Promise.resolve(progress({ type: "world_sealed", environmentRunId: run.id })).catch(
           () => undefined,
@@ -462,7 +483,7 @@ export async function runEnvironmentTarget(
       ...(connectionBundle ? { connectionBundle } : {}),
       signal: options.signal,
     });
-    await seal(options.environmentClient, run.id, context.executionId, "completed");
+    await seal(options.environmentClient, run.id, context.executionId, "completed", timing);
     finalized = true;
     await Promise.resolve(progress({ type: "world_sealed", environmentRunId: run.id })).catch(
       () => undefined,
@@ -481,7 +502,7 @@ export async function runEnvironmentTarget(
     }
     if (environmentIncomplete) {
       try {
-        await seal(options.environmentClient, run.id, context.executionId, "completed");
+        await seal(options.environmentClient, run.id, context.executionId, "completed", timing);
       } catch (finalizationError) {
         throw new TargetOutcomeUncertainError(context.executionId, {
           cause: new AggregateError([error, finalizationError]),
@@ -494,7 +515,7 @@ export async function runEnvironmentTarget(
       return undefined;
     }
     try {
-      await seal(options.environmentClient, run.id, context.executionId, "abandoned");
+      await seal(options.environmentClient, run.id, context.executionId, "abandoned", timing);
     } catch (finalizationError) {
       throw new TargetOutcomeUncertainError(context.executionId, {
         cause: new AggregateError([error, finalizationError]),

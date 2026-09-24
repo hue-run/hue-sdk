@@ -8,6 +8,14 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Fixed
+
+- The seal wait of `runSimulation`, `runLocalAgent` and `runEnvironmentTarget` honors a status
+  read's `Retry-After` when a 429 or 503 outlasts the client's retries: it waits at least that
+  long, capped at the time left, instead of polling again after 250 ms.
+
 ### [0.9.0] - 2026-09-24
 
 #### Breaking
@@ -529,6 +537,17 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### Unreleased
+
+#### Fixed
+
+- `EnvironmentClient.wait_for_seal` ends each status read by elapsed time. A socket timeout
+  restarts with every byte, so a server that sent its handshake, headers or body a byte at a time
+  could hold one read for many times its window; the read's sockets are now shut down when the
+  window passes, and the wait ends on time with `EnvironmentSealTimeoutError`.
+- The `wait_for_seal` docstring names `EnvironmentSealTimeoutError`, which keeps `status=None`
+  like a connection failure, so callers check for it before `status`.
 
 ### [0.6.0] - 2026-09-24
 

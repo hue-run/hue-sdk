@@ -3,14 +3,14 @@ import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHue } from "../src/index.js";
-import { createEvaluationClient } from "../src/evals.js";
+import { createEvaluationClient, TargetOutcomeUncertainError } from "../src/evals.js";
 import {
   caseTraceparent,
   createWorldForExecution,
   gatewayState,
   runEnvironmentTarget,
+  type SealTiming,
 } from "../src/evals/environment-target.js";
-import { TargetOutcomeUncertainError } from "../src/evals/runner.js";
 import {
   agentEnvironment,
   createEnvironmentClient,
@@ -101,7 +101,9 @@ function worldApi(
     lagReads?: number;
     finishConflict?: boolean;
     /** Status reads after the finish that fail with this status before the world answers. */
-    failedReads?: { count: number; status: number };
+    failedReads?: { count: number; status: number; retryAfter?: string };
+    /** Status reads after the finish never answer. */
+    hangReads?: boolean;
   } = {},
 ) {
   const requests: { method: string; path: string; body?: Record<string, unknown>; at: number }[] =
@@ -159,10 +161,14 @@ function worldApi(
         });
       }
       if (path === `/environment-runs/${runId}` && request.method === "GET") {
+        if (finished && options.hangReads) return new Promise<Response>(() => {});
         if (finished && options.failedReads && options.failedReads.count-- > 0)
           return Response.json(
             { error: "unavailable" },
-            { status: options.failedReads.status, headers: { "Retry-After": "0" } },
+            {
+              status: options.failedReads.status,
+              headers: { "Retry-After": options.failedReads.retryAfter ?? "0" },
+            },
           );
         const done = sealed();
         return Response.json({
@@ -515,7 +521,10 @@ describe("world creation on a deployment whose gateway is off", () => {
 
 describe("environment target with a gateway world", () => {
   /** One case through `runEnvironmentTarget` against the mock World API. */
-  async function runCase(api: ReturnType<typeof worldApi>) {
+  async function runCase(
+    api: ReturnType<typeof worldApi>,
+    options: { sealTiming?: Partial<SealTiming>; maxAttempts?: number } = {},
+  ) {
     const hue = createHue({
       apiKey: key,
       baseUrl: api.baseUrl,
@@ -523,7 +532,11 @@ describe("environment target with a gateway world", () => {
       captureContent: false,
     });
     const client = createEvaluationClient({ apiKey: key, baseUrl: api.baseUrl });
-    const environmentClient = createEnvironmentClient({ apiKey: key, baseUrl: api.baseUrl });
+    const environmentClient = createEnvironmentClient({
+      apiKey: key,
+      baseUrl: api.baseUrl,
+      maxAttempts: options.maxAttempts,
+    });
     const warnings: string[] = [];
     const original = process.emitWarning;
     process.emitWarning = ((message: string | Error) => {
@@ -539,6 +552,7 @@ describe("environment target with a gateway world", () => {
           inputs: { task: "reply" },
           agentRevision: "tester@abc123",
           ttlSeconds: 600,
+          sealTiming: options.sealTiming,
           context: {
             config: {},
             item: {
@@ -619,6 +633,67 @@ describe("environment target with a gateway world", () => {
     const { output } = await runCase(api);
     expect(output).toEqual({ done: true });
     expect(statusReads(api)).toBe(6);
+  });
+
+  test("a 429 that outlasts the client's retries waits its Retry-After, not the poll interval", async () => {
+    const api = worldApi({
+      graceMs: 50,
+      failedReads: { count: 1, status: 429, retryAfter: "1" },
+    });
+    const { output } = await runCase(api, { maxAttempts: 1, sealTiming: { pollMs: 20 } });
+    expect(output).toEqual({ done: true });
+    const [refused, sealed] = api.requests.filter(
+      (request) => request.method === "GET" && request.path === `/environment-runs/${runId}`,
+    );
+    expect(sealed!.at - refused!.at).toBeGreaterThanOrEqual(950);
+  });
+
+  test("a Retry-After longer than the time left waits only until the deadline", async () => {
+    const api = worldApi({
+      graceMs: 50,
+      failedReads: { count: 100, status: 503, retryAfter: "5" },
+    });
+    const started = performance.now();
+    const failure = await runCase(api, {
+      maxAttempts: 1,
+      sealTiming: { pollMs: 20, waitMs: 300 },
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TargetOutcomeUncertainError);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // A timer that fires a moment early may let one more read start before the deadline.
+    expect(statusReads(api)).toBeLessThanOrEqual(2);
+  });
+
+  test("a world that never seals ends the wait at its deadline as an uncertain outcome", async () => {
+    const api = worldApi({ graceMs: 50, lagReads: Number.POSITIVE_INFINITY });
+    const started = performance.now();
+    const failure = await runCase(api, { sealTiming: { pollMs: 20, waitMs: 300 } }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(TargetOutcomeUncertainError);
+    expect(((failure as Error).cause as Error).message).toBe(
+      `World ${runId} was not sealed after its completion grace`,
+    );
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(2_000);
+    // It kept polling until the deadline rather than giving up after one read.
+    expect(statusReads(api)).toBeGreaterThan(3);
+  });
+
+  test("a status read that never answers is cut off at the deadline", async () => {
+    const api = worldApi({ graceMs: 50, hangReads: true });
+    const started = performance.now();
+    const failure = await runCase(api, { sealTiming: { waitMs: 300 } }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(TargetOutcomeUncertainError);
+    expect(((failure as Error).cause as Error).message).toBe(
+      `World ${runId} was not sealed after its completion grace`,
+    );
+    // Without the deadline the read would hold for the client's 10 s request timeout, four times.
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(statusReads(api)).toBeLessThanOrEqual(2);
   });
 
   test("a status read the server refuses outright ends the wait as an uncertain outcome", async () => {

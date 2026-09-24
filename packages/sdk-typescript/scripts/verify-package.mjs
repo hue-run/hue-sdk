@@ -511,6 +511,7 @@ const installedPackageTests = [
   "receipt.test.ts",
   "managed.test.ts",
   "files.test.ts",
+  "world.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -597,6 +598,10 @@ void [transition, event, options, backend];
         .replaceAll(
           '"../src/evals/scorer-publication.js"',
           '"../node_modules/@hue-run/sdk/dist/evals/scorer-publication.js"',
+        )
+        .replaceAll(
+          '"../src/evals/environment-target.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/environment-target.js"',
         ),
     );
   }

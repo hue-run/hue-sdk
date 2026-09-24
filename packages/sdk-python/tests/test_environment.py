@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -307,17 +308,52 @@ def test_wait_for_seal_honors_retry_after_with_loopback(receiver, monkeypatch):
     assert len(receiver.requests) == 2
 
 
-def test_wait_for_seal_deadline_has_distinct_error(monkeypatch):
-    client = EnvironmentClient("https://app.hue.test", KEY)
-    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.02)
-    monkeypatch.setattr(environment_module, "SEAL_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(client, "_get_run_once", lambda _run_id, **_: {"status": "open"})
-    monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
+def test_wait_for_seal_deadline_has_distinct_error(receiver, monkeypatch):
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(environment_module, "SEAL_POLL_SECONDS", 0.02)
+    client = EnvironmentClient(receiver.url, KEY)
+    for _ in range(100):
+        reply(receiver, gateway_run(status="open", lifecycle="completing"))
+    started = time.monotonic()
 
     with pytest.raises(
         EnvironmentSealTimeoutError, match="was not sealed after its completion grace"
-    ):
+    ) as timed_out:
         client.wait_for_seal(RUN_ID)
+
+    assert timed_out.value.status is None and timed_out.value.run_id == RUN_ID
+    assert 0.3 <= time.monotonic() - started < 2
+    # It kept reading the open world until the deadline rather than giving up after one read.
+    assert len(receiver.requests) > 3
+
+
+def test_wait_for_seal_cuts_off_a_read_that_never_answers(receiver, monkeypatch):
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    client = EnvironmentClient(receiver.url, KEY)
+    receiver.delay_seconds = 2
+    reply(receiver, gateway_run(status="completed", lifecycle="sealed"))
+    started = time.monotonic()
+
+    with pytest.raises(EnvironmentSealTimeoutError):
+        client.wait_for_seal(RUN_ID)
+
+    assert time.monotonic() - started < 1.5
+    assert len(receiver.requests) == 1
+
+
+def test_wait_for_seal_cuts_off_a_read_that_trickles_its_response(receiver, monkeypatch):
+    # Each byte arrives well inside the per-read timeout; only elapsed time can end the read.
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    client = EnvironmentClient(receiver.url, KEY)
+    receiver.trickle_seconds = 0.05
+    reply(receiver, {"status": "completed"})
+    started = time.monotonic()
+
+    with pytest.raises(EnvironmentSealTimeoutError):
+        client.wait_for_seal(RUN_ID)
+
+    assert time.monotonic() - started < 1.5
+    assert len(receiver.requests) == 1
 
 
 def test_wait_for_seal_rejects_non_transient_read(monkeypatch):
