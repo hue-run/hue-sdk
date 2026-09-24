@@ -131,7 +131,7 @@ def test_scrubs_url_fragments_schema_defaults_and_huge_integer_digest_inputs():
     scrubbed = json.loads(scrub_tool_credentials("gen_ai.tool.definitions", json.dumps(definition)))
     assert scrubbed["server_url"] == "https://mcp.example.test/?token=%5Bredacted%5D"
     assert scrubbed["properties"]["authorization"]["default"] == "[redacted]"
-    assert scrubbed["properties"]["authorization"]["examples"] == "[redacted]"
+    assert scrubbed["properties"]["authorization"]["examples"] == ["[redacted]"]
     assert "synthetic" not in json.dumps(scrubbed)
     sys.set_int_max_str_digits(20_000)
     source = {"gen_ai.tool.definitions": json.dumps([{"name": "big", "value": 10**4000}])}
