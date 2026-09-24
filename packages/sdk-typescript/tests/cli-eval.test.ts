@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -652,12 +652,21 @@ async function workspace() {
   return directory;
 }
 
+/** Whether the process can still run. A killed process nobody has reaped yet is a zombie that
+ * `kill(pid, 0)` still finds; on Linux its state says so. */
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
+  }
+  if (!existsSync("/proc/self/stat")) return true;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const state = stat.slice(stat.lastIndexOf(")") + 2).charAt(0);
+    return state !== "Z" && state !== "X";
+  } catch {
+    return false; // Gone between the two checks.
   }
 }
 
