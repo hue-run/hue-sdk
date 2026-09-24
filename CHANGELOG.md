@@ -10,6 +10,38 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.8.1] - 2026-09-24
+
+#### Added
+
+- **Wire.** `hue.recordFile(file, explicitContext?)` adds a `hue.file` event to the active span:
+  `hue.file.sha256`, `hue.file.role` (`input`, `attachment` or `output`), `hue.file.media_type`,
+  `hue.file.size` when known and, only when content is captured, `hue.file.name`. File bytes are
+  hashed locally and never exported; the event is recorded in both capture modes. Exported type
+  `FileRecord`.
+- **Wire.** `hue.recordProviderToolCalls(response, { provider?, request?, servers?, parentContext? })`
+  records OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call` and
+  `code_interpreter_call` items and Anthropic `mcp_tool_use` / `server_tool_use` blocks as
+  `execute_tool` child spans with `gen_ai.tool.type` `extension`, `mcp.server.name` and, with
+  `request`, `server.address`. Arguments and results are content. An OpenAI `mcp_list_tools` item
+  becomes a `tools/list` span carrying that server's `gen_ai.tool.definitions`. Exported types
+  `ProviderToolCallOptions`, `HostedServerInfo` and `HostedToolProvider`.
+- **Wire.** `model()` accepts `systemInstructions` and `tools`, recorded as
+  `gen_ai.system_instructions` and `gen_ai.tool.definitions` when content is captured;
+  `recordMessages({ systemInstructions })` adds the instructions to the inference log body.
+- **Wire.** `SpanOptions.workspaceId` (also on `model()`) records `hue.workspace.id`, inherited by
+  nested helper spans and the AI SDK adapters like `userId`.
+- **Wire.** `hue.tool(..., { mcp })` accepts `provider` and `surface`, recorded as
+  `hue.mcp.provider` and `hue.mcp.surface`; `bindEnvironmentTools` passes a catalog entry's values.
+- **Wire.** Metadata-only export that removes tool definitions leaves `hue.tool.names` and
+  `hue.tool.definitions.sha256` (RFC 8785 canonical JSON of the credential-scrubbed definitions) on
+  the same record.
+- **Wire.** AI SDK 7 provider-executed (`extension`) MCP tool spans get `mcp.server.name` from the
+  recorded `serverLabel`, and an MCP `error` in the result sets ERROR status and
+  `error.type: mcp_error`. Both survive metadata-only export.
+- `hue login --env-path <path>` and `hue eval --env-path <path>` name the env file like
+  `--env-file`.
+
 #### Changed
 
 - `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
@@ -18,10 +50,18 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
-- `hue login --env-path <path>` writes to a new env file. The same command with `--env-file` exits
-  with `node: <path>: not found` before `hue` runs, because Node 22 and 24 read `--env-file` from
-  the whole command line. `--env-file` still works for an existing file, and `hue eval` accepts
-  `--env-path` as an alias.
+- **Wire.** Hosted-tool credentials in exported tool definitions (`authorization`,
+  `authorization_token`, `headers`, `api_key`, `access_token`, `x-api-key`) are replaced with
+  `"[redacted]"` before `redact` runs, in `gen_ai.tool.definitions`, `ai.prompt.tools`,
+  `llm.tools.*.tool.json_schema` and the `tools` / `mcp_servers` entries of recorded raw requests
+  and responses. Schema parameters with those names are kept.
+- **Wire.** A `blob` or `file` part over 64 KiB in `gen_ai.input.messages`,
+  `gen_ai.output.messages` or `ai.prompt.messages` is exported without its payload, with `sha256`
+  and `size` instead, so a span that inlines a large file is no longer rejected at export. The
+  digest matches `hue.file.sha256` for the same bytes.
+- `hue login --env-path <path>` creates a new env file. With `--env-file`, Node 22 and 24 exit with
+  `node: <path>: not found` before `hue` runs when the file does not exist yet, because Node reads
+  `--env-file` from the whole command line. `--env-file` still works for an existing file.
 
 ### [0.8.0] - 2026-09-24
 
@@ -452,6 +492,26 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- **Wire.** `span.record_file(role=..., media_type=..., sha256=..., data=..., byte_size=..., name=...)`
+  adds a `hue.file` event with the same attributes as TypeScript `hue.recordFile`.
+- **Wire.** `hue.model(..., system_instructions=..., tools=...)` and
+  `span.log_inference(system_instructions=...)` record `gen_ai.system_instructions` and
+  `gen_ai.tool.definitions` when content is captured.
+- **Wire.** `hue.context(workspace_id=...)` records `hue.workspace.id` on nested helper spans.
+- **Wire.** `hue.tool(..., mcp=)` accepts `provider` and `surface`, recorded as
+  `hue.mcp.provider` and `hue.mcp.surface`.
+- **Wire.** Metadata-only export that removes tool definitions leaves `hue.tool.names` and
+  `hue.tool.definitions.sha256`, with the same digest as TypeScript.
+
+#### Fixed
+
+- **Wire.** Hosted-tool credentials in exported tool definitions and recorded raw requests are
+  replaced with `"[redacted]"` at export, as in TypeScript.
+- **Wire.** A `blob` or `file` part over 64 KiB in recorded messages is exported as its `sha256`
+  and `size` instead of its payload, so a 2 MiB inline document no longer drops the record.
 
 ### [0.5.0] - 2026-09-24
 
