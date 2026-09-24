@@ -76,6 +76,19 @@ def _is_source_label(value: Any) -> bool:
         return False
 
 
+def _identifier(value: Any) -> str:
+    """Validate a workspace identifier with TypeScript/Fern's UTF-16 limit."""
+    if type(value) is not str or not value or "\x00" in value:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.")
+    try:
+        units = len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as error:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.") from error
+    if units > 4096:
+        raise ValueError("Workspace identifiers must contain 1–4096 valid characters.")
+    return value
+
+
 def _is_text_label(value: Any) -> bool:
     """A label that is also free of NUL and unpaired surrogates, so it can be exported."""
     if not _is_label(value) or "\x00" in value:
@@ -568,9 +581,17 @@ class Hue:
 
     @contextmanager
     def context(
-        self, *, session_id: str | None = None, user_id: str | None = None
+        self,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> Iterator[None]:
-        """Task-local attributes inherited by nested Hue helpers; no global baggage changes."""
+        """Task-local attributes inherited by nested Hue helpers; no global baggage changes.
+
+        ``workspace_id`` is the application workspace or tenant the work runs in, recorded as
+        ``hue.workspace.id``.
+        """
         if not self._active:
             yield
             return
@@ -581,6 +602,13 @@ class Hue:
                 attributes["gen_ai.conversation.id"] = session_id
             if user_id is not None:
                 attributes["user.id"] = user_id
+            if workspace_id is not None:
+                try:
+                    attributes["hue.workspace.id"] = _identifier(workspace_id)
+                except Exception:
+                    # An invalid nested override must not inherit the outer tenant identifier.
+                    attributes.pop("hue.workspace.id", None)
+                    self._record_issue()
             token = self._context_attributes.set(attributes)
         except Exception:
             self._record_issue()

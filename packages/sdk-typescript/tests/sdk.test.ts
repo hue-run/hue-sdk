@@ -422,6 +422,69 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("workspaceId is recorded as hue.workspace.id and inherited like the user", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "workspace",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan(
+        "request",
+        async () => {
+          await hue.tool("lookup", null, () => "ok");
+          await hue.model("synthetic-model", () => "ok", { provider: "synthetic" });
+          await generateText({
+            model: new MockLanguageModelV4({
+              doGenerate: async () => ({
+                content: [{ type: "text", text: "ok" }],
+                finishReason: { unified: "stop", raw: "stop" },
+                usage,
+                warnings: [],
+              }),
+            }),
+            prompt: "Synthetic prompt",
+            telemetry: hueTelemetry(hue),
+          });
+          await hue.withSpan("other-workspace", () => undefined, { workspaceId: "workspace-2" });
+        },
+        { workspaceId: "workspace-1", userId: "user-1" },
+      );
+      await hue.withSpan("unscoped", () => undefined);
+      await hue.model("synthetic-model", () => "ok", {
+        provider: "synthetic",
+        name: "direct-model",
+        workspaceId: "workspace-3",
+      });
+      expect(await hue.withSpan("blank", () => "ran", { workspaceId: "" })).toBe("ran");
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(1);
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const workspace = (name: string) =>
+        attr(spans.find((span) => span.name === name)!, "hue.workspace.id")?.stringValue;
+      const request = spans.find((span) => span.name === "request")!;
+      const scoped = spans.filter(
+        (span) => span.traceId === request.traceId && span.name !== "other-workspace",
+      );
+      expect(scoped.map((span) => span.name)).toEqual(
+        expect.arrayContaining(["request", "execute_tool lookup", "chat synthetic-model"]),
+      );
+      expect(scoped.length).toBeGreaterThan(4);
+      for (const span of scoped) {
+        expect(attr(span, "hue.workspace.id")?.stringValue).toBe("workspace-1");
+        expect(attr(span, "user.id")?.stringValue).toBe("user-1");
+      }
+      expect(workspace("other-workspace")).toBe("workspace-2");
+      expect(workspace("unscoped")).toBeUndefined();
+      expect(workspace("direct-model")).toBe("workspace-3");
+      expect(spans.some((span) => span.name === "blank")).toBe(false);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("tool records the Hue provider and surface and drops blank or invalid labels", async () => {
     const endpoint = receiver();
     const hue = createHue({

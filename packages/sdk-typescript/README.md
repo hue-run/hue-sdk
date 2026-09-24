@@ -133,7 +133,7 @@ await hue.model(
 
 The span is named `{operation} {model}` (`operation` defaults to `chat`) with
 `gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. Like `withSpan`, the
-options come after the callback and also accept `name`, `sessionId`, `userId`, `input` (recorded as
+options come after the callback and also accept `name`, `sessionId`, `userId`, `workspaceId`, `input` (recorded as
 `gen_ai.input.messages`) and `parentContext`. When you send system instructions or tools separately
 from the messages, pass `systemInstructions` (for example `[{ type: "text", content: instructions }]`)
 and `tools` (for example `[{ type: "function", name, description, parameters }]`); they are recorded
@@ -351,7 +351,9 @@ For external parent context pass `parentContext` to `withSpan`. Across processes
 speak W3C `traceparent` only and never include the API key or baggage. Hue registers no global
 propagator, so `propagation.inject()` from `@opentelemetry/api` is a no-op unless your
 application configured one. `getContext()` exposes the helper's current context for APIs taking
-an explicit context. Session/user identifiers are inherited within a client callback and are
+an explicit context. Session, user and workspace identifiers (`sessionId` as
+`gen_ai.conversation.id`, `userId` as `user.id`, and `workspaceId` as `hue.workspace.id` for the
+application workspace or tenant) are inherited within a client callback and are
 stamped only on spans created through Hue's tracer (helpers and the AI SDK adapters); spans from
 other instrumentations on a shared provider carry them only if that instrumentation sets them.
 Separate requests require separate callbacks.
