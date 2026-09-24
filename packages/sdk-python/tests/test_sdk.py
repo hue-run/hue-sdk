@@ -172,6 +172,8 @@ def test_context_records_the_workspace_on_nested_helpers(receiver):
     assert spans["other-workspace"]["hue.workspace.id"].string_value == "workspace-2"
     assert spans["other-workspace"]["user.id"].string_value == "user-1"
     assert "hue.workspace.id" not in spans["unscoped"]
+
+
 def test_tool_records_the_hue_provider_and_surface(receiver):
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.tool(
@@ -326,6 +328,18 @@ def test_record_file_rejects_oversized_data_before_hashing_or_exporting(receiver
         hue.force_flush()
     (request,) = receiver.spans()
     assert [event.name for event in request.events] == []
+
+
+@pytest.mark.parametrize("workspace_id", [123, "", "\x00bad", "\ud800", "😀" * 2049])
+def test_context_rejects_invalid_workspace_identifiers(receiver, workspace_id):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.context(workspace_id=workspace_id):
+            with hue.span("request"):
+                pass
+        assert hue.export_status.instrumentation_failures == 1
+        hue.force_flush()
+    span = next(span for span in receiver.spans() if span.name == "request")
+    assert "hue.workspace.id" not in attrs(span)
 
 
 def test_disabled_client_does_not_count_invalid_mcp(receiver):

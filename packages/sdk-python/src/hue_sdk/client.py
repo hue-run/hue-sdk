@@ -590,7 +590,12 @@ class Hue:
             if user_id is not None:
                 attributes["user.id"] = user_id
             if workspace_id is not None:
-                attributes["hue.workspace.id"] = workspace_id
+                try:
+                    attributes["hue.workspace.id"] = _identifier(workspace_id)
+                except Exception:
+                    # An invalid nested override must not inherit the outer tenant identifier.
+                    attributes.pop("hue.workspace.id", None)
+                    self._record_issue()
             token = self._context_attributes.set(attributes)
         except Exception:
             self._record_issue()
