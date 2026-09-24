@@ -525,6 +525,8 @@ describe("Hue SDK contract", () => {
     const imageDigest = createHash("sha256").update(image).digest("hex");
     const text = `${"line\n".repeat(20000)}end`;
     const textDigest = createHash("sha256").update(text, "utf8").digest("hex");
+    const asciiText = "A".repeat(64 * 1024 + 4);
+    const asciiDigest = createHash("sha256").update(asciiText, "utf8").digest("hex");
     try {
       const span = tracerProvider.getTracer("third-party").startSpan("external");
       // AI SDK 6 file parts: the large image is hashed, its other fields kept; small data stays.
@@ -549,6 +551,7 @@ describe("Hue SDK contract", () => {
             role: "assistant",
             parts: [
               { type: "blob", modality: "document", mime_type: "text/plain", content: text },
+              { type: "blob", modality: "document", mime_type: "text/plain", content: asciiText },
               {
                 type: "blob",
                 modality: "image",
@@ -590,6 +593,13 @@ describe("Hue SDK contract", () => {
           mime_type: "text/plain",
           sha256: textDigest,
           size: Buffer.byteLength(text),
+        },
+        {
+          type: "blob",
+          modality: "document",
+          mime_type: "text/plain",
+          sha256: asciiDigest,
+          size: Buffer.byteLength(asciiText),
         },
         {
           type: "blob",
@@ -725,22 +735,6 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("hashes long text files as UTF-8 instead of guessing plain text is base64", () => {
-    const content = "A".repeat(64 * 1024 + 4);
-    const value = JSON.stringify([{ type: "file", mediaType: "text/plain", data: content }]);
-    const [file] = JSON.parse(hashInlineFiles("ai.prompt.messages", value) as string) as {
-      type: string;
-      mediaType: string;
-      size: number;
-      sha256: string;
-    }[];
-    expect(file).toEqual({
-      type: "file",
-      mediaType: "text/plain",
-      sha256: createHash("sha256").update(content, "utf8").digest("hex"),
-      size: Buffer.byteLength(content, "utf8"),
-    });
-  });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({
@@ -1998,6 +1992,9 @@ describe("Vercel AI SDK integration", () => {
     } finally {
       await tracerProvider.shutdown();
       await transport.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
   test("a large inline file in AI SDK 7 messages exports as its digest instead of rejecting the span", async () => {
     const endpoint = receiver();
     const hue = createHue({
