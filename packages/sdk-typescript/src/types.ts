@@ -197,6 +197,29 @@ export interface ToolOptions extends Pick<SpanOptions, "parentContext"> {
   mcp?: McpServerInfo;
 }
 
+/**
+ * A file the traced work read, received or produced, for {@link HueClient.recordFile}. Files are
+ * linked by content hash; their bytes are never exported.
+ */
+export interface FileRecord {
+  /**
+   * `input` was given to the agent, `attachment` arrived from a tool or message, and `output` was
+   * produced by the agent.
+   */
+  role: "input" | "attachment" | "output";
+  /** Media type, for example `application/pdf`. */
+  mediaType: string;
+  /** Hex SHA-256 of the file's bytes; computed from `data` when omitted. */
+  sha256?: string;
+  /** The file's bytes, only hashed and measured, never exported; a string is hashed as UTF-8.
+   * Data larger than 25 MiB is omitted and counted as an instrumentation failure. */
+  data?: Uint8Array | string;
+  /** Size in bytes; computed from `data` when omitted. */
+  byteSize?: number;
+  /** File name, recorded as `hue.file.name` only when `captureContent` is true. */
+  name?: string;
+}
+
 /** Provider-reported token counts for {@link HueSpan.setUsage}. */
 export interface TokenUsage {
   /** Provider-reported prompt tokens (`gen_ai.usage.input_tokens`). */

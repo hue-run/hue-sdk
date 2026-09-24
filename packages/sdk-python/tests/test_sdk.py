@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -196,6 +197,114 @@ def test_tool_source_labels_use_utf16_length_like_typescript_and_fern(receiver):
     assert spans["accepted"]["hue.mcp.surface"].string_value == accepted
     assert "hue.mcp.provider" not in spans["rejected"]
     assert "hue.mcp.surface" not in spans["rejected"]
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver, capture_content):
+    body = "synthetic-file-body"
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    pdf = "AB" * 32
+    with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
+        with hue.span("request") as span:
+            span.record_file(
+                role="input", media_type="text/plain", data=body.encode(), name="notes.txt"
+            )
+            span.record_file(
+                role="output", media_type="application/pdf", sha256=pdf, byte_size=2048
+            )
+            # A str is hashed as UTF-8; a blank name is omitted (and counted when captured).
+            span.record_file(role="attachment", media_type="text/plain", data=body, name=" ")
+            # Each of these is omitted and counted; the block keeps running.
+            span.record_file(role="draft", media_type="text/plain", data=body)
+            span.record_file(role="input", media_type="text/plain", sha256="not-a-digest")
+            span.record_file(role="input", media_type="text/plain", data=body, sha256="0" * 64)
+            span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=-1)
+            span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=2**63)
+            span.record_file(role="input", media_type="", sha256=digest)
+        assert hue.export_status.instrumentation_failures == (7 if capture_content else 6)
+        hue.force_flush()
+    (request,) = receiver.spans()
+    files = [
+        {item.key: item.value.string_value or item.value.int_value for item in event.attributes}
+        for event in request.events
+        if event.name == "hue.file"
+    ]
+    assert files == [
+        {
+            "hue.file.sha256": digest,
+            "hue.file.role": "input",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": len(body),
+            **({"hue.file.name": "notes.txt"} if capture_content else {}),
+        },
+        {
+            "hue.file.sha256": pdf.lower(),
+            "hue.file.role": "output",
+            "hue.file.media_type": "application/pdf",
+            "hue.file.size": 2048,
+        },
+        {
+            "hue.file.sha256": digest,
+            "hue.file.role": "attachment",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": len(body),
+        },
+    ]
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert body.encode() not in telemetry
+
+
+def test_record_file_on_an_ended_span_counts_once_without_hashing(receiver, monkeypatch):
+    import hue_sdk.client as client_module
+
+    hashed: list[bytes] = []
+    real_sha256 = hashlib.sha256
+
+    def counting(data=b"", *args, **kwargs):
+        hashed.append(bytes(data))
+        return real_sha256(data, *args, **kwargs)
+
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.span("request") as span:
+            pass
+        monkeypatch.setattr(client_module.hashlib, "sha256", counting)
+        # The span has ended: one counted omission, and the bytes are never hashed.
+        span.record_file(role="input", media_type="text/plain", data=b"bytes", name=" ")
+        assert hue.export_status.instrumentation_failures == 1
+        assert hashed == []
+        hue.force_flush()
+    (request,) = receiver.spans()
+    assert [event.name for event in request.events] == []
+
+
+def test_record_file_rejects_oversized_data_before_hashing_or_exporting(receiver, monkeypatch):
+    from hue_sdk.client import _MAX_FILE_DATA_BYTES
+
+    hashed: list[bytes] = []
+    real_sha256 = hashlib.sha256
+
+    def counting(data=b"", *args, **kwargs):
+        hashed.append(bytes(data))
+        return real_sha256(data, *args, **kwargs)
+
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.span("request") as span:
+            monkeypatch.setattr("hue_sdk.client.hashlib.sha256", counting)
+            span.record_file(
+                role="input",
+                media_type="application/octet-stream",
+                data=bytes(_MAX_FILE_DATA_BYTES + 1),
+            )
+            span.record_file(
+                role="input",
+                media_type="text/plain",
+                data="x" * (_MAX_FILE_DATA_BYTES + 1),
+            )
+            assert hue.export_status.instrumentation_failures == 2
+            assert hashed == []
+        hue.force_flush()
+    (request,) = receiver.spans()
+    assert [event.name for event in request.events] == []
 
 
 def test_disabled_client_does_not_count_invalid_mcp(receiver):

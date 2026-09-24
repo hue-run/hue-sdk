@@ -4,6 +4,8 @@ export const MAX_BODY_BYTES = 1024 * 1024;
 export const MAX_CONTENT_BYTES = 256 * 1024;
 /** Instrumentation scope of the client's own tracer and logger. */
 export const HUE_SCOPE = "@hue-run/sdk";
+/** Maximum bytes accepted when recordFile hashes caller-provided data locally. */
+export const MAX_FILE_DATA_BYTES = 25 * 1024 * 1024;
 
 /** Loopback hostnames that may use plain HTTP without opting in. */
 export function isLoopbackHost(hostname: string): boolean {

@@ -115,6 +115,7 @@
             "ExperimentalTelemetrySettings",
             "ExportIssue",
             "ExportReport",
+            "FileRecord",
             "FlushableLoggerProvider",
             "FlushableTracerProvider",
             "HueClient",

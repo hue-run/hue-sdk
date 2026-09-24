@@ -154,6 +154,30 @@ helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
 while the callback result is returned unchanged.
 
+## Files
+
+Record a file the work read, received or produced with `hue.recordFile`. It adds a `hue.file`
+event to the active span (or the span of an explicit context passed second), keyed by the file's
+SHA-256, so a trace can be linked to the same file elsewhere without exporting its bytes:
+
+```ts
+import { readFile } from "node:fs/promises";
+
+await hue.withSpan("review contract", async () => {
+  const pdf = await readFile("contract.pdf");
+  hue.recordFile({ role: "input", mediaType: "application/pdf", data: pdf, name: "contract.pdf" });
+  // ...
+});
+```
+
+`data` up to 25 MiB is hashed and measured locally and never exported; larger data is omitted and
+counted as an instrumentation failure, so pass `sha256` (and `byteSize`) instead when you already
+have them. The event carries `hue.file.sha256`, `hue.file.role` (`input`,
+`attachment` or `output`), `hue.file.media_type` and `hue.file.size`. It is metadata, so it is
+recorded in both capture modes, while `hue.file.name` is recorded only when `captureContent` is
+true. An invalid record, or one without an active span, is omitted and counted as an
+instrumentation failure.
+
 ## Vercel AI SDK 6
 
 AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass

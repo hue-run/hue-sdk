@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { context, trace, type TraceState } from "@opentelemetry/api";
@@ -502,6 +503,121 @@ describe("Hue SDK contract", () => {
       expect(attr(span("rejected"), "hue.mcp.surface")).toBeUndefined();
       expect(attr(span("nul"), "hue.mcp.provider")).toBeUndefined();
       expect(attr(span("nul"), "hue.mcp.surface")).toBeUndefined();
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test.each([true, false])(
+    "recordFile links a file by content hash without exporting its bytes (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "files",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      const body = "synthetic-file-body";
+      const digest = createHash("sha256").update(body).digest("hex");
+      const pdf = "AB".repeat(32);
+      try {
+        await hue.withSpan("request", () => {
+          hue.recordFile({
+            role: "input",
+            mediaType: "text/plain",
+            data: Buffer.from(body),
+            name: "notes.txt",
+          });
+          hue.recordFile({
+            role: "output",
+            mediaType: "application/pdf",
+            sha256: pdf,
+            byteSize: 2048,
+          });
+          // A string is hashed as UTF-8; a blank name is omitted (and counted when captured).
+          hue.recordFile({ role: "attachment", mediaType: "text/plain", data: body, name: " " });
+          // Each of these is omitted and counted; the callback keeps running.
+          hue.recordFile({ role: "draft" as never, mediaType: "text/plain", data: body });
+          hue.recordFile({ role: "input", mediaType: "text/plain", sha256: "not-a-digest" });
+          hue.recordFile({
+            role: "input",
+            mediaType: "text/plain",
+            data: body,
+            sha256: "0".repeat(64),
+          });
+          hue.recordFile({ role: "input", mediaType: "text/plain", sha256: digest, byteSize: -1 });
+          hue.recordFile({ role: "input", mediaType: "", sha256: digest });
+        });
+        // Outside any span there is nothing to attach the event to.
+        hue.recordFile({ role: "input", mediaType: "text/plain", data: body });
+        const result = await hue.flushSafe();
+        expect(result.report.instrumentationFailures).toBe(captureContent ? 7 : 6);
+        const request = endpoint.requests
+          .flatMap((request) => request.records)
+          .find((span) => span.name === "request")!;
+        const files = (request.events ?? [])
+          .filter((event) => event.name === "hue.file")
+          .map((event) =>
+            Object.fromEntries(
+              (event.attributes ?? []).map((item) => [
+                item.key,
+                item.value.stringValue ?? Number(item.value.intValue),
+              ]),
+            ),
+          );
+        expect(files).toEqual([
+          {
+            "hue.file.sha256": digest,
+            "hue.file.role": "input",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": body.length,
+            ...(captureContent ? { "hue.file.name": "notes.txt" } : {}),
+          },
+          {
+            "hue.file.sha256": pdf.toLowerCase(),
+            "hue.file.role": "output",
+            "hue.file.media_type": "application/pdf",
+            "hue.file.size": 2048,
+          },
+          {
+            "hue.file.sha256": digest,
+            "hue.file.role": "attachment",
+            "hue.file.media_type": "text/plain",
+            "hue.file.size": body.length,
+          },
+        ]);
+        expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain(body);
+      } finally {
+        await hue.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
+  test("recordFile rejects oversized data before hashing or exporting it", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "files-limit",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const oversized = new Uint8Array(25 * 1024 * 1024 + 1);
+    try {
+      await hue.withSpan("request", () => {
+        hue.recordFile({ role: "input", mediaType: "application/octet-stream", data: oversized });
+        hue.recordFile({
+          role: "input",
+          mediaType: "text/plain",
+          data: "x".repeat(25 * 1024 * 1024 + 1),
+        });
+      });
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(2);
+      const request = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((span) => span.name === "request")!;
+      expect(request.events ?? []).toEqual([]);
     } finally {
       await hue.shutdown();
       endpoint.server.stop(true);
