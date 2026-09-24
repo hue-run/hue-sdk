@@ -13,8 +13,7 @@ from urllib.parse import urlencode
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.connection import HTTPConnection, HTTPSConnection
-from urllib3.connectionpool import ConnectionPool, HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.connectionpool import ConnectionPool
 
 from ..evals._json import MISSING, encode, json_value, uuid
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
@@ -99,6 +98,9 @@ class _ReadDeadline:
     """Ends one bounded read by elapsed time. Per-read socket timeouts restart with every byte,
     so a peer that trickles its handshake, headers or body could hold the read far longer; when
     the window passes, every connection the read opened is shut down and the blocked read fails.
+
+    Name resolution and connecting come before there is a socket to shut down: each address is
+    tried with the socket timeout, so they are bounded by it rather than by the window.
     """
 
     def __init__(self, seconds: float) -> None:
@@ -110,9 +112,9 @@ class _ReadDeadline:
         self._timer.start()
 
     def track(self, sock: socket.socket) -> None:
-        # Keep a duplicate: TLS detaches the original before its handshake, and shutting the
-        # duplicate down ends every read on the connection, TLS or not.
-        duplicate = sock.dup()
+        # Keep a plain duplicate: TLS detaches the original before its handshake, and shutting
+        # the duplicate down ends every read on the connection, TLS, proxy or not.
+        duplicate = socket.fromfd(sock.fileno(), sock.family, sock.type, sock.proto)
         with self._lock:
             self._sockets.append(duplicate)
             if self.passed:
@@ -149,30 +151,39 @@ def _track(sock: socket.socket) -> None:
         deadline.track(sock)
 
 
-class _DeadlineHTTPConnection(HTTPConnection):
-    def _new_conn(self) -> socket.socket:
-        sock = super()._new_conn()
+_deadline_connections: dict[type[Any], type[Any]] = {}
+
+
+def _deadline_connection(base: type[Any]) -> type[Any]:
+    """``base`` with each new socket handed to the current bounded read's deadline.
+
+    The pool's own class is extended rather than replaced, so a SOCKS or other proxy connection
+    keeps its behavior. ``_new_conn`` is urllib3's socket factory in 1.26 and 2.x (verified with
+    1.26.20, 2.7.0 and 2.8.0); if a release drops it, reads fall back to the socket timeout.
+    """
+    if getattr(base, "_hue_read_deadline", False):
+        return base
+    cached = _deadline_connections.get(base)
+    if cached is not None:
+        return cached
+
+    def _new_conn(self: Any) -> socket.socket:
+        sock: socket.socket = base._new_conn(self)
         _track(sock)
         return sock
 
-
-class _DeadlineHTTPSConnection(HTTPSConnection):
-    def _new_conn(self) -> socket.socket:
-        sock = super()._new_conn()
-        _track(sock)
-        return sock
+    connection = type(base.__name__, (base,), {"_new_conn": _new_conn, "_hue_read_deadline": True})
+    return _deadline_connections.setdefault(base, connection)
 
 
 class _DeadlineAdapter(HTTPAdapter):
     """Opens connections whose sockets the current bounded read can shut down."""
 
     def get_connection_with_tls_context(self, *args: Any, **kwargs: Any) -> ConnectionPool:
-        pool = super().get_connection_with_tls_context(*args, **kwargs)
-        if isinstance(pool, HTTPSConnectionPool):
-            pool.ConnectionCls = _DeadlineHTTPSConnection
-        elif isinstance(pool, HTTPConnectionPool):
-            pool.ConnectionCls = _DeadlineHTTPConnection
-        return pool
+        pool: Any = super().get_connection_with_tls_context(*args, **kwargs)
+        if isinstance(getattr(pool, "ConnectionCls", None), type):
+            pool.ConnectionCls = _deadline_connection(pool.ConnectionCls)
+        return cast(ConnectionPool, pool)
 
 
 class EnvironmentClient:
@@ -419,9 +430,10 @@ class EnvironmentClient:
 
         A status read after the grace asks the World API to seal an overdue world. Transient
         connection and gateway errors are retried through a bounded 30-second post-grace window,
-        and each read ends with that window however slowly the server answers. Pass the
-        ``completingUntil`` value returned by :meth:`finish_run`; an absent or malformed value
-        causes an immediate status read.
+        and each read ends with that window however slowly the server answers; resolving the
+        host and connecting are bounded by the client's timeout for each address instead. Pass
+        the ``completingUntil`` value returned by :meth:`finish_run`; an absent or malformed
+        value causes an immediate status read.
 
         Raises:
             EnvironmentSealTimeoutError: The world was still open, or every read failed

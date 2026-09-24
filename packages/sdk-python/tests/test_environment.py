@@ -9,6 +9,7 @@ import stat
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
@@ -398,6 +399,47 @@ def test_wait_for_seal_cuts_off_a_stalled_tls_handshake(monkeypatch):
         stop.set()
         thread.join(timeout=5)
         server.close()
+
+
+def test_bounded_reads_extend_a_proxy_connection_class(receiver, monkeypatch):
+    # A SOCKS proxy swaps in its own pool and a connection class that takes proxy options. The
+    # read's deadline must extend that class rather than replace it, and still end a slow read.
+    # The hook is urllib3's socket factory, verified with urllib3 1.26.20, 2.7.0 and 2.8.0.
+    from requests.adapters import HTTPAdapter
+    from urllib3.connection import HTTPConnection
+    from urllib3.connectionpool import HTTPConnectionPool
+
+    opened: list[str] = []
+
+    class ProxyConnection(HTTPConnection):
+        def __init__(self, *args, _proxy_options, **kwargs):
+            self._proxy_options = _proxy_options
+            super().__init__(*args, **kwargs)
+
+        def _new_conn(self):
+            opened.append(self._proxy_options)
+            return super()._new_conn()
+
+    class ProxyPool(HTTPConnectionPool):
+        ConnectionCls = ProxyConnection
+
+    def proxied(self, request, verify, proxies=None, cert=None):
+        parsed = urlsplit(request.url)
+        return ProxyPool(parsed.hostname, parsed.port, _proxy_options="tunnel")
+
+    monkeypatch.setattr(HTTPAdapter, "get_connection_with_tls_context", proxied)
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    client = EnvironmentClient(receiver.url, KEY)
+    reply(receiver, gateway_run(status="completed", lifecycle="sealed"))
+    assert client.wait_for_seal(RUN_ID)["status"] == "completed"
+
+    receiver.trickle_seconds = 0.05
+    reply(receiver, {"status": "completed"})
+    started = time.monotonic()
+    with pytest.raises(EnvironmentSealTimeoutError):
+        client.wait_for_seal(RUN_ID)
+    assert time.monotonic() - started < 1.5
+    assert opened == ["tunnel", "tunnel"]
 
 
 def test_wait_for_seal_rejects_non_transient_read(monkeypatch):
