@@ -1052,9 +1052,7 @@ describe("hue eval", () => {
           ]);
           pid = Number(await readFile(survivor, "utf8"));
           // The shell exits on SIGTERM; the agent it started does not, and would keep its world
-          // token. It is killed after the grace, before the case is failed; allow for reaping.
-          for (let waited = 0; alive(pid) && waited < 2_000; waited += 50)
-            await new Promise((done) => setTimeout(done, 50));
+          // token. It is killed after the grace, and the case fails only once it is gone.
           expect(alive(pid)).toBe(false);
         } finally {
           if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");

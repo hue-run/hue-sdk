@@ -305,6 +305,9 @@ async function loadAdapter(file: string): Promise<LoadedAdapter> {
 
 /** Grace between the stop signal and SIGKILL for an agent command that ignores SIGTERM. */
 const COMMAND_KILL_GRACE_MS = 5_000;
+/** How long after SIGKILL a stopped command waits for its group to be gone before settling. A
+ * killed process that nobody reaps stays in the group as a zombie, which can no longer run. */
+const COMMAND_REAP_MS = 2_000;
 
 /**
  * Spawns the agent command once in its own process group and returns its trimmed stdout. A
@@ -360,17 +363,23 @@ function spawnAgentCommand(
         // ESRCH: the group is already gone; nothing is left to stop.
       }
     };
-    /** SIGTERM, then SIGKILL for whatever is still running when the grace ends. */
+    /** SIGTERM, then SIGKILL for whatever is still running when the grace ends; the command
+     * settles once the group is gone. */
     const stop = () => {
       if (stopping) return;
       stopping = true;
       clearTimeout(timer);
       signalTree("SIGTERM");
-      const deadline = Date.now() + COMMAND_KILL_GRACE_MS;
+      const killAt = Date.now() + COMMAND_KILL_GRACE_MS;
+      let reapBy: number | undefined;
       poll = setInterval(() => {
-        if (running() && Date.now() < deadline) return;
+        const left = running();
+        if (left && reapBy === undefined && Date.now() >= killAt) {
+          signalTree("SIGKILL");
+          reapBy = Date.now() + COMMAND_REAP_MS;
+        }
+        if (left && (reapBy === undefined || Date.now() < reapBy)) return;
         clearInterval(poll);
-        if (running()) signalTree("SIGKILL");
         stopped = true;
         settle();
       }, 50);
