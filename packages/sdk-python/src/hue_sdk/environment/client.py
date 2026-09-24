@@ -99,8 +99,8 @@ class _ReadDeadline:
     so a peer that trickles its handshake, headers or body could hold the read far longer; when
     the window passes, every connection the read opened is shut down and the blocked read fails.
 
-    Name resolution and connecting come before there is a socket to shut down: each address is
-    tried with the socket timeout, so they are bounded by it rather than by the window.
+    Name resolution and connecting come before there is a socket to shut down: resolving the
+    host is not bounded, and each address is tried with the socket timeout rather than the window.
     """
 
     def __init__(self, seconds: float) -> None:
@@ -430,10 +430,10 @@ class EnvironmentClient:
 
         A status read after the grace asks the World API to seal an overdue world. Transient
         connection and gateway errors are retried through a bounded 30-second post-grace window,
-        and each read ends with that window however slowly the server answers; resolving the
-        host and connecting are bounded by the client's timeout for each address instead. Pass
-        the ``completingUntil`` value returned by :meth:`finish_run`; an absent or malformed
-        value causes an immediate status read.
+        and once connected each read ends with that window however slowly the server answers.
+        Connecting uses the client's timeout for each address, and resolving the host is not
+        bounded, so either can outlast the window. Pass the ``completingUntil`` value returned by
+        :meth:`finish_run`; an absent or malformed value causes an immediate status read.
 
         Raises:
             EnvironmentSealTimeoutError: The world was still open, or every read failed
