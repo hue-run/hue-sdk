@@ -187,6 +187,9 @@ execution starts, hand the agent the provider mirror URLs and the world token (n
 key), finish before the execution completes, and read the sealed world's evaluator-only evidence.
 
 ```python
+import os
+import subprocess
+
 from hue_sdk.environment import EnvironmentClient, agent_environment, mcp_config_file, world_handoff
 
 client = EnvironmentClient(api_key=os.environ["HUE_API_KEY"])
