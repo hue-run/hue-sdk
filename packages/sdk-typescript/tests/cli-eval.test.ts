@@ -610,7 +610,7 @@ describe("hue eval", () => {
         expectNoSecrets(result);
         const [experiment] = [...f.experiments.values()];
         expect(experiment).toMatchObject({
-          name: "Refund flow · hue-agent · v1",
+          name: "hue-agent @ v1",
           datasetVersionId: f.version.id,
           config: {},
         });
@@ -677,7 +677,7 @@ describe("hue eval", () => {
         expect(result.stderr).toContain("[refund] agent started");
         const document = JSON.parse(result.stdout) as Record<string, any>;
         const [experiment] = [...f.experiments.values()];
-        expect(experiment?.name).toBe("Refund flow · agent-command · cmd");
+        expect(experiment?.name).toBe("agent-command @ cmd");
         expect(document).toMatchObject({
           experimentId: experiment!.id,
           runId: experiment!.evaluation.id,
@@ -737,9 +737,7 @@ describe("hue eval", () => {
         expect(result.stdout).toContain("refund  FAIL             polite  FAILED");
         expect(result.stdout).toContain("  refund: No refund was recorded in the world journal.");
         expect(result.stdout).toContain("0 of 1 case passed");
-        expect([...failing.experiments.values()][0]?.name).toBe(
-          "Refund flow · hue-agent · env-rev",
-        );
+        expect([...failing.experiments.values()][0]?.name).toBe("hue-agent @ env-rev");
       } finally {
         failing.stop();
       }
