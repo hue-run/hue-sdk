@@ -408,7 +408,10 @@ describe("Hue SDK contract", () => {
       await hue.tool("rejected", {}, () => "ok", {
         mcp: { provider: rejected, surface: rejected },
       });
-      expect((await hue.flushSafe()).report.instrumentationFailures).toBe(2);
+      await hue.tool("nul", {}, () => "ok", {
+        mcp: { provider: "\u0000bad", surface: "\u0000bad" },
+      });
+      expect((await hue.flushSafe()).report.instrumentationFailures).toBe(4);
       const spans = endpoint.requests
         .filter((request) => request.signal === "traces")
         .flatMap((request) => request.records);
@@ -418,6 +421,8 @@ describe("Hue SDK contract", () => {
       expect(attr(span("accepted"), "hue.mcp.surface")?.stringValue).toBe(accepted);
       expect(attr(span("rejected"), "hue.mcp.provider")).toBeUndefined();
       expect(attr(span("rejected"), "hue.mcp.surface")).toBeUndefined();
+      expect(attr(span("nul"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("nul"), "hue.mcp.surface")).toBeUndefined();
     } finally {
       await hue.shutdown();
       endpoint.server.stop(true);
