@@ -28,9 +28,7 @@ def test_scrubs_generic_credentials_and_url_userinfo_query_without_parameter_nam
         },
     }
 
-    output = json.loads(
-        scrub_tool_credentials("gen_ai.tool.definitions", json.dumps(input_value))
-    )
+    output = json.loads(scrub_tool_credentials("gen_ai.tool.definitions", json.dumps(input_value)))
     assert output["token"] == "[redacted]"
     assert output["api_token"] == "[redacted]"
     assert output["bearer_token"] == "[redacted]"
