@@ -459,7 +459,8 @@ export class HueClient {
    * `gen_ai.request.model` and `gen_ai.provider.name`. The argument order matches `withSpan`. The
    * handle's `setInput`/`setOutput` record `gen_ai.input.messages` / `gen_ai.output.messages`,
    * which should use the GenAI semantic-convention message shape; `recordMessages` inside the
-   * callback inherits the request metadata.
+   * callback inherits the request metadata. `options.systemInstructions` and `options.tools` are
+   * recorded as `gen_ai.system_instructions` and `gen_ai.tool.definitions`, content like `input`.
    */
   async model<T>(
     model: string,
@@ -482,7 +483,14 @@ export class HueClient {
         ? `${operation} ${requestModel}`
         : label(options.name, `${operation} ${requestModel}`);
     const metadata = { operation, provider, requestModel };
-    const { sessionId, userId, parentContext, input }: Partial<ModelOptions> = options ?? {};
+    const {
+      sessionId,
+      userId,
+      parentContext,
+      input,
+      systemInstructions,
+      tools,
+    }: Partial<ModelOptions> = options ?? {};
     return this.withSpan(
       name,
       (span) => {
@@ -492,6 +500,9 @@ export class HueClient {
           setOutput: (value) => this.setContent(span.span, "gen_ai.output.messages", value),
         };
         if (input !== undefined) handle.setInput(input);
+        if (systemInstructions !== undefined)
+          this.setContent(span.span, "gen_ai.system_instructions", systemInstructions);
+        if (tools !== undefined) this.setContent(span.span, "gen_ai.tool.definitions", tools);
         // recordMessages inside the callback copies this request metadata onto its log record.
         const store = this.storage.getStore() ?? { context: span.context };
         return this.storage.run({ ...store, model: metadata }, () => callback(handle));
@@ -581,6 +592,8 @@ export class HueClient {
       input?: unknown;
       /** Output messages, ideally in the GenAI semantic-convention shape; any JSON-encodable value. */
       output?: unknown;
+      /** System instructions sent separately from the messages, as `gen_ai.system_instructions`. */
+      systemInstructions?: unknown;
       /** `gen_ai.operation.name` for the record; defaults to the enclosing `model()` span's value. */
       operation?: string;
       /** `gen_ai.provider.name` for the record; defaults to the enclosing `model()` span's value. */
@@ -599,6 +612,8 @@ export class HueClient {
       const body: Record<string, unknown> = {};
       if (messages.input !== undefined) body["gen_ai.input.messages"] = messages.input;
       if (messages.output !== undefined) body["gen_ai.output.messages"] = messages.output;
+      if (messages.systemInstructions !== undefined)
+        body["gen_ai.system_instructions"] = messages.systemInstructions;
       // Request metadata is inherited only when the record correlates with the enclosing helper
       // scope; an unrelated explicit context carries caller-supplied values alone.
       const enclosing =

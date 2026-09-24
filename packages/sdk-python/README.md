@@ -74,11 +74,11 @@ Before redaction, helpers copy supported content into detached built-in containe
 | Helper                                         | Attributes / behavior                                                                                                                          |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `span(name)`                                   | Generic `input.value` / `output.value`, optional OTel attributes and kind                                                                      |
-| `model(model, provider=...)`                   | `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.provider.name`; message content in `gen_ai.input.messages` / `gen_ai.output.messages` |
+| `model(model, provider=..., system_instructions=..., tools=...)` | `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.provider.name`; message content in `gen_ai.input.messages` / `gen_ai.output.messages`; optional content `gen_ai.system_instructions` and `gen_ai.tool.definitions` |
 | `tool(name, call_id=..., mcp=...)`             | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, call ID, optional MCP `initialize` `serverInfo` as `mcp.server.name` / `mcp.server.version` and Hue `provider` / `surface` as `hue.mcp.provider` / `hue.mcp.surface`, arguments and result |
 | `context(session_id=..., user_id=...)`         | Task-local `gen_ai.conversation.id` / `user.id` on nested Hue helpers; observed users are not Hue account identities                           |
 | `span.set_usage(...)`                          | Nonnegative reported `gen_ai.usage.input_tokens` / `output_tokens`; `None` leaves a field absent                                               |
-| `span.log_inference(input=..., output=...)`    | Correlated `gen_ai.client.inference.operation.details` log linked to that span: structured body plus request metadata and session attributes |
+| `span.log_inference(input=..., output=..., system_instructions=...)` | Correlated `gen_ai.client.inference.operation.details` log linked to that span: structured body plus request metadata and session attributes |
 | `span.record_error(error)`                     | Exception type event and ERROR status; context managers also record escaping errors/cancellation                                               |
 | `Hue.inject(headers)` / `Hue.extract(headers)` | W3C trace context propagation; pass extracted context to `span(parent_context=...)`                                                            |
 

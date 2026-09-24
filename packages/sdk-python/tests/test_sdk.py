@@ -84,6 +84,56 @@ def test_actual_trace_log_correlation_and_content(receiver):
             assert headers["Content-Type"] == "application/x-protobuf"
 
 
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_model_records_system_instructions_and_tool_definitions(receiver, capture_content):
+    system_instructions = [{"type": "text", "content": "Answer in one sentence."}]
+    tools = [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Look up an order",
+            "parameters": {"type": "object", "properties": {"id": {"type": "string"}}},
+        }
+    ]
+    with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
+        with hue.model(
+            "synthetic-model",
+            provider="synthetic",
+            system_instructions=system_instructions,
+            tools=tools,
+        ) as model:
+            model.log_inference(
+                system_instructions=system_instructions,
+                output=[{"role": "assistant", "parts": [{"type": "text", "content": "Shipped."}]}],
+            )
+        # A value that is not JSON is omitted and counted; the block still runs.
+        with hue.model("synthetic-model", provider="synthetic", name="invalid", tools={1j}):
+            pass
+        assert hue.export_status.instrumentation_failures == (1 if capture_content else 0)
+        hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    model_attributes, invalid = spans["chat synthetic-model"], spans["invalid"]
+    assert "gen_ai.tool.definitions" not in invalid
+    if not capture_content:
+        assert "gen_ai.system_instructions" not in model_attributes
+        assert "gen_ai.tool.definitions" not in model_attributes
+        assert receiver.logs() == []
+        return
+    assert (
+        json.loads(model_attributes["gen_ai.system_instructions"].string_value)
+        == system_instructions
+    )
+    assert json.loads(model_attributes["gen_ai.tool.definitions"].string_value) == tools
+    (log,) = receiver.logs()
+    body = body_of(log)
+    assert set(body) == {"gen_ai.output.messages", "gen_ai.system_instructions"}
+    (part,) = body["gen_ai.system_instructions"].array_value.values
+    assert {entry.key: entry.value.string_value for entry in part.kvlist_value.values} == {
+        "type": "text",
+        "content": "Answer in one sentence.",
+    }
+
+
 def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.tool("get_thread", mcp={"name": "gmail", "version": "1.2.3"}):

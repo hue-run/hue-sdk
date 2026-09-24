@@ -134,7 +134,11 @@ await hue.model(
 The span is named `{operation} {model}` (`operation` defaults to `chat`) with
 `gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. Like `withSpan`, the
 options come after the callback and also accept `name`, `sessionId`, `userId`, `input` (recorded as
-`gen_ai.input.messages`) and `parentContext`. `setUsage` records
+`gen_ai.input.messages`) and `parentContext`. When you send system instructions or tools separately
+from the messages, pass `systemInstructions` (for example `[{ type: "text", content: instructions }]`)
+and `tools` (for example `[{ type: "function", name, description, parameters }]`); they are recorded
+as `gen_ai.system_instructions` and `gen_ai.tool.definitions` under the same `captureContent` rule
+as the messages. `recordMessages` also accepts `systemInstructions` for its log record. `setUsage` records
 nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
 counted as instrumentation failures. Unknown usage stays absent. `hue.tool(name, input, execute)`
 creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result; an optional
