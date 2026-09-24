@@ -530,6 +530,16 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### Unreleased
+
+#### Fixed
+
+- Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
+  counted as skipped instrumentation rather than silently omitted.
+- Provider-tool tail classification isolates broken item types, and strict hostname validation
+  rejects ambiguous URL text before it can enter `server.address`.
+- Model dumps disable Pydantic content warnings when supported.
+
 ### [0.6.0] - 2026-09-24
 
 #### Added
