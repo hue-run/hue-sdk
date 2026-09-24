@@ -47,6 +47,8 @@ refuses to publish a version without a matching entry below.
 - `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
   shortened to 7 characters); the eval set is already shown on the run page. Previously the name
   repeated the eval set name in a `·`-separated string.
+- Provider-executed hosted tool calls recorded by `recordProviderToolCalls` now export bounded
+  `execute_tool` and `tools/list` spans with their provider metadata and server address. **Wire**
 
 #### Fixed
 

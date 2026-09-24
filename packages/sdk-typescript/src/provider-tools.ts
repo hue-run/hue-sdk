@@ -42,6 +42,27 @@ function isItem(value: unknown): value is Item {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Only provider-executed tool items contribute to invalid-item diagnostics when a response is
+ * truncated; messages and reasoning are harmless response content. */
+function isProviderToolItem(value: unknown): boolean {
+  if (!isItem(value) || typeof value.type !== "string") return false;
+  return (
+    value.type === "mcp_call" ||
+    value.type === "mcp_list_tools" ||
+    value.type === "web_search_call" ||
+    value.type === "file_search_call" ||
+    value.type === "code_interpreter_call" ||
+    value.type === "mcp_tool_use" ||
+    value.type === "server_tool_use" ||
+    value.type === "mcp_tool_result" ||
+    value.type === "server_tool_result"
+  );
+}
+
+function countProviderToolItems(items: unknown[]): number {
+  return items.reduce<number>((count, item) => count + (isProviderToolItem(item) ? 1 : 0), 0);
+}
+
 function text(value: unknown): string | undefined {
   return typeof value === "string" &&
     value.trim() !== "" &&
@@ -66,7 +87,7 @@ function jsonArguments(value: unknown): unknown {
 /** OpenAI Responses `output` items. Built-in tools are named by their kind; MCP calls by tool. */
 function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
   const count = Math.min(items.length, MAX_PROVIDER_ITEMS);
-  activity.skipped += items.length - count;
+  activity.skipped += countProviderToolItems(items.slice(count));
   for (let index = 0; index < count; index++) {
     const item = items[index];
     if (!isItem(item)) continue;
@@ -156,7 +177,7 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
   const results = new Map<string, Item>();
   const count = Math.min(blocks.length, MAX_PROVIDER_ITEMS);
   const truncated = blocks.length > MAX_PROVIDER_ITEMS;
-  activity.skipped += blocks.length - count;
+  activity.skipped += countProviderToolItems(blocks.slice(count));
   for (let index = 0; index < count; index++) {
     const block = blocks[index];
     if (

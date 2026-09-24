@@ -53,3 +53,14 @@ test("does not export an Anthropic use block without its bounded result", () => 
   expect(activity.calls).toEqual([]);
   expect(activity.skipped).toBe(2);
 });
+
+test("does not count truncated messages and reasoning as invalid provider tools", () => {
+  const activity = hostedToolActivity("openai", {
+    output: [
+      ...Array.from({ length: 256 }, () => ({ type: "message", content: [] })),
+      { type: "mcp_call", id: "call-after-content", name: "tool", arguments: "{}" },
+    ],
+  });
+  expect(activity.calls).toEqual([]);
+  expect(activity.skipped).toBe(1);
+});

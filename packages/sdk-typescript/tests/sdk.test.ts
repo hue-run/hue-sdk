@@ -22,6 +22,7 @@ import { OpenTelemetry } from "@ai-sdk/otel";
 import { generateText, jsonSchema, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
+import hostedFixtures from "./fixtures/hosted-tool-calls.json" with { type: "json" };
 import sdkPackage from "@hue-run/sdk/package.json" with { type: "json" };
 
 type Value = {
@@ -185,6 +186,80 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test.each([true, false])(
+    "records provider-executed tools under their model parent without leaking request credentials (captureContent=%p)",
+    async (captureContent) => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "provider-tool-guard",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      const openai = hostedFixtures.openai as {
+        request: Record<string, unknown>;
+        response: { output: Record<string, unknown>[] };
+      };
+      const anthropic = hostedFixtures.anthropic as {
+        request: Record<string, unknown>;
+        response: { content: Record<string, unknown>[] };
+      };
+      try {
+        await hue.model(
+          "synthetic-model",
+          async () => {
+            const response = structuredClone(openai.response);
+            response.output[1] = {
+              ...response.output[1],
+              arguments: JSON.stringify({ query: "private-provider-content" }),
+            };
+            response.output.push({
+              type: "mcp_call",
+              id: "constructor-call",
+              server_label: "constructor",
+              name: "constructor_tool",
+              arguments: "{}",
+            });
+            hue.recordProviderToolCalls(response, {
+              provider: "openai",
+              request: openai.request,
+              // An object with no own `constructor` key must not resolve Object.prototype.
+              servers: {},
+            });
+            hue.recordProviderToolCalls(anthropic.response, {
+              provider: "anthropic",
+              request: anthropic.request,
+            });
+          },
+          { provider: "openai" },
+        );
+        await hue.flush();
+        const spans = endpoint.requests.flatMap((request) => request.records);
+        const model = spans.find((span) => span.name === "chat synthetic-model")!;
+        const tools = spans.filter((span) => span.name?.startsWith("execute_tool "));
+        expect(tools.length).toBe(9);
+        expect(tools.every((span) => span.parentSpanId === model.spanId)).toBe(true);
+        const constructorTool = tools.find((span) => span.name === "execute_tool constructor_tool");
+        expect(attr(constructorTool!, "mcp.server.name")?.stringValue).toBe("constructor");
+        expect(spans.some((span) => attr(span, "mcp.server.name")?.stringValue === "Object")).toBe(
+          false,
+        );
+        const raw = endpoint.requests.map((request) => request.raw).join(" ");
+        expect(raw).not.toContain("synthetic-oauth-token");
+        if (captureContent) {
+          expect(raw).toContain("private-provider-content");
+          expect(tools.some((span) => attr(span, "gen_ai.tool.call.arguments"))).toBe(true);
+        } else {
+          expect(raw).not.toContain("private-provider-content");
+          expect(tools.every((span) => !attr(span, "gen_ai.tool.call.arguments"))).toBe(true);
+        }
+      } finally {
+        await hue.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
+
   test("model helper records GenAI request attributes, message content and validated usage", async () => {
     const endpoint = receiver();
     const hue = createHue({

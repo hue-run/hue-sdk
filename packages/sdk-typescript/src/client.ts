@@ -107,7 +107,7 @@ function isLabel(value: unknown): value is string {
   );
 }
 
-/** A source label uses the stricter wire-safe validation without changing existing labels. */
+/** A source label is validated independently so provider metadata remains wire-safe. */
 function isSourceLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -116,11 +116,6 @@ function isSourceLabel(value: unknown): value is string {
     !value.includes("\u0000") &&
     value.isWellFormed()
   );
-}
-
-/** A label that is also free of NUL and unpaired surrogates, which export would reject. */
-function isTextLabel(value: unknown): value is string {
-  return isLabel(value) && !value.includes("\u0000") && value.isWellFormed();
 }
 
 type Outcome<T> = { value: T } | { error: unknown };
@@ -691,7 +686,10 @@ export class HueClient {
       const server = (label: string | undefined): Attributes => {
         const attributes: Attributes = {};
         if (label === undefined) return attributes;
-        const info = options.servers?.[label];
+        const info =
+          options.servers && Object.hasOwn(options.servers, label)
+            ? options.servers[label]
+            : undefined;
         for (const [key, value] of [
           ["mcp.server.name", info?.name ?? label],
           ["mcp.server.version", info?.version],
@@ -768,7 +766,7 @@ export class HueClient {
       const { role, mediaType, data, name } = file;
       if (role !== "input" && role !== "attachment" && role !== "output")
         throw new TypeError("Invalid file role");
-      if (!isTextLabel(mediaType)) throw new TypeError("Invalid media type");
+      if (!isLabel(mediaType)) throw new TypeError("Invalid media type");
       let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
       let byteSize = file.byteSize;
       if (data !== undefined) {
@@ -813,7 +811,7 @@ export class HueClient {
       };
       if (byteSize !== undefined) attributes["hue.file.size"] = byteSize;
       if (this.captureContent && name !== undefined) {
-        if (isTextLabel(name)) attributes["hue.file.name"] = name;
+        if (isLabel(name)) attributes["hue.file.name"] = name;
         else this.transport.instrumentationFailure();
       }
       span.addEvent("hue.file", attributes);
