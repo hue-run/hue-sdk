@@ -10,6 +10,13 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Fixed
+
+- The hosted-tool recorder resolves `servers` entries with own-property lookup, so labels such as
+  `constructor` keep their server name instead of inheriting from `Object.prototype`.
+- Truncated provider responses count only provider tool calls toward instrumentation failures, so
+  harmless message and reasoning tails no longer make strict `flush()` throw.
+
 ### [0.8.1] - 2026-09-24
 
 #### Added

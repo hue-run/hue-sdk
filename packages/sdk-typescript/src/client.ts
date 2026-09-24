@@ -96,7 +96,7 @@ function identifier(value: string | undefined): string | undefined {
   return value;
 }
 
-/** A usable metadata label: a non-blank string of at most 256 characters. */
+/** A usable metadata label: non-blank, at most 256 UTF-16 code units, with no NUL or unpaired surrogate. */
 function isLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -105,22 +105,6 @@ function isLabel(value: unknown): value is string {
     !value.includes("\u0000") &&
     value.isWellFormed()
   );
-}
-
-/** A source label uses the stricter wire-safe validation without changing existing labels. */
-function isSourceLabel(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.trim() !== "" &&
-    value.length <= 256 &&
-    !value.includes("\u0000") &&
-    value.isWellFormed()
-  );
-}
-
-/** A label that is also free of NUL and unpaired surrogates, which export would reject. */
-function isTextLabel(value: unknown): value is string {
-  return isLabel(value) && !value.includes("\u0000") && value.isWellFormed();
 }
 
 type Outcome<T> = { value: T } | { error: unknown };
@@ -442,21 +426,17 @@ export class HueClient {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": name,
     };
-    const stamp = (
-      key: string,
-      value: unknown,
-      valid: (value: unknown) => value is string = isLabel,
-    ) => {
+    const stamp = (key: string, value: unknown) => {
       if (value === undefined) return;
       // A blank or non-string label is omitted and counted; the tool call itself still runs.
-      if (valid(value)) attributes[key] = value;
+      if (isLabel(value)) attributes[key] = value;
       else if (this.enabled && !this.closed) this.transport.instrumentationFailure();
     };
     stamp("gen_ai.tool.call.id", options.callId);
     stamp("mcp.server.name", options.mcp?.name);
     stamp("mcp.server.version", options.mcp?.version);
-    stamp("hue.mcp.provider", options.mcp?.provider, isSourceLabel);
-    stamp("hue.mcp.surface", options.mcp?.surface, isSourceLabel);
+    stamp("hue.mcp.provider", options.mcp?.provider);
+    stamp("hue.mcp.surface", options.mcp?.surface);
     return this.withSpan(
       `execute_tool ${name}`,
       async ({ span }) => {
@@ -691,7 +671,10 @@ export class HueClient {
       const server = (label: string | undefined): Attributes => {
         const attributes: Attributes = {};
         if (label === undefined) return attributes;
-        const info = options.servers?.[label];
+        const info =
+          options.servers && Object.hasOwn(options.servers, label)
+            ? options.servers[label]
+            : undefined;
         for (const [key, value] of [
           ["mcp.server.name", info?.name ?? label],
           ["mcp.server.version", info?.version],
@@ -768,7 +751,7 @@ export class HueClient {
       const { role, mediaType, data, name } = file;
       if (role !== "input" && role !== "attachment" && role !== "output")
         throw new TypeError("Invalid file role");
-      if (!isTextLabel(mediaType)) throw new TypeError("Invalid media type");
+      if (!isLabel(mediaType)) throw new TypeError("Invalid media type");
       let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
       let byteSize = file.byteSize;
       if (data !== undefined) {
@@ -813,7 +796,7 @@ export class HueClient {
       };
       if (byteSize !== undefined) attributes["hue.file.size"] = byteSize;
       if (this.captureContent && name !== undefined) {
-        if (isTextLabel(name)) attributes["hue.file.name"] = name;
+        if (isLabel(name)) attributes["hue.file.name"] = name;
         else this.transport.instrumentationFailure();
       }
       span.addEvent("hue.file", attributes);

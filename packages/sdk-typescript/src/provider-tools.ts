@@ -42,6 +42,32 @@ function isItem(value: unknown): value is Item {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Only provider-executed tool items contribute to invalid-item diagnostics when a response is
+ * truncated; messages and reasoning are harmless response content. */
+function isProviderToolItem(provider: HostedToolProvider, value: unknown): boolean {
+  if (!isItem(value) || typeof value.type !== "string") return false;
+  if (provider === "openai")
+    return (
+      value.type === "mcp_call" ||
+      value.type === "mcp_list_tools" ||
+      value.type === "web_search_call" ||
+      value.type === "file_search_call" ||
+      value.type === "code_interpreter_call"
+    );
+  return value.type === "mcp_tool_use" || value.type === "server_tool_use";
+}
+
+function countProviderToolItems(provider: HostedToolProvider, items: unknown[], start = 0): number {
+  let count = 0;
+  for (const key of Object.keys(items)) {
+    const index = Number(key);
+    if (!Number.isInteger(index) || index < start || index >= items.length || String(index) !== key)
+      continue;
+    if (isProviderToolItem(provider, items[index])) count++;
+  }
+  return count;
+}
+
 function text(value: unknown): string | undefined {
   return typeof value === "string" &&
     value.trim() !== "" &&
@@ -50,6 +76,10 @@ function text(value: unknown): string | undefined {
     value.isWellFormed()
     ? value
     : undefined;
+}
+
+function errorCode(value: unknown): string {
+  return typeof value === "string" && /^[a-z0-9_]{1,64}$/.test(value) ? value : "error";
 }
 
 /** MCP arguments arrive as a JSON string; record the structure when it parses, else the text. */
@@ -66,7 +96,7 @@ function jsonArguments(value: unknown): unknown {
 /** OpenAI Responses `output` items. Built-in tools are named by their kind; MCP calls by tool. */
 function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
   const count = Math.min(items.length, MAX_PROVIDER_ITEMS);
-  activity.skipped += items.length - count;
+  activity.skipped += countProviderToolItems("openai", items, count);
   for (let index = 0; index < count; index++) {
     const item = items[index];
     if (!isItem(item)) continue;
@@ -156,7 +186,7 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
   const results = new Map<string, Item>();
   const count = Math.min(blocks.length, MAX_PROVIDER_ITEMS);
   const truncated = blocks.length > MAX_PROVIDER_ITEMS;
-  activity.skipped += blocks.length - count;
+  activity.skipped += countProviderToolItems("anthropic", blocks, count);
   for (let index = 0; index < count; index++) {
     const block = blocks[index];
     if (
@@ -188,7 +218,7 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
     let errorType: string | undefined;
     if (result?.is_error === true) errorType = "mcp_error";
     else if (isItem(content) && typeof content.type === "string" && content.type.endsWith("_error"))
-      errorType = text(content.error_code) ?? "error";
+      errorType = errorCode(content.error_code);
     activity.calls.push({
       name,
       callId,

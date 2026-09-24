@@ -51,5 +51,50 @@ test("does not export an Anthropic use block without its bounded result", () => 
     ],
   });
   expect(activity.calls).toEqual([]);
-  expect(activity.skipped).toBe(2);
+  expect(activity.skipped).toBe(1);
+});
+
+test("does not count truncated messages and reasoning as invalid provider tools", () => {
+  const activity = hostedToolActivity("openai", {
+    output: [
+      ...Array.from({ length: 256 }, () => ({ type: "message", content: [] })),
+      { type: "mcp_call", id: "call-after-content", name: "tool", arguments: "{}" },
+    ],
+  });
+  expect(activity.calls).toEqual([]);
+  expect(activity.skipped).toBe(1);
+});
+
+test("does not count an Anthropic text tail as provider tools", () => {
+  const activity = hostedToolActivity("anthropic", {
+    content: [
+      ...Array.from({ length: 256 }, () => ({ type: "text", text: "harmless response" })),
+      { type: "mcp_tool_use", id: "late", name: "tool", input: {} },
+    ],
+  });
+  expect(activity.calls).toEqual([]);
+  expect(activity.skipped).toBe(1);
+});
+
+test("counts sparse provider tails without scanning array holes", () => {
+  const output: unknown[] = [];
+  output.length = 2 ** 32 - 1;
+  output[2 ** 32 - 2] = { type: "mcp_call", id: "late", name: "tool" };
+  const activity = hostedToolActivity("openai", { output });
+  expect(activity.calls).toEqual([]);
+  expect(activity.skipped).toBe(1);
+});
+
+test("bounds Anthropic error codes to safe metadata labels", () => {
+  const activity = hostedToolActivity("anthropic", {
+    content: [
+      { type: "mcp_tool_use", id: "call", name: "tool", input: {} },
+      {
+        type: "mcp_tool_result",
+        tool_use_id: "call",
+        content: { type: "mcp_tool_result_error", error_code: "SECRET-" + "x".repeat(256) },
+      },
+    ],
+  });
+  expect(activity.calls[0]?.errorType).toBe("error");
 });
