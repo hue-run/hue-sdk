@@ -436,6 +436,16 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+#### Added
+
+- **`hue_sdk.environment`.** `EnvironmentClient` for Hue's World API: `create_run` (with
+  `execution_id`, `traceparent` and `agent_revision`), `get_run`, `finish_run`, `get_evidence`,
+  `act`, `list_steps` and `record_coverage_gap`, retrying deduplicated mutations and waiting Hue's
+  `Retry-After` on 429 and 503. `world_handoff`, `agent_environment`,
+  `strip_hue_control_plane_credentials`, `legacy_mcp_capability` and `mcp_config_file` build an
+  agent child's configuration from the world's token, mirror URLs, `env` and `mcpConfig` without
+  the project key. No tool binding is included.
+
 ### [0.4.0] - 2026-09-23
 
 #### Breaking

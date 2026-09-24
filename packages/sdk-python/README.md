@@ -180,6 +180,51 @@ Python 3.10+ is supported. CI tests Python 3.10 and 3.14, source imports and an 
 
 See the [documentation](https://docs.hue.run/sdks/python) for integration guidance and [troubleshooting](https://docs.hue.run/guides/troubleshooting) for export failures.
 
+## Simulated worlds
+
+`hue_sdk.environment.EnvironmentClient` drives Hue's World API: create a world after the case's
+execution starts, hand the agent the provider mirror URLs and the world token (never the project
+key), finish before the execution completes, and read the sealed world's evaluator-only evidence.
+
+```python
+import os
+import subprocess
+
+from hue_sdk.environment import EnvironmentClient, agent_environment, mcp_config_file, world_handoff
+
+client = EnvironmentClient(api_key=os.environ["HUE_API_KEY"])
+run = client.create_run(
+    idempotency_key=f"execution:{execution_id}",
+    environment_version_id=version_id,
+    execution_id=execution_id,
+    ttl_seconds=600,
+    traceparent=f"00-{span.trace_id}-{span.span_id}-01",
+    agent_revision="my-agent@1.4.2",
+)
+world = None
+try:
+    world = world_handoff(run)
+    if world is None:  # the deployment's gateway is off: this run has Hue-native actions instead
+        client.finish_run(
+            run["id"], idempotency_key=f"execution:{execution_id}:abandoned", status="abandoned"
+        )
+        raise RuntimeError("this deployment does not serve simulation worlds")
+    child = agent_environment(world)  # os.environ minus Hue control-plane credentials, plus the carriers
+    with mcp_config_file(world) as path:  # owner-only mcp.json, removed after the block
+        subprocess.run(agent_command, env={**child, "MCP_CONFIG": path}, check=True)
+finally:
+    if world is not None:
+        client.finish_run(
+            run["id"], idempotency_key=f"execution:{execution_id}:completed", status="completed"
+        )
+evidence = client.get_evidence(run["id"], section="ledger")
+```
+
+`agent_environment` removes `HUE_API_KEY`, `HUE_MCP_KEY` and any `hue_sk_`, `hue_mcp_` or
+`hue_attempt_` value unless `include_hue_credentials=True`, and for one compatibility release also
+sets `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` from the first MCP mirror. Nothing
+here logs the token. The client waits Hue's `Retry-After` on 429 and 503 before retrying.
+
 ## Managed targets
 
 Start a frozen dataset run in Hue while your existing agent stays in your application:
