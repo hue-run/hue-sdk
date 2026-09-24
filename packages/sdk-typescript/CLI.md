@@ -368,11 +368,11 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-hue eval --case "Refund an eligible charge" ./hue-agent.ts --env-file .env.hue
-hue eval --case https://app.hue.run/projects/demo/scenarios/<id> ./hue-agent.ts --baseline <run id>
-hue eval --set "Billing regressions" --scorer-version <id> ./hue-agent.ts --save-version
+hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
+hue eval --case https://app.hue.run/projects/demo/scenarios/<id> ./hue-agent.ts --content --baseline <run id>
+hue eval --set "Billing regressions" --scorer-version <id> ./hue-agent.ts --content --save-version
 hue eval --case "Refund an eligible charge" --command "python agent.py" --timeout 120 --content
-hue eval --worker ./hue-agent.ts --agent-key support-agent --env-file .env.hue
+hue eval --worker ./hue-agent.ts --agent-key support-agent --content --env-file .env.hue
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -421,12 +421,12 @@ A Scenario or eval set whose dataset version is not saved cannot back an experim
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
 (default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given; `--origin`
-overrides the origin. Telemetry content capture stays off unless `--content` is passed; pass it so
-the run's case spans carry content. Model and tool spans inside the agent come only from the
-agent's own instrumentation. In one-shot mode it also decides whether case outputs, error messages and explanations are persisted
-to Hue. `--worker` always persists them, because a run launched from Hue is read on its run page:
-that is `runLocalAgent()`'s contract and `--content` does not change it. Trace evidence is required
-for every case.
+overrides the origin. Telemetry content capture stays off unless `--content` is passed; the
+examples pass it so the run's case spans carry content. Model and tool spans inside the agent come
+only from the agent's own instrumentation. In one-shot mode `--content` also decides whether case
+outputs, error messages and explanations are persisted to Hue. `--worker` always persists them,
+because a run launched from Hue is read on its run page: that is `runLocalAgent()`'s contract and
+`--content` does not change it. Trace evidence is required for every case.
 Resumable checkpoints live in `.hue/eval/<agent-key>/<project id>/` (a `.gitignore` is written
 inside `.hue/eval/`); `--checkpoint-dir` overrides the root. Rerunning the same selection resumes
 an interrupted run without invoking the agent again; a different selection is refused until the
@@ -450,8 +450,8 @@ published version, beside or instead of explicit `--scorer-version` IDs.
 ```sh
 hue eval --set gia-d1-citation --scorer gia-d1-citation \
   --command "pnpm --filter @august/frontend run hue:gia-agent" \
-  --revision prompt-v10 --wait 1800 --json --env-file .env.hue
-hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-agent.ts --baseline <experiment id>
+  --revision prompt-v10 --wait 1800 --content --json --env-file .env.hue
+hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-agent.ts --content --baseline <experiment id>
 ```
 
 For each case the command is spawned once **inside a private case directory** with
@@ -483,5 +483,6 @@ Code evaluators pinned to the run are **not** executed on your machine: the CLI 
 deferred (`deferUnboundLocalScorers`) and Hue's grading executor scores the uploaded documents;
 evaluator-only pinned files such as a legal corpus are never downloaded. `Waiting for Hue
 checks...` then covers that grading, so size `--wait` to the evaluator's runtime. The
-`--json` document gains `"mode": "direct"` and `"deferredScorerVersionIds"`. Exit codes, `--baseline`
-and checkpoints behave as for Scenarios.
+`--json` document gains `"mode": "direct"` and `"deferredScorerVersionIds"`. Exit codes, `--baseline`,
+`--content` and checkpoints behave as for Scenarios; generated documents are uploaded with or
+without `--content`.
