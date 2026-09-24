@@ -9,6 +9,7 @@ into ``execute_tool`` spans of type ``extension`` after the fact. Mirrors the Ty
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -97,93 +98,131 @@ def _json_arguments(value: Any) -> Any:
         return ABSENT
     try:
         return json.loads(value)
-    except ValueError:
+    except (ValueError, RecursionError):
         return value
 
 
-def _openai_calls(items: list[Any], activity: HostedToolActivity) -> None:
+def _item_type(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return value.get("type")
+    return getattr(value, "type", None)
+
+
+def _is_provider_tool_item(provider: str, value: Any) -> bool:
+    kind = _item_type(value)
+    if provider == "openai":
+        return kind in (
+            "mcp_call",
+            "mcp_list_tools",
+            "web_search_call",
+            "file_search_call",
+            "code_interpreter_call",
+        )
+    return kind in ("mcp_tool_use", "server_tool_use")
+
+
+_ERROR_CODE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+def _error_code(value: Any) -> str:
+    return value if isinstance(value, str) and _ERROR_CODE.fullmatch(value) else "error"
+
+
+def _openai_item(item: Any, activity: HostedToolActivity, capture_content: bool) -> None:
+    item = _data(item)
+    if not isinstance(item, dict):
+        return
+    kind = item.get("type")
+    call_id = _text(item.get("id"))
+    if kind == "mcp_call":
+        name = _text(item.get("name"))
+        if name is None:
+            activity.skipped += 1
+            return
+        activity.calls.append(
+            HostedToolCall(
+                name,
+                call_id,
+                _text(item.get("server_label")),
+                _json_arguments(item.get("arguments")) if capture_content else ABSENT,
+                item["output"] if capture_content and item.get("output") is not None else ABSENT,
+                "mcp_error" if item.get("error") is not None else None,
+            )
+        )
+    elif kind == "mcp_list_tools":
+        server = _text(item.get("server_label"))
+        tools = item.get("tools")
+        if server is None or not isinstance(tools, list):
+            activity.skipped += 1
+            return
+        definitions = []
+        definition_count = min(len(tools), MAX_PROVIDER_DEFINITIONS)
+        activity.skipped += len(tools) - definition_count
+        for index in range(definition_count):
+            try:
+                tool = _data(tools[index])
+            except Exception:
+                activity.skipped += 1
+                continue
+            if not isinstance(tool, dict):
+                continue
+            definition: dict[str, Any] = {"type": "function"}
+            for source, target in (
+                ("name", "name"),
+                ("description", "description"),
+                ("input_schema", "parameters"),
+                ("annotations", "annotations"),
+            ):
+                if source in tool and tool[source] is not None:
+                    definition[target] = tool[source]
+            definitions.append(definition)
+        activity.listings.append(
+            HostedToolListing(
+                server, definitions, "mcp_error" if item.get("error") is not None else None
+            )
+        )
+    elif kind in ("web_search_call", "file_search_call", "code_interpreter_call"):
+        name = kind[: -len("_call")]
+        error_type = "failed" if item.get("status") == "failed" else None
+        if kind == "web_search_call":
+            arguments = item.get("action") if capture_content else ABSENT
+            result = ABSENT
+        elif kind == "file_search_call":
+            arguments = {"queries": item.get("queries")} if capture_content else ABSENT
+            result = (
+                item["results"] if capture_content and item.get("results") is not None else ABSENT
+            )
+        else:
+            arguments = (
+                {"code": item.get("code"), "container_id": item.get("container_id")}
+                if capture_content
+                else ABSENT
+            )
+            result = (
+                item["outputs"] if capture_content and item.get("outputs") is not None else ABSENT
+            )
+        activity.calls.append(HostedToolCall(name, call_id, None, arguments, result, error_type))
+
+
+def _openai_calls(items: list[Any], activity: HostedToolActivity, capture_content: bool) -> None:
     """OpenAI Responses ``output`` items. Built-in tools are named by kind, MCP calls by tool."""
     count = min(len(items), MAX_PROVIDER_ITEMS)
-    activity.skipped += len(items) - count
+    activity.skipped += sum(_is_provider_tool_item("openai", item) for item in items[count:])
     for index in range(count):
         try:
-            item = _data(items[index])
+            _openai_item(items[index], activity, capture_content)
         except Exception:
             activity.skipped += 1
-            continue
-        if not isinstance(item, dict):
-            continue
-        kind = item.get("type")
-        call_id = _text(item.get("id"))
-        if kind == "mcp_call":
-            name = _text(item.get("name"))
-            if name is None:
-                activity.skipped += 1
-                continue
-            activity.calls.append(
-                HostedToolCall(
-                    name,
-                    call_id,
-                    _text(item.get("server_label")),
-                    _json_arguments(item.get("arguments")),
-                    item["output"] if item.get("output") is not None else ABSENT,
-                    "mcp_error" if item.get("error") is not None else None,
-                )
-            )
-        elif kind == "mcp_list_tools":
-            server = _text(item.get("server_label"))
-            tools = item.get("tools")
-            if server is None or not isinstance(tools, list):
-                activity.skipped += 1
-                continue
-            definitions = []
-            definition_count = min(len(tools), MAX_PROVIDER_DEFINITIONS)
-            activity.skipped += len(tools) - definition_count
-            for index in range(definition_count):
-                try:
-                    tool = _data(tools[index])
-                except Exception:
-                    activity.skipped += 1
-                    continue
-                if not isinstance(tool, dict):
-                    continue
-                definition: dict[str, Any] = {"type": "function"}
-                for source, target in (
-                    ("name", "name"),
-                    ("description", "description"),
-                    ("input_schema", "parameters"),
-                    ("annotations", "annotations"),
-                ):
-                    if source in tool and tool[source] is not None:
-                        definition[target] = tool[source]
-                definitions.append(definition)
-            activity.listings.append(
-                HostedToolListing(
-                    server, definitions, "mcp_error" if item.get("error") is not None else None
-                )
-            )
-        elif kind in ("web_search_call", "file_search_call", "code_interpreter_call"):
-            name = kind[: -len("_call")]
-            error_type = "failed" if item.get("status") == "failed" else None
-            if kind == "web_search_call":
-                arguments, result = item.get("action"), ABSENT
-            elif kind == "file_search_call":
-                arguments = {"queries": item.get("queries")}
-                result = item["results"] if item.get("results") is not None else ABSENT
-            else:
-                arguments = {"code": item.get("code"), "container_id": item.get("container_id")}
-                result = item["outputs"] if item.get("outputs") is not None else ABSENT
-            activity.calls.append(
-                HostedToolCall(name, call_id, None, arguments, result, error_type)
-            )
         # Messages, reasoning, approval requests and other items are not executed tools.
 
 
-def _anthropic_calls(blocks: list[Any], activity: HostedToolActivity) -> None:
+def _anthropic_calls(
+    blocks: list[Any], activity: HostedToolActivity, capture_content: bool
+) -> None:
     """Anthropic Messages ``content`` blocks: a use block paired with the result that names it."""
     count = min(len(blocks), MAX_PROVIDER_ITEMS)
     truncated = len(blocks) > MAX_PROVIDER_ITEMS
-    activity.skipped += len(blocks) - count
+    activity.skipped += sum(_is_provider_tool_item("anthropic", block) for block in blocks[count:])
     converted: list[Any] = []
     for index in range(count):
         try:
@@ -202,52 +241,60 @@ def _anthropic_calls(blocks: list[Any], activity: HostedToolActivity) -> None:
         ):
             results[block["tool_use_id"]] = block
     for block in blocks:
-        if not isinstance(block, dict) or block.get("type") not in (
-            "mcp_tool_use",
-            "server_tool_use",
-        ):
-            continue
-        name = _text(block.get("name"))
-        call_id = _text(block.get("id"))
-        if name is None:
-            activity.skipped += 1
-            continue
-        result = results.get(call_id) if call_id is not None else None
-        # When the response was truncated, an unmatched use block may have its result outside the
-        # bounded prefix. Do not export it as a successful call with a missing result.
-        if truncated and result is None:
-            activity.skipped += 1
-            continue
-        if result is None:
-            content = ABSENT
-        else:
-            try:
-                content = _data(result.get("content"))
-            except Exception:
+        try:
+            if not isinstance(block, dict) or block.get("type") not in (
+                "mcp_tool_use",
+                "server_tool_use",
+            ):
+                continue
+            name = _text(block.get("name"))
+            call_id = _text(block.get("id"))
+            if name is None:
                 activity.skipped += 1
+                continue
+            result = results.get(call_id) if call_id is not None else None
+            # When the response was truncated, an unmatched use block may have its result outside
+            # the bounded prefix. Do not export it as a successful call with a missing result.
+            if truncated and result is None:
+                activity.skipped += 1
+                continue
+            raw_content = result.get("content") if result is not None else None
+            if result is None or not capture_content:
                 content = ABSENT
-        error_type = None
-        if result is not None and result.get("is_error") is True:
-            error_type = "mcp_error"
-        elif (
-            isinstance(content, dict)
-            and isinstance(content.get("type"), str)
-            and content["type"].endswith("_error")
-        ):
-            error_type = _text(content.get("error_code")) or "error"
-        activity.calls.append(
-            HostedToolCall(
-                name,
-                call_id,
-                _text(block.get("server_name")) if block["type"] == "mcp_tool_use" else None,
-                block.get("input"),
-                content if result is not None and "content" in result else ABSENT,
-                error_type,
+            else:
+                content = _data(raw_content)
+            error_type = None
+            if result is not None and result.get("is_error") is True:
+                error_type = "mcp_error"
+            else:
+                error_content = raw_content if not capture_content else content
+                if (
+                    isinstance(error_content, Mapping)
+                    and isinstance(error_content.get("type"), str)
+                    and error_content["type"].endswith("_error")
+                ):
+                    error_type = _error_code(error_content.get("error_code"))
+            activity.calls.append(
+                HostedToolCall(
+                    name,
+                    call_id,
+                    _text(block.get("server_name")) if block["type"] == "mcp_tool_use" else None,
+                    block.get("input") if capture_content else ABSENT,
+                    (
+                        content
+                        if capture_content and result is not None and "content" in result
+                        else ABSENT
+                    ),
+                    error_type,
+                )
             )
-        )
+        except Exception:
+            activity.skipped += 1
 
 
-def hosted_tool_activity(provider: str, response: Any) -> HostedToolActivity:
+def hosted_tool_activity(
+    provider: str, response: Any, capture_content: bool = True
+) -> HostedToolActivity:
     """The hosted tool calls in a provider response.
 
     Reads the ``output`` items of an OpenAI Responses API response or the ``content`` blocks of an
@@ -275,9 +322,9 @@ def hosted_tool_activity(provider: str, response: Any) -> HostedToolActivity:
     if not isinstance(items, list):
         return activity
     if provider == "openai":
-        _openai_calls(items, activity)
+        _openai_calls(items, activity, capture_content)
     else:
-        _anthropic_calls(items, activity)
+        _anthropic_calls(items, activity, capture_content)
     return activity
 
 
@@ -315,6 +362,12 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
             hostname = urlsplit(url).hostname
         except ValueError:
             continue
-        if hostname:
+        if "\\" in url or "\x00" in url or len(url) > 8192:
+            continue
+        if (
+            hostname
+            and len(hostname) <= 253
+            and (":" not in hostname or urlsplit(url).netloc.startswith("["))
+        ):
             addresses[label] = hostname
     return addresses

@@ -252,7 +252,7 @@ class HueSpan:
         if named is None:
             raise ValueError("Unknown provider for hosted tool calls.")
         addresses = hosted_server_addresses(named, request)
-        activity = hosted_tool_activity(named, response)
+        activity = hosted_tool_activity(named, response, self._client.capture_content)
         self._client._record_issues(activity.skipped)
         parent = trace.set_span_in_context(self.otel_span)
 
@@ -262,8 +262,9 @@ class HueSpan:
                 return attributes
             info = servers.get(label) if isinstance(servers, Mapping) else None
             info = info if isinstance(info, Mapping) else {}
+            server_name = info.get("name") if info.get("name") is not None else label
             for key, value in (
-                ("mcp.server.name", info.get("name", label)),
+                ("mcp.server.name", server_name),
                 ("mcp.server.version", info.get("version")),
                 ("hue.mcp.provider", info.get("provider")),
                 ("hue.mcp.surface", info.get("surface")),

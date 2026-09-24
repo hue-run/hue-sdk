@@ -324,6 +324,16 @@ def test_provider_tool_recorder_uses_span_metadata_after_model_scope_exits(recei
         assert hue.export_status.instrumentation_failures == 0
 
 
+def test_harmless_truncated_response_stays_exportable(receiver):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            span.record_provider_tool_calls(
+                {"output": [{"type": "message", "content": []} for _ in range(200)]}
+            )
+        assert hue.export_status.instrumentation_failures == 0
+        assert hue.force_flush()
+
+
 def test_context_records_the_workspace_on_nested_helpers(receiver):
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.context(workspace_id="workspace-1", user_id="user-1"):

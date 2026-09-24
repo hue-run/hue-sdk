@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hue_sdk._provider_tools import ABSENT, hosted_tool_activity
+from hue_sdk._provider_tools import ABSENT, hosted_server_addresses, hosted_tool_activity
 
 
 def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
@@ -26,7 +26,7 @@ def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
     # The malformed first item is counted within the 128-item parse cap, so 127 valid calls remain.
     assert len(activity.calls) == 127
     assert activity.calls[0].arguments is ABSENT
-    assert activity.skipped > 1_800
+    assert activity.skipped == 1_875
 
 
 def test_provider_tool_definitions_are_bounded_per_listing():
@@ -69,4 +69,39 @@ def test_anthropic_use_without_bounded_result_is_skipped():
         },
     )
     assert activity.calls == []
-    assert activity.skipped == 2
+    assert activity.skipped == 1
+
+
+def test_deep_arguments_do_not_drop_sibling_calls():
+    activity = hosted_tool_activity(
+        "openai",
+        {
+            "output": [
+                {
+                    "type": "mcp_call",
+                    "id": "deep",
+                    "name": "deep",
+                    "arguments": "[" * 1000 + "]" * 1000,
+                },
+                {"type": "mcp_call", "id": "valid", "name": "valid", "arguments": "{}"},
+            ]
+        },
+    )
+    assert [call.name for call in activity.calls] == ["deep", "valid"]
+    assert activity.calls[0].arguments != ABSENT
+
+
+def test_provider_server_addresses_reject_unsafe_urls():
+    assert hosted_server_addresses(
+        "openai",
+        {
+            "tools": [
+                {
+                    "server_label": "backslash",
+                    "server_url": "https://mcp.example.test\\sk-live-secret/sse",
+                },
+                {"server_label": "nul", "server_url": "https://mcp.example.test/\x00/sse"},
+                {"server_label": "ok", "server_url": "https://mcp.example.test/sse"},
+            ]
+        },
+    ) == {"ok": "mcp.example.test"}
