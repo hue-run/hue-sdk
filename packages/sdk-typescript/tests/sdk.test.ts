@@ -22,7 +22,6 @@ import { generateText, jsonSchema, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import sdkPackage from "@hue-run/sdk/package.json" with { type: "json" };
-import toolDefinitions from "./fixtures/tool-definitions.json" with { type: "json" };
 
 type Value = {
   stringValue?: string;
