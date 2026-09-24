@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -234,10 +235,13 @@ def test_retry_after_is_honored_and_bounded(receiver, backoff):
 def test_wait_for_seal_reads_past_completion_grace(monkeypatch):
     client = EnvironmentClient("https://app.hue.test", KEY)
     states = iter([{"status": "open"}, {"status": "completed"}])
-    monkeypatch.setattr(client, "get_run", lambda _run_id: next(states))
-    monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
-    state = client.wait_for_seal(RUN_ID)
+    sleeps = []
+    monkeypatch.setattr(client, "_get_run_once", lambda _run_id, **_: next(states))
+    monkeypatch.setattr(environment_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+    completing_until = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+    state = client.wait_for_seal(RUN_ID, completing_until=completing_until)
     assert state["status"] == "completed"
+    assert sleeps and sleeps[0] > 0
 
 
 def test_wait_for_seal_retries_transient_reads(monkeypatch):
@@ -256,7 +260,7 @@ def test_wait_for_seal_retries_transient_reads(monkeypatch):
             raise response
         return response
 
-    monkeypatch.setattr(client, "get_run", read)
+    monkeypatch.setattr(client, "_get_run_once", lambda _run_id, **_: read(_run_id))
     monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
     state = client.wait_for_seal(RUN_ID)
     assert state["status"] == "completed"
@@ -265,7 +269,9 @@ def test_wait_for_seal_retries_transient_reads(monkeypatch):
 def test_wait_for_seal_rejects_non_transient_read(monkeypatch):
     client = EnvironmentClient("https://app.hue.test", KEY)
     monkeypatch.setattr(
-        client, "get_run", lambda _run_id: (_ for _ in ()).throw(HueEnvironmentError(404))
+        client,
+        "_get_run_once",
+        lambda _run_id, **_: (_ for _ in ()).throw(HueEnvironmentError(404)),
     )
     with pytest.raises(HueEnvironmentError) as refused:
         client.wait_for_seal(RUN_ID)

@@ -101,7 +101,9 @@ class EnvironmentClient:
     def __repr__(self) -> str:
         return "EnvironmentClient()"
 
-    def _send(self, method: str, path: str, payload: bytes | None) -> Any:
+    def _send(
+        self, method: str, path: str, payload: bytes | None, *, timeout_seconds: float | None = None
+    ) -> Any:
         try:
             with requests.request(
                 method,
@@ -111,7 +113,7 @@ class EnvironmentClient:
                     **self._headers,
                     **({"Content-Type": "application/json"} if payload is not None else {}),
                 },
-                timeout=self._timeout,
+                timeout=self._timeout if timeout_seconds is None else timeout_seconds,
                 allow_redirects=False,
                 stream=True,
             ) as response:
@@ -153,6 +155,10 @@ class EnvironmentClient:
                 )
         raise AssertionError("Unreachable")
 
+    def _request_once(self, method: str, path: str, *, timeout_seconds: float) -> Any:
+        """Make one bounded request without retries, for a deadline-bound seal read."""
+        return self._send(method, path, None, timeout_seconds=timeout_seconds)
+
     def create_run(
         self,
         *,
@@ -193,9 +199,19 @@ class EnvironmentClient:
 
     def get_run(self, run_id: str) -> RunState:
         run = self._request("GET", f"/environment-runs/{uuid(run_id)}")
+        return self._run_state(run)
+
+    @staticmethod
+    def _run_state(run: Any) -> RunState:
         state: dict[str, Any] = {"validity": "not_assessed", "coverageGap": None}
         state.update(run)
         return cast(RunState, state)
+
+    def _get_run_once(self, run_id: str, *, timeout_seconds: float) -> RunState:
+        run = self._request_once(
+            "GET", f"/environment-runs/{uuid(run_id)}", timeout_seconds=timeout_seconds
+        )
+        return self._run_state(run)
 
     def record_coverage_gap(
         self,
@@ -287,7 +303,10 @@ class EnvironmentClient:
             time.sleep(wait)
         while True:
             try:
-                state = self.get_run(run_id)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise HueEnvironmentError()
+                state = self._get_run_once(run_id, timeout_seconds=min(self._timeout, remaining))
                 if state["status"] != "open":
                     return state
             except HueEnvironmentError as error:

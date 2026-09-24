@@ -238,8 +238,16 @@ try {
   await new Promise((resolve) =>
     setTimeout(resolve, Math.min(10_000, Math.max(0, graceEnd - Date.now()))),
   );
-  while ((await environmentClient.getRun(run.id)).status === "open")
+  const sealDeadline = Date.now() + 30_000;
+  let sealed = false;
+  while (Date.now() < sealDeadline) {
+    if ((await environmentClient.getRun(run.id)).status !== "open") {
+      sealed = true;
+      break;
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (!sealed) throw new Error("World was not sealed after its completion grace");
 }
 ```
 
