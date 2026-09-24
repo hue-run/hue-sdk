@@ -194,6 +194,35 @@ export interface EnvironmentDefinition {
 /** The extendable legacy name remains V1. Publication and runs select their
  * explicit version; provider context is validated by the authoritative server. */
 export type EnvironmentDefinitionV1 = EnvironmentDefinition;
+/** Gmail mailbox carrier holding messages and drafts in the simplified shape Hue's
+ * `hue.gmail.*` actions read. */
+export interface GmailMailboxConfigurationV1 {
+  /** Gmail mailbox configuration discriminator. */
+  kind: "gmail_mailbox/v1";
+  /** Collection containing synthetic messages. */
+  messagesCollection: string;
+  /** Collection containing synthetic drafts. */
+  draftsCollection: string;
+  /** Synthetic mailbox address. */
+  mailboxAddress: string;
+}
+/** Gmail mailbox carrier served by Hue's simulation gateway: messages, drafts and labels in the
+ * entity shapes the Gmail mirrors serve, with threads derived from each message's `threadId`. A
+ * definition whose provider instances all use it may publish with no actions. */
+export interface GmailMailboxConfigurationV2 {
+  /** Gmail mailbox configuration discriminator. */
+  kind: "gmail_mailbox/v2";
+  /** Collection containing synthetic messages. */
+  messagesCollection: string;
+  /** Collection containing synthetic drafts, each naming a `DRAFT`-labelled message. */
+  draftsCollection: string;
+  /** Collection containing synthetic labels. */
+  labelsCollection: string;
+  /** Synthetic mailbox address; Hue accepts only `owner@example.test`, in any letter case. */
+  mailboxAddress: string;
+}
+/** Either Gmail mailbox carrier, discriminated by `kind`; Hue validates both at publication. */
+export type GmailMailboxConfiguration = GmailMailboxConfigurationV1 | GmailMailboxConfigurationV2;
 /** One synthetic Gmail principal and its world-state collection bindings. */
 export interface GmailProviderInstance {
   /** Stable instance key referenced by attempt provider selection. */
@@ -203,16 +232,7 @@ export interface GmailProviderInstance {
   /** Synthetic principal UUID, canonicalized to lowercase by Hue. */
   syntheticPrincipalId: string;
   /** Versioned mapping from Gmail concepts to authored-world collections. */
-  configuration: {
-    /** Gmail mailbox configuration discriminator. */
-    kind: "gmail_mailbox/v1";
-    /** Collection containing synthetic messages. */
-    messagesCollection: string;
-    /** Collection containing synthetic drafts. */
-    draftsCollection: string;
-    /** Synthetic mailbox address. */
-    mailboxAddress: string;
-  };
+  configuration: GmailMailboxConfiguration;
 }
 /** V2 authored world with immutable provider-instance bindings. */
 export interface EnvironmentDefinitionV2 extends Omit<EnvironmentDefinition, "schemaVersion"> {

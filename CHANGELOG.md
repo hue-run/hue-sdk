@@ -10,8 +10,20 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Breaking
+
+- `GmailProviderInstance.configuration` is now `GmailMailboxConfiguration`, a union discriminated
+  by `kind`, instead of the `gmail_mailbox/v1` object alone. The change is type-only, with no
+  runtime or wire effect, but code that assigns a read-back `configuration`, or its `kind`, to the
+  old `gmail_mailbox/v1` type, or that checks `kind` exhaustively, no longer compiles. Migration:
+  narrow on `configuration.kind` before treating a value as `GmailMailboxConfigurationV1` (the
+  exported name of the old shape), and handle `gmail_mailbox/v2` in exhaustive checks.
+
 #### Added
 
+- `gmail_mailbox/v2` Gmail provider instances. `GmailMailboxConfigurationV2` adds
+  `labelsCollection`, so `publishVersion` and `runSimulation` author worlds on that carrier
+  without a cast and `getVersion` reads `labelsCollection` back.
 - `runSimulation`, `runLocalAgent` and `runEnvironmentTarget` wait up to about 40 seconds for a
   gateway world to seal after its completion grace before the execution completes.
 - `isTransientEnvironmentError` classifies retryable World API failures for bounded polling.
