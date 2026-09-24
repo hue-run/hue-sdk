@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
+  shortened to 7 characters); the eval set is already shown on the run page. Previously the name
+  repeated the eval set name in a `·`-separated string.
+
 ### [0.7.0] - 2026-09-23
 
 #### Breaking
