@@ -342,6 +342,92 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("tool records the Hue provider and surface and drops blank or invalid labels", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "mcp-tool-surface",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.tool("labeled", {}, () => "ok", {
+        mcp: { name: "gmail", provider: "google.gmail", surface: "google.gmail/mcp" },
+      });
+      await hue.tool("blank", {}, () => "ok", {
+        mcp: { name: "gmail", provider: " ", surface: "" },
+      });
+      await hue.tool("invalid", {}, () => "ok", {
+        mcp: {
+          name: "gmail",
+          provider: "google\u0000gmail",
+          surface: "\ud800",
+          version: 3 as unknown as string,
+        },
+      });
+      await hue.tool("oversized", {}, () => "ok", {
+        mcp: { provider: "p".repeat(257), surface: "s".repeat(256) },
+      });
+      const result = await hue.flushSafe();
+      expect(result.report.instrumentationFailures).toBe(6);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const span = (name: string) =>
+        spans.find((record) => record.name === `execute_tool ${name}`)!;
+      expect(attr(span("labeled"), "hue.mcp.provider")?.stringValue).toBe("google.gmail");
+      expect(attr(span("labeled"), "hue.mcp.surface")?.stringValue).toBe("google.gmail/mcp");
+      expect(attr(span("labeled"), "mcp.server.name")?.stringValue).toBe("gmail");
+      for (const name of ["blank", "invalid"]) {
+        expect(attr(span(name), "mcp.server.name")?.stringValue).toBe("gmail");
+        expect(attr(span(name), "mcp.server.version")).toBeUndefined();
+        expect(attr(span(name), "hue.mcp.provider")).toBeUndefined();
+        expect(attr(span(name), "hue.mcp.surface")).toBeUndefined();
+      }
+      expect(attr(span("oversized"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("oversized"), "hue.mcp.surface")?.stringValue).toBe("s".repeat(256));
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+  test("tool source labels use UTF-16 length like Python and Fern", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "mcp-tool-source-unicode",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const accepted = "😀".repeat(128); // 256 UTF-16 code units: the inclusive limit.
+    const rejected = "😀".repeat(129);
+    try {
+      await hue.tool("accepted", {}, () => "ok", {
+        mcp: { provider: accepted, surface: accepted },
+      });
+      await hue.tool("rejected", {}, () => "ok", {
+        mcp: { provider: rejected, surface: rejected },
+      });
+      await hue.tool("nul", {}, () => "ok", {
+        mcp: { provider: "\u0000bad", surface: "\u0000bad" },
+      });
+      expect((await hue.flushSafe()).report.instrumentationFailures).toBe(4);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const span = (name: string) =>
+        spans.find((record) => record.name === `execute_tool ${name}`)!;
+      expect(attr(span("accepted"), "hue.mcp.provider")?.stringValue).toBe(accepted);
+      expect(attr(span("accepted"), "hue.mcp.surface")?.stringValue).toBe(accepted);
+      expect(attr(span("rejected"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("rejected"), "hue.mcp.surface")).toBeUndefined();
+      expect(attr(span("nul"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("nul"), "hue.mcp.surface")).toBeUndefined();
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({

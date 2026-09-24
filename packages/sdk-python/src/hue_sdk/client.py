@@ -45,8 +45,18 @@ _MISSING = object()
 
 
 def _is_label(value: Any) -> bool:
-    """A non-blank string of at most 256 characters, matching TypeScript's ``isLabel``."""
+    """A non-blank string of at most 256 characters, matching existing label behavior."""
     return type(value) is str and bool(value.strip()) and len(value) <= 256
+
+
+def _is_source_label(value: Any) -> bool:
+    """A source label that is UTF-16 bounded and safe to export."""
+    if type(value) is not str or not value.strip() or "\x00" in value:
+        return False
+    try:
+        return len(value.encode("utf-16-le")) // 2 <= 256 and value.encode("utf-8") is not None
+    except UnicodeEncodeError:
+        return False
 
 
 class ProjectValidationError(RuntimeError):
@@ -589,14 +599,16 @@ class Hue:
             attributes["gen_ai.tool.call.id"] = self._metadata_string(call_id, "unknown")
         if mcp is not None:
             if isinstance(mcp, Mapping):
-                for key, field in (
-                    ("mcp.server.name", "name"),
-                    ("mcp.server.version", "version"),
+                for key, field, valid in (
+                    ("mcp.server.name", "name", _is_label),
+                    ("mcp.server.version", "version", _is_label),
+                    ("hue.mcp.provider", "provider", _is_source_label),
+                    ("hue.mcp.surface", "surface", _is_source_label),
                 ):
                     value = mcp.get(field)
                     if value is None:
                         continue
-                    if _is_label(value):
+                    if valid(value):
                         attributes[key] = value
                     elif self._active:
                         self._record_issue()

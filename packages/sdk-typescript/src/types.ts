@@ -167,14 +167,19 @@ export interface SpanOptions {
 }
 
 /**
- * MCP `initialize` `serverInfo` for {@link HueClient.tool}. Pass
- * `client.getServerVersion()` after connect; any MCP server works.
+ * MCP `initialize` `serverInfo` for {@link HueClient.tool}, plus the Hue provider and surface
+ * when the tool came from one. Pass `client.getServerVersion()` after connect; any MCP server
+ * works.
  */
 export interface McpServerInfo {
   /** `serverInfo.name` from MCP initialize, recorded as `mcp.server.name`. */
   name?: string;
   /** `serverInfo.version` from MCP initialize, recorded as `mcp.server.version`. */
   version?: string;
+  /** Hue provider id such as `google.gmail`, recorded as `hue.mcp.provider`. */
+  provider?: string;
+  /** Hue surface such as `google.gmail/mcp`, recorded as `hue.mcp.surface`. */
+  surface?: string;
 }
 
 /**
