@@ -500,6 +500,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+### [0.5.1] - 2026-09-24
+
 #### Added
 
 - **Wire.** `span.record_file(role=..., media_type=..., sha256=..., data=..., byte_size=..., name=...)`
