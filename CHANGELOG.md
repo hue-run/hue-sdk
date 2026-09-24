@@ -64,6 +64,7 @@ refuses to publish a version without a matching entry below.
   carrying only placeholders never fails `flush()`. **Wire**
 - `liveSpans` option (default `true`; always off for setup credentials).
 
+
 ### [0.6.0] - 2026-09-23
 
 #### Added

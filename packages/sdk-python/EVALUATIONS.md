@@ -74,7 +74,7 @@ The runner saves a starting marker before requesting an execution and a running 
 
 Prepared completion/results and their stable request keys are saved before upload. A dropped acknowledgement can replay the same request without repeating the target or acknowledged scoring. A crash before the prepared checkpoint exists is uncertain; custom scorers may recompute after a crash before their results are saved. The runner stops starting new cases after a failure and lets already-running callbacks finish safely.
 
-`run_experiment` and `rescore` are synchronous entry points with bounded worker concurrency (1–16). Sync and async callbacks are supported inside their workers. From an async application, call the runner through `asyncio.to_thread`.
+`run_experiment` and `rescore` are synchronous entry points with bounded worker concurrency (1–64). Sync and async callbacks are supported inside their workers. From an async application, call the runner through `asyncio.to_thread`.
 
 ## Historical rescoring
 

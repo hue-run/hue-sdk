@@ -778,6 +778,13 @@ def test_async_target_errors_and_cancellation_stay_distinct_and_redacted(
         arguments["hue"].shutdown()
 
 
+def test_concurrency_allows_up_to_64_cases_in_flight():
+    runner_module._settings(False, 64, 2000)
+    for concurrency in (0, 65):
+        with pytest.raises(ValueError, match="concurrency must be 1–64"):
+            runner_module._settings(False, concurrency, 2000)
+
+
 @pytest.mark.parametrize("field", ["inputs", "config"])
 def test_invalid_runner_inputs_never_become_target_errors(evaluation_receiver, tmp_path, field):
     setattr(evaluation_receiver, field, {"unrepresentable_python_integer": 2**54})
