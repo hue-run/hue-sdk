@@ -8,7 +8,7 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.9.0] - 2026-09-24
 
 #### Breaking
 
@@ -33,6 +33,13 @@ refuses to publish a version without a matching entry below.
 - `runSimulation`, `runLocalAgent` and `runEnvironmentTarget` wait up to about 40 seconds for a
   gateway world to seal after its completion grace before the execution completes.
 - `isTransientEnvironmentError` classifies retryable World API failures for bounded polling.
+
+#### Changed
+
+- `resolveScenarioPins`, and so `hue eval --case`, pin every scorer version a published Scenario
+  lists in `publication.scorerVersionIds` (its outcome scorer first), falling back to the single
+  `scorerVersionId` of older publications; extra `--scorer` pins still merge in.
+  `CaseConversionPublication` gains the optional `scorerVersionIds`.
 
 #### Fixed
 
@@ -75,10 +82,7 @@ refuses to publish a version without a matching entry below.
 
 #### Changed
 
-- `resolveScenarioPins`, and so `hue eval --case`, pin every scorer version a published Scenario
-  lists in `publication.scorerVersionIds` (its outcome scorer first), falling back to the single
-  `scorerVersionId` of older publications; extra `--scorer` pins still merge in.
-  `CaseConversionPublication` gains the optional `scorerVersionIds`.
+- Correction: multi-pin `resolveScenarioPins` (`publication.scorerVersionIds`) shipped after 0.8.1; it is documented under 0.9.0.
 - `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
   shortened to 7 characters); the eval set is already shown on the run page. Previously the name
   repeated the eval set name in a `·`-separated string.
@@ -526,19 +530,23 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.6.0] - 2026-09-24
 
 #### Added
 
 - `HueEnvironmentError.diagnostic` exposes a validated `X-Hue-Diagnostic` code from World API
   refusals. This is new after Python 0.5.1, which does not include it.
+- **Wire.** `record_provider_tool_calls` records provider-executed OpenAI and Anthropic tool
+  activity as child spans, with bounded diagnostics and content capture matching TypeScript.
+- `EnvironmentClient.wait_for_seal` waits through a gateway world's completion grace with bounded,
+  retry-aware status reads before returning the sealed run and raises
+  `EnvironmentSealTimeoutError` when the bounded wait expires.
 
 ### [0.5.1] - 2026-09-24
 
 #### Added
 
-- `EnvironmentClient.wait_for_seal` waits through a world's completion grace before the execution
-  completes and raises `EnvironmentSealTimeoutError` when the bounded wait expires.
+- Correction: `wait_for_seal` and `EnvironmentSealTimeoutError` shipped after Python 0.5.1; they are documented under 0.6.0.
 - **Wire.** `span.record_file(role=..., media_type=..., sha256=..., data=..., byte_size=..., name=...)`
   adds a `hue.file` event with the same attributes as TypeScript `hue.recordFile`.
 - **Wire.** `hue.model(..., system_instructions=..., tools=...)` and
