@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import { access, mkdir, writeFile } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -26,7 +27,16 @@ import { TargetResult } from "../evals/types.js";
 import { CheckpointStore } from "../evals/checkpoint.js";
 import { digest } from "../evals/json.js";
 import { runLocalAgent } from "../evals/local-worker.js";
-import { runExperiment, TargetCancelledError, type RunnerReport } from "../evals/runner.js";
+import {
+  describeTelemetryIssues,
+  runExperiment,
+  TargetCancelledError,
+  TELEMETRY_NOT_ACCEPTED,
+  telemetryIssueCounts,
+  type RunnerReport,
+  type TelemetryNotAccepted,
+} from "../evals/runner.js";
+import { HueExportError } from "../transport.js";
 import {
   matchByName,
   parseScenarioSelector,
@@ -317,6 +327,9 @@ interface RunningCommand {
   settled: Promise<void>;
 }
 const runningCommands = new Set<RunningCommand>();
+/** Owner-only MCP configuration directories not yet disposed; a forced exit removes them, since
+ * each holds a world token. */
+const mcpConfigDirectories = new Set<string>();
 
 /** Stops every agent command still running and resolves once each has settled. */
 async function settleCommands(): Promise<void> {
@@ -367,11 +380,15 @@ export function spawnAgentCommand(
     let poll: NodeJS.Timeout | undefined;
     let watch: NodeJS.Timeout | undefined;
     let closed: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-    /** Records a vanished group; any other failure to signal it is reported. */
+    let warned = false;
+    /** Records a vanished group; any other failure to signal it is reported, once. */
     const gone = (error: unknown, signal: NodeJS.Signals | 0) => {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ESRCH") groupGone = true;
-      else warn(`could not signal the agent command's process group (${signal}, ${code})`);
+      else if (!warned) {
+        warned = true;
+        warn(`could not signal the agent command's process group (${signal}, ${code})`);
+      }
     };
     /** Whether anything the command started is left: its whole group, or the child alone. */
     const running = () => {
@@ -440,6 +457,8 @@ export function spawnAgentCommand(
     }, options.timeoutSeconds * 1000);
     const cancel = () => stop();
     options.signal?.addEventListener("abort", cancel, { once: true });
+    // An abort that landed before the listener existed still stops the command.
+    if (options.signal?.aborted) stop();
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.byteLength;
       if (size > 4 * 1024 * 1024) {
@@ -540,6 +559,8 @@ function commandAdapter(
       HUE_CASE_KEY: context.item.externalKey,
     };
     const configFile = context.world ? await writeMcpConfig(context.world) : undefined;
+    const configDirectory = configFile ? dirname(configFile.path) : undefined;
+    if (configDirectory) mcpConfigDirectories.add(configDirectory);
     try {
       const env = context.world
         ? {
@@ -568,6 +589,7 @@ function commandAdapter(
       );
     } finally {
       await configFile?.dispose();
+      if (configDirectory) mcpConfigDirectories.delete(configDirectory);
     }
   };
 }
@@ -685,6 +707,9 @@ function redact(message: string, secrets: string[]): string {
 function explain(error: unknown): string {
   if (error instanceof HueApiError && (error.status === 401 || error.status === 403))
     return `${error.message}. Check that HUE_API_KEY is a "Read and write" project key for this origin.`;
+  // The error's own message points at an in-memory report the user cannot reach.
+  if (error instanceof HueExportError)
+    return `Hue could not accept all telemetry (${describeTelemetryIssues(telemetryIssueCounts(error))})`;
   if (error instanceof Error) {
     const causes: string[] = [];
     let cause: unknown = error.cause;
@@ -871,19 +896,36 @@ function toJson(
   runUrl: string,
   baseline?: { experimentId: string; comparison: VerdictComparison },
   extra: Record<string, JsonValue> = {},
+  telemetry: TelemetryNotAccepted[] = [],
 ) {
+  const notAccepted = new Map(telemetry.map((entry) => [entry.caseId, entry.issues]));
   return {
     experimentId: verdicts.experimentId,
     runId: verdicts.runId,
     runUrl,
     complete: verdicts.results.complete,
-    cases: verdicts.summary.cases,
+    cases: verdicts.summary.cases.map((item) =>
+      notAccepted.has(item.caseId)
+        ? {
+            ...item,
+            telemetry: { code: TELEMETRY_NOT_ACCEPTED, issues: notAccepted.get(item.caseId)! },
+          }
+        : item,
+    ),
     totals: verdicts.summary.totals,
     ...extra,
     ...(baseline
       ? { baseline: { experimentId: baseline.experimentId, ...baseline.comparison } }
       : {}),
   };
+}
+
+/** Says which cases failed because Hue did not accept their telemetry, with sanitized counts. */
+function reportTelemetry(telemetry: TelemetryNotAccepted[] | undefined, output: Output) {
+  for (const entry of telemetry ?? [])
+    output.error(
+      `[${entry.caseKey}] telemetry not accepted, case failed: ${describeTelemetryIssues(entry.issues)}`,
+    );
 }
 
 /** Waits for Hue's verdicts, prints them (table or JSON, with the optional baseline) and returns the exit code. */
@@ -895,6 +937,7 @@ async function reportVerdicts(
     subjectIds: string[];
     runUrl: string;
     extra?: Record<string, JsonValue>;
+    telemetryNotAccepted?: TelemetryNotAccepted[];
   },
   baselineId: string | undefined,
   output: Output,
@@ -926,7 +969,9 @@ async function reportVerdicts(
     };
   }
   if (values.json) {
-    process.stdout.write(`${JSON.stringify(toJson(verdicts, run.runUrl, baseline, run.extra))}\n`);
+    process.stdout.write(
+      `${JSON.stringify(toJson(verdicts, run.runUrl, baseline, run.extra, run.telemetryNotAccepted))}\n`,
+    );
   } else {
     renderTable(verdicts, output);
     if (baseline) renderComparison(baseline.experimentId, baseline.comparison, output);
@@ -1015,6 +1060,8 @@ async function runOnce(
     runName,
     persistResultContent: values.content,
     traceEvidence: { mode: "required" },
+    // A case whose telemetry Hue did not accept fails instead of staying started.
+    traceNotAccepted: "fail_case",
     concurrency,
     agentRevision: agent.revision,
     // The CLI adapts to whatever the deployment serves; the library warning is for code that
@@ -1047,6 +1094,7 @@ async function runOnce(
         output.log(`[${label}] attempt prepared: ${event.status}`);
     },
   });
+  reportTelemetry(report.telemetryNotAccepted, output);
   return reportVerdicts(
     client,
     values,
@@ -1054,6 +1102,7 @@ async function runOnce(
       experimentId: report.experimentId,
       subjectIds: report.subjectIds,
       runUrl: runUrl || report.runUrl,
+      telemetryNotAccepted: report.telemetryNotAccepted,
     },
     baselineId,
     output,
@@ -1147,6 +1196,7 @@ async function runDirect(
       checkpointDirectory: join(store.directory, experimentId),
       persistResultContent: values.content,
       traceEvidence: { mode: "required" },
+      traceNotAccepted: "fail_case",
       concurrency: run.concurrency,
       scorers: [],
       deferUnboundLocalScorers: true,
@@ -1183,6 +1233,7 @@ async function runDirect(
     output.log(
       `${report.deferredScorerVersionIds.length} evaluator version${report.deferredScorerVersionIds.length === 1 ? "" : "s"} left to Hue's executor`,
     );
+  reportTelemetry(report.telemetryNotAccepted, output);
   return reportVerdicts(
     client,
     values,
@@ -1191,6 +1242,7 @@ async function runDirect(
       subjectIds: report.subjectIds,
       runUrl,
       extra: { mode: "direct", deferredScorerVersionIds: report.deferredScorerVersionIds },
+      telemetryNotAccepted: report.telemetryNotAccepted,
     },
     run.baselineId,
     output,
@@ -1247,6 +1299,7 @@ async function runWorker(
     },
     scorers: [],
     concurrency,
+    traceNotAccepted: "fail_case",
     deprecationWarnings: false,
     signal,
     ...(maxRuns === undefined ? {} : { maxRuns }),
@@ -1268,6 +1321,7 @@ async function runWorker(
       output.log(
         `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
       );
+      reportTelemetry(report.telemetryNotAccepted, output);
       if (!current) return;
       output.log("Waiting for Hue checks...");
       try {
@@ -1280,7 +1334,7 @@ async function runWorker(
         if (signal.aborted) return;
         if (values.json)
           process.stdout.write(
-            `${JSON.stringify(toJson(verdicts, new URL(`/experiments/${current.experimentId}`, connection.baseUrl).toString()))}\n`,
+            `${JSON.stringify(toJson(verdicts, new URL(`/experiments/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
           );
         else renderTable(verdicts, output);
       } catch (error) {
@@ -1303,16 +1357,23 @@ async function runWorker(
 export async function runEvalCommand(argv: string[]): Promise<number> {
   const secrets: string[] = [];
   const controller = new AbortController();
+  let firstInterrupt = 0;
   // The first interrupt stops the agents within their grace; a repeated one kills their process
-  // groups at once and exits, so no agent is left running with its world token.
+  // groups at once and exits, so no agent is left running with its world token. `npm run` and
+  // `npx` forward the terminal's SIGINT a moment after the terminal delivers it, so a repeat
+  // within 50 ms is the same Ctrl+C.
   const interrupt = () => {
     if (!controller.signal.aborted) {
+      firstInterrupt = performance.now();
       if (runningCommands.size)
         process.stderr.write("Stopping the agent; press Ctrl+C again to force.\n");
       controller.abort(new Error("Interrupted"));
       return;
     }
+    if (performance.now() - firstInterrupt < 50) return;
     for (const command of runningCommands) command.kill();
+    for (const directory of mcpConfigDirectories)
+      rmSync(directory, { recursive: true, force: true });
     process.stderr.write("Interrupted.\n");
     process.exit(130);
   };

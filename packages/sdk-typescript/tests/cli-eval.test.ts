@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnAgentCommand } from "../src/cli/eval.js";
+import { TargetCancelledError } from "../src/evals.js";
 import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
 
 const cli = join(import.meta.dir, "../src/setup/cli.ts");
@@ -25,6 +26,8 @@ function hueStandIn(
     frozen?: boolean;
     /** Answer creates as a deployment whose simulation gateway serves the world. */
     gateway?: boolean;
+    /** Refuse trace exports with 400, or drop their connection without an answer. */
+    traces?: "refuse" | "drop";
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -108,6 +111,8 @@ function hueStandIn(
     otlp: 0,
     frozen: [] as number[],
     completions: [] as Record<string, unknown>[],
+    /** Trace evidence each completion declared, in completion order. */
+    evidence: [] as Record<string, unknown>[],
     worldCreates: [] as Record<string, unknown>[],
     experiments: [] as Record<string, unknown>[],
     register: [] as Record<string, unknown>[],
@@ -161,6 +166,18 @@ function hueStandIn(
       if (path.startsWith("/otlp/")) {
         calls.otlp++;
         await request.arrayBuffer();
+        if (path.endsWith("/traces") && options.traces === "refuse")
+          return new Response(null, { status: 400 });
+        if (path.endsWith("/traces") && options.traces === "drop")
+          // A body that fails after the headers: the server ends the connection mid-answer.
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new Error("Dropped"));
+              },
+            }),
+            { headers: { "Content-Type": "application/x-protobuf" } },
+          );
         return new Response(new Uint8Array(), {
           headers: { "Content-Type": "application/x-protobuf" },
         });
@@ -409,6 +426,10 @@ function hueStandIn(
           ...(hasOutput ? { output: body.output } : {}),
           ...(body.error ? { error: body.error } : {}),
         });
+        calls.evidence.push({
+          traceEvidence: body.traceEvidence,
+          ...(body.omissionReason === undefined ? {} : { omissionReason: body.omissionReason }),
+        });
         execution.subjectId = subjectId;
         subjects.set(subjectId, {
           id: subjectId,
@@ -538,7 +559,7 @@ function hue(
     /** Sends SIGINT once the CLI prints a line matching this, standing in for Ctrl+C. */
     interruptOn?: RegExp;
     /** Sends SIGINT this many times, 100 ms apart, once this file exists. */
-    interruptAfter?: { file: string; times: number };
+    interruptAfter?: { file: string; times: number; gapMillis?: number };
   },
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
@@ -571,12 +592,12 @@ function hue(
       maybeInterrupt(chunk);
     });
     if (options.interruptAfter) {
-      const { file, times } = options.interruptAfter;
+      const { file, times, gapMillis = 100 } = options.interruptAfter;
       const waiting = setInterval(() => {
         if (!existsSync(file)) return;
         clearInterval(waiting);
         for (let index = 0; index < times; index++)
-          setTimeout(() => child.kill("SIGINT"), index * 100);
+          setTimeout(() => child.kill("SIGINT"), index * gapMillis);
       }, 50);
       child.on("close", () => clearInterval(waiting));
     }
@@ -653,6 +674,8 @@ setTimeout(() => {}, 60_000);
 const stubbornSource = `import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
 writeFileSync(process.env.HUE_TEST_SURVIVOR, String(process.pid));
+if (process.env.HUE_TEST_CONFIG_RECORD)
+  writeFileSync(process.env.HUE_TEST_CONFIG_RECORD, process.env.HUE_MCP_CONFIG ?? "");
 setInterval(() => {}, 1_000);
 `;
 
@@ -733,6 +756,7 @@ describe("hue eval", () => {
         ]);
         // Metadata-only by default: the completion carries no output.
         expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
+        expect(f.calls.evidence).toEqual([{ traceEvidence: "required" }]);
         expect(f.calls.completions[0]).not.toHaveProperty("output");
         expect(f.calls.otlp).toBeGreaterThan(0);
         expect(await readFile(join(cwd, ".hue", "eval", ".gitignore"), "utf8")).toBe("*\n");
@@ -1086,6 +1110,74 @@ describe("hue eval", () => {
     );
   }
 
+  for (const traces of ["refuse", "drop"] as const)
+    test(
+      `a case whose trace Hue ${traces === "refuse" ? "refuses" : "drops"} is completed as failed, with its counts`,
+      async () => {
+        const f = hueStandIn({ traces });
+        const cwd = await workspace();
+        try {
+          const run = (json: boolean) =>
+            hue(
+              [
+                "--scenario",
+                "Refund flow",
+                "--command",
+                `${process.execPath} agent-command.mjs`,
+                "--origin",
+                f.baseUrl,
+                "--wait",
+                "0",
+                "--checkpoint-dir",
+                join(cwd, json ? "json" : "text"),
+                ...(json ? ["--json"] : []),
+              ],
+              { cwd },
+            );
+          const text = await run(false);
+          expectNoSecrets(text);
+          expect(text.status).toBe(1);
+          // The case is failed, not left started: the outcome is kept and the evidence omitted.
+          expect(f.calls.completions).toEqual([
+            expect.objectContaining({ state: "error", error: { type: "TelemetryNotAccepted" } }),
+          ]);
+          expect(f.calls.evidence).toEqual([
+            {
+              traceEvidence: "omit",
+              omissionReason: expect.stringMatching(/^telemetry_not_accepted: traces /),
+            },
+          ]);
+          const issue =
+            traces === "refuse" ? "traces failed \\d+ \\(HTTP 400\\)" : "traces failed \\d+";
+          expect(text.stderr).toMatch(
+            new RegExp(
+              `\\[refund\\] telemetry not accepted, case failed: telemetry_not_accepted: ${issue}`,
+            ),
+          );
+          expect(text.stderr).not.toContain("Inspect issues and report");
+          const json = await run(true);
+          expectNoSecrets(json);
+          expect(json.status).toBe(1);
+          const [entry] = (JSON.parse(json.stdout) as { cases: Record<string, unknown>[] }).cases;
+          expect(entry).toMatchObject({
+            externalKey: "refund",
+            telemetry: {
+              code: "telemetry_not_accepted",
+              issues: [
+                traces === "refuse"
+                  ? { signal: "traces", kind: "failed", status: 400, count: expect.any(Number) }
+                  : { signal: "traces", kind: "failed", count: expect.any(Number) },
+              ],
+            },
+          });
+        } finally {
+          f.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT * 2,
+    );
+
   test(
     "a second interrupt during the stop kills the agent's whole group at once",
     async () => {
@@ -1127,6 +1219,135 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT,
   );
+
+  test(
+    "a repeated SIGINT within 50 ms is the same Ctrl+C and stops the agent gracefully",
+    async () => {
+      // `npm run` and `npx` forward the terminal's SIGINT a moment after the terminal's own.
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      let pid: number | undefined;
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-stubborn.mjs >/dev/null 2>&1; true`,
+            "--origin",
+            f.baseUrl,
+            "--wait",
+            "0",
+          ],
+          {
+            cwd,
+            env: { HUE_TEST_SURVIVOR: survivor },
+            interruptAfter: { file: survivor, times: 2, gapMillis: 5 },
+          },
+        );
+        pid = Number(await readFile(survivor, "utf8"));
+        expect(result.status).toBe(130);
+        // Not forced: the case was reported cancelled after the grace killed the agent.
+        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "cancelled" })]);
+        expect(alive(pid)).toBe(false);
+      } finally {
+        if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "a forced exit removes the MCP configuration that holds the world token",
+    async () => {
+      const f = hueStandIn({ gateway: true });
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      const record = join(cwd, "config-path.txt");
+      let pid: number | undefined;
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-stubborn.mjs >/dev/null 2>&1; true`,
+            "--origin",
+            f.baseUrl,
+            "--wait",
+            "0",
+          ],
+          {
+            cwd,
+            env: { HUE_TEST_SURVIVOR: survivor, HUE_TEST_CONFIG_RECORD: record },
+            interruptAfter: { file: survivor, times: 2 },
+          },
+        );
+        pid = Number(await readFile(survivor, "utf8"));
+        expect(result.status).toBe(130);
+        const configPath = await readFile(record, "utf8");
+        expect(configPath).toMatch(/mcp\.json$/);
+        expect(existsSync(configPath)).toBe(false);
+        expect(existsSync(join(configPath, ".."))).toBe(false);
+      } finally {
+        if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test("a signal error other than ESRCH is reported once per command", async () => {
+    const kill = process.kill.bind(process);
+    let refused = 0;
+    const killSpy = spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      // The group's probes are refused a few times before it is found gone.
+      if (pid < 0 && signal === 0 && refused < 5) {
+        refused++;
+        throw Object.assign(new Error("Operation not permitted"), { code: "EPERM" });
+      }
+      return kill(pid, signal);
+    }) as typeof process.kill);
+    const warnings: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(((chunk: string) => {
+      if (String(chunk).startsWith("Warning:")) warnings.push(String(chunk));
+      return write(chunk);
+    }) as typeof process.stderr.write);
+    try {
+      await expect(
+        spawnAgentCommand("sleep 5", { env: process.env, timeoutSeconds: 0.2 }),
+      ).rejects.toThrow("timed out");
+      expect(refused).toBe(5);
+      expect(warnings).toEqual([
+        "Warning: could not signal the agent command's process group (0, EPERM)\n",
+      ]);
+    } finally {
+      killSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test("an abort that lands before the command starts stops it at once", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const started = performance.now();
+    await expect(
+      spawnAgentCommand("sleep 5", {
+        env: process.env,
+        timeoutSeconds: 30,
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(TargetCancelledError);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
 
   test("a stop never signals the agent's group again once it has emptied", async () => {
     // The shell and its group are gone at once, but a process that left the group keeps stdout

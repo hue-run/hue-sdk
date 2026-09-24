@@ -192,6 +192,9 @@ export interface RunSimulationOptions {
         /** Bounded explanation for the omission. */
         reason: string;
       };
+  /** What a case does when required telemetry is not accepted; see
+   * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */
+  traceNotAccepted?: "stop" | "fail_case";
   /** Local scorer callbacks bound by their declared source digests. */
   localScorers?: LocalScorer[];
   /** Cases in flight, 1–64; defaults to 1. */
@@ -788,6 +791,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       checkpointDirectory: join(store.directory, `experiment-${experimentId}`),
       persistResultContent: options.persistResultContent,
       traceEvidence: options.traceEvidence,
+      ...(options.traceNotAccepted ? { traceNotAccepted: options.traceNotAccepted } : {}),
       environmentEvidence: "required",
       scorers: bindings,
       concurrency: options.concurrency,

@@ -157,6 +157,9 @@ export interface RunLocalAgentOptions {
   scorers?: LocalScorer[];
   /** Cases in flight, between 1 and 16; defaults to 1. */
   concurrency?: number;
+  /** What a case does when its telemetry is not accepted; see
+   * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */
+  traceNotAccepted?: "stop" | "fail_case";
   /** Polling interval in milliseconds, 250–60000; defaults to 2000. */
   pollIntervalMillis?: number;
   /** Stops polling cooperatively; does not cancel an active callback. */
@@ -343,6 +346,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           // Worker dispatch uses the case pin: directTarget never receives a world.
           environmentEvidence: options.directTarget ? "when_pinned" : "required",
           traceEvidence: { mode: "required" },
+          ...(options.traceNotAccepted ? { traceNotAccepted: options.traceNotAccepted } : {}),
           scorers: options.scorers,
           concurrency: options.concurrency,
           target: (inputs, context) => {

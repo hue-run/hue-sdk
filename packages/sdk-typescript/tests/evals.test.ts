@@ -508,6 +508,67 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("fail_case completes a case whose telemetry was not accepted as failed, once", async () => {
+    const f = fixture();
+    const exp = f.create();
+    let calls = 0;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "failed-evidence",
+      captureContent: false,
+    });
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory: await directory(),
+      persistResultContent: true,
+      traceEvidence: { mode: "required" as const },
+      traceNotAccepted: "fail_case" as const,
+      target: async () => {
+        // Only the first case's telemetry is refused; the other case is unaffected.
+        if (++calls === 1) f.failTelemetry();
+        return "known completed output";
+      },
+    };
+    const completions = () =>
+      f.requests
+        .filter((request) => request.path.endsWith("/complete"))
+        .map((request) => request.body);
+    try {
+      const report = await runExperiment(options);
+      expect(completions()).toEqual([
+        expect.objectContaining({
+          state: "error",
+          output: "known completed output",
+          error: {
+            type: "TelemetryNotAccepted",
+            message: expect.stringMatching(/^telemetry_not_accepted: traces failed 1 \(HTTP 401\)/),
+          },
+          traceEvidence: "omit",
+          omissionReason: expect.stringMatching(/^telemetry_not_accepted: traces failed 1/),
+        }),
+        expect.objectContaining({ state: "succeeded", traceEvidence: "required" }),
+      ]);
+      expect(completions()[1]).not.toHaveProperty("omissionReason");
+      expect(report.telemetryNotAccepted).toEqual([
+        {
+          caseId: expect.any(String),
+          caseKey: expect.any(String),
+          executionId: expect.any(String),
+          issues: [{ signal: "traces", kind: "failed", status: 401, count: 1 }],
+        },
+      ]);
+      // Resuming finds both cases completed: no target runs and nothing is completed again.
+      await runExperiment(options);
+      expect(calls).toBe(2);
+      expect(completions()).toHaveLength(2);
+    } finally {
+      await hue.shutdownSafe();
+      f.server.stop(true);
+    }
+  });
   test("every non-local and unknown scorer pin is deferred without uploading placeholders", async () => {
     const f = fixture();
     const hosted = version({

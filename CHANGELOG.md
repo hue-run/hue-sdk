@@ -10,7 +10,28 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `traceNotAccepted: "fail_case"` for `runExperiment`, `runSimulation` and `runLocalAgent`: a case
+  whose required telemetry Hue did not accept is completed as failed (error `TelemetryNotAccepted`,
+  evidence omitted with a reason starting `telemetry_not_accepted`) instead of being left started,
+  and is listed in the new `RunnerReport.telemetryNotAccepted` with sanitized issue counts. The
+  default, `"stop"`, keeps the previous behavior. Exported types `TelemetryNotAccepted` and
+  `TelemetryIssueCount`.
+
 #### Fixed
+
+- `hue eval` completes a case whose telemetry Hue did not accept as failed with
+  `telemetry_not_accepted`, prints the export issue counts for it (and adds them to the case's
+  `--json` entry), and goes on with the run. Before, the run stopped with "Hue could not accept all
+  telemetry. Inspect issues and report for sanitized counts.", pointing at a report the CLI never
+  printed, and the case's execution stayed started. Other export errors now print their counts
+  too.
+- `hue eval` treats a second SIGINT within 50 ms as the same Ctrl+C, since `npm run` and `npx`
+  forward the terminal's own a moment later; before, a single Ctrl+C under them took the forced
+  path. A forced exit now also removes the owner-only MCP configuration that holds the world
+  token, a failure to signal an agent's process group is reported once rather than on every
+  poll, and an interrupt that lands before a command starts stops it at once.
 
 - The seal wait of `runSimulation`, `runLocalAgent` and `runEnvironmentTarget` honors a status
   read's `Retry-After` when a 429 or 503 outlasts the client's retries: it waits at least that

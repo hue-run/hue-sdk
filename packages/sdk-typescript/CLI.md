@@ -388,7 +388,8 @@ numbers as values, text and category metrics as-is, an overall result per case a
 Failing cases print the scorer explanation. `--baseline <experiment id|url>` adds improvement,
 regression and unchanged counts with per-case deltas. `--json` prints one JSON document
 (`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout
-and sends progress to stderr. `--wait <seconds>` (default 300) bounds the verdict wait because
+and sends progress to stderr; a case failed for its telemetry carries
+`telemetry: { code: "telemetry_not_accepted", issues: [{ signal, kind, status?, count }] }`. `--wait <seconds>` (default 300) bounds the verdict wait because
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
 every case of the saved version; there is no case subset.
 
@@ -425,7 +426,11 @@ overrides the origin. Telemetry content capture stays off unless `--content` is 
 one-shot mode it also decides whether case outputs, error messages and explanations are persisted
 to Hue. `--worker` always persists them, because a run launched from Hue is read on its run page:
 that is `runLocalAgent()`'s contract and `--content` does not change it. Trace evidence is required
-for every case.
+for every case: when Hue does not accept a case's traces or logs, the case is completed as failed
+(error `TelemetryNotAccepted`, evidence omitted as `telemetry_not_accepted`) instead of being left
+started, the run goes on, and stderr names the case with the export issue counts, for example
+`[refund] telemetry not accepted, case failed: telemetry_not_accepted: traces failed 1 (HTTP 400)`.
+Counts carry signals, kinds, HTTP statuses and record numbers only, never content or credentials.
 Resumable checkpoints live in `.hue/eval/<agent-key>/<project id>/` (a `.gitignore` is written
 inside `.hue/eval/`); `--checkpoint-dir` overrides the root. Rerunning the same selection resumes
 an interrupted run without invoking the agent again; a different selection is refused until the
