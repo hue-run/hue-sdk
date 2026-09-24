@@ -51,6 +51,8 @@ _MAX_FILE_DATA_BYTES = 25 * 1024 * 1024
 
 def _utf8_byte_size(value: str, limit: int) -> int:
     """Count UTF-8 bytes in bounded chunks, stopping after ``limit``."""
+    if len(value) > limit:
+        return limit + 1
     total = 0
     for offset in range(0, len(value), 8192):
         total += len(value[offset : offset + 8192].encode("utf-8"))

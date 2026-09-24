@@ -675,7 +675,10 @@ export class HueClient {
             ? (() => {
                 // Buffer.byteLength measures UTF-8 without allocating the copy that hashing would
                 // otherwise require. Reject before Buffer.from/createHash can retain large input.
-                if (Buffer.byteLength(data, "utf8") > MAX_FILE_DATA_BYTES)
+                if (
+                  data.length > MAX_FILE_DATA_BYTES ||
+                  Buffer.byteLength(data, "utf8") > MAX_FILE_DATA_BYTES
+                )
                   throw new RangeError("File data exceeds Hue's 25 MiB limit");
                 return Buffer.from(data, "utf8");
               })()
