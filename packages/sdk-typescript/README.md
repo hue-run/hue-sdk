@@ -324,12 +324,18 @@ rotates. Only definitions another integration recorded can be summarized: `hueTe
 inputs and exports through Hue's attached processors gets the summary.
 Recorded messages can inline files: GenAI `blob` parts in `gen_ai.input.messages` /
 `gen_ai.output.messages` (what the AI SDK 7 adapter records for a file part) and AI SDK 6 `file`
-parts in `ai.prompt.messages`. A span whose messages exceed 256 KiB would be rejected, so before
-export Hue replaces the `content`/`data` of any such part longer than 64 KiB with the file's
-`sha256` (of the decoded bytes for base64 and `data:` URLs, of the UTF-8 text otherwise) and
+parts in `ai.prompt.messages`. A span whose messages exceed 256 KiB would be rejected, so when a
+record is queued Hue replaces the `content`/`data` of any such part longer than 64 KiB with the
+file's `sha256` (of the decoded bytes for base64 and `data:` URLs, of the UTF-8 text otherwise) and
 `size`, keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
 files are exported as recorded. The digest matches `hue.recordFile`'s `hue.file.sha256` for the same
-bytes, so a file can be recognized wherever it appears.
+bytes, so a file can be recognized wherever it appears. The replacement happens before the record is
+charged to the queue budget, so a large file does not drop its span. It is bounded: a message
+attribute longer than 8 MiB of text is left unchanged, and the default 8 MiB `maxQueueBytes` then
+drops the span. Base64 grows a file by a third, so that ceiling is an inline file of about 6 MiB.
+The same message text is hashed once per record, and a record inspects at most 16 MiB of message
+text in all; messages past that are charged as recorded. With `captureContent: false` the messages,
+which export removes, are neither hashed nor charged.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown

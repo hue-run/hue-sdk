@@ -4,6 +4,8 @@ import { MAX_BODY_BYTES } from "./config.js";
 /** Inline file content larger than this many UTF-8 bytes is exported as its digest instead. */
 export const INLINE_FILE_LIMIT = 64 * 1024;
 const MAX_INLINE_FILE_TEXT = 8 * MAX_BODY_BYTES;
+/** Message text one record inspects for inline files in all, in UTF-16 code units. */
+export const INLINE_FILE_TEXT_PER_RECORD = 2 * MAX_INLINE_FILE_TEXT;
 
 /** Message attributes whose JSON can inline files: GenAI blob parts and AI SDK 6 file parts. */
 const messageKeys = new Set([
@@ -11,6 +13,11 @@ const messageKeys = new Set([
   "gen_ai.output.messages",
   "ai.prompt.messages",
 ]);
+
+/** Whether an attribute is one of the recorded message attributes that can inline files. */
+export function isMessageKey(key: string): boolean {
+  return messageKeys.has(key);
+}
 
 /** Strict base64: alphabet characters only, padded to a multiple of four. */
 const base64 = /^[A-Za-z0-9+/]*={0,2}$/;

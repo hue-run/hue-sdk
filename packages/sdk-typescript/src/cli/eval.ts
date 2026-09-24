@@ -305,14 +305,39 @@ async function loadAdapter(file: string): Promise<LoadedAdapter> {
 
 /** Grace between the stop signal and SIGKILL for an agent command that ignores SIGTERM. */
 const COMMAND_KILL_GRACE_MS = 5_000;
+/** How long after SIGKILL a stopped command waits for its group to be gone before settling. A
+ * killed process that nobody reaps stays in the group as a zombie, which can no longer run. */
+const COMMAND_REAP_MS = 2_000;
+
+/** An agent command that has not settled: a repeated interrupt kills it at once, and the CLI
+ * keeps its signal handlers until every one has settled. */
+interface RunningCommand {
+  stop(): void;
+  kill(): void;
+  settled: Promise<void>;
+}
+const runningCommands = new Set<RunningCommand>();
+
+/** Stops every agent command still running and resolves once each has settled. */
+async function settleCommands(): Promise<void> {
+  for (const command of runningCommands) command.stop();
+  while (runningCommands.size) await Promise.all([...runningCommands].map((c) => c.settled));
+}
+
+function warn(message: string) {
+  process.stderr.write(`Warning: ${message}\n`);
+}
 
 /**
  * Spawns the agent command once in its own process group and returns its trimmed stdout. A
  * timeout or Ctrl+C stops the agent the shell started, not only the shell: a survivor would still
- * hold a world token and could write after Hue recorded the case as failed. Windows has no
- * process group to signal, so the child alone is stopped there.
+ * hold a world token and could write after Hue recorded the case as failed. The group is signalled
+ * even once the shell has exited, since a compound command's agent can outlive it, and a stopped
+ * command settles only when nothing in the group is left. Once the group is found empty it is
+ * never signalled again, since its ID could be reused. Windows has no process group to signal,
+ * so the child alone is stopped there.
  */
-function spawnAgentCommand(
+export function spawnAgentCommand(
   command: string,
   options: {
     cwd?: string;
@@ -335,31 +360,91 @@ function spawnAgentCommand(
     let size = 0;
     let timedOut = false;
     let oversized = false;
-    let escalation: NodeJS.Timeout | undefined;
-    const signalTree = (signal: NodeJS.Signals) => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
+    let stopping = false;
+    let stopped = false;
+    let settled = false;
+    let groupGone = false;
+    let poll: NodeJS.Timeout | undefined;
+    let watch: NodeJS.Timeout | undefined;
+    let closed: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    /** Records a vanished group; any other failure to signal it is reported. */
+    const gone = (error: unknown, signal: NodeJS.Signals | 0) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") groupGone = true;
+      else warn(`could not signal the agent command's process group (${signal}, ${code})`);
+    };
+    /** Whether anything the command started is left: its whole group, or the child alone. */
+    const running = () => {
+      if (!group || child.pid === undefined)
+        return child.exitCode === null && child.signalCode === null;
+      if (groupGone) return false;
       try {
-        if (group && child.pid !== undefined) process.kill(-child.pid, signal);
-        else child.kill(signal);
-      } catch {
-        // The group is already gone; nothing is left to stop.
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        gone(error, 0);
+        return !groupGone;
       }
     };
-    const stop = (signal: NodeJS.Signals) => {
-      signalTree(signal);
-      escalation ??= setTimeout(() => signalTree("SIGKILL"), COMMAND_KILL_GRACE_MS).unref();
+    const signalTree = (signal: NodeJS.Signals) => {
+      if (group && child.pid !== undefined) {
+        if (groupGone) return;
+        try {
+          process.kill(-child.pid, signal);
+        } catch (error) {
+          gone(error, signal);
+        }
+      } else if (running()) child.kill(signal);
+    };
+    /** SIGTERM, then SIGKILL for whatever is still running when the grace ends; the command
+     * settles once the group is gone. */
+    const stop = () => {
+      if (stopping || settled) return;
+      stopping = true;
+      clearTimeout(timer);
+      signalTree("SIGTERM");
+      const killAt = Date.now() + COMMAND_KILL_GRACE_MS;
+      let reapBy: number | undefined;
+      poll = setInterval(() => {
+        const left = running();
+        if (left && reapBy === undefined && Date.now() >= killAt) {
+          signalTree("SIGKILL");
+          reapBy = Date.now() + COMMAND_REAP_MS;
+        }
+        if (left && (reapBy === undefined || Date.now() < reapBy)) return;
+        clearInterval(poll);
+        if (left) warn("the agent command's process group still has members after SIGKILL");
+        stopped = true;
+        settle();
+      }, 50);
+    };
+    let markSettled = () => {};
+    const handle: RunningCommand = {
+      stop,
+      kill: () => signalTree("SIGKILL"),
+      settled: new Promise<void>((done) => (markSettled = done)),
+    };
+    runningCommands.add(handle);
+    const release = () => {
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      clearInterval(watch);
+      options.signal?.removeEventListener("abort", cancel);
+      runningCommands.delete(handle);
+      markSettled();
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      stop("SIGTERM");
+      stop();
     }, options.timeoutSeconds * 1000);
-    const cancel = () => stop("SIGTERM");
+    const cancel = () => stop();
     options.signal?.addEventListener("abort", cancel, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.byteLength;
       if (size > 4 * 1024 * 1024) {
         oversized = true;
-        stop("SIGTERM");
+        stop();
         return;
       }
       chunks.push(chunk);
@@ -368,21 +453,34 @@ function spawnAgentCommand(
     if (options.stdin !== undefined) child.stdin.end(options.stdin);
     else child.stdin.end();
     child.on("error", (error) => {
-      clearTimeout(timer);
-      clearTimeout(escalation);
-      options.signal?.removeEventListener("abort", cancel);
+      if (settled) return;
+      release();
       reject(new Error(`Unable to start the agent command: ${error.message}`));
     });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      clearTimeout(escalation);
-      options.signal?.removeEventListener("abort", cancel);
+    // From the shell's exit, notice the moment its group empties, so a later stop never signals
+    // an ID another process may have taken.
+    child.on("exit", () => {
+      if (!group || !running()) return;
+      watch = setInterval(() => {
+        if (!running()) clearInterval(watch);
+      }, 50).unref();
+    });
+    /** Settles once the shell's output closed or, after a stop, once its group is gone. A stopped
+     * command's output no longer matters, and a process that left the group may hold the pipe. */
+    const settle = () => {
+      if (settled || (stopping ? !stopped : !closed)) return;
+      release();
+      if (stopping) {
+        child.stdout.destroy();
+        child.stdin.destroy();
+      }
       if (options.signal?.aborted) return reject(new TargetCancelledError());
       if (timedOut)
         return reject(
           new Error(`The agent command timed out after ${options.timeoutSeconds} seconds`),
         );
       if (oversized) return reject(new Error("The agent command printed more than 4 MiB"));
+      const { code, signal } = closed!;
       if (code !== 0)
         return reject(
           new Error(
@@ -392,6 +490,10 @@ function spawnAgentCommand(
           ),
         );
       resolvePromise(Buffer.concat(chunks).toString("utf8").trim());
+    };
+    child.on("close", (code, signal) => {
+      closed = { code, signal };
+      settle();
     });
   });
 }
@@ -1201,9 +1303,21 @@ async function runWorker(
 export async function runEvalCommand(argv: string[]): Promise<number> {
   const secrets: string[] = [];
   const controller = new AbortController();
-  const interrupt = () => controller.abort(new Error("Interrupted"));
-  process.once("SIGINT", interrupt);
-  process.once("SIGTERM", interrupt);
+  // The first interrupt stops the agents within their grace; a repeated one kills their process
+  // groups at once and exits, so no agent is left running with its world token.
+  const interrupt = () => {
+    if (!controller.signal.aborted) {
+      if (runningCommands.size)
+        process.stderr.write("Stopping the agent; press Ctrl+C again to force.\n");
+      controller.abort(new Error("Interrupted"));
+      return;
+    }
+    for (const command of runningCommands) command.kill();
+    process.stderr.write("Interrupted.\n");
+    process.exit(130);
+  };
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
   let hue: HueClient | undefined;
   let json = false;
   try {
@@ -1303,6 +1417,9 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     process.stderr.write(`Error: ${redact(explain(error), secrets)}\n`);
     return 1;
   } finally {
+    // The handlers stay until every agent command has settled, so an interrupt during a stop's
+    // grace still reaches it.
+    await settleCommands();
     process.removeListener("SIGINT", interrupt);
     process.removeListener("SIGTERM", interrupt);
     if (hue) await hue.shutdownSafe({ timeoutMillis: 5000 });
