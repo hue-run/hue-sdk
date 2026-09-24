@@ -141,7 +141,10 @@ creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and res
 fourth argument `{ callId }` records the provider's tool call id as `gen_ai.tool.call.id`. When the
 tool came from an MCP server, pass `{ mcp: client.getServerVersion() }` (the MCP `initialize`
 `serverInfo`) to record `mcp.server.name` and `mcp.server.version` so a generic verb such as
-`get_thread` is attributed to that server. Content
+`get_thread` is attributed to that server. When the server is a Hue surface, `mcp.provider` and
+`mcp.surface` (for example `google.gmail` and `google.gmail/mcp`) record `hue.mcp.provider` and
+`hue.mcp.surface`. A blank, over-256-character or otherwise invalid label is omitted and counted as
+an instrumentation failure; the tool still runs. Content
 helpers (`setInput`, `setOutput`, `tool` arguments and results, `recordMessages`,
 `SpanOptions.input`) accept any value and encode plain JSON data (`JsonValue`) at runtime; a value
 that is not JSON, such as a `Date` or a class instance, is omitted with an instrumentation failure
@@ -215,6 +218,15 @@ has been verified. Other OTel
 instrumentations can use `hue.tracer` directly or explicitly attach the processors
 below. Instrumentations that only use a global provider need your application's
 normal OTel setup; Hue does not silently replace it.
+
+Provider-executed tools, such as OpenAI hosted MCP (`openai.tools.mcp`), appear as
+`execute_tool mcp.<name>` spans with `gen_ai.tool.type` `extension`. The server is named only
+by `serverLabel` inside the recorded result, so before export the TypeScript SDK copies it to
+`mcp.server.name`, and a result with an MCP `error` sets ERROR status and `error.type`
+`mcp_error`. Metadata-only export keeps these two attributes while stripping arguments and
+results. The label can only be read when AI SDK recorded the result: `hueTelemetry(hue)` with
+`captureContent: false` records none, whereas an application whose AI SDK integration records
+outputs and exports through Hue's attached processors keeps the label.
 
 ## Privacy and content
 
