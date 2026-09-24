@@ -13,8 +13,10 @@ OpenTelemetry exporters; it does not fabricate the exported bytes.
 `hosted-tool-calls.json` is synthetic: an OpenAI Responses request/response pair with a hosted MCP
 server (`mcp_list_tools`, a successful and a failed `mcp_call`), built-in tool calls and an
 approval request, and an Anthropic Messages pair with `server_tool_use` and `mcp_tool_use` blocks
-and their results, including an error. Credentials are placeholders. Both SDK suites record it
-through their hosted-call recorder and assert the same spans.
+and their results, including an error. Credentials are placeholders. The Python suite records this
+fixture through its hosted-call recorder; the TypeScript suite keeps it as shared fixture material
+while exercising its parser limits directly.
+
 # Tool-definition digest fixture
 
 `tool-definitions.json` is synthetic: a hosted MCP provider tool with placeholder credentials,

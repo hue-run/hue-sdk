@@ -27,6 +27,12 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from opentelemetry.util.types import AttributeValue
 
 from ._otel_compat import encode_logs
+from ._provider_tools import (
+    ABSENT,
+    hosted_server_addresses,
+    hosted_tool_activity,
+    hosted_tool_provider,
+)
 from ._version import __version__
 from .processors import HUE_TRACER_SCOPE, BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
@@ -62,8 +68,13 @@ def _utf8_byte_size(value: str, limit: int) -> int:
 
 
 def _is_label(value: Any) -> bool:
-    """A non-blank string of at most 256 characters, matching existing label behavior."""
-    return type(value) is str and bool(value.strip()) and len(value) <= 256
+    """A non-blank string of at most 256 UTF-16 code units, matching TypeScript's ``isLabel``."""
+    if type(value) is not str or not value.strip() or "\x00" in value:
+        return False
+    try:
+        return len(value.encode("utf-16-le")) // 2 <= 256
+    except UnicodeEncodeError:
+        return False
 
 
 def _is_source_label(value: Any) -> bool:
@@ -194,6 +205,113 @@ class HueSpan:
         self._client._instrument(
             lambda: self.otel_span.add_event("exception", {"exception.type": error_type})
         )
+
+    def record_provider_tool_calls(
+        self,
+        response: Any,
+        *,
+        provider: str | None = None,
+        request: Any = None,
+        servers: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Record the tools the provider executed itself while producing ``response``.
+
+        No ``hue.tool()`` block saw them: OpenAI Responses ``mcp_call``, ``web_search_call``,
+        ``file_search_call`` and ``code_interpreter_call`` items, and Anthropic Messages
+        ``mcp_tool_use`` / ``server_tool_use`` blocks with their result blocks. Each becomes an
+        ``execute_tool {name}`` child span of this span with ``gen_ai.tool.type`` ``extension``
+        and ``gen_ai.tool.call.id``; MCP calls add ``mcp.server.name`` (the provider's label, or
+        the ``servers`` entry for it: ``name``, ``version``, ``provider``, ``surface``). Arguments
+        and results follow ``capture_content``; a failed call carries ``error.type`` and ERROR
+        status. An OpenAI ``mcp_list_tools`` item becomes a ``tools/list`` child span carrying
+        that server's ``gen_ai.tool.definitions``. Call it on the ``model()`` span so ``provider``
+        (``openai`` or ``anthropic``) defaults to that block's provider; pass the ``request`` to
+        record each server's host as ``server.address`` (only server URLs are read). SDK response
+        objects are read through ``model_dump()``. The spans have no duration of their own: the
+        provider ran the tools inside the model request. Unreadable items are skipped and
+        counted; nothing is raised.
+        """
+        if not self._client._active:
+            return
+        self._client._instrument(
+            lambda: self._record_provider_tool_calls(response, provider, request, servers)
+        )
+
+    def _record_provider_tool_calls(
+        self,
+        response: Any,
+        provider: str | None,
+        request: Any,
+        servers: Mapping[str, Mapping[str, Any]] | None,
+    ) -> None:
+        named = hosted_tool_provider(
+            provider
+            if provider is not None
+            else self._record_attributes.get("gen_ai.provider.name")
+        )
+        if named is None:
+            raise ValueError("Unknown provider for hosted tool calls.")
+        addresses = hosted_server_addresses(named, request)
+        activity = hosted_tool_activity(named, response, self._client.capture_content)
+        self._client._record_issues(activity.skipped)
+        parent = trace.set_span_in_context(self.otel_span)
+
+        def server(label: str | None) -> dict[str, AttributeValue]:
+            attributes: dict[str, AttributeValue] = {}
+            if label is None:
+                return attributes
+            info = servers.get(label) if isinstance(servers, Mapping) else None
+            info = info if isinstance(info, Mapping) else {}
+            server_name = info.get("name") if info.get("name") is not None else label
+            for key, value in (
+                ("mcp.server.name", server_name),
+                ("mcp.server.version", info.get("version")),
+                ("hue.mcp.provider", info.get("provider")),
+                ("hue.mcp.surface", info.get("surface")),
+            ):
+                if value is None:
+                    continue
+                if _is_label(value):
+                    attributes[key] = value
+                else:
+                    self._client._record_issue()
+            address = addresses.get(label)
+            if address is not None:
+                attributes["server.address"] = address
+            return attributes
+
+        for call in activity.calls:
+            attributes: dict[str, AttributeValue] = {
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": call.name,
+                "gen_ai.tool.type": "extension",
+            }
+            if call.call_id is not None:
+                attributes["gen_ai.tool.call.id"] = call.call_id
+            attributes.update(server(call.server))
+            with self._client.span(
+                f"execute_tool {call.name}",
+                attributes=attributes,
+                parent_context=parent,
+                _category="tool",
+            ) as child:
+                if call.arguments is not ABSENT:
+                    child.set_input(call.arguments)
+                if call.result is not ABSENT:
+                    child.set_output(call.result)
+                if call.error_type is not None:
+                    child.set_attribute("error.type", call.error_type)
+                    child.otel_span.set_status(Status(StatusCode.ERROR))
+        for listing in activity.listings:
+            with self._client.span(
+                "tools/list",
+                attributes={"mcp.method.name": "tools/list", **server(listing.server)},
+                parent_context=parent,
+            ) as child:
+                child._set_content("gen_ai.tool.definitions", listing.definitions)
+                if listing.error_type is not None:
+                    child.set_attribute("error.type", listing.error_type)
+                    child.otel_span.set_status(Status(StatusCode.ERROR))
 
     def record_file(
         self,
@@ -524,11 +642,16 @@ class Hue:
     def _active(self) -> bool:
         return self.enabled and not self._closed and self._pid == os.getpid()
 
-    def _record_issue(self) -> None:
+    def _record_issues(self, count: int = 1) -> None:
         if self._pid != os.getpid():
             return
+        if count < 1:
+            return
         with self._issues_lock:
-            self._issues += 1
+            self._issues += count
+
+    def _record_issue(self) -> None:
+        self._record_issues()
 
     def _instrument(self, action: Callable[[], Any]) -> None:
         if not self._active:
