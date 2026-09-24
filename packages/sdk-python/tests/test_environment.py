@@ -248,7 +248,7 @@ def test_wait_for_seal_retries_transient_reads(monkeypatch):
     client = EnvironmentClient("https://app.hue.test", KEY)
     responses = iter(
         [
-            HueEnvironmentError(503),
+            HueEnvironmentError(503, retry_after=1),
             HueEnvironmentError(),
             {"status": "completed"},
         ]
@@ -261,9 +261,11 @@ def test_wait_for_seal_retries_transient_reads(monkeypatch):
         return response
 
     monkeypatch.setattr(client, "_get_run_once", lambda _run_id, **_: read(_run_id))
-    monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
+    sleeps = []
+    monkeypatch.setattr(environment_module.time, "sleep", lambda seconds: sleeps.append(seconds))
     state = client.wait_for_seal(RUN_ID)
     assert state["status"] == "completed"
+    assert sleeps[0] == 1
 
 
 def test_wait_for_seal_rejects_non_transient_read(monkeypatch):

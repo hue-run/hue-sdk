@@ -217,19 +217,13 @@ async function awaitSeal(
       const remaining = deadline - Date.now();
       if (remaining <= 0)
         throw new Error(`World ${runId} was not sealed after its completion grace`);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const run = await Promise.race([
-        client.getRun(runId),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`World ${runId} status read exceeded its seal deadline`)),
-            remaining,
-          );
-        }),
-      ]).finally(() => {
-        if (timer !== undefined) clearTimeout(timer);
-      });
-      if (run.status !== "open") return;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), remaining);
+      try {
+        if ((await client.getRun(runId, { signal: controller.signal })).status !== "open") return;
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (error) {
       if (!isTransientEnvironmentError(error) || Date.now() >= deadline) throw error;
     }

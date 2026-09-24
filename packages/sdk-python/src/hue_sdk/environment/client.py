@@ -314,6 +314,9 @@ class EnvironmentClient:
                     raise
                 if time.monotonic() >= deadline:
                     raise
+                delay = error.retry_after if error.retry_after is not None else 0.25
+                time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+                continue
             if time.monotonic() >= deadline:
                 raise HueEnvironmentError()
             time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
