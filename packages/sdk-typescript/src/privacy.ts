@@ -167,7 +167,12 @@ function hostedMcpCall(attributes: Attributes): { serverName?: string; failed: b
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
     return { failed: false };
-  const { serverLabel, error } = parsed as { serverLabel?: unknown; error?: unknown };
+  const { type, serverLabel, error } = parsed as {
+    type?: unknown;
+    serverLabel?: unknown;
+    error?: unknown;
+  };
+  if (type !== "call") return { failed: false };
   const valid =
     typeof serverLabel === "string" &&
     serverLabel.trim() !== "" &&
@@ -204,7 +209,9 @@ export function redactSpan(
         hosted.failed && span.status.code === SpanStatusCode.UNSET
           ? SpanStatusCode.ERROR
           : span.status.code,
-      ...(options.captureContent && span.status.message !== undefined
+      ...(options.captureContent &&
+      span.status.message !== undefined &&
+      !(hosted.failed && span.status.code === SpanStatusCode.UNSET)
         ? { message: String(redactValue(span.status.message, "status.message", options, budget)) }
         : {}),
     },
