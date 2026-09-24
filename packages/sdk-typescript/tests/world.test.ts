@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHue } from "../src/index.js";
 import { createEvaluationClient } from "../src/evals.js";
-import { runEnvironmentTarget } from "../src/evals/environment-target.js";
+import { caseTraceparent, runEnvironmentTarget } from "../src/evals/environment-target.js";
 import {
   agentEnvironment,
   createEnvironmentClient,
@@ -305,6 +305,19 @@ describe("environment client World API", () => {
     const wait = new HueEnvironmentError(503, 1000);
     expect(wait.retryAfterMs).toBe(1000);
   }, 10_000);
+});
+
+describe("case trace context", () => {
+  test("carries the span's own flags, so an unsampled case span is not reported as sampled", () => {
+    const ids = { traceId: "1".repeat(32), spanId: "2".repeat(16) };
+    expect(caseTraceparent(ids)).toBe(`00-${ids.traceId}-${ids.spanId}-01`);
+    expect(caseTraceparent({ ...ids, span: { spanContext: () => ({ traceFlags: 0 }) } })).toBe(
+      `00-${ids.traceId}-${ids.spanId}-00`,
+    );
+    expect(caseTraceparent({ ...ids, span: { spanContext: () => ({ traceFlags: 1 }) } })).toBe(
+      `00-${ids.traceId}-${ids.spanId}-01`,
+    );
+  });
 });
 
 describe("environment target with a gateway world", () => {

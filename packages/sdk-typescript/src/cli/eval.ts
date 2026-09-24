@@ -403,19 +403,25 @@ function parseAnswer(text: string): JsonValue | undefined {
  * the CLI unless `--allow-hue-credentials` is passed. A world created while the gateway is off
  * still gets the `hue_sim_` capability under the same `HUE_MCP_*` names.
  */
+/** The parent environment an agent child starts from: without Hue control-plane credentials
+ * unless `--allow-hue-credentials` was passed. */
+function parentEnvironment(allowHueCredentials: boolean): Record<string, string> {
+  return allowHueCredentials
+    ? Object.fromEntries(
+        Object.entries(process.env).filter(
+          (entry): entry is [string, string] => entry[1] !== undefined,
+        ),
+      )
+    : stripHueControlPlaneCredentials(process.env);
+}
+
 function commandAdapter(
   command: string,
   timeoutSeconds: number,
   options: { allowHueCredentials: boolean },
 ): EvalAdapter {
   return async (inputs, context) => {
-    const parent = options.allowHueCredentials
-      ? Object.fromEntries(
-          Object.entries(process.env).filter(
-            (entry): entry is [string, string] => entry[1] !== undefined,
-          ),
-        )
-      : stripHueControlPlaneCredentials(process.env);
+    const parent = parentEnvironment(options.allowHueCredentials);
     const identity = {
       HUE_EXECUTION_ID: context.executionId,
       HUE_ENVIRONMENT_RUN_ID: context.environmentRunId,
@@ -459,7 +465,11 @@ function commandAdapter(
  * Direct cases: the command works in a private case directory and writes its documents to
  * `output/`. Its stdout is only used as the JSON output when it wrote no result or summary file.
  */
-function directCommandAdapter(command: string, timeoutSeconds: number): DirectEvalAdapter {
+function directCommandAdapter(
+  command: string,
+  timeoutSeconds: number,
+  options: { allowHueCredentials: boolean },
+): DirectEvalAdapter {
   return async (inputs, context) => {
     const layout = await stageDirectCase(context.outputDirectory, {
       inputs,
@@ -471,7 +481,7 @@ function directCommandAdapter(command: string, timeoutSeconds: number): DirectEv
     const stdout = await spawnAgentCommand(command, {
       cwd: layout.caseDirectory,
       env: {
-        ...process.env,
+        ...parentEnvironment(options.allowHueCredentials),
         HUE_CASE_DIR: layout.caseDirectory,
         HUE_CASE_INPUTS: layout.inputsPath,
         HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
@@ -1248,7 +1258,11 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
         : commandAdapter(values.command!, timeout, {
             allowHueCredentials: values["allow-hue-credentials"],
           }),
-      direct: loaded ?? directCommandAdapter(values.command!, timeout),
+      direct:
+        loaded ??
+        directCommandAdapter(values.command!, timeout, {
+          allowHueCredentials: values["allow-hue-credentials"],
+        }),
     };
     hue = createHue({ apiKey, baseUrl, serviceName: key, captureContent: values.content });
     return values.worker

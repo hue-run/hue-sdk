@@ -189,9 +189,22 @@ function warnDeprecated(code: string, message: string) {
   process.emitWarning(message, { type: "DeprecationWarning", code });
 }
 
-/** The W3C context of the case span, sent on create so the world span parents on it. */
-export function caseTraceparent(span: { traceId: string; spanId: string }): string {
-  return `00-${span.traceId}-${span.spanId}-01`;
+/** The W3C context of the case span, sent on create so the world span parents on it. The
+ * flags are the span's own: an unsampled case span is not exported, and the World API must not
+ * be told otherwise. */
+export function caseTraceparent(span: {
+  traceId: string;
+  spanId: string;
+  span?: { spanContext?(): { traceFlags?: number } };
+}): string {
+  let flags = 1;
+  try {
+    const context = span.span?.spanContext?.();
+    if (context && typeof context.traceFlags === "number") flags = context.traceFlags;
+  } catch {
+    // A span that cannot report its context is treated as sampled, as before.
+  }
+  return `00-${span.traceId}-${span.spanId}-${(flags & 0xff).toString(16).padStart(2, "0")}`;
 }
 
 /** One authoritative environment/provider lifecycle shared by direct simulations and

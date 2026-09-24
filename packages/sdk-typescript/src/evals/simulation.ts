@@ -730,10 +730,17 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
     baseUrl: options.client.baseUrl,
   });
   try {
-    const scenarioDigest = digest(definitionIdentity(definition));
+    // The agent revision is part of the attempt: a resume after it changed would otherwise
+    // finish the remaining cases under a different revision than the completed ones.
+    const scenarioDigest = digest({
+      definition: definitionIdentity(definition),
+      agentRevision: options.agentRevision ?? null,
+    });
     let attempt = await store.read<Attempt>("active-attempt");
     if (attempt && attempt.stage !== "completed" && attempt.scenarioDigest !== scenarioDigest)
-      throw new Error("Recover the unfinished simulation before running a changed scenario");
+      throw new Error(
+        "Recover the unfinished simulation before running a changed scenario or agent revision",
+      );
     if (!attempt || attempt.stage === "completed") {
       attempt = {
         scenarioDigest,
