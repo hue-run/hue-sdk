@@ -134,7 +134,11 @@ await hue.model(
 The span is named `{operation} {model}` (`operation` defaults to `chat`) with
 `gen_ai.operation.name`, `gen_ai.request.model` and `gen_ai.provider.name`. Like `withSpan`, the
 options come after the callback and also accept `name`, `sessionId`, `userId`, `input` (recorded as
-`gen_ai.input.messages`) and `parentContext`. `setUsage` records
+`gen_ai.input.messages`) and `parentContext`. When you send system instructions or tools separately
+from the messages, pass `systemInstructions` (for example `[{ type: "text", content: instructions }]`)
+and `tools` (for example `[{ type: "function", name, description, parameters }]`); they are recorded
+as `gen_ai.system_instructions` and `gen_ai.tool.definitions` under the same `captureContent` rule
+as the messages. `recordMessages` also accepts `systemInstructions` for its log record. `setUsage` records
 nonnegative integer `gen_ai.usage.input_tokens` / `output_tokens`; other values are omitted and
 counted as instrumentation failures. Unknown usage stays absent. `hue.tool(name, input, execute)`
 creates an `execute_tool {name}` span with `gen_ai.tool.name`, arguments and result; an optional
@@ -255,6 +259,16 @@ and `mcp_servers` entries of a raw provider request or response recorded as `inp
 object keep their schemas, so a tool that takes a `headers` argument is still described. A
 definition nested more than 256 levels deep rejects its record. Sensitive `default`, `const`,
 `examples` and `enum` values under credential-named schema parameters are redacted too.
+
+With `captureContent: false`, export removes tool definitions but keeps a summary of them on the
+same record: `hue.tool.names` lists each definition's `name` (Chat Completions `function.name`,
+or the `type` of an unnamed built-in tool such as `mcp`) in order, and
+`hue.tool.definitions.sha256` is the lowercase hex SHA-256 of the
+[RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) canonical JSON of the credential-scrubbed
+definition list. The digest is the same in both SDKs and does not change when a credential
+rotates. Only definitions another integration recorded can be summarized: `hueTelemetry(hue)` with
+`captureContent: false` records none, whereas an application whose AI SDK integration records
+inputs and exports through Hue's attached processors gets the summary.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown

@@ -84,6 +84,56 @@ def test_actual_trace_log_correlation_and_content(receiver):
             assert headers["Content-Type"] == "application/x-protobuf"
 
 
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_model_records_system_instructions_and_tool_definitions(receiver, capture_content):
+    system_instructions = [{"type": "text", "content": "Answer in one sentence."}]
+    tools = [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Look up an order",
+            "parameters": {"type": "object", "properties": {"id": {"type": "string"}}},
+        }
+    ]
+    with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
+        with hue.model(
+            "synthetic-model",
+            provider="synthetic",
+            system_instructions=system_instructions,
+            tools=tools,
+        ) as model:
+            model.log_inference(
+                system_instructions=system_instructions,
+                output=[{"role": "assistant", "parts": [{"type": "text", "content": "Shipped."}]}],
+            )
+        # A value that is not JSON is omitted and counted; the block still runs.
+        with hue.model("synthetic-model", provider="synthetic", name="invalid", tools={1j}):
+            pass
+        assert hue.export_status.instrumentation_failures == (1 if capture_content else 0)
+        hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    model_attributes, invalid = spans["chat synthetic-model"], spans["invalid"]
+    assert "gen_ai.tool.definitions" not in invalid
+    if not capture_content:
+        assert "gen_ai.system_instructions" not in model_attributes
+        assert "gen_ai.tool.definitions" not in model_attributes
+        assert receiver.logs() == []
+        return
+    assert (
+        json.loads(model_attributes["gen_ai.system_instructions"].string_value)
+        == system_instructions
+    )
+    assert json.loads(model_attributes["gen_ai.tool.definitions"].string_value) == tools
+    (log,) = receiver.logs()
+    body = body_of(log)
+    assert set(body) == {"gen_ai.output.messages", "gen_ai.system_instructions"}
+    (part,) = body["gen_ai.system_instructions"].array_value.values
+    assert {entry.key: entry.value.string_value for entry in part.kvlist_value.values} == {
+        "type": "text",
+        "content": "Answer in one sentence.",
+    }
+
+
 def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.tool("get_thread", mcp={"name": "gmail", "version": "1.2.3"}):
@@ -761,6 +811,133 @@ def test_tool_definition_too_deeply_nested_to_inspect_drops_its_record(receiver)
         assert not hue.force_flush()
         assert hue.export_status.dropped_trace_records == 1
     assert receiver.spans() == []
+
+
+TOOL_DEFINITIONS_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "packages"
+    / "sdk-typescript"
+    / "tests"
+    / "fixtures"
+    / "tool-definitions.json"
+)
+
+
+def test_tool_catalog_digest_is_identical_to_typescript(receiver):
+    if not TOOL_DEFINITIONS_FIXTURE.is_file():
+        pytest.skip("TypeScript fixtures are not part of this checkout")
+    fixture = json.loads(TOOL_DEFINITIONS_FIXTURE.read_text(encoding="utf-8"))
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=False, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("fixture")
+        span.set_attribute("gen_ai.tool.definitions", json.dumps(fixture["definitions"]))
+        span.end()
+        assert hue.force_flush()
+    (exported,) = receiver.spans()
+    values = attrs(exported)
+    assert [item.string_value for item in values["hue.tool.names"].array_value.values] == (
+        fixture["names"]
+    )
+    assert values["hue.tool.definitions.sha256"].string_value == fixture["sha256"]
+    assert "gen_ai.tool.definitions" not in values
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_metadata_only_export_summarizes_the_tool_definitions_it_removes(
+    receiver, capture_content, monkeypatch
+):
+    from hue_sdk import _tool_definitions
+
+    parsed: list[int] = []
+    original = _tool_definitions._parse
+    monkeypatch.setattr(
+        _tool_definitions,
+        "_parse",
+        lambda text, **options: parsed.append(len(text)) or original(text, **options),
+    )
+    definitions = [
+        {
+            "type": "provider",
+            "name": "gmail",
+            "id": "openai.mcp",
+            "args": {"serverLabel": "gmail", "authorization": "synthetic-oauth-token"},
+        },
+        {"type": "function", "name": "fetch_page", "description": "Fetch a page"},
+    ]
+    rotated = json.loads(json.dumps(definitions))
+    rotated[0]["args"]["authorization"] = "rotated-oauth-token"
+    provider = TracerProvider()
+    tracer = provider.get_tracer("third-party")
+
+    def record(name, attributes):
+        span = tracer.start_span(name)
+        for key, value in attributes.items():
+            span.set_attribute(key, value)
+        span.end()
+
+    with Hue(receiver.url, KEY, capture_content=capture_content, tracer_provider=provider) as hue:
+        record("definitions", {"gen_ai.tool.definitions": json.dumps(definitions)})
+        # Rotated credentials, reordered keys and whitespace describe the same catalog.
+        record(
+            "rotated",
+            {"gen_ai.tool.definitions": json.dumps(rotated, indent=2, sort_keys=True)},
+        )
+        # OpenInference numbers each tool; index 10 sorts after 9.
+        record(
+            "openinference",
+            {
+                f"llm.tools.{index}.tool.json_schema": json.dumps(
+                    {"type": "function", "function": {"name": f"tool_{index}"}}
+                )
+                for index in (10, 2, 0, 9, 1, 3, 4, 5, 6, 7, 8)
+            },
+        )
+        record(
+            "ai-sdk-6", {"ai.prompt.tools": [json.dumps({"type": "function", "name": "lookup"})]}
+        )
+        record("not-json", {"gen_ai.tool.definitions": "not JSON"})
+        if not capture_content:
+            # Longer than one export request: removed without being parsed or summarized.
+            oversized = [{"type": "function", "name": "big", "description": "x" * 1_100_000}]
+            record("oversized", {"gen_ai.tool.definitions": json.dumps(oversized)})
+        record(
+            "preset",
+            {
+                "gen_ai.tool.definitions": json.dumps([{"type": "function", "name": "lookup"}]),
+                "hue.tool.names": ["application-set"],
+            },
+        )
+        assert hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+
+    def names(name):
+        value = spans[name].get("hue.tool.names")
+        return None if value is None else [item.string_value for item in value.array_value.values]
+
+    def digest(name):
+        value = spans[name].get("hue.tool.definitions.sha256")
+        return None if value is None else value.string_value
+
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert b"synthetic-oauth-token" not in telemetry
+    assert names("preset") == ["application-set"]
+    if capture_content:
+        # Content mode exports the scrubbed definitions themselves and adds no summary.
+        assert all(digest(name) is None for name in ("definitions", "openinference", "ai-sdk-6"))
+        return
+    assert names("definitions") == ["gmail", "fetch_page"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest("definitions") or "")
+    assert digest("rotated") == digest("definitions")
+    assert names("openinference") == [f"tool_{index}" for index in range(11)]
+    assert names("ai-sdk-6") == ["lookup"]
+    assert digest("not-json") is None and names("not-json") is None
+    assert digest("oversized") is None and names("oversized") is None
+    assert max(parsed) < 1_000_000
+    assert re.fullmatch(r"[0-9a-f]{64}", digest("preset") or "")
+    for values in spans.values():
+        assert not any(key.startswith("llm.tools.") for key in values)
+        assert "gen_ai.tool.definitions" not in values and "ai.prompt.tools" not in values
+    assert b"Fetch a page" not in telemetry
 
 
 @pytest.mark.parametrize("capture_content", [True, False])

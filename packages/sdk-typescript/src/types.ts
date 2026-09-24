@@ -217,6 +217,18 @@ export interface ModelOptions
   operation?: string;
   /** Span name; defaults to "{operation} {model}". */
   name?: string;
+  /**
+   * System instructions sent separately from the chat history, recorded as
+   * `gen_ai.system_instructions` when `captureContent` is true. Any JSON-encodable value, ideally
+   * GenAI semantic-convention parts such as `[{ type: "text", content: "..." }]`.
+   */
+  systemInstructions?: unknown;
+  /**
+   * Tool definitions offered to the model, recorded as `gen_ai.tool.definitions` when
+   * `captureContent` is true. Any JSON-encodable value, ideally the GenAI shape
+   * `[{ type: "function", name, description, parameters }]`.
+   */
+  tools?: unknown;
 }
 
 /** Value for AI SDK 6's `experimental_telemetry` option; AI SDK 7 uses `hueTelemetry` instead. */
