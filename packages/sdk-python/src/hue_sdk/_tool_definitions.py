@@ -5,10 +5,14 @@ Mirrors the TypeScript SDK's ``tool-definitions.ts`` so both export paths replac
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from .transport import MAX_REQUEST_BYTES
 
 REDACTED = "[redacted]"
 
@@ -34,7 +38,7 @@ _CREDENTIAL_KEYS = frozenset(
     }
 )
 # OpenInference records each tool as ``llm.tools.{index}.tool.json_schema``.
-_OPENINFERENCE_TOOL = re.compile(r"llm\.tools\.\d+\.tool\.json_schema\Z")
+_OPENINFERENCE_TOOL = re.compile(r"llm\.tools\.(\d+)\.tool\.json_schema\Z")
 _DEFINITION_KEYS = frozenset({"gen_ai.tool.definitions", "ai.prompt.tools"})
 _REQUEST_KEYS = frozenset({"input.value", "output.value", "llm.invocation_parameters"})
 _MAX_DEPTH = 256
@@ -156,11 +160,20 @@ class _Scrub:
         return result
 
 
-def _parse(text: str) -> Any:
-    """Parse JSON text, returning ``None`` for text that is not JSON."""
+def _reject_constant(_name: str) -> Any:
+    raise ValueError("NaN and Infinity are not JSON.")
+
+
+def _parse(text: str, *, strict: bool = False) -> Any:
+    """Parse JSON text, returning ``None`` for text that is not JSON.
+
+    ``strict`` also refuses the ``NaN``/``Infinity`` literals Python accepts, as JavaScript does.
+    """
     try:
+        if strict:
+            return json.loads(text, parse_constant=_reject_constant)
         return json.loads(text)
-    except json.JSONDecodeError:
+    except ValueError:
         return None
 
 
@@ -213,3 +226,163 @@ def scrub_tool_credentials(key: str, value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return type(value)(scrub(item) if isinstance(item, str) else item for item in value)
     return value
+
+
+def _is_name(value: Any) -> bool:
+    """A usable tool name: non-blank, at most 256 UTF-16 units, well-formed and free of NUL."""
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        return False
+    try:
+        return len(value.encode("utf-16-le")) <= 512
+    except UnicodeEncodeError:
+        return False
+
+
+def _tool_name(definition: Any) -> str | None:
+    """``name``, else Chat Completions' ``function.name``, else an unnamed built-in's ``type``."""
+    if not isinstance(definition, dict):
+        return None
+    function = definition.get("function")
+    nested = function.get("name") if isinstance(function, dict) else None
+    for candidate in (definition.get("name"), nested, definition.get("type")):
+        if _is_name(candidate):
+            return str(candidate)
+    return None
+
+
+def _utf8_size(value: str, limit: int) -> int:
+    """Count UTF-8 bytes without allocating an encoded copy beyond ``limit``."""
+    size = 0
+    for character in value:
+        code = ord(character)
+        size += 1 if code <= 0x7F else 2 if code <= 0x7FF else 3 if code <= 0xFFFF else 4
+        if size > limit:
+            return size
+    return size
+
+
+def _parse_definitions(texts: list[Any]) -> list[Any] | None:
+    # Admission runs on the application thread, and export removes these attributes unbudgeted:
+    # definitions longer than one export request are not parsed and get no summary.
+    if (
+        sum(_utf8_size(text, MAX_REQUEST_BYTES) for text in texts if isinstance(text, str))
+        > MAX_REQUEST_BYTES
+    ):
+        return None
+    parsed = [_parse(text, strict=True) if isinstance(text, str) else None for text in texts]
+    return parsed if all(isinstance(item, (dict, list)) for item in parsed) else None
+
+
+def _definitions_of(source: Mapping[str, Any]) -> list[Any] | None:
+    """``gen_ai.tool.definitions``, else ``ai.prompt.tools``, else ``llm.tools.{i}`` by index."""
+    if "gen_ai.tool.definitions" in source:
+        parsed = _parse_definitions([source["gen_ai.tool.definitions"]])
+        if parsed is None:
+            return None
+        return parsed[0] if isinstance(parsed[0], list) else parsed
+    if "ai.prompt.tools" in source:
+        tools = source["ai.prompt.tools"]
+        return _parse_definitions(list(tools) if isinstance(tools, (list, tuple)) else [tools])
+    indexed = []
+    for key, value in source.items():
+        match = _OPENINFERENCE_TOOL.match(key) if isinstance(key, str) else None
+        if match:
+            indexed.append((int(match.group(1)), value))
+    indexed.sort(key=lambda item: item[0])
+    return _parse_definitions([value for _, value in indexed]) if indexed else None
+
+
+def _es_number(value: float) -> str:
+    """ECMAScript ``Number.prototype.toString``, as RFC 8785 requires; non-finite is ``null``."""
+    if value != value or value in (float("inf"), float("-inf")):
+        return "null"
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    mantissa, _, exponent = repr(abs(value)).partition("e")
+    whole, _, fraction = mantissa.partition(".")
+    digits = whole + fraction
+    point = len(whole) + (int(exponent) if exponent else 0)
+    stripped = digits.lstrip("0")
+    point -= len(digits) - len(stripped)
+    digits = stripped.rstrip("0")
+    if len(digits) <= point <= 21:
+        return sign + digits + "0" * (point - len(digits))
+    if 0 < point <= 21:
+        return sign + digits[:point] + "." + digits[point:]
+    if -6 < point <= 0:
+        return sign + "0." + "0" * -point + digits
+    scale = point - 1
+    return (
+        sign
+        + digits[0]
+        + ("." + digits[1:] if len(digits) > 1 else "")
+        + "e"
+        + ("+" if scale >= 0 else "-")
+        + str(abs(scale))
+    )
+
+
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _json_string(value: str) -> str:
+    # JSON.stringify escapes unpaired surrogates; json.loads already joined the valid pairs.
+    text = json.dumps(value, ensure_ascii=False)
+    return _LONE_SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+
+
+def _canonical(value: Any) -> str:
+    """RFC 8785 (JCS) canonical JSON, byte-identical to the TypeScript SDK's."""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, int):
+        if abs(value) <= 2**53:
+            return str(value)
+        try:
+            return _es_number(float(value))
+        except OverflowError:
+            return "null"
+    if isinstance(value, float):
+        return _es_number(value)
+    if isinstance(value, str):
+        return _json_string(value)
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical(item) for item in value) + "]"
+    if isinstance(value, dict):
+        members = sorted(
+            value.items(), key=lambda item: item[0].encode("utf-16-be", "surrogatepass")
+        )
+        return (
+            "{" + ",".join(f"{_json_string(key)}:{_canonical(item)}" for key, item in members) + "}"
+        )
+    raise TypeError("Unsupported JSON value.")
+
+
+def with_tool_catalog_summary(source: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Add the metadata-only summary of the tool definitions a record carries.
+
+    ``hue.tool.names`` lists each definition's name in order, and ``hue.tool.definitions.sha256``
+    is the lowercase hex SHA-256 of the RFC 8785 canonical JSON of the credential-scrubbed
+    definition list, identical to the TypeScript SDK's. Export then removes the definitions.
+    Returns the source unchanged when it has no parseable definitions; attributes the source
+    already sets are kept.
+    """
+    try:
+        definitions = _definitions_of(source)
+        if definitions is None:
+            return source
+        scrubbed = _Scrub().node(definitions)
+        names = [name for name in map(_tool_name, definitions) if name is not None]
+        summary: dict[str, Any] = {"hue.tool.names": names} if names else {}
+        summary["hue.tool.definitions.sha256"] = hashlib.sha256(
+            _canonical(scrubbed).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        # Metadata-only export removes the definitions whether or not they can be summarized.
+        return source
+    return {**summary, **source}
