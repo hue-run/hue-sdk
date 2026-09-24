@@ -358,13 +358,28 @@ tick, the transport queues a placeholder: an ordinary OTLP span whose parent is 
 with its name, kind, start time and current attributes, an end time of 0,
 `hue.span_type = "pending_span"` and `hue.pending_parent_id` (the running span's own parent,
 omitted for a root). Hue shows the span as running and replaces the placeholder when the real span
-arrives. A placeholder whose span has ended by the time it is exported is not sent.
+arrives.
+
+The placeholder then waits for the next batch export like any queued span: up to 500 ms until the
+next tick, then the 1 s batch delay when nothing else is queued, so it usually reaches Hue within
+about 1.5 s of its span starting. It goes out sooner when a batch is already scheduled, for example
+because another span has just ended, and at once for a full batch or `flush()`. It goes out later
+while an earlier export is still in flight, because the next batch is scheduled only after that
+export finishes. A placeholder whose span has ended by the time it is exported is not sent, so a
+short span may send none and appear in Hue only when it finishes.
 
 - Only spans from the client's tracer (`withSpan`, `tool`, `model`, `hue.tracer` and the AI SDK
   adapters) and spans with a `gen_ai.`, `ai.`, `llm.` or `traceloop.` attribute at start, or a
   name starting with `ai.`, are announced. HTTP, database and other framework spans are not.
 - Placeholder attributes follow `captureContent` and `redact` like the real span. Tool
   definitions, system instructions and any value over 64 KiB are left out.
+- The transport builds each placeholder from the running span itself, so code in a wrapping
+  processor's `onEnd` never runs on it. If a wrapper forwards `onStart` to Hue but scrubs
+  attributes, renames the span or drops it in `onEnd`, a placeholder exported while the span is
+  still open is sent anyway: it has the span's original name, and its attributes as set on the span
+  with `captureContent` and `redact` applied. Scrub with `redact`, which applies to placeholders
+  too, or before the value is set on the span; do not forward `onStart` for spans you rename or
+  drop; or turn live spans off with `liveSpans: false`.
 - Placeholders are advisory. They are queued only while the queue is under a quarter of its
   record and byte budgets, and skipped silently otherwise. While queued they count in
   `pendingSpans` and `pendingBytes`, but never as accepted, rejected, failed or dropped records.
