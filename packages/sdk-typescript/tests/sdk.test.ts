@@ -617,7 +617,6 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
-<<<<<<< HEAD
   test.each([true, false])(
     "recordFile links a file by content hash without exporting its bytes (captureContent=%p)",
     async (captureContent) => {
