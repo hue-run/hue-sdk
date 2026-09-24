@@ -642,6 +642,127 @@ def test_content_prefixes_list_every_recognized_key_identically_to_typescript():
     assert tuple(re.findall(r'"([^"]+)"', block.group(1))) == CONTENT_PREFIXES
 
 
+def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
+    hosted_mcp = {
+        "type": "mcp",
+        "server_label": "gmail",
+        "server_url": "https://mcp.example.test/gmail",
+        "authorization": "synthetic-oauth-token",
+        "headers": {"X-Api-Key": "synthetic-header-secret"},
+        "require_approval": "never",
+    }
+    # A function tool whose parameters are named like credentials: parameter schemas are kept.
+    fetch_page = json.dumps(
+        {
+            "type": "function",
+            "name": "fetch_page",
+            "parameters": {
+                "type": "object",
+                "properties": {"headers": {"type": "object"}, "api_key": {"type": "string"}},
+                "required": ["headers"],
+            },
+        }
+    )
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("external")
+        span.set_attribute("llm.tools.0.tool.json_schema", json.dumps(hosted_mcp))
+        span.set_attribute("llm.tools.1.tool.json_schema", fetch_page)
+        span.set_attribute(
+            "gen_ai.tool.definitions",
+            json.dumps(
+                [
+                    {
+                        "type": "provider",
+                        "name": "gmail",
+                        "id": "openai.mcp",
+                        "args": {"serverLabel": "gmail", "authorization": "synthetic-oauth-token"},
+                    }
+                ]
+            ),
+        )
+        span.set_attribute(
+            "llm.invocation_parameters",
+            json.dumps(
+                {
+                    "max_tokens": 100,
+                    "mcp_servers": [
+                        {
+                            "type": "url",
+                            "url": "https://mcp.example.test/slack",
+                            "name": "slack",
+                            "authorization_token": "synthetic-oauth-token",
+                        }
+                    ],
+                }
+            ),
+        )
+        span.set_attribute("ai.prompt.tools", ["not JSON: authorization"])
+        span.set_attribute("output.value", "The authorization field was set.")
+        span.end()
+        assert hue.force_flush()
+    (exported,) = receiver.spans()
+    values = attrs(exported)
+    assert json.loads(values["llm.tools.0.tool.json_schema"].string_value) == {
+        **hosted_mcp,
+        "authorization": "[redacted]",
+        "headers": "[redacted]",
+    }
+    assert values["llm.tools.1.tool.json_schema"].string_value == fetch_page
+    assert json.loads(values["gen_ai.tool.definitions"].string_value)[0]["args"] == {
+        "serverLabel": "gmail",
+        "authorization": "[redacted]",
+    }
+    parameters = json.loads(values["llm.invocation_parameters"].string_value)
+    assert parameters["mcp_servers"][0]["authorization_token"] == "[redacted]"
+    assert parameters["max_tokens"] == 100
+    assert values["ai.prompt.tools"].array_value.values[0].string_value == (
+        "not JSON: authorization"
+    )
+    assert values["output.value"].string_value == "The authorization field was set."
+    telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
+    assert b"synthetic-oauth-token" not in telemetry
+    assert b"synthetic-header-secret" not in telemetry
+
+
+def test_oversized_tool_definition_is_dropped_without_being_parsed(receiver, monkeypatch):
+    from hue_sdk import _tool_definitions
+
+    parsed: list[int] = []
+    original = _tool_definitions._parse
+    monkeypatch.setattr(
+        _tool_definitions, "_parse", lambda text: parsed.append(len(text)) or original(text)
+    )
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        tracer = provider.get_tracer("third-party")
+        oversized = tracer.start_span("oversized")
+        # Larger than one export request: admission drops the record before the scrub runs.
+        oversized.set_attribute("input.value", json.dumps({"tools": [], "input": "x" * 1_100_000}))
+        oversized.end()
+        small = tracer.start_span("small")
+        small.set_attribute("input.value", json.dumps({"tools": [{"authorization": "secret"}]}))
+        small.end()
+        assert not hue.force_flush()
+        assert hue.export_status.dropped_trace_records == 1
+    assert [span.name for span in receiver.spans()] == ["small"]
+    assert parsed and max(parsed) < 1_000
+
+
+def test_tool_definition_too_deeply_nested_to_inspect_drops_its_record(receiver):
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        span = provider.get_tracer("third-party").start_span("deep")
+        span.set_attribute(
+            "gen_ai.tool.definitions",
+            '{"a":' * 300 + '{"authorization":"synthetic-oauth-token"}' + "}" * 300,
+        )
+        span.end()
+        assert not hue.force_flush()
+        assert hue.export_status.dropped_trace_records == 1
+    assert receiver.spans() == []
+
+
 @pytest.mark.parametrize("capture_content", [True, False])
 def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver, capture_content):
     from hue_sdk.snapshots import CONTENT_PREFIXES
