@@ -219,6 +219,15 @@ instrumentations can use `hue.tracer` directly or explicitly attach the processo
 below. Instrumentations that only use a global provider need your application's
 normal OTel setup; Hue does not silently replace it.
 
+Provider-executed tools, such as OpenAI hosted MCP (`openai.tools.mcp`), appear as
+`execute_tool mcp.<name>` spans with `gen_ai.tool.type` `extension`. The server is named only
+by `serverLabel` inside the recorded result, so before export the TypeScript SDK copies it to
+`mcp.server.name`, and a result with an MCP `error` sets ERROR status and `error.type`
+`mcp_error`. Metadata-only export keeps these two attributes while stripping arguments and
+results. The label can only be read when AI SDK recorded the result: `hueTelemetry(hue)` with
+`captureContent: false` records none, whereas an application whose AI SDK integration records
+outputs and exports through Hue's attached processors keeps the label.
+
 ## Privacy and content
 
 `captureContent: false` disables manual input/output/messages/tool content and

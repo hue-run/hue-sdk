@@ -17,6 +17,7 @@ import {
   type ExportIssue,
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
+import { OpenTelemetry } from "@ai-sdk/otel";
 import { generateText, streamText } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
@@ -1409,6 +1410,141 @@ describe("Vercel AI SDK integration", () => {
       }
     },
   );
+
+  // Content as @ai-sdk/openai 4.0.66 maps an OpenAI Responses `mcp_call` item: a provider-executed
+  // `mcp.<name>` call plus a result naming the server only in `serverLabel`.
+  const hostedMcpModel = (
+    error?: string | { code: number; message: string },
+    serverLabel: string | undefined = "gmail",
+  ) =>
+    new MockLanguageModelV4({
+      provider: "openai.responses",
+      modelId: "synthetic-model",
+      doGenerate: async () => ({
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "mcp_synthetic",
+            toolName: "mcp.create_draft",
+            input: '{"to":"synthetic@example.test"}',
+            providerExecuted: true,
+            dynamic: true,
+          },
+          {
+            type: "tool-result",
+            toolCallId: "mcp_synthetic",
+            toolName: "mcp.create_draft",
+            result: {
+              type: "call",
+              ...(serverLabel === undefined ? {} : { serverLabel }),
+              name: "create_draft",
+              arguments: '{"to":"synthetic@example.test"}',
+              ...(error === undefined ? { output: "Synthetic draft saved" } : { error }),
+            },
+            providerMetadata: { openai: { itemId: "mcp_synthetic" } },
+          },
+          { type: "text", text: "Synthetic hosted answer" },
+        ],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage,
+        warnings: [],
+      }),
+    });
+
+  test.each([
+    { captureContent: true, error: undefined },
+    { captureContent: false, error: undefined },
+    { captureContent: true, error: { code: -32000, message: "Synthetic MCP failure" } },
+    { captureContent: false, error: "Synthetic MCP failure" },
+  ])(
+    "hosted MCP extension spans carry the server label (%o)",
+    async ({ captureContent, error }) => {
+      const endpoint = receiver();
+      const transport = createHueTransport({
+        apiKey,
+        serviceName: "hosted-mcp",
+        captureContent,
+        baseUrl: endpoint.url,
+      });
+      // The application records AI SDK content; Hue's export path applies captureContent.
+      const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+      try {
+        await generateText({
+          model: hostedMcpModel(error),
+          prompt: "Synthetic hosted request",
+          telemetry: {
+            recordInputs: true,
+            recordOutputs: true,
+            integrations: [new OpenTelemetry({ tracer: tracerProvider.getTracer("app") })],
+          },
+        });
+        await tracerProvider.forceFlush();
+        await transport.flush();
+        const spans = endpoint.requests.flatMap((request) => request.records);
+        const tool = spans.find((span) => span.name === "execute_tool mcp.create_draft")!;
+        expect(attr(tool, "gen_ai.tool.type")?.stringValue).toBe("extension");
+        expect(attr(tool, "mcp.server.name")?.stringValue).toBe("gmail");
+        if (error === undefined) {
+          expect(attr(tool, "error.type")).toBeUndefined();
+          expect(tool.status?.code ?? 0).toBe(0);
+        } else {
+          expect(attr(tool, "error.type")?.stringValue).toBe("mcp_error");
+          expect(tool.status?.code).toBe(2);
+          expect(tool.status?.message).toBeUndefined();
+        }
+        const others = spans.filter((span) => span !== tool);
+        expect(others.every((span) => attr(span, "mcp.server.name") === undefined)).toBe(true);
+        const raw = endpoint.requests.map((request) => request.raw).join(" ");
+        if (captureContent) {
+          expect(attr(tool, "gen_ai.tool.call.result")?.stringValue).toContain('"serverLabel"');
+        } else {
+          expect(attr(tool, "gen_ai.tool.call.result")).toBeUndefined();
+          expect(attr(tool, "gen_ai.tool.call.arguments")).toBeUndefined();
+          expect(raw).not.toContain("synthetic@example.test");
+          expect(raw).not.toContain("Synthetic draft saved");
+          expect(raw).not.toContain("Synthetic MCP failure");
+        }
+      } finally {
+        await tracerProvider.shutdown();
+        await transport.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+  );
+
+  test("hosted MCP errors stay failed when the server label is malformed", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "hosted-mcp-invalid-label",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    try {
+      await generateText({
+        model: hostedMcpModel({ code: -32000, message: "Synthetic MCP failure" }, "\u0000bad"),
+        prompt: "Synthetic hosted request",
+        telemetry: {
+          recordInputs: true,
+          recordOutputs: true,
+          integrations: [new OpenTelemetry({ tracer: tracerProvider.getTracer("app") })],
+        },
+      });
+      await tracerProvider.forceFlush();
+      await transport.flush();
+      const tool = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((span) => span.name === "execute_tool mcp.create_draft")!;
+      expect(attr(tool, "mcp.server.name")).toBeUndefined();
+      expect(attr(tool, "error.type")?.stringValue).toBe("mcp_error");
+      expect(tool.status?.code).toBe(2);
+    } finally {
+      await tracerProvider.shutdown();
+      await transport.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
 
   test("provider failure becomes an error span and missing token usage stays absent", async () => {
     const endpoint = receiver();
