@@ -227,7 +227,7 @@ function toolName(definition: unknown): string | undefined {
  */
 function parseDefinitions(texts: unknown[]): unknown[] | undefined {
   const length = texts.reduce<number>(
-    (total, text) => total + (typeof text === "string" ? text.length : 0),
+    (total, text) => total + (typeof text === "string" ? Buffer.byteLength(text, "utf8") : 0),
     0,
   );
   if (length > MAX_BODY_BYTES) return undefined;

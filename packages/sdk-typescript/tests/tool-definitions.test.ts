@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { scrubToolCredentials } from "../src/tool-definitions.js";
+import { scrubToolCredentials, withToolCatalogSummary } from "../src/tool-definitions.js";
 
 test("scrubs generic credentials and URL userinfo/query values without changing parameter schemas", () => {
   const input = {
@@ -111,4 +111,13 @@ test("scrubs credential values embedded in JSON Schema parameter metadata", () =
     authorization: { type: "string", default: "[redacted]" },
     region: { type: "string", default: "synthetic-region" },
   });
+});
+
+test("uses UTF-8 bytes for the shared metadata summary budget", () => {
+  const source = {
+    "gen_ai.tool.definitions": JSON.stringify([
+      { type: "function", name: "synthetic", description: "😀".repeat(600_000) },
+    ]),
+  };
+  expect(withToolCatalogSummary(source)).toEqual(source);
 });

@@ -250,10 +250,24 @@ def _tool_name(definition: Any) -> str | None:
     return None
 
 
+def _utf8_size(value: str, limit: int) -> int:
+    """Count UTF-8 bytes without allocating an encoded copy beyond ``limit``."""
+    size = 0
+    for character in value:
+        code = ord(character)
+        size += 1 if code <= 0x7F else 2 if code <= 0x7FF else 3 if code <= 0xFFFF else 4
+        if size > limit:
+            return size
+    return size
+
+
 def _parse_definitions(texts: list[Any]) -> list[Any] | None:
     # Admission runs on the application thread, and export removes these attributes unbudgeted:
     # definitions longer than one export request are not parsed and get no summary.
-    if sum(len(text) for text in texts if isinstance(text, str)) > MAX_REQUEST_BYTES:
+    if (
+        sum(_utf8_size(text, MAX_REQUEST_BYTES) for text in texts if isinstance(text, str))
+        > MAX_REQUEST_BYTES
+    ):
         return None
     parsed = [_parse(text, strict=True) if isinstance(text, str) else None for text in texts]
     return parsed if all(isinstance(item, (dict, list)) for item in parsed) else None

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from hue_sdk._tool_definitions import scrub_tool_credentials
+from hue_sdk._tool_definitions import scrub_tool_credentials, with_tool_catalog_summary
 
 
 def test_scrubs_generic_credentials_and_url_userinfo_query_without_parameter_names():
@@ -105,3 +105,12 @@ def test_scrubs_nested_credential_schema_metadata():
         "authorization": {"type": "string", "default": "[redacted]"},
         "region": {"type": "string", "default": "synthetic-region"},
     }
+
+
+def test_uses_utf8_bytes_for_the_shared_metadata_summary_budget():
+    source = {
+        "gen_ai.tool.definitions": json.dumps(
+            [{"type": "function", "name": "synthetic", "description": "😀" * 600_000}]
+        )
+    }
+    assert with_tool_catalog_summary(source) == source
