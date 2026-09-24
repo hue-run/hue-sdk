@@ -246,8 +246,9 @@ export batch. Do not put user content or secrets in span names or scope names.
 
 Hosted tools carry credentials in their definitions, such as the `authorization` and `headers` of
 an OpenAI hosted MCP tool. Before export, and before `redact`, Hue replaces the values of
-`authorization`, `authorization_token`, `headers`, `api_key`, `access_token` and `x-api-key` (in
-any case, with or without `-` and `_`) with `"[redacted]"` in recorded tool definitions
+credential-like fields including `authorization`, `authorization_token`, `headers`, `api_key`,
+`access_token`, `x-api-key`, and keys ending in `token`, `secret`, `password`, `apikey` or
+`credential` (case-insensitively, ignoring `-` and `_`) with `"[redacted]"` in recorded tool definitions
 (`gen_ai.tool.definitions`, `ai.prompt.tools`, `llm.tools.*.tool.json_schema`) and in the `tools`
 and `mcp_servers` entries of a raw provider request or response recorded as `input.value`,
 `output.value` or `llm.invocation_parameters`. Parameters named in a JSON Schema `properties`
