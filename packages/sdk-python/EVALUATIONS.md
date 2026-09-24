@@ -16,7 +16,8 @@ def target(inputs, context):
     # context.item contains the frozen case and context.span is an ordinary Hue span helper.
     return inputs["question"].upper()
 
-with Hue(api_key=os.environ["HUE_API_KEY"], capture_content=False) as hue:
+# capture_content=False sends metadata only.
+with Hue(api_key=os.environ["HUE_API_KEY"], capture_content=True) as hue:
     report = run_experiment(
         client=client, hue=hue, experiment_id=os.environ["HUE_EXPERIMENT_ID"],
         target=target, checkpoint_directory=".local/my-evaluation",

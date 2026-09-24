@@ -8,10 +8,10 @@ pip install -r examples/python-evaluation/requirements.txt  # hue-run[evals]
 
 # Set HUE_API_KEY (and HUE_BASE_URL for a deployment other than Hue Cloud) through your ignored environment or secret manager.
 python examples/python-evaluation/main.py \
-  --capture-content no --persist-result-content yes \
+  --capture-content yes --persist-result-content yes \
   --checkpoint-directory .local/python-evaluation-checkpoints
 ```
 
-Choose both content settings explicitly. `capture-content` controls telemetry helper content; `persist-result-content` independently controls evaluation output and evidence storage, including checkpoint files. With result storage disabled, historical evaluators report unavailable output. Identifiers and typed metrics remain stored. The example prints only created IDs and counts and calls no model provider.
+Choose both content settings explicitly. `capture-content` controls telemetry helper content; `yes` records full traces, and `no` sends metadata only when a policy forbids sending that content. `persist-result-content` independently controls evaluation output and evidence storage, including checkpoint files. With result storage disabled, historical evaluators report unavailable output. Identifiers and typed metrics remain stored. The example prints only created IDs and counts and calls no model provider.
 
 Checkpoint directories use private POSIX permissions. A crashed owner leaves `.lock`; confirm that it stopped before removing that lock. See the [runner contract](../../packages/sdk-python/EVALUATIONS.md) for retry and recovery semantics.

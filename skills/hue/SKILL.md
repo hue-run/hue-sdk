@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.4.1"
+  version: "0.4.2"
 ---
 
 # Hue tracing
@@ -60,13 +60,13 @@ The user creates a **Tracing only** project service key in Hue under **Settings 
 
 SDK constructors do not automatically read environment variables. For another Hue deployment, use its configured origin. A custom SDK origin excludes API paths; the standard OTLP exporter needs its full signal endpoint. Never change the model provider's API base URL to Hue.
 
-## Capture and instrumentation
+## Capture and instrument full traces
 
-Use metadata-only capture unless the user or an existing approved application policy authorizes content capture. Explicitly choose `captureContent` / `capture_content`, preserve redaction and credential filtering, and explain what is sent. When approved, capture supported prompts/messages, responses and tool inputs/outputs alongside available model/provider identifiers, usage, timing, errors and existing correlation. Do not invent missing fields.
+Recommend content capture: `captureContent: true` / `capture_content=True`. Trace inspection, evaluations and judges in Hue read the recorded content. The value is required; always pass it explicitly. In the plan you show the user, state what content capture sends to Hue: supported prompts/messages, responses and tool inputs/outputs, alongside available model/provider identifiers, usage, timing, errors and existing correlation. The user's approval of that plan authorizes content capture. Choose metadata-only (`false`) only if the user declines or an existing application policy forbids sending that content to another service. Preserve redaction and credential filtering in both modes. Do not invent missing fields.
 
-Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry and Vercel content attributes at export when capture is disabled (Python requires 0.2.0); still configure the chosen instrumentor's own input/output capture controls to match the approved policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
+Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry and Vercel content attributes at export when capture is disabled (Python requires 0.2.0); still configure the chosen instrumentor's own input/output capture controls to match the chosen policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
 
-Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()`, `model()` (requires 0.2.0) and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument one real request path with model/tool children, preserve propagated parent context, and reuse the application's session identifier when available. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent. When wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` (requires 0.4.1) or `mcp=` to Python `hue.tool` (requires 0.2.3) so the span records `mcp.server.name` from `initialize`; do not infer the server from a generic tool name.
+Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()`, `model()` (requires 0.2.0) and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument every request path that calls a model or tool, not only one: add model/tool child spans, preserve propagated parent context, and reuse the application's session identifier when available. Then verify at least one real request as described under Verify delivery. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent. When wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` (requires 0.4.1) or `mcp=` to Python `hue.tool` (requires 0.2.3) so the span records `mcp.server.name` from `initialize`; do not infer the server from a generic tool name.
 
 For AI SDK 7, `hueTelemetry()` from `@hue-run/sdk/ai-sdk` provides per-call integrations. Those replace the global integrations for that call. If existing telemetry must keep receiving the call, follow the existing-provider guide and attach Hue's transport to that provider instead. Direct OTLP users keep their framework instrumentation without adding Hue wrappers.
 

@@ -421,8 +421,8 @@ A Scenario or eval set whose dataset version is not saved cannot back an experim
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
 (default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given; `--origin`
-overrides the origin. Telemetry content capture stays off unless `--content` is passed; in
-one-shot mode it also decides whether case outputs, error messages and explanations are persisted
+overrides the origin. Telemetry content capture stays off unless `--content` is passed; pass it to
+record full traces. In one-shot mode it also decides whether case outputs, error messages and explanations are persisted
 to Hue. `--worker` always persists them, because a run launched from Hue is read on its run page:
 that is `runLocalAgent()`'s contract and `--content` does not change it. Trace evidence is required
 for every case.

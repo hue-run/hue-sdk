@@ -26,12 +26,15 @@ using an ignored `.env` file or your secret manager:
 
 ```sh
 HUE_API_KEY=<project service key>
-HUE_CAPTURE_CONTENT=false
+HUE_CAPTURE_CONTENT=true
 HUE_CHAT_MODE=synthetic
 PORT=3401
 ```
 
-`HUE_CAPTURE_CONTENT` and `HUE_CHAT_MODE` are required explicit decisions. Set
+`HUE_CAPTURE_CONTENT` and `HUE_CHAT_MODE` are required explicit decisions.
+`HUE_CAPTURE_CONTENT=true`, the recommended setting, records prompts, responses and tool
+inputs/outputs so you can inspect full traces in Hue; `false` sends metadata only, for when a
+policy forbids sending that content. Set
 `HUE_BASE_URL` only for a different Hue deployment; omitting it uses
 `https://app.hue.run`. Start with `node --env-file=.env dist/server.js` or provide the
 variables in your process environment and run `node dist/server.js`. Open the
@@ -58,7 +61,7 @@ capture affects telemetry storage, not the text shown to the person chatting.
 
 For acceptance, send a normal request and a controlled error with the same
 session, verify root/provider/tool spans and correlated logs in Hue, then repeat
-with content capture disabled. Trace IDs are shown on the page. Telemetry export
+with `HUE_CAPTURE_CONTENT=false` to check the metadata-only opt-out. Trace IDs are shown on the page. Telemetry export
 failures are displayed separately from provider errors; the app waits for both
 signals before it reports telemetry accepted.
 
