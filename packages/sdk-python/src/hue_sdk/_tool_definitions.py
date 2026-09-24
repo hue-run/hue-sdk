@@ -68,8 +68,8 @@ def _is_url_key(key: Any) -> bool:
     return normalized in {"serverurl", "url"}
 
 
-# WHATWG URL parsing, for the special schemes a hosted endpoint uses, so a scrubbed URL is
-# serialized as the TypeScript SDK's `URL` serializes it and both SDKs digest the same text.
+# WHATWG URL parsing, for the special schemes a hosted endpoint uses, so a scrubbed URL with an
+# ordinary host is serialized as the TypeScript SDK's `URL` serializes it.
 _SPECIAL_PORTS = {"ftp": 21, "http": 80, "https": 443, "ws": 80, "wss": 443}
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
 _TAB_OR_NEWLINE = re.compile("[\t\n\r]")
@@ -133,6 +133,8 @@ def _query_names(query: str) -> list[str]:
     return names
 
 
+# Characters of an IDN host WHATWG parsing is attempted for; the DNS allows 253.
+_MAX_IDN_HOST = 1024
 _RADIX_DIGITS = {8: frozenset("01234567"), 10: frozenset("0123456789")}
 _RADIX_DIGITS[16] = frozenset("0123456789abcdefABCDEF")
 
@@ -247,9 +249,15 @@ def _joiners_valid(label: str) -> bool:
 
 def _domain_to_ascii(domain: str) -> str:
     """UTS 46 ToASCII with WHATWG's options: the mapping, the validity criteria, CheckJoiners
-    and CheckBidi as ``_bidi_valid`` describes, and Punycode."""
+    and CheckBidi as ``_bidi_valid`` describes, and Punycode. It differs from the TypeScript
+    SDK's parser only at the edges: an IDN host over ``_MAX_IDN_HOST`` characters and a
+    non-joiner in an Arabic joining context are refused here."""
     if domain.isascii() and not any(label[:4].lower() == "xn--" for label in domain.split(".")):
         return domain.lower()
+    # Mapping and Punycode grow faster than the host, so a longer IDN host is refused before
+    # either runs, whatever the idna version.
+    if len(domain) > _MAX_IDN_HOST:
+        raise _InvalidUrl
     labels = _remap(domain).split(".")
     unicode_labels = []
     for label in labels:
@@ -261,6 +269,7 @@ def _domain_to_ascii(domain: str) -> str:
             if (
                 not decoded
                 or decoded.isascii()
+                or decoded[:4].lower() == "xn--"
                 or _remap(decoded) != decoded
                 or not unicodedata.is_normalized("NFC", decoded)
             ):
@@ -358,8 +367,9 @@ class _Scrub:
         Query parameter names are provider-defined, so retaining values based on a guessed
         credential-key list could leak a secret under an unfamiliar name. Fragments can also carry
         bearer tokens in provider-specific URLs, so they are removed too. A URL with a special
-        scheme (``http``, ``https``, ``ws``, ``wss``, ``ftp``) is parsed and serialized as WHATWG
-        ``URL`` does, so both SDKs export the same text and digest.
+        scheme (``http``, ``https``, ``ws``, ``wss``, ``ftp``) is parsed and, when scrubbed,
+        serialized as WHATWG ``URL`` does, so for ordinary hosts both SDKs export the same text
+        and digest; ``_domain_to_ascii`` notes where IDN hosts can still differ.
         """
         text = _TAB_OR_NEWLINE.sub("", _LONE_SURROGATE.sub("\ufffd", value).strip(_C0_OR_SPACE))
         scheme = _SCHEME.match(text)
@@ -484,7 +494,8 @@ def _parse(text: str, *, strict: bool = False) -> Any:
 
 
 def _finite(value: Any) -> Any:
-    """Non-finite numbers become ``null``, as ``JSON.stringify`` writes them."""
+    """Non-finite numbers become ``null``, as ``JSON.stringify`` writes them. Only called when
+    the value has one, so deeply nested content without one never recurses here."""
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, list):
@@ -495,7 +506,10 @@ def _finite(value: Any) -> Any:
 
 
 def _dump(value: Any) -> str:
-    return json.dumps(_finite(value), ensure_ascii=False, separators=(",", ":"))
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except ValueError:
+        return json.dumps(_finite(value), ensure_ascii=False, separators=(",", ":"))
 
 
 def _scrub_definition_text(text: str) -> str:

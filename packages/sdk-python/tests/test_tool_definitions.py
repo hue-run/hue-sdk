@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from hue_sdk._tool_definitions import scrub_tool_credentials, with_tool_catalog_summary
+from hue_sdk._tool_definitions import _Scrub, scrub_tool_credentials, with_tool_catalog_summary
 
 URL_FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -199,3 +200,29 @@ def test_scrubbed_urls_and_huge_integers_match_the_typescript_fixture(default_in
     # only the digest is shared. The raw-request path parses the same way.
     request = scrub_tool_credentials("input.value", '{"tools":' + big + "}")
     assert "synthetic-secret" not in request and '"maximum":null' in request
+
+
+def test_long_idn_hosts_are_refused_before_any_idna_work(monkeypatch):
+    # Mapping and Punycode are superlinear, and older idna releases have no length cap of their
+    # own: a 20,000-character label once took about a minute on the thread ending the span.
+    import idna
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("uts46_remap ran for an oversized host")
+
+    monkeypatch.setattr(idna, "uts46_remap", unexpected)
+    for host in ("例" * 20_000 + ".example", "xn--" + "a" * (1 << 20) + ".example"):
+        started = time.monotonic()
+        assert _Scrub().url(f"https://{host}/mcp?token=secret") == "[redacted]"
+        assert time.monotonic() - started < 1
+
+
+def test_deep_request_content_without_non_finite_numbers_is_exported():
+    # Only a value with a non-finite number is rewritten, so deep content elsewhere in a raw
+    # request never meets that rewrite's recursion. Before 3.12 the JSON parser itself counts
+    # against the recursion limit, so the nesting there stays within what it reads.
+    depth = 5_000 if sys.version_info >= (3, 12) else 600
+    deep = "[" * depth + "]" * depth
+    text = '{"tools":[{"type":"mcp","authorization":"synthetic-secret"}],"messages":' + deep + "}"
+    scrubbed = scrub_tool_credentials("input.value", text)
+    assert "synthetic-secret" not in scrubbed and scrubbed.endswith(deep + "}")

@@ -573,8 +573,10 @@ No registry release is claimed until publication and registry acceptance complet
 - A scrubbed `url` or `server_url` with an `http`, `https`, `ws`, `wss` or `ftp` scheme is
   serialized as WHATWG `URL` does (lowercase scheme and host, IDN hosts in Punycode, default
   ports dropped, the path percent-encoded and its dot segments resolved, query names encoded as
-  `URLSearchParams` encodes them), and a URL WHATWG refuses becomes `[redacted]`. The exported
-  text and `hue.tool.definitions.sha256` now match the TypeScript SDK's for these URLs.
+  `URLSearchParams` encodes them), and a URL WHATWG refuses becomes `[redacted]`. For ordinary
+  hosts the exported text and `hue.tool.definitions.sha256` now match the TypeScript SDK's; some
+  internationalized hosts still differ, as the README describes, and an IDN host longer than
+  1,024 characters is refused before any IDNA work.
 
 ### [0.6.0] - 2026-09-24
 
