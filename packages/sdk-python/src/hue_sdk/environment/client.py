@@ -4,12 +4,16 @@ import json
 import math
 import random
 import re
+import socket
+import threading
 import time
 from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlencode
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connectionpool import ConnectionPool
 
 from ..evals._json import MISSING, encode, json_value, uuid
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
@@ -90,6 +94,98 @@ def _invalid_constant(_value: str) -> None:
     raise ValueError("Invalid JSON constant.")
 
 
+class _ReadDeadline:
+    """Ends one bounded read by elapsed time. Per-read socket timeouts restart with every byte,
+    so a peer that trickles its handshake, headers or body could hold the read far longer; when
+    the window passes, every connection the read opened is shut down and the blocked read fails.
+
+    Name resolution and connecting come before there is a socket to shut down: resolving the
+    host is not bounded, and each address is tried with the socket timeout rather than the window.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self.passed = False
+        self._timer = threading.Timer(seconds, self._pass)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def track(self, sock: socket.socket) -> None:
+        # Keep a plain duplicate: TLS detaches the original before its handshake, and shutting
+        # the duplicate down ends every read on the connection, TLS, proxy or not.
+        duplicate = socket.fromfd(sock.fileno(), sock.family, sock.type, sock.proto)
+        with self._lock:
+            self._sockets.append(duplicate)
+            if self.passed:
+                _shut_down(duplicate)
+
+    def _pass(self) -> None:
+        with self._lock:
+            self.passed = True
+            for sock in self._sockets:
+                _shut_down(sock)
+
+    def close(self) -> None:
+        self._timer.cancel()
+        with self._lock:
+            for sock in self._sockets:
+                sock.close()
+            self._sockets.clear()
+
+
+def _shut_down(sock: socket.socket) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+# The deadline of the bounded read in progress on this thread, for the connections it opens.
+_read_deadline = threading.local()
+
+
+def _track(sock: socket.socket) -> None:
+    deadline: _ReadDeadline | None = getattr(_read_deadline, "current", None)
+    if deadline is not None:
+        deadline.track(sock)
+
+
+_deadline_connections: dict[type[Any], type[Any]] = {}
+
+
+def _deadline_connection(base: type[Any]) -> type[Any]:
+    """``base`` with each new socket handed to the current bounded read's deadline.
+
+    The pool's own class is extended rather than replaced, so a SOCKS or other proxy connection
+    keeps its behavior. ``_new_conn`` is urllib3's socket factory in 1.26 and 2.x (verified with
+    1.26.20, 2.7.0 and 2.8.0); if a release drops it, reads fall back to the socket timeout.
+    """
+    if getattr(base, "_hue_read_deadline", False):
+        return base
+    cached = _deadline_connections.get(base)
+    if cached is not None:
+        return cached
+
+    def _new_conn(self: Any) -> socket.socket:
+        sock: socket.socket = base._new_conn(self)
+        _track(sock)
+        return sock
+
+    connection = type(base.__name__, (base,), {"_new_conn": _new_conn, "_hue_read_deadline": True})
+    return _deadline_connections.setdefault(base, connection)
+
+
+class _DeadlineAdapter(HTTPAdapter):
+    """Opens connections whose sockets the current bounded read can shut down."""
+
+    def get_connection_with_tls_context(self, *args: Any, **kwargs: Any) -> ConnectionPool:
+        pool: Any = super().get_connection_with_tls_context(*args, **kwargs)
+        if isinstance(getattr(pool, "ConnectionCls", None), type):
+            pool.ConnectionCls = _deadline_connection(pool.ConnectionCls)
+        return cast(ConnectionPool, pool)
+
+
 class EnvironmentClient:
     """Synchronous project-key client for Hue's authoritative simulated worlds.
 
@@ -132,42 +228,53 @@ class EnvironmentClient:
     def _send(
         self, method: str, path: str, payload: bytes | None, *, timeout_seconds: float | None = None
     ) -> Any:
+        # A bounded read's window starts before the request and covers the whole exchange.
+        deadline = _ReadDeadline(timeout_seconds) if timeout_seconds is not None else None
+        _read_deadline.current = deadline
         try:
-            with requests.request(
-                method,
-                f"{self.base_url}/api/v1{path}",
-                data=payload,
-                headers={
-                    **self._headers,
-                    **({"Content-Type": "application/json"} if payload is not None else {}),
-                },
-                timeout=self._timeout if timeout_seconds is None else timeout_seconds,
-                allow_redirects=False,
-                stream=True,
-            ) as response:
-                if not 200 <= response.status_code < 300:
-                    raise HueEnvironmentError(
-                        response.status_code, _retry_after(response), _diagnostic(response)
+            with requests.Session() as session:
+                if deadline is not None:
+                    adapter = _DeadlineAdapter()
+                    session.mount("http://", adapter)
+                    session.mount("https://", adapter)
+                with session.request(
+                    method,
+                    f"{self.base_url}/api/v1{path}",
+                    data=payload,
+                    headers={
+                        **self._headers,
+                        **({"Content-Type": "application/json"} if payload is not None else {}),
+                    },
+                    timeout=self._timeout if timeout_seconds is None else timeout_seconds,
+                    allow_redirects=False,
+                    stream=True,
+                ) as response:
+                    if not 200 <= response.status_code < 300:
+                        raise HueEnvironmentError(
+                            response.status_code, _retry_after(response), _diagnostic(response)
+                        )
+                    chunks: list[bytes] = []
+                    size = 0
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if deadline is not None and deadline.passed:
+                            raise HueEnvironmentError()
+                        size += len(chunk)
+                        if size > _MAX_RESPONSE_BYTES:
+                            raise HueEnvironmentError()
+                        chunks.append(chunk)
+                    if deadline is not None and deadline.passed:
+                        raise HueEnvironmentError()
+                    return json.loads(
+                        b"".join(chunks).decode("utf-8"), parse_constant=_invalid_constant
                     )
-                deadline = (
-                    time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-                )
-                chunks: list[bytes] = []
-                size = 0
-                for chunk in response.iter_content(chunk_size=8192):
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise HueEnvironmentError()
-                    size += len(chunk)
-                    if size > _MAX_RESPONSE_BYTES:
-                        raise HueEnvironmentError()
-                    chunks.append(chunk)
-                return json.loads(
-                    b"".join(chunks).decode("utf-8"), parse_constant=_invalid_constant
-                )
         except HueEnvironmentError:
             raise
-        except (requests.RequestException, ValueError, UnicodeError, RecursionError):
+        except (requests.RequestException, OSError, ValueError, UnicodeError, RecursionError):
             raise HueEnvironmentError() from None
+        finally:
+            _read_deadline.current = None
+            if deadline is not None:
+                deadline.close()
 
     def _request(self, method: str, path: str, body: Any = MISSING) -> Any:
         # Validate/serialize before retrying. Neither caller mutation nor another
@@ -322,9 +429,19 @@ class EnvironmentClient:
         """Wait until a completed world leaves ``open`` after its completion grace.
 
         A status read after the grace asks the World API to seal an overdue world. Transient
-        connection and gateway errors are retried through a bounded 30-second post-grace window.
-        Pass the ``completingUntil`` value returned by :meth:`finish_run`; an absent or malformed
-        value causes an immediate status read.
+        connection and gateway errors are retried through a bounded 30-second post-grace window,
+        and once connected each read ends with that window however slowly the server answers.
+        Connecting uses the client's timeout for each address, and resolving the host is not
+        bounded, so either can outlast the window. Pass the ``completingUntil`` value returned by
+        :meth:`finish_run`; an absent or malformed value causes an immediate status read.
+
+        Raises:
+            EnvironmentSealTimeoutError: The world was still open, or every read failed
+                transiently, when the window ended. It subclasses ``HueEnvironmentError`` and
+                keeps ``status=None`` like a connection failure, so check for it before
+                inspecting ``status``.
+            HueEnvironmentError: A read was refused with a status that is not retried, such
+                as 404.
         """
         try:
             grace_end = datetime.fromisoformat(

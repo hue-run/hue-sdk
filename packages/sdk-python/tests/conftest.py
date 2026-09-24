@@ -17,6 +17,8 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTrace
 class Receiver:
     url: str = ""
     delay_seconds: float = 0
+    # Send each response one byte at a time with this pause, so no single read waits long.
+    trickle_seconds: float = 0
     # A receiver that predates live spans (an older Hue or a generic collector) omits the
     # Hue-Pending-Spans header from its default trace acknowledgements.
     legacy: bool = False
@@ -97,6 +99,21 @@ def receiver():
                         # A current Hue marks every trace acknowledgement this way.
                         headers["Hue-Pending-Spans"] = "1"
             time.sleep(state.delay_seconds)
+            if state.trickle_seconds:
+                head = "".join(
+                    [
+                        f"{self.protocol_version} {status} Reply\r\n",
+                        *(f"{key}: {value}\r\n" for key, value in headers.items()),
+                        f"Content-Length: {len(result)}\r\n\r\n",
+                    ]
+                )
+                try:
+                    for byte in head.encode() + result:
+                        self.wfile.write(bytes([byte]))
+                        time.sleep(state.trickle_seconds)
+                except OSError:
+                    pass  # The client gave up and shut the connection.
+                return
             self.send_response(status)
             for key, value in headers.items():
                 self.send_header(key, value)

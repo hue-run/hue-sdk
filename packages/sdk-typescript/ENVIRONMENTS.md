@@ -223,6 +223,8 @@ its own Gmail MCP or REST client, the mirror URL, the world token where the Goog
 import {
   agentEnvironment,
   createEnvironmentClient,
+  HueEnvironmentError,
+  isTransientEnvironmentError,
   worldHandoff,
   writeMcpConfig,
 } from "@hue-run/sdk/environment";
@@ -252,12 +254,22 @@ try {
   );
   const sealDeadline = Date.now() + 30_000;
   let sealed = false;
-  while (Date.now() < sealDeadline) {
-    if ((await environmentClient.getRun(run.id)).status !== "open") {
-      sealed = true;
-      break;
+  while (!sealed && Date.now() < sealDeadline) {
+    let wait = 250;
+    try {
+      // The deadline also ends a read that hangs, with the client's retries inside it.
+      const state = await environmentClient.getRun(run.id, {
+        signal: AbortSignal.timeout(Math.max(0, sealDeadline - Date.now())),
+      });
+      sealed = state.status !== "open";
+    } catch (error) {
+      if (!isTransientEnvironmentError(error)) throw error; // a refusal such as 404 is final
+      wait = Math.max(wait, (error as HueEnvironmentError).retryAfterMs ?? 0);
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (!sealed)
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(wait, Math.max(0, sealDeadline - Date.now()))),
+      );
   }
   if (!sealed) throw new Error("World was not sealed after its completion grace");
 }

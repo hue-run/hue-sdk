@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import stat
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
@@ -307,17 +311,135 @@ def test_wait_for_seal_honors_retry_after_with_loopback(receiver, monkeypatch):
     assert len(receiver.requests) == 2
 
 
-def test_wait_for_seal_deadline_has_distinct_error(monkeypatch):
-    client = EnvironmentClient("https://app.hue.test", KEY)
-    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.02)
-    monkeypatch.setattr(environment_module, "SEAL_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(client, "_get_run_once", lambda _run_id, **_: {"status": "open"})
-    monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
+def test_wait_for_seal_deadline_has_distinct_error(receiver, monkeypatch):
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(environment_module, "SEAL_POLL_SECONDS", 0.02)
+    client = EnvironmentClient(receiver.url, KEY)
+    for _ in range(100):
+        reply(receiver, gateway_run(status="open", lifecycle="completing"))
+    started = time.monotonic()
 
     with pytest.raises(
         EnvironmentSealTimeoutError, match="was not sealed after its completion grace"
-    ):
+    ) as timed_out:
         client.wait_for_seal(RUN_ID)
+
+    assert timed_out.value.status is None and timed_out.value.run_id == RUN_ID
+    assert 0.3 <= time.monotonic() - started < 2
+    # It kept reading the open world until the deadline rather than giving up after one read.
+    assert len(receiver.requests) > 3
+
+
+def test_wait_for_seal_cuts_off_a_read_that_never_answers(receiver, monkeypatch):
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    client = EnvironmentClient(receiver.url, KEY)
+    receiver.delay_seconds = 2
+    reply(receiver, gateway_run(status="completed", lifecycle="sealed"))
+    started = time.monotonic()
+
+    with pytest.raises(EnvironmentSealTimeoutError):
+        client.wait_for_seal(RUN_ID)
+
+    assert time.monotonic() - started < 1.5
+    assert len(receiver.requests) == 1
+
+
+def test_wait_for_seal_cuts_off_a_read_that_trickles_its_response(receiver, monkeypatch):
+    # Each byte arrives well inside the per-read timeout; only elapsed time can end the read.
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    client = EnvironmentClient(receiver.url, KEY)
+    receiver.trickle_seconds = 0.05
+    reply(receiver, {"status": "completed"})
+    started = time.monotonic()
+
+    with pytest.raises(EnvironmentSealTimeoutError):
+        client.wait_for_seal(RUN_ID)
+
+    assert time.monotonic() - started < 1.5
+    assert len(receiver.requests) == 1
+
+
+def test_wait_for_seal_cuts_off_a_stalled_tls_handshake(monkeypatch):
+    # TLS takes over the connection's socket before its handshake, so a server that trickles
+    # one handshake record must still be cut off when the read's window passes.
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    server = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+
+    def trickle():
+        connection, _ = server.accept()
+        with connection:
+            connection.recv(65536)  # the ClientHello
+            try:
+                # A handshake record header announcing 16 KiB, then its body a byte at a time.
+                connection.sendall(b"\x16\x03\x03\x40\x00")
+                while not stop.wait(0.05):
+                    connection.sendall(b"\x00")
+            except OSError:
+                pass  # The client shut the connection.
+
+    thread = threading.Thread(target=trickle, daemon=True)
+    thread.start()
+    shut_down: list[int] = []
+    real_shut_down = environment_module._shut_down
+    monkeypatch.setattr(
+        environment_module,
+        "_shut_down",
+        lambda sock: (shut_down.append(sock.fileno()), real_shut_down(sock)),
+    )
+    client = EnvironmentClient(f"https://127.0.0.1:{server.getsockname()[1]}", KEY)
+    started = time.monotonic()
+    try:
+        with pytest.raises(EnvironmentSealTimeoutError):
+            client.wait_for_seal(RUN_ID)
+        assert time.monotonic() - started < 1.5
+        # The deadline ended the handshake on a live socket, not one TLS had already detached.
+        assert shut_down and -1 not in shut_down
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        server.close()
+
+
+def test_bounded_reads_extend_a_proxy_connection_class(receiver, monkeypatch):
+    # A SOCKS proxy swaps in its own pool and a connection class that takes proxy options. The
+    # read's deadline must extend that class rather than replace it, and still end a slow read.
+    # The hook is urllib3's socket factory, verified with urllib3 1.26.20, 2.7.0 and 2.8.0.
+    from requests.adapters import HTTPAdapter
+    from urllib3.connection import HTTPConnection
+    from urllib3.connectionpool import HTTPConnectionPool
+
+    opened: list[str] = []
+
+    class ProxyConnection(HTTPConnection):
+        def __init__(self, *args, _proxy_options, **kwargs):
+            self._proxy_options = _proxy_options
+            super().__init__(*args, **kwargs)
+
+        def _new_conn(self):
+            opened.append(self._proxy_options)
+            return super()._new_conn()
+
+    class ProxyPool(HTTPConnectionPool):
+        ConnectionCls = ProxyConnection
+
+    def proxied(self, request, verify, proxies=None, cert=None):
+        parsed = urlsplit(request.url)
+        return ProxyPool(parsed.hostname, parsed.port, _proxy_options="tunnel")
+
+    monkeypatch.setattr(HTTPAdapter, "get_connection_with_tls_context", proxied)
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.3)
+    client = EnvironmentClient(receiver.url, KEY)
+    reply(receiver, gateway_run(status="completed", lifecycle="sealed"))
+    assert client.wait_for_seal(RUN_ID)["status"] == "completed"
+
+    receiver.trickle_seconds = 0.05
+    reply(receiver, {"status": "completed"})
+    started = time.monotonic()
+    with pytest.raises(EnvironmentSealTimeoutError):
+        client.wait_for_seal(RUN_ID)
+    assert time.monotonic() - started < 1.5
+    assert opened == ["tunnel", "tunnel"]
 
 
 def test_wait_for_seal_rejects_non_transient_read(monkeypatch):
