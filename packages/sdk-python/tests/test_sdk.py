@@ -131,6 +131,23 @@ def test_tool_records_the_hue_provider_and_surface(receiver):
     assert spans["oversized"]["hue.mcp.surface"].string_value == "s" * 256
 
 
+def test_tool_source_labels_use_utf16_length_like_typescript_and_fern(receiver):
+    accepted = "😀" * 128  # 256 UTF-16 code units: the inclusive limit.
+    rejected = "😀" * 129
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.tool("accepted", mcp={"provider": accepted, "surface": accepted}):
+            pass
+        with hue.tool("rejected", mcp={"provider": rejected, "surface": rejected}):
+            pass
+        assert hue.export_status.instrumentation_failures == 2
+        hue.force_flush()
+    spans = {span.name.removeprefix("execute_tool "): attrs(span) for span in receiver.spans()}
+    assert spans["accepted"]["hue.mcp.provider"].string_value == accepted
+    assert spans["accepted"]["hue.mcp.surface"].string_value == accepted
+    assert "hue.mcp.provider" not in spans["rejected"]
+    assert "hue.mcp.surface" not in spans["rejected"]
+
+
 def test_disabled_client_does_not_count_invalid_mcp(receiver):
     hue = Hue(receiver.url, KEY, capture_content=False, enabled=False)
     with hue.tool("get_thread", mcp={"name": ""}):

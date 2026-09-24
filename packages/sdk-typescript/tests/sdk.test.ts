@@ -391,6 +391,38 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
+  test("tool source labels use UTF-16 length like Python and Fern", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "mcp-tool-source-unicode",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const accepted = "😀".repeat(128); // 256 UTF-16 code units: the inclusive limit.
+    const rejected = "😀".repeat(129);
+    try {
+      await hue.tool("accepted", {}, () => "ok", {
+        mcp: { provider: accepted, surface: accepted },
+      });
+      await hue.tool("rejected", {}, () => "ok", {
+        mcp: { provider: rejected, surface: rejected },
+      });
+      expect((await hue.flushSafe()).report.instrumentationFailures).toBe(2);
+      const spans = endpoint.requests
+        .filter((request) => request.signal === "traces")
+        .flatMap((request) => request.records);
+      const span = (name: string) =>
+        spans.find((record) => record.name === `execute_tool ${name}`)!;
+      expect(attr(span("accepted"), "hue.mcp.provider")?.stringValue).toBe(accepted);
+      expect(attr(span("accepted"), "hue.mcp.surface")?.stringValue).toBe(accepted);
+      expect(attr(span("rejected"), "hue.mcp.provider")).toBeUndefined();
+      expect(attr(span("rejected"), "hue.mcp.surface")).toBeUndefined();
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("resourceAttributes reach the exported resource; attach mode ignores them with a warning", async () => {
     // Attach mode: the application owns the resource, so the option is a warning, not a failure.
     const transport = createHueTransport({

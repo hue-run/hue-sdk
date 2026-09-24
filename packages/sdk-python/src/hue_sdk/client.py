@@ -45,8 +45,16 @@ _MISSING = object()
 
 
 def _is_label(value: Any) -> bool:
-    """A non-blank string of at most 256 characters, matching TypeScript's ``isLabel``."""
-    return type(value) is str and bool(value.strip()) and len(value) <= 256
+    """A non-blank string of at most 256 UTF-16 code units, matching ``isLabel``."""
+    if type(value) is not str or not value.strip():
+        return False
+    # JavaScript's String.length (and Fern's decoder) counts UTF-16 code units, so
+    # use the same unit here instead of Python's Unicode code-point count.  The
+    # strict encoding also rejects lone surrogates before they can be exported.
+    try:
+        return len(value.encode("utf-16-le")) // 2 <= 256
+    except UnicodeEncodeError:
+        return False
 
 
 def _is_source_label(value: Any) -> bool:
