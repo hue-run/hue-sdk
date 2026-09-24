@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,13 +10,22 @@ import type { Completion, Execution, Experiment, StoredResult, Subject } from ".
 const cli = join(import.meta.dir, "../src/setup/cli.ts");
 const key = "synthetic-eval-key-canary";
 const mcpToken = "hue_sim_synthetic_token_canary";
+const worldToken = `hue_world_${"c".repeat(64)}.${"s".repeat(43)}`;
 const digest = "d".repeat(64);
 const SPAWN_TIMEOUT = 90_000;
 
 type Verdict = "pass" | "fail" | "error" | "none";
 
 /** Loopback Hue stand-in: one published Scenario, worlds, executions and deferred verdicts. */
-function hueStandIn(options: { verdict?: Verdict; deferredPolls?: number; frozen?: boolean } = {}) {
+function hueStandIn(
+  options: {
+    verdict?: Verdict;
+    deferredPolls?: number;
+    frozen?: boolean;
+    /** Answer creates as a deployment whose simulation gateway serves the world. */
+    gateway?: boolean;
+  } = {},
+) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
   const projectId = randomUUID();
   const environmentId = randomUUID();
@@ -97,6 +107,7 @@ function hueStandIn(options: { verdict?: Verdict; deferredPolls?: number; frozen
     otlp: 0,
     frozen: [] as number[],
     completions: [] as Record<string, unknown>[],
+    worldCreates: [] as Record<string, unknown>[],
     experiments: [] as Record<string, unknown>[],
     register: [] as Record<string, unknown>[],
     claims: 0,
@@ -233,6 +244,7 @@ function hueStandIn(options: { verdict?: Verdict; deferredPolls?: number; frozen
         return Response.json(experiment);
       }
       if (path === "/environment-runs") {
+        calls.worldCreates.push(body);
         const world = {
           id: randomUUID(),
           executionId: String(body.executionId),
@@ -240,13 +252,51 @@ function hueStandIn(options: { verdict?: Verdict; deferredPolls?: number; frozen
           steps: [] as Record<string, unknown>[],
         };
         worlds.set(world.id, world);
+        const mirror = `${url.origin}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        const expiresAt = new Date(Date.now() + 600_000).toISOString();
+        const gateway = options.gateway
+          ? {
+              worldId: world.id,
+              token: worldToken,
+              lifecycle: "live",
+              completingUntil: null,
+              baggage: `hue-world=${world.id}`,
+              traceparent: body.traceparent ?? null,
+              surfaces: [
+                {
+                  provider: "google.gmail",
+                  surface: "google.gmail/mcp",
+                  providerInstanceKey: "gmail-primary",
+                  url: mirror,
+                  alias: null,
+                },
+              ],
+              env: {
+                HUE_WORLD_ID: world.id,
+                HUE_WORLD_TOKEN: worldToken,
+                BAGGAGE: `hue-world=${world.id}`,
+                HUE_SIM_GOOGLE_GMAIL_MCP_URL: mirror,
+              },
+              mcpConfig: {
+                mcpServers: {
+                  "gmail-primary": {
+                    type: "http",
+                    url: mirror,
+                    headers: { Authorization: `Bearer ${worldToken}` },
+                  },
+                },
+              },
+              connection: null,
+            }
+          : {};
         return Response.json({
+          ...gateway,
           id: world.id,
           environmentVersionId,
           clockNs: "0",
           stateDigest: digest,
           maxSteps: 50,
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          expiresAt,
           actions: [
             {
               name: "save",
@@ -547,7 +597,8 @@ export default async function runMyAgent(inputs: { task: string }, context: Cont
 }
 `;
 
-const commandSource = `let data = "";
+const commandSource = `import { readFileSync } from "node:fs";
+let data = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) data += chunk;
 const { inputs, config } = JSON.parse(data);
@@ -564,6 +615,13 @@ process.stdout.write(JSON.stringify({
     caseId: process.env.HUE_CASE_ID,
     executionId: process.env.HUE_EXECUTION_ID,
     worldId: process.env.HUE_ENVIRONMENT_RUN_ID,
+    hasApiKey: "HUE_API_KEY" in process.env,
+    worldToken: process.env.HUE_WORLD_TOKEN,
+    gmailMirror: process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL,
+    mcpConfig: process.env.HUE_MCP_CONFIG
+      ? JSON.parse(readFileSync(process.env.HUE_MCP_CONFIG, "utf8"))
+      : null,
+    mcpConfigPath: process.env.HUE_MCP_CONFIG,
   },
 }));
 `;
@@ -711,9 +769,107 @@ describe("hue eval", () => {
             caseId: f.scenario.publication.caseId,
             executionId: world!.executionId,
             worldId: world!.id,
+            // The project key never reaches the agent unless the caller opts in.
+            hasApiKey: false,
+            mcpConfig: null,
           },
         });
         expect(result.stdout.trim().split("\n")).toHaveLength(1);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "--allow-hue-credentials keeps the project key in the --command child",
+    async () => {
+      const cwd = await workspace();
+      const f = hueStandIn();
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--allow-hue-credentials",
+            "--origin",
+            f.baseUrl,
+            "--json",
+            "--content",
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        expectNoSecrets(result);
+        const [completion] = f.calls.completions;
+        expect((completion!.output as { env: { hasApiKey: boolean } }).env.hasApiKey).toBe(true);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "a gateway world hands the --command child its mirrors, token and MCP configuration file",
+    async () => {
+      const cwd = await workspace();
+      const f = hueStandIn({ gateway: true });
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--revision",
+            "tester@abc123",
+            "--origin",
+            f.baseUrl,
+            "--json",
+            "--content",
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        expectNoSecrets(result);
+        expect(result.stdout).not.toContain(worldToken);
+        expect(result.stderr).not.toContain(worldToken);
+        const [world] = [...f.worlds.values()];
+        const mirror = `${f.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        const [completion] = f.calls.completions;
+        const env = (completion!.output as { env: Record<string, unknown> }).env;
+        expect(env).toMatchObject({
+          hasToken: false,
+          url: mirror,
+          worldToken,
+          gmailMirror: mirror,
+          hasApiKey: false,
+          executionId: world!.executionId,
+          worldId: world!.id,
+          mcpConfig: {
+            mcpServers: {
+              "gmail-primary": {
+                type: "http",
+                url: mirror,
+                headers: { Authorization: `Bearer ${worldToken}` },
+              },
+            },
+          },
+        });
+        // The owner-only file is gone after the case; no legacy capability was minted; the
+        // world was created with the agent revision and the case span's context.
+        expect(existsSync(String(env.mcpConfigPath))).toBe(false);
+        expect(f.calls.requests).not.toContain("POST /local-agent-worker/mcp-capability");
+        expect(f.calls.worldCreates[0]).toMatchObject({ agentRevision: "tester@abc123" });
+        expect(String(f.calls.worldCreates[0]!.traceparent)).toMatch(
+          /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/,
+        );
       } finally {
         f.stop();
         await rm(cwd, { recursive: true, force: true });

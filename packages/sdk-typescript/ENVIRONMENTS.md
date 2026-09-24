@@ -196,6 +196,67 @@ An observation with `status: "error"` is a recorded world answer, not a transpor
 Run mutations retry with stable invocation/idempotency identities. Registry writes do not retry
 automatically because identity creation and publication have no request key.
 
+## Worlds served by the simulation gateway
+
+Where a Hue deployment has the simulation gateway on, `createRun` returns the World API handoff
+beside the run: `token` (a `hue_world_…` credential that lives exactly as long as the world),
+`surfaces[]` (one mirror URL per pinned provider surface, such as the Gmail MCP and REST mirrors),
+`env` (`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `BAGGAGE`, `TRACEPARENT` and one
+`HUE_SIM_<SURFACE ID>_URL` per surface) and `mcpConfig` (the common `mcpServers` shape with the
+token in the `Authorization` header). The agent is pointed at the mirrors by configuration only:
+its own Gmail MCP or REST client, the mirror URL, the world token where the Google credential went.
+
+```ts
+import {
+  agentEnvironment,
+  createEnvironmentClient,
+  worldHandoff,
+  writeMcpConfig,
+} from "@hue-run/sdk/environment";
+
+const run = await environmentClient.createRun({
+  idempotencyKey: `execution:${executionId}`,
+  environmentVersionId,
+  executionId,
+  ttlSeconds: 600,
+  traceparent: `00-${span.traceId}-${span.spanId}-01`, // parents the world span on the case span
+  agentRevision: "my-agent@1.4.2", // joins the world's fingerprint
+});
+const world = worldHandoff(run); // null for a world created while the gateway is off
+const child = agentEnvironment(world!, { parent: process.env }); // no HUE_API_KEY in the agent
+const config = await writeMcpConfig(world!); // owner-only mcp.json; dispose after the run
+try {
+  await spawnAgent({ env: child, mcpConfigPath: config.path });
+} finally {
+  await config.dispose();
+  await environmentClient.finishRun(run.id, {
+    idempotencyKey: `execution:${executionId}:completed`,
+    status: "completed",
+  });
+}
+```
+
+`runSimulation`, `runLocalAgent` and `hue eval` do this for you: they create the world with the
+execution, the stable key, the case span's context and the agent revision, pass the handoff as
+`context.world`, and finish before returning so telemetry is flushed and the execution completed
+afterwards. For one compatibility release `context.mcp` is the world's first MCP mirror with the
+world token, so an adapter that read `HUE_MCP_URL` and `HUE_MCP_TOKEN` keeps working;
+`agentEnvironment` sets those names too unless `legacyMcpVariables: false`. A gateway world binds
+no Hue-native `tools` (Hue refuses them); a world created while the gateway is off keeps its tools
+and the `hue_sim_` capability and emits a one-time `DeprecationWarning`.
+
+`agentEnvironment` removes Hue control-plane credentials from the child by default: `HUE_API_KEY`,
+`HUE_MCP_KEY` and any variable whose value is a `hue_sk_`, `hue_mcp_` or `hue_attempt_`
+credential. Pass `includeHueCredentials: true` only for an agent that must call Hue's own API.
+Nothing in these helpers logs the token; keep it out of your own logs and checkpoints.
+
+Finish answers `lifecycle: "completing"` with `sealedAt: null` for a gateway world: the seal
+follows a 5 s grace so in-flight writes land, and a late finish answers 409, which the helpers
+treat as the seal they can no longer change. `getEvidence(runId, { section, bodies })` reads the
+sealed world's evaluator-only evidence (start and end state, the diff, the call ledger, coverage,
+fingerprint) with the project key; a world token can never read it. The client honors Hue's
+`Retry-After` on 429 and 503.
+
 ## Coverage gaps
 
 A provider adapter can record a known valid provider request that the environment cannot

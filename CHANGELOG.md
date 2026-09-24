@@ -10,12 +10,31 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- **World API handoff.** `createRun` accepts `traceparent` and `agentRevision`, and its response
+  carries the world's `token`, `surfaces`, `env` and `mcpConfig` where Hue's simulation gateway
+  serves the world. `worldHandoff`, `agentEnvironment`, `stripHueControlPlaneCredentials`,
+  `legacyMcpCapability` and `writeMcpConfig` in `@hue-run/sdk/environment` build an agent child's
+  configuration from it without the project key; `getEvidence` reads a sealed world's
+  evaluator-only evidence; `HueEnvironmentError` carries `retryAfterMs` and the client waits
+  Hue's `Retry-After` on 429 and 503. `runSimulation`, `runLocalAgent` and `runEnvironmentTarget`
+  create the world with the case span's context and the agent revision (`agentRevision` on
+  `runSimulation`), pass `context.world`, and finish before completing. `hue eval --command`
+  hands the child the world's environment and an owner-only `HUE_MCP_CONFIG` file, removes
+  `HUE_API_KEY` and other Hue control-plane credentials from it unless `--allow-hue-credentials`
+  is passed, and sends `--revision` as the agent revision.
+
 #### Changed
 
+- `SimulationTargetContext.mcp`, `LocalAgentTargetContext.mcp` and `EnvironmentTargetContext.mcp`
+  are optional: for a gateway world they hold the first MCP mirror with the world token; for a
+  world created while the gateway is off they still hold the `hue_sim_` capability, now with a
+  one-time `DeprecationWarning` (`HUE_NATIVE_SIMULATION_TOOLS`; the provider facade warns
+  `HUE_PROVIDER_FACADE`). `SealedRun.sealedAt` is null while a gateway world is `completing`.
 - `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
   shortened to 7 characters); the eval set is already shown on the run page. Previously the name
   repeated the eval set name in a `·`-separated string.
-
 ### [0.7.0] - 2026-09-23
 
 #### Breaking
