@@ -190,7 +190,8 @@ See the [documentation](https://docs.hue.run/sdks/python) for integration guidan
 
 `hue_sdk.environment.EnvironmentClient` drives Hue's World API: create a world after the case's
 execution starts, hand the agent the provider mirror URLs and the world token (never the project
-key), finish before the execution completes, and read the sealed world's evaluator-only evidence.
+key), finish and `wait_for_seal` before the execution completes, and read the sealed world's
+evaluator-only evidence.
 
 ```python
 import os

@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `runSimulation`, `runLocalAgent` and `runEnvironmentTarget` wait up to about 40 seconds for a
+  gateway world to seal after its completion grace before the execution completes.
+- `isTransientEnvironmentError` classifies retryable World API failures for bounded polling.
+
 #### Fixed
 
 - The hosted-tool recorder resolves `servers` entries with own-property lookup, so labels such as
@@ -504,6 +510,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Added
 
+- `EnvironmentClient.wait_for_seal` waits through a world's completion grace before the execution
+  completes and raises `EnvironmentSealTimeoutError` when the bounded wait expires.
 - **Wire.** `span.record_file(role=..., media_type=..., sha256=..., data=..., byte_size=..., name=...)`
   adds a `hue.file` event with the same attributes as TypeScript `hue.recordFile`.
 - **Wire.** `hue.model(..., system_instructions=..., tools=...)` and

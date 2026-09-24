@@ -1,11 +1,12 @@
 """Hue's simulated worlds: the World API client and the agent handoff helpers.
 
 A world is created after the case's execution starts, hands the agent provider mirror URLs and
-a world token (never the project key), is finished before the execution completes, and is read
-back as evaluator-only evidence once sealed. No agent framework or tool binding is required.
+a world token (never the project key), is finished and ``wait_for_seal`` completes before the
+execution completes, and is read back as evaluator-only evidence once sealed. No agent framework
+or tool binding is required.
 """
 
-from .client import EnvironmentClient, HueEnvironmentError
+from .client import EnvironmentClient, EnvironmentSealTimeoutError, HueEnvironmentError
 from .types import (
     ActionDefinition,
     ActionParameter,
@@ -56,6 +57,7 @@ __all__ = [
     "CoverageGapResult",
     "Effect",
     "EnvironmentClient",
+    "EnvironmentSealTimeoutError",
     "EnvironmentCoverage",
     "EnvironmentRun",
     "ErrorObservation",

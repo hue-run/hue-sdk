@@ -162,9 +162,9 @@ export interface RunEnvironmentTargetOptions {
 
 /** The completion grace is five seconds; cap an unexpectedly distant timestamp and let reads
  * force the seal after the grace. */
-const MAX_GRACE_WAIT_MS = 10_000;
-const SEAL_POLL_MS = 250;
-const SEAL_WAIT_MS = 30_000;
+export const MAX_GRACE_WAIT_MS = 10_000;
+export const SEAL_POLL_MS = 250;
+export const SEAL_WAIT_MS = 30_000;
 
 /** Finish, then wait for the authoritative run to leave open. */
 async function seal(
@@ -210,24 +210,25 @@ async function awaitSeal(
   let wait = Number.isFinite(graceEnd)
     ? Math.min(Math.max(0, graceEnd - Date.now()), MAX_GRACE_WAIT_MS)
     : 0;
-  const deadline = Date.now() + wait + SEAL_WAIT_MS;
+  const deadline = performance.now() + wait + SEAL_WAIT_MS;
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, wait));
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error(`World ${runId} was not sealed after its completion grace`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remaining);
     try {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0)
-        throw new Error(`World ${runId} was not sealed after its completion grace`);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), remaining);
-      try {
-        if ((await client.getRun(runId, { signal: controller.signal })).status !== "open") return;
-      } finally {
-        clearTimeout(timer);
-      }
+      if ((await client.getRun(runId, { signal: controller.signal })).status !== "open") return;
     } catch (error) {
-      if (!isTransientEnvironmentError(error) || Date.now() >= deadline) throw error;
+      if (!isTransientEnvironmentError(error)) throw error;
+      if (performance.now() >= deadline)
+        throw new Error(`World ${runId} was not sealed after its completion grace`, {
+          cause: error,
+        });
+    } finally {
+      clearTimeout(timer);
     }
-    if (Date.now() >= deadline)
+    if (performance.now() >= deadline)
       throw new Error(`World ${runId} was not sealed after its completion grace`);
     wait = SEAL_POLL_MS;
   }

@@ -13,6 +13,7 @@ import pytest
 import hue_sdk.environment.client as environment_module
 from hue_sdk.environment import (
     EnvironmentClient,
+    EnvironmentSealTimeoutError,
     HueEnvironmentError,
     agent_environment,
     is_hue_control_plane_credential,
@@ -266,6 +267,33 @@ def test_wait_for_seal_retries_transient_reads(monkeypatch):
     state = client.wait_for_seal(RUN_ID)
     assert state["status"] == "completed"
     assert sleeps[0] == 1
+
+
+def test_wait_for_seal_honors_retry_after_with_loopback(receiver, monkeypatch):
+    client = EnvironmentClient(receiver.url, KEY)
+    reply(receiver, {"error": "busy"}, status=429, **{"Retry-After": "1"})
+    reply(receiver, gateway_run(status="completed", lifecycle="sealed"))
+    sleeps: list[float] = []
+    monkeypatch.setattr(environment_module.time, "sleep", sleeps.append)
+
+    state = client.wait_for_seal(RUN_ID)
+
+    assert state["status"] == "completed"
+    assert 1.0 in sleeps
+    assert len(receiver.requests) == 2
+
+
+def test_wait_for_seal_deadline_has_distinct_error(monkeypatch):
+    client = EnvironmentClient("https://app.hue.test", KEY)
+    monkeypatch.setattr(environment_module, "SEAL_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(environment_module, "SEAL_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(client, "_get_run_once", lambda _run_id, **_: {"status": "open"})
+    monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        EnvironmentSealTimeoutError, match="was not sealed after its completion grace"
+    ):
+        client.wait_for_seal(RUN_ID)
 
 
 def test_wait_for_seal_rejects_non_transient_read(monkeypatch):

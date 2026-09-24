@@ -29,6 +29,9 @@ _RETRYABLE = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # A Retry-After longer than this waits this long: the gateway asks for 1 s, never minutes.
 _MAX_RETRY_AFTER_SECONDS = 10.0
+MAX_GRACE_WAIT_SECONDS = 10.0
+SEAL_WAIT_SECONDS = 30.0
+SEAL_POLL_SECONDS = 0.25
 # Version 00 reserves the high six trace-flags bits; only the low two are currently defined.
 _TRACEPARENT = re.compile(r"^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-0[0-3]$")
 _EVIDENCE_SECTIONS = ("all", "start", "end", "diff", "ledger")
@@ -46,6 +49,15 @@ class HueEnvironmentError(RuntimeError):
             if status is not None
             else "Hue environment connection or response failed."
         )
+
+
+class EnvironmentSealTimeoutError(HueEnvironmentError):
+    """A world stayed open through its completion grace and bounded seal wait."""
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__()
+        self.args = (f"World {run_id} was not sealed after its completion grace",)
 
 
 def _retry_after(response: requests.Response) -> float | None:
@@ -119,9 +131,14 @@ class EnvironmentClient:
             ) as response:
                 if not 200 <= response.status_code < 300:
                     raise HueEnvironmentError(response.status_code, _retry_after(response))
+                deadline = (
+                    time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+                )
                 chunks: list[bytes] = []
                 size = 0
                 for chunk in response.iter_content(chunk_size=8192):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise HueEnvironmentError()
                     size += len(chunk)
                     if size > _MAX_RESPONSE_BYTES:
                         raise HueEnvironmentError()
@@ -297,29 +314,34 @@ class EnvironmentClient:
             ).timestamp()
         except (TypeError, ValueError, OverflowError):
             grace_end = time.time()
-        wait = min(max(0.0, grace_end - time.time()), 10.0)
-        deadline = time.monotonic() + wait + 30.0
+        wait = min(max(0.0, grace_end - time.time()), MAX_GRACE_WAIT_SECONDS)
+        deadline = time.monotonic() + wait + SEAL_WAIT_SECONDS
         if wait:
             time.sleep(wait)
         while True:
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise HueEnvironmentError()
+                    raise EnvironmentSealTimeoutError(run_id)
                 state = self._get_run_once(run_id, timeout_seconds=min(self._timeout, remaining))
                 if state["status"] != "open":
                     return state
             except HueEnvironmentError as error:
+                if isinstance(error, EnvironmentSealTimeoutError):
+                    raise
                 if error.status is not None and error.status not in _RETRYABLE:
                     raise
                 if time.monotonic() >= deadline:
-                    raise
-                delay = error.retry_after if error.retry_after is not None else 0.25
-                time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+                    raise EnvironmentSealTimeoutError(run_id) from error
+                delay = min(
+                    max(SEAL_POLL_SECONDS, error.retry_after or 0.0),
+                    max(0.0, deadline - time.monotonic()),
+                )
+                time.sleep(delay)
                 continue
             if time.monotonic() >= deadline:
-                raise HueEnvironmentError()
-            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+                raise EnvironmentSealTimeoutError(run_id)
+            time.sleep(min(SEAL_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
     def get_evidence(
         self,
