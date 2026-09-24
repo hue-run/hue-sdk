@@ -239,8 +239,35 @@ describe("Hue SDK contract", () => {
         const tools = spans.filter((span) => span.name?.startsWith("execute_tool "));
         expect(tools.length).toBe(9);
         expect(tools.every((span) => span.parentSpanId === model.spanId)).toBe(true);
-        const constructorTool = tools.find((span) => span.name === "execute_tool constructor_tool");
-        expect(attr(constructorTool!, "mcp.server.name")?.stringValue).toBe("constructor");
+        const listing = spans.find((span) => span.name === "tools/list")!;
+        expect(listing.parentSpanId).toBe(model.spanId);
+        expect(attr(listing, "mcp.method.name")?.stringValue).toBe("tools/list");
+        expect(attr(listing, "mcp.server.name")?.stringValue).toBe("gmail");
+        expect(attr(listing, "server.address")?.stringValue).toBe("mcp.example.test");
+        const byName = Object.fromEntries(tools.map((span) => [span.name, span]));
+        expect(
+          attr(byName["execute_tool search_threads"]!, "gen_ai.tool.call.id")?.stringValue,
+        ).toBe("mcp_1");
+        expect(attr(byName["execute_tool search_threads"]!, "server.address")?.stringValue).toBe(
+          "mcp.example.test",
+        );
+        expect(attr(byName["execute_tool create_draft"]!, "error.type")?.stringValue).toBe(
+          "mcp_error",
+        );
+        expect(byName["execute_tool create_draft"]!.status?.code).toBe(2);
+        expect(attr(byName["execute_tool file_search"]!, "error.type")?.stringValue).toBe("failed");
+        expect(attr(byName["execute_tool code_interpreter"]!, "error.type")).toBeUndefined();
+        expect(attr(byName["execute_tool post_message"]!, "mcp.server.name")?.stringValue).toBe(
+          "slack",
+        );
+        expect(attr(byName["execute_tool post_message"]!, "server.address")?.stringValue).toBe(
+          "mcp.example.test",
+        );
+        expect(attr(byName["execute_tool post_message"]!, "error.type")?.stringValue).toBe(
+          "mcp_error",
+        );
+        const constructorTool = byName["execute_tool constructor_tool"]!;
+        expect(attr(constructorTool, "mcp.server.name")?.stringValue).toBe("constructor");
         expect(spans.some((span) => attr(span, "mcp.server.name")?.stringValue === "Object")).toBe(
           false,
         );
@@ -248,10 +275,23 @@ describe("Hue SDK contract", () => {
         expect(raw).not.toContain("synthetic-oauth-token");
         if (captureContent) {
           expect(raw).toContain("private-provider-content");
-          expect(tools.some((span) => attr(span, "gen_ai.tool.call.arguments"))).toBe(true);
+          expect(attr(listing, "gen_ai.tool.definitions")).toBeDefined();
+          expect(
+            attr(byName["execute_tool search_threads"]!, "gen_ai.tool.call.arguments"),
+          ).toBeDefined();
+          expect(
+            attr(byName["execute_tool search_threads"]!, "gen_ai.tool.call.result"),
+          ).toBeDefined();
+          expect(
+            attr(byName["execute_tool post_message"]!, "gen_ai.tool.call.arguments"),
+          ).toBeDefined();
         } else {
           expect(raw).not.toContain("private-provider-content");
-          expect(tools.every((span) => !attr(span, "gen_ai.tool.call.arguments"))).toBe(true);
+          for (const span of [listing, ...tools]) {
+            expect(attr(span, "gen_ai.tool.call.arguments")).toBeUndefined();
+            expect(attr(span, "gen_ai.tool.call.result")).toBeUndefined();
+            expect(attr(span, "gen_ai.tool.definitions")).toBeUndefined();
+          }
         }
       } finally {
         await hue.shutdown();
