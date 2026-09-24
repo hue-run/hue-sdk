@@ -83,10 +83,10 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is [`0.7.0`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.7.0), with
+The published TypeScript package is [`0.8.0`](https://github.com/hue-run/hue-sdk/releases/tag/typescript-v0.8.0), with
 live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
 `runLocalAgent()`, V2 environments and the local
-[setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.4.0`](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.4.0), with live spans, the same
+[setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.5.0`](https://github.com/hue-run/hue-sdk/releases/tag/python-v0.5.0), with live spans, the same
 product-named evaluation client methods and the MCP `mcp=` option. Existing low-level
 methods remain callable. Setup's Python path still installs its separately tested
 package pin. Package checks use synthetic local services.
