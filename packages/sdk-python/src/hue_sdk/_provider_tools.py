@@ -94,7 +94,13 @@ def _json_arguments(value: Any) -> Any:
     # chunks as soon as the content limit is crossed, rather than walking every character.
     from .client import _utf8_byte_size
 
-    if _utf8_byte_size(value, MAX_CONTENT_BYTES) > MAX_CONTENT_BYTES:
+    try:
+        oversized = _utf8_byte_size(value, MAX_CONTENT_BYTES) > MAX_CONTENT_BYTES
+    except UnicodeEncodeError:
+        # Preserve a readable call when a provider included an unpaired surrogate. The exporter
+        # applies its normal bounded string handling later; this parser must not drop siblings.
+        return value
+    if oversized:
         return ABSENT
     try:
         return json.loads(value)
@@ -382,7 +388,6 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
             or "\\" in url
             or "\x00" in url
             or "\uff3c" in url
-            or ";" in url
             or "%5c" in url.lower()
             or any(character.isspace() or ord(character) < 0x20 for character in url)
         ):
@@ -401,8 +406,18 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
                 ipaddress.ip_address(hostname)
             except ValueError:
                 continue
-        elif not _HOSTNAME.fullmatch(hostname):
-            continue
+        else:
+            # Validate Unicode DNS names through IDNA, while retaining the original hostname in
+            # the attribute. A trailing root label is valid absolute-DNS spelling.
+            dns_name = hostname[:-1] if hostname.endswith(".") else hostname
+            if not dns_name:
+                continue
+            try:
+                ascii_name = dns_name.encode("idna").decode("ascii")
+            except UnicodeError:
+                continue
+            if len(ascii_name) > 253 or not _HOSTNAME.fullmatch(ascii_name):
+                continue
         if hostname:
             addresses[label] = hostname
     return addresses

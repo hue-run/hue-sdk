@@ -50,6 +50,17 @@ def test_oversized_mcp_arguments_are_counted_as_skipped():
     assert activity.skipped == 1
 
 
+def test_unpaired_surrogate_arguments_keep_the_call():
+    arguments = '{"value":"\ud800"}'
+    activity = hosted_tool_activity(
+        "openai",
+        {"output": [{"type": "mcp_call", "name": "tool", "arguments": arguments}]},
+    )
+    assert len(activity.calls) == 1
+    assert activity.calls[0].arguments == arguments
+    assert activity.skipped == 0
+
+
 def test_provider_tool_definitions_are_bounded_per_listing():
     activity = hosted_tool_activity(
         "openai",
@@ -123,9 +134,17 @@ def test_provider_server_addresses_reject_unsafe_urls():
                 },
                 {"server_label": "nul", "server_url": "https://mcp.example.test/\x00/sse"},
                 {"server_label": "ok", "server_url": "https://mcp.example.test/sse"},
+                {"server_label": "path-semi", "server_url": "https://mcp.example.test/sse;v=1"},
+                {"server_label": "idn", "server_url": "https://münchen.example/sse"},
+                {"server_label": "absolute", "server_url": "https://mcp.example.test./sse"},
             ]
         },
-    ) == {"ok": "mcp.example.test"}
+    ) == {
+        "ok": "mcp.example.test",
+        "path-semi": "mcp.example.test",
+        "idn": "münchen.example",
+        "absolute": "mcp.example.test.",
+    }
 
 
 @pytest.mark.parametrize(
