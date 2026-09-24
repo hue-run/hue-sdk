@@ -51,8 +51,13 @@ _MISSING = object()
 
 
 def _is_label(value: Any) -> bool:
-    """A non-blank string of at most 256 characters, matching TypeScript's ``isLabel``."""
-    return type(value) is str and bool(value.strip()) and len(value) <= 256
+    """A non-blank string of at most 256 UTF-16 code units, matching TypeScript's ``isLabel``."""
+    if type(value) is not str or not value.strip() or "\x00" in value:
+        return False
+    try:
+        return len(value.encode("utf-16-le")) // 2 <= 256
+    except UnicodeEncodeError:
+        return False
 
 
 class ProjectValidationError(RuntimeError):
