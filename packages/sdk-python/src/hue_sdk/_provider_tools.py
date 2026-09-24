@@ -26,6 +26,7 @@ MAX_PROVIDER_DEFINITIONS = 512
 MAX_PROVIDER_SERVERS = 512
 _HOSTNAME_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _HOSTNAME = re.compile(rf"{_HOSTNAME_LABEL}(?:\.{_HOSTNAME_LABEL})*\Z")
+_UNSAFE_URL = re.compile(r"[\s\x00-\x1f]")
 
 
 @dataclass
@@ -69,7 +70,7 @@ def _data(value: Any) -> Any:
     if callable(dump) and not isinstance(value, (Mapping, str, bytes)):
         try:
             return dump(warnings=False)
-        except TypeError:
+        except (TypeError, ValueError):
             return dump()
     if isinstance(value, Mapping):
         return dict(value)
@@ -128,7 +129,7 @@ def _is_provider_tool_item(provider: str, value: Any) -> bool:
     return kind in ("mcp_tool_use", "server_tool_use")
 
 
-_ERROR_CODE = re.compile(r"^[a-z0-9_]{1,64}$")
+_ERROR_CODE = re.compile(r"[a-z0-9_]{1,64}\Z")
 
 
 def _error_code(value: Any) -> str:
@@ -390,7 +391,7 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
             or "\x00" in url
             or "\uff3c" in url
             or "%5c" in url.lower()
-            or any(character.isspace() or ord(character) < 0x20 for character in url)
+            or _UNSAFE_URL.search(url)
         ):
             continue
         try:
@@ -405,16 +406,19 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
             or any(unicodedata.category(character) in {"Cc", "Cf"} for character in hostname)
         ):
             continue
-        if ":" in hostname:
-            if not parsed.netloc.startswith("["):
+        if parsed.netloc.startswith("["):
+            if ":" not in hostname:
                 continue
             try:
-                ipaddress.ip_address(hostname)
+                ipaddress.IPv6Address(hostname)
             except ValueError:
                 continue
+            address = hostname
+        elif ":" in hostname:
+            continue
         else:
-            # Validate Unicode DNS names through IDNA, while retaining the original hostname in
-            # the attribute. A trailing root label is valid absolute-DNS spelling.
+            # Validate Unicode DNS names through IDNA and export the validated A-label. A trailing
+            # root label is valid absolute-DNS spelling.
             dns_name = hostname[:-1] if hostname.endswith(".") else hostname
             if not dns_name:
                 continue
@@ -424,6 +428,7 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
                 continue
             if len(ascii_name) > 253 or not _HOSTNAME.fullmatch(ascii_name):
                 continue
+            address = ascii_name + ("." if hostname.endswith(".") else "")
         if hostname:
-            addresses[label] = hostname
+            addresses[label] = address
     return addresses

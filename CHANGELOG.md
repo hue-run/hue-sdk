@@ -538,8 +538,7 @@ No registry release is claimed until publication and registry acceptance complet
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation
   rejects ambiguous URL text before it can enter `server.address`.
-- Deeply nested provider arguments no longer discard sibling calls; model dumps disable Pydantic
-  content warnings when supported.
+- Model dumps disable Pydantic content warnings when supported.
 
 ### [0.6.0] - 2026-09-24
 

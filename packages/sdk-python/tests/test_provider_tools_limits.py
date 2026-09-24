@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from hue_sdk._provider_tools import ABSENT, hosted_server_addresses, hosted_tool_activity
+from hue_sdk._provider_tools import (
+    ABSENT,
+    _error_code,
+    hosted_server_addresses,
+    hosted_tool_activity,
+)
 
 
 def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
@@ -124,6 +129,8 @@ def test_deep_arguments_do_not_drop_sibling_calls():
 
 
 def test_provider_server_addresses_reject_unsafe_urls():
+    host_253 = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 61))
+    host_255 = ".".join(("a" * 63,) * 4)
     assert hosted_server_addresses(
         "openai",
         {
@@ -137,13 +144,16 @@ def test_provider_server_addresses_reject_unsafe_urls():
                 {"server_label": "path-semi", "server_url": "https://mcp.example.test/sse;v=1"},
                 {"server_label": "idn", "server_url": "https://münchen.example/sse"},
                 {"server_label": "absolute", "server_url": "https://mcp.example.test./sse"},
+                {"server_label": "max", "server_url": f"https://{host_253}/sse"},
+                {"server_label": "too-long", "server_url": f"https://{host_255}/sse"},
             ]
         },
     ) == {
         "ok": "mcp.example.test",
         "path-semi": "mcp.example.test",
-        "idn": "münchen.example",
+        "idn": "xn--mnchen-3ya.example",
         "absolute": "mcp.example.test.",
+        "max": host_253,
     }
 
 
@@ -156,6 +166,7 @@ def test_provider_server_addresses_reject_unsafe_urls():
         "https://mcp.example.test /sse",
         "https://mcp.example.test\u200b/sse",
         "https://[fe80::1%25eth0]/sse",
+        "https://[v1.sk-live-secret]/sse",
         "https://" + ("a" * 254) + ".test/sse",
         "https://mcp.example.test\ud800/sse",
     ],
@@ -192,6 +203,36 @@ def test_broken_tail_item_does_not_discard_bounded_prefix():
     assert activity.skipped == 1
 
 
+def test_broken_anthropic_tail_item_does_not_discard_bounded_prefix():
+    activity = hosted_tool_activity(
+        "anthropic",
+        {
+            "content": [
+                *[
+                    item
+                    for index in range(64)
+                    for item in (
+                        {"type": "server_tool_use", "id": f"call-{index}", "name": "tool"},
+                        {
+                            "type": "server_tool_result",
+                            "tool_use_id": f"call-{index}",
+                            "content": {"type": "text", "text": "ok"},
+                        },
+                    )
+                ],
+                _RaisingType(),
+            ]
+        },
+    )
+    assert len(activity.calls) == 64
+    assert activity.skipped == 1
+
+
+@pytest.mark.parametrize("value", ["UPPER", "a" * 65, "ok\n", "bad-code"])
+def test_error_codes_are_bounded(value):
+    assert _error_code(value) == "error"
+
+
 class _WarningsModel:
     def __init__(self):
         self.warning_argument = None
@@ -205,4 +246,16 @@ def test_model_dump_disables_content_warnings():
     response = _WarningsModel()
     activity = hosted_tool_activity("openai", response, capture_content=False)
     assert response.warning_argument is False
+    assert len(activity.calls) == 1
+
+
+class _PydanticV1Model:
+    def model_dump(self, **kwargs):
+        if "warnings" in kwargs:
+            raise ValueError("warnings is only supported in Pydantic v2")
+        return {"output": [{"type": "mcp_call", "name": "tool", "arguments": "{}"}]}
+
+
+def test_model_dump_falls_back_for_pydantic_v1():
+    activity = hosted_tool_activity("openai", _PydanticV1Model(), capture_content=False)
     assert len(activity.calls) == 1
