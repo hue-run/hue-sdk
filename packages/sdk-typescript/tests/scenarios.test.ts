@@ -45,7 +45,10 @@ function registry(pageSize = 100) {
     });
     return { id, version: addVersion(id, options.frozen ?? true) };
   }
-  function scenario(name: string, options: { published?: boolean; frozen?: boolean } = {}) {
+  function scenario(
+    name: string,
+    options: { published?: boolean; frozen?: boolean; listedScorers?: number | "empty" } = {},
+  ) {
     const { id: datasetId, version } = dataset(name, { frozen: options.frozen ?? true });
     const id = randomUUID();
     const pins = {
@@ -57,6 +60,18 @@ function registry(pageSize = 100) {
       scorerId: randomUUID(),
       scorerVersionId: randomUUID(),
     };
+    // A publication that lists its pins names the outcome scorer first, then the others.
+    const listed =
+      options.listedScorers === undefined
+        ? {}
+        : options.listedScorers === "empty"
+          ? { scorerVersionIds: [] as string[] }
+          : {
+              scorerVersionIds: [
+                pins.scorerVersionId,
+                ...Array.from({ length: options.listedScorers }, () => randomUUID()),
+              ],
+            };
     scenarios.set(id, {
       id,
       domain: "support",
@@ -64,9 +79,9 @@ function registry(pageSize = 100) {
       revision: 1,
       createdAt: "2026-09-18T00:00:00.000Z",
       traceId: randomUUID(),
-      publication: options.published === false ? null : pins,
+      publication: options.published === false ? null : { ...pins, ...listed },
     });
-    return { id, ...pins };
+    return { id, ...pins, ...listed };
   }
   const page = <T extends { id: string }>(items: T[], after?: string) => {
     const start = after ? items.findIndex((item) => item.id === after) + 1 : 0;
@@ -169,6 +184,19 @@ describe("resolveScenarioPins", () => {
       ),
     ).toEqual(expected);
     expect(fixture.calls.list).toBe(0);
+  });
+
+  test("pins every scorer version a publication lists, the outcome scorer first", async () => {
+    const fixture = registry();
+    const published = fixture.scenario("Refund flow with judges", { listedScorers: 2 });
+    const pins = await resolveScenarioPins(fixture.client, published.id);
+    expect(pins.scorerVersionIds).toEqual(published.scorerVersionIds!);
+    expect(pins.scorerVersionIds).toHaveLength(3);
+    expect(pins.scorerVersionIds[0]).toBe(published.scorerVersionId);
+    // An empty list reads as an older publication: the single pin stands.
+    const empty = fixture.scenario("Refund flow, empty list", { listedScorers: "empty" });
+    const single = await resolveScenarioPins(fixture.client, empty.id);
+    expect(single.scorerVersionIds).toEqual([empty.scorerVersionId]);
   });
 
   test("resolves by exact and case-insensitive name across published Scenarios only", async () => {

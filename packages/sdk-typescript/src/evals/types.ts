@@ -901,8 +901,13 @@ export interface CaseConversionPublication {
   environmentVersionId: string;
   /** Scorer identity of the published outcome checks. */
   scorerId: string;
-  /** Immutable scorer version pinned by the Scenario. */
+  /** Immutable scorer version pinned by the Scenario for its outcome checks. */
   scorerVersionId: string;
+  /**
+   * Every immutable scorer version the Scenario pins, `scorerVersionId` first. Absent on
+   * Scenarios published before publications listed their pins.
+   */
+  scorerVersionIds?: string[];
 }
 /** A Scenario read by {@link EvaluationClient.getCaseConversion}. Extra server fields are ignored. */
 export interface CaseConversion extends Partial<Omit<CaseConversionSummary, "id" | "status">> {

@@ -73,6 +73,10 @@ refuses to publish a version without a matching entry below.
 
 #### Changed
 
+- `resolveScenarioPins`, and so `hue eval --case`, pin every scorer version a published Scenario
+  lists in `publication.scorerVersionIds` (its outcome scorer first), falling back to the single
+  `scorerVersionId` of older publications; extra `--scorer` pins still merge in.
+  `CaseConversionPublication` gains the optional `scorerVersionIds`.
 - `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
   shortened to 7 characters); the eval set is already shown on the run page. Previously the name
   repeated the eval set name in a `·`-separated string.
