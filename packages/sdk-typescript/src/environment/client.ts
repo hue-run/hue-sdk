@@ -115,6 +115,7 @@ export class EnvironmentClient {
   ): Promise<T> {
     let response: Response;
     try {
+      const timeout = AbortSignal.timeout(this.timeoutMillis);
       response = await fetch(`${this.baseUrl}/api/v1${path}`, {
         method,
         headers: {
@@ -123,7 +124,7 @@ export class EnvironmentClient {
         },
         body: payload,
         redirect: "error",
-        signal: options.signal ?? AbortSignal.timeout(this.timeoutMillis),
+        signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
       });
     } catch {
       throw new HueEnvironmentError();
