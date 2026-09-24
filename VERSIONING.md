@@ -5,7 +5,7 @@ This policy covers `@hue-run/sdk` (npm) and `hue-run` (PyPI). Both packages are 
 ## Semantic versioning before 1.0
 
 - A `0.MINOR` release (for example `0.2.0`) may change public API, defaults or wire behavior. Every such change is listed under **Breaking** in [CHANGELOG.md](CHANGELOG.md) with a migration note.
-- A `0.x.PATCH` release is backwards compatible for the documented public API. It may add APIs and fix bugs. It does not change capture semantics (`captureContent` / `capture_content`), default queue or timeout budgets, or the wire format.
+- A `0.x.PATCH` release is backwards compatible for the documented public API. It may add APIs, add emitted attributes and events, and fix bugs, including what export sends for values that were rejected or should never have been sent. Such additions are marked **Wire** in the changelog. It does not rename or remove an emitted attribute, event or endpoint, change what `captureContent` / `capture_content` controls, change default queue or timeout budgets, or change the checkpoint format.
 - Only stable `X.Y.Z` versions are published to npm and PyPI. Pilot builds ship as GitHub pre-releases.
 
 ## Public API
@@ -59,4 +59,4 @@ Linux is tested in CI. macOS is used for development and is supported. On Window
 
 ## Release cadence
 
-Releases are cut from `main` by the [release workflow](RELEASING.md) after the version, changelog and package metadata have been reviewed. There is no fixed cadence; security fixes are released as soon as they are verified (see [SECURITY.md](SECURITY.md)).
+Releases are cut from `main` by the [release workflow](RELEASING.md) after the version, changelog and package metadata have been reviewed. Prefer a patch release; bump `0.MINOR` only for a change listed under **Breaking**. There is no fixed cadence; security fixes are released as soon as they are verified (see [SECURITY.md](SECURITY.md)).
