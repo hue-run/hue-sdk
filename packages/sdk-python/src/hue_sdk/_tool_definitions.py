@@ -341,7 +341,12 @@ def _canonical(value: Any) -> str:
     if value is False:
         return "false"
     if isinstance(value, int):
-        return str(value) if abs(value) <= 2**53 else _es_number(float(value))
+        if abs(value) <= 2**53:
+            return str(value)
+        try:
+            return _es_number(float(value))
+        except OverflowError:
+            return "null"
     if isinstance(value, float):
         return _es_number(value)
     if isinstance(value, str):
