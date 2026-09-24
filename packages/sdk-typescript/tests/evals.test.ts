@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -565,6 +565,46 @@ describe("installed evaluation API and runner contract", () => {
       expect(calls).toBe(2);
       expect(completions()).toHaveLength(2);
     } finally {
+      await hue.shutdownSafe();
+      f.server.stop(true);
+    }
+  });
+  test("fail_case raises a checkpoint that cannot be saved instead of failing the case", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "failed-checkpoint",
+      captureContent: false,
+    });
+    // Telemetry is accepted; only saving the acknowledgement fails, as on a full disk.
+    const write = CheckpointStore.prototype.write;
+    const spy = spyOn(CheckpointStore.prototype, "write").mockImplementation(async function (
+      this: CheckpointStore,
+      name: string,
+      value: unknown,
+    ) {
+      if ((value as { exportState?: string }).exportState === "accepted")
+        throw new Error("No space left on device");
+      return write.call(this, name, value);
+    });
+    try {
+      await expect(
+        runExperiment({
+          client: f.client,
+          hue,
+          experimentId: exp.id,
+          checkpointDirectory: await directory(),
+          persistResultContent: true,
+          traceEvidence: { mode: "required" },
+          traceNotAccepted: "fail_case",
+          target: async () => "known completed output",
+        }),
+      ).rejects.toThrow("No space left on device");
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toEqual([]);
+    } finally {
+      spy.mockRestore();
       await hue.shutdownSafe();
       f.server.stop(true);
     }

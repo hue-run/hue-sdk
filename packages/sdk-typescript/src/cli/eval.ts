@@ -1,7 +1,8 @@
 import { execFileSync, spawn } from "node:child_process";
-import { rmSync } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -558,10 +559,14 @@ function commandAdapter(
       HUE_CASE_ID: context.item.id,
       HUE_CASE_KEY: context.item.externalKey,
     };
-    const configFile = context.world ? await writeMcpConfig(context.world) : undefined;
-    const configDirectory = configFile ? dirname(configFile.path) : undefined;
+    // The token-bearing file is written inside a private directory registered before any of it
+    // exists, so a forced exit at any point removes it.
+    const configDirectory = context.world ? mkdtempSync(join(tmpdir(), "hue-mcp-config-")) : undefined;
     if (configDirectory) mcpConfigDirectories.add(configDirectory);
     try {
+      const configFile = context.world
+        ? await writeMcpConfig(context.world, { directory: configDirectory })
+        : undefined;
       const env = context.world
         ? {
             ...agentEnvironment(context.world, { parent, includeHueCredentials: true }),
@@ -588,8 +593,10 @@ function commandAdapter(
         }),
       );
     } finally {
-      await configFile?.dispose();
-      if (configDirectory) mcpConfigDirectories.delete(configDirectory);
+      if (configDirectory) {
+        await rm(configDirectory, { recursive: true, force: true });
+        mcpConfigDirectories.delete(configDirectory);
+      }
     }
   };
 }

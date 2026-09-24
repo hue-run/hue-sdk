@@ -203,9 +203,13 @@ export interface RunnerReport {
 /** Export issue counts, never content: which signal, what happened, the HTTP status when Hue
  * answered, and how many records. */
 export interface TelemetryIssueCount {
+  /** Signal the records belong to. */
   signal: "traces" | "logs";
+  /** `rejected` by Hue, `failed` to deliver, `dropped` from the queue, or an `invalid` record. */
   kind: "rejected" | "failed" | "dropped" | "invalid";
+  /** HTTP status when the issue came from Hue's answer. */
   status?: number;
+  /** Records affected. */
   count: number;
 }
 
@@ -695,6 +699,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           },
         );
         // End root before waiting for both OTLP signals. Export failure leaves the prepared checkpoint intact.
+        let exportError: Error | undefined;
         try {
           await options.hue.flush();
           // Another concurrent flush may already have surfaced this failure. OTLP
@@ -708,37 +713,43 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 ),
               options.hue.transport.getReport(),
             );
-          checkpoint.exportState = "accepted";
-          await store.write(file, checkpoint);
+        } catch (error) {
+          exportError = error as Error;
+        }
+        try {
+          if (exportError === undefined) {
+            checkpoint.exportState = "accepted";
+            await store.write(file, checkpoint);
+          }
         } catch (error) {
           // The explicitly chosen omission policy can complete without acknowledged telemetry.
-          if (options.traceEvidence.mode !== "omit") {
-            if (options.traceNotAccepted !== "fail_case") throw error;
-            // Required evidence that Hue did not accept fails the case rather than leaving
-            // its execution started: the outcome is kept, the evidence is declared omitted.
-            const failed = checkpoint as Prepared;
-            const issues = telemetryIssueCounts(error);
-            const { traceEvidence: _required, ...complete } = failed.complete;
-            if (complete.state === "succeeded") {
-              complete.state = "error";
-              complete.error = {
-                type: "TelemetryNotAccepted",
-                ...(options.persistResultContent
-                  ? { message: describeTelemetryIssues(issues) }
-                  : {}),
-              };
-              // Local scores were taken of a succeeded outcome that is now a failure.
-              failed.scores = [];
-            }
-            failed.complete = {
-              ...complete,
-              traceEvidence: "omit",
-              omissionReason: describeTelemetryIssues(issues).slice(0, 4000),
+          if (options.traceEvidence.mode !== "omit") throw error;
+        }
+        if (exportError !== undefined && options.traceEvidence.mode !== "omit") {
+          if (options.traceNotAccepted !== "fail_case") throw exportError;
+          // Required evidence that Hue did not accept fails the case rather than leaving its
+          // execution started: the outcome is kept, the evidence is declared omitted. Only an
+          // export failure takes this path; a checkpoint that cannot be saved is raised above.
+          const failed = checkpoint as Prepared;
+          const issues = telemetryIssueCounts(exportError);
+          const { traceEvidence: _required, ...complete } = failed.complete;
+          if (complete.state === "succeeded") {
+            complete.state = "error";
+            complete.error = {
+              type: "TelemetryNotAccepted",
+              ...(options.persistResultContent ? { message: describeTelemetryIssues(issues) } : {}),
             };
-            failed.exportState = "not_accepted";
-            failed.telemetryIssues = issues;
-            await store.write(file, failed);
+            // Local scores were taken of a succeeded outcome that is now a failure.
+            failed.scores = [];
           }
+          failed.complete = {
+            ...complete,
+            traceEvidence: "omit",
+            omissionReason: describeTelemetryIssues(issues).slice(0, 4000),
+          };
+          failed.exportState = "not_accepted";
+          failed.telemetryIssues = issues;
+          await store.write(file, failed);
         }
       }
       const prepared = checkpoint as Prepared;
