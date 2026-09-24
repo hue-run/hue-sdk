@@ -23,7 +23,8 @@ def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
             ]
         },
     )
-    assert len(activity.calls) == 128
+    # The malformed first item is counted within the 128-item parse cap, so 127 valid calls remain.
+    assert len(activity.calls) == 127
     assert activity.calls[0].arguments is ABSENT
     assert activity.skipped > 1_800
 
