@@ -300,6 +300,66 @@ export interface Effect {
   /** Changed field names. */
   fields: string[];
 }
+/** Lifecycle of a world the simulation gateway serves. */
+export type WorldLifecycle = "pending" | "live" | "completing" | "sealed";
+/** Advisory flags on a world's status read. */
+export type WorldFlag = "no_calls" | "fingerprint_differs";
+/** One pinned provider surface of one provider instance, as the mirror URL an official client
+ * is pointed at. `alias` stays null until the provider's alias hosts are served. */
+export interface WorldSurface {
+  /** Provider identity, such as `google.gmail`. */
+  provider: string;
+  /** Surface identity, such as `google.gmail/mcp` or `google.gmail/rest`. */
+  surface: string;
+  /** The provider instance of the environment version this surface belongs to. */
+  providerInstanceKey: string;
+  /** Mirror URL in the path form. */
+  url: string;
+  /** Alias-host URL, or null while unavailable. */
+  alias: string | null;
+}
+/** One MCP server entry of the common `mcpServers` configuration shape. */
+export interface WorldMcpServer {
+  /** Transport; the mirrors serve Streamable HTTP. */
+  type: "http";
+  /** Mirror URL of the MCP surface. */
+  url: string;
+  /** The world token as a bearer. */
+  headers: { Authorization: string };
+}
+/** The common `mcpServers` shape, one server per MCP surface of each provider instance. */
+export interface WorldMcpConfig {
+  /** Servers keyed by provider instance (suffixed by surface when an instance has several). */
+  mcpServers: Record<string, WorldMcpServer>;
+}
+/**
+ * What the World API hands an agent for one world: the world token in the provider's own
+ * credential slot, the mirror URLs, the environment carriers and the MCP configuration.
+ * Minted per response and never stored by Hue; keep it out of logs and checkpoints.
+ */
+export interface WorldHandoff {
+  /** World identity (the environment-run ID). */
+  id: string;
+  /** The `hue_world_…` credential; lives exactly as long as the world. */
+  token: string;
+  /** World deadline; the token outlives it by the 5 s completion grace. */
+  expiresAt: string;
+  /** Current lifecycle. */
+  lifecycle: WorldLifecycle;
+  /** Grace deadline while completing, else null. */
+  completingUntil: string | null;
+  /** The caller's trace context, echoed for the agent; null when none was supplied. */
+  traceparent: string | null;
+  /** `hue-world=<id>`, the OpenTelemetry baggage carrier value. */
+  baggage: string;
+  /** Mirror surfaces of every provider instance the environment version binds. */
+  surfaces: WorldSurface[];
+  /** `HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `BAGGAGE`, `TRACEPARENT` and one
+   * `HUE_SIM_<SURFACE ID>_URL` per surface. */
+  env: Record<string, string>;
+  /** The `mcpServers` configuration for the MCP surfaces. */
+  mcpConfig: WorldMcpConfig;
+}
 /** Newly created isolated world and its action catalog. */
 export interface EnvironmentRun {
   /** Environment-run identity. */
@@ -316,6 +376,26 @@ export interface EnvironmentRun {
   expiresAt: string;
   /** Closed generated action catalog. */
   actions: ActionDefinition[];
+  /** World identity; present for a world the simulation gateway serves. */
+  worldId?: string;
+  /** World token; present for a world the simulation gateway serves. */
+  token?: string;
+  /** Lifecycle; present for a world the simulation gateway serves. */
+  lifecycle?: WorldLifecycle;
+  /** Grace deadline while completing. */
+  completingUntil?: string | null;
+  /** Baggage carrier value. */
+  baggage?: string;
+  /** The stored caller trace context, or null. */
+  traceparent?: string | null;
+  /** Mirror surfaces. */
+  surfaces?: WorldSurface[];
+  /** Environment carriers. */
+  env?: Record<string, string>;
+  /** MCP configuration. */
+  mcpConfig?: WorldMcpConfig;
+  /** Reserved for connection keys; null today. */
+  connection?: null;
 }
 /** Result of invoking one environment action. */
 export interface ActionResult {
@@ -407,6 +487,20 @@ export interface RunState extends EnvironmentCoverage {
   stateDigest: string;
   /** Final state, available after sealing. */
   finalState?: JsonValue;
+  /** World identity; present for a world the simulation gateway serves. */
+  worldId?: string;
+  /** Lifecycle; present for a world the simulation gateway serves. */
+  lifecycle?: WorldLifecycle;
+  /** Grace deadline while completing. */
+  completingUntil?: string | null;
+  /** The trace the linked execution declared, or null. */
+  traceExternalId?: string | null;
+  /** Mirror surfaces. */
+  surfaces?: WorldSurface[];
+  /** Advisory flags. A status read never returns the token. */
+  flags?: WorldFlag[];
+  /** Reserved for connection keys; null today. */
+  connection?: null;
 }
 /** One immutable journal entry. */
 export interface Step {
@@ -448,9 +542,25 @@ export interface SealedRun {
   stepCount: number;
   /** Final state digest. */
   stateDigest: string;
-  /** Seal timestamp. */
-  sealedAt: string;
+  /** Seal timestamp; null while a gateway world is `completing` (its seal follows the grace). */
+  sealedAt: string | null;
+  /** Lifecycle after finish, for a world the simulation gateway serves. */
+  lifecycle?: "completing" | "sealed";
+  /** Grace deadline while completing. */
+  completingUntil?: string | null;
 }
+/** One section of a sealed world's evidence, or everything. */
+export type WorldEvidenceSection = "all" | "start" | "end" | "diff" | "ledger";
+/** Options for reading a sealed world's evaluator-only evidence. */
+export interface WorldEvidenceOptions {
+  /** One section, or everything (default). */
+  section?: WorldEvidenceSection;
+  /** Include ledger request and response bodies (default true). */
+  bodies?: boolean;
+}
+/** The evaluator-only evidence of a sealed world: start and end state, the diff, the call ledger,
+ * coverage and the fingerprint. Hue's shape is the authority; this client does not narrow it. */
+export type WorldEvidence = Record<string, JsonValue>;
 /** Options for creating one fresh isolated world. */
 export interface CreateRunInput {
   /** Stable idempotency key for recovering creation acknowledgement. */
@@ -465,6 +575,11 @@ export interface CreateRunInput {
   maxSteps?: number;
   /** Optional lease in seconds. */
   ttlSeconds?: number;
+  /** The case span's W3C context (`00-<trace id>-<span id>-<flags>`); its trace ID must equal
+   * the trace the execution declared at start. The world span is parented on it. */
+  traceparent?: string;
+  /** The agent revision under test, 1 to 256 characters; part of the world's fingerprint. */
+  agentRevision?: string;
 }
 /** Request to invoke one action. */
 export interface ActionInput {

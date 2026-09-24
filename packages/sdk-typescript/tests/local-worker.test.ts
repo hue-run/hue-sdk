@@ -922,7 +922,7 @@ test("local candidates receive only cloned inputs, configuration, identities and
           "trace",
         ]);
         expect(context.item).toEqual({ id: f.item.id, externalKey: "pinned" });
-        expect(Object.keys(context.mcp).sort()).toEqual(["expiresAt", "token", "url"]);
+        expect(Object.keys(context.mcp!).sort()).toEqual(["expiresAt", "token", "url"]);
         expect(Object.keys(context.trace).sort()).toEqual(["spanId", "traceId"]);
         expect(JSON.stringify(context)).not.toContain("evaluator-private");
         expect(tools).toEqual({});

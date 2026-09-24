@@ -7,6 +7,11 @@ import { randomUUID } from "node:crypto";
 import { createHue, type HueClient } from "../client.js";
 import { createEnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
+import {
+  agentEnvironment,
+  stripHueControlPlaneCredentials,
+  writeMcpConfig,
+} from "../environment/world.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
 import type {
   ExperimentCase,
@@ -92,9 +97,15 @@ Selection (exactly one, not used with --worker):
 
 Agent (exactly one):
   <adapter-file>                  Module exporting default or runMyAgent(inputs, context)
-  --command "<shell command>"     Simulation: spawned per case with HUE_MCP_URL, HUE_MCP_TOKEN,
-                                  HUE_MCP_EXPIRES_AT, HUE_EXECUTION_ID, HUE_ENVIRONMENT_RUN_ID,
-                                  HUE_CASE_ID and HUE_CASE_KEY set; {"inputs","config"} on stdin.
+  --command "<shell command>"     Simulation: spawned per case with the world's environment
+                                  (HUE_WORLD_ID, HUE_WORLD_TOKEN, one HUE_SIM_<SURFACE>_URL per
+                                  provider mirror, HUE_MCP_CONFIG, plus HUE_MCP_URL, HUE_MCP_TOKEN
+                                  and HUE_MCP_EXPIRES_AT for the first MCP mirror), HUE_EXECUTION_ID,
+                                  HUE_ENVIRONMENT_RUN_ID, HUE_CASE_ID and HUE_CASE_KEY set;
+                                  {"inputs","config"} on stdin. HUE_API_KEY and other Hue
+                                  control-plane credentials are removed from the child.
+  --allow-hue-credentials         Keep HUE_API_KEY and other Hue control-plane credentials in
+                                  the --command child (off by default)
                                   Direct: spawned in a private case directory with HUE_CASE_DIR,
                                   HUE_CASE_INPUTS, HUE_CASE_OUTPUT_DIR, HUE_CASE_ID, HUE_CASE_KEY
                                   and HUE_EXECUTION_ID set; files/<role>/ hold the pinned inputs
@@ -161,6 +172,7 @@ function parse(argv: string[]) {
         "scorer-version": { type: "string", multiple: true },
         mode: { type: "string" },
         command: { type: "string" },
+        "allow-hue-credentials": { type: "boolean", default: false },
         worker: { type: "boolean", default: false },
         "max-runs": { type: "string" },
         "agent-key": { type: "string" },
@@ -384,26 +396,63 @@ function parseAnswer(text: string): JsonValue | undefined {
   }
 }
 
-/** Runs the shell command once per case; the MCP token travels only through the child's environment. */
-function commandAdapter(command: string, timeoutSeconds: number): EvalAdapter {
-  return async (inputs, context) =>
-    parseAnswer(
-      await spawnAgentCommand(command, {
-        env: {
-          ...process.env,
-          HUE_MCP_URL: context.mcp.url,
-          HUE_MCP_TOKEN: context.mcp.token,
-          HUE_MCP_EXPIRES_AT: context.mcp.expiresAt,
-          HUE_EXECUTION_ID: context.executionId,
-          HUE_ENVIRONMENT_RUN_ID: context.environmentRunId,
-          HUE_CASE_ID: context.item.id,
-          HUE_CASE_KEY: context.item.externalKey,
-        },
-        stdin: JSON.stringify({ inputs, config: context.config }),
-        timeoutSeconds,
-        ...(context.signal ? { signal: context.signal } : {}),
-      }),
-    );
+/**
+ * Runs the shell command once per case. The world token and mirror URLs travel only through the
+ * child's environment and an owner-only MCP configuration file that is removed after the run;
+ * Hue control-plane credentials (`HUE_API_KEY`, `HUE_MCP_KEY`, any `hue_sk_` value) stay with
+ * the CLI unless `--allow-hue-credentials` is passed. A world created while the gateway is off
+ * still gets the `hue_sim_` capability under the same `HUE_MCP_*` names.
+ */
+function commandAdapter(
+  command: string,
+  timeoutSeconds: number,
+  options: { allowHueCredentials: boolean },
+): EvalAdapter {
+  return async (inputs, context) => {
+    const parent = options.allowHueCredentials
+      ? Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        )
+      : stripHueControlPlaneCredentials(process.env);
+    const identity = {
+      HUE_EXECUTION_ID: context.executionId,
+      HUE_ENVIRONMENT_RUN_ID: context.environmentRunId,
+      HUE_CASE_ID: context.item.id,
+      HUE_CASE_KEY: context.item.externalKey,
+    };
+    const configFile = context.world ? await writeMcpConfig(context.world) : undefined;
+    try {
+      const env = context.world
+        ? {
+            ...agentEnvironment(context.world, { parent, includeHueCredentials: true }),
+            ...identity,
+            HUE_MCP_CONFIG: configFile!.path,
+          }
+        : {
+            ...parent,
+            ...(context.mcp
+              ? {
+                  HUE_MCP_URL: context.mcp.url,
+                  HUE_MCP_TOKEN: context.mcp.token,
+                  HUE_MCP_EXPIRES_AT: context.mcp.expiresAt,
+                }
+              : {}),
+            ...identity,
+          };
+      return parseAnswer(
+        await spawnAgentCommand(command, {
+          env,
+          stdin: JSON.stringify({ inputs, config: context.config }),
+          timeoutSeconds,
+          ...(context.signal ? { signal: context.signal } : {}),
+        }),
+      );
+    } finally {
+      await configFile?.dispose();
+    }
+  };
 }
 
 /**
@@ -846,6 +895,10 @@ async function runOnce(
     persistResultContent: values.content,
     traceEvidence: { mode: "required" },
     concurrency,
+    agentRevision: agent.revision,
+    // The CLI adapts to whatever the deployment serves; the library warning is for code that
+    // still reads the legacy capability itself.
+    deprecationWarnings: false,
     signal,
     target: agents.simulation,
     async onProgress(event: SimulationProgress) {
@@ -1073,6 +1126,7 @@ async function runWorker(
     },
     scorers: [],
     concurrency,
+    deprecationWarnings: false,
     signal,
     ...(maxRuns === undefined ? {} : { maxRuns }),
     target(inputs, tools: Record<string, EnvironmentTool>, context) {
@@ -1083,7 +1137,8 @@ async function runWorker(
         executionId: context.executionId,
         environmentRunId: context.environmentRunId,
         tools,
-        mcp: context.mcp,
+        ...(context.world ? { world: context.world } : {}),
+        ...(context.mcp ? { mcp: context.mcp } : {}),
         ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
         signal,
       });
@@ -1190,7 +1245,9 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
               throw new Error("The adapter returned generated files for a simulated-world case");
             return answer;
           }
-        : commandAdapter(values.command!, timeout),
+        : commandAdapter(values.command!, timeout, {
+            allowHueCredentials: values["allow-hue-credentials"],
+          }),
       direct: loaded ?? directCommandAdapter(values.command!, timeout),
     };
     hue = createHue({ apiKey, baseUrl, serviceName: key, captureContent: values.content });

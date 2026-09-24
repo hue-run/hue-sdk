@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
 import type { EnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
+import type { WorldHandoff } from "../environment/types.js";
 import type {
   ActualAgentManifestInputV2,
   AttemptConnectionBundleV2,
@@ -59,13 +60,17 @@ export interface LocalAgentTargetContext {
     /** Root execution span identifier. */
     spanId: string;
   };
-  /** Short-lived, execution-scoped hosted tools for model providers that execute MCP remotely. */
-  mcp: {
-    /** Execution-scoped MCP endpoint. */
+  /** The mirror URLs, world token, environment carriers and MCP configuration of a gateway
+   * world; absent for a world created while the gateway was off. */
+  world?: WorldHandoff;
+  /** One MCP endpoint and bearer: the gateway world's first MCP mirror with the world token,
+   * or the deprecated execution-scoped `hue_sim_` capability of a legacy world. */
+  mcp?: {
+    /** MCP endpoint. */
     url: string;
-    /** Short-lived bearer, never the project service key. */
+    /** Bearer for that endpoint, never the project service key. */
     token: string;
-    /** Capability expiry as an ISO timestamp. */
+    /** Expiry as an ISO timestamp. */
     expiresAt: string;
   };
   /** Credential-bearing provider connections for this callback only. Hue never
@@ -120,11 +125,16 @@ function localAgentTargetContext(context: EnvironmentTargetContext): LocalAgentT
     executionId: context.executionId,
     environmentRunId: context.environmentRunId,
     trace: { traceId: context.trace.traceId, spanId: context.trace.spanId },
-    mcp: {
-      url: context.mcp.url,
-      token: context.mcp.token,
-      expiresAt: context.mcp.expiresAt,
-    },
+    ...(context.world ? { world: structuredClone(context.world) } : {}),
+    ...(context.mcp
+      ? {
+          mcp: {
+            url: context.mcp.url,
+            token: context.mcp.token,
+            expiresAt: context.mcp.expiresAt,
+          },
+        }
+      : {}),
     ...(context.connectionBundle
       ? { connectionBundle: structuredClone(context.connectionBundle) }
       : {}),
@@ -153,6 +163,8 @@ export interface RunLocalAgentOptions {
   signal?: AbortSignal;
   /** Useful for one-shot jobs and deterministic acceptance. Omit to keep polling. */
   maxRuns?: number;
+  /** Emit a one-time `DeprecationWarning` when the deployment serves a legacy world; on by default. */
+  deprecationWarnings?: boolean;
   /** Opt into the experiment's immutable V2 provider profile. These three values are
    * validated together before the worker polls; no endpoint or credential is supplied here. */
   actualAgentManifest?:
@@ -354,6 +366,9 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
               inputs,
               context,
               requested,
+              // The registered revision is the agent revision under test.
+              agentRevision: options.agent.revision,
+              deprecationWarnings: options.deprecationWarnings,
               signal: options.signal,
               target: (targetInputs, targetContext) =>
                 target(

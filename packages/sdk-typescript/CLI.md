@@ -346,8 +346,9 @@ the CLI never prints it. The optional `zod` peer of `@hue-run/sdk/evals` must be
 
 Write an adapter module that hands the case inputs and the world's tools or MCP connection to
 the real agent. The module exports `default` or `runMyAgent`; `context` is the SDK's
-`SimulationTargetContext` (`tools`, `mcp`, `config`, `item`, `executionId`, `environmentRunId`,
-`signal`):
+`SimulationTargetContext` (`world`, `mcp`, `tools`, `config`, `item`, `executionId`,
+`environmentRunId`, `signal`; `world` carries the provider mirror URLs, the world token, `env` and
+`mcpConfig` where Hue's simulation gateway serves the world):
 
 ```ts
 // hue-agent.ts: erasable TypeScript only; Node.js 24 and Bun strip the types natively.
@@ -386,12 +387,19 @@ and sends progress to stderr. `--wait <seconds>` (default 300) bounds the verdic
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
 every case of the saved version; there is no case subset.
 
-`--command "<shell command>"` spawns the command once per case with `HUE_MCP_URL`,
-`HUE_MCP_TOKEN`, `HUE_MCP_EXPIRES_AT`, `HUE_EXECUTION_ID`, `HUE_ENVIRONMENT_RUN_ID`, `HUE_CASE_ID`
-and `HUE_CASE_KEY` in its environment and `{"inputs": ..., "config": ...}` on stdin. Its stdout is
-the answer (JSON when it parses, otherwise trimmed text; empty means no output); a non-zero exit
-or the per-case `--timeout` (default 600 seconds) is a target failure. The scoped MCP token is
-never logged. The agent key defaults to the slug of the command's script name.
+`--command "<shell command>"` spawns the command once per case with the world's environment
+(`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, one `HUE_SIM_<SURFACE ID>_URL` per provider mirror,
+`HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the case, and
+`HUE_MCP_URL`, `HUE_MCP_TOKEN`, `HUE_MCP_EXPIRES_AT` for the first MCP mirror), plus
+`HUE_EXECUTION_ID`, `HUE_ENVIRONMENT_RUN_ID`, `HUE_CASE_ID` and `HUE_CASE_KEY`, and
+`{"inputs": ..., "config": ...}` on stdin. The child does not receive `HUE_API_KEY`, `HUE_MCP_KEY`
+or any other Hue control-plane credential unless `--allow-hue-credentials` is passed; the rest of
+the parent environment (model keys, application settings) is inherited. Its stdout is the answer
+(JSON when it parses, otherwise trimmed text; empty means no output); a non-zero exit or the
+per-case `--timeout` (default 600 seconds) is a target failure. The world token is never logged.
+A world created while the deployment's simulation gateway is off gets the legacy `hue_sim_`
+capability under the same `HUE_MCP_*` names. The agent key defaults to the slug of the command's
+script name; `--revision` is sent to Hue as the agent revision of every world.
 
 `--worker` registers the adapter through `runLocalAgent()` with key `--agent-key` (default: the
 adapter filename slug), name `--agent-name` (default: the key), revision `--revision` (default:

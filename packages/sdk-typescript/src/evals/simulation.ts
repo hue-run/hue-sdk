@@ -6,6 +6,7 @@ import type { EnvironmentTool } from "../environment/tools.js";
 import type {
   EnvironmentIdentity,
   PublishableEnvironmentDefinition,
+  WorldHandoff,
 } from "../environment/types.js";
 import { HueApiError, type EvaluationClient } from "./client.js";
 import { CheckpointStore } from "./checkpoint.js";
@@ -145,10 +146,15 @@ export interface SimulationTargetContext {
   executionId: string;
   /** Stable world identity for adapter control operations such as coverage reporting. */
   environmentRunId: string;
-  /** Framework-neutral local callables backed by this attempt's isolated world. */
+  /** Framework-neutral local callables backed by this attempt's isolated world; empty for a
+   * gateway world, whose calls go to the provider mirrors in `world`. */
   tools: Record<string, EnvironmentTool>;
-  /** Short-lived capability for providers that execute MCP remotely. */
-  mcp: SimulationMcpCapability;
+  /** The mirror URLs, world token, environment carriers and MCP configuration of a gateway
+   * world; absent for a world created while the gateway was off. */
+  world?: WorldHandoff;
+  /** One MCP endpoint and bearer: the gateway world's first MCP mirror with the world token, or
+   * the deprecated execution-scoped `hue_sim_` capability of a legacy world. */
+  mcp?: SimulationMcpCapability;
   /** Credential-bearing provider connections for this callback only. Hue never
    * checkpoints, logs or adds this response to parity digests. */
   connectionBundle?: AttemptConnectionBundleV2;
@@ -196,6 +202,10 @@ export interface RunSimulationOptions {
   maxSteps?: number;
   /** Per-world lease in seconds, 1–86400. */
   ttlSeconds?: number;
+  /** The agent revision under test, sent on world create for the world's fingerprint. */
+  agentRevision?: string;
+  /** Emit a one-time `DeprecationWarning` when the deployment serves a legacy world; on by default. */
+  deprecationWarnings?: boolean;
   /** Cooperative caller cancellation signal. */
   signal?: AbortSignal;
   /** Optional display name for the fresh experiment. */
@@ -777,6 +787,8 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
           requested,
           maxSteps: options.maxSteps,
           ttlSeconds: options.ttlSeconds,
+          agentRevision: options.agentRevision,
+          deprecationWarnings: options.deprecationWarnings,
           signal: options.signal,
           onProgress: (event) =>
             options.onProgress?.({
@@ -795,11 +807,16 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
               executionId: targetContext.executionId,
               environmentRunId: targetContext.environmentRunId,
               tools: targetContext.tools,
-              mcp: {
-                url: targetContext.mcp.url,
-                token: targetContext.mcp.token,
-                expiresAt: targetContext.mcp.expiresAt,
-              },
+              ...(targetContext.world ? { world: structuredClone(targetContext.world) } : {}),
+              ...(targetContext.mcp
+                ? {
+                    mcp: {
+                      url: targetContext.mcp.url,
+                      token: targetContext.mcp.token,
+                      expiresAt: targetContext.mcp.expiresAt,
+                    },
+                  }
+                : {}),
               ...(targetContext.connectionBundle
                 ? { connectionBundle: structuredClone(targetContext.connectionBundle) }
                 : {}),
