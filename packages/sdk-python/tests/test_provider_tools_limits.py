@@ -141,9 +141,12 @@ def test_provider_server_addresses_reject_unsafe_urls():
     ],
 )
 def test_provider_server_addresses_reject_ambiguous_or_invalid_hosts(url):
-    assert hosted_server_addresses(
-        "openai", {"tools": [{"server_label": "unsafe", "server_url": url}]}
-    ) == {}
+    assert (
+        hosted_server_addresses(
+            "openai", {"tools": [{"server_label": "unsafe", "server_url": url}]}
+        )
+        == {}
+    )
 
 
 class _RaisingType:
