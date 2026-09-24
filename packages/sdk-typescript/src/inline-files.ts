@@ -55,19 +55,17 @@ function hashNode(value: unknown, state: HashState, depth: number): unknown {
   const key = contentKey(part);
   const inline = key === undefined ? undefined : part[key];
   const mimeType = part.mime_type ?? part.mediaType;
-  if (
-    key !== undefined &&
-    typeof inline === "string" &&
-    Buffer.byteLength(inline, "utf8") > INLINE_FILE_LIMIT
-  ) {
+  if (key !== undefined && typeof inline === "string") {
     const bytes = fileBytes(inline, mimeType);
-    const { [key]: _omitted, ...rest } = part;
-    state.changed = true;
-    return {
-      ...rest,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      size: bytes.byteLength,
-    };
+    if (bytes.byteLength > INLINE_FILE_LIMIT) {
+      const { [key]: _omitted, ...rest } = part;
+      state.changed = true;
+      return {
+        ...rest,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength,
+      };
+    }
   }
   return Object.fromEntries(
     Object.entries(part).map(([name, item]) => [name, hashNode(item, state, depth + 1)]),

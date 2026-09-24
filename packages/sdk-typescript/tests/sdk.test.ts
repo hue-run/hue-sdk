@@ -728,7 +728,9 @@ describe("Hue SDK contract", () => {
   test("hashes long text files as UTF-8 instead of guessing plain text is base64", () => {
     const content = "A".repeat(64 * 1024 + 4);
     const value = JSON.stringify([{ type: "file", mediaType: "text/plain", data: content }]);
-    const [file] = JSON.parse(hashInlineFiles("ai.prompt.messages", value)) as {
+    const [file] = JSON.parse(hashInlineFiles("ai.prompt.messages", value) as string) as {
+      type: string;
+      mediaType: string;
       size: number;
       sha256: string;
     }[];

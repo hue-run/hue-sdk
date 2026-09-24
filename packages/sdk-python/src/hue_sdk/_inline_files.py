@@ -79,15 +79,12 @@ class _Hash:
         key = _content_key(value)
         inline = value.get(key) if key is not None else None
         mime_type = value.get("mime_type", value.get("mediaType"))
-        if (
-            key is not None
-            and isinstance(inline, str)
-            and _utf8_size(inline, INLINE_FILE_LIMIT) > INLINE_FILE_LIMIT
-        ):
+        if key is not None and isinstance(inline, str):
             data = _file_bytes(inline, mime_type)
-            self.changed = True
-            rest = {name: item for name, item in value.items() if name != key}
-            return {**rest, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+            if len(data) > INLINE_FILE_LIMIT:
+                self.changed = True
+                rest = {name: item for name, item in value.items() if name != key}
+                return {**rest, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
         return {name: self.node(item, depth + 1) for name, item in value.items()}
 
 
