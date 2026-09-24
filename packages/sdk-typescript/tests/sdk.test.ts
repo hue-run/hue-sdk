@@ -227,6 +227,7 @@ describe("Hue SDK contract", () => {
             response.output[1] = {
               ...response.output[1],
               arguments: JSON.stringify({ query: "private-provider-content" }),
+              output: "synthetic-provider-result-marker",
             };
             response.output.push({
               type: "mcp_call",
@@ -305,6 +306,7 @@ describe("Hue SDK contract", () => {
           expect(raw).not.toContain(secret);
         if (captureContent) {
           expect(raw).toContain("private-provider-content");
+          expect(raw).toContain("synthetic-provider-result-marker");
           expect(attr(listing, "gen_ai.tool.definitions")).toBeDefined();
           expect(
             attr(byName["execute_tool search_threads"]!, "gen_ai.tool.call.arguments"),
@@ -317,9 +319,10 @@ describe("Hue SDK contract", () => {
           ).toBeDefined();
         } else {
           expect(raw).not.toContain("private-provider-content");
+          expect(raw).not.toContain("synthetic-provider-result-marker");
           for (const privateValue of ["Create a draft", "Update posted", "channel_not_found"])
             expect(raw).not.toContain(privateValue);
-          expect(raw).not.toContain('"threads"');
+          expect(raw).not.toMatch(/\\+"threads\\+"/);
           for (const span of [listing, ...tools]) {
             expect(attr(span, "gen_ai.tool.call.arguments")).toBeUndefined();
             expect(attr(span, "gen_ai.tool.call.result")).toBeUndefined();

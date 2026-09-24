@@ -426,14 +426,10 @@ export class HueClient {
       "gen_ai.operation.name": "execute_tool",
       "gen_ai.tool.name": name,
     };
-    const stamp = (
-      key: string,
-      value: unknown,
-      valid: (value: unknown) => value is string = isLabel,
-    ) => {
+    const stamp = (key: string, value: unknown) => {
       if (value === undefined) return;
       // A blank or non-string label is omitted and counted; the tool call itself still runs.
-      if (valid(value)) attributes[key] = value;
+      if (isLabel(value)) attributes[key] = value;
       else if (this.enabled && !this.closed) this.transport.instrumentationFailure();
     };
     stamp("gen_ai.tool.call.id", options.callId);
