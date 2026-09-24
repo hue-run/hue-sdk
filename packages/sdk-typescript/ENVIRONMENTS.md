@@ -126,6 +126,18 @@ Hue canonicalizes valid synthetic-principal UUIDs to lowercase, and repository r
 the same before comparing immutable digests, so casing-only UUID changes reuse the stored
 version without dropping provider bindings.
 
+Each Gmail provider instance names its mailbox carrier in `configuration`
+(`GmailMailboxConfiguration`, narrowed by `kind`). `gmail_mailbox/v1` binds `messagesCollection`
+and `draftsCollection` in the simplified shape Hue's `hue.gmail.*` actions read.
+`gmail_mailbox/v2` adds `labelsCollection` and binds all three in the entity shapes the Gmail
+mirrors serve: messages may also carry `cc`, `bcc`, `htmlBody`, `snippet`, attachment metadata,
+`sizeEstimate`, `historyId` and `raw`, each draft names a `DRAFT`-labelled message, and threads
+are derived from each message's `threadId`. Only the simulation gateway serves it: the pinned
+provider-profile preflight above reports `profile_unavailable` for a `gmail_mailbox/v2`
+instance. Its `mailboxAddress` must be the synthetic owner `owner@example.test` (compared
+case-insensitively) or publication is refused, and a definition whose provider instances all use
+it may publish with `actions: []`.
+
 ```ts
 const definition = {
   kind: "repository" as const,

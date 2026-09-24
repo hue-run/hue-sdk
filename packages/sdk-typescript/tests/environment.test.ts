@@ -45,11 +45,36 @@ const v2: EnvironmentDefinitionV2 = {
     },
   ],
 };
+// The gateway's carrier adds a labels collection; a world whose provider instances all use it
+// may publish without actions.
+const mailbox: EnvironmentDefinitionV2 = {
+  schemaVersion: 2,
+  state: {
+    collections: {
+      messages: {},
+      drafts: {},
+      labels: { Label_1: { id: "Label_1", name: "Customers", type: "user" } },
+    },
+  },
+  actions: [],
+  providerInstances: [
+    {
+      ...v2.providerInstances[0]!,
+      configuration: {
+        kind: "gmail_mailbox/v2",
+        messagesCollection: "messages",
+        draftsCollection: "drafts",
+        labelsCollection: "labels",
+        mailboxAddress: "owner@example.test",
+      },
+    },
+  ],
+};
 
 describe("environment HTTP client", () => {
   test("authors an immutable environment version", async () => {
     const environmentId = randomUUID();
-    const versionIds: string[] = [randomUUID(), randomUUID()];
+    const versionIds: string[] = [randomUUID(), randomUUID(), randomUUID()];
     const requests: string[] = [];
     const published: PublishableEnvironmentDefinition[] = [];
     const server = Bun.serve({
@@ -96,9 +121,19 @@ describe("environment HTTP client", () => {
       );
       expect((await client.publishVersion(environmentId, v1)).id).toBe(versionIds[0]);
       expect((await client.publishVersion(environmentId, v2)).id).toBe(versionIds[1]);
+      expect((await client.publishVersion(environmentId, mailbox)).id).toBe(versionIds[2]);
       expect((await client.getVersion(versionIds[0]!)).definition).toEqual(v1);
       expect((await client.getVersion(versionIds[1]!)).definition).toEqual(v2);
-      expect(published).toEqual([v1, v2]);
+      const readback = (await client.getVersion(versionIds[2]!)).definition;
+      expect(readback).toEqual(mailbox);
+      // Readback narrows by carrier kind without a cast, so the labels collection stays visible.
+      const carriers = readback.schemaVersion === 2 ? readback.providerInstances : [];
+      expect(
+        carriers.flatMap(({ configuration }) =>
+          configuration.kind === "gmail_mailbox/v2" ? [configuration.labelsCollection] : [],
+        ),
+      ).toEqual(["labels"]);
+      expect(published).toEqual([v1, v2, mailbox]);
       expect(() =>
         client.createRun({
           idempotencyKey: randomUUID(),
@@ -110,8 +145,10 @@ describe("environment HTTP client", () => {
         "POST /environments",
         `POST /environments/${environmentId}/versions`,
         `POST /environments/${environmentId}/versions`,
+        `POST /environments/${environmentId}/versions`,
         `GET /environment-versions/${versionIds[0]}`,
         `GET /environment-versions/${versionIds[1]}`,
+        `GET /environment-versions/${versionIds[2]}`,
       ]);
     } finally {
       server.stop(true);
