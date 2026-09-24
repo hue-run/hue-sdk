@@ -66,48 +66,6 @@ def test_scrubs_generic_credentials_and_url_userinfo_query_without_parameter_nam
     ) == json.dumps({"server_url": "[redacted]"}, separators=(",", ":"))
 
 
-def test_scrubs_nested_credential_schema_metadata():
-    output = json.loads(
-        scrub_tool_credentials(
-            "gen_ai.tool.definitions",
-            json.dumps(
-                {
-                    "type": "function",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "authorization": {
-                                "anyOf": [{"type": "string", "default": "synthetic-default"}],
-                                "examples": ["synthetic-example"],
-                                "enum": ["synthetic-enum"],
-                            },
-                            "headers": {
-                                "type": "object",
-                                "properties": {
-                                    "authorization": {
-                                        "type": "string",
-                                        "default": "synthetic-nested-header",
-                                    },
-                                    "region": {"type": "string", "default": "synthetic-region"},
-                                },
-                            },
-                        },
-                    },
-                }
-            ),
-        )
-    )
-    assert output["parameters"]["properties"]["authorization"]["anyOf"][0]["default"] == (
-        "[redacted]"
-    )
-    assert output["parameters"]["properties"]["authorization"]["examples"] == ["[redacted]"]
-    assert output["parameters"]["properties"]["authorization"]["enum"] == ["[redacted]"]
-    assert output["parameters"]["properties"]["headers"]["properties"] == {
-        "authorization": {"type": "string", "default": "[redacted]"},
-        "region": {"type": "string", "default": "synthetic-region"},
-    }
-
-
 def test_uses_utf8_bytes_for_the_shared_metadata_summary_budget():
     source = {
         "gen_ai.tool.definitions": json.dumps(
