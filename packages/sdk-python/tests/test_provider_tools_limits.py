@@ -44,3 +44,29 @@ def test_provider_tool_definitions_are_bounded_per_listing():
     )
     assert len(activity.listings[0].definitions) == 512
     assert activity.skipped == 1_488
+
+
+def test_anthropic_use_without_bounded_result_is_skipped():
+    activity = hosted_tool_activity(
+        "anthropic",
+        {
+            "content": [
+                {"type": "mcp_tool_use", "id": "call-0", "name": "tool", "input": {}},
+                *(
+                    {
+                        "type": "mcp_tool_result",
+                        "tool_use_id": f"result-{index}",
+                        "content": {"type": "text", "text": "ok"},
+                    }
+                    for index in range(127)
+                ),
+                {
+                    "type": "mcp_tool_result",
+                    "tool_use_id": "call-0",
+                    "content": {"type": "text", "text": "ok"},
+                },
+            ]
+        },
+    )
+    assert activity.calls == []
+    assert activity.skipped == 2

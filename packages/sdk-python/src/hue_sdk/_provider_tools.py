@@ -182,6 +182,7 @@ def _openai_calls(items: list[Any], activity: HostedToolActivity) -> None:
 def _anthropic_calls(blocks: list[Any], activity: HostedToolActivity) -> None:
     """Anthropic Messages ``content`` blocks: a use block paired with the result that names it."""
     count = min(len(blocks), MAX_PROVIDER_ITEMS)
+    truncated = len(blocks) > MAX_PROVIDER_ITEMS
     activity.skipped += len(blocks) - count
     converted: list[Any] = []
     for index in range(count):
@@ -212,6 +213,11 @@ def _anthropic_calls(blocks: list[Any], activity: HostedToolActivity) -> None:
             activity.skipped += 1
             continue
         result = results.get(call_id) if call_id is not None else None
+        # When the response was truncated, an unmatched use block may have its result outside the
+        # bounded prefix. Do not export it as a successful call with a missing result.
+        if truncated and result is None:
+            activity.skipped += 1
+            continue
         if result is None:
             content = ABSENT
         else:

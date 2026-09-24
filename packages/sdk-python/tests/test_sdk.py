@@ -264,6 +264,14 @@ def test_record_provider_tool_calls_records_hosted_calls_as_extension_spans(
     }
 
 
+def test_provider_tool_recorder_uses_span_metadata_after_model_scope_exits(receiver):
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            pass
+        span.record_provider_tool_calls({"output": []})
+        assert hue.export_status.instrumentation_failures == 0
+
+
 def test_disabled_client_does_not_count_invalid_mcp(receiver):
     hue = Hue(receiver.url, KEY, capture_content=False, enabled=False)
     with hue.tool("get_thread", mcp={"name": ""}):
