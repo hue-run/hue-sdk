@@ -542,6 +542,11 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Fixed
 
+- Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
+  counted as skipped instrumentation rather than silently omitted.
+- Provider-tool tail classification isolates broken item types, and strict hostname validation
+  rejects ambiguous URL text before it can enter `server.address`.
+- Model dumps disable Pydantic content warnings when supported.
 - `EnvironmentClient.wait_for_seal` ends each status read by elapsed time. A socket timeout
   restarts with every byte, so a server that sent its handshake, headers or body a byte at a time
   could hold one read for many times its window; the read's sockets are now shut down when the

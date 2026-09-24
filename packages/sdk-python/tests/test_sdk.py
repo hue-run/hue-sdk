@@ -187,6 +187,7 @@ def test_record_provider_tool_calls_records_hosted_calls_as_extension_spans(
                     request=fixture["openai"]["request"],
                     servers={
                         "gmail": {
+                            "name": None,
                             "version": "2.0",
                             "provider": "google.gmail",
                             "surface": "google.gmail/mcp",
