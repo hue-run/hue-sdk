@@ -19,7 +19,6 @@ import {
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { OpenTelemetry } from "@ai-sdk/otel";
-import { hashInlineFiles } from "../src/inline-files.js";
 import { generateText, jsonSchema, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
@@ -1995,60 +1994,6 @@ describe("Vercel AI SDK integration", () => {
       await endpoint.server.stop(true);
     }
   });
-  test("a large inline file in AI SDK 7 messages exports as its digest instead of rejecting the span", async () => {
-    const endpoint = receiver();
-    const hue = createHue({
-      apiKey,
-      serviceName: "inline-files",
-      captureContent: true,
-      baseUrl: endpoint.url,
-    });
-    const pdf = Uint8Array.from({ length: 300 * 1024 }, (_, index) => index % 251);
-    const digest = createHash("sha256").update(pdf).digest("hex");
-    try {
-      await generateText({
-        model: new MockLanguageModelV4({
-          doGenerate: async () => ({
-            content: [{ type: "text", text: "Summary" }],
-            finishReason: { unified: "stop", raw: "stop" },
-            usage,
-            warnings: [],
-          }),
-        }),
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Summarize the contract" },
-              { type: "file", data: pdf, mediaType: "application/pdf" },
-            ],
-          },
-        ],
-        telemetry: hueTelemetry(hue),
-      });
-      // Strict flush: every span, including the ones that inlined the file, was accepted.
-      await hue.flush();
-      const spans = endpoint.requests.flatMap((request) => request.records);
-      const chat = spans.find((span) => span.name === "chat mock-model-id")!;
-      const [message] = JSON.parse(attr(chat, "gen_ai.input.messages")!.stringValue!) as {
-        parts: Record<string, unknown>[];
-      }[];
-      expect(message.parts[0]).toEqual({ type: "text", content: "Summarize the contract" });
-      expect(message.parts[1]).toMatchObject({
-        type: "blob",
-        mime_type: "application/pdf",
-        sha256: digest,
-        size: pdf.byteLength,
-      });
-      expect(message.parts[1].content).toBeUndefined();
-      const raw = endpoint.requests.map((request) => request.raw).join(" ");
-      expect(raw).not.toContain(Buffer.from(pdf).toString("base64").slice(0, 64));
-      expect(hue.transport.getReport().failedSpans).toBe(0);
-    } finally {
-      await hue.shutdown();
-      await endpoint.server.stop(true);
-    }
-  });
 
   test.each([true, false])(
     "AI SDK 7 tool definitions export without hosted MCP credentials (captureContent=%p)",
@@ -2138,6 +2083,61 @@ describe("Vercel AI SDK integration", () => {
       }
     },
   );
+
+  test("a large inline file in AI SDK 7 messages exports as its digest instead of rejecting the span", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "inline-files",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const pdf = Uint8Array.from({ length: 300 * 1024 }, (_, index) => index % 251);
+    const digest = createHash("sha256").update(pdf).digest("hex");
+    try {
+      await generateText({
+        model: new MockLanguageModelV4({
+          doGenerate: async () => ({
+            content: [{ type: "text", text: "Summary" }],
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+            warnings: [],
+          }),
+        }),
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Summarize the contract" },
+              { type: "file", data: pdf, mediaType: "application/pdf" },
+            ],
+          },
+        ],
+        telemetry: hueTelemetry(hue),
+      });
+      // Strict flush: every span, including the ones that inlined the file, was accepted.
+      await hue.flush();
+      const spans = endpoint.requests.flatMap((request) => request.records);
+      const chat = spans.find((span) => span.name === "chat mock-model-id")!;
+      const [message] = JSON.parse(attr(chat, "gen_ai.input.messages")!.stringValue!) as {
+        parts: Record<string, unknown>[];
+      }[];
+      expect(message.parts[0]).toEqual({ type: "text", content: "Summarize the contract" });
+      expect(message.parts[1]).toMatchObject({
+        type: "blob",
+        mime_type: "application/pdf",
+        sha256: digest,
+        size: pdf.byteLength,
+      });
+      expect(message.parts[1].content).toBeUndefined();
+      const raw = endpoint.requests.map((request) => request.raw).join(" ");
+      expect(raw).not.toContain(Buffer.from(pdf).toString("base64").slice(0, 64));
+      expect(hue.transport.getReport().failedSpans).toBe(0);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
 
   test("provider failure becomes an error span and missing token usage stays absent", async () => {
     const endpoint = receiver();

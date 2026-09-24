@@ -23,8 +23,8 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
-from ._tool_definitions import scrub_tool_credentials, with_tool_catalog_summary
 from ._inline_files import hash_inline_files
+from ._tool_definitions import scrub_tool_credentials, with_tool_catalog_summary
 from .transport import (
     MAX_REQUEST_BYTES,
     PENDING_PARENT_KEY,
