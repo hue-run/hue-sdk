@@ -220,9 +220,10 @@ try:
         subprocess.run(agent_command, env={**child, "MCP_CONFIG": path}, check=True)
 finally:
     if world is not None:
-        client.finish_run(
+        finished = client.finish_run(
             run["id"], idempotency_key=f"execution:{execution_id}:completed", status="completed"
         )
+        client.wait_for_seal(run["id"], completing_until=finished.get("completingUntil"))
 evidence = client.get_evidence(run["id"], section="ledger")
 ```
 

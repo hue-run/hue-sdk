@@ -229,3 +229,44 @@ def test_retry_after_is_honored_and_bounded(receiver, backoff):
     with pytest.raises(HueEnvironmentError) as refused:
         client.finish_run(RUN_ID, idempotency_key="f", status="completed")
     assert refused.value.status == 409 and refused.value.retry_after is None
+
+
+def test_wait_for_seal_reads_past_completion_grace(monkeypatch):
+    client = EnvironmentClient("https://app.hue.test", KEY)
+    states = iter([{"status": "open"}, {"status": "completed"}])
+    monkeypatch.setattr(client, "get_run", lambda _run_id: next(states))
+    monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
+    state = client.wait_for_seal(RUN_ID)
+    assert state["status"] == "completed"
+
+
+def test_wait_for_seal_retries_transient_reads(monkeypatch):
+    client = EnvironmentClient("https://app.hue.test", KEY)
+    responses = iter(
+        [
+            HueEnvironmentError(503),
+            HueEnvironmentError(),
+            {"status": "completed"},
+        ]
+    )
+
+    def read(_run_id):
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(client, "get_run", read)
+    monkeypatch.setattr(environment_module.time, "sleep", lambda _seconds: None)
+    state = client.wait_for_seal(RUN_ID)
+    assert state["status"] == "completed"
+
+
+def test_wait_for_seal_rejects_non_transient_read(monkeypatch):
+    client = EnvironmentClient("https://app.hue.test", KEY)
+    monkeypatch.setattr(
+        client, "get_run", lambda _run_id: (_ for _ in ()).throw(HueEnvironmentError(404))
+    )
+    with pytest.raises(HueEnvironmentError) as refused:
+        client.wait_for_seal(RUN_ID)
+    assert refused.value.status == 404

@@ -5,6 +5,7 @@ import math
 import random
 import re
 import time
+from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlencode
 
@@ -265,6 +266,38 @@ class EnvironmentClient:
             f"/environment-runs/{uuid(run_id)}/finish",
             {"idempotencyKey": idempotency_key, "status": status},
         )
+
+    def wait_for_seal(self, run_id: str, *, completing_until: str | None = None) -> RunState:
+        """Wait until a completed world leaves ``open`` after its completion grace.
+
+        A status read after the grace asks the World API to seal an overdue world. Transient
+        connection and gateway errors are retried through a bounded 30-second post-grace window.
+        Pass the ``completingUntil`` value returned by :meth:`finish_run`; an absent or malformed
+        value causes an immediate status read.
+        """
+        try:
+            grace_end = datetime.fromisoformat(
+                (completing_until or "").replace("Z", "+00:00")
+            ).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            grace_end = time.time()
+        wait = min(max(0.0, grace_end - time.time()), 10.0)
+        deadline = time.monotonic() + wait + 30.0
+        if wait:
+            time.sleep(wait)
+        while True:
+            try:
+                state = self.get_run(run_id)
+                if state["status"] != "open":
+                    return state
+            except HueEnvironmentError as error:
+                if error.status is not None and error.status not in _RETRYABLE:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+            if time.monotonic() >= deadline:
+                raise HueEnvironmentError()
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
 
     def get_evidence(
         self,

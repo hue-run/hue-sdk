@@ -53,6 +53,13 @@ export class HueEnvironmentError extends Error {
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+/** A connection failure or a status the client retries; seal polling continues through these. */
+export function isTransientEnvironmentError(error: unknown): boolean {
+  return (
+    error instanceof HueEnvironmentError &&
+    (error.status === undefined || RETRYABLE.has(error.status))
+  );
+}
 /** A `Retry-After` longer than this waits this long: Hue asks for a second, never minutes. */
 const MAX_RETRY_AFTER_MS = 10_000;
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
@@ -163,8 +170,7 @@ export class EnvironmentClient {
         return await this.send<T>(method, path, payload);
       } catch (error) {
         if (!(error instanceof HueEnvironmentError)) throw error;
-        const recoverable = error.status === undefined || RETRYABLE.has(error.status);
-        if (!recoverable || attempt >= this.maxAttempts) throw error;
+        if (!isTransientEnvironmentError(error) || attempt >= this.maxAttempts) throw error;
         // Hue's admission refusals say how long to wait; anything else backs off.
         const backoff = Math.min(100 * 2 ** (attempt - 1), 2000);
         const wait = error.retryAfterMs ?? backoff + Math.random() * backoff;
