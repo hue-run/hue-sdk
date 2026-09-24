@@ -8,6 +8,13 @@ material, excluded from the published package's `files` list. The Apache-2.0 lic
 is included alongside it. This fixture decodes actual HTTP requests from official
 OpenTelemetry exporters; it does not fabricate the exported bytes.
 
+# Hosted tool call fixture
+
+`hosted-tool-calls.json` is synthetic: an OpenAI Responses request/response pair with a hosted MCP
+server (`mcp_list_tools`, a successful and a failed `mcp_call`), built-in tool calls and an
+approval request, and an Anthropic Messages pair with `server_tool_use` and `mcp_tool_use` blocks
+and their results, including an error. Credentials are placeholders. Both SDK suites record it
+through their hosted-call recorder and assert the same spans.
 # Tool-definition digest fixture
 
 `tool-definitions.json` is synthetic: a hosted MCP provider tool with placeholder credentials,

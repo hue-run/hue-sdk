@@ -20,6 +20,7 @@ import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
 import { HUE_SCOPE } from "./config.js";
+import { hostedServerAddresses, hostedToolActivity, hostedToolProvider } from "./provider-tools.js";
 import { encodeContent, noopSpan, safeSpan } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
@@ -35,6 +36,7 @@ import type {
   ModelOptions,
   ProjectConnection,
   SpanOptions,
+  ProviderToolCallOptions,
   TokenUsage,
   ToolOptions,
   VerifyTraceOptions,
@@ -96,7 +98,13 @@ function identifier(value: string | undefined): string | undefined {
 
 /** A usable metadata label: a non-blank string of at most 256 characters. */
 function isLabel(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "" && value.length <= 256;
+  return (
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    value.length <= 256 &&
+    !value.includes("\u0000") &&
+    value.isWellFormed()
+  );
 }
 
 /** A source label uses the stricter wire-safe validation without changing existing labels. */
@@ -652,6 +660,93 @@ export class HueClient {
       });
     } catch {
       this.transport.instrumentationFailure("logs");
+    }
+  }
+
+  /**
+   * Records the tools a model provider executed itself while producing `response`, which no
+   * `hue.tool()` call saw: OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call` and
+   * `code_interpreter_call` items, and Anthropic Messages `mcp_tool_use` / `server_tool_use`
+   * blocks with their result blocks. Each becomes an `execute_tool {name}` child span of the active
+   * (or given) context with `gen_ai.tool.type` `extension` and `gen_ai.tool.call.id`; MCP calls add
+   * `mcp.server.name` (the provider's label, or the `servers` entry for it). Arguments and results
+   * follow `captureContent`; a failed call carries `error.type` and ERROR status. An OpenAI
+   * `mcp_list_tools` item becomes a `tools/list` child span carrying that server's tools as
+   * `gen_ai.tool.definitions`. Call it inside `hue.model()` so the spans nest under the model call
+   * and `provider` defaults to its provider; pass `request` to record each server's host as
+   * `server.address`. The spans have no duration of their own: the provider ran the tools inside
+   * the model request. Unreadable items are skipped and counted; nothing is thrown.
+   */
+  recordProviderToolCalls(response: unknown, options: ProviderToolCallOptions = {}): void {
+    if (!this.enabled || this.closed) return;
+    try {
+      const store = this.storage.getStore();
+      const provider = options.provider ?? hostedToolProvider(store?.model?.provider);
+      if (provider === undefined) throw new TypeError("Unknown provider for hosted tool calls");
+      const parent = options.parentContext ?? store?.context ?? context.active();
+      const addresses = hostedServerAddresses(provider, options.request);
+      const activity = hostedToolActivity(provider, response);
+      if (activity.skipped > 0)
+        this.transport.instrumentationFailure("traces", undefined, activity.skipped);
+      const server = (label: string | undefined): Attributes => {
+        const attributes: Attributes = {};
+        if (label === undefined) return attributes;
+        const info = options.servers?.[label];
+        for (const [key, value] of [
+          ["mcp.server.name", info?.name ?? label],
+          ["mcp.server.version", info?.version],
+          ["hue.mcp.provider", info?.provider],
+          ["hue.mcp.surface", info?.surface],
+        ] as const) {
+          if (value === undefined) continue;
+          if (isLabel(value)) attributes[key] = value;
+          else this.transport.instrumentationFailure();
+        }
+        const address = addresses.get(label);
+        if (address !== undefined) attributes["server.address"] = address;
+        return attributes;
+      };
+      const fail = (span: Span, type: string) => {
+        span.setAttribute("error.type", type);
+        span.setStatus({ code: SpanStatusCode.ERROR });
+      };
+      for (const call of activity.calls) {
+        const span = this.tracer.startSpan(
+          `execute_tool ${call.name}`,
+          {
+            kind: SpanKind.INTERNAL,
+            attributes: {
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": call.name,
+              "gen_ai.tool.type": "extension",
+              ...(call.callId === undefined ? {} : { "gen_ai.tool.call.id": call.callId }),
+              ...server(call.server),
+            },
+          },
+          parent,
+        );
+        if (call.arguments !== undefined)
+          this.setContent(span, "gen_ai.tool.call.arguments", call.arguments);
+        if (call.result !== undefined)
+          this.setContent(span, "gen_ai.tool.call.result", call.result);
+        if (call.errorType !== undefined) fail(span, call.errorType);
+        span.end();
+      }
+      for (const listing of activity.listings) {
+        const span = this.tracer.startSpan(
+          "tools/list",
+          {
+            kind: SpanKind.INTERNAL,
+            attributes: { "mcp.method.name": "tools/list", ...server(listing.server) },
+          },
+          parent,
+        );
+        this.setContent(span, "gen_ai.tool.definitions", listing.definitions);
+        if (listing.errorType !== undefined) fail(span, listing.errorType);
+        span.end();
+      }
+    } catch {
+      this.transport.instrumentationFailure();
     }
   }
 
