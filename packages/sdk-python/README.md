@@ -201,15 +201,22 @@ run = client.create_run(
     traceparent=f"00-{span.trace_id}-{span.span_id}-01",
     agent_revision="my-agent@1.4.2",
 )
-world = world_handoff(run)
-if world is None:  # the deployment's gateway is off: this run has Hue-native actions instead
-    raise RuntimeError("this deployment does not serve simulation worlds")
-child = agent_environment(world)  # os.environ minus Hue control-plane credentials, plus the carriers
+world = None
 try:
+    world = world_handoff(run)
+    if world is None:  # the deployment's gateway is off: this run has Hue-native actions instead
+        client.finish_run(
+            run["id"], idempotency_key=f"execution:{execution_id}:abandoned", status="abandoned"
+        )
+        raise RuntimeError("this deployment does not serve simulation worlds")
+    child = agent_environment(world)  # os.environ minus Hue control-plane credentials, plus the carriers
     with mcp_config_file(world) as path:  # owner-only mcp.json, removed after the block
         subprocess.run(agent_command, env={**child, "MCP_CONFIG": path}, check=True)
 finally:
-    client.finish_run(run["id"], idempotency_key=f"execution:{execution_id}:completed", status="completed")
+    if world is not None:
+        client.finish_run(
+            run["id"], idempotency_key=f"execution:{execution_id}:completed", status="completed"
+        )
 evidence = client.get_evidence(run["id"], section="ledger")
 ```
 

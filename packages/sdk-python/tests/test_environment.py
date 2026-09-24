@@ -189,6 +189,7 @@ def test_create_forwards_trace_context_and_revision_and_validates_them(receiver)
         "01-bad",
         "00-" + "0" * 32 + "-" + "2" * 16 + "-01",
         "00-" + "1" * 32 + "-" + "0" * 16 + "-01",
+        "00-" + "1" * 32 + "-" + "2" * 16 + "-ff",
     ):
         with pytest.raises(ValueError):
             client.create_run(

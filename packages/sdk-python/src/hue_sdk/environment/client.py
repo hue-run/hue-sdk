@@ -28,7 +28,8 @@ _RETRYABLE = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # A Retry-After longer than this waits this long: the gateway asks for 1 s, never minutes.
 _MAX_RETRY_AFTER_SECONDS = 10.0
-_TRACEPARENT = re.compile(r"^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-[0-9a-f]{2}$")
+# Version 00 reserves the high six trace-flags bits; only the low two are currently defined.
+_TRACEPARENT = re.compile(r"^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-0[0-3]$")
 _EVIDENCE_SECTIONS = ("all", "start", "end", "diff", "ledger")
 
 
