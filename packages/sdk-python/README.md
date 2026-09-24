@@ -32,7 +32,7 @@ from hue_sdk import Hue
 
 with Hue(
     api_key=os.environ["HUE_API_KEY"],
-    capture_content=False,  # Required: choose explicitly.
+    capture_content=True,  # Required: True records content; False sends metadata only.
 ) as hue:
     project = hue.validate_project()
     with hue.context(session_id="conversation-42", user_id="observed-user-7"):
@@ -46,11 +46,15 @@ with Hue(
         raise RuntimeError("Telemetry export failed; inspect Hue export_status.")
 ```
 
+`capture_content=True`, as above, is the recommended choice: trace inspection, evaluations and judges read the inputs, outputs and tool arguments and results it records. Choose `False` for metadata only when a policy forbids sending that content; see [Content and semantic fields](#content-and-semantic-fields).
+
 The SDK uses `https://app.hue.run` by default. Set `base_url` only for a different Hue deployment or a local receiver, using an origin without an API suffix. Existing `Hue(base_url, api_key, ...)` calls remain supported; a bare key passed as the first positional argument raises `TypeError` pointing at `api_key=`. The project service key determines the project. The SDK validates the project at `GET /api/v1/projects/current` when explicitly requested; construction itself does not perform a request. HTTP is permitted only for `localhost` and loopback IPs. Userinfo, query strings, fragments, paths and redirects are rejected. The key is sent only as `Authorization: Bearer …`; `repr(hue)`, SDK errors and status counters omit it.
 
 ## Content and semantic fields
 
-`capture_content` has no default. `False` makes `set_input` and `set_output` omit content before it reaches an OTel queue and makes `log_inference` emit no record. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
+`capture_content` has no default. Set it to `True` for full traces: prompts and messages, responses and tool inputs/outputs, alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that content, and your redactor and the credential filtering below apply to it. Choose `False`, metadata-only mode, when your users decline or an application or data policy forbids sending that content to another service.
+
+`False` makes `set_input` and `set_output` omit content before it reaches an OTel queue and makes `log_inference` emit no record. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 
 When capture is disabled Hue also strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content attributes (including OpenInference retrieval documents, embeddings, reranker documents, prompt-template variables and images), legacy `gen_ai.*` message events, log bodies and status descriptions from every record it exports, including spans produced by third-party instrumentors on the same provider. [COMPATIBILITY.md](https://github.com/hue-run/hue-sdk/blob/main/COMPATIBILITY.md) lists the exact keys. This setting is still **not a blanket PII filter**: custom attribute names, span names, session/user identifiers and resource attributes cannot be classified automatically and remain under your control, and other exporters keep their own policy. The server stores received content; there is no automatic telemetry expiry. Delete scoped data explicitly when required by your retention policy.
 

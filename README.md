@@ -21,7 +21,7 @@ Hue Cloud is currently invite-only; to request access, email [team@hue.run](mail
 ## Why Hue
 
 - **Standard OpenTelemetry, nothing proprietary.** Traces and correlated logs travel as OTLP/HTTP to documented endpoints. Any OpenTelemetry-emitting language or instrumentor works without a Hue package, and Hue never replaces your global providers.
-- **Explicit content policy.** `captureContent` / `capture_content` is a required choice. Metadata-only mode strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content fields at export time in both SDKs, and a redaction hook runs over the rest.
+- **Full traces, explicit content policy.** `captureContent` / `capture_content` is a required choice. Set it to `true` to record the prompts, responses and tool inputs/outputs that trace inspection, evaluations and judges read; your redaction hook and built-in credential filtering still apply. Metadata-only mode (`false`) is the opt-out when a policy forbids sending that content; it strips recognized GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content fields at export time in both SDKs.
 - **Fail-open by contract.** Safe constructors, byte- and record-bounded queues, cumulative loss counters and bounded lifecycle deadlines are written down in [RELIABILITY.md](./RELIABILITY.md) and tested against the installed packages.
 - **Provable delivery.** `verifyTrace()` / `verify_trace()` confirm that a real request's spans and fields were stored, without exposing content.
 - **Small, auditable footprint.** The tracing core depends only on official OpenTelemetry packages (plus `requests` in Python), and the JSON Schema validator used by the evaluation scorers is an opt-in extra. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
@@ -76,7 +76,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 ## What you can do
 
 - Record requests, model calls, tools, errors and sessions using standard OTLP.
-- Choose content capture or metadata only, and inspect export failures.
+- Record full traces with content capture, or choose metadata only, and inspect export failures.
 - Preserve an existing OpenTelemetry provider and its other exporters.
 - Confirm stored traces, known child spans, and required field presence after export.
 - Run local evaluation targets and scorers against frozen datasets.
@@ -95,7 +95,7 @@ Your application runs the model or agent. Instrumentation must emit telemetry; t
 
 ## Send a trace
 
-After installing the TypeScript SDK above, set `HUE_API_KEY` to a project service key in your server environment. Save the following as `first-trace.mjs` and run `node first-trace.mjs`; the [quickstart](https://docs.hue.run/quickstart) walks through the same steps in more detail. Choose content capture explicitly:
+After installing the TypeScript SDK above, set `HUE_API_KEY` to a project service key in your server environment. Save the following as `first-trace.mjs` and run `node first-trace.mjs`; the [quickstart](https://docs.hue.run/quickstart) walks through the same steps in more detail. `captureContent` is required; the example records content, the recommended setting:
 
 ```js
 import { createHue } from "@hue-run/sdk";
@@ -103,7 +103,7 @@ import { createHue } from "@hue-run/sdk";
 const hue = createHue({
   apiKey: process.env.HUE_API_KEY,
   serviceName: "my-agent",
-  captureContent: false,
+  captureContent: true, // false sends metadata only
 });
 
 try {
@@ -119,7 +119,7 @@ try {
 }
 ```
 
-The default destination is `https://app.hue.run`. Metadata-only mode omits the input/output text above. The [tracing guide](./packages/sdk-typescript/README.md) covers capture, redaction, borrowed providers, streaming and shutdown.
+The default destination is `https://app.hue.run`. The trace records the input and output text above; with `captureContent: false` it keeps span names, timing and metadata without that text. The [tracing guide](./packages/sdk-typescript/README.md) covers capture, redaction, borrowed providers, streaming and shutdown.
 
 No Hue project yet? Request access at [team@hue.run](mailto:team@hue.run), or run the same script against a local OpenTelemetry Collector by setting `baseUrl` as described in [Local development without a Hue account](./packages/sdk-typescript/README.md#local-development-without-a-hue-account); `checkConnection()` is a Hue-only diagnostic, so remove that call when the receiver is a generic collector.
 
@@ -145,8 +145,9 @@ Then ask your coding agent:
 
 ```text
 Use the Hue skill to add tracing to this application. Preserve its behavior and
-existing telemetry. Start with metadata-only capture unless our team has approved
-content capture. Preserve redaction and use safe initialization, bounded lifecycle
+existing telemetry. Capture full traces (prompts, responses and tool inputs and
+outputs) on every request path that calls a model or tool, unless our data policy
+forbids sending that content. Preserve redaction and use safe initialization, bounded lifecycle
 methods and a kill switch. Test collector outages and verify a real trace in Hue. Tell me what you changed and still need me to configure.
 ```
 
