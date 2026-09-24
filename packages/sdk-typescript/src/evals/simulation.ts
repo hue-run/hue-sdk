@@ -731,13 +731,21 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
   });
   try {
     // The agent revision is part of the attempt: a resume after it changed would otherwise
-    // finish the remaining cases under a different revision than the completed ones.
+    // finish the remaining cases under a different revision than the completed ones. A
+    // checkpoint written before revisions were tracked carries the definition digest alone and
+    // still matches its definition.
     const scenarioDigest = digest({
       definition: definitionIdentity(definition),
       agentRevision: options.agentRevision ?? null,
     });
     let attempt = await store.read<Attempt>("active-attempt");
-    if (attempt && attempt.stage !== "completed" && attempt.scenarioDigest !== scenarioDigest)
+    const previousDigest = digest(definitionIdentity(definition));
+    if (
+      attempt &&
+      attempt.stage !== "completed" &&
+      attempt.scenarioDigest !== scenarioDigest &&
+      attempt.scenarioDigest !== previousDigest
+    )
       throw new Error(
         "Recover the unfinished simulation before running a changed scenario or agent revision",
       );

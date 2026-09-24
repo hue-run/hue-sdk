@@ -348,7 +348,8 @@ describe("world creation on a deployment whose gateway is off", () => {
       traceparent: `00-${"1".repeat(32)}-${"2".repeat(16)}-01`,
       agentRevision: "agent@1",
     };
-    const run = await createWorldForExecution(client, input);
+    // The deployment's health says the gateway is off, so the refusal is the legacy body's.
+    const run = await createWorldForExecution(client, input, { gatewayEnabled: async () => false });
     expect(run.token).toBeUndefined();
     expect(bodies).toHaveLength(2);
     expect(bodies[0]).toMatchObject({ traceparent: input.traceparent, agentRevision: "agent@1" });
@@ -362,6 +363,11 @@ describe("world creation on a deployment whose gateway is off", () => {
       createWorldForExecution(once, { idempotencyKey: "k", environmentVersionId: versionId }),
     ).rejects.toMatchObject({ status: 400 });
     expect(refusing.requests).toHaveLength(1);
+    // With the gateway on, a 400 (a trace context that does not match the execution) stands.
+    await expect(
+      createWorldForExecution(once, input, { gatewayEnabled: async () => true }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(refusing.requests).toHaveLength(2);
   });
 });
 

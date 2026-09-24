@@ -207,15 +207,43 @@ export function caseTraceparent(span: {
   return `00-${span.traceId}-${span.spanId}-${(flags & 0xff).toString(16).padStart(2, "0")}`;
 }
 
+const gatewayStates = new Map<string, Promise<boolean>>();
 /**
- * Creates the world with the World API fields; a deployment whose simulation gateway is off
- * refuses them on the legacy create (400), so the create is repeated once without them and the
- * world is the legacy kind. The stable idempotency key makes the repeat a replay, never a
- * second world.
+ * Whether the deployment serves the simulation gateway: its credential-free health endpoint
+ * answers 200 with `gateway: "simulation"` when on and an empty 404 when off. Probed once per
+ * origin, and only after a create was refused.
+ */
+export function gatewayEnabled(baseUrl: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  const origin = new URL(baseUrl).origin;
+  let state = gatewayStates.get(origin);
+  if (!state) {
+    state = fetchImpl(`${origin}/api/sim/gmailmcp.googleapis.com/_hue/health`, {
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    })
+      .then(async (response) => {
+        if (!response.ok) return false;
+        const body = (await response.json()) as { gateway?: string };
+        return body.gateway === "simulation";
+      })
+      .catch(() => false);
+    gatewayStates.set(origin, state);
+  }
+  return state;
+}
+
+/**
+ * Creates the world with the World API fields. An older deployment whose simulation gateway is
+ * off refuses them on the legacy create (400); when the deployment's health says the gateway is
+ * off, the create is repeated once without them and the world is the legacy kind. A 400 from a
+ * deployment with the gateway on is a real refusal (a trace context that does not match the
+ * execution, for one) and is raised as it is. The stable idempotency key makes a repeat a
+ * replay, never a second world.
  */
 export async function createWorldForExecution(
-  client: Pick<EnvironmentClient, "createRun">,
+  client: Pick<EnvironmentClient, "createRun" | "baseUrl">,
   input: Parameters<EnvironmentClient["createRun"]>[0],
+  options: { gatewayEnabled?: (baseUrl: string) => Promise<boolean> } = {},
 ): Promise<EnvironmentRun> {
   try {
     return await client.createRun(input);
@@ -224,7 +252,8 @@ export async function createWorldForExecution(
     if (
       !(error instanceof HueEnvironmentError) ||
       error.status !== 400 ||
-      (traceparent === undefined && agentRevision === undefined)
+      (traceparent === undefined && agentRevision === undefined) ||
+      (await (options.gatewayEnabled ?? gatewayEnabled)(client.baseUrl))
     )
       throw error;
     return client.createRun(legacy);
