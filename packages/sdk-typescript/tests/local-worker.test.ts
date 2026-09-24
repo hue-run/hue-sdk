@@ -917,10 +917,13 @@ test("local candidates receive only cloned inputs, configuration, identities and
           "config",
           "environmentRunId",
           "executionId",
+          "files",
           "item",
           "mcp",
+          "outputDirectory",
           "trace",
         ]);
+        expect(context.files).toEqual([]);
         expect(context.item).toEqual({ id: f.item.id, externalKey: "pinned" });
         expect(Object.keys(context.mcp!).sort()).toEqual(["expiresAt", "token", "url"]);
         expect(Object.keys(context.trace).sort()).toEqual(["spanId", "traceId"]);

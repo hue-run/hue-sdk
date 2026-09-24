@@ -193,7 +193,7 @@ The runner stops scheduling more cases after an operational failure and waits fo
 
 ## Verification boundaries
 
-`scripts/verify-package.mjs` installs a real packed tarball outside the monorepo and runs HTTP contract tests against a synthetic service plus actual OpenTelemetry exporters. It checks two configurations, rescoring without target invocation, absent/null output, upload resume, uncertain execution, exclusive checkpoints, source/metric contracts, content policy and terminating schema workers. It also exercises the local worker's ready, incomplete and uncertain provider-attempt control-plane paths, but does not call an issued provider facade. `scripts/verify-file-cases.mjs` runs against the same installed consumer: pinned input download and verification, artifact publication of a generated document, file-aware local scoring during the run and again on a later rescore, and a declared file the target could not deliver recorded as the target's own error. `scripts/verify-evaluation-api.mjs` is a separate opt-in acceptance against a real Hue receiver/API; it creates synthetic datasets/scorers/experiments in the project associated with the supplied development key.
+`scripts/verify-package.mjs` installs a real packed tarball outside the monorepo and runs HTTP contract tests against a synthetic service plus actual OpenTelemetry exporters. It checks two configurations, rescoring without target invocation, absent/null output, upload resume, uncertain execution, exclusive checkpoints, source/metric contracts, content policy and terminating schema workers. It also exercises the local worker's ready, incomplete and uncertain provider-attempt control-plane paths, but does not call an issued provider facade. `scripts/verify-file-cases.mjs` runs against the same installed consumer: pinned input download and verification, artifact publication of a generated document, file-aware local scoring during the run and again on a later rescore, a declared file the target could not deliver recorded as the target's own error, and a worker world case that receives its agent-visible files with the world, uploads the returned document and refuses altered bytes as `case_file_mismatch`. `scripts/verify-evaluation-api.mjs` is a separate opt-in acceptance against a real Hue receiver/API; it creates synthetic datasets/scorers/experiments in the project associated with the supplied development key.
 
 ## Outbound local agent worker
 
@@ -235,7 +235,9 @@ try {
 
 The callback receives cloned inputs, local tools, and an allowlisted context containing
 `config`, `item: {id, externalKey}`, `executionId`, `environmentRunId`,
-`trace: {traceId,spanId}` and a short-lived `mcp` capability. Expected outcomes, case metadata
+`trace: {traceId,spanId}`, a short-lived `mcp` capability, `files` (verified copies of the case's
+agent-visible input files, empty when it has none) and a private `outputDirectory`; return
+`withFiles(output, files)` to upload generated files, as for direct cases. Expected outcomes, case metadata
 and original source pins remain private to grading. Pass the tools or scoped MCP capability into
 the agent's actual tool boundary; their presence does not redirect provider calls. Capabilities
 are not written to checkpoints. `maxRuns` limits completed runs for one-shot workers, while
@@ -272,7 +274,14 @@ On the outbound worker, supply `directTarget` beside or instead of `target`. Sup
 `environment:v1` (both strings are exported as `localAgentCapabilities`). Declare the file
 capabilities the agent accepts and returns — `input:docx`, `input:pdf`, `output:docx` and so on — so
 Hue matches them against each case's `hue.requiredCapabilities` metadata and offers only matching
-cases. `registeredCapabilities` refuses a registration that names a capability without its callback.
+cases. A case pinned to a world whose manifest also holds agent-visible files is offered only to a
+registration that declares `environment-files:v1` (`localAgentCapabilities.environmentFiles`)
+and `input:<extension>` for each file; `target` then receives them as `context.files` with the
+world, as described in
+[ENVIRONMENTS.md](ENVIRONMENTS.md#worlds-served-by-the-simulation-gateway). The worker never adds
+`environment-files:v1` itself: Hue keeps each registered revision's capabilities fixed, so declare
+it under a new revision. `registeredCapabilities` refuses a registration that names a capability
+without its callback.
 
 ```ts
 import { basename } from "node:path";
@@ -316,14 +325,16 @@ grading, as they do for world cases.
 
 Before an execution exists, `runExperiment` downloads every pinned input file named by the frozen
 case's `inputFiles` and verifies byte count and SHA-256. A download failure is an SDK failure and
-consumes no execution slot; a file already saved with the pinned identity is reused instead of
-downloaded again. The target sees only the agent-visible roles — `source`, `attached_template`,
+consumes no execution slot; bytes that differ from the manifest raise `CaseFileError` with the
+stable code `case_file_mismatch`, and a file already saved with the pinned identity is reused
+instead of downloaded again. The target sees only the agent-visible roles — `source`, `attached_template`,
 `attached_reference` and `original` — as `context.files`; evaluator-only
 `org_template` and `evaluator_reference` files (an organization's template, a legal corpus, an
 answer key) reach scorers but not the agent, and are not even downloaded when no bound code
 evaluator runs in this process. Verified copies live under `filesDirectory` (default
-`<checkpointDirectory>/files`, created mode 0700), and each case gets its own private
-`context.outputDirectory` to write into.
+`<checkpointDirectory>/files`, created mode 0700), evaluator-only files apart from the agent's, and
+each case gets its own private `context.outputDirectory` to write into. The files of a case pinned
+to a world are removed once it completes; those of a direct case stay for inspection.
 
 Return generated documents by wrapping the output in `withFiles(output, files)`. Each entry names a
 `path` or in-memory `bytes`, a `filename`, a Hue-accepted `contentType` and at most one `primary`.

@@ -57,8 +57,56 @@ export class OutputFileError extends Error {
     this.name = "OutputFileError";
   }
 }
+/** Stable codes of a pinned file the runner refuses to hand over. */
+export type CaseFileErrorCode = "case_file_mismatch" | "case_file_name_refused";
+/**
+ * Thrown when a pinned file cannot be used: its downloaded bytes differ from the manifest's size
+ * or SHA-256 (`case_file_mismatch`), or a file meant for an agent working in a world is not
+ * named by one safe file name (`case_file_name_refused`). Raised before the case's execution
+ * starts, so no execution, world or target call is spent on it.
+ */
+export class CaseFileError extends Error {
+  constructor(
+    /** Stable diagnostic code. */
+    readonly code: CaseFileErrorCode,
+    /** Hue artifact identity of the refused file. */
+    readonly artifactId: string,
+    message: string,
+  ) {
+    super(`${message} (${code})`);
+    this.name = "CaseFileError";
+  }
+}
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+/** A file name quoted for a message: at most 120 characters, controls escaped. */
+const quoted = (name: string) => JSON.stringify([...name].slice(0, 120).join(""));
+/** Names Windows reserves for devices, with or without an extension. */
+const DEVICE_NAME = /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$/iu;
+/**
+ * Whether `name` can be used unchanged as one file name: not empty, `.` or `..`; no `/`, `\`
+ * or control character; no Windows device name (`CON`, `NUL`, `COM1`, … with any extension); no
+ * trailing dot or space, which Windows drops; at most 255 UTF-8 bytes. An absolute path or a
+ * path with a parent step always contains a separator, so it is refused too.
+ */
+export function isSafeFileName(name: string): boolean {
+  if (typeof name !== "string" || !name || name === "." || name === "..") return false;
+  // eslint-disable-next-line no-control-regex -- control characters are refused
+  if (/[/\\\x00-\x1f\x7f]/u.test(name)) return false;
+  if (name.endsWith(".") || name.endsWith(" ")) return false;
+  if (DEVICE_NAME.test(name.split(".")[0]!.trimEnd())) return false;
+  return Buffer.byteLength(name) <= 255;
+}
+/** Refuse a pinned file whose name is not one safe file name; see {@link isSafeFileName}. */
+export function assertSafeFileNames(files: readonly Pick<CaseFile, "artifactId" | "filename">[]) {
+  for (const file of files)
+    if (!isSafeFileName(file.filename))
+      throw new CaseFileError(
+        "case_file_name_refused",
+        file.artifactId,
+        `Pinned file ${quoted(String(file.filename))} is not a safe file name`,
+      );
+}
 /** Reduce a declared file name to a single printable path segment, at most 200 characters. */
 export function safeFilename(name: string): string {
   const cleaned = [...name]
@@ -119,7 +167,11 @@ export async function downloadCaseFiles(
     if (!present) {
       const bytes = await client.downloadArtifact(file.artifactId);
       if (bytes.byteLength !== file.byteSize || sha256(bytes) !== file.sha256)
-        throw new Error(`Downloaded input ${file.filename} does not match its pinned identity`);
+        throw new CaseFileError(
+          "case_file_mismatch",
+          file.artifactId,
+          `Downloaded file ${quoted(file.filename)} does not match its pinned size and SHA-256`,
+        );
       await writePrivate(path, bytes);
     }
     saved.push({
@@ -134,6 +186,34 @@ export async function downloadCaseFiles(
     });
   }
   return saved;
+}
+
+/**
+ * Download a case's needed inputs under `caseDirectory`: the agent-visible roles into `inputs/`
+ * and evaluator-only files into `evaluator-inputs/`, so the directory the target's files live in
+ * never holds an evaluator's file. `all` keeps the manifest order for scorers; `target` is the
+ * agent-visible subset.
+ */
+export async function downloadCaseInputs(
+  client: EvaluationClient,
+  files: CaseFile[],
+  caseDirectory: string,
+): Promise<{ all: LocalFile[]; target: LocalFile[] }> {
+  const visible = (file: CaseFile) => targetFileRoles.includes(file.role);
+  const agentFiles = files.filter(visible);
+  const evaluatorFiles = files.filter((file) => !visible(file));
+  const target = agentFiles.length
+    ? await downloadCaseFiles(client, agentFiles, join(caseDirectory, "inputs"))
+    : [];
+  const evaluator = evaluatorFiles.length
+    ? await downloadCaseFiles(client, evaluatorFiles, join(caseDirectory, "evaluator-inputs"))
+    : [];
+  const saved = [...target, ...evaluator];
+  const all = files.map(
+    (file) =>
+      saved.find((entry) => entry.artifactId === file.artifactId && entry.role === file.role)!,
+  );
+  return { all, target };
 }
 
 /** Copy the target's generated files next to the checkpoint and record their identities. */

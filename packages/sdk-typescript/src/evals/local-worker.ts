@@ -42,6 +42,10 @@ export const localAgentCapabilities = {
   /** Ordinary cases run directly on this machine: JSON inputs and pinned input files in,
    * JSON output and generated files out. */
   direct: "direct:v1",
+  /** Cases pinned to a world that also carry agent-visible input files: `target` receives them
+   * with the world and may return generated files. Declare it with `input:<extension>` for each
+   * accepted file type; it requires `target`. */
+  environmentFiles: "environment-files:v1",
 } as const;
 
 /** Candidate-visible context for one queued local agent execution. */
@@ -77,6 +81,13 @@ export interface LocalAgentTargetContext {
   /** Credential-bearing provider connections for this callback only. Hue never
    * checkpoints, logs or adds this response to parity digests. */
   connectionBundle?: AttemptConnectionBundleV2;
+  /** Verified copies of the case's agent-visible input files; evaluator-only files are
+   * withheld. Hue offers a world case with such files only to a registration declaring
+   * `environment-files:v1`. Empty when the case has none. */
+  files: LocalFile[];
+  /** Private directory for this case, removed after it; return generated files with
+   * `withFiles`. */
+  outputDirectory: string;
 }
 
 /** Candidate-visible context for one queued ordinary case run directly on this machine. */
@@ -139,6 +150,8 @@ function localAgentTargetContext(context: EnvironmentTargetContext): LocalAgentT
     ...(context.connectionBundle
       ? { connectionBundle: structuredClone(context.connectionBundle) }
       : {}),
+    files: structuredClone(context.files),
+    outputDirectory: context.outputDirectory,
   };
 }
 
@@ -194,12 +207,13 @@ export interface RunLocalAgentOptions {
     surfaceKey: "google.gmail/mcp" | "slack/mcp";
   };
   /** Runs cases pinned to a hosted world (`environment:v1`): invokes the existing agent against
-   * isolated tools and candidate-safe context. */
+   * isolated tools and candidate-safe context. Return the output, or `withFiles(output, files)`
+   * when it generated files. */
   target?(
     inputs: JsonValue,
     tools: Record<string, EnvironmentTool>,
     context: LocalAgentTargetContext,
-  ): JsonValue | undefined | Promise<JsonValue | undefined>;
+  ): JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
   /** Runs ordinary cases without a world (`direct:v1`): the agent receives the case inputs
    * and verified input files and returns JSON output and/or generated files. */
   directTarget?(
@@ -228,6 +242,8 @@ export function registeredCapabilities(options: {
     throw new TypeError("direct:v1 requires a directTarget callback");
   if (declared.includes(localAgentCapabilities.environment) && !options.target)
     throw new TypeError("environment:v1 requires a target callback");
+  if (declared.includes(localAgentCapabilities.environmentFiles) && !options.target)
+    throw new TypeError("environment-files:v1 requires a target callback");
   return [
     ...new Set([
       ...declared,

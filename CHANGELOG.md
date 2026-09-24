@@ -19,6 +19,35 @@ refuses to publish a version without a matching entry below.
   completes and listed in the new `RunnerReport.telemetryNotAccepted` with sanitized issue counts.
   The default, `"stop"`, keeps the previous behavior. Exported types `TelemetryNotAccepted` and
   `TelemetryIssueCount`.
+- Cases pinned to a world can carry input files. `runSimulation` and `runLocalAgent` download
+  the case's agent-visible files before its execution starts, verify each one's size and SHA-256
+  against the case manifest and hand the verified copies to the environment callback as
+  `context.files`, beside the world, with a private `context.outputDirectory`. Evaluator-only
+  files (`org_template`, `evaluator_reference`) never reach the agent. The callback may return
+  `withFiles(output, files)`: the files are uploaded and linked to the execution as `artifactIds`
+  and `primaryArtifactId`, within the limits of direct cases. The world token is never written
+  to the case directory, which is removed once the case completes.
+- `localAgentCapabilities.environmentFiles` (`environment-files:v1`). A worker that declares it,
+  with `input:<extension>` for each file type it accepts, is offered world cases whose manifest
+  holds agent-visible files; it requires `target`. The worker never adds it to a registration
+  itself, so existing registrations keep their capabilities.
+- `CaseFileError`, with the stable `code` `case_file_mismatch` when a downloaded pinned file
+  differs from the manifest's size or SHA-256, and `case_file_name_refused` when a file for an
+  agent in a world is not one safe file name (a path separator, `.` or `..`, a control character,
+  a Windows device name such as `CON`, a trailing dot or space, or more than 255 bytes). Both are
+  raised before the case's execution starts, so no execution or world is spent on it.
+- `hue eval` hands a world case's files to the agent: an adapter receives `context.files` and
+  `context.outputDirectory` and may return `withFiles`, and a `--command` also gets
+  `HUE_CASE_DIR`, `HUE_CASE_INPUTS` and `HUE_CASE_OUTPUT_DIR` with the direct-case layout; every
+  file it leaves in `output/` is uploaded. `--worker` registers each repeated
+  `--capability <value>`, such as `environment-files:v1` and `input:pdf`, beside `environment:v1`.
+
+#### Changed
+
+- A downloaded pinned file that differs from its manifest now raises `CaseFileError`
+  (`case_file_mismatch`) instead of a plain `Error`, for direct cases and `rescore` too.
+- Evaluator-only files downloaded for a local code evaluator are saved apart from the agent's
+  copies, so the directory holding `context.files` never contains them.
 
 #### Fixed
 

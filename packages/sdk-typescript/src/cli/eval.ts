@@ -66,7 +66,7 @@ import { envFileArgument, envFileOptions } from "./env-file.js";
 export type EvalAdapter = (
   inputs: JsonValue,
   context: SimulationTargetContext,
-) => JsonValue | undefined | Promise<JsonValue | undefined>;
+) => JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
 
 /**
  * Context of a direct (file) case: pinned input files in, generated documents out. The same
@@ -116,6 +116,9 @@ Agent (exactly one):
                                   HUE_ENVIRONMENT_RUN_ID, HUE_CASE_ID and HUE_CASE_KEY set;
                                   {"inputs","config"} on stdin. HUE_API_KEY and other Hue
                                   control-plane credentials are removed from the child.
+                                  HUE_CASE_DIR, HUE_CASE_INPUTS and HUE_CASE_OUTPUT_DIR name the
+                                  case directory as for direct cases: the case's agent-visible
+                                  files and output/, uploaded after the case
   --allow-hue-credentials         Keep HUE_API_KEY and other Hue control-plane credentials in
                                   the --command child (off by default)
                                   Direct: spawned in a private case directory with HUE_CASE_DIR,
@@ -129,6 +132,8 @@ Modes:
   --agent-key <key>               Agent key (default: slug of the adapter filename)
   --agent-name <name>             Agent display name (default: the key)
   --revision <id>                 Agent revision (default: AGENT_REVISION, git HEAD or "dev")
+  --capability <value>            Extra capability to register (repeatable), for example
+                                  environment-files:v1 and input:pdf for world cases with files
 
 Connection:
   --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first
@@ -190,6 +195,7 @@ function parse(argv: string[]) {
         "max-runs": { type: "string" },
         "agent-key": { type: "string" },
         "agent-name": { type: "string" },
+        capability: { type: "string", multiple: true },
         revision: { type: "string" },
         ...envFileOptions,
         origin: { type: "string" },
@@ -553,11 +559,23 @@ function commandAdapter(
 ): EvalAdapter {
   return async (inputs, context) => {
     const parent = parentEnvironment(options.allowHueCredentials);
+    // The case directory direct cases get: inputs, the verified agent-visible files and
+    // output/. It holds no world credential and the runner removes it after the case.
+    const layout = await stageDirectCase(context.outputDirectory, {
+      inputs,
+      config: context.config,
+      item: context.item,
+      executionId: context.executionId,
+      files: context.files,
+    });
     const identity = {
       HUE_EXECUTION_ID: context.executionId,
       HUE_ENVIRONMENT_RUN_ID: context.environmentRunId,
       HUE_CASE_ID: context.item.id,
       HUE_CASE_KEY: context.item.externalKey,
+      HUE_CASE_DIR: layout.caseDirectory,
+      HUE_CASE_INPUTS: layout.inputsPath,
+      HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
     };
     // The token-bearing file is written inside a private directory registered before any of it
     // exists, so a forced exit at any point removes it.
@@ -586,14 +604,13 @@ function commandAdapter(
               : {}),
             ...identity,
           };
-      return parseAnswer(
-        await spawnAgentCommand(command, {
-          env,
-          stdin: JSON.stringify({ inputs, config: context.config }),
-          timeoutSeconds,
-          ...(context.signal ? { signal: context.signal } : {}),
-        }),
-      );
+      const stdout = await spawnAgentCommand(command, {
+        env,
+        stdin: JSON.stringify({ inputs, config: context.config }),
+        timeoutSeconds,
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+      return collectDirectOutputs(layout.outputDirectory, parseAnswer(stdout));
     } finally {
       if (configDirectory) {
         await rm(configDirectory, { recursive: true, force: true });
@@ -1339,7 +1356,7 @@ async function runWorker(
       key: agent.key,
       name: agent.name,
       revision: agent.revision,
-      capabilities: ["environment:v1"],
+      capabilities: ["environment:v1", ...(values.capability ?? [])],
     },
     scorers: [],
     concurrency,
@@ -1359,6 +1376,8 @@ async function runWorker(
         ...(context.world ? { world: context.world } : {}),
         ...(context.mcp ? { mcp: context.mcp } : {}),
         ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
+        files: context.files,
+        outputDirectory: context.outputDirectory,
         signal,
       });
     },
@@ -1483,19 +1502,16 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     };
     if (values.worker && (values.mode || values["set-version"] || values.scorer?.length))
       throw new UsageError("--worker takes no selection; Hue chooses the run to execute");
+    if (!values.worker && values.capability?.length)
+      throw new UsageError("--capability applies to --worker only");
     const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;
     // One adapter module serves both case kinds; the direct context announces itself with `mode`.
     const agents: Agents = {
-      simulation: loaded
-        ? async (inputs, context) => {
-            const answer = await loaded(inputs, context);
-            if (answer instanceof TargetResult)
-              throw new Error("The adapter returned generated files for a simulated-world case");
-            return answer;
-          }
-        : commandAdapter(values.command!, timeout, {
-            allowHueCredentials: values["allow-hue-credentials"],
-          }),
+      simulation:
+        loaded ??
+        commandAdapter(values.command!, timeout, {
+          allowHueCredentials: values["allow-hue-credentials"],
+        }),
       direct:
         loaded ??
         directCommandAdapter(values.command!, timeout, {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ROOT_CONTEXT } from "@opentelemetry/api";
 import type { HueClient } from "../client.js";
@@ -9,7 +9,10 @@ import { EvaluationClient, HueApiError } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { CheckpointStore } from "./checkpoint.js";
 import {
+  assertSafeFileNames,
+  CaseFileError,
   downloadCaseFiles,
+  downloadCaseInputs,
   localOutputFiles,
   OutputFileError,
   stageOutputFiles,
@@ -128,6 +131,17 @@ function neededInputFiles(
   return codeEvaluatorRunsHere
     ? files
     : files.filter((file) => (targetFileRoles as readonly string[]).includes(file.role));
+}
+
+/** Remove a case's files; a failure is reported as a warning and never fails the case. */
+async function removeCaseFiles(directory: string): Promise<void> {
+  try {
+    await rm(directory, { recursive: true, force: true });
+  } catch {
+    process.emitWarning(`Could not remove the case files in ${directory}`, {
+      code: "HUE_CASE_FILES_NOT_REMOVED",
+    });
+  }
 }
 
 /** Immutable case context passed to a direct experiment target. */
@@ -524,7 +538,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     ): Promise<Prepared> {
       const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
       const inputs = needed.length
-        ? await downloadCaseFiles(options.client, needed, join(caseDirectory, "inputs"))
+        ? (await downloadCaseInputs(options.client, needed, caseDirectory)).all
         : [];
       await uploadOutputFiles(options.client, saved.executionId, saved.files, () =>
         store.write(file, saved),
@@ -575,7 +589,11 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     }
     await pool(items, concurrency, async (item) => {
       const file = `case-${uuid(item.id)}`;
-      const caseDirectory = join(filesRoot, `case-${uuid(item.id)}`);
+      // A case pinned to a world keeps its files apart and removes them once it is complete: the
+      // agent's copies of its inputs, its work and the staged outputs.
+      const worldDirectory = join(filesRoot, `world-case-${uuid(item.id)}`);
+      const caseDirectoryOf = (frozen: ExperimentCase) =>
+        frozen.environmentVersionId ? worldDirectory : join(filesRoot, `case-${uuid(item.id)}`);
       let checkpoint = await store.read<CaseCheckpoint>(file);
       if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
         if (checkpoint.stage === "serialization_failed")
@@ -595,7 +613,13 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         if (checkpoint.hasOutput && checkpoint.output === undefined)
           throw new UncertainExecutionError(item.id, checkpoint.executionId);
         const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
-        checkpoint = await prepare(file, checkpoint, frozenCase, caseDirectory, checkpoint.output);
+        checkpoint = await prepare(
+          file,
+          checkpoint,
+          frozenCase,
+          caseDirectoryOf(frozenCase),
+          checkpoint.output,
+        );
       }
       if (!checkpoint) {
         if (item.execution) throw new UncertainExecutionError(item.id, item.execution.id);
@@ -607,10 +631,22 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         const targetInputs = json(frozenCase.inputs);
         const targetConfig = json(experiment.config);
         // Pinned input files are verified on disk before an execution exists for the same reason.
+        const caseDirectory = caseDirectoryOf(frozenCase);
         const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
-        const inputFiles = needed.length
-          ? await downloadCaseFiles(options.client, needed, join(caseDirectory, "inputs"))
-          : [];
+        let inputFiles: LocalFile[] = [];
+        try {
+          // An agent working in a world receives its files by name: each must be one safe name.
+          if (frozenCase.environmentVersionId)
+            assertSafeFileNames(
+              needed.filter((entry) => (targetFileRoles as readonly string[]).includes(entry.role)),
+            );
+          if (needed.length)
+            inputFiles = (await downloadCaseInputs(options.client, needed, caseDirectory)).target;
+        } catch (error) {
+          if (error instanceof CaseFileError && frozenCase.environmentVersionId)
+            await removeCaseFiles(worldDirectory);
+          throw error;
+        }
         const outputDirectory = join(caseDirectory, "work");
         await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
         const failureSequenceBefore = options.hue.transport.getFailureSequence();
@@ -638,11 +674,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 item: structuredClone(frozenCase),
                 span,
                 executionId: execution.id,
-                files: structuredClone(
-                  inputFiles.filter((entry) =>
-                    (targetFileRoles as readonly string[]).includes(entry.role),
-                  ),
-                ),
+                files: structuredClone(inputFiles),
                 outputDirectory,
               });
               if (result instanceof TargetResult) {
@@ -799,6 +831,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         save,
         versions,
       );
+      await removeCaseFiles(worldDirectory);
       report.subjectIds.push(prepared.completion.subjectId);
       report.resultIds.push(...results);
     });
