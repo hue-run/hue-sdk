@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
+import {
+  HueEnvironmentError,
+  isTransientEnvironmentError,
+  type EnvironmentClient,
+} from "../environment/client.js";
 import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
 import type { EnvironmentRun, WorldHandoff } from "../environment/types.js";
 import { legacyMcpCapability, worldHandoff } from "../environment/world.js";
@@ -156,21 +160,28 @@ export interface RunEnvironmentTargetOptions {
   ): JsonValue | undefined | Promise<JsonValue | undefined>;
 }
 
-/** Confirm a seal from the authoritative run after a lost acknowledgement. */
+/** The completion grace is five seconds; cap an unexpectedly distant timestamp and let reads
+ * force the seal after the grace. */
+export const MAX_GRACE_WAIT_MS = 10_000;
+export const SEAL_POLL_MS = 250;
+export const SEAL_WAIT_MS = 30_000;
+
+/** Finish, then wait for the authoritative run to leave open. */
 async function seal(
   client: EnvironmentClient,
   runId: string,
   executionId: string,
   status: "completed" | "abandoned",
 ): Promise<void> {
+  let completingUntil: string | null | undefined;
   try {
-    await client.finishRun(runId, {
+    const finished = await client.finishRun(runId, {
       idempotencyKey: `execution:${executionId}:${status}`,
       status,
     });
+    if (finished.lifecycle === "completing") completingUntil = finished.completingUntil ?? null;
   } catch (error) {
-    // A gateway world answers 409 once it is completing, sealed or expired: each is the
-    // outcome the caller wanted or the one it can no longer change.
+    // A gateway world answers 409 once it is completing, sealed or expired.
     const recovered = await client.getRun(runId).catch(() => undefined);
     if (
       recovered?.status !== status &&
@@ -178,6 +189,48 @@ async function seal(
       !(recovered?.status === "open" && recovered.lifecycle === "completing")
     )
       throw new TargetOutcomeUncertainError(executionId, { cause: error });
+    if (recovered?.status === "open") completingUntil = recovered.completingUntil ?? null;
+  }
+  if (completingUntil !== undefined) {
+    try {
+      await awaitSeal(client, runId, completingUntil);
+    } catch (error) {
+      throw new TargetOutcomeUncertainError(executionId, { cause: error });
+    }
+  }
+}
+
+/** Wait out a completing world's grace, then read until the server seals it. */
+async function awaitSeal(
+  client: EnvironmentClient,
+  runId: string,
+  completingUntil: string | null,
+): Promise<void> {
+  const graceEnd = Date.parse(completingUntil ?? "");
+  let wait = Number.isFinite(graceEnd)
+    ? Math.min(Math.max(0, graceEnd - Date.now()), MAX_GRACE_WAIT_MS)
+    : 0;
+  const deadline = performance.now() + wait + SEAL_WAIT_MS;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error(`World ${runId} was not sealed after its completion grace`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remaining);
+    try {
+      if ((await client.getRun(runId, { signal: controller.signal })).status !== "open") return;
+    } catch (error) {
+      if (!isTransientEnvironmentError(error)) throw error;
+      if (performance.now() >= deadline)
+        throw new Error(`World ${runId} was not sealed after its completion grace`, {
+          cause: error,
+        });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (performance.now() >= deadline)
+      throw new Error(`World ${runId} was not sealed after its completion grace`);
+    wait = SEAL_POLL_MS;
   }
 }
 

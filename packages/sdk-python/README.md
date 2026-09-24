@@ -190,7 +190,8 @@ See the [documentation](https://docs.hue.run/sdks/python) for integration guidan
 
 `hue_sdk.environment.EnvironmentClient` drives Hue's World API: create a world after the case's
 execution starts, hand the agent the provider mirror URLs and the world token (never the project
-key), finish before the execution completes, and read the sealed world's evaluator-only evidence.
+key), finish and `wait_for_seal` before the execution completes, and read the sealed world's
+evaluator-only evidence.
 
 ```python
 import os
@@ -220,9 +221,10 @@ try:
         subprocess.run(agent_command, env={**child, "MCP_CONFIG": path}, check=True)
 finally:
     if world is not None:
-        client.finish_run(
+        finished = client.finish_run(
             run["id"], idempotency_key=f"execution:{execution_id}:completed", status="completed"
         )
+        client.wait_for_seal(run["id"], completing_until=finished.get("completingUntil"))
 evidence = client.get_evidence(run["id"], section="ledger")
 ```
 

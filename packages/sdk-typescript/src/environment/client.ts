@@ -53,6 +53,13 @@ export class HueEnvironmentError extends Error {
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+/** A connection failure or a status the client retries; seal polling continues through these. */
+export function isTransientEnvironmentError(error: unknown): boolean {
+  return (
+    error instanceof HueEnvironmentError &&
+    (error.status === undefined || RETRYABLE.has(error.status))
+  );
+}
 /** A `Retry-After` longer than this waits this long: Hue asks for a second, never minutes. */
 const MAX_RETRY_AFTER_MS = 10_000;
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
@@ -100,9 +107,15 @@ export class EnvironmentClient {
     this.maxAttempts = attempts;
   }
 
-  private async send<T>(method: string, path: string, payload?: string): Promise<T> {
+  private async send<T>(
+    method: string,
+    path: string,
+    payload?: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<T> {
     let response: Response;
     try {
+      const timeout = AbortSignal.timeout(this.timeoutMillis);
       response = await fetch(`${this.baseUrl}/api/v1${path}`, {
         method,
         headers: {
@@ -111,7 +124,7 @@ export class EnvironmentClient {
         },
         body: payload,
         redirect: "error",
-        signal: AbortSignal.timeout(this.timeoutMillis),
+        signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
       });
     } catch {
       throw new HueEnvironmentError();
@@ -145,7 +158,12 @@ export class EnvironmentClient {
     }
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<T> {
     // Serialize once: a body this client cannot encode is a caller error that no retry fixes.
     const payload =
       body === undefined
@@ -160,15 +178,27 @@ export class EnvironmentClient {
           );
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.send<T>(method, path, payload);
+        return await this.send<T>(method, path, payload, options);
       } catch (error) {
         if (!(error instanceof HueEnvironmentError)) throw error;
-        const recoverable = error.status === undefined || RETRYABLE.has(error.status);
-        if (!recoverable || attempt >= this.maxAttempts) throw error;
+        if (options.signal?.aborted) throw error;
+        if (!isTransientEnvironmentError(error) || attempt >= this.maxAttempts) throw error;
         // Hue's admission refusals say how long to wait; anything else backs off.
         const backoff = Math.min(100 * 2 ** (attempt - 1), 2000);
         const wait = error.retryAfterMs ?? backoff + Math.random() * backoff;
-        await new Promise((resolve) => setTimeout(resolve, wait));
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            options.signal?.removeEventListener("abort", abort);
+            resolve();
+          }, wait);
+          const abort = () => {
+            clearTimeout(timer);
+            options.signal?.removeEventListener("abort", abort);
+            reject(new HueEnvironmentError());
+          };
+          if (options.signal?.aborted) abort();
+          else options.signal?.addEventListener("abort", abort, { once: true });
+        });
       }
     }
   }
@@ -259,8 +289,13 @@ export class EnvironmentClient {
     });
   }
   /** Reads authoritative current or sealed world state. */
-  async getRun(runId: string) {
-    const run = await this.request<RunState>("GET", `/environment-runs/${uuid(runId)}`);
+  async getRun(runId: string, options: { signal?: AbortSignal } = {}) {
+    const run = await this.request<RunState>(
+      "GET",
+      `/environment-runs/${uuid(runId)}`,
+      undefined,
+      options,
+    );
     return { validity: "not_assessed" as const, coverageGap: null, ...run };
   }
   /** Record a known coverage gap with durable identity; retries reuse the exact request. */

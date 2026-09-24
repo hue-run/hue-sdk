@@ -2,6 +2,7 @@ export {
   createEnvironmentClient,
   EnvironmentClient,
   HueEnvironmentError,
+  isTransientEnvironmentError,
 } from "./environment/client.js";
 export type { EnvironmentClientOptions } from "./environment/client.js";
 export { bindEnvironmentTools } from "./environment/tools.js";

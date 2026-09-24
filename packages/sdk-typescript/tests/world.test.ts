@@ -10,6 +10,7 @@ import {
   gatewayState,
   runEnvironmentTarget,
 } from "../src/evals/environment-target.js";
+import { TargetOutcomeUncertainError } from "../src/evals/runner.js";
 import {
   agentEnvironment,
   createEnvironmentClient,
@@ -90,10 +91,28 @@ afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop(true);
 });
 
-/** The World API routes a client needs, with every request recorded. */
-function worldApi(options: { create?: (body: Record<string, unknown>) => Response } = {}) {
-  const requests: { method: string; path: string; body?: Record<string, unknown> }[] = [];
+/** The World API routes a client needs, with every request recorded. A world finished
+ * `completed` stays open for `graceMs`, then for `lagReads` more status reads, as a server whose
+ * seal follows its grace. */
+function worldApi(
+  options: {
+    create?: (body: Record<string, unknown>) => Response;
+    graceMs?: number;
+    lagReads?: number;
+    finishConflict?: boolean;
+    /** Status reads after the finish that fail with this status before the world answers. */
+    failedReads?: { count: number; status: number };
+  } = {},
+) {
+  const requests: { method: string; path: string; body?: Record<string, unknown>; at: number }[] =
+    [];
   let created: EnvironmentRun | undefined;
+  let finished: { status: string; completingUntil: number } | undefined;
+  let lagReads = options.lagReads ?? 0;
+  const sealed = () =>
+    finished !== undefined &&
+    (finished.status === "abandoned" ||
+      (Date.now() >= finished.completingUntil && lagReads-- <= 0));
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -108,7 +127,7 @@ function worldApi(options: { create?: (body: Record<string, unknown>) => Respons
       }
       const body =
         request.method === "POST" ? ((await request.json()) as Record<string, unknown>) : undefined;
-      requests.push({ method: request.method, path, body });
+      requests.push({ method: request.method, path, body, at: Date.now() });
       if (path === "/projects/current")
         return Response.json({
           id: randomUUID(),
@@ -121,16 +140,49 @@ function worldApi(options: { create?: (body: Record<string, unknown>) => Respons
         created ??= gatewayRun({ traceparent: (body!.traceparent as string) ?? null });
         return Response.json(created, { status: 201 });
       }
-      if (path.endsWith("/finish"))
+      if (path.endsWith("/finish")) {
+        finished ??= {
+          status: String(body!.status),
+          completingUntil: Date.now() + (options.graceMs ?? 200),
+        };
+        if (options.finishConflict)
+          return Response.json({ error: "world_completing" }, { status: 409 });
+        const abandoned = finished.status === "abandoned";
         return Response.json({
           id: runId,
           status: body!.status,
           stepCount: 0,
           stateDigest: "a".repeat(64),
-          sealedAt: null,
-          lifecycle: "completing",
-          completingUntil: new Date(Date.now() + 5_000).toISOString(),
+          sealedAt: abandoned ? new Date().toISOString() : null,
+          lifecycle: abandoned ? "sealed" : "completing",
+          completingUntil: abandoned ? null : new Date(finished.completingUntil).toISOString(),
         });
+      }
+      if (path === `/environment-runs/${runId}` && request.method === "GET") {
+        if (finished && options.failedReads && options.failedReads.count-- > 0)
+          return Response.json(
+            { error: "unavailable" },
+            { status: options.failedReads.status, headers: { "Retry-After": "0" } },
+          );
+        const done = sealed();
+        return Response.json({
+          id: runId,
+          environmentVersionId: versionId,
+          executionId,
+          seed: "0",
+          status: done ? finished!.status : "open",
+          stepCount: 0,
+          maxSteps: 500,
+          clockNs: "0",
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          createdAt: new Date().toISOString(),
+          sealedAt: done ? new Date().toISOString() : null,
+          stateDigest: "a".repeat(64),
+          lifecycle: done ? "sealed" : finished ? "completing" : "live",
+          completingUntil:
+            finished && !done ? new Date(finished.completingUntil).toISOString() : null,
+        });
+      }
       if (path.includes("/evidence"))
         return Response.json({ worldId: runId, section: path.split("section=")[1] ?? "all" });
       if (path.endsWith("/mcp-capability"))
@@ -413,8 +465,8 @@ describe("world creation on a deployment whose gateway is off", () => {
 });
 
 describe("environment target with a gateway world", () => {
-  test("creates the world with the case context, hands the agent the mirrors and finishes before returning", async () => {
-    const api = worldApi();
+  /** One case through `runEnvironmentTarget` against the mock World API. */
+  async function runCase(api: ReturnType<typeof worldApi>) {
     const hue = createHue({
       apiKey: key,
       baseUrl: api.baseUrl,
@@ -459,11 +511,21 @@ describe("environment target with a gateway world", () => {
           },
         }),
       );
-      expect(output).toEqual({ done: true });
+      return { output, seen: seen!, warnings, returnedAt: Date.now() };
     } finally {
       process.emitWarning = original;
       await hue.shutdown();
     }
+  }
+  const statusReads = (api: ReturnType<typeof worldApi>) =>
+    api.requests.filter(
+      (request) => request.method === "GET" && request.path === `/environment-runs/${runId}`,
+    ).length;
+
+  test("creates the world with the case context, hands the agent the mirrors and returns only once the world is sealed", async () => {
+    const api = worldApi({ graceMs: 300 });
+    const { output, seen, warnings, returnedAt } = await runCase(api);
+    expect(output).toEqual({ done: true });
     const create = api.requests.find((request) => request.path === "/environment-runs")!;
     expect(create.body).toMatchObject({
       idempotencyKey: `execution:${executionId}`,
@@ -474,18 +536,53 @@ describe("environment target with a gateway world", () => {
     expect(create.body!.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     // The agent got the world and its first MCP mirror as `mcp`; no legacy capability was minted
     // and no Hue-native tools were bound for a gateway world.
-    expect(seen!.world).toMatchObject({ id: runId, token });
-    expect(seen!.mcp).toEqual({ url: mirror, token, expiresAt: seen!.world!.expiresAt });
-    expect(seen!.tools).toEqual({});
+    expect(seen.world).toMatchObject({ id: runId, token });
+    expect(seen.mcp).toEqual({ url: mirror, token, expiresAt: seen.world!.expiresAt });
+    expect(seen.tools).toEqual({});
     expect(api.requests.some((request) => request.path.endsWith("/mcp-capability"))).toBe(false);
     expect(warnings).toEqual([]);
     const paths = api.requests.map((request) => request.path);
-    expect(paths.indexOf(`/environment-runs/${runId}/finish`)).toBeGreaterThan(
-      paths.indexOf("/environment-runs"),
-    );
-    expect(api.requests.find((request) => request.path.endsWith("/finish"))!.body).toEqual({
+    const finish = paths.indexOf(`/environment-runs/${runId}/finish`);
+    expect(finish).toBeGreaterThan(paths.indexOf("/environment-runs"));
+    expect(api.requests[finish]!.body).toEqual({
       idempotencyKey: `execution:${executionId}:completed`,
       status: "completed",
     });
+    // Completion refuses an open world, so the target waits out the grace and reads the seal.
+    expect(paths.lastIndexOf(`/environment-runs/${runId}`)).toBeGreaterThan(finish);
+    expect(statusReads(api)).toBe(1);
+    const read = api.requests.at(-1)!;
+    expect(read.at - api.requests[finish]!.at).toBeGreaterThanOrEqual(300);
+    expect(returnedAt).toBeGreaterThanOrEqual(read.at);
+  });
+
+  test("keeps reading the status while the world is still completing after its grace", async () => {
+    const api = worldApi({ graceMs: 50, lagReads: 2 });
+    const { output } = await runCase(api);
+    expect(output).toEqual({ done: true });
+    expect(statusReads(api)).toBe(3);
+  });
+
+  test("status reads that stay unavailable past the client's retries are polled until the seal", async () => {
+    // Four failures exhaust one getRun's attempts; the wait asks again and the fifth read fails
+    // once more before the sixth finds the seal.
+    const api = worldApi({ graceMs: 50, failedReads: { count: 5, status: 503 } });
+    const { output } = await runCase(api);
+    expect(output).toEqual({ done: true });
+    expect(statusReads(api)).toBe(6);
+  });
+
+  test("a status read the server refuses outright ends the wait as an uncertain outcome", async () => {
+    const api = worldApi({ graceMs: 50, failedReads: { count: 1, status: 404 } });
+    await expect(runCase(api)).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+    expect(statusReads(api)).toBe(1);
+  });
+
+  test("a finish refused while the world is completing still waits for the seal", async () => {
+    const api = worldApi({ graceMs: 100, finishConflict: true });
+    const { output } = await runCase(api);
+    expect(output).toEqual({ done: true });
+    // One read recovers the refused finish; the next, after the grace, finds the seal.
+    expect(statusReads(api)).toBe(2);
   });
 });

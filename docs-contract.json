@@ -216,6 +216,7 @@
             "bindEnvironmentTools",
             "createEnvironmentClient",
             "isHueControlPlaneCredential",
+            "isTransientEnvironmentError",
             "legacyMcpCapability",
             "stripHueControlPlaneCredentials",
             "worldHandoff",

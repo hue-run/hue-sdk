@@ -5,6 +5,7 @@ import math
 import random
 import re
 import time
+from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlencode
 
@@ -28,6 +29,9 @@ _RETRYABLE = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # A Retry-After longer than this waits this long: the gateway asks for 1 s, never minutes.
 _MAX_RETRY_AFTER_SECONDS = 10.0
+MAX_GRACE_WAIT_SECONDS = 10.0
+SEAL_WAIT_SECONDS = 30.0
+SEAL_POLL_SECONDS = 0.25
 # Version 00 reserves the high six trace-flags bits; only the low two are currently defined.
 _TRACEPARENT = re.compile(r"^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-0[0-3]$")
 _EVIDENCE_SECTIONS = ("all", "start", "end", "diff", "ledger")
@@ -45,6 +49,15 @@ class HueEnvironmentError(RuntimeError):
             if status is not None
             else "Hue environment connection or response failed."
         )
+
+
+class EnvironmentSealTimeoutError(HueEnvironmentError):
+    """A world stayed open through its completion grace and bounded seal wait."""
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__()
+        self.args = (f"World {run_id} was not sealed after its completion grace",)
 
 
 def _retry_after(response: requests.Response) -> float | None:
@@ -100,7 +113,9 @@ class EnvironmentClient:
     def __repr__(self) -> str:
         return "EnvironmentClient()"
 
-    def _send(self, method: str, path: str, payload: bytes | None) -> Any:
+    def _send(
+        self, method: str, path: str, payload: bytes | None, *, timeout_seconds: float | None = None
+    ) -> Any:
         try:
             with requests.request(
                 method,
@@ -110,15 +125,20 @@ class EnvironmentClient:
                     **self._headers,
                     **({"Content-Type": "application/json"} if payload is not None else {}),
                 },
-                timeout=self._timeout,
+                timeout=self._timeout if timeout_seconds is None else timeout_seconds,
                 allow_redirects=False,
                 stream=True,
             ) as response:
                 if not 200 <= response.status_code < 300:
                     raise HueEnvironmentError(response.status_code, _retry_after(response))
+                deadline = (
+                    time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+                )
                 chunks: list[bytes] = []
                 size = 0
                 for chunk in response.iter_content(chunk_size=8192):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise HueEnvironmentError()
                     size += len(chunk)
                     if size > _MAX_RESPONSE_BYTES:
                         raise HueEnvironmentError()
@@ -151,6 +171,10 @@ class EnvironmentClient:
                     else backoff + random.random() * backoff
                 )
         raise AssertionError("Unreachable")
+
+    def _request_once(self, method: str, path: str, *, timeout_seconds: float) -> Any:
+        """Make one bounded request without retries, for a deadline-bound seal read."""
+        return self._send(method, path, None, timeout_seconds=timeout_seconds)
 
     def create_run(
         self,
@@ -192,9 +216,19 @@ class EnvironmentClient:
 
     def get_run(self, run_id: str) -> RunState:
         run = self._request("GET", f"/environment-runs/{uuid(run_id)}")
+        return self._run_state(run)
+
+    @staticmethod
+    def _run_state(run: Any) -> RunState:
         state: dict[str, Any] = {"validity": "not_assessed", "coverageGap": None}
         state.update(run)
         return cast(RunState, state)
+
+    def _get_run_once(self, run_id: str, *, timeout_seconds: float) -> RunState:
+        run = self._request_once(
+            "GET", f"/environment-runs/{uuid(run_id)}", timeout_seconds=timeout_seconds
+        )
+        return self._run_state(run)
 
     def record_coverage_gap(
         self,
@@ -265,6 +299,49 @@ class EnvironmentClient:
             f"/environment-runs/{uuid(run_id)}/finish",
             {"idempotencyKey": idempotency_key, "status": status},
         )
+
+    def wait_for_seal(self, run_id: str, *, completing_until: str | None = None) -> RunState:
+        """Wait until a completed world leaves ``open`` after its completion grace.
+
+        A status read after the grace asks the World API to seal an overdue world. Transient
+        connection and gateway errors are retried through a bounded 30-second post-grace window.
+        Pass the ``completingUntil`` value returned by :meth:`finish_run`; an absent or malformed
+        value causes an immediate status read.
+        """
+        try:
+            grace_end = datetime.fromisoformat(
+                (completing_until or "").replace("Z", "+00:00")
+            ).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            grace_end = time.time()
+        wait = min(max(0.0, grace_end - time.time()), MAX_GRACE_WAIT_SECONDS)
+        deadline = time.monotonic() + wait + SEAL_WAIT_SECONDS
+        if wait:
+            time.sleep(wait)
+        while True:
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise EnvironmentSealTimeoutError(run_id)
+                state = self._get_run_once(run_id, timeout_seconds=min(self._timeout, remaining))
+                if state["status"] != "open":
+                    return state
+            except HueEnvironmentError as error:
+                if isinstance(error, EnvironmentSealTimeoutError):
+                    raise
+                if error.status is not None and error.status not in _RETRYABLE:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise EnvironmentSealTimeoutError(run_id) from error
+                delay = min(
+                    max(SEAL_POLL_SECONDS, error.retry_after or 0.0),
+                    max(0.0, deadline - time.monotonic()),
+                )
+                time.sleep(delay)
+                continue
+            if time.monotonic() >= deadline:
+                raise EnvironmentSealTimeoutError(run_id)
+            time.sleep(min(SEAL_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
     def get_evidence(
         self,

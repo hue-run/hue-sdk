@@ -230,17 +230,31 @@ try {
   await spawnAgent({ env: child, mcpConfigPath: config.path });
 } finally {
   await config.dispose();
-  await environmentClient.finishRun(run.id, {
+  const finished = await environmentClient.finishRun(run.id, {
     idempotencyKey: `execution:${executionId}:completed`,
     status: "completed",
   });
+  const graceEnd = Date.parse(finished.completingUntil ?? "") || Date.now();
+  await new Promise((resolve) =>
+    setTimeout(resolve, Math.min(10_000, Math.max(0, graceEnd - Date.now()))),
+  );
+  const sealDeadline = Date.now() + 30_000;
+  let sealed = false;
+  while (Date.now() < sealDeadline) {
+    if ((await environmentClient.getRun(run.id)).status !== "open") {
+      sealed = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (!sealed) throw new Error("World was not sealed after its completion grace");
 }
 ```
 
 `runSimulation`, `runLocalAgent` and `hue eval` do this for you: they create the world with the
 execution, the stable key, the case span's context and the agent revision, pass the handoff as
-`context.world`, and finish before returning so telemetry is flushed and the execution completed
-afterwards. For one compatibility release `context.mcp` is the world's first MCP mirror with the
+`context.world`, and finish and wait for the seal before returning so telemetry is flushed and the
+execution completed afterwards. For one compatibility release `context.mcp` is the world's first MCP mirror with the
 world token, so an adapter that read `HUE_MCP_URL` and `HUE_MCP_TOKEN` keeps working;
 `agentEnvironment` sets those names too unless `legacyMcpVariables: false`. A gateway world binds
 no Hue-native `tools` (Hue refuses them); a world created while the gateway is off keeps its tools
@@ -253,7 +267,9 @@ Nothing in these helpers logs the token; keep it out of your own logs and checkp
 
 Finish answers `lifecycle: "completing"` with `sealedAt: null` for a gateway world: the seal
 follows a 5 s grace so in-flight writes land, and a late finish answers 409, which the helpers
-treat as the seal they can no longer change. `getEvidence(runId, { section, bodies })` reads the
+treat as the seal they can no longer change. Completing an execution while the world is open
+returns 409, so direct clients read the run after the finish response's `completingUntil`
+until it is no longer open; the helper waits through transient failures. `getEvidence(runId, { section, bodies })` reads the
 sealed world's evaluator-only evidence (start and end state, the diff, the call ledger, coverage,
 fingerprint) with the project key; a world token can never read it. The client honors Hue's
 `Retry-After` on 429 and 503.
