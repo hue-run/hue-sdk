@@ -400,7 +400,7 @@ describe("environment client World API", () => {
       status: 409,
       headers: { get: () => "\u0000" },
       body: null,
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
     try {
       const client = createEnvironmentClient({ apiKey: key, baseUrl: "https://app.hue.test" });
       await expect(
