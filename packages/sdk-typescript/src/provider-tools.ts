@@ -59,8 +59,12 @@ function isProviderToolItem(value: unknown): boolean {
   );
 }
 
-function countProviderToolItems(items: unknown[]): number {
-  return items.reduce<number>((count, item) => count + (isProviderToolItem(item) ? 1 : 0), 0);
+function countProviderToolItems(items: unknown[], start = 0): number {
+  let count = 0;
+  for (let index = start; index < items.length; index++) {
+    if (isProviderToolItem(items[index])) count++;
+  }
+  return count;
 }
 
 function text(value: unknown): string | undefined {
@@ -87,7 +91,7 @@ function jsonArguments(value: unknown): unknown {
 /** OpenAI Responses `output` items. Built-in tools are named by their kind; MCP calls by tool. */
 function openaiCalls(items: unknown[], activity: HostedToolActivity): void {
   const count = Math.min(items.length, MAX_PROVIDER_ITEMS);
-  activity.skipped += countProviderToolItems(items.slice(count));
+  activity.skipped += countProviderToolItems(items, count);
   for (let index = 0; index < count; index++) {
     const item = items[index];
     if (!isItem(item)) continue;
@@ -177,7 +181,7 @@ function anthropicCalls(blocks: unknown[], activity: HostedToolActivity): void {
   const results = new Map<string, Item>();
   const count = Math.min(blocks.length, MAX_PROVIDER_ITEMS);
   const truncated = blocks.length > MAX_PROVIDER_ITEMS;
-  activity.skipped += countProviderToolItems(blocks.slice(count));
+  activity.skipped += countProviderToolItems(blocks, count);
   for (let index = 0; index < count; index++) {
     const block = blocks[index];
     if (

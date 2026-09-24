@@ -300,6 +300,35 @@ describe("Hue SDK contract", () => {
     },
   );
 
+  test("does not make a harmless truncated response fail strict flush", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "provider-tool-truncation",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.model(
+        "synthetic-model",
+        async () => {
+          hue.recordProviderToolCalls(
+            {
+              output: Array.from({ length: 256 }, () => ({ type: "message", content: [] })),
+            },
+            { provider: "openai" },
+          );
+        },
+        { provider: "openai" },
+      );
+      const report = await hue.flush();
+      expect(report.instrumentationFailures).toBe(0);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("model helper records GenAI request attributes, message content and validated usage", async () => {
     const endpoint = receiver();
     const hue = createHue({
