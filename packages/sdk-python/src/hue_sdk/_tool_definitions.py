@@ -15,9 +15,6 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-# A dependency of requests; its UTS 46 table maps IDN hosts as WHATWG URL parsing does.
-import idna
-
 from .transport import MAX_REQUEST_BYTES
 
 REDACTED = "[redacted]"
@@ -136,6 +133,10 @@ def _query_names(query: str) -> list[str]:
     return names
 
 
+_RADIX_DIGITS = {8: frozenset("01234567"), 10: frozenset("0123456789")}
+_RADIX_DIGITS[16] = frozenset("0123456789abcdefABCDEF")
+
+
 def _ipv4_number(part: str) -> int | None:
     radix = 10
     if part[:2] in ("0x", "0X"):
@@ -144,10 +145,12 @@ def _ipv4_number(part: str) -> int | None:
         part, radix = part[1:], 8
     if not part:
         return 0 if radix != 10 else None
-    try:
-        return int(part, radix) if part.isascii() and part.isalnum() else None
-    except ValueError:
+    if not set(part) <= _RADIX_DIGITS[radix]:
         return None
+    # Leading zeros do not count, and anything longer is out of range for an IPv4 part; neither
+    # may reach int(), which refuses more than about 4,300 decimal digits.
+    digits = part.lstrip("0") or "0"
+    return int(digits, radix) if len(digits) <= 12 else 1 << 64
 
 
 def _ends_in_number(domain: str) -> bool:
@@ -201,18 +204,55 @@ def _ipv6(text: str) -> str:
 
 def _remap(domain: str) -> str:
     try:
+        # A dependency of requests, imported only for an IDN host; without it the host is
+        # refused rather than serialized differently.
+        import idna
+
         return idna.uts46_remap(domain, std3_rules=False, transitional=False)
-    except (idna.IDNAError, UnicodeError, ValueError):
+    except (ImportError, UnicodeError, ValueError):
         raise _InvalidUrl from None
 
 
+_RTL_ALLOWED = frozenset({"R", "AL", "AN", "EN", "ES", "CS", "ET", "ON", "BN", "NSM"})
+
+
+def _bidi_valid(label: str) -> bool:
+    """RFC 5893 rules 2 to 4 for a label that begins with right-to-left text (a letter or an
+    Arabic digit), as the Node.js parser applies them: only such characters, ending on a strong
+    or numeric one, and not both kinds of digits. Bun's parser applies all six rules, so it
+    refuses a few more labels."""
+    classes = [unicodedata.bidirectional(char) for char in label]
+    if not classes or classes[0] not in ("R", "AL", "AN"):
+        return True
+    end = len(classes)
+    while end and classes[end - 1] == "NSM":
+        end -= 1
+    return (
+        set(classes) <= _RTL_ALLOWED
+        and end > 0
+        and classes[end - 1] in ("R", "AL", "EN", "AN")
+        and not {"EN", "AN"} <= set(classes)
+    )
+
+
+def _joiners_valid(label: str) -> bool:
+    """RFC 5892 ContextJ: a joiner follows a virama. A zero-width non-joiner between Arabic
+    letters is also valid there; that joining-type rule is not checked and it is refused."""
+    return all(
+        index > 0 and unicodedata.combining(label[index - 1]) == 9
+        for index, char in enumerate(label)
+        if char in "\u200c\u200d"
+    )
+
+
 def _domain_to_ascii(domain: str) -> str:
-    """UTS 46 ToASCII with WHATWG's options, for the mapping and Punycode steps. The IDNA 2008
-    bidi and joiner context rules are not checked; a label with a joiner is refused."""
+    """UTS 46 ToASCII with WHATWG's options: the mapping, the validity criteria, CheckJoiners
+    and CheckBidi as ``_bidi_valid`` describes, and Punycode."""
     if domain.isascii() and not any(label[:4].lower() == "xn--" for label in domain.split(".")):
         return domain.lower()
-    labels = []
-    for label in _remap(domain).split("."):
+    labels = _remap(domain).split(".")
+    unicode_labels = []
+    for label in labels:
         if label.startswith("xn--"):
             try:
                 decoded = label[4:].encode("ascii").decode("punycode")
@@ -225,12 +265,16 @@ def _domain_to_ascii(domain: str) -> str:
                 or not unicodedata.is_normalized("NFC", decoded)
             ):
                 raise _InvalidUrl
-        elif not label.isascii():
-            if "\u200c" in label or "\u200d" in label:
-                raise _InvalidUrl
-            label = "xn--" + label.encode("punycode").decode("ascii")
-        labels.append(label)
-    return ".".join(labels)
+            label = decoded
+        if label and (unicodedata.category(label[0]).startswith("M") or not _joiners_valid(label)):
+            raise _InvalidUrl
+        unicode_labels.append(label)
+    if not all(_bidi_valid(label) for label in unicode_labels):
+        raise _InvalidUrl
+    return ".".join(
+        label if label.isascii() else "xn--" + label.encode("punycode").decode("ascii")
+        for label in unicode_labels
+    )
 
 
 def _host(text: str) -> str:
@@ -284,9 +328,10 @@ def _scrub_special_url(scheme: str, rest: str) -> str | None:
     host = _host(host_text)
     port = None
     if port_text:
-        if not (port_text.isascii() and port_text.isdigit()) or int(port_text) > 65535:
+        digits = port_text.lstrip("0") or "0"
+        if not set(port_text) <= _RADIX_DIGITS[10] or len(digits) > 5 or int(digits) > 65535:
             raise _InvalidUrl
-        port = None if int(port_text) == _SPECIAL_PORTS[scheme] else int(port_text)
+        port = None if int(digits) == _SPECIAL_PORTS[scheme] else int(digits)
     rest, hashed, fragment = rest.partition("#")
     path, questioned, query = rest.partition("?")
     username, _, password = userinfo.partition(":")
@@ -321,7 +366,8 @@ class _Scrub:
         if scheme and scheme.group()[:-1].lower() in _SPECIAL_PORTS:
             try:
                 scrubbed = _scrub_special_url(scheme.group()[:-1].lower(), text[scheme.end() :])
-            except _InvalidUrl:
+            except ValueError:
+                # Refused by WHATWG, or anything else that stops the parse: never export it.
                 scrubbed = REDACTED
             if scrubbed is None:
                 return value
