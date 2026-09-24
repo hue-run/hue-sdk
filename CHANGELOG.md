@@ -10,36 +10,28 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.9.0] - 2026-09-24
+
 #### Breaking
 
-- `GmailProviderInstance.configuration` is now `GmailMailboxConfiguration`, a union discriminated
-  by `kind`, instead of the `gmail_mailbox/v1` object alone. The change is type-only, with no
-  runtime or wire effect, but code that assigns a read-back `configuration`, or its `kind`, to the
-  old `gmail_mailbox/v1` type, or that checks `kind` exhaustively, no longer compiles. Migration:
-  narrow on `configuration.kind` before treating a value as `GmailMailboxConfigurationV1` (the
-  exported name of the old shape), and handle `gmail_mailbox/v2` in exhaustive checks.
+- `GmailProviderInstance.configuration` accepts the `gmail_mailbox/v1` and `gmail_mailbox/v2`
+  carriers through the exported `GmailMailboxConfiguration` union. Consumers that assigned a
+  read-back configuration to the old V1-only shape must narrow `configuration.kind` first.
 
-#### Added
+#### Changed
 
-- `HueEnvironmentError.diagnostic` exposes a validated `X-Hue-Diagnostic` code from World API
-  refusals. This is new after TypeScript 0.8.1, which does not include it.
-- `gmail_mailbox/v2` Gmail provider instances. `GmailMailboxConfigurationV2` adds
-  `labelsCollection`, so `publishVersion` and `runSimulation` author worlds on that carrier
-  without a cast and `getVersion` reads `labelsCollection` back. `GmailMailboxConfiguration`,
-  `GmailMailboxConfigurationV1` and `GmailMailboxConfigurationV2` are exported from
-  `@hue-run/sdk/environment`. Hue accepts that carrier only with the synthetic mailbox address
-  `owner@example.test`, and a definition whose provider instances all use it may publish with no
-  actions.
-- `runSimulation`, `runLocalAgent` and `runEnvironmentTarget` wait up to about 40 seconds for a
-  gateway world to seal after its completion grace before the execution completes.
-- `isTransientEnvironmentError` classifies retryable World API failures for bounded polling.
+- Gateway worlds wait for the authoritative World API seal after `finishRun`, including a bounded
+  completion grace and status-read deadline, before simulation execution reports completion.
+- `resolveScenarioPins` pins every scorer version listed by a published Scenario, preserving
+  the listed order and falling back to the single outcome scorer when the list is empty.
 
 #### Fixed
 
-- The hosted-tool recorder resolves `servers` entries with own-property lookup, so labels such as
-  `constructor` keep their server name instead of inheriting from `Object.prototype`.
-- Truncated provider responses count only provider tool calls toward instrumentation failures, so
-  harmless message and reasoning tails no longer make strict `flush()` throw.
+- Provider tool truncation counts only omitted provider tool items, so long message or reasoning
+  responses do not make strict telemetry flush fail; server labels use own-property lookup so
+  inherited names such as `constructor` cannot resolve to `Object`.
+- World API refusal diagnostics are exposed as validated `HueEnvironmentError.diagnostic`;
+  the 0.8.1 TypeScript package does not include this field.
 
 ### [0.8.1] - 2026-09-24
 
@@ -75,10 +67,6 @@ refuses to publish a version without a matching entry below.
 
 #### Changed
 
-- `resolveScenarioPins`, and so `hue eval --case`, pin every scorer version a published Scenario
-  lists in `publication.scorerVersionIds` (its outcome scorer first), falling back to the single
-  `scorerVersionId` of older publications; extra `--scorer` pins still merge in.
-  `CaseConversionPublication` gains the optional `scorerVersionIds`.
 - `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
   shortened to 7 characters); the eval set is already shown on the run page. Previously the name
   repeated the eval set name in a `·`-separated string.
@@ -526,19 +514,11 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.6.0] - 2026-09-24
+
 
 #### Added
 
-- `HueEnvironmentError.diagnostic` exposes a validated `X-Hue-Diagnostic` code from World API
-  refusals. This is new after Python 0.5.1, which does not include it.
-
-### [0.5.1] - 2026-09-24
-
-#### Added
-
-- `EnvironmentClient.wait_for_seal` waits through a world's completion grace before the execution
-  completes and raises `EnvironmentSealTimeoutError` when the bounded wait expires.
 - **Wire.** `span.record_file(role=..., media_type=..., sha256=..., data=..., byte_size=..., name=...)`
   adds a `hue.file` event with the same attributes as TypeScript `hue.recordFile`.
 - **Wire.** `hue.model(..., system_instructions=..., tools=...)` and
@@ -556,6 +536,13 @@ No registry release is claimed until publication and registry acceptance complet
   replaced with `"[redacted]"` at export, as in TypeScript.
 - **Wire.** A `blob` or `file` part over 64 KiB in recorded messages is exported as its `sha256`
   and `size` instead of its payload, so a 2 MiB inline document no longer drops the record.
+
+- **Wire.** `record_provider_tool_calls` records provider-executed OpenAI and Anthropic tool
+  activity as child spans, with bounded diagnostics and content capture matching TypeScript.
+- `EnvironmentClient.wait_for_seal` waits through a gateway world's completion grace with bounded,
+  retry-aware status reads before returning the sealed run.
+- World API refusal diagnostics are exposed as validated `HueEnvironmentError.diagnostic`;
+  the 0.5.1 Python package does not include this field.
 
 ### [0.5.0] - 2026-09-24
 

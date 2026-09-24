@@ -34,7 +34,7 @@
       {
         "boundary": "Requires a Hue deployment that answers trace exports with `Hue-Pending-Spans: 1` (app.hue.run does). A receiver without that header, an older Hue or a generic collector, gets placeholders only in the first export that carries them: the SDK then records one warning and switches live spans off for that client. Turn `liveSpans` / `live_spans` off to send none at all.",
         "path": "Live spans",
-        "verifiedSupport": "Placeholders for running Hue and AI spans, sent by the Hue transports from TypeScript `0.7.0` and Python `0.4.0`"
+        "verifiedSupport": "Placeholders for running Hue and AI spans, sent by the Hue transports from TypeScript `0.9.0` and Python `0.6.0`"
       }
     ],
     "sections": [
@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:bc2b7fb1f29cb4416da9f2863b42c32a9eddcf7257b2c7b653e6b548fff6f832",
+    "sha256": "sha256:1fba1db373823da3eaf4b157c910a5b201cb57e538fabab4ff0a82daf154e3f6",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -102,7 +102,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.5.1"
+      "version": "0.6.0"
     },
     "typescript": {
       "bins": {
@@ -188,9 +188,6 @@
             "EnvironmentVersion",
             "EnvironmentVersionSummary",
             "FinishRunInput",
-            "GmailMailboxConfiguration",
-            "GmailMailboxConfigurationV1",
-            "GmailMailboxConfigurationV2",
             "GmailProviderInstance",
             "HUE_CONTROL_PLANE_VARIABLES",
             "HueEnvironmentError",
@@ -219,7 +216,6 @@
             "bindEnvironmentTools",
             "createEnvironmentClient",
             "isHueControlPlaneCredential",
-            "isTransientEnvironmentError",
             "legacyMcpCapability",
             "stripHueControlPlaneCredentials",
             "worldHandoff",
@@ -488,7 +484,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.8.1"
+      "version": "0.9.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
