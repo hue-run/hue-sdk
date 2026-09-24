@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { isLoopbackHost } from "../config.js";
+import { envFileArgument, envFileOptions } from "./env-file.js";
 
 /**
  * `hue login`: guided storage of keys that a person creates in Hue. The command never mints a key.
@@ -55,7 +56,7 @@ const KEY_KINDS: Record<
 /** Settings preset that authorizes both evaluations and the coding agent's MCP reads and writes. */
 const KEY_PRESET = "Read and write";
 
-export const LOGIN_USAGE = `Usage: hue login [--origin URL] [--env-file PATH] [--keys evaluations|coding-agent|both]
+export const LOGIN_USAGE = `Usage: hue login [--origin URL] [--env-path PATH] [--keys evaluations|coding-agent|both]
                  [--no-browser] [--force] [--gitignore]
 
 Store the key you created in Hue in a private env file. By default one "Read and write" key serves
@@ -64,7 +65,9 @@ before it is stored, and key values are never printed.
 
 Options:
   --origin URL     Hue origin (default ${DEFAULT_ORIGIN})
-  --env-file PATH  Env file to write (default ${DEFAULT_ENV_FILE} in the current directory)
+  --env-path PATH  Env file to write (default ${DEFAULT_ENV_FILE} in the current directory); it is
+                   created when missing. --env-file also works, but Node itself exits
+                   before this command runs when that file does not exist yet
   --keys KIND      evaluations (HUE_API_KEY), coding-agent (HUE_MCP_KEY) or both from one key
                    (default both)
   --no-browser     Do not open the key settings page in a browser
@@ -595,7 +598,7 @@ function parseLoginArguments(argv: string[]) {
     strict: true,
     options: {
       origin: { type: "string" },
-      "env-file": { type: "string" },
+      ...envFileOptions,
       keys: { type: "string" },
       "no-browser": { type: "boolean", default: false },
       force: { type: "boolean", default: false },
@@ -631,8 +634,10 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   };
 
   let parsed: ReturnType<typeof parseLoginArguments>;
+  let envFileOption: string | undefined;
   try {
     parsed = parseLoginArguments(argv);
+    envFileOption = envFileArgument(parsed.values);
   } catch (error) {
     return fail(`${(error as Error).message}\n\n${LOGIN_USAGE}`, 2);
   }
@@ -658,7 +663,7 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
       2,
     );
   const mcpUrl = mcpUrlForOrigin(origin);
-  const envPath = resolve(cwd, parsed.values["env-file"] ?? DEFAULT_ENV_FILE);
+  const envPath = resolve(cwd, envFileOption ?? DEFAULT_ENV_FILE);
   const envDisplay = displayPath(cwd, envPath);
 
   let envFile: { text: string; exists: boolean };

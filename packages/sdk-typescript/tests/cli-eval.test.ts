@@ -1053,11 +1053,20 @@ describe("hue eval", () => {
           ["--scenario", "Refund flow", "./hue-agent.ts", "--wait", "-1"],
           ["--scenario", "Refund flow", "./missing-adapter.ts"],
           ["--scenario", "Refund flow", "./hue-agent.ts", "--unknown"],
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--env-file", "a", "--env-path", "b"],
         ]) {
           const result = await hue([...args, "--origin", f.baseUrl], { cwd });
           expect(result.status).toBe(2);
           expect(result.stderr).toContain("Usage: hue eval");
         }
+        expect(f.calls.requests).toEqual([]);
+        // --env-path loads like --env-file: a missing file is refused before Hue is contacted.
+        const missingEnv = await hue(
+          ["--scenario", "Refund flow", "./hue-agent.ts", "--env-path", ".env.missing"],
+          { cwd, dropKey: true },
+        );
+        expect(missingEnv.status).toBe(2);
+        expect(missingEnv.stderr).toContain("Unable to load .env.missing");
         expect(f.calls.requests).toEqual([]);
         const help = await hue(["--help"], { cwd, dropKey: true });
         expect(help.status).toBe(0);

@@ -167,6 +167,10 @@ describe("hue login", () => {
       [["extra"], "Unexpected argument: extra"],
       [["--origin", "http://hue.example"], "--origin must be an HTTPS origin"],
       [["--origin", "https://hue.example/app"], "--origin must be an HTTPS origin"],
+      [
+        ["--env-file", ".env.a", "--env-path", ".env.b"],
+        "Pass one of --env-file and --env-path, not both.",
+      ],
     ] as const) {
       const result = await login([...argv], { cwd: root });
       expect(result.code).toBe(2);
@@ -383,6 +387,28 @@ describe("hue login", () => {
     );
     expect(await mode(envPath)).toBe(0o600);
     expect(forced.stdout).toContain("--env-file config/.env.local");
+  });
+
+  test("--env-path creates a new env file that --env-file cannot name under Node", async () => {
+    const root = await temporaryRoot();
+    const result = await login(["--origin", ORIGIN, "--env-path", ".env.local"], {
+      cwd: root,
+      lines: [KEY],
+    });
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("in .env.local.");
+    expect(await readFile(join(root, ".env.local"), "utf8")).toBe(
+      `HUE_API_KEY=${KEY}\nHUE_BASE_URL=${ORIGIN}\nHUE_MCP_KEY=${KEY}\nHUE_MCP_URL=${ORIGIN}/api/mcp\n`,
+    );
+    expect(await mode(join(root, ".env.local"))).toBe(0o600);
+    await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
+    // Naming the same file with both spellings is not a conflict.
+    const both = await login(
+      ["--origin", ORIGIN, "--env-file", ".env.local", "--env-path", ".env.local"],
+      { cwd: root, lines: [KEY] },
+    );
+    expect(both.code).toBe(0);
   });
 
   test("env text helpers keep unrelated lines and drop duplicate managed assignments", () => {

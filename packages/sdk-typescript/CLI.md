@@ -157,8 +157,12 @@ project. Run them separately with different keys if you want to revoke either us
 ```sh
 hue login                                  # one key for both uses into ./.env.hue
 hue login --keys coding-agent --gitignore  # only HUE_MCP_KEY; add .env.hue to .gitignore
-hue login --origin https://staging.hue.run --env-file .env.staging
+hue login --origin https://staging.hue.run --env-path .env.staging
 ```
+
+`--env-path <path>` writes another env file, creating it when missing. `--env-file <path>` is
+accepted too, but Node 22 and 24 read that flag from the whole command line and exit with
+`node: <path>: not found` before `hue` runs when the file does not exist yet.
 
 The env file is written with mode `0600` through a temporary file and an atomic rename. Other
 lines are preserved; a symlink or a non-regular file is refused; an existing different value is
@@ -412,7 +416,7 @@ apply; Hue chooses the pinned experiment. The worker exits 0 when it stops norma
 A Scenario or eval set whose dataset version is not saved cannot back an experiment: the command
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
-(default `https://app.hue.run`), loaded from `--env-file <path>` first when given; `--origin`
+(default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given; `--origin`
 overrides the origin. Telemetry content capture stays off unless `--content` is passed; in
 one-shot mode it also decides whether case outputs, error messages and explanations are persisted
 to Hue. `--worker` always persists them, because a run launched from Hue is read on its run page:

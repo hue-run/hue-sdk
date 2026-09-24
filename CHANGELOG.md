@@ -16,6 +16,13 @@ refuses to publish a version without a matching entry below.
   shortened to 7 characters); the eval set is already shown on the run page. Previously the name
   repeated the eval set name in a `·`-separated string.
 
+#### Fixed
+
+- `hue login --env-path <path>` writes to a new env file. The same command with `--env-file` exits
+  with `node: <path>: not found` before `hue` runs, because Node 22 and 24 read `--env-file` from
+  the whole command line. `--env-file` still works for an existing file, and `hue eval` accepts
+  `--env-path` as an alias.
+
 ### [0.8.0] - 2026-09-24
 
 #### Added
