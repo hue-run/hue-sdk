@@ -40,15 +40,31 @@ _EVIDENCE_SECTIONS = ("all", "start", "end", "diff", "ledger")
 class HueEnvironmentError(RuntimeError):
     """Sanitized transport/refusal error; response bodies and credentials are never included."""
 
-    def __init__(self, status: int | None = None, retry_after: float | None = None) -> None:
+    def __init__(
+        self,
+        status: int | None = None,
+        retry_after: float | None = None,
+        diagnostic: str | None = None,
+    ) -> None:
         self.status = status
         # The server's Retry-After in seconds, bounded, when a 429 or 503 carried one.
         self.retry_after = retry_after
+        self.diagnostic = diagnostic
+        detail = f", {diagnostic}" if diagnostic else ""
         super().__init__(
-            f"Hue environment request failed (HTTP {status})."
+            f"Hue environment request failed (HTTP {status}{detail})."
             if status is not None
             else "Hue environment connection or response failed."
         )
+
+
+_DIAGNOSTIC = re.compile(r"^[a-z_]{1,64}$")
+
+
+def _diagnostic(response: requests.Response) -> str | None:
+    """The response's diagnostic code, or None when absent or invalid."""
+    value = response.headers.get("X-Hue-Diagnostic")
+    return value if value is not None and _DIAGNOSTIC.fullmatch(value) else None
 
 
 class EnvironmentSealTimeoutError(HueEnvironmentError):
@@ -130,7 +146,9 @@ class EnvironmentClient:
                 stream=True,
             ) as response:
                 if not 200 <= response.status_code < 300:
-                    raise HueEnvironmentError(response.status_code, _retry_after(response))
+                    raise HueEnvironmentError(
+                        response.status_code, _retry_after(response), _diagnostic(response)
+                    )
                 deadline = (
                     time.monotonic() + timeout_seconds if timeout_seconds is not None else None
                 )

@@ -21,6 +21,8 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- `HueEnvironmentError.diagnostic` exposes a validated `X-Hue-Diagnostic` code from World API
+  refusals. This is new after TypeScript 0.8.1, which does not include it.
 - `gmail_mailbox/v2` Gmail provider instances. `GmailMailboxConfigurationV2` adds
   `labelsCollection`, so `publishVersion` and `runSimulation` author worlds on that carrier
   without a cast and `getVersion` reads `labelsCollection` back. `GmailMailboxConfiguration`,
@@ -525,6 +527,11 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- `HueEnvironmentError.diagnostic` exposes a validated `X-Hue-Diagnostic` code from World API
+  refusals. This is new after Python 0.5.1, which does not include it.
 
 ### [0.5.1] - 2026-09-24
 

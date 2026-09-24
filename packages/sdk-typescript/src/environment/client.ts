@@ -42,14 +42,23 @@ export class HueEnvironmentError extends Error {
     readonly status?: number,
     /** Hue's `Retry-After` in milliseconds, bounded, when a 429 or 503 carried one. */
     readonly retryAfterMs?: number,
+    /** The server's `X-Hue-Diagnostic` code, when it is a short snake-case value. */
+    readonly diagnostic?: string,
   ) {
     super(
       status
-        ? `Hue environment request failed (HTTP ${status})`
+        ? `Hue environment request failed (HTTP ${status}${diagnostic ? `, ${diagnostic}` : ""})`
         : "Hue environment connection or response failed",
     );
     this.name = "HueEnvironmentError";
   }
+}
+
+const DIAGNOSTIC = /^[a-z_]{1,64}$/;
+/** The response's diagnostic code, or undefined when absent or invalid. */
+function diagnosticOf(response: Response): string | undefined {
+  const value = response.headers.get("x-hue-diagnostic");
+  return value !== null && DIAGNOSTIC.test(value) ? value : undefined;
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
@@ -134,6 +143,7 @@ export class EnvironmentClient {
       throw new HueEnvironmentError(
         response.status,
         response.status === 429 || response.status === 503 ? retryAfterMillis(response) : undefined,
+        diagnosticOf(response),
       );
     }
     try {
