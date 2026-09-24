@@ -867,6 +867,7 @@ try {
     const seen = {};
     await worker(world, async (_inputs, _tools, context) => {
       seen.context = context;
+      seen.downloads = [...world.calls.downloads];
       seen.siblings = (await readdir(dirname(context.files[0].path))).sort();
       seen.modes = await Promise.all(
         context.files.map(async (file) => (await stat(file.path)).mode & 0o777),
@@ -897,9 +898,12 @@ try {
       assert.ok(!path.includes(worldToken));
     }
     assert.deepEqual(seen.modes, [0o600, 0o600]);
-    // The agent's directory holds its two files and nothing of the evaluator's.
+    // The agent's directory holds its two files, and the evaluator's template is downloaded only
+    // after the agent finished.
     assert.equal(seen.siblings.length, 2);
     assert.ok(!seen.siblings.some((name) => name.includes("Org.docx")));
+    assert.ok(!seen.downloads.includes(world.inputs.evaluatorOnly.id));
+    assert.ok(world.calls.downloads.includes(world.inputs.evaluatorOnly.id));
     assert.deepEqual(world.calls.finishes, ["completed"]);
     const completion = world.calls.completions[0];
     assert.equal(completion.state, "succeeded");

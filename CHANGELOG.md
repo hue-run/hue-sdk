@@ -26,7 +26,8 @@ refuses to publish a version without a matching entry below.
   files (`org_template`, `evaluator_reference`) never reach the agent. The callback may return
   `withFiles(output, files)`: the files are uploaded and linked to the execution as `artifactIds`
   and `primaryArtifactId`, within the limits of direct cases. The world token is never written
-  to the case directory, which is removed once the case completes.
+  to the case directory, which is removed when the case ends; only staged outputs an interrupted
+  upload resumes from are kept until it does.
 - `localAgentCapabilities.environmentFiles` (`environment-files:v1`). A worker that declares it,
   with `input:<extension>` for each file type it accepts, is offered world cases whose manifest
   holds agent-visible files; it requires `target`. The worker never adds it to a registration
@@ -46,8 +47,9 @@ refuses to publish a version without a matching entry below.
 
 - A downloaded pinned file that differs from its manifest now raises `CaseFileError`
   (`case_file_mismatch`) instead of a plain `Error`, for direct cases and `rescore` too.
-- Evaluator-only files downloaded for a local code evaluator are saved apart from the agent's
-  copies, so the directory holding `context.files` never contains them.
+- Evaluator-only files for a local code evaluator are downloaded after the target finished, just
+  before scoring, and saved apart from the agent's copies, so they are not on disk while the agent
+  runs. Before, they were downloaded with the agent's files before the execution started.
 
 #### Fixed
 

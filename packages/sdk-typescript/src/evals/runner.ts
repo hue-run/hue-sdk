@@ -10,7 +10,6 @@ import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { CheckpointStore } from "./checkpoint.js";
 import {
   assertSafeFileNames,
-  CaseFileError,
   downloadCaseFiles,
   downloadCaseInputs,
   localOutputFiles,
@@ -587,11 +586,12 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       await store.write(file, prepared);
       return prepared;
     }
-    await pool(items, concurrency, async (item) => {
+    // A case pinned to a world keeps its files apart and removes them when it ends: the agent's
+    // copies of its inputs, its work, the evaluator's downloads and the staged outputs.
+    const worldDirectoryOf = (itemId: string) => join(filesRoot, `world-case-${uuid(itemId)}`);
+    const runCase = async (item: (typeof items)[number]) => {
       const file = `case-${uuid(item.id)}`;
-      // A case pinned to a world keeps its files apart and removes them once it is complete: the
-      // agent's copies of its inputs, its work and the staged outputs.
-      const worldDirectory = join(filesRoot, `world-case-${uuid(item.id)}`);
+      const worldDirectory = worldDirectoryOf(item.id);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
         frozen.environmentVersionId ? worldDirectory : join(filesRoot, `case-${uuid(item.id)}`);
       let checkpoint = await store.read<CaseCheckpoint>(file);
@@ -631,22 +631,17 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         const targetInputs = json(frozenCase.inputs);
         const targetConfig = json(experiment.config);
         // Pinned input files are verified on disk before an execution exists for the same reason.
+        // Only the agent-visible ones are: evaluator-only files are downloaded for local scoring
+        // after the target finished, so they are not on disk while it runs.
         const caseDirectory = caseDirectoryOf(frozenCase);
-        const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
-        let inputFiles: LocalFile[] = [];
-        try {
-          // An agent working in a world receives its files by name: each must be one safe name.
-          if (frozenCase.environmentVersionId)
-            assertSafeFileNames(
-              needed.filter((entry) => (targetFileRoles as readonly string[]).includes(entry.role)),
-            );
-          if (needed.length)
-            inputFiles = (await downloadCaseInputs(options.client, needed, caseDirectory)).target;
-        } catch (error) {
-          if (error instanceof CaseFileError && frozenCase.environmentVersionId)
-            await removeCaseFiles(worldDirectory);
-          throw error;
-        }
+        const agentFiles = (frozenCase.inputFiles ?? []).filter((entry) =>
+          (targetFileRoles as readonly string[]).includes(entry.role),
+        );
+        // An agent working in a world receives its files by name: each must be one safe name.
+        if (frozenCase.environmentVersionId) assertSafeFileNames(agentFiles);
+        const inputFiles = agentFiles.length
+          ? (await downloadCaseInputs(options.client, agentFiles, caseDirectory)).target
+          : [];
         const outputDirectory = join(caseDirectory, "work");
         await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
         const failureSequenceBefore = options.hue.transport.getFailureSequence();
@@ -831,9 +826,26 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         save,
         versions,
       );
-      await removeCaseFiles(worldDirectory);
       report.subjectIds.push(prepared.completion.subjectId);
       report.resultIds.push(...results);
+    };
+    await pool(items, concurrency, async (item) => {
+      const worldDirectory = worldDirectoryOf(item.id);
+      try {
+        await runCase(item);
+      } catch (error) {
+        // An interrupted upload resumes from the staged outputs its checkpoint names; nothing
+        // else of a world case is needed again: inputs are downloaded anew for scoring.
+        const saved = await store
+          .read<CaseCheckpoint>(`case-${uuid(item.id)}`)
+          .catch(() => ({ stage: "unreadable" as const }));
+        if (saved?.stage === "uploading" || saved?.stage === "unreadable")
+          for (const part of ["inputs", "evaluator-inputs", "work"])
+            await removeCaseFiles(join(worldDirectory, part));
+        else await removeCaseFiles(worldDirectory);
+        throw error;
+      }
+      await removeCaseFiles(worldDirectory);
     });
     let finish = await store.read<{ key: string }>("finish");
     if (!finish) {

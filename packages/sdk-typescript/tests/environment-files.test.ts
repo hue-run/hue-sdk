@@ -62,6 +62,8 @@ function platform(
     tamper?: boolean;
     /** Pin this local scorer instead of the Hue-graded world outcome. */
     scorer?: LocalScorer;
+    /** Refuse this many generated-artifact completions with 500 first. */
+    failArtifactCompletions?: number;
   } = {},
 ) {
   const projectId = randomUUID();
@@ -150,7 +152,8 @@ function platform(
   >();
   const results = new Map<string, StoredResult[]>();
   const reservations = new Map<string, string>();
-  const queue: { runId: string; experimentId: string; state: string }[] = [];
+  const queue: { runId: string; experimentId: string; state: string; workerId?: string }[] = [];
+  let failArtifactCompletions = options.failArtifactCompletions ?? 0;
   const calls = {
     downloads: [] as string[],
     starts: 0,
@@ -244,9 +247,15 @@ function platform(
         });
       }
       if (path === "/local-agent-worker/claim") {
-        const queued = queue.find((item) => item.state === "queued");
+        // A claimed run goes back only to the worker that holds it, for checkpointed recovery.
+        const queued = queue.find(
+          (item) =>
+            item.state === "queued" ||
+            (item.state === "claimed" && item.workerId === body.workerId),
+        );
         if (!queued) return Response.json(null);
         queued.state = "claimed";
+        queued.workerId = String(body.workerId);
         return Response.json({ runId: queued.runId, experimentId: queued.experimentId });
       }
       if (path === "/local-agent-worker/runs/heartbeat")
@@ -349,6 +358,10 @@ function platform(
             headers: { "content-type": stored.contentType },
             expiresAt: new Date(Date.now() + 60_000).toISOString(),
           });
+        if (failArtifactCompletions > 0) {
+          failArtifactCompletions--;
+          return new Response(null, { status: 500 });
+        }
         if (
           !stored.bytes ||
           stored.bytes.byteLength !== stored.byteSize ||
@@ -650,6 +663,7 @@ describe("environment target files (environment-files:v1)", () => {
           bytes: Buffer;
           modes: { file: number; directory: number; output: number };
           siblings: string[];
+          downloads: string[];
           caseFiles: { path: string; text: string }[];
         }
       | undefined;
@@ -669,6 +683,7 @@ describe("environment target files (environment-files:v1)", () => {
               output: await mode(context.outputDirectory),
             },
             siblings: await readdir(dirname(file.path)),
+            downloads: [...f.calls.downloads],
             // Everything on disk for this case while the agent runs: its inputs, the
             // evaluator's download and the agent's work.
             caseFiles: await tree(dirname(dirname(file.path))),
@@ -695,15 +710,12 @@ describe("environment target files (environment-files:v1)", () => {
     ]);
     expect(seen!.bytes.equals(f.source.bytes)).toBe(true);
     expect(seen!.modes).toEqual({ file: 0o600, directory: 0o700, output: 0o700 });
-    // The evaluator's file was downloaded for the local scorer, but not next to the agent's.
-    const agentDirectory = dirname(context.files[0]!.path);
+    // The evaluator's file is not on disk while the agent runs: the local scorer's copy is
+    // downloaded after the target finished, apart from the agent's.
     expect(seen!.siblings).toEqual([basename(context.files[0]!.path)]);
-    const evaluatorCopies = seen!.caseFiles.filter(
-      (file) => file.text === f.answerKey.bytes.toString(),
-    );
-    expect(evaluatorCopies).toHaveLength(1);
-    for (const outside of [agentDirectory, context.outputDirectory])
-      expect(evaluatorCopies[0]!.path.startsWith(`${outside}/`)).toBe(false);
+    expect(seen!.downloads).toEqual([f.source.id]);
+    expect(seen!.caseFiles.some((file) => file.text === f.answerKey.bytes.toString())).toBe(false);
+    expect(dirname(scored!.files![1]!.path)).not.toBe(dirname(context.files[0]!.path));
     expect(JSON.stringify(context)).not.toContain("evaluator-private");
     // The world token reaches the agent only through the handoff: no path, no file holds it.
     expect(context.world?.token).toBe(worldToken);
@@ -749,6 +761,47 @@ describe("environment target files (environment-files:v1)", () => {
     expect(existsSync(caseDirectory)).toBe(false);
     expect(existsSync(context.outputDirectory)).toBe(false);
     for (const file of scored!.files!) expect(existsSync(file.path)).toBe(false);
+  }, 30_000);
+
+  test("a case that stops early keeps only the staged outputs its upload resumes from", async () => {
+    const f = platform({ failArtifactCompletions: 1 });
+    const experiment = f.enqueue();
+    const directory = await mkdtemp(join(tmpdir(), "hue-environment-files-resume-"));
+    const caseDirectory = join(
+      directory,
+      `experiment-${experiment.id}`,
+      "files",
+      `world-case-${f.frozenCase.id}`,
+    );
+    let targets = 0;
+    const target: RunLocalAgentOptions["target"] = async (_inputs, _tools, context) => {
+      targets++;
+      const letter = join(context.outputDirectory, "Citacion.docx");
+      await writeFile(letter, "carta de citación");
+      return withFiles({ summary: "letter drafted" }, [
+        { path: letter, filename: "Citacion.docx", contentType: docx, primary: true },
+      ]);
+    };
+    try {
+      await expect(worker(f, directory, { target })).rejects.toMatchObject({ status: 500 });
+      // The agent's inputs and work are gone; the staged letter stays for the upload to resume.
+      expect((await readdir(caseDirectory)).sort()).toEqual(["outputs"]);
+      expect(await readdir(join(caseDirectory, "outputs"))).toEqual(["Citacion.docx"]);
+      const staged = [...f.artifacts.values()].find((item) => item.filename === "Citacion.docx");
+      expect(staged?.state).toBe("reserved");
+      // The resume publishes the staged letter without invoking the agent again. The runner then
+      // stops, as before, because the first attempt's trace export was never acknowledged; with
+      // the upload settled, nothing of the case is kept.
+      await expect(worker(f, directory, { target })).rejects.toThrow(
+        /trace export acknowledgement is unavailable/,
+      );
+      expect(staged?.state).toBe("ready");
+      expect(Buffer.from(staged!.bytes!).toString()).toBe("carta de citación");
+    } finally {
+      f.stop();
+    }
+    expect(targets).toBe(1);
+    expect(existsSync(caseDirectory)).toBe(false);
   }, 30_000);
 
   test("a file whose bytes do not match the manifest fails the case before an execution or world exists", async () => {
