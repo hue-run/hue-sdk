@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.8.1`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses the published compatibility pin `@hue-run/sdk@0.8.1`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
