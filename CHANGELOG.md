@@ -23,7 +23,11 @@ refuses to publish a version without a matching entry below.
 
 - `gmail_mailbox/v2` Gmail provider instances. `GmailMailboxConfigurationV2` adds
   `labelsCollection`, so `publishVersion` and `runSimulation` author worlds on that carrier
-  without a cast and `getVersion` reads `labelsCollection` back.
+  without a cast and `getVersion` reads `labelsCollection` back. `GmailMailboxConfiguration`,
+  `GmailMailboxConfigurationV1` and `GmailMailboxConfigurationV2` are exported from
+  `@hue-run/sdk/environment`. Hue accepts that carrier only with the synthetic mailbox address
+  `owner@example.test`, and a definition whose provider instances all use it may publish with no
+  actions.
 - `runSimulation`, `runLocalAgent` and `runEnvironmentTarget` wait up to about 40 seconds for a
   gateway world to seal after its completion grace before the execution completes.
 - `isTransientEnvironmentError` classifies retryable World API failures for bounded polling.
