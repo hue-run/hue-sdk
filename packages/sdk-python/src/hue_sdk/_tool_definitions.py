@@ -8,13 +8,30 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 REDACTED = "[redacted]"
 
 # Compared case-insensitively and ignoring "-" and "_": OpenAI hosted MCP ``authorization`` and
-# ``headers``, Anthropic MCP ``authorization_token``, and common API key fields.
+# ``headers``, Anthropic MCP ``authorization_token``, and common API key fields. Provider tool
+# schemas are untrusted input, so generic names such as ``token``, ``secret``, and ``password``
+# are included too.
 _CREDENTIAL_KEYS = frozenset(
-    {"authorization", "authorizationtoken", "headers", "apikey", "accesstoken", "xapikey"}
+    {
+        "authorization",
+        "authorizationtoken",
+        "headers",
+        "apikey",
+        "accesstoken",
+        "xapikey",
+        "token",
+        "refreshtoken",
+        "clientsecret",
+        "password",
+        "secret",
+        "credential",
+        "credentials",
+    }
 )
 # OpenInference records each tool as ``llm.tools.{index}.tool.json_schema``.
 _OPENINFERENCE_TOOL = re.compile(r"llm\.tools\.\d+\.tool\.json_schema\Z")
@@ -24,14 +41,67 @@ _MAX_DEPTH = 256
 
 
 def _is_credential_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = key.lower().replace("-", "").replace("_", "")
     return (
-        isinstance(key, str) and key.lower().replace("-", "").replace("_", "") in _CREDENTIAL_KEYS
+        normalized in _CREDENTIAL_KEYS
+        or normalized.endswith("token")
+        or normalized.endswith("secret")
+        or normalized.endswith("password")
+        or normalized.endswith("apikey")
+        or normalized.endswith("credential")
     )
+
+
+def _is_url_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = key.lower().replace("-", "").replace("_", "")
+    return normalized in {"serverurl", "url"}
 
 
 class _Scrub:
     def __init__(self) -> None:
         self.changed = False
+
+    def url(self, value: str) -> str:
+        """Remove URL userinfo and every query value from a hosted endpoint.
+
+        Query parameter names are provider-defined, so retaining values based on a guessed
+        credential-key list could leak a secret under an unfamiliar name. URL fragments are left
+        untouched because they are not sent to the server and are useful for identifying a tool.
+        """
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            # A malformed URL may still contain a credential. Do not export an opaque URL-valued
+            # string when it cannot be parsed safely.
+            self.changed = True
+            return REDACTED
+        # Match the TypeScript URL parser: only absolute URLs can be inspected safely. A relative
+        # or otherwise opaque URL-valued string is replaced rather than exported verbatim.
+        if not parsed.scheme or not parsed.netloc:
+            self.changed = True
+            return REDACTED
+
+        changed = False
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = netloc.rsplit("@", 1)[1]
+            changed = True
+        query = parsed.query
+        if query:
+            # Keep parameter names for endpoint identity, but replace all values, including
+            # values whose names are not recognizable credentials.
+            query = urlencode(
+                [(key, REDACTED) for key, _ in parse_qsl(query, keep_blank_values=True)]
+            )
+            changed = True
+        if not changed:
+            return value
+        self.changed = True
+        return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
 
     def node(self, value: Any, depth: int = 0, parameters: bool = False) -> Any:
         """Replace every credential key's value at any depth.
@@ -51,6 +121,8 @@ class _Scrub:
             if not parameters and item is not None and _is_credential_key(key):
                 self.changed = True
                 result[key] = REDACTED
+            elif not parameters and isinstance(item, str) and _is_url_key(key):
+                result[key] = self.url(item)
             else:
                 result[key] = self.node(item, depth + 1, key == "properties")
         return result

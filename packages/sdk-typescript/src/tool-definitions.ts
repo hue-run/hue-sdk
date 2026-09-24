@@ -4,6 +4,8 @@ const REDACTED = "[redacted]";
 /**
  * Credential keys, compared case-insensitively and ignoring `-` and `_`: OpenAI hosted MCP
  * `authorization` and `headers`, Anthropic MCP `authorization_token`, and common API key fields.
+ * Keep this list deliberately broad: provider tool schemas are untrusted input and providers use
+ * generic names such as `token`, `secret`, and `password` for hosted credentials.
  */
 const credentialKeys = new Set([
   "authorization",
@@ -12,10 +14,61 @@ const credentialKeys = new Set([
   "apikey",
   "accesstoken",
   "xapikey",
+  "token",
+  "refreshtoken",
+  "clientsecret",
+  "password",
+  "secret",
+  "credential",
+  "credentials",
 ]);
 
+/** URL-valued fields in hosted tool and MCP-server definitions can carry credentials in userinfo
+ * or query parameters. Query values are all replaced because a provider may use an arbitrary key
+ * for its credential and guessing which names are sensitive would leave a leak. */
+function isUrlKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[-_]/g, "");
+  return normalized === "serverurl" || normalized === "url";
+}
+
+function scrubUrl(value: string, state: ScrubState): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    // A malformed URL may still contain a credential. Do not export an opaque URL-valued
+    // string when it cannot be parsed safely.
+    state.changed = true;
+    return REDACTED;
+  }
+
+  let changed = false;
+  if (url.username || url.password) {
+    url.username = "";
+    url.password = "";
+    changed = true;
+  }
+  if (url.search) {
+    const keys = Array.from(url.searchParams.keys());
+    const scrubbed = new URLSearchParams();
+    for (const key of keys) scrubbed.append(key, REDACTED);
+    url.search = scrubbed.toString();
+    changed = true;
+  }
+  if (changed) state.changed = true;
+  return changed ? url.toString() : value;
+}
+
 function isCredentialKey(key: string): boolean {
-  return credentialKeys.has(key.toLowerCase().replace(/[-_]/g, ""));
+  const normalized = key.toLowerCase().replace(/[-_]/g, "");
+  return (
+    credentialKeys.has(normalized) ||
+    normalized.endsWith("token") ||
+    normalized.endsWith("secret") ||
+    normalized.endsWith("password") ||
+    normalized.endsWith("apikey") ||
+    normalized.endsWith("credential")
+  );
 }
 
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */
@@ -40,6 +93,8 @@ function scrubNode(value: unknown, state: ScrubState, depth: number, parameters:
         state.changed = true;
         return [key, REDACTED];
       }
+      if (!parameters && typeof item === "string" && isUrlKey(key))
+        return [key, scrubUrl(item, state)];
       return [key, scrubNode(item, state, depth + 1, key === "properties")];
     }),
   );
