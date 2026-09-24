@@ -197,6 +197,8 @@ def test_tool_source_labels_use_utf16_length_like_typescript_and_fern(receiver):
     assert spans["accepted"]["hue.mcp.surface"].string_value == accepted
     assert "hue.mcp.provider" not in spans["rejected"]
     assert "hue.mcp.surface" not in spans["rejected"]
+
+
 @pytest.mark.parametrize("capture_content", [True, False])
 def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver, capture_content):
     body = "synthetic-file-body"

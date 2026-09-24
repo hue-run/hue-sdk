@@ -107,6 +107,8 @@ function isSourceLabel(value: unknown): value is string {
     !value.includes("\u0000") &&
     value.isWellFormed()
   );
+}
+
 /** A label that is also free of NUL and unpaired surrogates, which export would reject. */
 function isTextLabel(value: unknown): value is string {
   return isLabel(value) && !value.includes("\u0000") && value.isWellFormed();

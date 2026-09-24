@@ -74,6 +74,8 @@ def _is_source_label(value: Any) -> bool:
         return len(value.encode("utf-16-le")) // 2 <= 256 and value.encode("utf-8") is not None
     except UnicodeEncodeError:
         return False
+
+
 def _is_text_label(value: Any) -> bool:
     """A label that is also free of NUL and unpaired surrogates, so it can be exported."""
     if not _is_label(value) or "\x00" in value:
