@@ -811,6 +811,101 @@ describe("Hue SDK contract", () => {
     }
   });
 
+  test("admission hashes a shared message once and bounds the message text it inspects", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "inline-files-work",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const message = (seed: number) =>
+      JSON.stringify([
+        {
+          role: "user",
+          parts: [
+            {
+              type: "blob",
+              modality: "document",
+              mime_type: "application/pdf",
+              content: Buffer.alloc(1024 * 1024, seed).toString("base64"),
+            },
+          ],
+        },
+      ]);
+    const shared = message(1);
+    const distinct = Array.from({ length: 24 }, (_, index) => message(index + 2));
+    const parsed: number[] = [];
+    const parse = JSON.parse;
+    const spy = spyOn(JSON, "parse").mockImplementation(((text: string, reviver?: never) => {
+      if (typeof text === "string" && text.length > 1024 * 1024) parsed.push(text.length);
+      return parse(text, reviver);
+    }) as typeof JSON.parse);
+    try {
+      // One message shared by 128 events under all three message keys is parsed once.
+      const repeated = hue.tracer.startSpan("shared-message");
+      for (let index = 0; index < 128; index++)
+        repeated.addEvent(`event-${index}`, {
+          "gen_ai.input.messages": shared,
+          "gen_ai.output.messages": shared,
+          "ai.prompt.messages": shared,
+        });
+      repeated.end();
+      expect(parsed).toHaveLength(1);
+      // Distinct messages are inspected only up to the per-record limit of 16 MiB of text.
+      parsed.length = 0;
+      const many = hue.tracer.startSpan("distinct-messages");
+      distinct.forEach((text, index) =>
+        many.addEvent(`event-${index}`, { "gen_ai.input.messages": text }),
+      );
+      many.end();
+      expect(parsed.length).toBeLessThanOrEqual(Math.floor((16 * 1024 * 1024) / shared.length));
+      // The messages past the limit are charged as recorded, so this span exceeds the budget.
+      expect(hue.transport.getReport().droppedSpans).toBe(1);
+    } finally {
+      spy.mockRestore();
+      await hue.shutdownSafe();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("metadata-only admission neither hashes nor charges the recorded messages", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "inline-files-metadata",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    const content = Buffer.alloc(5 * 1024 * 1024, 7).toString("base64");
+    const messages = JSON.stringify([
+      { role: "user", parts: [{ type: "blob", mime_type: "application/pdf", content }] },
+    ]);
+    let parsedMessages = 0;
+    const parse = JSON.parse;
+    const spy = spyOn(JSON, "parse").mockImplementation(((text: string, reviver?: never) => {
+      if (text === messages) parsedMessages += 1;
+      return parse(text, reviver);
+    }) as typeof JSON.parse);
+    try {
+      const span = hue.tracer.startSpan("metadata-only");
+      span.setAttribute("gen_ai.input.messages", messages);
+      span.end();
+      await hue.flush();
+      expect(parsedMessages).toBe(0);
+      const record = endpoint.requests
+        .flatMap((request) => request.records)
+        .find((candidate) => candidate.name === "metadata-only")!;
+      expect(record).toBeDefined();
+      expect(attr(record, "gen_ai.input.messages")).toBeUndefined();
+      expect(hue.transport.getReport()).toMatchObject({ droppedSpans: 0 });
+    } finally {
+      spy.mockRestore();
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
   test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
     const endpoint = receiver();
     const transport = createHueTransport({

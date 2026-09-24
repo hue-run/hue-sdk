@@ -3,7 +3,12 @@ import { types as utilTypes } from "node:util";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord, ReadWriteLogRecord } from "@opentelemetry/sdk-logs";
-import { hashInlineFiles } from "./inline-files.js";
+import {
+  hashInlineFiles,
+  INLINE_FILE_LIMIT,
+  INLINE_FILE_TEXT_PER_RECORD,
+  isMessageKey,
+} from "./inline-files.js";
 
 // Intrinsic accessors are captured once and invoked with an explicit receiver so a
 // hostile object cannot override them; the unbound reference is the point.
@@ -26,8 +31,14 @@ class Snapshot {
   private nodes = 0;
   private ancestors = new Set<object>();
   private copied = new Map<object, unknown>();
+  private hashed = new Map<string, unknown>();
+  private inspected = 0;
 
-  constructor(private limit: number) {}
+  /** In metadata-only mode the recorded messages, which export strips, are not copied at all. */
+  constructor(
+    private limit: number,
+    private captureContent = true,
+  ) {}
 
   private charge(bytes: number): void {
     this.bytes += bytes;
@@ -40,6 +51,21 @@ class Snapshot {
    */
   attributes<T>(value: T): T {
     return this.copy(value, 1, "attributes");
+  }
+
+  /** A message attribute with its large inline files hashed. The same text is hashed once per
+   * record, and a record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} of it in all;
+   * beyond that, messages are charged as recorded. */
+  private inlineFiles(key: string, value: unknown): unknown {
+    // A UTF-16 unit is at most three UTF-8 bytes, so shorter text cannot hold a file to hash.
+    if (typeof value !== "string" || !isMessageKey(key) || value.length * 3 <= INLINE_FILE_LIMIT)
+      return value;
+    if (this.hashed.has(value)) return this.hashed.get(value);
+    if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
+    this.inspected += value.length;
+    const result = hashInlineFiles(key, value);
+    this.hashed.set(value, result);
+    return result;
   }
 
   /** Span events, whose attributes are attribute maps. */
@@ -100,9 +126,10 @@ class Snapshot {
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (!descriptor || !("value" in descriptor))
           throw new TypeError("Telemetry accessors are unsupported");
+        if (shape === "attributes" && !this.captureContent && isMessageKey(key)) continue;
         this.charge(key.length * 2 + 16);
         (copy as Record<string, unknown>)[key] = this.copy(
-          shape === "attributes" ? hashInlineFiles(key, descriptor.value) : descriptor.value,
+          shape === "attributes" ? this.inlineFiles(key, descriptor.value) : descriptor.value,
           depth + 1,
           shape === "event" && key === "attributes" ? "attributes" : "value",
         );
@@ -155,8 +182,9 @@ function contextReader(context: SpanContext): () => SpanContext {
 export function snapshotSpan(
   source: ReadableSpan,
   limit: number,
+  captureContent = true,
 ): { record: ReadableSpan; bytes: number; unresolvedResource: boolean } {
-  const snapshot = new Snapshot(limit);
+  const snapshot = new Snapshot(limit, captureContent);
   const context = snapshot.context(source.spanContext())!;
   if (source.links.length > 16384) throw new RangeError("Link complexity limit exceeded");
   const links = source.links.map((link) => ({
@@ -191,8 +219,9 @@ export function snapshotSpan(
 export function snapshotLog(
   source: ReadableLogRecord,
   limit: number,
+  captureContent = true,
 ): { record: ReadWriteLogRecord; bytes: number; unresolvedResource: boolean } {
-  const snapshot = new Snapshot(limit);
+  const snapshot = new Snapshot(limit, captureContent);
   // Only our batching processor sees this copy. Its writer methods deliberately
   // cannot mutate the admitted snapshot or invalidate its charged byte count.
   const record: ReadWriteLogRecord = {

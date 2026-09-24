@@ -268,8 +268,8 @@ export class HueTransport {
         this.pendingBytes;
       const snapshot =
         signal === "traces"
-          ? snapshotSpan(record as ReadableSpan, remaining)
-          : snapshotLog(record as ReadableLogRecord, remaining);
+          ? snapshotSpan(record as ReadableSpan, remaining, this.options.captureContent)
+          : snapshotLog(record as ReadableLogRecord, remaining, this.options.captureContent);
       this.pendingBytes += snapshot.bytes;
       if (signal === "traces") this.spans.set(snapshot.record as ReadableSpan, snapshot.bytes);
       else this.logs.set(snapshot.record as ReadableLogRecord, snapshot.bytes);

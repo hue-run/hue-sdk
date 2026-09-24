@@ -333,6 +333,9 @@ bytes, so a file can be recognized wherever it appears. The replacement happens 
 charged to the queue budget, so a large file does not drop its span. It is bounded: a message
 attribute longer than 8 MiB of text is left unchanged, and the default 8 MiB `maxQueueBytes` then
 drops the span. Base64 grows a file by a third, so that ceiling is an inline file of about 6 MiB.
+The same message text is hashed once per record, and a record inspects at most 16 MiB of message
+text in all; messages past that are charged as recorded. With `captureContent: false` the messages,
+which export removes, are neither hashed nor charged.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown

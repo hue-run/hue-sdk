@@ -404,7 +404,8 @@ the parent environment (model keys, application settings) is inherited. Its stdo
 per-case `--timeout` (default 600 seconds) is a target failure. A timed-out or interrupted command
 is stopped as a whole process group on macOS and Linux: SIGTERM, then SIGKILL for anything still
 running 5 seconds later, including an agent a compound command started after its shell exited;
-the case settles only once nothing in the group is left. The world token is never logged.
+the case settles only once nothing in the group is left. A second Ctrl+C during that grace kills
+the group at once and exits with 130. The world token is never logged.
 A world created while the deployment's simulation gateway is off gets the legacy `hue_sim_`
 capability under the same `HUE_MCP_*` names. The agent key defaults to the slug of the command's
 script name; `--revision` is sent to Hue as the agent revision of every world.

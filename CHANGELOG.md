@@ -19,11 +19,15 @@ refuses to publish a version without a matching entry below.
   64 KiB are replaced by their `sha256` and `size` when the record is queued, before its bytes are
   charged to the queue budget, as Python does; before, the full file was charged first, so under
   the default 8 MiB `maxQueueBytes` a span inlining a file over about 3 MiB was dropped. A message
-  attribute longer than 8 MiB is still left to the budget.
+  attribute longer than 8 MiB is still left to the budget. The same text is hashed once per record,
+  a record inspects at most 16 MiB of message text, and with `captureContent: false` the messages
+  export removes are neither hashed nor charged.
 - `hue eval` stops a timed-out or cancelled `--command` by signalling its whole process group even
   after the shell has exited, then kills whatever is left after the 5-second grace, and settles the
-  case only once the group is gone. Before, an agent started by a compound command (`a; b`,
-  `a | b`) that ignored SIGTERM kept running, with its world credentials, after the case failed.
+  case only once the group is gone; a group found empty is never signalled again. Before, an agent
+  started by a compound command (`a; b`, `a | b`) that ignored SIGTERM kept running, with its world
+  credentials, after the case failed. A second Ctrl+C during the grace now kills the agent's group
+  at once and exits with 130 instead of ending the CLI and leaving the agent running.
 
 ### [0.9.0] - 2026-09-24
 

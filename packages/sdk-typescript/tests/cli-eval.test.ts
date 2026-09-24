@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnAgentCommand } from "../src/cli/eval.js";
 import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
 
 const cli = join(import.meta.dir, "../src/setup/cli.ts");
@@ -536,6 +537,8 @@ function hue(
     dropKey?: boolean;
     /** Sends SIGINT once the CLI prints a line matching this, standing in for Ctrl+C. */
     interruptOn?: RegExp;
+    /** Sends SIGINT this many times, 100 ms apart, once this file exists. */
+    interruptAfter?: { file: string; times: number };
   },
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
@@ -567,6 +570,16 @@ function hue(
       stderr += chunk;
       maybeInterrupt(chunk);
     });
+    if (options.interruptAfter) {
+      const { file, times } = options.interruptAfter;
+      const waiting = setInterval(() => {
+        if (!existsSync(file)) return;
+        clearInterval(waiting);
+        for (let index = 0; index < times; index++)
+          setTimeout(() => child.kill("SIGINT"), index * 100);
+      }, 50);
+      child.on("close", () => clearInterval(waiting));
+    }
     const timer = setTimeout(() => child.kill("SIGKILL"), SPAWN_TIMEOUT);
     child.on("error", (error) => {
       clearTimeout(timer);
@@ -1072,6 +1085,83 @@ describe("hue eval", () => {
       SPAWN_TIMEOUT * 2,
     );
   }
+
+  test(
+    "a second interrupt during the stop kills the agent's whole group at once",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      let pid: number | undefined;
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-stubborn.mjs >/dev/null 2>&1; true`,
+            "--origin",
+            f.baseUrl,
+            "--wait",
+            "0",
+          ],
+          {
+            cwd,
+            env: { HUE_TEST_SURVIVOR: survivor },
+            interruptAfter: { file: survivor, times: 2 },
+          },
+        );
+        pid = Number(await readFile(survivor, "utf8"));
+        expect(result.status).toBe(130);
+        expect(result.stderr).toContain("Stopping the agent; press Ctrl+C again to force.");
+        expectNoSecrets(result);
+        // The agent ignores SIGTERM; the second interrupt SIGKILLs its group before the CLI exits.
+        for (let waited = 0; alive(pid) && waited < 1_000; waited += 50)
+          await new Promise((done) => setTimeout(done, 50));
+        expect(alive(pid)).toBe(false);
+      } finally {
+        if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test("a stop never signals the agent's group again once it has emptied", async () => {
+    // The shell and its group are gone at once, but a process that left the group keeps stdout
+    // open, so the command times out after its group emptied: its ID must not be signalled.
+    const calls: [number, string | number | undefined, string?][] = [];
+    const kill = process.kill.bind(process);
+    const spy = spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      try {
+        const sent = kill(pid, signal);
+        if (pid < 0) calls.push([pid, signal]);
+        return sent;
+      } catch (error) {
+        if (pid < 0) calls.push([pid, signal, (error as NodeJS.ErrnoException).code]);
+        throw error;
+      }
+    }) as typeof process.kill);
+    const escaped = `require("child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 2000)"], { detached: true, stdio: "inherit" }).unref()`;
+    try {
+      await expect(
+        spawnAgentCommand(`${process.execPath} -e '${escaped}'`, {
+          env: process.env,
+          timeoutSeconds: 0.5,
+        }),
+      ).rejects.toThrow("timed out");
+      const emptied = calls.findIndex(([, , code]) => code === "ESRCH");
+      expect(emptied).toBeGreaterThanOrEqual(0);
+      expect(calls.slice(emptied + 1)).toEqual([]);
+      expect(calls.filter(([, signal]) => signal !== 0)).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 
   test(
     "an interrupt while waiting for Hue's checks exits 130 without a verdict",
