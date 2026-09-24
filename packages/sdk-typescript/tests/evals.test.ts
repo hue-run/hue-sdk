@@ -460,6 +460,17 @@ describe("local evaluation scorers", () => {
 });
 
 describe("installed evaluation API and runner contract", () => {
+  test("runs up to 64 cases at once and refuses more", async () => {
+    const options = (concurrency: number) =>
+      ({ persistResultContent: false, concurrency }) as never;
+    for (const concurrency of [0, 65, 1.5])
+      await expect(runExperiment(options(concurrency))).rejects.toThrow("concurrency must be 1–64");
+    // 64 clears the bound and stops at the next required option.
+    await expect(runExperiment(options(64))).rejects.toThrow(
+      "Choose a trace evidence policy explicitly",
+    );
+  });
+
   test("a failure consumed by another flush cannot acknowledge incomplete case evidence", async () => {
     const f = fixture();
     const exp = f.create();

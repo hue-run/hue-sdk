@@ -130,7 +130,7 @@ Output and limits:
                                   outputs/explanations (--worker always persists them)
   --save-version                  Freeze an unsaved eval-set version before running
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
-  --concurrency <n>               Cases in flight, 1-16 (default: 1)
+  --concurrency <n>               Cases in flight, 1-64 (default: 1)
   --timeout <seconds>             Per-case --command timeout (default: 600)
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
   -h, --help                      Show this help
@@ -855,7 +855,7 @@ async function runOnce(
   signal: AbortSignal,
 ): Promise<number> {
   const client = new EvaluationClient(connection);
-  const concurrency = integer("concurrency", values.concurrency, 1, 1, 16);
+  const concurrency = integer("concurrency", values.concurrency, 1, 1, 64);
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
   const pins = await resolveSelection(client, values);
@@ -1106,7 +1106,7 @@ async function runWorker(
   const client = new ObservedClient(connection);
   const environmentClient = createEnvironmentClient(connection);
   const wait = integer("wait", values.wait, 300, 0, 86_400);
-  const concurrency = integer("concurrency", values.concurrency, 1, 1, 16);
+  const concurrency = integer("concurrency", values.concurrency, 1, 1, 64);
   const maxRuns =
     values["max-runs"] === undefined
       ? undefined
