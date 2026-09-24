@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.8.0] - 2026-09-24
+
 #### Added
 
 - **World API handoff.** `createRun` accepts `traceparent` and `agentRevision`, and its response
@@ -32,6 +34,8 @@ refuses to publish a version without a matching entry below.
   world created while the gateway is off they still hold the `hue_sim_` capability, now with a
   one-time `DeprecationWarning` (`HUE_NATIVE_SIMULATION_TOOLS`; the provider facade warns
   `HUE_PROVIDER_FACADE`). `SealedRun.sealedAt` is null while a gateway world is `completing`.
+- `runExperiment()`, simulations and `hue eval --concurrency` accept up to 64 cases in flight
+  (was 16). The default stays 1.
 
 ### [0.7.0] - 2026-09-23
 
@@ -436,6 +440,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+### [0.5.0] - 2026-09-24
+
 #### Added
 
 - **`hue_sdk.environment`.** `EnvironmentClient` for Hue's World API: `create_run` (with
@@ -445,6 +451,10 @@ No registry release is claimed until publication and registry acceptance complet
   `strip_hue_control_plane_credentials`, `legacy_mcp_capability` and `mcp_config_file` build an
   agent child's configuration from the world's token, mirror URLs, `env` and `mcpConfig` without
   the project key. No tool binding is included.
+
+#### Changed
+
+- `run_experiment` and `rescore` accept `concurrency` up to 64 (was 16). The default stays 1.
 
 ### [0.4.0] - 2026-09-23
 

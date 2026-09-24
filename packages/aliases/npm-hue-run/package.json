@@ -1,6 +1,6 @@
 {
   "name": "hue-run",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Alias of @hue-run/sdk. Install @hue-run/sdk directly; this package only re-exports it.",
   "license": "MIT",
   "type": "module",
@@ -42,6 +42,6 @@
     "./setup-events.schema.json": "./setup-events.schema.json"
   },
   "dependencies": {
-    "@hue-run/sdk": "0.7.0"
+    "@hue-run/sdk": "0.8.0"
   }
 }
