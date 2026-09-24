@@ -403,9 +403,9 @@ describe("hue login", () => {
     );
     expect(await mode(join(root, ".env.local"))).toBe(0o600);
     await expect(lstat(join(root, ".env.hue"))).rejects.toThrow();
-    // Naming the same file with both spellings is not a conflict.
+    // Naming the same file with both spellings is not a conflict, however the path is written.
     const both = await login(
-      ["--origin", ORIGIN, "--env-file", ".env.local", "--env-path", ".env.local"],
+      ["--origin", ORIGIN, "--env-file", "./.env.local", "--env-path", join(root, ".env.local")],
       { cwd: root, lines: [KEY] },
     );
     expect(both.code).toBe(0);

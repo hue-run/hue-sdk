@@ -1230,7 +1230,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       throw new UsageError("Pass exactly one of --case, --set or --dataset-version");
     let envFile: string | undefined;
     try {
-      envFile = envFileArgument(values);
+      envFile = envFileArgument(values, process.cwd());
     } catch (error) {
       throw new UsageError((error as Error).message);
     }

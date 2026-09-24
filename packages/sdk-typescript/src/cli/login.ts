@@ -637,7 +637,7 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   let envFileOption: string | undefined;
   try {
     parsed = parseLoginArguments(argv);
-    envFileOption = envFileArgument(parsed.values);
+    envFileOption = envFileArgument(parsed.values, cwd);
   } catch (error) {
     return fail(`${(error as Error).message}\n\n${LOGIN_USAGE}`, 2);
   }
