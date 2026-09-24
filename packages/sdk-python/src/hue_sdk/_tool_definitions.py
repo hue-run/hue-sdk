@@ -6,8 +6,11 @@ Mirrors the TypeScript SDK's ``tool-definitions.ts`` so both export paths replac
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -65,6 +68,295 @@ def _is_url_key(key: Any) -> bool:
     return normalized in {"serverurl", "url"}
 
 
+# WHATWG URL parsing, for the special schemes a hosted endpoint uses, so a scrubbed URL with an
+# ordinary host is serialized as the TypeScript SDK's `URL` serializes it.
+_SPECIAL_PORTS = {"ftp": 21, "http": 80, "https": 443, "ws": 80, "wss": 443}
+_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
+_TAB_OR_NEWLINE = re.compile("[\t\n\r]")
+_C0_OR_SPACE = "".join(map(chr, range(0x21)))
+_FORBIDDEN_HOST = frozenset("\x00\t\n\r #/:<>?@[\\]^|")
+_FORBIDDEN_DOMAIN = _FORBIDDEN_HOST | frozenset(map(chr, range(0x20))) | {"%", "\x7f"}
+_PATH_ESCAPED = frozenset(' "#<>?^`{}')
+_SINGLE_DOT = frozenset({".", "%2e"})
+_DOUBLE_DOT = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
+_HEX = frozenset(b"0123456789abcdefABCDEF")
+_FORM_SAFE = frozenset(b"*-._0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
+
+class _InvalidUrl(ValueError):
+    """A URL the WHATWG parser refuses."""
+
+
+def _percent_encode(text: str) -> str:
+    """UTF-8 percent-encode a path segment with the WHATWG path percent-encode set."""
+    return "".join(
+        "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        if char in _PATH_ESCAPED or not 0x20 <= ord(char) <= 0x7E
+        else char
+        for char in text
+    )
+
+
+def _percent_decode(data: bytes) -> bytes:
+    decoded = bytearray()
+    index = 0
+    while index < len(data):
+        if (
+            data[index] == 0x25
+            and index + 2 < len(data)
+            and data[index + 1] in _HEX
+            and data[index + 2] in _HEX
+        ):
+            decoded.append(int(data[index + 1 : index + 3], 16))
+            index += 3
+        else:
+            decoded.append(data[index])
+            index += 1
+    return bytes(decoded)
+
+
+def _form_encode(text: str) -> str:
+    """The application/x-www-form-urlencoded serialization of one name or value."""
+    return "".join(
+        "+" if byte == 0x20 else chr(byte) if byte in _FORM_SAFE else f"%{byte:02X}"
+        for byte in text.encode("utf-8")
+    )
+
+
+def _query_names(query: str) -> list[str]:
+    """The names ``URLSearchParams`` reads from a query, in order."""
+    names = []
+    for pair in query.encode("utf-8").split(b"&"):
+        if pair:
+            name = pair.split(b"=", 1)[0].replace(b"+", b" ")
+            names.append(_percent_decode(name).decode("utf-8", "replace"))
+    return names
+
+
+# Characters of an IDN host WHATWG parsing is attempted for; the DNS allows 253.
+_MAX_IDN_HOST = 1024
+_RADIX_DIGITS = {8: frozenset("01234567"), 10: frozenset("0123456789")}
+_RADIX_DIGITS[16] = frozenset("0123456789abcdefABCDEF")
+
+
+def _ipv4_number(part: str) -> int | None:
+    radix = 10
+    if part[:2] in ("0x", "0X"):
+        part, radix = part[2:], 16
+    elif len(part) > 1 and part[0] == "0":
+        part, radix = part[1:], 8
+    if not part:
+        return 0 if radix != 10 else None
+    if not set(part) <= _RADIX_DIGITS[radix]:
+        return None
+    # Leading zeros do not count, and anything longer is out of range for an IPv4 part; neither
+    # may reach int(), which refuses more than about 4,300 decimal digits.
+    digits = part.lstrip("0") or "0"
+    return int(digits, radix) if len(digits) <= 12 else 1 << 64
+
+
+def _ends_in_number(domain: str) -> bool:
+    parts = domain.split(".")
+    if parts[-1] == "":
+        if len(parts) == 1:
+            return False
+        parts.pop()
+    last = parts[-1]
+    return bool(last) and (last.isascii() and last.isdigit() or _ipv4_number(last) is not None)
+
+
+def _ipv4(domain: str) -> str:
+    parts = domain.split(".")
+    if parts[-1] == "" and len(parts) > 1:
+        parts.pop()
+    numbers = [_ipv4_number(part) for part in parts]
+    if len(parts) > 4 or any(number is None for number in numbers):
+        raise _InvalidUrl
+    values = [number for number in numbers if number is not None]
+    if any(number > 255 for number in values[:-1]) or values[-1] >= 256 ** (5 - len(values)):
+        raise _InvalidUrl
+    address = values[-1] + sum(
+        number * 256 ** (3 - index) for index, number in enumerate(values[:-1])
+    )
+    return ".".join(str(address >> shift & 255) for shift in (24, 16, 8, 0))
+
+
+def _ipv6(text: str) -> str:
+    if "%" in text:
+        raise _InvalidUrl
+    try:
+        value = int(ipaddress.IPv6Address(text))
+    except ValueError:
+        raise _InvalidUrl from None
+    pieces = [value >> (112 - 16 * index) & 0xFFFF for index in range(8)]
+    # Compress the first longest run of two or more zero pieces.
+    start, length, index = -1, 1, 0
+    while index < 8:
+        end = index
+        while end < 8 and pieces[end] == 0:
+            end += 1
+        if end - index > length:
+            start, length = index, end - index
+        index = max(end, index + 1)
+    hexes = [f"{piece:x}" for piece in pieces]
+    if start < 0:
+        return ":".join(hexes)
+    return ":".join(hexes[:start]) + "::" + ":".join(hexes[start + length :])
+
+
+def _remap(domain: str) -> str:
+    try:
+        # A dependency of requests, imported only for an IDN host; without it the host is
+        # refused rather than serialized differently.
+        import idna
+
+        return idna.uts46_remap(domain, std3_rules=False, transitional=False)
+    except (ImportError, UnicodeError, ValueError):
+        raise _InvalidUrl from None
+
+
+_RTL_ALLOWED = frozenset({"R", "AL", "AN", "EN", "ES", "CS", "ET", "ON", "BN", "NSM"})
+
+
+def _bidi_valid(label: str) -> bool:
+    """RFC 5893 rules 2 to 4 for a label that begins with right-to-left text (a letter or an
+    Arabic digit), as the Node.js parser applies them: only such characters, ending on a strong
+    or numeric one, and not both kinds of digits. Bun's parser applies all six rules, so it
+    refuses a few more labels."""
+    classes = [unicodedata.bidirectional(char) for char in label]
+    if not classes or classes[0] not in ("R", "AL", "AN"):
+        return True
+    end = len(classes)
+    while end and classes[end - 1] == "NSM":
+        end -= 1
+    return (
+        set(classes) <= _RTL_ALLOWED
+        and end > 0
+        and classes[end - 1] in ("R", "AL", "EN", "AN")
+        and not {"EN", "AN"} <= set(classes)
+    )
+
+
+def _joiners_valid(label: str) -> bool:
+    """RFC 5892 ContextJ: a joiner follows a virama. A zero-width non-joiner between Arabic
+    letters is also valid there; that joining-type rule is not checked and it is refused."""
+    return all(
+        index > 0 and unicodedata.combining(label[index - 1]) == 9
+        for index, char in enumerate(label)
+        if char in "\u200c\u200d"
+    )
+
+
+def _domain_to_ascii(domain: str) -> str:
+    """UTS 46 ToASCII with WHATWG's options: the mapping, the validity criteria, CheckJoiners
+    and CheckBidi as ``_bidi_valid`` describes, and Punycode. It differs from the TypeScript
+    SDK's parser only at the edges: an IDN host over ``_MAX_IDN_HOST`` characters and a
+    non-joiner in an Arabic joining context are refused here."""
+    if domain.isascii() and not any(label[:4].lower() == "xn--" for label in domain.split(".")):
+        return domain.lower()
+    # Mapping and Punycode grow faster than the host, so a longer IDN host is refused before
+    # either runs, whatever the idna version.
+    if len(domain) > _MAX_IDN_HOST:
+        raise _InvalidUrl
+    labels = _remap(domain).split(".")
+    unicode_labels = []
+    for label in labels:
+        if label.startswith("xn--"):
+            try:
+                decoded = label[4:].encode("ascii").decode("punycode")
+            except (UnicodeError, ValueError):
+                raise _InvalidUrl from None
+            if (
+                not decoded
+                or decoded.isascii()
+                or decoded[:4].lower() == "xn--"
+                or _remap(decoded) != decoded
+                or not unicodedata.is_normalized("NFC", decoded)
+            ):
+                raise _InvalidUrl
+            label = decoded
+        if label and (unicodedata.category(label[0]).startswith("M") or not _joiners_valid(label)):
+            raise _InvalidUrl
+        unicode_labels.append(label)
+    if not all(_bidi_valid(label) for label in unicode_labels):
+        raise _InvalidUrl
+    return ".".join(
+        label if label.isascii() else "xn--" + label.encode("punycode").decode("ascii")
+        for label in unicode_labels
+    )
+
+
+def _host(text: str) -> str:
+    if text.startswith("["):
+        if not text.endswith("]"):
+            raise _InvalidUrl
+        return f"[{_ipv6(text[1:-1])}]"
+    domain = _domain_to_ascii(_percent_decode(text.encode("utf-8")).decode("utf-8", "replace"))
+    if not domain or any(char in _FORBIDDEN_DOMAIN for char in domain):
+        raise _InvalidUrl
+    return _ipv4(domain) if _ends_in_number(domain) else domain
+
+
+def _path(path: str) -> str:
+    segments: list[str] = []
+    parts = re.split(r"[/\\]", path)[1:] if path else [""]
+    for index, part in enumerate(parts):
+        last = index == len(parts) - 1
+        if part.lower() in _DOUBLE_DOT:
+            if segments:
+                segments.pop()
+            if last:
+                segments.append("")
+        elif part.lower() in _SINGLE_DOT:
+            if last:
+                segments.append("")
+        else:
+            segments.append(_percent_encode(part))
+    return "".join("/" + segment for segment in segments)
+
+
+def _scrub_special_url(scheme: str, rest: str) -> str | None:
+    """A special-scheme URL without userinfo, query values and fragment, serialized as WHATWG
+    does, or ``None`` when it has none of them. Raises ``_InvalidUrl`` for a URL WHATWG refuses."""
+    rest = rest.lstrip("/\\")
+    end = min([i for i in map(rest.find, "/\\?#") if i >= 0], default=len(rest))
+    authority, rest = rest[:end], rest[end:]
+    userinfo, at, hostport = authority.rpartition("@")
+    if at and not hostport:
+        raise _InvalidUrl
+    if hostport.startswith("["):
+        close = hostport.find("]")
+        host_text, port_text = hostport[: close + 1], hostport[close + 1 :]
+        if close < 0 or port_text and not port_text.startswith(":"):
+            raise _InvalidUrl
+        port_text = port_text[1:]
+    else:
+        host_text, _, port_text = hostport.partition(":")
+    if not host_text:
+        raise _InvalidUrl
+    host = _host(host_text)
+    port = None
+    if port_text:
+        digits = port_text.lstrip("0") or "0"
+        if not set(port_text) <= _RADIX_DIGITS[10] or len(digits) > 5 or int(digits) > 65535:
+            raise _InvalidUrl
+        port = None if int(digits) == _SPECIAL_PORTS[scheme] else int(digits)
+    rest, hashed, fragment = rest.partition("#")
+    path, questioned, query = rest.partition("?")
+    username, _, password = userinfo.partition(":")
+    if not (username or password or query or fragment):
+        return None
+    serialized = f"{scheme}://{host}" + (f":{port}" if port is not None else "") + _path(path)
+    if query:
+        pairs = "&".join(
+            f"{_form_encode(name)}={_form_encode(REDACTED)}" for name in _query_names(query)
+        )
+        serialized += f"?{pairs}" if pairs else ""
+    elif questioned:
+        serialized += "?"
+    return serialized + ("#" if hashed and not fragment else "")
+
+
 class _Scrub:
     def __init__(self) -> None:
         self.changed = False
@@ -74,8 +366,23 @@ class _Scrub:
 
         Query parameter names are provider-defined, so retaining values based on a guessed
         credential-key list could leak a secret under an unfamiliar name. Fragments can also carry
-        bearer tokens in provider-specific URLs, so they are removed too.
+        bearer tokens in provider-specific URLs, so they are removed too. A URL with a special
+        scheme (``http``, ``https``, ``ws``, ``wss``, ``ftp``) is parsed and, when scrubbed,
+        serialized as WHATWG ``URL`` does, so for ordinary hosts both SDKs export the same text
+        and digest; ``_domain_to_ascii`` notes where IDN hosts can still differ.
         """
+        text = _TAB_OR_NEWLINE.sub("", _LONE_SURROGATE.sub("\ufffd", value).strip(_C0_OR_SPACE))
+        scheme = _SCHEME.match(text)
+        if scheme and scheme.group()[:-1].lower() in _SPECIAL_PORTS:
+            try:
+                scrubbed = _scrub_special_url(scheme.group()[:-1].lower(), text[scheme.end() :])
+            except ValueError:
+                # Refused by WHATWG, or anything else that stops the parse: never export it.
+                scrubbed = REDACTED
+            if scrubbed is None:
+                return value
+            self.changed = True
+            return scrubbed
         try:
             parsed = urlsplit(value)
         except ValueError:
@@ -164,6 +471,15 @@ def _reject_constant(_name: str) -> Any:
     raise ValueError("NaN and Infinity are not JSON.")
 
 
+def _parse_int(text: str) -> int | float:
+    """A JSON integer as JavaScript reads it. CPython refuses ``int()`` of more than about 4,300
+    digits, and ``JSON.parse`` reads such a number as an (infinite) double anyway."""
+    try:
+        return int(text)
+    except ValueError:
+        return float(text)
+
+
 def _parse(text: str, *, strict: bool = False) -> Any:
     """Parse JSON text, returning ``None`` for text that is not JSON.
 
@@ -171,14 +487,29 @@ def _parse(text: str, *, strict: bool = False) -> Any:
     """
     try:
         if strict:
-            return json.loads(text, parse_constant=_reject_constant)
-        return json.loads(text)
+            return json.loads(text, parse_int=_parse_int, parse_constant=_reject_constant)
+        return json.loads(text, parse_int=_parse_int)
     except ValueError:
         return None
 
 
+def _finite(value: Any) -> Any:
+    """Non-finite numbers become ``null``, as ``JSON.stringify`` writes them. Only called when
+    the value has one, so deeply nested content without one never recurses here."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, list):
+        return [_finite(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    return value
+
+
 def _dump(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except ValueError:
+        return json.dumps(_finite(value), ensure_ascii=False, separators=(",", ":"))
 
 
 def _scrub_definition_text(text: str) -> str:

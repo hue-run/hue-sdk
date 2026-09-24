@@ -62,7 +62,7 @@ to the callback and is never written to checkpoints.
 
 ### Published pins and verdicts
 
-`scenario: { kind: "pins", datasetVersionId, scorerVersionIds, config?, name? }` runs already
+`definition: { kind: "pins", datasetVersionId, scorerVersionIds, config?, name? }` runs already
 published immutable pins, such as a Scenario's frozen case and Hue-owned outcome checks or a saved
 eval set with explicitly chosen scorer versions. `resolveScenarioPins(client, selector)` reads
 those pins from a Scenario ID, its Hue URL or its name (`listScenarios` and `getScenario` expose

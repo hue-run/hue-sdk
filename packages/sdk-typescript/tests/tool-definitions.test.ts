@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { scrubToolCredentials, withToolCatalogSummary } from "../src/tool-definitions.js";
+import urlFixture from "./fixtures/tool-definition-urls.json" with { type: "json" };
 
 test("scrubs generic credentials and URL userinfo/query values without changing parameter schemas", () => {
   const input = {
@@ -120,4 +121,30 @@ test("uses UTF-8 bytes for the shared metadata summary budget", () => {
     ]),
   };
   expect(withToolCatalogSummary(source)).toEqual(source);
+});
+
+test("scrubbed URLs and a definition with a huge integer match the shared fixture", () => {
+  // The Python suite checks the same file, so both SDKs export the same URL text and digest.
+  for (const { url, scrubbed } of urlFixture.urls)
+    expect(
+      JSON.parse(
+        scrubToolCredentials(
+          "gen_ai.tool.definitions",
+          JSON.stringify({ server_url: url }),
+        ) as string,
+      ),
+    ).toEqual({ server_url: scrubbed });
+  const definitions = urlFixture.urls.map(({ url }, index) => ({
+    type: "mcp",
+    server_label: `mcp-${index}`,
+    server_url: url,
+  }));
+  const summary = (text: string) =>
+    (withToolCatalogSummary({ "gen_ai.tool.definitions": text }) as Record<string, unknown>)[
+      "hue.tool.definitions.sha256"
+    ];
+  expect(summary(JSON.stringify(definitions))).toBe(urlFixture.sha256);
+  const big = `[{"type":"function","name":"limits","authorization":"synthetic-secret","parameters":{"type":"integer","maximum":${"9".repeat(urlFixture.bigInteger.digits)}}}]`;
+  expect(scrubToolCredentials("gen_ai.tool.definitions", big)).toBe(urlFixture.bigInteger.scrubbed);
+  expect(summary(big)).toBe(urlFixture.bigInteger.sha256);
 });
