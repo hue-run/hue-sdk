@@ -133,7 +133,10 @@ class _Scrub:
             return value
         result = {}
         for key, item in value.items():
-            if credential_parameter and key in {"default", "const", "examples", "enum"}:
+            if credential_parameter and key in {"examples", "enum"}:
+                self.changed = True
+                result[key] = [REDACTED for _ in item] if isinstance(item, list) else REDACTED
+            elif credential_parameter and key in {"default", "const"}:
                 self.changed = True
                 result[key] = REDACTED
             elif not parameters and item is not None and _is_credential_key(key):
@@ -146,7 +149,9 @@ class _Scrub:
                     item,
                     depth + 1,
                     key == "properties",
-                    credential_parameter or (parameters and _is_credential_key(key)),
+                    False
+                    if key == "properties"
+                    else credential_parameter or (parameters and _is_credential_key(key)),
                 )
         return result
 

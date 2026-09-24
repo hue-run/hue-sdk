@@ -100,7 +100,11 @@ function scrubNode(
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
-      if (credentialParameter && ["default", "const", "examples", "enum"].includes(key)) {
+      if (credentialParameter && ["examples", "enum"].includes(key)) {
+        state.changed = true;
+        return [key, Array.isArray(item) ? item.map(() => REDACTED) : REDACTED];
+      }
+      if (credentialParameter && ["default", "const"].includes(key)) {
         state.changed = true;
         return [key, REDACTED];
       }
@@ -117,7 +121,9 @@ function scrubNode(
           state,
           depth + 1,
           key === "properties",
-          credentialParameter || (parameters && isCredentialKey(key)),
+          key === "properties"
+            ? false
+            : credentialParameter || (parameters && isCredentialKey(key)),
         ),
       ];
     }),

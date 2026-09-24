@@ -86,6 +86,13 @@ test("scrubs credential values embedded in JSON Schema parameter metadata", () =
               description: "The authorization argument is retained.",
               anyOf: [{ type: "string", default: "synthetic-nested-default" }],
             },
+            headers: {
+              type: "object",
+              properties: {
+                authorization: { type: "string", default: "synthetic-nested-header" },
+                region: { type: "string", default: "synthetic-region" },
+              },
+            },
           },
         },
       }),
@@ -95,9 +102,13 @@ test("scrubs credential values embedded in JSON Schema parameter metadata", () =
     type: "string",
     default: "[redacted]",
     const: "[redacted]",
-    examples: "[redacted]",
-    enum: "[redacted]",
+    examples: ["[redacted]"],
+    enum: ["[redacted]"],
     description: "The authorization argument is retained.",
     anyOf: [{ type: "string", default: "[redacted]" }],
+  });
+  expect(output.parameters.properties.headers.properties).toEqual({
+    authorization: { type: "string", default: "[redacted]" },
+    region: { type: "string", default: "synthetic-region" },
   });
 });
