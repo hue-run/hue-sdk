@@ -641,11 +641,16 @@ class Hue:
     def _active(self) -> bool:
         return self.enabled and not self._closed and self._pid == os.getpid()
 
-    def _record_issue(self) -> None:
+    def _record_issues(self, count: int = 1) -> None:
         if self._pid != os.getpid():
             return
+        if count < 1:
+            return
         with self._issues_lock:
-            self._issues += 1
+            self._issues += count
+
+    def _record_issue(self) -> None:
+        self._record_issues()
 
     def _instrument(self, action: Callable[[], Any]) -> None:
         if not self._active:
