@@ -14,8 +14,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
+from .transport import MAX_CONTENT_BYTES
+
 ABSENT: Any = object()
 """Marks arguments or a result the response did not carry, as distinct from ``None``."""
+MAX_PROVIDER_ITEMS = 128
+MAX_PROVIDER_DEFINITIONS = 512
+MAX_PROVIDER_SERVERS = 512
 
 
 @dataclass
@@ -66,13 +71,30 @@ def _data(value: Any) -> Any:
 
 
 def _text(value: Any) -> str | None:
-    return value if isinstance(value, str) and value.strip() and len(value) <= 256 else None
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        return None
+    try:
+        return value if len(value.encode("utf-16-le")) // 2 <= 256 else None
+    except UnicodeEncodeError:
+        return None
+
+
+def _utf8_size(value: str, limit: int) -> int:
+    size = 0
+    for character in value:
+        code = ord(character)
+        size += 1 if code <= 0x7F else 2 if code <= 0x7FF else 3 if code <= 0xFFFF else 4
+        if size > limit:
+            return size
+    return size
 
 
 def _json_arguments(value: Any) -> Any:
     """MCP arguments arrive as JSON text; record the structure when it parses, else the text."""
     if not isinstance(value, str):
         return value
+    if _utf8_size(value, MAX_CONTENT_BYTES) > MAX_CONTENT_BYTES:
+        return ABSENT
     try:
         return json.loads(value)
     except ValueError:
@@ -81,8 +103,14 @@ def _json_arguments(value: Any) -> Any:
 
 def _openai_calls(items: list[Any], activity: HostedToolActivity) -> None:
     """OpenAI Responses ``output`` items. Built-in tools are named by kind, MCP calls by tool."""
-    for item in items:
-        item = _data(item)
+    count = min(len(items), MAX_PROVIDER_ITEMS)
+    activity.skipped += len(items) - count
+    for index in range(count):
+        try:
+            item = _data(items[index])
+        except Exception:
+            activity.skipped += 1
+            continue
         if not isinstance(item, dict):
             continue
         kind = item.get("type")
@@ -109,8 +137,14 @@ def _openai_calls(items: list[Any], activity: HostedToolActivity) -> None:
                 activity.skipped += 1
                 continue
             definitions = []
-            for tool in tools:
-                tool = _data(tool)
+            definition_count = min(len(tools), MAX_PROVIDER_DEFINITIONS)
+            activity.skipped += len(tools) - definition_count
+            for index in range(definition_count):
+                try:
+                    tool = _data(tools[index])
+                except Exception:
+                    activity.skipped += 1
+                    continue
                 if not isinstance(tool, dict):
                     continue
                 definition: dict[str, Any] = {"type": "function"}
@@ -147,7 +181,16 @@ def _openai_calls(items: list[Any], activity: HostedToolActivity) -> None:
 
 def _anthropic_calls(blocks: list[Any], activity: HostedToolActivity) -> None:
     """Anthropic Messages ``content`` blocks: a use block paired with the result that names it."""
-    blocks = [_data(block) for block in blocks]
+    count = min(len(blocks), MAX_PROVIDER_ITEMS)
+    activity.skipped += len(blocks) - count
+    converted: list[Any] = []
+    for index in range(count):
+        try:
+            converted.append(_data(blocks[index]))
+        except Exception:
+            activity.skipped += 1
+            converted.append(None)
+    blocks = converted
     results: dict[str, dict[str, Any]] = {}
     for block in blocks:
         if (
@@ -169,7 +212,14 @@ def _anthropic_calls(blocks: list[Any], activity: HostedToolActivity) -> None:
             activity.skipped += 1
             continue
         result = results.get(call_id) if call_id is not None else None
-        content = _data(result.get("content")) if result is not None else ABSENT
+        if result is None:
+            content = ABSENT
+        else:
+            try:
+                content = _data(result.get("content"))
+            except Exception:
+                activity.skipped += 1
+                content = ABSENT
         error_type = None
         if result is not None and result.get("is_error") is True:
             error_type = "mcp_error"
@@ -199,7 +249,11 @@ def hosted_tool_activity(provider: str, response: Any) -> HostedToolActivity:
     are read through ``model_dump()``. Anything else yields no calls.
     """
     activity = HostedToolActivity()
-    response = _data(response)
+    try:
+        response = _data(response)
+    except Exception:
+        activity.skipped += 1
+        return activity
     items = (
         response
         if isinstance(response, list)
@@ -207,7 +261,11 @@ def hosted_tool_activity(provider: str, response: Any) -> HostedToolActivity:
         if isinstance(response, dict)
         else None
     )
-    items = _data(items)
+    try:
+        items = _data(items)
+    except Exception:
+        activity.skipped += 1
+        return activity
     if not isinstance(items, list):
         return activity
     if provider == "openai":
@@ -224,14 +282,23 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
     ``name``. Nothing else in the request is read.
     """
     addresses: dict[str, str] = {}
-    request = _data(request)
+    try:
+        request = _data(request)
+    except Exception:
+        return addresses
     if not isinstance(request, dict):
         return addresses
-    entries = _data(request.get("tools" if provider == "openai" else "mcp_servers"))
+    try:
+        entries = _data(request.get("tools" if provider == "openai" else "mcp_servers"))
+    except Exception:
+        return addresses
     if not isinstance(entries, list):
         return addresses
-    for entry in entries:
-        entry = _data(entry)
+    for index in range(min(len(entries), MAX_PROVIDER_SERVERS)):
+        try:
+            entry = _data(entries[index])
+        except Exception:
+            continue
         if not isinstance(entry, dict):
             continue
         label = _text(entry.get("server_label" if provider == "openai" else "name"))
