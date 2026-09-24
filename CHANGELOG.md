@@ -34,6 +34,13 @@ refuses to publish a version without a matching entry below.
   gateway world to seal after its completion grace before the execution completes.
 - `isTransientEnvironmentError` classifies retryable World API failures for bounded polling.
 
+#### Changed
+
+- `resolveScenarioPins`, and so `hue eval --case`, pin every scorer version a published Scenario
+  lists in `publication.scorerVersionIds` (its outcome scorer first), falling back to the single
+  `scorerVersionId` of older publications; extra `--scorer` pins still merge in.
+  `CaseConversionPublication` gains the optional `scorerVersionIds`.
+
 #### Fixed
 
 - The hosted-tool recorder resolves `servers` entries with own-property lookup, so labels such as
@@ -75,10 +82,7 @@ refuses to publish a version without a matching entry below.
 
 #### Changed
 
-- `resolveScenarioPins`, and so `hue eval --case`, pin every scorer version a published Scenario
-  lists in `publication.scorerVersionIds` (its outcome scorer first), falling back to the single
-  `scorerVersionId` of older publications; extra `--scorer` pins still merge in.
-  `CaseConversionPublication` gains the optional `scorerVersionIds`.
+- Correction: multi-pin `resolveScenarioPins` (`publication.scorerVersionIds`) shipped after 0.8.1; it is documented under 0.9.0.
 - `hue eval` names a run `<agent key> @ <revision>` when `--name` is not passed (commit hashes
   shortened to 7 characters); the eval set is already shown on the run page. Previously the name
   repeated the eval set name in a `·`-separated string.
