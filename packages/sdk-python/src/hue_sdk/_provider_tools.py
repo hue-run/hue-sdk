@@ -8,6 +8,7 @@ into ``execute_tool`` spans of type ``extension`` after the fact. Mirrors the Ty
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,8 @@ ABSENT: Any = object()
 MAX_PROVIDER_ITEMS = 128
 MAX_PROVIDER_DEFINITIONS = 512
 MAX_PROVIDER_SERVERS = 512
+_HOSTNAME_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_HOSTNAME = re.compile(rf"{_HOSTNAME_LABEL}(?:\.{_HOSTNAME_LABEL})*\Z")
 
 
 @dataclass
@@ -63,7 +66,10 @@ def _data(value: Any) -> Any:
     """Plain data for a response or item: SDK models are dumped, mappings and sequences copied."""
     dump = getattr(value, "model_dump", None)
     if callable(dump) and not isinstance(value, (Mapping, str, bytes)):
-        return dump()
+        try:
+            return dump(warnings=False)
+        except TypeError:
+            return dump()
     if isinstance(value, Mapping):
         return dict(value)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
@@ -80,21 +86,15 @@ def _text(value: Any) -> str | None:
         return None
 
 
-def _utf8_size(value: str, limit: int) -> int:
-    size = 0
-    for character in value:
-        code = ord(character)
-        size += 1 if code <= 0x7F else 2 if code <= 0x7FF else 3 if code <= 0xFFFF else 4
-        if size > limit:
-            return size
-    return size
-
-
 def _json_arguments(value: Any) -> Any:
     """MCP arguments arrive as JSON text; record the structure when it parses, else the text."""
     if not isinstance(value, str):
         return value
-    if _utf8_size(value, MAX_CONTENT_BYTES) > MAX_CONTENT_BYTES:
+    # Import lazily because client.py imports this module. The shared helper stops in bounded
+    # chunks as soon as the content limit is crossed, rather than walking every character.
+    from .client import _utf8_byte_size
+
+    if _utf8_byte_size(value, MAX_CONTENT_BYTES) > MAX_CONTENT_BYTES:
         return ABSENT
     try:
         return json.loads(value)
@@ -139,12 +139,15 @@ def _openai_item(item: Any, activity: HostedToolActivity, capture_content: bool)
         if name is None:
             activity.skipped += 1
             return
+        arguments = _json_arguments(item.get("arguments")) if capture_content else ABSENT
+        if capture_content and arguments is ABSENT:
+            activity.skipped += 1
         activity.calls.append(
             HostedToolCall(
                 name,
                 call_id,
                 _text(item.get("server_label")),
-                _json_arguments(item.get("arguments")) if capture_content else ABSENT,
+                arguments,
                 item["output"] if capture_content and item.get("output") is not None else ABSENT,
                 "mcp_error" if item.get("error") is not None else None,
             )
@@ -204,10 +207,23 @@ def _openai_item(item: Any, activity: HostedToolActivity, capture_content: bool)
         activity.calls.append(HostedToolCall(name, call_id, None, arguments, result, error_type))
 
 
+def _count_truncated_provider_items(provider: str, items: Sequence[Any]) -> int:
+    count = 0
+    for item in items:
+        try:
+            if _is_provider_tool_item(provider, item):
+                count += 1
+        except Exception:
+            # A broken provider-model ``type`` property must not prevent the bounded prefix from
+            # being recorded. Count the unreadable tail item as skipped and continue.
+            count += 1
+    return count
+
+
 def _openai_calls(items: list[Any], activity: HostedToolActivity, capture_content: bool) -> None:
     """OpenAI Responses ``output`` items. Built-in tools are named by kind, MCP calls by tool."""
     count = min(len(items), MAX_PROVIDER_ITEMS)
-    activity.skipped += sum(_is_provider_tool_item("openai", item) for item in items[count:])
+    activity.skipped += _count_truncated_provider_items("openai", items[count:])
     for index in range(count):
         try:
             _openai_item(items[index], activity, capture_content)
@@ -222,7 +238,7 @@ def _anthropic_calls(
     """Anthropic Messages ``content`` blocks: a use block paired with the result that names it."""
     count = min(len(blocks), MAX_PROVIDER_ITEMS)
     truncated = len(blocks) > MAX_PROVIDER_ITEMS
-    activity.skipped += sum(_is_provider_tool_item("anthropic", block) for block in blocks[count:])
+    activity.skipped += _count_truncated_provider_items("anthropic", blocks[count:])
     converted: list[Any] = []
     for index in range(count):
         try:
@@ -358,16 +374,35 @@ def hosted_server_addresses(provider: str, request: Any) -> dict[str, str]:
         url = entry.get("server_url" if provider == "openai" else "url")
         if label is None or not isinstance(url, str):
             continue
-        try:
-            hostname = urlsplit(url).hostname
-        except ValueError:
-            continue
-        if "\\" in url or "\x00" in url or len(url) > 8192:
-            continue
+        # Reject ambiguous delimiters before urlsplit can normalize them into a host. In
+        # particular, encoded/fullwidth backslashes and IPv6 zone identifiers must not become
+        # exported address text.
         if (
-            hostname
-            and len(hostname) <= 253
-            and (":" not in hostname or urlsplit(url).netloc.startswith("["))
+            len(url) > 8192
+            or "\\" in url
+            or "\x00" in url
+            or "\uff3c" in url
+            or ";" in url
+            or "%5c" in url.lower()
+            or any(character.isspace() or ord(character) < 0x20 for character in url)
         ):
+            continue
+        try:
+            parsed = urlsplit(url)
+            hostname = parsed.hostname
+        except (TypeError, UnicodeError, ValueError):
+            continue
+        if not hostname or len(hostname) > 253 or "%" in hostname:
+            continue
+        if ":" in hostname:
+            if not parsed.netloc.startswith("["):
+                continue
+            try:
+                ipaddress.ip_address(hostname)
+            except ValueError:
+                continue
+        elif not _HOSTNAME.fullmatch(hostname):
+            continue
+        if hostname:
             addresses[label] = hostname
     return addresses

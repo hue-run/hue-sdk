@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from hue_sdk._provider_tools import ABSENT, hosted_server_addresses, hosted_tool_activity
 
 
@@ -26,7 +28,26 @@ def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
     # The malformed first item is counted within the 128-item parse cap, so 127 valid calls remain.
     assert len(activity.calls) == 127
     assert activity.calls[0].arguments is ABSENT
-    assert activity.skipped == 1_875
+    assert activity.skipped == 1_876
+
+
+def test_oversized_mcp_arguments_are_counted_as_skipped():
+    activity = hosted_tool_activity(
+        "openai",
+        {
+            "output": [
+                {
+                    "type": "mcp_call",
+                    "id": "oversized",
+                    "name": "tool",
+                    "arguments": "x" * 262_145,
+                }
+            ]
+        },
+    )
+    assert len(activity.calls) == 1
+    assert activity.calls[0].arguments is ABSENT
+    assert activity.skipped == 1
 
 
 def test_provider_tool_definitions_are_bounded_per_listing():
@@ -81,7 +102,7 @@ def test_deep_arguments_do_not_drop_sibling_calls():
                     "type": "mcp_call",
                     "id": "deep",
                     "name": "deep",
-                    "arguments": "[" * 1000 + "]" * 1000,
+                    "arguments": "[" * 100_000 + "]" * 100_000,
                 },
                 {"type": "mcp_call", "id": "valid", "name": "valid", "arguments": "{}"},
             ]
@@ -105,3 +126,60 @@ def test_provider_server_addresses_reject_unsafe_urls():
             ]
         },
     ) == {"ok": "mcp.example.test"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://mcp.example.test%5Csk-live-secret/sse",
+        "https://mcp.example.test\uff3csk-live-secret/sse",
+        "https://mcp.example.test;sk-live-secret/sse",
+        "https://mcp.example.test /sse",
+        "https://[fe80::1%25eth0]/sse",
+        "https://" + ("a" * 254) + ".test/sse",
+        "https://mcp.example.test\ud800/sse",
+    ],
+)
+def test_provider_server_addresses_reject_ambiguous_or_invalid_hosts(url):
+    assert hosted_server_addresses(
+        "openai", {"tools": [{"server_label": "unsafe", "server_url": url}]}
+    ) == {}
+
+
+class _RaisingType:
+    @property
+    def type(self):
+        raise RuntimeError("synthetic type failure")
+
+
+def test_broken_tail_item_does_not_discard_bounded_prefix():
+    activity = hosted_tool_activity(
+        "openai",
+        {
+            "output": [
+                *(
+                    {"type": "mcp_call", "id": f"call-{index}", "name": "tool"}
+                    for index in range(128)
+                ),
+                _RaisingType(),
+            ]
+        },
+    )
+    assert len(activity.calls) == 128
+    assert activity.skipped == 1
+
+
+class _WarningsModel:
+    def __init__(self):
+        self.warning_argument = None
+
+    def model_dump(self, *, warnings):
+        self.warning_argument = warnings
+        return {"output": [{"type": "mcp_call", "name": "tool", "arguments": "{}"}]}
+
+
+def test_model_dump_disables_content_warnings():
+    response = _WarningsModel()
+    activity = hosted_tool_activity("openai", response, capture_content=False)
+    assert response.warning_argument is False
+    assert len(activity.calls) == 1
