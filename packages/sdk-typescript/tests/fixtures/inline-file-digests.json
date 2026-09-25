@@ -222,6 +222,59 @@
         "sha256": "23c5588e105a1766816cf6ca7c6039e7fcbd1dab475afa14eb339783ad6e4726",
         "size": 68004
       }
+    },
+    {
+      "name": "a data: URL with millions of parameters: its 7-byte file stays inline",
+      "part": {
+        "type": "blob",
+        "modality": "document"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:application/octet-stream",
+        "unit": ";",
+        "times": 3400000,
+        "suffix": ";base64,AAECAwQFBg=="
+      },
+      "expected": null
+    },
+    {
+      "name": "text with a lone surrogate, written as U+FFFD",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "Notes \ud800 line\n",
+        "times": 5100,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "c8ca5a046c31c451b68564ae481c92bb3123f62038ebc1c24119dc0bc5197c36",
+        "size": 76500
+      }
+    },
+    {
+      "name": "a percent-encoded data: URL with a lone surrogate, written as U+FFFD",
+      "part": {
+        "type": "file",
+        "mediaType": "text/plain",
+        "filename": "notes.txt"
+      },
+      "key": "data",
+      "content": {
+        "prefix": "data:text/plain,",
+        "unit": "caf%C3%A9 \udc00 ",
+        "times": 7000,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "747fc6522365e9f05ce67135a3914865176bcc5a72c1b5fde796bac0877fdfc5",
+        "size": 70000
+      }
     }
   ]
 }

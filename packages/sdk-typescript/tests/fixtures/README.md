@@ -41,5 +41,7 @@ both SDKs must export in place of the content, computed from the bytes each case
 rather than by decoding it, or `null` where the file's bytes fit in 64 KiB and the part stays
 inline. It covers base64 content under text, JSON, image and absent media types, `data:` URLs
 with `;base64` before or after another parameter, a percent-escaped `data:` URL, a text file's
-own text, base64 characters before a final newline, and `data:` URLs whose data does not decode,
-which are hashed as their text. Both suites check the file.
+own text, base64 characters before a final newline, `data:` URLs whose data does not decode,
+which are hashed as their text, a `data:` URL with millions of parameters, and text and a
+percent-escaped `data:` URL with a lone surrogate, which both SDKs write as U+FFFD. Both suites
+check the file.

@@ -47,6 +47,11 @@ refuses to publish a version without a matching entry below.
   deadline instead of 10 seconds, retries included, so a slow acknowledgement or a `Retry-After`
   within it no longer fails the case as `TelemetryNotAccepted`. The retry count is unchanged, and
   a refusal (4xx or rejected records) still fails the case at once.
+- A large inline file whose `data:` URL has a pathological number of `;` parameters is hashed as
+  the bytes its own encoding gives. The header was read with a pattern repeated per parameter,
+  which throws on Node (from about 3.4 million), leaving the message unhashed, or stops matching
+  on Bun (from about 1.1 million), hashing the URL's text. The Python SDK reads the header the
+  same way.
 
 ### [0.10.0] - 2026-09-25
 
@@ -756,6 +761,9 @@ No registry release is claimed until publication and registry acceptance complet
   of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
   content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
   running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
+- A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
+  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
+  `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
 
 ### [0.6.1] - 2026-09-25
 
