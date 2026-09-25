@@ -155,12 +155,19 @@ await hue.model(
 
 Each OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call` or `code_interpreter_call`
 item, and each Anthropic `mcp_tool_use` or `server_tool_use` block with its result, becomes an
-`execute_tool {name}` child span with `gen_ai.tool.type` `extension`, `gen_ai.tool.call.id` and,
-for MCP calls, `mcp.server.name` (the provider's label). Arguments and results follow
-`captureContent`; a failed call carries `error.type` (`mcp_error`, the provider's status or error
-code) and ERROR status. An `mcp_list_tools` item becomes a `tools/list` child span with that
-server's `gen_ai.tool.definitions`. Pass the request so each server's host is recorded as
-`server.address` (only server URLs are read, never credentials), and `servers` to record a
+`execute_tool {name}` child span with `gen_ai.tool.type` `extension`, `gen_ai.tool.call.id`,
+`hue.tool.call.position` (the 0-based position of its item in the response: the OpenAI `output`
+index or the Anthropic `content` block index, in both capture modes) and, for MCP calls,
+`mcp.server.name` (the provider's label). Arguments and results follow `captureContent`; a failed
+call carries `error.type` (`mcp_error`, the provider's status or error code) and ERROR status. With
+`captureContent: true`, a failed OpenAI MCP call's status description is the provider's error
+text, credentials scrubbed (URL userinfo, query values and fragments, authorization-scheme
+credentials, credential-named `key=value` pairs) and cut to 1,024 characters. An `mcp_list_tools`
+item becomes a `tools/list` child span with that server's `gen_ai.tool.definitions`; with
+`captureContent: false` it carries only `hue.tool.names` and `hue.tool.definitions.sha256`, the
+summary described below. Pass the request so each server's host is recorded as `server.address`
+(only server URLs are read, never credentials; a host name keeps its underscores, as WHATWG URL
+parsing does), and `servers` to record a
 server's real `name`, `version`, Hue `provider` and `surface` under its label. `provider` defaults
 to the enclosing `model()` call's provider (`openai` or `anthropic`). The spans have no duration of
 their own: the provider ran the tools inside the model request.

@@ -32,7 +32,9 @@ from ._provider_tools import (
     hosted_server_addresses,
     hosted_tool_activity,
     hosted_tool_provider,
+    provider_error_description,
 )
+from ._tool_definitions import tool_catalog_summary
 from ._version import __version__
 from .processors import HUE_TRACER_SCOPE, BoundedLogProcessor, BoundedSpanProcessor
 from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
@@ -175,6 +177,19 @@ class HueSpan:
         }.get(self._category, "output.value")
         self._set_content(key, value)
 
+    def _set_catalog_summary(self, definitions: list[dict[str, Any]]) -> None:
+        def summarize() -> None:
+            encoded = json.dumps(
+                snapshot_content(definitions),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            for key, value in tool_catalog_summary(encoded).items():
+                self.otel_span.set_attribute(key, value)
+
+        self._client._instrument(summarize)
+
     def _set_content(self, key: str, value: Any) -> None:
         if not self._client._active or not self._client.capture_content:
             return
@@ -219,12 +234,16 @@ class HueSpan:
         No ``hue.tool()`` block saw them: OpenAI Responses ``mcp_call``, ``web_search_call``,
         ``file_search_call`` and ``code_interpreter_call`` items, and Anthropic Messages
         ``mcp_tool_use`` / ``server_tool_use`` blocks with their result blocks. Each becomes an
-        ``execute_tool {name}`` child span of this span with ``gen_ai.tool.type`` ``extension``
-        and ``gen_ai.tool.call.id``; MCP calls add ``mcp.server.name`` (the provider's label, or
-        the ``servers`` entry for it: ``name``, ``version``, ``provider``, ``surface``). Arguments
-        and results follow ``capture_content``; a failed call carries ``error.type`` and ERROR
-        status. An OpenAI ``mcp_list_tools`` item becomes a ``tools/list`` child span carrying
-        that server's ``gen_ai.tool.definitions``. Call it on the ``model()`` span so ``provider``
+        ``execute_tool {name}`` child span of this span with ``gen_ai.tool.type`` ``extension``,
+        ``gen_ai.tool.call.id`` and ``hue.tool.call.position`` (the item's 0-based position in the
+        response); MCP calls add ``mcp.server.name`` (the provider's label, or the ``servers``
+        entry for it: ``name``, ``version``, ``provider``, ``surface``). Arguments and results
+        follow ``capture_content``; a failed call carries ``error.type`` and ERROR status, and with
+        content capture a failed OpenAI MCP call's status description is the provider's scrubbed,
+        bounded error text, passed to the redactor as ``status.message``. An OpenAI
+        ``mcp_list_tools`` item becomes a ``tools/list`` child span carrying that server's
+        ``gen_ai.tool.definitions``, or without content capture only ``hue.tool.names`` and
+        ``hue.tool.definitions.sha256``. Call it on the ``model()`` span so ``provider``
         (``openai`` or ``anthropic``) defaults to that block's provider; pass the ``request`` to
         record each server's host as ``server.address`` (only server URLs are read). SDK response
         objects are read through ``model_dump()``. The spans have no duration of their own: the
@@ -288,6 +307,8 @@ class HueSpan:
             }
             if call.call_id is not None:
                 attributes["gen_ai.tool.call.id"] = call.call_id
+            if call.position is not None:
+                attributes["hue.tool.call.position"] = call.position
             attributes.update(server(call.server))
             with self._client.span(
                 f"execute_tool {call.name}",
@@ -301,14 +322,27 @@ class HueSpan:
                     child.set_output(call.result)
                 if call.error_type is not None:
                     child.set_attribute("error.type", call.error_type)
-                    child.otel_span.set_status(Status(StatusCode.ERROR))
+                    # The provider's error text is content: read only when content is captured.
+                    description = (
+                        self._client._text_content(
+                            "status.message", provider_error_description(call.error_text)
+                        )
+                        if call.error_text is not None
+                        else None
+                    )
+                    child.otel_span.set_status(Status(StatusCode.ERROR, description))
         for listing in activity.listings:
             with self._client.span(
                 "tools/list",
                 attributes={"mcp.method.name": "tools/list", **server(listing.server)},
                 parent_context=parent,
             ) as child:
-                child._set_content("gen_ai.tool.definitions", listing.definitions)
+                if self._client.capture_content:
+                    child._set_content("gen_ai.tool.definitions", listing.definitions)
+                else:
+                    # Names and the catalog digest are metadata: without content, the listing
+                    # carries the summary metadata-only export gives any record's definitions.
+                    child._set_catalog_summary(listing.definitions)
                 if listing.error_type is not None:
                     child.set_attribute("error.type", listing.error_type)
                     child.otel_span.set_status(Status(StatusCode.ERROR))
@@ -669,6 +703,19 @@ class Hue:
             raise RuntimeError("Hue has already shut down.")
         if not self.enabled:
             raise RuntimeError("Hue tracing is disabled.")
+
+    def _text_content(self, key: str, value: str) -> str | None:
+        """Plain text content, such as a status description, through the redactor as content is;
+        ``None`` (and a counted failure) when the redactor fails or returns something else."""
+        try:
+            if self._redactor is not None:
+                value = snapshot_content(self._redactor(key, value))
+            if not isinstance(value, str) or len(value) > MAX_CONTENT_BYTES:
+                raise ValueError("Redacted text is not bounded text.")
+            return value
+        except Exception:
+            self._record_issue()
+            return None
 
     def _content(self, key: str, value: Any) -> str:
         # Redact before serialization, before queues and before any exporter receives content.

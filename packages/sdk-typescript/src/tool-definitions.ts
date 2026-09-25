@@ -78,6 +78,34 @@ function isCredentialKey(key: string): boolean {
   );
 }
 
+/** A URL in free text: a scheme, `://` and everything up to whitespace, a quote or `<>`. */
+const textUrl = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`]+/gi;
+/** An authorization scheme followed by its credential, as in an `Authorization` header. The
+ * credential cannot start with `=`, so `token = value` is left to the key-value rule. */
+const authorizationValue = /\b(bearer|basic|token)(\s+)[a-z0-9._~+/-][a-z0-9._~+/=-]*/gi;
+/** A `key=value` or `key: value` pair, the key optionally quoted; the value is checked later. */
+const keyValuePair =
+  /(["']?)([a-z][a-z0-9_-]{0,63})\1(\s*[:=]\s*)(["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)([^\s"',;&})\]]+)/gi;
+
+/**
+ * Removes credentials from free text a provider returned, such as an MCP call's error message,
+ * with the rules tool definitions use: each URL loses its userinfo and fragment and every query
+ * value becomes `[redacted]`, as a `url` field does (an unparseable one becomes `[redacted]`);
+ * the credential after an authorization scheme (`Bearer`, `Basic`, `Token`) and the value of a
+ * `key=value` or `key: value` pair whose key names a credential become `[redacted]`.
+ */
+export function scrubCredentialText(text: string): string {
+  const state: ScrubState = { changed: false };
+  return text
+    .replace(textUrl, (url) => scrubUrl(url, state))
+    .replace(authorizationValue, `$1$2${REDACTED}`)
+    .replace(
+      keyValuePair,
+      (pair: string, quote: string, key: string, separator: string, valueQuote: string) =>
+        isCredentialKey(key) ? `${quote}${key}${quote}${separator}${valueQuote}${REDACTED}` : pair,
+    );
+}
+
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */
 const openInferenceTool = /^llm\.tools\.(\d+)\.tool\.json_schema$/;
 
@@ -300,4 +328,19 @@ export function withToolCatalogSummary<T extends Record<string, unknown>>(source
     return source;
   }
   return { ...summary, ...source } as T;
+}
+
+/**
+ * The metadata-only summary of one JSON-encoded definition list: `hue.tool.names` and
+ * `hue.tool.definitions.sha256`, exactly as export summarizes a record's
+ * `gen_ai.tool.definitions`. Empty when the list cannot be summarized.
+ */
+export function toolCatalogSummary(definitions: string): Record<string, string | string[]> {
+  const summarized: Record<string, unknown> = withToolCatalogSummary({
+    "gen_ai.tool.definitions": definitions,
+  });
+  const summary: Record<string, string | string[]> = {};
+  for (const key of ["hue.tool.names", "hue.tool.definitions.sha256"])
+    if (key in summarized) summary[key] = summarized[key] as string | string[];
+  return summary;
 }

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
+from ._tool_definitions import scrub_credential_text
 from .transport import MAX_CONTENT_BYTES
 
 ABSENT: Any = object()
@@ -24,7 +25,9 @@ ABSENT: Any = object()
 MAX_PROVIDER_ITEMS = 128
 MAX_PROVIDER_DEFINITIONS = 512
 MAX_PROVIDER_SERVERS = 512
-_HOSTNAME_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+# Underscores are kept, as the WHATWG URL parser (and so the TypeScript SDK) keeps them: they are
+# legal in DNS labels and name real servers, such as Docker Compose services and internal hosts.
+_HOSTNAME_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
 _HOSTNAME = re.compile(rf"{_HOSTNAME_LABEL}(?:\.{_HOSTNAME_LABEL})*\Z")
 _UNSAFE_URL = re.compile(r"[\s\x00-\x1f]")
 
@@ -39,6 +42,12 @@ class HostedToolCall:
     result: Any = ABSENT
     # Low-cardinality failure marker for ``error.type``; ``None`` when the call succeeded.
     error_type: str | None = None
+    # 0-based position of the call's item in the response: the OpenAI ``output`` index or the
+    # Anthropic ``content`` block index.
+    position: int | None = None
+    # The provider's own error text for a failed OpenAI MCP call, read only when content is
+    # captured; unscrubbed and unbounded.
+    error_text: str | None = None
 
 
 @dataclass
@@ -130,13 +139,40 @@ def _is_provider_tool_item(provider: str, value: Any) -> bool:
 
 
 _ERROR_CODE = re.compile(r"[a-z0-9_]{1,64}\Z")
+# The most of a provider's error text scrubbed, and the most exported, in code points.
+MAX_ERROR_SCAN = 16_384
+MAX_ERROR_TEXT = 1_024
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def provider_error_description(value: str) -> str:
+    """A provider's error text as a failed call exports it under content capture.
+
+    Credentials are scrubbed first, then the text keeps at most 1,024 code points with ``…``
+    marking a cut; lone surrogates are replaced and NUL removed. Identical to the TypeScript
+    SDK's ``providerErrorDescription``.
+    """
+    text = _LONE_SURROGATE.sub("\ufffd", value).replace("\x00", "")
+    scanned = text[:MAX_ERROR_SCAN]
+    scrubbed = scrub_credential_text(scanned)
+    bounded = scrubbed[:MAX_ERROR_TEXT]
+    cut = len(text) > MAX_ERROR_SCAN or len(scrubbed) > MAX_ERROR_TEXT
+    return f"{bounded}…" if cut else bounded
+
+
+def _error_text(value: Any) -> str | None:
+    """An OpenAI MCP call's ``error``: its text, or an error object's string ``message``."""
+    message = value.get("message") if isinstance(value, Mapping) else value
+    return message if isinstance(message, str) and message.strip() else None
 
 
 def _error_code(value: Any) -> str:
     return value if isinstance(value, str) and _ERROR_CODE.fullmatch(value) else "error"
 
 
-def _openai_item(item: Any, activity: HostedToolActivity, capture_content: bool) -> None:
+def _openai_item(
+    item: Any, activity: HostedToolActivity, capture_content: bool, position: int
+) -> None:
     item = _data(item)
     if not isinstance(item, dict):
         return
@@ -150,6 +186,7 @@ def _openai_item(item: Any, activity: HostedToolActivity, capture_content: bool)
         arguments = _json_arguments(item.get("arguments")) if capture_content else ABSENT
         if capture_content and arguments is ABSENT:
             activity.skipped += 1
+        failed = item.get("error") is not None
         activity.calls.append(
             HostedToolCall(
                 name,
@@ -157,7 +194,9 @@ def _openai_item(item: Any, activity: HostedToolActivity, capture_content: bool)
                 _text(item.get("server_label")),
                 arguments,
                 item["output"] if capture_content and item.get("output") is not None else ABSENT,
-                "mcp_error" if item.get("error") is not None else None,
+                "mcp_error" if failed else None,
+                position=position,
+                error_text=_error_text(item["error"]) if capture_content and failed else None,
             )
         )
     elif kind == "mcp_list_tools":
@@ -212,7 +251,9 @@ def _openai_item(item: Any, activity: HostedToolActivity, capture_content: bool)
             result = (
                 item["outputs"] if capture_content and item.get("outputs") is not None else ABSENT
             )
-        activity.calls.append(HostedToolCall(name, call_id, None, arguments, result, error_type))
+        activity.calls.append(
+            HostedToolCall(name, call_id, None, arguments, result, error_type, position=position)
+        )
 
 
 def _count_truncated_provider_items(provider: str, items: Sequence[Any]) -> int:
@@ -234,7 +275,7 @@ def _openai_calls(items: list[Any], activity: HostedToolActivity, capture_conten
     activity.skipped += _count_truncated_provider_items("openai", items[count:])
     for index in range(count):
         try:
-            _openai_item(items[index], activity, capture_content)
+            _openai_item(items[index], activity, capture_content, index)
         except Exception:
             activity.skipped += 1
         # Messages, reasoning, approval requests and other items are not executed tools.
@@ -264,7 +305,7 @@ def _anthropic_calls(
             and isinstance(block.get("tool_use_id"), str)
         ):
             results[block["tool_use_id"]] = block
-    for block in blocks:
+    for position, block in enumerate(blocks):
         try:
             if not isinstance(block, dict) or block.get("type") not in (
                 "mcp_tool_use",
@@ -310,6 +351,7 @@ def _anthropic_calls(
                         else ABSENT
                     ),
                     error_type,
+                    position=position,
                 )
             )
         except Exception:

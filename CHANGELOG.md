@@ -101,6 +101,20 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   or errored result keeps its verdict whatever flag it carries, and a skip without the flag, such
   as one for an incomplete environment, is still a skip.
 
+- Provider tool spans from `recordProviderToolCalls` carry `hue.tool.call.position`, the 0-based
+  position of the call's item in the provider response (the OpenAI `output` index or the Anthropic
+  `content` block index), in both capture modes, so calls from one response that share a start
+  time keep their order. **Wire**
+- A `tools/list` span from `recordProviderToolCalls` with `captureContent: false` carries
+  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
+  any record's tool definitions; before, it carried neither. Descriptions and schemas are still
+  exported only with content capture. **Wire**
+- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
+  its ERROR status description, credentials scrubbed (URL userinfo, query values and fragments,
+  authorization-scheme credentials, credential-named `key=value` and `key: value` pairs) and cut
+  to 1,024 characters; the `redact` hook sees it as `status.message`. Without content capture the
+  span keeps `error.type` only. **Wire**
+
 #### Changed
 
 - A downloaded pinned file that differs from its manifest now raises `CaseFileError`
@@ -148,6 +162,9 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   even under a text media type, as Hue reads it, so such a text (`AAAA…`, for example) is hashed
   as the bytes it decodes to and stays inline while those fit in 64 KiB. A text file's own text
   is still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
+- `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
+  throws when read: the item is skipped and counted, and the other calls are recorded, as the
+  Python SDK does.
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
   `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
   the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
@@ -745,6 +762,18 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### [0.6.1] - 2026-09-25
 
+#### Added
+
+- Provider tool spans from `record_provider_tool_calls` carry `hue.tool.call.position`, the
+  0-based position of the call's item in the provider response, in both capture modes. **Wire**
+- A `tools/list` span from `record_provider_tool_calls` with `capture_content=False` carries
+  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
+  any record's tool definitions. **Wire**
+- With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters exactly as the
+  TypeScript SDK does, after your `redactor` sees it as `status.message`. Without content capture
+  the span keeps `error.type` only. **Wire**
+
 #### Fixed
 
 - **Wire.** A large inline file part in a recorded message is exported with the `sha256` and
@@ -756,6 +785,9 @@ No registry release is claimed until publication and registry acceptance complet
   text (`AAAA…`, for example) is hashed as the bytes it decodes to and stays inline while those
   fit in 64 KiB. A text file's own text is still hashed as UTF-8. This matches the TypeScript
   SDK, checked against a shared fixture.
+- `server.address` keeps a host name with an underscore, such as a Docker Compose service
+  (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
+  dropped.
 - Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation

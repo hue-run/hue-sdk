@@ -17,6 +17,14 @@ and their results, including an error. Credentials are placeholders. The Python 
 fixture through its hosted-call recorder; the TypeScript suite keeps it as shared fixture material
 while exercising its parser limits directly.
 
+# Provider error text fixture
+
+`provider-error-text.json` is synthetic: error messages a hosted MCP call can report, each with
+the text both SDKs export as the failed span's status description under content capture once
+credentials are scrubbed (URL userinfo, query values and fragments, authorization-scheme
+credentials, credential-named `key=value` and `key: value` pairs) and the text bounded. Credentials
+are placeholders. The Python suite reads the same file.
+
 # Tool-definition digest fixture
 
 `tool-definitions.json` is synthetic: a hosted MCP provider tool with placeholder credentials,

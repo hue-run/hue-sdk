@@ -61,6 +61,47 @@ def _is_credential_key(key: Any) -> bool:
     )
 
 
+# JavaScript's ``\s``, spelled out so both SDKs split free text at the same characters.
+_JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+# A URL in free text: a scheme, ``://`` and everything up to whitespace, a quote or ``<>``.
+_TEXT_URL = re.compile(rf"\b[a-z][a-z0-9+.-]*://[^{_JS_SPACE}\"'<>`]+", re.IGNORECASE | re.ASCII)
+# An authorization scheme followed by its credential, as in an ``Authorization`` header. The
+# credential cannot start with ``=``, so ``token = value`` is left to the key-value rule.
+_AUTHORIZATION_VALUE = re.compile(
+    rf"\b(bearer|basic|token)([{_JS_SPACE}]+)[a-z0-9._~+/-][a-z0-9._~+/=-]*",
+    re.IGNORECASE | re.ASCII,
+)
+# A ``key=value`` or ``key: value`` pair, the key optionally quoted; the value is checked later.
+_KEY_VALUE_PAIR = re.compile(
+    rf"([\"']?)([a-z][a-z0-9_-]{{0,63}})\1([{_JS_SPACE}]*[:=][{_JS_SPACE}]*)([\"']?)"
+    rf"(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)[{_JS_SPACE}])"
+    rf"([^{_JS_SPACE}\"',;&}})\]]+)",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def scrub_credential_text(text: str) -> str:
+    """Remove credentials from free text a provider returned, such as an MCP error message.
+
+    The rules are the tool definitions': each URL loses its userinfo and fragment and every query
+    value becomes ``[redacted]``, as a ``url`` field does (an unparseable one becomes
+    ``[redacted]``); the credential after an authorization scheme (``Bearer``, ``Basic``,
+    ``Token``) and the value of a ``key=value`` or ``key: value`` pair whose key names a
+    credential become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
+    """
+    scrub = _Scrub()
+    text = _TEXT_URL.sub(lambda match: scrub.url(match.group()), text)
+    text = _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
+
+    def pair(match: re.Match[str]) -> str:
+        quote, key, separator, value_quote = match[1], match[2], match[3], match[4]
+        if not _is_credential_key(key):
+            return match.group()
+        return f"{quote}{key}{quote}{separator}{value_quote}{REDACTED}"
+
+    return _KEY_VALUE_PAIR.sub(pair, text)
+
+
 def _is_url_key(key: Any) -> bool:
     if not isinstance(key, str):
         return False
@@ -717,3 +758,17 @@ def with_tool_catalog_summary(source: Mapping[str, Any]) -> Mapping[str, Any]:
         # Metadata-only export removes the definitions whether or not they can be summarized.
         return source
     return {**summary, **source}
+
+
+def tool_catalog_summary(definitions: str) -> dict[str, Any]:
+    """The metadata-only summary of one JSON-encoded definition list.
+
+    ``hue.tool.names`` and ``hue.tool.definitions.sha256``, exactly as export summarizes a
+    record's ``gen_ai.tool.definitions``; empty when the list cannot be summarized.
+    """
+    summarized = with_tool_catalog_summary({"gen_ai.tool.definitions": definitions})
+    return {
+        key: summarized[key]
+        for key in ("hue.tool.names", "hue.tool.definitions.sha256")
+        if key in summarized
+    }

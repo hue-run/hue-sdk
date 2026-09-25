@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "input": "Tool 'search_threads' failed: upstream timeout after 30s",
+      "expected": "Tool 'search_threads' failed: upstream timeout after 30s"
+    },
+    {
+      "input": "401 Unauthorized calling https://synthetic-user:synthetic-pass@mcp.example.test/sse?api_key=synthetic-key&x=1#frag",
+      "expected": "401 Unauthorized calling https://mcp.example.test/sse?api_key=%5Bredacted%5D&x=%5Bredacted%5D"
+    },
+    {
+      "input": "Authorization: Bearer synthetic-bearer-token was rejected",
+      "expected": "Authorization: Bearer [redacted] was rejected"
+    },
+    {
+      "input": "{\"error\":\"invalid_grant\",\"access_token\":\"synthetic-access\",\"note\":\"x\"}",
+      "expected": "{\"error\":\"invalid_grant\",\"access_token\":\"[redacted]\",\"note\":\"x\"}"
+    },
+    {
+      "input": "password=synthetic-pw&user=bob; X-Api-Key: synthetic-api-key",
+      "expected": "password=[redacted]&user=bob; X-Api-Key: [redacted]"
+    },
+    {
+      "input": "token = 'synthetic-token-2'",
+      "expected": "token = '[redacted]'"
+    },
+    {
+      "input": "Basic c3ludGhldGljOnBhc3M= denied",
+      "expected": "Basic [redacted] denied"
+    },
+    {
+      "input": "see http://[::1]:8080/path?token=synthetic-ipv6#x",
+      "expected": "see http://[::1]:8080/path?token=%5Bredacted%5D"
+    },
+    {
+      "input": "connect http://synthetic:secret@[bad/path failed",
+      "expected": "connect [redacted] failed"
+    },
+    {
+      "input": "Failed to reach https://mcp.example.test/sse.",
+      "expected": "Failed to reach https://mcp.example.test/sse."
+    },
+    {
+      "input": "bad \u0000 nul \ud800 lone",
+      "expected": "bad  nul \ufffd lone"
+    },
+    {
+      "input": "Upstream said: {'client_secret': 'synthetic-client-secret', 'status': 403}",
+      "expected": "Upstream said: {'client_secret': '[redacted]', 'status': 403}"
+    },
+    {
+      "input": "refresh_token=synthetic-refresh, retry later",
+      "expected": "refresh_token=[redacted], retry later"
+    },
+    {
+      "input": "Token synthetic-token-value is expired",
+      "expected": "Token [redacted] is expired"
+    },
+    {
+      "input": "wss://synthetic-user@realtime.example.test/socket?session=abc rejected",
+      "expected": "wss://realtime.example.test/socket?session=%5Bredacted%5D rejected"
+    },
+    {
+      "input": "\u00dcn\u00efc\u00f6d\u00e9 message with \ud83d\ude00 emoji and no secrets",
+      "expected": "\u00dcn\u00efc\u00f6d\u00e9 message with \ud83d\ude00 emoji and no secrets"
+    },
+    {
+      "input": "HTTP 502 from mcp_server:8080 (Bad Gateway)",
+      "expected": "HTTP 502 from mcp_server:8080 (Bad Gateway)"
+    }
+  ]
+}
