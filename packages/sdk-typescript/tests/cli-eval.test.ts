@@ -5,6 +5,9 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
+import protobuf from "protobufjs/light.js";
+import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { spawnAgentCommand } from "../src/cli/eval.js";
 import { TargetCancelledError } from "../src/evals.js";
 import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
@@ -17,6 +20,10 @@ const digest = "d".repeat(64);
 const SPAWN_TIMEOUT = 90_000;
 
 type Verdict = "pass" | "fail" | "error" | "none";
+
+const traceRequest = protobuf.Root.fromJSON(schema).lookupType(
+  "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
+);
 
 /** Loopback Hue stand-in: one published Scenario, worlds, executions and deferred verdicts. */
 function hueStandIn(
@@ -115,6 +122,8 @@ function hueStandIn(
     completions: [] as Record<string, unknown>[],
     /** Trace evidence each completion declared, in completion order. */
     evidence: [] as Record<string, unknown>[],
+    /** Exported spans, decoded: name and attribute keys. */
+    spans: [] as { name: string; attributes: string[] }[],
     worldCreates: [] as Record<string, unknown>[],
     experiments: [] as Record<string, unknown>[],
     register: [] as Record<string, unknown>[],
@@ -167,7 +176,22 @@ function hueStandIn(
         });
       if (path.startsWith("/otlp/")) {
         calls.otlp++;
-        await request.arrayBuffer();
+        let bytes = Buffer.from(await request.arrayBuffer());
+        if (path.endsWith("/traces")) {
+          if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
+          const decoded = traceRequest.toObject(traceRequest.decode(bytes)) as {
+            resourceSpans?: {
+              scopeSpans?: { spans?: { name: string; attributes?: { key: string }[] }[] }[];
+            }[];
+          };
+          for (const resource of decoded.resourceSpans ?? [])
+            for (const scope of resource.scopeSpans ?? [])
+              for (const span of scope.spans ?? [])
+                calls.spans.push({
+                  name: span.name,
+                  attributes: (span.attributes ?? []).map((attribute) => attribute.key),
+                });
+        }
         if (path.endsWith("/traces") && options.traces === "refuse")
           return new Response(null, { status: 400 });
         if (path.endsWith("/traces") && options.traces === "drop")
@@ -757,11 +781,17 @@ describe("hue eval", () => {
         expect([...f.worlds.values()].map((world) => [world.status, world.steps])).toEqual([
           ["completed", [{ action: "save", args: { note: "refund charge ch_2" } }]],
         ]);
-        // Metadata-only by default: the completion carries no output.
+        // The output is stored by default, while span content stays off without --content.
         expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
         expect(f.calls.evidence).toEqual([{ traceEvidence: "required" }]);
-        expect(f.calls.completions[0]).not.toHaveProperty("output");
+        expect(f.calls.completions[0]).toMatchObject({
+          output: { answer: "saved", caseKey: "refund", hasMcp: true },
+        });
         expect(f.calls.otlp).toBeGreaterThan(0);
+        const caseSpan = f.calls.spans.find((span) => span.name === "hue.experiment.case")!;
+        expect(caseSpan).toBeDefined();
+        expect(caseSpan.attributes).not.toContain("input.value");
+        expect(caseSpan.attributes).not.toContain("output.value");
         expect(await readFile(join(cwd, ".hue", "eval", ".gitignore"), "utf8")).toBe("*\n");
         expect(f.calls.requests.filter((line) => line === "GET /case-conversions")).toHaveLength(1);
       } finally {
@@ -979,8 +1009,12 @@ describe("hue eval", () => {
         );
         expect(result.status).toBe(1);
         expectNoSecrets(result);
+        // Error messages are stored by default too.
         expect(crashing.calls.completions).toEqual([
-          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+          expect.objectContaining({
+            state: "error",
+            error: { type: "TargetError", message: "The agent command exited with code 3" },
+          }),
         ]);
         expect([...crashing.worlds.values()][0]?.status).toBe("abandoned");
         const document = JSON.parse(result.stdout) as Record<string, any>;
@@ -1053,7 +1087,10 @@ describe("hue eval", () => {
         expect(result.status).toBe(1);
         expectNoSecrets(result);
         expect(f.calls.completions).toEqual([
-          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+          expect.objectContaining({
+            state: "error",
+            error: { type: "TargetError", message: "The agent command timed out after 1 seconds" },
+          }),
         ]);
         // The grandchild writes 2500 ms after the agent starts. Signalling only the shell
         // would leave it holding HUE_MCP_TOKEN and writing after Hue failed the case.
@@ -1097,7 +1134,13 @@ describe("hue eval", () => {
           expect(result.status).toBe(1);
           expectNoSecrets(result);
           expect(f.calls.completions).toEqual([
-            expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+            expect.objectContaining({
+              state: "error",
+              error: {
+                type: "TargetError",
+                message: "The agent command timed out after 1 seconds",
+              },
+            }),
           ]);
           pid = Number(await readFile(survivor, "utf8"));
           // The shell exits on SIGTERM; the agent it started does not, and would keep its world
@@ -1143,7 +1186,13 @@ describe("hue eval", () => {
           expect(text.status).toBe(1);
           // The case is failed, not left started: the outcome is kept and the evidence omitted.
           expect(f.calls.completions).toEqual([
-            expect.objectContaining({ state: "error", error: { type: "TelemetryNotAccepted" } }),
+            expect.objectContaining({
+              state: "error",
+              error: {
+                type: "TelemetryNotAccepted",
+                message: expect.stringMatching(/^telemetry_not_accepted: traces failed/),
+              },
+            }),
           ]);
           // Without its evidence the case keeps no output a grader could pass.
           expect(f.calls.completions[0]).not.toHaveProperty("output");
@@ -1185,6 +1234,52 @@ describe("hue eval", () => {
       },
       SPAWN_TIMEOUT * 2,
     );
+
+  test(
+    "--no-output keeps outputs and error messages out of Hue; --worker refuses it",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      try {
+        const args = [
+          "--scenario",
+          "Refund flow",
+          "--command",
+          `${process.execPath} agent-command.mjs`,
+          "--origin",
+          f.baseUrl,
+          "--wait",
+          "0",
+          "--no-output",
+        ];
+        const answered = await hue([...args, "--checkpoint-dir", join(cwd, "answered")], { cwd });
+        expect(answered.status).toBe(0);
+        const crashed = await hue([...args, "--checkpoint-dir", join(cwd, "crashed")], {
+          cwd,
+          env: { FAIL_AGENT: "1" },
+        });
+        expect(crashed.status).toBe(1);
+        expect(f.calls.completions).toEqual([
+          expect.objectContaining({ state: "succeeded" }),
+          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+        ]);
+        expect(f.calls.completions[0]).not.toHaveProperty("output");
+        expect(f.calls.completions[1]).not.toHaveProperty("error.message");
+        const worker = await hue(
+          ["--worker", "./hue-agent.ts", "--origin", f.baseUrl, "--no-output"],
+          {
+            cwd,
+          },
+        );
+        expect(worker.status).toBe(2);
+        expect(worker.stderr).toContain("--no-output applies to one-shot runs");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
 
   test(
     "a second interrupt during the stop kills the agent's whole group at once",

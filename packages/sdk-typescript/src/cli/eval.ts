@@ -139,8 +139,9 @@ Output and limits:
   --name <run name>               Run name (default: <agent key> @ <revision>, hashes shortened)
   --baseline <experiment id|url>  Compare verdicts with a previous experiment
   --json                          Print one JSON document on stdout; progress goes to stderr
-  --content                       Capture telemetry content; one-shot also persists
-                                  outputs/explanations (--worker always persists them)
+  --content                       Capture telemetry content (span inputs, outputs and messages)
+  --no-output                     One-shot: do not store case outputs, error messages and
+                                  explanations in Hue (stored by default; --worker always stores)
   --save-version                  Freeze an unsaved eval-set version before running
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
   --concurrency <n>               Cases in flight, 1-64 (default: 1)
@@ -197,6 +198,7 @@ function parse(argv: string[]) {
         baseline: { type: "string" },
         json: { type: "boolean", default: false },
         content: { type: "boolean", default: false },
+        "no-output": { type: "boolean", default: false },
         "save-version": { type: "boolean", default: false },
         "checkpoint-dir": { type: "string" },
         concurrency: { type: "string" },
@@ -1098,7 +1100,9 @@ async function runOnce(
       scorerVersionIds: pins.scorerVersionIds,
     },
     runName,
-    persistResultContent: values.content,
+    // Outputs, error messages and explanations are stored unless opted out; --content governs
+    // only the telemetry.
+    persistResultContent: !values["no-output"],
     traceEvidence: { mode: "required" },
     // A case whose telemetry Hue did not accept fails instead of staying started.
     traceNotAccepted: "fail_case",
@@ -1236,7 +1240,9 @@ async function runDirect(
       hue: run.hue,
       experimentId,
       checkpointDirectory: join(store.directory, experimentId),
-      persistResultContent: values.content,
+      // Outputs, error messages and explanations are stored unless opted out; --content governs
+      // only the telemetry.
+      persistResultContent: !values["no-output"],
       traceEvidence: { mode: "required" },
       traceNotAccepted: "fail_case",
       onTelemetryNotAccepted: telemetry.report,
@@ -1483,6 +1489,10 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     };
     if (values.worker && (values.mode || values["set-version"] || values.scorer?.length))
       throw new UsageError("--worker takes no selection; Hue chooses the run to execute");
+    if (values.worker && values["no-output"])
+      throw new UsageError(
+        "--no-output applies to one-shot runs; a run launched from Hue always stores its outputs",
+      );
     const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;
     // One adapter module serves both case kinds; the direct context announces itself with `mode`.
     const agents: Agents = {

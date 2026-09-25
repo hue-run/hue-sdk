@@ -10,6 +10,15 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- Behavior change: one-shot `hue eval` stores each case's output, error message and explanations in
+  Hue by default, as `--worker` already did, so answer checks can grade the output and the run page
+  shows it. `--content` now governs only telemetry content capture, which stays off by default.
+  `--no-output` keeps outputs, error messages and explanations out of a one-shot run; `--worker`
+  refuses it. Migration: an interrupted one-shot run keeps the choice it started with, so resume
+  one started without `--content` by an earlier version with `--no-output`.
+
 #### Added
 
 - `traceNotAccepted: "fail_case"` for `runExperiment`, `runSimulation` and `runLocalAgent`: a case

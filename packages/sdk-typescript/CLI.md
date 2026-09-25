@@ -425,13 +425,17 @@ version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_
 (default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given; `--origin`
 overrides the origin. Telemetry content capture stays off unless `--content` is passed; the
 examples pass it so the run's case spans carry content. Model and tool spans inside the agent come
-only from the agent's own instrumentation. In one-shot mode `--content` also decides whether case
-outputs, error messages and explanations are persisted to Hue. `--worker` always persists them,
-because a run launched from Hue is read on its run page: that is `runLocalAgent()`'s contract and
-`--content` does not change it. Trace evidence is required for every case: when Hue does not
-accept a case's traces or logs, the case is completed as failed (error `TelemetryNotAccepted`,
-evidence omitted as `telemetry_not_accepted`, no output or generated files attached) instead of
-being left started, and the run goes on. Stderr names the case as it completes, with the export
+only from the agent's own instrumentation. Case outputs, error messages and explanations are
+stored in Hue whether or not `--content` is passed, so a case's answer can be graded and read on
+its run page; `--no-output` keeps them out in one-shot mode. `--worker` always stores them, because
+a run launched from Hue is read on its run page (that is `runLocalAgent()`'s contract), and refuses
+`--no-output`. An interrupted one-shot run keeps the choice it started with: resume one that an
+earlier SDK started without `--content` by passing `--no-output`.
+
+Trace evidence is required for every case: when Hue does not accept a case's traces or logs, the
+case is completed as failed (error `TelemetryNotAccepted`, evidence omitted as
+`telemetry_not_accepted`, no output or generated files attached) instead of being left started,
+and the run goes on. Stderr names the case as it completes, with the export
 issue counts, for example
 `[refund] telemetry not accepted, case failed: telemetry_not_accepted: traces failed 1 (HTTP 400)`;
 the case counts as an error in the table and JSON whatever its scores, and the command exits 1.
@@ -493,5 +497,5 @@ deferred (`deferUnboundLocalScorers`) and Hue's grading executor scores the uplo
 evaluator-only pinned files such as a legal corpus are never downloaded. `Waiting for Hue
 checks...` then covers that grading, so size `--wait` to the evaluator's runtime. The
 `--json` document gains `"mode": "direct"` and `"deferredScorerVersionIds"`. Exit codes, `--baseline`,
-`--content` and checkpoints behave as for Scenarios; generated documents are uploaded with or
-without `--content`.
+`--content`, `--no-output` and checkpoints behave as for Scenarios; generated documents are
+uploaded with or without them.
