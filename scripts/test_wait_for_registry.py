@@ -38,6 +38,8 @@ def scripted(states):
 FULL = "https://registry.npmjs.org/@hue-run%2fsdk/0.10.0"
 ABBREVIATED = "https://registry.npmjs.org/@hue-run%2fsdk"
 SIMPLE = "https://pypi.org/simple/hue-run/"
+RELEASE = "https://pypi.org/pypi/hue-run/0.6.1/json"
+FILES = ["hue_run-0.6.1-py3-none-any.whl", "hue_run-0.6.1.tar.gz"]
 PUBLISHED = {
     FULL: {"version": "0.10.0", "dist": {"integrity": "sha512-x"}},
     ABBREVIATED: {"versions": {"0.9.0": {}, "0.10.0": {}}, "dist-tags": {"latest": "0.10.0"}},
@@ -61,22 +63,49 @@ class WaitTests(unittest.TestCase):
         poll["index"] = 2
         self.assertEqual(registry.npm_missing("0.10.0", "latest", fetch), [])
 
-    def test_pypi_waits_for_both_files_in_the_simple_index(self):
-        listed = lambda *names: {SIMPLE: {"files": [{"filename": name} for name in names]}}  # noqa: E731
+    def test_pypi_waits_for_both_files_in_the_index_and_the_version_document(self):
+        def listed(*names):
+            return {SIMPLE: {"files": [{"filename": name} for name in names]}}
+
+        released = {RELEASE: {"urls": [{"filename": name} for name in FILES]}}
         fetch, poll = scripted(
             [
                 {},
                 listed("hue_run-0.6.0-py3-none-any.whl", "hue_run-0.6.1-py3-none-any.whl"),
-                listed("hue_run-0.6.1-py3-none-any.whl", "hue_run-0.6.1.tar.gz"),
+                listed(*FILES),
+                {**listed(*FILES), **released},
             ]
         )
-        self.assertEqual(len(registry.pypi_missing("0.6.1", fetch)), 2)
+        self.assertEqual(len(registry.pypi_missing("0.6.1", fetch)), 4)
         poll["index"] = 1
         self.assertEqual(
-            registry.pypi_missing("0.6.1", fetch), ["hue_run-0.6.1.tar.gz in the simple index"]
+            registry.pypi_missing("0.6.1", fetch),
+            ["hue_run-0.6.1.tar.gz in the simple index"]
+            + [f"{name} in the version document" for name in FILES],
         )
+        # The index lists both files while the version document still lags.
         poll["index"] = 2
+        self.assertEqual(
+            registry.pypi_missing("0.6.1", fetch),
+            [f"{name} in the version document" for name in FILES],
+        )
+        poll["index"] = 3
         self.assertEqual(registry.pypi_missing("0.6.1", fetch), [])
+
+    def test_an_html_simple_index_is_read_as_pip_reads_it(self):
+        html = "".join(f'<a href="https://files.example/{name}#sha256=0">{name}</a>\n' for name in FILES)
+
+        def urlopen(request, timeout):
+            body = html if request.full_url == SIMPLE else '{"urls": []}'
+            return io.BytesIO(body.encode())
+
+        with patch.object(registry, "urlopen", urlopen):
+            index = registry.fetch_json(SIMPLE, {})
+            self.assertEqual(index, {"html": html})
+            self.assertEqual(
+                registry.pypi_missing("0.6.1", registry.fetch_json),
+                [f"{name} in the version document" for name in FILES],
+            )
 
     def test_wait_returns_once_served_and_fails_at_its_bound(self):
         clock = Clock()
