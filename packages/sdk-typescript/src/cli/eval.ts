@@ -29,6 +29,7 @@ import type {
 import { TargetResult } from "../evals/types.js";
 import { CheckpointIdentityError, CheckpointStore } from "../evals/checkpoint.js";
 import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
+import { safeFilename } from "../evals/files.js";
 import { digest } from "../evals/json.js";
 import { runLocalAgent } from "../evals/local-worker.js";
 import {
@@ -602,7 +603,9 @@ const TEXT_CONTENT_TYPES = new Set(["text/plain", "text/csv", "application/json"
  * the case's credentials. Other documents, a file declared by path and text that is not UTF-8
  * are uploaded as written. */
 function redactFile(file: OutputFile, secrets: string[]): OutputFile {
-  const filename = redactSecrets(file.filename, secrets);
+  // A name that is not a string is left for staging to refuse.
+  const filename =
+    typeof file.filename === "string" ? redactSecrets(file.filename, secrets) : file.filename;
   if (filename !== file.filename) file = { ...file, filename };
   if (!file.bytes || !TEXT_CONTENT_TYPES.has(file.contentType)) return file;
   let text: string;
@@ -615,6 +618,30 @@ function redactFile(file: OutputFile, secrets: string[]): OutputFile {
   return redacted === text ? file : { ...file, bytes: new TextEncoder().encode(redacted) };
 }
 
+/** Generated files cleared of the case's credentials. A name redaction made equal to another
+ * file's, as staging compares them, gains `-2`, `-3`, … before its extension, so every file is
+ * still taken. */
+function redactFiles(files: OutputFile[], secrets: string[]): OutputFile[] {
+  const redacted = files.map((file) => redactFile(file, secrets));
+  const renamed = redacted.map((file, index) => file.filename !== files[index]!.filename);
+  const taken = new Set(
+    redacted.flatMap((file, index) =>
+      !renamed[index] && typeof file.filename === "string" ? [safeFilename(file.filename)] : [],
+    ),
+  );
+  return redacted.map((file, index) => {
+    if (!renamed[index]) return file;
+    const dot = file.filename.lastIndexOf(".");
+    const stem = dot > 0 ? file.filename.slice(0, dot) : file.filename;
+    const extension = dot > 0 ? file.filename.slice(dot) : "";
+    let filename = file.filename;
+    for (let copy = 2; taken.has(safeFilename(filename)); copy++)
+      filename = `${stem}-${copy}${extension}`;
+    taken.add(safeFilename(filename));
+    return filename === file.filename ? file : { ...file, filename };
+  });
+}
+
 /** An answer with its strings redacted, keys included. Deeper than any output the runner
  * accepts, a value is left for the runner to refuse. */
 function redactAnswer(value: unknown, secrets: string[], depth = 0): unknown {
@@ -623,7 +650,7 @@ function redactAnswer(value: unknown, secrets: string[], depth = 0): unknown {
   if (value instanceof TargetResult)
     return new TargetResult(
       redactAnswer(value.output, secrets, depth + 1) as JsonValue | undefined,
-      value.files.map((file) => redactFile(file, secrets)),
+      redactFiles(value.files, secrets),
     );
   if (Array.isArray(value)) return value.map((item) => redactAnswer(item, secrets, depth + 1));
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)

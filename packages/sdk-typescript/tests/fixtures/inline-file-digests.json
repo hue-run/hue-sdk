@@ -204,6 +204,24 @@
         "sha256": "833659d7dde421c105b0a385bce14e1ecf162e6ef81c5f0737d0935a63738e81",
         "size": 68019
       }
+    },
+    {
+      "name": "base64 characters before a final newline are text",
+      "part": {
+        "type": "blob",
+        "modality": "document"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": "QUI\n"
+      },
+      "expected": {
+        "sha256": "23c5588e105a1766816cf6ca7c6039e7fcbd1dab475afa14eb339783ad6e4726",
+        "size": 68004
+      }
     }
   ]
 }

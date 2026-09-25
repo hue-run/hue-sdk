@@ -162,9 +162,10 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   answer.
 - `hue eval` also replaces the credentials it redacts from the answer in the UTF-8 `.txt`, `.csv`
   and `.json` documents it collects from `output/`, and in every generated file's name, before
-  uploading them. PDF, Office and image
-  documents and files an adapter returns by `path` are uploaded as written, so an agent must still
-  never write credentials to `output/`.
+  uploading them; a name that redaction makes equal to another file's gains `-2`, `-3`, … before
+  its extension, so both are still uploaded. PDF, Office and image documents and files an adapter
+  returns by `path` are uploaded as written, so an agent must still never write credentials to
+  `output/`.
 - `hue eval --case` and `resolveScenarioPins` accept the published eval set case's own ID, the one
   Hue shows on the case page, and URLs naming `/cases/<id>` or `/case-conversions/<id>`. Before,
   only the case conversion's ID or a `/scenarios/<id>` URL resolved, and the case's own ID failed

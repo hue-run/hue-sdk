@@ -902,6 +902,7 @@ writeFileSync(out + "/rows.json", JSON.stringify([{ key }]));
 writeFileSync(out + "/latin1.txt", Buffer.concat([Buffer.from([0xff]), Buffer.from(key)]));
 writeFileSync(out + "/chart.png", Buffer.concat([Buffer.from([0x89, 0x50]), Buffer.from(key)]));
 writeFileSync(out + "/report-" + key + ".csv", "a,b\\n");
+writeFileSync(out + "/report-[redacted].csv", "c,d\\n");
 process.stdout.write(key);
 `,
     );
@@ -932,10 +933,12 @@ process.stdout.write(key);
       expect(JSON.parse(uploaded("rows.json").toString())).toEqual([{ key: "[redacted]" }]);
       expect(uploaded("latin1.txt").subarray(1).toString()).toBe(key);
       expect(uploaded("chart.png").subarray(2).toString()).toBe(key);
-      // A generated file's name is cleared of it too.
+      // A generated file's name is cleared of it too, and stays distinct from the agent's own
+      // file of the redacted name, so both are uploaded.
       const names = [...standIn.artifacts.values()].map((stored) => stored.filename);
-      expect(names).toContain("report-[redacted].csv");
       expect(names.join("\n")).not.toContain(key);
+      expect(uploaded("report-[redacted].csv").toString()).toBe("c,d\n");
+      expect(uploaded("report-[redacted]-2.csv").toString()).toBe("a,b\n");
     } finally {
       standIn.stop();
     }
