@@ -428,11 +428,11 @@ examples pass it so the run's case spans carry content. Model and tool spans ins
 only from the agent's own instrumentation. In one-shot mode `--content` also decides whether case
 outputs, error messages and explanations are persisted to Hue. `--worker` always persists them,
 because a run launched from Hue is read on its run page: that is `runLocalAgent()`'s contract and
-`--content` does not change it. Trace evidence is required for every case: when Hue does not accept a case's traces or logs, the
-case is completed as failed (error `TelemetryNotAccepted`, evidence omitted as
-`telemetry_not_accepted`, no output or generated files attached) instead of being left started,
-and the run goes on. Stderr names the case as it completes, with the export issue counts, for
-example
+`--content` does not change it. Trace evidence is required for every case: when Hue does not
+accept a case's traces or logs, the case is completed as failed (error `TelemetryNotAccepted`,
+evidence omitted as `telemetry_not_accepted`, no output or generated files attached) instead of
+being left started, and the run goes on. Stderr names the case as it completes, with the export
+issue counts, for example
 `[refund] telemetry not accepted, case failed: telemetry_not_accepted: traces failed 1 (HTTP 400)`;
 the case counts as an error in the table and JSON whatever its scores, and the command exits 1.
 Counts carry signals, kinds, HTTP statuses and record numbers only, never content or credentials.
