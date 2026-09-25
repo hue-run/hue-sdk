@@ -614,9 +614,10 @@ their agents with `runLocalAgent()`; setup does not register workers or launch s
 
 ### Command-line evaluation
 
-The `hue eval` command, shipped in TypeScript `0.5.0`, wraps `runSimulation()` and
-`runLocalAgent()` for an adapter file or a shell command: `hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run
-from a published case's immutable pins, runs the agent in one isolated world per case, waits
+The `hue eval` command, shipped in TypeScript `0.5.0` (`--case` since `0.6.0`, `--scenario`
+before), wraps `runSimulation()` and `runLocalAgent()` for an adapter file or a shell command:
+`hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run from a published case's
+immutable pins, runs the agent in one isolated world per case, waits
 for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
 `--worker` registers the same adapter for runs launched from Hue. It needs a Read and
 write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is

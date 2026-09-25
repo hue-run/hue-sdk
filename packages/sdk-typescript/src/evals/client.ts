@@ -227,7 +227,9 @@ export class EvaluationClient {
       if (seconds === undefined) return response;
       await response.body?.cancel().catch(() => undefined);
       // Never sooner than asked; the jitter spreads out parallel requests refused together.
-      await new Promise((resolve) => setTimeout(resolve, seconds * 1000 * (1 + Math.random() / 2)));
+      await new Promise((resolve) =>
+        setTimeout(resolve, seconds * 1000 * (1 + Math.random() * 0.5)),
+      );
     }
   }
   private async request<T>(
