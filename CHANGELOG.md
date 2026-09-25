@@ -29,8 +29,9 @@ refuses to publish a version without a matching entry below.
   within a two-minute lease, and a 47-second verification failed at the client's 10-second
   timeout. A completion that times out, finds verification running (409) or is refused with 429 or
   503 now reads the artifact until it is ready or leaves verification, completing again while it
-  verifies, for up to three minutes; a mismatched, cancelled or abandoned artifact is still
-  refused. A resumed upload whose artifact is already verifying no longer asks for another upload
+  verifies, and up to three more times when a 429, 503 or lost response left it unverified, for up
+  to three minutes; a mismatched, cancelled or abandoned artifact, or one a 409 left unverified,
+  is still refused. A resumed upload whose artifact is already verifying no longer asks for another upload
   capability, which Hue refuses then, and settles on the same artifact.
 - `hue eval` exports its own telemetry, and so each case's required trace, with a 30-second
   deadline instead of 10 seconds, retries included, so a slow acknowledgement or a `Retry-After`

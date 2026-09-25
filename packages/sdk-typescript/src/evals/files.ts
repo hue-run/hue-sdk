@@ -386,10 +386,11 @@ function mayStillVerify(error: unknown): boolean {
 
 /**
  * Completes an artifact's verification and returns the state it settles in. When a completion
- * times out or finds verification already running, the artifact is read after a pause: ready is
- * returned, any state but verifying is returned for the caller to refuse (a resume uploads a
- * rejected artifact again), and a verification still running is completed again, which Hue
- * refuses while its lease holds and restarts once it lapsed, all within `timing.settleMillis`.
+ * times out, finds verification already running or is refused for now, the artifact is read after
+ * a pause: ready is returned; verifying is completed again, which Hue refuses while its lease
+ * holds and restarts once it lapsed; an artifact a retryable refusal (a lost response, 429 or 503)
+ * left unverified is completed again up to three times; any other state is returned for the
+ * caller to refuse (a resume uploads a rejected artifact again). All within `timing.settleMillis`.
  */
 async function settleArtifact(
   client: EvaluationClient,
@@ -398,11 +399,14 @@ async function settleArtifact(
 ): Promise<ArtifactReservation["state"]> {
   const deadline = Date.now() + timing.settleMillis;
   let pause = timing.pollMillis;
+  let retries = 0;
   for (;;) {
+    let refusedForNow: boolean;
     try {
       return (await client.completeArtifact(id)).state;
     } catch (error) {
       if (!mayStillVerify(error) || Date.now() >= deadline) throw error;
+      refusedForNow = (error as HueApiError).status !== 409;
     }
     await new Promise((resolve) =>
       setTimeout(resolve, Math.max(0, Math.min(pause, deadline - Date.now()))),
@@ -414,7 +418,13 @@ async function settleArtifact(
     } catch (error) {
       if (!mayStillVerify(error)) throw error;
     }
-    if (current && current.state !== "verifying") return current.state;
+    if (current?.state === "ready") return current.state;
+    const unverified =
+      current &&
+      ["reserved", "rejected"].includes(current.state) &&
+      current.failureCode !== "mismatch";
+    if (current && current.state !== "verifying" && !(unverified && refusedForNow && retries++ < 3))
+      return current.state;
     if (Date.now() >= deadline)
       throw new Error(
         `Hue was still verifying generated file ${id} after ${Math.round(timing.settleMillis / 1000)} seconds`,

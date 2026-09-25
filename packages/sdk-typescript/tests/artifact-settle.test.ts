@@ -13,7 +13,8 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
  * completion marks the artifact verifying at once and ready `verifyMillis` later, whether or not
  * the client is still waiting, and Hue's rules for a verification in progress apply.
  */
-function slowArtifacts(verifyMillis: number) {
+function slowArtifacts(verifyMillis: number, options: { refuseCompletions?: number } = {}) {
+  let refusals = options.refuseCompletions ?? 0;
   const calls = { reserves: 0, uploads: 0, completes: 0, reads: 0 };
   const reservations = new Map<string, string>();
   const artifacts = new Map<
@@ -79,6 +80,8 @@ function slowArtifacts(verifyMillis: number) {
       if (match[2] === "complete") {
         calls.completes++;
         if (stored.state === "ready") return Response.json(view(stored));
+        // Busy before verification starts: the artifact stays reserved.
+        if (refusals > 0 && refusals--) return new Response(null, { status: 503 });
         if (stored.state === "verifying") return new Response(null, { status: 409 });
         if (!stored.capability || !stored.bytes) return new Response(null, { status: 409 });
         stored.state = "verifying";
@@ -172,6 +175,23 @@ test("a resume adopts the verification an earlier attempt stopped waiting for", 
     expect(hue.artifacts.get(file.artifactId!)!.state).toBe("ready");
     expect(hue.calls.reserves).toBe(2);
     expect(hue.calls.uploads).toBe(1);
+  } finally {
+    hue.stop();
+  }
+});
+
+test("a completion refused for now before verification starts is asked again", async () => {
+  const hue = slowArtifacts(100, { refuseCompletions: 2 });
+  try {
+    const client = new EvaluationClient({
+      apiKey: "hue_sk_test",
+      baseUrl: hue.baseUrl,
+      timeoutMillis: 2000,
+    });
+    const file = await stagedFile();
+    await uploadOutputFiles(client, randomUUID(), [file], async () => {}, fast);
+    expect(hue.artifacts.get(file.artifactId!)!.state).toBe("ready");
+    expect(hue.calls.completes).toBe(3);
   } finally {
     hue.stop();
   }
