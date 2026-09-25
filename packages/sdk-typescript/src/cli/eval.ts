@@ -929,11 +929,22 @@ function toJson(
   };
 }
 
-/** Says that a case failed because Hue did not accept its telemetry, with sanitized counts. */
-function reportTelemetry(entry: TelemetryNotAccepted, output: Output) {
-  output.error(
-    `[${entry.caseKey}] telemetry not accepted, case failed: ${describeTelemetryIssues(entry.issues)}`,
-  );
+/** Says, once per execution, that a case failed because Hue did not accept its telemetry, with
+ * sanitized counts: as the case completes, or from the report for a case an earlier, interrupted
+ * run completed. */
+function telemetryReporter(output: Output) {
+  const reported = new Set<string>();
+  const report = (entry: TelemetryNotAccepted) => {
+    if (reported.has(entry.executionId)) return;
+    reported.add(entry.executionId);
+    output.error(
+      `[${entry.caseKey}] telemetry not accepted, case failed: ${describeTelemetryIssues(entry.issues)}`,
+    );
+  };
+  return {
+    report,
+    rest: (entries: TelemetryNotAccepted[] | undefined) => entries?.forEach(report),
+  };
 }
 
 /** A case without trace evidence fails whatever its scores say: a scorer that grades only the
@@ -1075,6 +1086,7 @@ async function runOnce(
   );
   const caseKeys = new Map<string, string>();
   let runUrl = "";
+  const telemetry = telemetryReporter(output);
   const report = await runSimulation({
     client,
     environmentClient,
@@ -1090,7 +1102,7 @@ async function runOnce(
     traceEvidence: { mode: "required" },
     // A case whose telemetry Hue did not accept fails instead of staying started.
     traceNotAccepted: "fail_case",
-    onTelemetryNotAccepted: (entry) => reportTelemetry(entry, output),
+    onTelemetryNotAccepted: telemetry.report,
     concurrency,
     agentRevision: agent.revision,
     // The CLI adapts to whatever the deployment serves; the library warning is for code that
@@ -1123,6 +1135,7 @@ async function runOnce(
         output.log(`[${label}] attempt prepared: ${event.status}`);
     },
   });
+  telemetry.rest(report.telemetryNotAccepted);
   return reportVerdicts(
     client,
     values,
@@ -1188,6 +1201,7 @@ async function runDirect(
   let experimentId = "";
   let runUrl = "";
   let report: RunnerReport;
+  const telemetry = telemetryReporter(output);
   try {
     const selectionDigest = digest({
       datasetVersionId: pins.datasetVersionId,
@@ -1225,7 +1239,7 @@ async function runDirect(
       persistResultContent: values.content,
       traceEvidence: { mode: "required" },
       traceNotAccepted: "fail_case",
-      onTelemetryNotAccepted: (entry) => reportTelemetry(entry, output),
+      onTelemetryNotAccepted: telemetry.report,
       concurrency: run.concurrency,
       scorers: [],
       deferUnboundLocalScorers: true,
@@ -1262,6 +1276,7 @@ async function runDirect(
     output.log(
       `${report.deferredScorerVersionIds.length} evaluator version${report.deferredScorerVersionIds.length === 1 ? "" : "s"} left to Hue's executor`,
     );
+  telemetry.rest(report.telemetryNotAccepted);
   return reportVerdicts(
     client,
     values,
@@ -1314,6 +1329,7 @@ async function runWorker(
       `Claimed run ${claim.runId}: ${new URL(`/experiments/${claim.experimentId}`, connection.baseUrl).toString()}`,
     );
   };
+  const telemetry = telemetryReporter(output);
   await runLocalAgent({
     client,
     environmentClient,
@@ -1328,7 +1344,7 @@ async function runWorker(
     scorers: [],
     concurrency,
     traceNotAccepted: "fail_case",
-    onTelemetryNotAccepted: (entry) => reportTelemetry(entry, output),
+    onTelemetryNotAccepted: telemetry.report,
     deprecationWarnings: false,
     signal,
     ...(maxRuns === undefined ? {} : { maxRuns }),
@@ -1350,6 +1366,7 @@ async function runWorker(
       output.log(
         `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
       );
+      telemetry.rest(report.telemetryNotAccepted);
       if (!current) return;
       output.log("Waiting for Hue checks...");
       try {

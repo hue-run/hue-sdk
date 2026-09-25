@@ -174,8 +174,9 @@ export interface RunExperimentOptions extends RunnerOptions {
    * the other cases.
    */
   traceNotAccepted?: "stop" | "fail_case";
-  /** Called once a case is completed as failed under `traceNotAccepted: "fail_case"`, before the
-   * run goes on, so the failure is known even if a later case stops the run. */
+  /** Called when this call completes a case as failed under `traceNotAccepted: "fail_case"`,
+   * before the run goes on, so the failure is known even if a later case stops the run. A call
+   * that resumes an already completed case lists it in the report without calling again. */
   onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
   /** Runs the application for one frozen case; return the output, `withFiles(output, files)`
    * when it generated files, or `undefined` when unavailable. */
@@ -770,6 +771,15 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           "Target outcome is saved but trace export acknowledgement is unavailable. Restore/export the trace or explicitly complete with omitted evidence through the client; never rerun the target.",
         );
       const save = () => store.write(file, prepared);
+      const notAccepted: TelemetryNotAccepted | undefined =
+        prepared.exportState === "not_accepted"
+          ? {
+              caseId: item.id,
+              caseKey: item.externalKey,
+              executionId: prepared.executionId,
+              issues: prepared.telemetryIssues ?? [],
+            }
+          : undefined;
       if (!prepared.completion) {
         prepared.completion = await options.client.completeExecution(
           prepared.executionId,
@@ -778,17 +788,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         for (const score of prepared.scores)
           score.payload.evaluationItemId = prepared.completion.evaluationItemId;
         await save();
+        // Once per failed case: a resumed call finds the completion and only reports it.
+        if (notAccepted) await options.onTelemetryNotAccepted?.(notAccepted);
       }
-      if (prepared.exportState === "not_accepted") {
-        const entry: TelemetryNotAccepted = {
-          caseId: item.id,
-          caseKey: item.externalKey,
-          executionId: prepared.executionId,
-          issues: prepared.telemetryIssues ?? [],
-        };
-        (report.telemetryNotAccepted ??= []).push(entry);
-        await options.onTelemetryNotAccepted?.(entry);
-      }
+      if (notAccepted) (report.telemetryNotAccepted ??= []).push(notAccepted);
       const results = await uploadScores(
         options,
         experiment.evaluation.id,

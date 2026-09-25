@@ -513,6 +513,7 @@ describe("installed evaluation API and runner contract", () => {
     const f = fixture();
     const exp = f.create();
     let calls = 0;
+    let notified = 0;
     const hue = createHue({
       apiKey: key,
       baseUrl: f.baseUrl,
@@ -527,6 +528,7 @@ describe("installed evaluation API and runner contract", () => {
       persistResultContent: true,
       traceEvidence: { mode: "required" as const },
       traceNotAccepted: "fail_case" as const,
+      onTelemetryNotAccepted: () => void notified++,
       target: async () => {
         // Only the first case's telemetry is refused; the other case is unaffected.
         if (++calls === 1) f.failTelemetry();
@@ -563,10 +565,14 @@ describe("installed evaluation API and runner contract", () => {
           issues: [{ signal: "traces", kind: "failed", status: 401, count: 1 }],
         },
       ]);
-      // Resuming finds both cases completed: no target runs and nothing is completed again.
-      await runExperiment(options);
+      expect(notified).toBe(1);
+      // Resuming finds both cases completed: no target runs, nothing is completed again and the
+      // callback is not repeated, while the resumed call's report still lists the failed case.
+      const resumed = await runExperiment(options);
       expect(calls).toBe(2);
       expect(completions()).toHaveLength(2);
+      expect(notified).toBe(1);
+      expect(resumed.telemetryNotAccepted).toEqual(report.telemetryNotAccepted);
     } finally {
       await hue.shutdownSafe();
       f.server.stop(true);
