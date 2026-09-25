@@ -240,6 +240,9 @@ jobs:
         with:
           name: release-typescript-${{ github.sha }}
           path: .artifacts
+      - name: Wait until npm serves the version and its dist-tag to this runner
+        # npm answers from caches that lag a publish; poll, bounded, before reading it.
+        run: python3 scripts/wait-for-registry.py typescript "$RELEASE_VERSION" --dist-tag "$NPM_DIST_TAG"
       - run: python3 scripts/release-artifacts.py registry typescript "$RELEASE_VERSION" .artifacts
       - name: Verify the published version carries npm provenance attestations
         run: |
@@ -271,6 +274,9 @@ jobs:
         with:
           name: release-python-${{ github.sha }}
           path: .artifacts
+      - name: Wait until PyPI's simple index lists both files to this runner
+        # PyPI's index is cached for minutes after an upload; poll with pip's headers, bounded.
+        run: python3 scripts/wait-for-registry.py python "$RELEASE_VERSION"
       - run: python3 scripts/release-artifacts.py registry python "$RELEASE_VERSION" .artifacts
       - env:
           PYTHON_VERSION: ${{ matrix.python }}
