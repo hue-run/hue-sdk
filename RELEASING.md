@@ -201,12 +201,13 @@ All integration checks use synthetic services. No paid model API or production H
 
 ## Registry aliases
 
-`packages/aliases/npm-hue-run` and `packages/aliases/pypi-hue-sdk` are thin alias packages that have
-not been published yet: `hue-run` on npm will re-export `@hue-run/sdk`, and `hue-sdk` on PyPI will
-depend on `hue-run`. Once published, they will make the sibling name on each registry resolve to the
-real SDK instead of an unrelated or squatted package (the Python import module is `hue_sdk`). Until
-then, `npm install hue-run` and `pip install hue-sdk` do not install Hue's SDK; use `@hue-run/sdk` and
-`hue-run`. The aliases are not part of the verified release workflow above.
+`packages/aliases/npm-hue-run` and `packages/aliases/pypi-hue-sdk` are thin alias packages: `hue-run`
+on npm re-exports `@hue-run/sdk`, and `hue-sdk` on PyPI depends on `hue-run`. Published, they make the
+sibling name on each registry resolve to the real SDK instead of an unrelated or squatted package (the
+Python import module is `hue_sdk`). Only the npm alias's early `0.2.x` versions have been published, so
+`npm install hue-run` installs `@hue-run/sdk` `0.2.x`, and `hue-sdk` is not on PyPI, so
+`pip install hue-sdk` does not install Hue's SDK; use `@hue-run/sdk` and `hue-run`. The aliases are
+not part of the verified release workflow above.
 
 For the first publication, and again whenever a package releases afterwards, bump the alias to the
 same version and its pinned dependency, then publish it by hand with the authorized account (npm
