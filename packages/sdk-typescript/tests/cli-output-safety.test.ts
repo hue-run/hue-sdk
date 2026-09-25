@@ -336,20 +336,23 @@ describe("the agent command", () => {
     const root = await mkdtemp(join(tmpdir(), "hue-leftover-"));
     const marker = join(root, "swapped");
     const pidFile = join(root, "pid");
-    // The command exits at once, leaving a child in its group that would swap a file later.
+    // The command exits at once, leaving a child in its group that would swap a file later. The
+    // script is fixed text; the paths reach it through the environment.
     const script = join(root, "agent.mjs");
     await writeFile(
       script,
       `import { spawn } from "node:child_process";
-const child = spawn(process.execPath, ["-e", ${JSON.stringify(
-        `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => require("fs").writeFileSync(${JSON.stringify(marker)}, "late"), 1500)`,
-      )}], { stdio: "ignore" });
+const child = spawn(
+  process.execPath,
+  ["-e", 'const fs = require("fs"); fs.writeFileSync(process.env.PID_FILE, String(process.pid)); setTimeout(() => fs.writeFileSync(process.env.MARKER, "late"), 1500)'],
+  { stdio: "ignore" },
+);
 child.unref();
 setTimeout(() => process.stdout.write("done"), 300);
 `,
     );
     const answer = await spawnAgentCommand(`${process.execPath} ${script}`, {
-      env: { ...process.env } as Record<string, string>,
+      env: { ...process.env, PID_FILE: pidFile, MARKER: marker } as Record<string, string>,
       timeoutSeconds: 30,
     });
     expect(answer).toBe("done");
