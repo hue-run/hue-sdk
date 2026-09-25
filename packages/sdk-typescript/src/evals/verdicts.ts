@@ -22,6 +22,10 @@ export interface WaitForResultsOptions {
   pollIntervalMillis?: number;
   /** Stops waiting early; the partial state is returned with `complete: false`. */
   signal?: AbortSignal;
+  /** Pinned versions of Hue's own judges (definition kind `world_judge`), whose results Hue can
+   * mark advisory. Any evaluator can write the same evidence, so no other result is advisory.
+   * {@link collectExperimentVerdicts} reads them from the experiment. */
+  judgeScorerVersionIds?: string[];
 }
 
 /** One stored result joined to its evaluation item. */
@@ -47,6 +51,10 @@ export interface VerdictResult {
   notApplicable?: boolean;
   /** What a not-applicable evaluator needs that the case lacks, such as `outcome_criteria`. */
   requires?: string;
+  /** Whether Hue recorded the result as advisory, as it does for every judge today: a result of a
+   * pinned Hue judge whose evidence says `advisory: true`, not an error, and whose metrics carry
+   * no `passed`. It is shown with its verdict but never decides a case. Absent means false. */
+  advisory?: boolean;
 }
 
 /** Outcome of {@link waitForResults}. */
@@ -111,6 +119,7 @@ export async function waitForResults(
   if (!Number.isInteger(timeout) || timeout < 0) throw new RangeError("timeoutMillis must be ≥ 0");
   if (!Number.isInteger(interval) || interval < 250 || interval > 60_000)
     throw new RangeError("pollIntervalMillis must be 250–60000");
+  const judges = new Set(options.judgeScorerVersionIds ?? []);
   const wanted = options.subjectIds ? new Set(options.subjectIds) : undefined;
   const pins = [...new Set(options.scorerVersionIds)];
   const deadline = Date.now() + timeout;
@@ -139,7 +148,14 @@ export async function waitForResults(
           // Only Hue's own flag on a skipped result marks it not applicable; the evidence alone
           // never does, and a scored or errored result keeps its verdict whatever it carries.
           const notApplicable = stored.state === "skipped" && stored.notApplicable === true;
-          const evidence = stored.evidence as { requires?: unknown } | null;
+          const evidence = stored.evidence as { requires?: unknown; advisory?: unknown } | null;
+          // Any evaluator can write `advisory: true` in its evidence; only Hue's own judges'
+          // results are advisory, never as an error or with a metric that says it passed.
+          const advisory =
+            judges.has(stored.scorerVersionId) &&
+            stored.state !== "error" &&
+            evidence?.advisory === true &&
+            !(stored.state === "scored" && stored.metrics.some((metric) => "passed" in metric));
           results.push({
             id: stored.id,
             itemId: stored.itemId,
@@ -150,6 +166,7 @@ export async function waitForResults(
             explanation: stored.explanation ?? null,
             error: stored.error ?? null,
             notApplicable,
+            advisory,
             ...(notApplicable && typeof evidence?.requires === "string"
               ? { requires: evidence.requires }
               : {}),
@@ -178,6 +195,9 @@ export interface CaseVerdict {
   /** Pinned scorer versions Hue recorded as not applicable to the case; always set by
    * {@link summarizeVerdicts}. */
   notApplicable?: string[];
+  /** Pinned scorer versions whose results for the case are advisory: their metrics are listed
+   * but never decide the case; always set by {@link summarizeVerdicts}. */
+  advisory?: string[];
   /** Reported metrics across pinned scorers, in result order. */
   metrics: (Metric & {
     /** Scorer version that reported the metric. */
@@ -251,15 +271,23 @@ export function summarizeVerdicts(
     // An evaluator that does not apply to the case neither passes nor fails it.
     const skippedAsInapplicable = (result: VerdictResult) =>
       result.state === "skipped" && result.notApplicable === true;
+    const isAdvisory = (result: VerdictResult) =>
+      result.advisory === true &&
+      result.state !== "error" &&
+      result.metrics.every((metric) => metric.passed === undefined);
     const inapplicable = own.filter(skippedAsInapplicable);
     const applicable = own.filter((result) => !skippedAsInapplicable(result));
-    const errors = applicable.filter((result) => result.state === "error");
-    const scored = applicable.filter((result) => result.state === "scored");
+    // An advisory result, such as a judge's, is shown but never decides the case, as in Hue.
+    const advisory = applicable.filter(isAdvisory);
+    const deciding = applicable.filter((result) => !isAdvisory(result));
+    const errors = deciding.filter((result) => result.state === "error");
+    const scored = deciding.filter((result) => result.state === "scored");
     const failing = scored.filter((result) => !result.metrics.every(metricPassed));
     const missing = [...pins].some((pin) => !own.some((result) => result.scorerVersionId === pin));
     const noneApplies = !missing && own.length > 0 && !applicable.length;
+    const noneDecides = !missing && applicable.length > 0 && !deciding.length;
     const state: CaseVerdict["state"] =
-      errors.length || noneApplies
+      errors.length || noneApplies || noneDecides
         ? "error"
         : failing.length
           ? "failed"
@@ -278,6 +306,7 @@ export function summarizeVerdicts(
       state,
       passed: state === "passed",
       notApplicable: inapplicable.map((result) => result.scorerVersionId),
+      advisory: advisory.map((result) => result.scorerVersionId),
       metrics,
       explanations: [
         ...(noneApplies
@@ -285,7 +314,18 @@ export function summarizeVerdicts(
               `No pinned evaluator applies to this case${requires.length ? ` (they need ${requires.join(" or ")})` : ""}; pin one that grades it`,
             ]
           : []),
-        ...applicable
+        ...(noneDecides
+          ? [
+              "Only advisory evaluators ran for this case, and they never decide it; pin one that grades it",
+              ...advisory
+                .filter((result) => result.state === "skipped")
+                .map(
+                  (result) =>
+                    `An advisory evaluator skipped the case: ${result.explanation ?? "no reason given"}`,
+                ),
+            ]
+          : []),
+        ...deciding
           .filter((result) => result.state !== "scored" || failing.includes(result))
           .map((result) => result.explanation)
           .filter((explanation): explanation is string => !!explanation),
@@ -394,10 +434,17 @@ export async function collectExperimentVerdicts(
   const experiment = await client.getExperiment(options.experimentId);
   const scorerVersionIds = experiment.evaluation.scorerVersions.map((version) => version.id);
   const { experimentId: _experimentId, ...wait } = options;
+  // Hue's own judges, the only evaluators whose results can be advisory.
+  const judgeScorerVersionIds = experiment.evaluation.scorerVersions
+    .filter(
+      (version) => (version.definition as { kind?: unknown } | undefined)?.kind === "world_judge",
+    )
+    .map((version) => version.id);
   const results = await waitForResults(client, {
     ...wait,
     runId: experiment.evaluation.id,
     scorerVersionIds,
+    judgeScorerVersionIds,
   });
   const experimentItems = await allPages((after) =>
     client.listExperimentItems(experiment.id, { after }),
