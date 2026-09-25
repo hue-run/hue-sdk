@@ -63,14 +63,14 @@ def _is_credential_key(key: Any) -> bool:
 
 # JavaScript's ``\s``, spelled out so both SDKs split free text at the same characters.
 _JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-# A URL in free text: a scheme of at most 64 characters, ``://`` and everything up to whitespace,
-# a quote or ``<>``. A quoted value right after ``=`` (``?token="…"``) is part of the URL, so all of
-# it is replaced. The bounded scheme keeps a long run such as ``a.a.a…`` linear.
-_TEXT_URL = re.compile(
-    rf"\b[a-z][a-z0-9+.-]{{0,63}}://(?:[^{_JS_SPACE}\"'<>`]|(?<==)\"[^\"<>`\r\n]*\""
+# A URL's ``://`` and everything after it up to whitespace, a quote or ``<>``. A quoted value right
+# after ``=`` (``?token="…"``) is part of the URL, so all of it is replaced.
+_URL_REST = re.compile(
+    rf"://(?:[^{_JS_SPACE}\"'<>`]|(?<==)\"[^\"<>`\r\n]*\""
     r"|(?<==)'[^'<>`\r\n]*'|(?<==)[\"'])+",
-    re.IGNORECASE | re.ASCII,
 )
+_SCHEME_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 # Schemes WHATWG parses as hierarchical, which both SDKs serialize alike.
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
@@ -116,6 +116,35 @@ _AUTHORIZATION_BARE = re.compile(
     rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)[^{_JS_SPACE}\"',;}})\]]+"
     rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
 )
+
+
+def _scrub_text_urls(text: str) -> str:
+    """Scrub each URL in free text. Each ``://`` is found by search and its scheme read back from
+    it: up to 64 scheme characters, starting at a letter, so a longer run before ``://`` still
+    leaves a URL to scrub and a long run such as ``a.a.a…`` costs one pass."""
+    scrub = _Scrub()
+    parts: list[str] = []
+    copied = 0
+    index = text.find("://")
+    while index != -1:
+        if index >= copied:
+            start = index
+            while start > copied and index - start < 64 and text[start - 1] in _SCHEME_CHARACTERS:
+                start -= 1
+            while start < index and text[start] not in _SCHEME_LETTERS:
+                start += 1
+            rest = _URL_REST.match(text, index) if start < index else None
+            if rest is not None:
+                url = text[start : rest.end()]
+                if _SPECIAL_TEXT_SCHEME.match(url):
+                    url = scrub.url(url)
+                elif _URL_PARTS.search(url):
+                    url = REDACTED
+                parts.append(text[copied:start] + url)
+                copied = rest.end()
+        index = text.find("://", index + 1)
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def _normalized_key(key: str) -> str:
@@ -168,14 +197,7 @@ def scrub_credential_text(text: str) -> str:
     ``key=value`` or ``key: value`` pair whose key names a credential (quoted, escaped-quoted or
     bare) become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
-    scrub = _Scrub()
-
-    def url(match: re.Match[str]) -> str:
-        if _SPECIAL_TEXT_SCHEME.match(match.group()):
-            return scrub.url(match.group())
-        return REDACTED if _URL_PARTS.search(match.group()) else match.group()
-
-    text = _TEXT_URL.sub(url, text)
+    text = _scrub_text_urls(text)
     text = _PREFIXED_TOKEN.sub(REDACTED, text)
     text = _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
     return _scrub_pairs(text)

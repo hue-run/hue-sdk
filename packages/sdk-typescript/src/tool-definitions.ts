@@ -78,11 +78,40 @@ function isCredentialKey(key: string): boolean {
   );
 }
 
-/** A URL in free text: a scheme of at most 64 characters, `://` and everything up to whitespace, a
- * quote or `<>`. A quoted value right after `=` (`?token="…"`) is part of the URL, so the whole
- * value is replaced. The bounded scheme keeps a long run such as `a.a.a…` linear. */
-const textUrl =
-  /\b[a-z][a-z0-9+.-]{0,63}:\/\/(?:[^\s"'<>`]|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["'])+/gi;
+/** A URL's `://` and everything after it up to whitespace, a quote or `<>`. A quoted value right
+ * after `=` (`?token="…"`) is part of the URL, so the whole value is replaced. */
+const urlRest = /:\/\/(?:[^\s"'<>`]|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["'])+/y;
+const isSchemeLetter = (code: number) => (code | 0x20) >= 0x61 && (code | 0x20) <= 0x7a;
+/** `a-z`, `0-9`, `+`, `.` and `-`, case-insensitively. */
+const isSchemeCharacter = (code: number) =>
+  isSchemeLetter(code) ||
+  (code >= 0x30 && code <= 0x39) ||
+  code === 0x2b ||
+  code === 0x2e ||
+  code === 0x2d;
+
+/** Scrubs each URL in free text. Each `://` is found by search and its scheme read back from it:
+ * up to 64 scheme characters, starting at a letter, so a longer run before `://` still leaves a
+ * URL to scrub and a long run such as `a.a.a…` costs one pass. */
+function scrubTextUrls(text: string, state: ScrubState): string {
+  let result = "";
+  let copied = 0;
+  for (let index = text.indexOf("://"); index !== -1; index = text.indexOf("://", index + 1)) {
+    if (index < copied) continue;
+    let start = index;
+    while (start > copied && index - start < 64 && isSchemeCharacter(text.charCodeAt(start - 1)))
+      start--;
+    while (start < index && !isSchemeLetter(text.charCodeAt(start))) start++;
+    if (start === index) continue;
+    urlRest.lastIndex = index;
+    const rest = urlRest.exec(text);
+    if (!rest) continue;
+    const end = index + rest[0].length;
+    result += text.slice(copied, start) + scrubTextUrl(text.slice(start, end), state);
+    copied = end;
+  }
+  return result + text.slice(copied);
+}
 /** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
 const specialScheme = /^(?:https?|wss?|ftp):/i;
 /** A URL in free text. One with another scheme, which runtimes parse differently, is replaced
@@ -166,8 +195,7 @@ function scrubPairs(text: string): string {
 export function scrubCredentialText(text: string): string {
   const state: ScrubState = { changed: false };
   return scrubPairs(
-    text
-      .replace(textUrl, (url) => scrubTextUrl(url, state))
+    scrubTextUrls(text, state)
       .replace(prefixedToken, REDACTED)
       .replace(authorizationValue, `$1$2${REDACTED}`),
   );

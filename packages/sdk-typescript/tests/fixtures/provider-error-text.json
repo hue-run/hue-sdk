@@ -171,6 +171,14 @@
     {
       "input": "risk-assessment and sk-learn ask-me; the Authorization header was missing",
       "expected": "risk-assessment and sk-learn ask-me; the Authorization header was missing"
+    },
+    {
+      "input": "failed at xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa://synthetic-user:synthetic-pass@mcp.example.test/sse",
+      "expected": "failed at xaaaaaaaaaaaaaaaa[redacted]"
+    },
+    {
+      "input": "retry_https://synthetic-user:synthetic-pass@mcp.example.test/sse?key=synthetic-key failed",
+      "expected": "retry_https://mcp.example.test/sse?key=%5Bredacted%5D failed"
     }
   ]
 }
