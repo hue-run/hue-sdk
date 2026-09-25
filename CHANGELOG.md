@@ -115,6 +115,13 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
 
 #### Fixed
 
+- **Wire.** A large inline file part in a recorded message is exported with the `sha256` and
+  `size` of the file's own bytes whatever its media type. Base64 content is decoded for text,
+  JSON and untyped parts too, and a `data:` URL without `;base64` is percent-decoded. Before,
+  those were hashed as the UTF-8 of their base64 or URL text, so the digest did not match the
+  file's bytes, and a text file sent as base64 could not be linked to its upload. Content in the
+  base64 alphabet is now read as base64 even under a text media type; a text file's own text is
+  still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
   `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
   the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
@@ -686,6 +693,13 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Fixed
 
+- **Wire.** A large inline file part in a recorded message is exported with the `sha256` and
+  `size` of the file's own bytes whatever its media type. Base64 content is decoded for text,
+  JSON and untyped parts too, and a `data:` URL without `;base64` is percent-decoded. Before,
+  those were hashed as the UTF-8 of their base64 or URL text, so the digest did not match the
+  file's bytes. Content in the base64 alphabet is now read as base64 even under a text media
+  type; a text file's own text is still hashed as UTF-8. This matches the TypeScript SDK,
+  checked against a shared fixture.
 - Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation

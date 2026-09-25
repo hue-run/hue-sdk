@@ -24,7 +24,9 @@ MAX_INLINE_FILE_TEXT = 8 * MAX_REQUEST_BYTES
 _MESSAGE_KEYS = frozenset({"gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"})
 # Strict base64: alphabet characters only, padded to a multiple of four.
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
-_BASE64_DATA_URL = re.compile(r"data:[^,]*;base64,")
+# An RFC 2397 data: URL's media type and parameters, up to the comma before its data.
+_DATA_URL = re.compile(r"data:([^;,]*)((?:;[^;,]*)*),")
+_HEX = frozenset("0123456789abcdefABCDEF")
 _MAX_DEPTH = 256
 
 
@@ -39,24 +41,42 @@ def _utf8_size(value: str, limit: int) -> int:
     return size
 
 
-def _binary_mime_type(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and not value.lower().startswith("text/")
-        and value.lower() != "application/json"
-    )
+def _percent_decoded(payload: str) -> bytes | None:
+    """RFC 2397 data without ``;base64``: percent-escaped octets, other characters as UTF-8.
+
+    None when a ``%`` does not start an escape.
+    """
+    decoded = bytearray()
+    start = 0
+    while (index := payload.find("%", start)) != -1:
+        pair = payload[index + 1 : index + 3]
+        if len(pair) != 2 or not _HEX.issuperset(pair):
+            return None
+        decoded += payload[start:index].encode("utf-8")
+        decoded.append(int(pair, 16))
+        start = index + 3
+    decoded += payload[start:].encode("utf-8")
+    return bytes(decoded)
 
 
-def _file_bytes(content: str, mime_type: Any = None) -> bytes:
-    """Decode explicit data URLs or MIME-marked binary content; otherwise use UTF-8."""
-    match = _BASE64_DATA_URL.match(content)
+def _file_bytes(content: str) -> bytes:
+    """The file's own bytes, whatever its media type.
+
+    A data: URL is decoded by its own encoding (base64 with ``;base64``, percent-escapes
+    otherwise), content in the base64 alphabet is decoded, and anything else, such as a text
+    file's own text, is UTF-8. A data: URL whose data does not decode is taken as UTF-8 too.
+    """
+    match = _DATA_URL.match(content)
     payload = content[match.end() :] if match else content
-    if (match or _binary_mime_type(mime_type)) and len(payload) % 4 == 0 and _BASE64.match(payload):
+    decoded: bytes | None = None
+    if match and "base64" not in match.group(2).split(";"):
+        decoded = _percent_decoded(payload)
+    elif len(payload) % 4 == 0 and _BASE64.match(payload):
         try:
-            return base64.b64decode(payload, validate=True)
+            decoded = base64.b64decode(payload, validate=True)
         except binascii.Error:
-            pass
-    return content.encode("utf-8")
+            decoded = None
+    return content.encode("utf-8") if decoded is None else decoded
 
 
 def _content_key(part: dict[str, Any]) -> str | None:
@@ -78,9 +98,8 @@ class _Hash:
             return value
         key = _content_key(value)
         inline = value.get(key) if key is not None else None
-        mime_type = value.get("mime_type", value.get("mediaType"))
         if key is not None and isinstance(inline, str):
-            data = _file_bytes(inline, mime_type)
+            data = _file_bytes(inline)
             if len(data) > INLINE_FILE_LIMIT:
                 self.changed = True
                 rest = {name: item for name, item in value.items() if name != key}

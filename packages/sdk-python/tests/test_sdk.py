@@ -1111,22 +1111,6 @@ def test_large_inline_files_in_messages_export_as_their_digest(receiver):
     assert base64.b64encode(document)[:64] not in telemetry
 
 
-def test_long_ascii_text_is_hashed_as_utf8_not_guessed_as_base64():
-    from hue_sdk._inline_files import hash_inline_files
-
-    content = "A" * (64 * 1024 + 4)
-    value = json.dumps(
-        [{"type": "file", "mediaType": "text/plain", "data": content}], separators=(",", ":")
-    )
-    [file] = json.loads(hash_inline_files("ai.prompt.messages", value))
-    assert file == {
-        "type": "file",
-        "mediaType": "text/plain",
-        "sha256": hashlib.sha256(content.encode()).hexdigest(),
-        "size": len(content.encode()),
-    }
-
-
 def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
     hosted_mcp = {
         "type": "mcp",
