@@ -161,8 +161,9 @@ index or the Anthropic `content` block index, in both capture modes) and, for MC
 `mcp.server.name` (the provider's label). Arguments and results follow `captureContent`; a failed
 call carries `error.type` (`mcp_error`, the provider's status or error code) and ERROR status. With
 `captureContent: true`, a failed OpenAI MCP call's status description is the provider's error
-text, credentials scrubbed (URL userinfo, query values and fragments, authorization-scheme
-credentials, credential-named `key=value` pairs) and cut to 1,024 characters. An `mcp_list_tools`
+text, credentials scrubbed (URL userinfo, query values and fragments, or the whole URL for a scheme
+other than `http(s)`, `ws(s)` and `ftp`; authorization-scheme credentials; the value of a
+credential-named `key=value` or `key: value` pair, quoted or not) and cut to 1,024 characters. An `mcp_list_tools`
 item becomes a `tools/list` child span with that server's `gen_ai.tool.definitions`; with
 `captureContent: false` it carries only `hue.tool.names` and `hue.tool.definitions.sha256`, the
 summary described below. Pass the request so each server's host is recorded as `server.address`

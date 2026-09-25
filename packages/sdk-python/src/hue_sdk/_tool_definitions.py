@@ -63,43 +63,80 @@ def _is_credential_key(key: Any) -> bool:
 
 # JavaScript's ``\s``, spelled out so both SDKs split free text at the same characters.
 _JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-# A URL in free text: a scheme, ``://`` and everything up to whitespace, a quote or ``<>``.
-_TEXT_URL = re.compile(rf"\b[a-z][a-z0-9+.-]*://[^{_JS_SPACE}\"'<>`]+", re.IGNORECASE | re.ASCII)
+# A URL in free text: a scheme, ``://`` and everything up to whitespace, a quote or ``<>``. A
+# quoted value right after ``=`` (``?token="…"``) is part of the URL, so all of it is replaced.
+_TEXT_URL = re.compile(
+    rf"\b[a-z][a-z0-9+.-]*://(?:[^{_JS_SPACE}\"'<>`]|(?<==)\"[^\"<>`\r\n]*\""
+    r"|(?<==)'[^'<>`\r\n]*'|(?<==)[\"'])+",
+    re.IGNORECASE | re.ASCII,
+)
+# Schemes WHATWG parses as hierarchical, which both SDKs serialize alike.
+_SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
+_URL_PARTS = re.compile(r"[@?#]")
 # An authorization scheme followed by its credential, as in an ``Authorization`` header. The
 # credential cannot start with ``=``, so ``token = value`` is left to the key-value rule.
 _AUTHORIZATION_VALUE = re.compile(
     rf"\b(bearer|basic|token)([{_JS_SPACE}]+)[a-z0-9._~+/-][a-z0-9._~+/=-]*",
     re.IGNORECASE | re.ASCII,
 )
-# A ``key=value`` or ``key: value`` pair, the key optionally quoted; the value is checked later.
-_KEY_VALUE_PAIR = re.compile(
-    rf"([\"']?)([a-z][a-z0-9_-]{{0,63}})\1([{_JS_SPACE}]*[:=][{_JS_SPACE}]*)([\"']?)"
-    rf"(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)[{_JS_SPACE}])"
-    rf"([^{_JS_SPACE}\"',;&}})\]]+)",
+# The key and separator of a ``key=value`` or ``key: value`` pair, the key optionally quoted. The
+# value is not consumed, so a pair inside another pair's value (``error: token=…``) is found.
+_PAIR_KEY = re.compile(
+    rf"([\"']?)([a-z][a-z0-9_-]{{0,63}})\1([{_JS_SPACE}]*[:=][{_JS_SPACE}]*)",
     re.IGNORECASE | re.ASCII,
 )
+# A quoted value to its closing quote on the same line, spaces and escaped quotes included.
+_QUOTED_VALUE = re.compile(r"\"(?:[^\"\\\r\n]|\\[^\r\n])+\"|'(?:[^'\\\r\n]|\\[^\r\n])+'")
+# An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
+# a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
+_BARE_VALUE = re.compile(
+    rf"([\"']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)[{_JS_SPACE}])"
+    rf"[^{_JS_SPACE}\"',;&}})\]]+",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def _scrub_pairs(text: str) -> str:
+    """Replace the value of each pair whose key names a credential."""
+    parts: list[str] = []
+    copied = 0
+    for match in _PAIR_KEY.finditer(text):
+        start = match.end()
+        if start < copied or not _is_credential_key(match[2]):
+            continue
+        quoted = _QUOTED_VALUE.match(text, start)
+        value = quoted or _BARE_VALUE.match(text, start)
+        if value is None:
+            continue
+        quote = quoted[0][0] if quoted else value[1]
+        parts.append(f"{text[copied:start]}{quote}{REDACTED}{quote if quoted else ''}")
+        copied = value.end()
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def scrub_credential_text(text: str) -> str:
     """Remove credentials from free text a provider returned, such as an MCP error message.
 
-    The rules are the tool definitions': each URL loses its userinfo and fragment and every query
-    value becomes ``[redacted]``, as a ``url`` field does (an unparseable one becomes
-    ``[redacted]``); the credential after an authorization scheme (``Bearer``, ``Basic``,
-    ``Token``) and the value of a ``key=value`` or ``key: value`` pair whose key names a
-    credential become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
+    The rules are the tool definitions': each ``http``, ``https``, ``ws``, ``wss`` or ``ftp`` URL
+    loses its userinfo and fragment and every query value becomes ``[redacted]``, as a ``url``
+    field does (an unparseable one becomes ``[redacted]``), and a URL with any other scheme, which
+    runtimes parse differently, becomes ``[redacted]`` when it has an ``@``, ``?`` or ``#``; the
+    credential after an authorization scheme (``Bearer``, ``Basic``, ``Token``) and the value of a
+    ``key=value`` or ``key: value`` pair whose key names a credential (a quoted value to its
+    closing quote) become ``[redacted]``. Identical to the TypeScript SDK's
+    ``scrubCredentialText``.
     """
     scrub = _Scrub()
-    text = _TEXT_URL.sub(lambda match: scrub.url(match.group()), text)
+
+    def url(match: re.Match[str]) -> str:
+        if _SPECIAL_TEXT_SCHEME.match(match.group()):
+            return scrub.url(match.group())
+        return REDACTED if _URL_PARTS.search(match.group()) else match.group()
+
+    text = _TEXT_URL.sub(url, text)
     text = _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
-
-    def pair(match: re.Match[str]) -> str:
-        quote, key, separator, value_quote = match[1], match[2], match[3], match[4]
-        if not _is_credential_key(key):
-            return match.group()
-        return f"{quote}{key}{quote}{separator}{value_quote}{REDACTED}"
-
-    return _KEY_VALUE_PAIR.sub(pair, text)
+    return _scrub_pairs(text)
 
 
 def _is_url_key(key: Any) -> bool:

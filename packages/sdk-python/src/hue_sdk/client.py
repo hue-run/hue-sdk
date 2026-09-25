@@ -710,7 +710,12 @@ class Hue:
         try:
             if self._redactor is not None:
                 value = snapshot_content(self._redactor(key, value))
-            if not isinstance(value, str) or len(value) > MAX_CONTENT_BYTES:
+            # Bounded in UTF-8 bytes, as content is; a lone surrogate fails to encode.
+            if (
+                not isinstance(value, str)
+                or len(value) > MAX_CONTENT_BYTES
+                or len(value.encode("utf-8")) > MAX_CONTENT_BYTES
+            ):
                 raise ValueError("Redacted text is not bounded text.")
             return value
         except Exception:

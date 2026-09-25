@@ -27,11 +27,11 @@ import {
   providerErrorDescription,
 } from "./provider-tools.js";
 import { toolCatalogSummary } from "./tool-definitions.js";
-import { encodeContent, noopSpan, safeSpan } from "./safety.js";
+import { encodeContent, noopSpan, safeSpan, type EncodeLimits } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
-import { MAX_FILE_DATA_BYTES } from "./config.js";
+import { MAX_BODY_BYTES, MAX_FILE_DATA_BYTES } from "./config.js";
 import type {
   ExportReport,
   FileRecord,
@@ -234,6 +234,9 @@ class ContextualTracer implements Tracer {
 }
 
 const propagator = new W3CTraceContextPropagator();
+/** A provider tool listing's bounds before its catalog summary: one export request, 64 levels and
+ * 65,536 values, as the Python SDK's content snapshot. */
+const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, depth: 64 };
 
 /**
  * Hue tracing client. Helpers create spans through a private tracer and local async context, never
@@ -748,10 +751,13 @@ export class HueClient {
         if (this.captureContent)
           this.setContent(span, "gen_ai.tool.definitions", listing.definitions);
         // Names and the catalog digest are metadata: without content, the listing carries the
-        // summary metadata-only export gives any record's tool definitions.
+        // summary metadata-only export gives any record's tool definitions, within the summary's
+        // bounds rather than one content field's.
         else
           try {
-            span.setAttributes(toolCatalogSummary(encodeContent(listing.definitions)));
+            span.setAttributes(
+              toolCatalogSummary(encodeContent(listing.definitions, catalogLimits)),
+            );
           } catch {
             this.transport.instrumentationFailure();
           }

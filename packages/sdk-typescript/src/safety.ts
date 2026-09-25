@@ -91,18 +91,28 @@ export function safeSpan(source: Span, failed: () => void): Span {
 }
 
 /** Validate a bounded data tree without invoking toJSON or property getters. */
-export function encodeContent(value: unknown): string {
+/** The bounds `encodeContent` enforces while it copies a value. */
+export interface EncodeLimits {
+  bytes: number;
+  nodes: number;
+  depth: number;
+}
+/** One content attribute's bounds. */
+const contentLimits: EncodeLimits = { bytes: MAX_CONTENT_BYTES, nodes: 16384, depth: 32 };
+
+export function encodeContent(value: unknown, limits: EncodeLimits = contentLimits): string {
   let nodes = 0;
   let bytes = 0;
   const ancestors = new Set<object>();
   const charge = (amount: number) => {
     bytes += amount;
-    if (bytes > MAX_CONTENT_BYTES) throw new RangeError("Content limit exceeded");
+    if (bytes > limits.bytes) throw new RangeError("Content limit exceeded");
   };
   const visit = (item: unknown, depth: number): unknown => {
-    if (++nodes > 16384 || depth > 32) throw new RangeError("Content complexity limit exceeded");
+    if (++nodes > limits.nodes || depth > limits.depth)
+      throw new RangeError("Content complexity limit exceeded");
     if (typeof item === "string") {
-      if (item.length > MAX_CONTENT_BYTES) throw new RangeError("Content limit exceeded");
+      if (item.length > limits.bytes) throw new RangeError("Content limit exceeded");
       charge(Buffer.byteLength(JSON.stringify(item)));
       return item;
     }
@@ -124,9 +134,9 @@ export function encodeContent(value: unknown): string {
     const result: unknown[] | Record<string, unknown> = array ? [] : Object.create(null);
     // Own descriptors avoid executing application accessors during capture.
     const keys = array
-      ? Array.from({ length: Math.min(item.length, 16385) }, (_, i) => String(i))
+      ? Array.from({ length: Math.min(item.length, limits.nodes + 1) }, (_, i) => String(i))
       : Object.keys(item);
-    if (keys.length > 16384) throw new RangeError("Content complexity limit exceeded");
+    if (keys.length > limits.nodes) throw new RangeError("Content complexity limit exceeded");
     for (const key of keys) {
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       if (!descriptor || !("value" in descriptor))
@@ -140,8 +150,7 @@ export function encodeContent(value: unknown): string {
     return result;
   };
   const encoded = JSON.stringify(visit(value, 0));
-  if (Buffer.byteLength(encoded) > MAX_CONTENT_BYTES)
-    throw new RangeError("Content limit exceeded");
+  if (Buffer.byteLength(encoded) > limits.bytes) throw new RangeError("Content limit exceeded");
   return encoded;
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { createHue } from "../src/index.js";
+import { hostedToolActivity } from "../src/provider-tools.js";
 import { withToolCatalogSummary } from "../src/tool-definitions.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
@@ -176,6 +177,47 @@ describe("provider tool spans", () => {
     expect(typeOnly!.status?.code).toBe(2);
     expect(typeOnly!.status?.message ?? "").toBe("");
     expect(metadata.raw).not.toContain("Upstream rejected");
+  });
+
+  test("a metadata-only catalog over one content field's bound keeps its summary", async () => {
+    // About 420 KB of definitions: over one content field's 256 KiB, within one export request.
+    const tools = Array.from({ length: 300 }, (_, index) => ({
+      name: `tool_${index}`,
+      description: "d".repeat(1_300),
+      input_schema: { type: "object" },
+    }));
+    const response = { output: [{ type: "mcp_list_tools", server_label: "big", tools }] };
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      baseUrl: endpoint.url,
+      serviceName: "provider-spans",
+      captureContent: false,
+    });
+    try {
+      await hue.model(
+        "synthetic-model",
+        async () => {
+          hue.recordProviderToolCalls(response);
+        },
+        { provider: "openai" },
+      );
+      expect((await hue.flush()).instrumentationFailures).toBe(0);
+    } finally {
+      await hue.shutdown();
+      endpoint.stop();
+    }
+    const [listing] = endpoint.spans.filter((span) => span.name === "tools/list");
+    const [parsed] = hostedToolActivity("openai", response).listings;
+    const expected: Record<string, unknown> = withToolCatalogSummary<Record<string, unknown>>({
+      "gen_ai.tool.definitions": JSON.stringify(parsed!.definitions),
+    });
+    expect(
+      attr(listing!, "hue.tool.names")?.arrayValue?.values?.map((value) => value.stringValue),
+    ).toEqual(tools.map((tool) => tool.name));
+    expect(attr(listing!, "hue.tool.definitions.sha256")?.stringValue).toBe(
+      expected["hue.tool.definitions.sha256"] as string,
+    );
   });
 
   test("server.address keeps an underscore in the MCP server's host name", async () => {

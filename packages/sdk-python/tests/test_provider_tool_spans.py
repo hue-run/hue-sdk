@@ -7,9 +7,12 @@ on a failed MCP call and ``server.address``, mirroring the TypeScript SDK's
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from hue_sdk import Hue
+from hue_sdk._provider_tools import hosted_tool_activity
 from hue_sdk._tool_definitions import with_tool_catalog_summary
 
 KEY = "synthetic-provider-span-key"
@@ -165,6 +168,45 @@ def test_the_redactor_sees_the_error_text_as_status_message(receiver):
     failed = named(spans, "execute_tool create_draft")[0]
     assert "status.message" in seen
     assert failed.status.message.startswith("[customer-redacted] rejected")
+
+
+def test_a_redactor_returning_oversized_status_text_omits_it_as_an_issue(receiver):
+    # 100,000 emoji: under the 256 KiB bound in characters, about 400 KB of UTF-8.
+    def redactor(field, value):
+        return "\U0001f600" * 100_000 if field == "status.message" else value
+
+    with Hue(receiver.url, KEY, capture_content=True, redactor=redactor) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            span.record_provider_tool_calls(OPENAI_RESPONSE, request=OPENAI_REQUEST)
+        hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 1
+    failed = named(receiver.spans(), "execute_tool create_draft")[0]
+    assert failed.status.code == 2 and failed.status.message == ""
+
+
+def test_a_large_metadata_only_catalog_keeps_its_summary(receiver):
+    # About 420 KB of definitions: over one content field's 256 KiB, within one export request.
+    tools = [
+        {"name": f"tool_{index}", "description": "d" * 1_300, "input_schema": {"type": "object"}}
+        for index in range(300)
+    ]
+    response = {"output": [{"type": "mcp_list_tools", "server_label": "big", "tools": tools}]}
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            span.record_provider_tool_calls(response)
+        hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    listing = attrs(named(receiver.spans(), "tools/list")[0])
+    [parsed] = hosted_tool_activity("openai", response).listings
+    expected = with_tool_catalog_summary(
+        {"gen_ai.tool.definitions": json.dumps(parsed.definitions)}
+    )
+    names = [value.string_value for value in listing["hue.tool.names"].array_value.values]
+    assert names == [f"tool_{index}" for index in range(300)]
+    assert (
+        listing["hue.tool.definitions.sha256"].string_value
+        == expected["hue.tool.definitions.sha256"]
+    )
 
 
 def test_server_address_keeps_an_underscore_in_the_mcp_server_host(receiver):

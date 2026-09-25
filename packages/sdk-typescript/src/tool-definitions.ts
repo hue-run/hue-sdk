@@ -78,32 +78,67 @@ function isCredentialKey(key: string): boolean {
   );
 }
 
-/** A URL in free text: a scheme, `://` and everything up to whitespace, a quote or `<>`. */
-const textUrl = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`]+/gi;
+/** A URL in free text: a scheme, `://` and everything up to whitespace, a quote or `<>`. A quoted
+ * value right after `=` (`?token="…"`) is part of the URL, so the whole value is replaced. */
+const textUrl =
+  /\b[a-z][a-z0-9+.-]*:\/\/(?:[^\s"'<>`]|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["'])+/gi;
+/** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
+const specialScheme = /^(?:https?|wss?|ftp):/i;
+/** A URL in free text. One with another scheme, which runtimes parse differently, is replaced
+ * whole when it could carry userinfo, a query or a fragment. */
+function scrubTextUrl(url: string, state: ScrubState): string {
+  if (specialScheme.test(url)) return scrubUrl(url, state);
+  return /[@?#]/.test(url) ? REDACTED : url;
+}
 /** An authorization scheme followed by its credential, as in an `Authorization` header. The
  * credential cannot start with `=`, so `token = value` is left to the key-value rule. */
 const authorizationValue = /\b(bearer|basic|token)(\s+)[a-z0-9._~+/-][a-z0-9._~+/=-]*/gi;
-/** A `key=value` or `key: value` pair, the key optionally quoted; the value is checked later. */
-const keyValuePair =
-  /(["']?)([a-z][a-z0-9_-]{0,63})\1(\s*[:=]\s*)(["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)([^\s"',;&})\]]+)/gi;
+/** The key and separator of a `key=value` or `key: value` pair, the key optionally quoted. The
+ * value is not consumed, so a pair inside another pair's value (`error: token=…`) is found. */
+const pairKey = /(["']?)([a-z][a-z0-9_-]{0,63})\1(\s*[:=]\s*)/gi;
+/** A quoted value to its closing quote on the same line, spaces and escaped quotes included. */
+const quotedValue = /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'/y;
+/** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
+ * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
+const bareValue =
+  /(["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
+
+/** Replaces the value of each pair whose key names a credential. */
+function scrubPairs(text: string): string {
+  let result = "";
+  let copied = 0;
+  for (const match of text.matchAll(pairKey)) {
+    const start = match.index + match[0].length;
+    if (start < copied || !isCredentialKey(match[2]!)) continue;
+    quotedValue.lastIndex = start;
+    bareValue.lastIndex = start;
+    const quoted = quotedValue.exec(text);
+    const value = quoted ?? bareValue.exec(text);
+    if (!value) continue;
+    const quote = quoted ? quoted[0][0]! : value[1]!;
+    result += `${text.slice(copied, start)}${quote}${REDACTED}${quoted ? quote : ""}`;
+    copied = start + value[0].length;
+  }
+  return result + text.slice(copied);
+}
 
 /**
  * Removes credentials from free text a provider returned, such as an MCP call's error message,
- * with the rules tool definitions use: each URL loses its userinfo and fragment and every query
- * value becomes `[redacted]`, as a `url` field does (an unparseable one becomes `[redacted]`);
+ * with the rules tool definitions use: each `http`, `https`, `ws`, `wss` or `ftp` URL loses its
+ * userinfo and fragment and every query value becomes `[redacted]`, as a `url` field does (an
+ * unparseable one becomes `[redacted]`), and a URL with any other scheme becomes `[redacted]` when
+ * it has an `@`, `?` or `#`;
  * the credential after an authorization scheme (`Bearer`, `Basic`, `Token`) and the value of a
- * `key=value` or `key: value` pair whose key names a credential become `[redacted]`.
+ * `key=value` or `key: value` pair whose key names a credential (a quoted value to its closing
+ * quote) become `[redacted]`.
  */
 export function scrubCredentialText(text: string): string {
   const state: ScrubState = { changed: false };
-  return text
-    .replace(textUrl, (url) => scrubUrl(url, state))
-    .replace(authorizationValue, `$1$2${REDACTED}`)
-    .replace(
-      keyValuePair,
-      (pair: string, quote: string, key: string, separator: string, valueQuote: string) =>
-        isCredentialKey(key) ? `${quote}${key}${quote}${separator}${valueQuote}${REDACTED}` : pair,
-    );
+  return scrubPairs(
+    text
+      .replace(textUrl, (url) => scrubTextUrl(url, state))
+      .replace(authorizationValue, `$1$2${REDACTED}`),
+  );
 }
 
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */

@@ -21,8 +21,11 @@ while exercising its parser limits directly.
 
 `provider-error-text.json` is synthetic: error messages a hosted MCP call can report, each with
 the text both SDKs export as the failed span's status description under content capture once
-credentials are scrubbed (URL userinfo, query values and fragments, authorization-scheme
-credentials, credential-named `key=value` and `key: value` pairs) and the text bounded. Credentials
+credentials are scrubbed (URL userinfo, query values and fragments, quoted query values included;
+a URL with another scheme than `http(s)`, `ws(s)` or `ftp` replaced whole when it has an `@`, `?`
+or `#`; authorization-scheme credentials; credential-named `key=value` and `key: value` pairs, a
+quoted value up to its closing quote and a pair inside another pair's value included) and the
+text bounded. Credentials
 are placeholders. The Python suite reads the same file.
 
 # Tool-definition digest fixture

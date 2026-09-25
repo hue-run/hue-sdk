@@ -67,6 +67,62 @@
     {
       "input": "HTTP 502 from mcp_server:8080 (Bad Gateway)",
       "expected": "HTTP 502 from mcp_server:8080 (Bad Gateway)"
+    },
+    {
+      "input": "Upstream said: password=\"synthetic two words\" and retried",
+      "expected": "Upstream said: password=\"[redacted]\" and retried"
+    },
+    {
+      "input": "{\"password\": \"synthetic two words\", \"user\": \"bob\"}",
+      "expected": "{\"password\": \"[redacted]\", \"user\": \"bob\"}"
+    },
+    {
+      "input": "secret=\"synthetic\\\"escaped value\" was refused",
+      "expected": "secret=\"[redacted]\" was refused"
+    },
+    {
+      "input": "password=\"\" is empty",
+      "expected": "password=\"\" is empty"
+    },
+    {
+      "input": "password=\"synthetic-unclosed and more",
+      "expected": "password=\"[redacted] and more"
+    },
+    {
+      "input": "\"authorization\": \"Bearer synthetic two words\"",
+      "expected": "\"authorization\": \"[redacted]\""
+    },
+    {
+      "input": "error: token=synthetic-chained-token",
+      "expected": "error: token=[redacted]"
+    },
+    {
+      "input": "status:password=synthetic-pw-2; retrying",
+      "expected": "status:password=[redacted]; retrying"
+    },
+    {
+      "input": "token=password = synthetic-pw-3",
+      "expected": "token=[redacted] = [redacted]"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token=\"synthetic-query-secret\" next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token='synthetic two words' next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "postgres://synthetic:secret@db.example.test/app refused the connection",
+      "expected": "[redacted] refused the connection"
+    },
+    {
+      "input": "redis://cache.example.test:6379/0 refused",
+      "expected": "redis://cache.example.test:6379/0 refused"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token=\"synthetic-unclosed-query next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
     }
   ]
 }

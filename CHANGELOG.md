@@ -110,10 +110,13 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   any record's tool definitions; before, it carried neither. Descriptions and schemas are still
   exported only with content capture. **Wire**
 - With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed (URL userinfo, query values and fragments,
-  authorization-scheme credentials, credential-named `key=value` and `key: value` pairs) and cut
-  to 1,024 characters; the `redact` hook sees it as `status.message`. Without content capture the
-  span keeps `error.type` only. **Wire**
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
+  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
+  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
+  `?` or `#`, and replaces authorization-scheme credentials and the value of a credential-named
+  `key=value` or `key: value` pair (a quoted value up to its closing quote, and a pair inside
+  another pair's value). The `redact` hook sees the text as `status.message`. Without content
+  capture the span keeps `error.type` only. **Wire**
 
 #### Changed
 
