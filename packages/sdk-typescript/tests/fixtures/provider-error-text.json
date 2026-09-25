@@ -219,6 +219,22 @@
     {
       "input": "the key: value pairs and a tapi key: stay as they are",
       "expected": "the key: value pairs and a tapi key: stay as they are"
+    },
+    {
+      "input": "sk-synthetic0123Xpassword: \"synthetic two words\" rest",
+      "expected": "[redacted]: \"[redacted]\" rest"
+    },
+    {
+      "input": "Hue said hue_inv_synthetic0123 is invalid",
+      "expected": "Hue said [redacted] is invalid"
+    },
+    {
+      "input": "Authorization: xoxb-synthetic-0123 was rejected",
+      "expected": "Authorization: [redacted] was rejected"
+    },
+    {
+      "input": "Authorization: Api-Key synthetic-api-key was rejected",
+      "expected": "Authorization: [redacted] was rejected"
     }
   ]
 }

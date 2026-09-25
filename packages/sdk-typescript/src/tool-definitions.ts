@@ -121,10 +121,10 @@ function scrubTextUrl(url: string, state: ScrubState): string {
   return /[@?#]/.test(url) ? REDACTED : url;
 }
 /** A credential its own prefix identifies wherever it appears, `%` escapes included: Hue's API, MCP,
- * world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (`sk-`), Stripe,
- * Slack, Google OAuth, GitHub and GitLab ones. */
+ * world, attempt, simulation, setup, install and invocation tokens, and OpenAI and Anthropic
+ * (`sk-`), Stripe, Slack, Google OAuth, GitHub and GitLab ones. */
 const prefixedToken =
-  /\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}/gi;
+  /\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv)_|sk-|[rs]k_(?:live|test)_|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}/gi;
 /** An authorization scheme followed by its credential, as in an `Authorization` header, up to
  * whitespace, a quote, a delimiter or a backslash. The credential cannot start with `=` or `:`, so
  * `token = value` and `Token : value` are left to the key-value rule. */
@@ -143,10 +143,11 @@ const quotedValue =
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
   /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
-/** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
- * `ApiKey …`), or a lone credential. One already replaced is left alone. */
+/** An `Authorization` header's unquoted value: a scheme word of letters and dashes and the
+ * credential after it (`Bot …`, `Api-Key …`), or a lone credential. One already replaced is left
+ * alone. */
 const authorizationBare =
-  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)[^\s"',;})\]]+(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)(?:[A-Za-z][A-Za-z-]*[ \t]+(?:\[redacted\]|[^\s"',;})\]]+)|[^\s"',;})\]]+)/y;
 
 function normalizedKey(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, "");
@@ -205,11 +206,12 @@ function scrubPairs(text: string): string {
  */
 export function scrubCredentialText(text: string): string {
   const state: ScrubState = { changed: false };
-  return scrubPairs(
-    scrubTextUrls(text, state)
-      .replace(prefixedToken, REDACTED)
-      .replace(authorizationValue, `$1$2${REDACTED}`),
-  );
+  // Pairs before prefixed tokens, so a token glued to a following key cannot swallow the key and
+  // shield its value; prefixed tokens before an authorization scheme's credential, so a token
+  // ending in `-token` is not read as the scheme `Token` followed by a credential.
+  return scrubPairs(scrubTextUrls(text, state))
+    .replace(prefixedToken, REDACTED)
+    .replace(authorizationValue, `$1$2${REDACTED}`);
 }
 
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */

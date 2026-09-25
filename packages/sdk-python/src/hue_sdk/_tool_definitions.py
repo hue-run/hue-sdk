@@ -75,10 +75,10 @@ _SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
 # A credential its own prefix identifies wherever it appears, ``%`` escapes included: Hue's API,
-# MCP, world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (``sk-``),
-# Stripe, Slack, Google OAuth, GitHub and GitLab ones.
+# MCP, world, attempt, simulation, setup, install and invocation tokens, and OpenAI and Anthropic
+# (``sk-``), Stripe, Slack, Google OAuth, GitHub and GitLab ones.
 _PREFIXED_TOKEN = re.compile(
-    r"\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_"
+    r"\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv)_|sk-|[rs]k_(?:live|test)_"
     r"|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}",
     re.IGNORECASE | re.ASCII,
 )
@@ -111,11 +111,12 @@ _BARE_VALUE = re.compile(
     rf"[^{_JS_SPACE}\"',;&}})\]]+",
     re.IGNORECASE | re.ASCII,
 )
-# An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
-# ``ApiKey …``), or a lone credential. One already replaced is left alone.
+# An ``Authorization`` header's unquoted value: a scheme word of letters and dashes and the
+# credential after it (``Bot …``, ``Api-Key …``), or a lone credential. One already replaced is
+# left alone.
 _AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)[^{_JS_SPACE}\"',;}})\]]+"
-    rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
+    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)(?:[A-Za-z][A-Za-z-]*[ \t]+"
+    rf"(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+)|[^{_JS_SPACE}\"',;}})\]]+)"
 )
 
 
@@ -209,10 +210,12 @@ def scrub_credential_text(text: str) -> str:
     ``key=value`` or ``key: value`` pair whose key names a credential (quoted, escaped-quoted or
     bare) become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
-    text = _scrub_text_urls(text)
+    # Pairs before prefixed tokens, so a token glued to a following key cannot swallow the key and
+    # shield its value; prefixed tokens before an authorization scheme's credential, so a token
+    # ending in ``-token`` is not read as the scheme ``Token`` followed by a credential.
+    text = _scrub_pairs(_scrub_text_urls(text))
     text = _PREFIXED_TOKEN.sub(REDACTED, text)
-    text = _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
-    return _scrub_pairs(text)
+    return _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
 
 
 def _is_url_key(key: Any) -> bool:
