@@ -414,8 +414,10 @@ after the case. Its stdout is the answer
 per-case `--timeout` (default 600 seconds) is a target failure. A timed-out or interrupted command
 is stopped as a whole process group on macOS and Linux: SIGTERM, then SIGKILL for anything still
 running 5 seconds later, including an agent a compound command started after its shell exited;
-the case settles only once nothing in the group is left. A second Ctrl+C during that grace kills
-the group at once and exits with 130. The world token is never logged.
+the case settles only once nothing in the group is left. A command that exits normally but leaves
+processes in its group has them stopped the same way before its answer and files are read. A
+second Ctrl+C during that grace kills the group at once, removes the world case's files, the MCP
+configuration file and the checkpoint locks, and exits with 130. The world token is never logged.
 A world created while the deployment's simulation gateway is off gets the legacy `hue_sim_`
 capability under the same `HUE_MCP_*` names. The agent key defaults to the slug of the command's
 script name; `--revision` is sent to Hue as the agent revision of every world.
@@ -495,6 +497,15 @@ output; `summary.txt` or `summary.md` is recorded as `{"summary": "..."}`. When 
 the command's stdout is the output (JSON when it parses). A single generated file is the primary
 document by default. Model and provider credentials stay in the command's own environment; the
 scoped case files are copies under `--checkpoint-dir` (default `.hue/eval/<agent-key>/<project>/direct/<experiment>`).
+
+The same collection serves world cases, and it does not trust paths the agent controls. `output/`
+must be a real directory, and a helper name, when present, a regular file; a symlink, FIFO or
+directory in either place is the case's error. Symlinks and other special files among the
+documents are skipped, as are hidden and lock entries. Every file is opened without following a
+final symlink or blocking, must be the regular file the listing saw and within its limit (4 MiB
+for a helper, 25 MiB for a document, checked before reading), and its upload is staged from the
+bytes read. A file or directory that changed while it was collected, more than 32 documents or
+more than 1024 entries is the case's error too.
 
 An adapter file works too: it is called with `(inputs, context)` where `context.mode` is
 `"direct"` and `context` carries `config`, `item`, `executionId`, `files` (agent-visible pinned

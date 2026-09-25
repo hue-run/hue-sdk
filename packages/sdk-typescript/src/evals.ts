@@ -1,4 +1,9 @@
-export { createEvaluationClient, EvaluationClient, HueApiError } from "./evals/client.js";
+export {
+  ArtifactSizeError,
+  createEvaluationClient,
+  EvaluationClient,
+  HueApiError,
+} from "./evals/client.js";
 export type { EvaluationClientOptions } from "./evals/client.js";
 export {
   runExperiment,

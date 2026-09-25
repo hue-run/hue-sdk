@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ROOT_CONTEXT } from "@opentelemetry/api";
@@ -8,6 +9,7 @@ import type { HueSpan } from "../types.js";
 import { EvaluationClient, HueApiError } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { CheckpointStore } from "./checkpoint.js";
+import { onForcedExit } from "./exit-cleanup.js";
 import {
   assertSafeFileNames,
   downloadCaseFiles,
@@ -142,6 +144,22 @@ async function removeCaseFiles(directory: string): Promise<void> {
       code: "HUE_CASE_FILES_NOT_REMOVED",
     });
   }
+}
+/** What a world case keeps when it ends early: the staged outputs its `uploading` checkpoint
+ * resumes from, until `prepared` records their artifacts. Set before that checkpoint is written,
+ * so a resume never finds them gone. */
+interface CaseFiles {
+  keepOutputs: boolean;
+}
+/** Everything of a world case's directory except the staged outputs. */
+const WORK_PARTS = ["inputs", "evaluator-inputs", "work"];
+async function releaseWorldFiles(directory: string, keepOutputs: boolean): Promise<void> {
+  if (!keepOutputs) return removeCaseFiles(directory);
+  for (const part of WORK_PARTS) await removeCaseFiles(join(directory, part));
+}
+function releaseWorldFilesSync(directory: string, keepOutputs: boolean): void {
+  for (const path of keepOutputs ? WORK_PARTS.map((part) => join(directory, part)) : [directory])
+    rmSync(path, { recursive: true, force: true });
 }
 
 /** Immutable case context passed to a direct experiment target. */
@@ -590,7 +608,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     // A case pinned to a world keeps its files apart and removes them when it ends: the agent's
     // copies of its inputs, its work, the evaluator's downloads and the staged outputs.
     const worldDirectoryOf = (itemId: string) => join(filesRoot, `world-case-${uuid(itemId)}`);
-    const runCase = async (item: (typeof items)[number]) => {
+    const runCase = async (item: (typeof items)[number], files: CaseFiles) => {
       const file = `case-${uuid(item.id)}`;
       const worldDirectory = worldDirectoryOf(item.id);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
@@ -614,6 +632,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         if (checkpoint.hasOutput && checkpoint.output === undefined)
           throw new UncertainExecutionError(item.id, checkpoint.executionId);
         const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
+        files.keepOutputs = true;
         checkpoint = await prepare(
           file,
           checkpoint,
@@ -621,6 +640,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           caseDirectoryOf(frozenCase),
           checkpoint.output,
         );
+        files.keepOutputs = false;
       }
       if (!checkpoint) {
         if (item.execution) throw new UncertainExecutionError(item.id, item.execution.id);
@@ -728,6 +748,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             };
             // Without persisted result content a restart cannot reconstruct the outcome; the
             // saved stage then reports the execution as uncertain instead of guessing.
+            files.keepOutputs = true;
             await store.write(file, uploading);
             return prepare(file, uploading, frozenCase, caseDirectory, output);
           },
@@ -737,6 +758,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             attributes: { "hue.experiment.id": experiment.id, "hue.dataset.case.id": item.id },
           },
         );
+        files.keepOutputs = false;
         // End root before waiting for both OTLP signals. Export failure leaves the prepared checkpoint intact.
         let exportError: Error | undefined;
         try {
@@ -837,22 +859,21 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       report.resultIds.push(...results);
     };
     await pool(items, concurrency, async (item) => {
+      // A world case's directory goes however the case ends, a forced exit included. An
+      // interrupted upload keeps only the staged outputs it resumes from; inputs are downloaded
+      // anew for scoring. A direct case has no such directory, so nothing is removed for it.
       const worldDirectory = worldDirectoryOf(item.id);
+      const files: CaseFiles = { keepOutputs: false };
+      const untrack = onForcedExit(() => releaseWorldFilesSync(worldDirectory, files.keepOutputs));
       try {
-        await runCase(item);
+        await runCase(item, files);
+        await releaseWorldFiles(worldDirectory, false);
       } catch (error) {
-        // An interrupted upload resumes from the staged outputs its checkpoint names; nothing
-        // else of a world case is needed again: inputs are downloaded anew for scoring.
-        const saved = await store
-          .read<CaseCheckpoint>(`case-${uuid(item.id)}`)
-          .catch(() => ({ stage: "unreadable" as const }));
-        if (saved?.stage === "uploading" || saved?.stage === "unreadable")
-          for (const part of ["inputs", "evaluator-inputs", "work"])
-            await removeCaseFiles(join(worldDirectory, part));
-        else await removeCaseFiles(worldDirectory);
+        await releaseWorldFiles(worldDirectory, files.keepOutputs);
         throw error;
+      } finally {
+        untrack();
       }
-      await removeCaseFiles(worldDirectory);
     });
     let finish = await store.read<{ key: string }>("finish");
     if (!finish) {

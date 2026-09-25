@@ -326,8 +326,8 @@ grading, as they do for world cases.
 Before an execution exists, `runExperiment` downloads the pinned input files named by the frozen
 case's `inputFiles` and verifies byte count and SHA-256. A download failure is an SDK failure and
 consumes no execution slot; bytes that differ from the manifest raise `CaseFileError` with the
-stable code `case_file_mismatch`, and a file already saved with the pinned identity is reused
-instead of downloaded again. The target sees only the agent-visible roles — `source`,
+stable code `case_file_mismatch`, and a download stops one byte past the pinned size. A file
+already saved with the pinned identity is reused instead of downloaded again. The target sees only the agent-visible roles — `source`,
 `attached_template`, `attached_reference` and `original` — as `context.files`; evaluator-only
 `org_template` and `evaluator_reference` files (an organization's template, a legal corpus, an
 answer key) reach scorers but not the agent. They are fetched only when a bound code evaluator
@@ -347,9 +347,11 @@ The runner copies them next to its checkpoint, publishes them through the artifa
 upload and verified completion APIs with stable per-execution keys, and completes the execution with
 `artifactIds` and `primaryArtifactId`, so the subject's frozen manifest holds inputs and outputs
 together. Generated files are always uploaded regardless of `persistResultContent`: they are the
-execution's evidence. A declared file that cannot be read, exceeds 25 MiB, repeats a filename or has
-an unsupported content type is saved as the target's error (`TargetError`), not as an uncertain
-execution. A crash after the target finished resumes from the staged files without invoking the
+execution's evidence. A declared `path` is read once, as a regular file (a symlink, FIFO or device
+is refused) whose size is checked before reading, and staged owner-only from those bytes. A
+declared file that cannot be read, exceeds 25 MiB, repeats a filename or has an unsupported
+content type is saved as the target's error (`TargetError`), not as an uncertain execution. A
+files directory must be owned by the current user and closed to everyone else (mode 0700). A crash after the target finished resumes from the staged files without invoking the
 target again; if result content is not persisted, the JSON output cannot be reconstructed and the
 case is reported as uncertain.
 

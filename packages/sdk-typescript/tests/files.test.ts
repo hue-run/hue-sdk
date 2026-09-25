@@ -487,11 +487,12 @@ function fixture(options: {
 }
 
 describe("file-based cases", () => {
-  test("filename truncation preserves a Unicode code point at the boundary", () => {
-    const expected = `${"a".repeat(199)}😀`;
-    const filename = safeFilename(`${expected}ignored`);
-    expect(filename).toBe(expected);
-    expect([...filename]).toHaveLength(200);
+  test("filename truncation keeps 200 UTF-8 bytes and never splits a code point", () => {
+    const expected = `${"a".repeat(196)}😀`;
+    expect(safeFilename(`${expected}ignored`)).toBe(expected);
+    expect(Buffer.byteLength(expected)).toBe(200);
+    // One more byte and the emoji no longer fits: it is dropped whole, not cut.
+    expect(safeFilename(`${"a".repeat(197)}😀ignored`)).toBe("a".repeat(197));
   });
 
   test("downloads pinned inputs, uploads generated files and grades them locally", async () => {

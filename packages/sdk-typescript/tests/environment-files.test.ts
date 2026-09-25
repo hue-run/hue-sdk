@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createHue } from "../src/index.js";
@@ -910,7 +910,7 @@ describe("environment target files (environment-files:v1)", () => {
       "..notes.txt",
       "CONFIG.json",
       "console.pdf",
-      "Report: Q3.pdf",
+      `${"é".repeat(98)}.pdf`,
     ])
       expect([name, isSafeFileName(name)]).toEqual([name, true]);
     for (const name of [
@@ -931,7 +931,15 @@ describe("environment target files (environment-files:v1)", () => {
       "trailing ",
       "tab\there.pdf",
       "nul\u0000byte.pdf",
-      `${"a".repeat(252)}.pdf`,
+      "c1\u0085control.pdf",
+      "Report: Q3.pdf",
+      "a<b>.pdf",
+      'quote".pdf',
+      "pipe|.pdf",
+      "what?.pdf",
+      "star*.pdf",
+      `${"a".repeat(197)}.pdf`,
+      `${"é".repeat(99)}.pdf`,
     ])
       expect([name, isSafeFileName(name)]).toEqual([name, false]);
   });
@@ -956,7 +964,15 @@ describe("environment target files (environment-files:v1)", () => {
   });
 });
 
-function hue(args: string[], options: { cwd: string; env?: Record<string, string> }) {
+function hue(
+  args: string[],
+  options: {
+    cwd: string;
+    env?: Record<string, string>;
+    /** Sends SIGINT this many times, 150 ms apart, once this file exists: Ctrl+C, repeated. */
+    interruptAfter?: { file: string; times: number };
+  },
+) {
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
   return new Promise<{ status: number | null; stdout: string; stderr: string }>(
     (resolve, reject) => {
@@ -969,6 +985,16 @@ function hue(args: string[], options: { cwd: string; env?: Record<string, string
       let stderr = "";
       child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
       child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+      if (options.interruptAfter) {
+        const { file, times } = options.interruptAfter;
+        const waiting = setInterval(() => {
+          if (!existsSync(file)) return;
+          clearInterval(waiting);
+          for (let index = 0; index < times; index++)
+            setTimeout(() => child.kill("SIGINT"), 200 + index * 150);
+        }, 50);
+        child.on("close", () => clearInterval(waiting));
+      }
       const timer = setTimeout(() => child.kill("SIGKILL"), SPAWN_TIMEOUT);
       child.on("error", (error) => {
         clearTimeout(timer);
@@ -1021,7 +1047,119 @@ export default async function (_inputs, context) {
 }
 `;
 
+/** Swaps its output directory for a symlink to a host directory, then answers normally. */
+const linkingSource = `import { rmSync, symlinkSync } from "node:fs";
+rmSync(process.env.HUE_CASE_OUTPUT_DIR, { recursive: true });
+symlinkSync(process.env.HOST_DIR, process.env.HUE_CASE_OUTPUT_DIR);
+process.stdout.write("done");
+`;
+
+/** Never answers and ignores SIGTERM; records where its world files live. */
+const stubbornSource = `import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+writeFileSync(process.env.MARKER + ".tmp", JSON.stringify({
+  mcpConfig: process.env.HUE_MCP_CONFIG,
+  caseDirectory: process.env.HUE_CASE_DIR,
+  pid: process.pid,
+}));
+(await import("node:fs")).renameSync(process.env.MARKER + ".tmp", process.env.MARKER);
+setInterval(() => {}, 1000);
+`;
+
+/** Every directory named `.lock` under `root`. */
+async function locks(root: string): Promise<string[]> {
+  if (!existsSync(root)) return [];
+  const found: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(root, entry.name);
+    if (entry.name === ".lock") found.push(path);
+    else found.push(...(await locks(path)));
+  }
+  return found;
+}
+
 describe("hue eval with a world case that carries files", () => {
+  test("an output directory swapped for a symlink to a host directory fails the case and uploads nothing", async () => {
+    const f = platform();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-environment-files-link-"));
+    const hostDirectory = join(cwd, "host");
+    await mkdir(hostDirectory);
+    await writeFile(join(hostDirectory, "secret.txt"), "host secret: never uploaded");
+    await writeFile(join(hostDirectory, "summary.txt"), "host secret: never uploaded");
+    await writeFile(join(cwd, "agent.mjs"), linkingSource);
+    try {
+      const run = await hue(
+        [
+          "--dataset-version",
+          f.version.id,
+          "--scorer-version",
+          f.worldOutcome.id,
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--content",
+          "--json",
+          "--wait",
+          "20",
+        ],
+        { cwd, env: { HUE_BASE_URL: f.baseUrl, HOST_DIR: hostDirectory } },
+      );
+      expect(run.status).toBe(1);
+      const completion = f.calls.completions[0]!;
+      expect(completion).toMatchObject({
+        state: "error",
+        error: { type: "TargetError", message: expect.stringContaining("is not a directory") },
+      });
+      expect(completion.artifactIds).toBeUndefined();
+      expect(JSON.stringify(completion)).not.toContain("host secret");
+      for (const stored of f.artifacts.values())
+        expect(Buffer.from(stored.bytes ?? []).toString()).not.toContain("host secret");
+      // Removing the case directory removed the link, never what it pointed at.
+      expect(await readdir(hostDirectory)).toEqual(["secret.txt", "summary.txt"]);
+    } finally {
+      f.stop();
+    }
+  }, 60_000);
+
+  test("a forced exit removes the world case's files, its MCP configuration and the locks", async () => {
+    const f = platform();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-environment-files-exit-"));
+    await writeFile(join(cwd, "agent.mjs"), stubbornSource);
+    const marker = join(cwd, "started.json");
+    try {
+      const run = await hue(
+        [
+          "--dataset-version",
+          f.version.id,
+          "--scorer-version",
+          f.worldOutcome.id,
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--wait",
+          "5",
+        ],
+        {
+          cwd,
+          env: { HUE_BASE_URL: f.baseUrl, MARKER: marker },
+          interruptAfter: { file: marker, times: 2 },
+        },
+      );
+      expect(run.status).toBe(130);
+      const seen = JSON.parse(await readFile(marker, "utf8")) as {
+        mcpConfig: string;
+        caseDirectory: string;
+        pid: number;
+      };
+      expect(existsSync(seen.mcpConfig)).toBe(false);
+      expect(existsSync(dirname(dirname(seen.mcpConfig)))).toBe(false);
+      // <world case>/work/case: the whole world case directory is gone.
+      expect(existsSync(dirname(dirname(seen.caseDirectory)))).toBe(false);
+      expect(await locks(join(cwd, ".hue", "eval"))).toEqual([]);
+    } finally {
+      f.stop();
+    }
+  }, 60_000);
+
   test("--command gets the case directory beside the world, and its output/ is uploaded", async () => {
     const f = platform();
     const cwd = await mkdtemp(join(tmpdir(), "hue-eval-environment-files-"));

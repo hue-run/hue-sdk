@@ -86,6 +86,17 @@ export class HueApiError extends Error {
   }
 }
 
+/** An artifact download that ran past the size its caller expected; the rest is not read. */
+export class ArtifactSizeError extends Error {
+  constructor(
+    /** The size the caller expected, in bytes. */
+    readonly maxBytes: number,
+  ) {
+    super(`Artifact download exceeded the expected ${maxBytes} bytes`);
+    this.name = "ArtifactSizeError";
+  }
+}
+
 const registryFieldAliases = [
   ["datasetId", "evalSetId"],
   ["datasetVersionId", "evalSetVersionId"],
@@ -242,8 +253,12 @@ export class EvaluationClient {
       throw new HueApiError();
     }
   }
-  /** Verified bytes of one ready artifact in this project, bounded to the 25 MiB pilot file size. */
-  async downloadArtifact(id: string): Promise<Uint8Array> {
+  /** Verified bytes of one ready artifact in this project, bounded to the 25 MiB pilot file size.
+   * With `maxBytes`, the download stops one byte past it and throws `ArtifactSizeError`. */
+  async downloadArtifact(id: string, options: { maxBytes?: number } = {}): Promise<Uint8Array> {
+    const expected = options.maxBytes;
+    if (expected !== undefined && (!Number.isSafeInteger(expected) || expected < 0))
+      throw new RangeError("maxBytes must be a non-negative integer");
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`, {
@@ -269,6 +284,7 @@ export class EvaluationClient {
           const { done, value } = await reader.read();
           if (done) break;
           size += value.byteLength;
+          if (expected !== undefined && size > expected) throw new ArtifactSizeError(expected);
           if (size > 25 * 1024 * 1024) throw new Error("Oversized artifact");
           chunks.push(value);
         }
@@ -276,7 +292,8 @@ export class EvaluationClient {
         await reader.cancel();
       }
       return new Uint8Array(Buffer.concat(chunks));
-    } catch {
+    } catch (error) {
+      if (error instanceof ArtifactSizeError) throw error;
       throw new HueApiError();
     }
   }

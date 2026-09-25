@@ -231,6 +231,7 @@
             "ActualAgentManifestInputV2",
             "ActualAgentManifestV2",
             "ArtifactReservation",
+            "ArtifactSizeError",
             "ArtifactUpload",
             "AttemptBaselineV2",
             "AttemptBindingRead",

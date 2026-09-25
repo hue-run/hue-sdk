@@ -292,8 +292,9 @@ the callback as `context.files` beside `context.world`, in a private directory (
 `evaluator_reference`) never reach the agent; a local code evaluator's copies are checked before
 the execution starts but saved only after the agent finished. Bytes that differ from the manifest raise
 `CaseFileError` with code `case_file_mismatch`; a name that is not one safe file name (a path
-separator, `.` or `..`, a control character, a Windows device name such as `CON`, a trailing dot
-or space, more than 255 bytes) raises `case_file_name_refused`. Either stops the run before an
+separator, `.` or `..`, a C0 or C1 control character, a character Windows reserves such as `:` or
+`?`, a Windows device name such as `CON`, a trailing dot or space, more than 200 bytes) raises
+`case_file_name_refused`. Either stops the run before an
 execution or world exists for the case. Return `withFiles(output, files)` to upload what the agent
 produced: the files are published and linked to the execution as `artifactIds` and
 `primaryArtifactId`, within the limits of direct cases (at most 32 files, 25 MiB each, the

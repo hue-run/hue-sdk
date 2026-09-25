@@ -26,6 +26,7 @@ import type {
 } from "../evals/types.js";
 import { TargetResult } from "../evals/types.js";
 import { CheckpointStore } from "../evals/checkpoint.js";
+import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
 import { digest } from "../evals/json.js";
 import { runLocalAgent } from "../evals/local-worker.js";
 import {
@@ -334,9 +335,6 @@ interface RunningCommand {
   settled: Promise<void>;
 }
 const runningCommands = new Set<RunningCommand>();
-/** Owner-only MCP configuration directories not yet disposed; a forced exit removes them, since
- * each holds a world token. */
-const mcpConfigDirectories = new Set<string>();
 
 /** Stops every agent command still running and resolves once each has settled. */
 async function settleCommands(): Promise<void> {
@@ -353,9 +351,11 @@ function warn(message: string) {
  * timeout or Ctrl+C stops the agent the shell started, not only the shell: a survivor would still
  * hold a world token and could write after Hue recorded the case as failed. The group is signalled
  * even once the shell has exited, since a compound command's agent can outlive it, and a stopped
- * command settles only when nothing in the group is left. Once the group is found empty it is
- * never signalled again, since its ID could be reused. Windows has no process group to signal,
- * so the child alone is stopped there.
+ * command settles only when nothing in the group is left. A command that exits normally but
+ * leaves processes behind has them stopped the same way before it settles, so none can touch its
+ * outputs while they are collected. Once the group is found empty it is never signalled again,
+ * since its ID could be reused. Windows has no process group to signal, so the child alone is
+ * stopped there.
  */
 export function spawnAgentCommand(
   command: string,
@@ -519,6 +519,9 @@ export function spawnAgentCommand(
     };
     child.on("close", (code, signal) => {
       closed = { code, signal };
+      // Whatever the command left running is stopped before its answer and files are read, so
+      // nothing it started can still write, swap or link files while they are collected.
+      if (group && !stopping && running()) return stop();
       settle();
     });
   });
@@ -582,7 +585,9 @@ function commandAdapter(
     const configDirectory = context.world
       ? mkdtempSync(join(tmpdir(), "hue-mcp-config-"))
       : undefined;
-    if (configDirectory) mcpConfigDirectories.add(configDirectory);
+    const untrack = configDirectory
+      ? onForcedExit(() => rmSync(configDirectory, { recursive: true, force: true }))
+      : undefined;
     try {
       const configFile = context.world
         ? await writeMcpConfig(context.world, { directory: configDirectory })
@@ -612,10 +617,8 @@ function commandAdapter(
       });
       return collectDirectOutputs(layout.outputDirectory, parseAnswer(stdout));
     } finally {
-      if (configDirectory) {
-        await rm(configDirectory, { recursive: true, force: true });
-        mcpConfigDirectories.delete(configDirectory);
-      }
+      if (configDirectory) await rm(configDirectory, { recursive: true, force: true });
+      untrack?.();
     }
   };
 }
@@ -1439,8 +1442,9 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     }
     if (performance.now() - firstInterrupt < 50) return;
     for (const command of runningCommands) command.kill();
-    for (const directory of mcpConfigDirectories)
-      rmSync(directory, { recursive: true, force: true });
+    // The exit cannot wait for the normal cleanup: remove the world cases' files, the MCP
+    // configurations holding world tokens and the checkpoint locks now.
+    runForcedExitCleanups();
     process.stderr.write("Interrupted.\n");
     process.exit(130);
   };

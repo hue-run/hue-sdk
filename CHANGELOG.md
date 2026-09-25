@@ -34,9 +34,13 @@ refuses to publish a version without a matching entry below.
   itself, so existing registrations keep their capabilities.
 - `CaseFileError`, with the stable `code` `case_file_mismatch` when a downloaded pinned file
   differs from the manifest's size or SHA-256, and `case_file_name_refused` when a file for an
-  agent in a world is not one safe file name (a path separator, `.` or `..`, a control character,
-  a Windows device name such as `CON`, a trailing dot or space, or more than 255 bytes). Both are
-  raised before the case's execution starts, so no execution or world is spent on it.
+  agent in a world is not one safe file name (a path separator, `.` or `..`, a C0 or C1 control
+  character, a character Windows reserves such as `:` or `?`, a Windows device name such as
+  `CON`, a trailing dot or space, or more than 200 bytes). Both are raised before the case's
+  execution starts, so no execution or world is spent on it.
+- `EvaluationClient.downloadArtifact(id, { maxBytes })` stops one byte past `maxBytes` and throws
+  the new `ArtifactSizeError`. Pinned downloads pass the manifest's size, so a longer body is a
+  `case_file_mismatch` without reading the rest.
 - `hue eval` hands a world case's files to the agent: an adapter receives `context.files` and
   `context.outputDirectory` and may return `withFiles`, and a `--command` also gets
   `HUE_CASE_DIR`, `HUE_CASE_INPUTS` and `HUE_CASE_OUTPUT_DIR` with the direct-case layout; every
@@ -51,6 +55,29 @@ refuses to publish a version without a matching entry below.
   but saved only after the target finished, just before scoring, apart from the agent's copies, so
   they are not on disk while the agent runs. They are downloaded twice as a result. Before, they
   were saved with the agent's files before the execution started.
+- A generated file declared by `path` is read once as a regular file, its size checked before
+  reading, and staged owner-only (0600) from those bytes; a symlink, FIFO or device is the
+  target's error. Before, it was read whole, then copied with its own mode.
+- `safeFilename` keeps at most 200 UTF-8 bytes instead of 200 characters, so a long multibyte
+  name no longer fails with the operating system's name-length error.
+- A files directory must be owned by the current user and closed to everyone else (mode 0700).
+- `hue eval` stops whatever a command left running in its process group (SIGTERM, then SIGKILL
+  after 5 seconds) before reading its answer and files. A forced exit (a second Ctrl+C) also
+  removes the world case's files, the MCP configuration holding the world token and the
+  checkpoint locks, so a rerun is not refused on a stale lock.
+
+#### Security
+
+- `hue eval` collects a command's `output/` without following the agent's links. The output
+  directory must be a real directory and a helper (`manifest.json`, `result.json`, `summary.txt`,
+  …) a regular file; every file is opened without following a final symlink or blocking on a
+  FIFO, must be the file the listing saw and within its limit (checked before reading), and is
+  uploaded from the bytes read. Before, a helper or an output directory linked to a host path
+  sent that host file to Hue, a file swapped for a link after the listing could be uploaded, and
+  a FIFO named like a helper hung the CLI. The listing also stops past 32 documents or 1024
+  entries. This applies to direct cases and world cases alike.
+- Input copies in a direct case directory whose names differ only in case or Unicode
+  normalization no longer overwrite each other on case-insensitive or normalizing filesystems.
 
 #### Fixed
 

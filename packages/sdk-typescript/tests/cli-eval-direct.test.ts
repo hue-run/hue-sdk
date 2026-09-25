@@ -532,7 +532,7 @@ function hue(args: string[], options: { cwd: string; env?: Record<string, string
 }
 
 /** Stands in for August's adapter: reads the case directory, writes the letters and a summary. */
-const agentSource = `import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+const agentSource = `import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const dir = process.env.HUE_CASE_DIR;
 const inputs = JSON.parse(readFileSync(process.env.HUE_CASE_INPUTS, "utf8"));
@@ -541,7 +541,8 @@ const out = process.env.HUE_CASE_OUTPUT_DIR;
 if (process.env.WRITE_UNSUPPORTED) writeFileSync(join(out, "notes.xyz"), "bytes");
 writeFileSync(join(out, "Citacion.docx"), "carta de citación para " + process.env.HUE_CASE_KEY);
 if (inputs.tipo_diligencia === "Virtual") writeFileSync(join(out, "Cuestionario descargos.docx"), "cuestionario");
-writeFileSync(join(out, "summary.txt"), "verificación de negrilla: 0 párrafos largos en negrilla\\nadvertencias para revisión: 0\\n");
+if (process.env.LINK_SUMMARY) symlinkSync(process.env.LINK_SUMMARY, join(out, "summary.txt"));
+else writeFileSync(join(out, "summary.txt"), "verificación de negrilla: 0 párrafos largos en negrilla\\nadvertencias para revisión: 0\\n");
 writeFileSync(join(out, "manifest.json"), JSON.stringify({ primary: "Citacion.docx" }));
 process.stdout.write(JSON.stringify({ roles, corpusVisible: existsSync(join(dir, "files", "evaluator_reference")), executionId: typeof process.env.HUE_EXECUTION_ID }));
 `;
@@ -689,6 +690,45 @@ describe("hue eval on a document eval set", () => {
       standIn.stop();
     }
   }, 120_000);
+
+  test("a summary linked to a host file fails the case instead of sending the file to Hue", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-link-"));
+    await writeFile(join(cwd, "agent.mjs"), agentSource);
+    const hostFile = join(cwd, "host-secret.txt");
+    await writeFile(hostFile, "host secret: never sent");
+    try {
+      const run = await hue(
+        [
+          "--set",
+          "gia-d1-citation",
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--content",
+          "--json",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl, LINK_SUMMARY: hostFile } },
+      );
+      expect(run.status).toBe(1);
+      expect(standIn.calls.completions[0]).toMatchObject({
+        state: "error",
+        error: {
+          type: "TargetError",
+          message: "output/summary.txt is not a regular file; the agent must write it itself",
+        },
+        filenames: [],
+      });
+      expect(JSON.stringify(standIn.calls.completions)).not.toContain("host secret");
+      for (const stored of standIn.artifacts.values())
+        expect(Buffer.from(stored.bytes ?? []).toString()).not.toContain("host secret");
+    } finally {
+      standIn.stop();
+    }
+  }, 60_000);
 
   test("an unsupported generated file and a failing verdict are reported as the case's own result", async () => {
     const standIn = documentStandIn({ verdict: "fail" });
@@ -890,7 +930,7 @@ describe("hue eval on a document eval set", () => {
     expect(single.output).toEqual({ ok: true });
     expect(single.files).toEqual([
       {
-        path: join(layout.outputDirectory, "Letter.docx"),
+        bytes: new Uint8Array(Buffer.from("letter")),
         filename: "Letter.docx",
         contentType: docx,
         primary: true,
@@ -912,7 +952,7 @@ describe("hue eval on a document eval set", () => {
       "Letter.docx",
       "anexos%2FSoporte.pdf",
     ]);
-    expect(nested.files[2]!.path).toBe(join(layout.outputDirectory, "anexos", "Soporte.pdf"));
+    expect(Buffer.from(nested.files[2]!.bytes!).toString()).toBe("%PDF");
     await writeFile(
       join(layout.outputDirectory, "manifest.json"),
       JSON.stringify({ primary: "anexos/Soporte.pdf" }),
