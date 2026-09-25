@@ -117,7 +117,8 @@ simulated world and grades the sealed outcome. Review and publish cases in the H
    into an ignored env file such as `.env.hue`; never print it, paste it into chat or commit it.
 3. Read the printed run URL and the per-case PASS/FAIL checks. Investigate with `get_run`
    (`include_failing_cases`), `get_run_item` and `get_trace`, change the agent, and rerun with
-   `--baseline <previous run id>` to see improvements and regressions.
+   `--baseline <previous experimentId>` to see improvements and regressions. Use the
+   `experimentId` from `--json` or the printed run URL; `runId` is a different identifier.
 4. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
@@ -156,7 +157,8 @@ grading executor scores the uploaded documents after the run.
 3. Read the `--json` document: `cases[].state`, `totals`, `runUrl`, `mode: "direct"` and
    `deferredScorerVersionIds` (the evaluator versions Hue graded). `complete: false` with exit 1
    means Hue's grading had not finished within `--wait`; rerun with a longer wait or inspect the
-   run URL and `get_run`. Compare prompt revisions with `--baseline <previous run id>`.
+   run URL and `get_run`. Compare prompt revisions with `--baseline <previous experimentId>`
+   using `experimentId` from the previous JSON document or its `runUrl`.
 
 ## Troubleshooting
 
