@@ -351,8 +351,11 @@ the CLI never prints it. The optional `zod` peer of `@hue-run/sdk/evals` must be
 Write an adapter module that hands the case inputs and the world's tools or MCP connection to
 the real agent. The module exports `default` or `runMyAgent`; `context` is the SDK's
 `SimulationTargetContext` (`world`, `mcp`, `tools`, `config`, `item`, `executionId`,
-`environmentRunId`, `signal`; `world` carries the provider mirror URLs, the world token, `env` and
-`mcpConfig` where Hue's simulation gateway serves the world):
+`environmentRunId`, `files`, `outputDirectory`, `signal`; `world` carries the provider mirror URLs,
+the world token, `env` and `mcpConfig` where Hue's simulation gateway serves the world). When the
+case also pins input files, `files` holds verified copies of its agent-visible ones (see
+[Evaluate a document eval set](#evaluate-a-document-eval-set)); return
+`withFiles(output, files)` from `@hue-run/sdk/evals` to upload documents the agent produced:
 
 ```ts
 // hue-agent.ts: erasable TypeScript only; Node.js 24 and Bun strip the types natively.
@@ -401,23 +404,35 @@ every case of the saved version; there is no case subset.
 `HUE_EXECUTION_ID`, `HUE_ENVIRONMENT_RUN_ID`, `HUE_CASE_ID` and `HUE_CASE_KEY`, and
 `{"inputs": ..., "config": ...}` on stdin. The child does not receive `HUE_API_KEY`, `HUE_MCP_KEY`
 or any other Hue control-plane credential unless `--allow-hue-credentials` is passed; the rest of
-the parent environment (model keys, application settings) is inherited. Its stdout is the answer
+the parent environment (model keys, application settings) is inherited. `HUE_CASE_DIR`,
+`HUE_CASE_INPUTS` and `HUE_CASE_OUTPUT_DIR` name a private case directory with the layout direct
+cases use: the case inputs, verified copies of the case's agent-visible pinned files under
+`files/<role>/`, and `output/`, whose files are uploaded after the world seals (the command still
+starts in the current directory). The case directory never holds the world token and is removed
+after the case. Its stdout is the answer
 (JSON when it parses, otherwise trimmed text; empty means no output); a non-zero exit or the
 per-case `--timeout` (default 600 seconds) is a target failure. A timed-out or interrupted command
 is stopped as a whole process group on macOS and Linux: SIGTERM, then SIGKILL for anything still
 running 5 seconds later, including an agent a compound command started after its shell exited;
-the case settles only once nothing in the group is left. A second Ctrl+C during that grace kills
-the group at once and exits with 130. The world token is never logged.
+the case settles only once nothing in the group is left. A command that exits normally but leaves
+processes in its group has them stopped the same way before its answer and files are read. A
+second Ctrl+C during that grace kills the group at once, removes the world case's files, the MCP
+configuration file and the checkpoint locks, and exits with 130. The world token is never logged.
 A world created while the deployment's simulation gateway is off gets the legacy `hue_sim_`
 capability under the same `HUE_MCP_*` names. The agent key defaults to the slug of the command's
 script name; `--revision` is sent to Hue as the agent revision of every world.
 
 `--worker` registers the adapter through `runLocalAgent()` with key `--agent-key` (default: the
 adapter filename slug), name `--agent-name` (default: the key), revision `--revision` (default:
-`AGENT_REVISION`, then the Git `HEAD` short hash, then `dev`) and capability `environment:v1`,
-prints the registration and each claimed run with its URL, executes runs launched from Hue until
-Ctrl+C or `--max-runs <n>`, and prints the verdict table after each run. Selection flags do not
-apply; Hue chooses the pinned experiment. The worker exits 0 when it stops normally.
+`AGENT_REVISION`, then the Git `HEAD` short hash, then `dev`) and capability `environment:v1`
+plus any repeated `--capability <value>`, prints the registration and each claimed run with its
+URL, executes runs launched from Hue until Ctrl+C or `--max-runs <n>`, and prints the verdict table
+after each run. Selection flags do not apply; Hue chooses the pinned experiment. The worker exits 0
+when it stops normally. Hue offers a case whose world comes with agent-visible files only to a
+registration that declares `environment-files:v1` and `input:<extension>` for each file type, for
+example `--capability environment-files:v1 --capability input:pdf`; the adapter or command then
+receives the files as described above. Hue keeps each registered revision's capabilities fixed,
+so declare new ones under a new `--revision`.
 
 A Scenario or eval set whose dataset version is not saved cannot back an experiment: the command
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
@@ -482,6 +497,15 @@ output; `summary.txt` or `summary.md` is recorded as `{"summary": "..."}`. When 
 the command's stdout is the output (JSON when it parses). A single generated file is the primary
 document by default. Model and provider credentials stay in the command's own environment; the
 scoped case files are copies under `--checkpoint-dir` (default `.hue/eval/<agent-key>/<project>/direct/<experiment>`).
+
+The same collection serves world cases, and it does not trust paths the agent controls. `output/`
+must be a real directory, and a helper name, when present, a regular file; a symlink, FIFO or
+directory in either place is the case's error. Symlinks and other special files among the
+documents are skipped, as are hidden and lock entries. Every file is opened without following a
+final symlink or blocking, must be the regular file the listing saw and within its limit (4 MiB
+for a helper, 25 MiB for a document, checked before reading), and its upload is staged from the
+bytes read. A file or directory that changed while it was collected, more than 32 documents or
+more than 1024 entries is the case's error too.
 
 An adapter file works too: it is called with `(inputs, context)` where `context.mode` is
 `"direct"` and `context` carries `config`, `item`, `executionId`, `files` (agent-visible pinned
