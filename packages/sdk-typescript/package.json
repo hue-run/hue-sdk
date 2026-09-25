@@ -99,7 +99,7 @@
     "@opentelemetry/context-async-hooks": "2.11.0",
     "@types/bun": "1.4.2",
     "@types/node": "26.5.1",
-    "ai": "7.0.99",
+    "ai": "7.0.106",
     "ajv": "8.20.0",
     "protobufjs": "8.8.0",
     "typescript": "7.0.2",
