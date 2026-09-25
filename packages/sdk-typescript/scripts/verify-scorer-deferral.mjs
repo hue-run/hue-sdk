@@ -41,17 +41,19 @@ const conversionV2Metrics = [
   "process_constraints",
   "task_success",
 ].map((name) => ({ name, type: "boolean" }));
-const assertionV3Metrics = [
+const assertionV2Metrics = [
   { name: "task_success", type: "boolean" },
-  ...[
-    "assertions_passed",
-    "assertions_failed",
-    "advisory_failed",
-    "agent_mistakes",
-    "judges_passed",
-    "judges_failed",
-    "judges_advisory",
-  ].map((name) => ({ name, type: "number", min: 0 })),
+  ...["assertions_passed", "assertions_failed", "advisory_failed", "agent_mistakes"].map(
+    (name) => ({ name, type: "number", min: 0 }),
+  ),
+];
+const assertionV3Metrics = [
+  ...assertionV2Metrics,
+  ...["judges_passed", "judges_failed", "judges_advisory"].map((name) => ({
+    name,
+    type: "number",
+    min: 0,
+  })),
 ];
 const judge = {
   model: "anthropic/claude-fable-5.1",
@@ -71,6 +73,11 @@ const deferred = [
     kind: "world_outcome",
     entry: "hue.conversion_outcome.v2",
     metrics: conversionV2Metrics,
+  }),
+  version({
+    kind: "world_outcome",
+    entry: "hue.outcome_assertions.v2",
+    metrics: assertionV2Metrics,
   }),
   version({
     kind: "world_outcome",

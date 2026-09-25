@@ -133,8 +133,8 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
 - A target output over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32
   levels of nesting) no longer stops the whole run with `OutcomeSerializationError`: that case
   completes as `error` with the type `OutputTooLarge` and, when result content is persisted, a
-  message naming the bound, and the other cases keep running. Output that is not JSON at all still
-  raises `OutcomeSerializationError`.
+  message naming the bound, and the other cases keep running. Output within the bounds that is not
+  JSON still raises `OutcomeSerializationError`.
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
   `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
   the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
@@ -734,7 +734,7 @@ No registry release is claimed until publication and registry acceptance complet
   output is over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels
   of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
   content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
-  running. Output that is not JSON at all still raises `OutcomeSerializationError`.
+  running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
 - Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation
