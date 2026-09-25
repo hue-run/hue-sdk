@@ -146,8 +146,9 @@ async function removeCaseFiles(directory: string): Promise<void> {
   }
 }
 /** What a world case keeps when it ends early: the staged outputs its `uploading` checkpoint
- * resumes from, until `prepared` records their artifacts. Set before that checkpoint is written,
- * so a resume never finds them gone. */
+ * resumes from, until `prepared` records their artifacts. It starts set until the saved
+ * checkpoint is read, and is set again before that checkpoint is written, so a resume never finds
+ * them gone. */
 interface CaseFiles {
   keepOutputs: boolean;
 }
@@ -614,6 +615,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       const caseDirectoryOf = (frozen: ExperimentCase) =>
         frozen.environmentVersionId ? worldDirectory : join(filesRoot, `case-${uuid(item.id)}`);
       let checkpoint = await store.read<CaseCheckpoint>(file);
+      files.keepOutputs = checkpoint?.stage === "uploading";
       if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
         if (checkpoint.stage === "serialization_failed")
           throw new OutcomeSerializationError(checkpoint.executionId);
@@ -632,7 +634,6 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         if (checkpoint.hasOutput && checkpoint.output === undefined)
           throw new UncertainExecutionError(item.id, checkpoint.executionId);
         const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
-        files.keepOutputs = true;
         checkpoint = await prepare(
           file,
           checkpoint,
@@ -863,7 +864,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       // interrupted upload keeps only the staged outputs it resumes from; inputs are downloaded
       // anew for scoring. A direct case has no such directory, so nothing is removed for it.
       const worldDirectory = worldDirectoryOf(item.id);
-      const files: CaseFiles = { keepOutputs: false };
+      const files: CaseFiles = { keepOutputs: true };
       const untrack = onForcedExit(() => releaseWorldFilesSync(worldDirectory, files.keepOutputs));
       try {
         await runCase(item, files);

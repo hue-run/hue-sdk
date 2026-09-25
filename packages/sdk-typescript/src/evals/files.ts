@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ArtifactSizeError, HueApiError, type EvaluationClient } from "./client.js";
 import type { CaseFile, LocalFile, OutputFile, SubjectFile } from "./types.js";
@@ -123,13 +123,20 @@ export function assertSafeFileNames(files: readonly Pick<CaseFile, "artifactId" 
         `Pinned file ${quoted(String(file.filename))} is not a safe file name`,
       );
 }
-/** Reduce a declared file name to a single printable path segment, at most 200 UTF-8 bytes. */
+/** Reduce a declared file name to a single printable path segment, at most 200 UTF-8 bytes. A
+ * longer name loses the end of its stem, not its extension, so `.pdf` stays `.pdf`. */
 export function safeFilename(name: string): string {
   const cleaned = [...name]
     .filter((c) => c.charCodeAt(0) >= 32 && c.charCodeAt(0) !== 127 && c !== "/" && c !== "\\")
     .join("")
     .trim();
-  const kept = truncateBytes(cleaned, MAX_NAME_BYTES);
+  const extension = extname(cleaned);
+  const kept =
+    Buffer.byteLength(cleaned) <= MAX_NAME_BYTES
+      ? cleaned
+      : extension && Buffer.byteLength(extension) <= 32
+        ? `${truncateBytes(cleaned.slice(0, -extension.length), MAX_NAME_BYTES - Buffer.byteLength(extension))}${extension}`
+        : truncateBytes(cleaned, MAX_NAME_BYTES);
   return kept && kept !== "." && kept !== ".." ? kept : "file";
 }
 /** Create `path` if needed and require a directory this user owns that no one else can open. */

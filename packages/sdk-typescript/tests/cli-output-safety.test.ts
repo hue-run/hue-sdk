@@ -217,8 +217,10 @@ describe("staging files", () => {
       "Café.pdf",
       "Café (2).pdf",
     ]);
-    // A name too long for the filesystem is cut to 200 bytes, between characters.
+    // A name too long for the filesystem is cut to 200 bytes, between characters, and keeps its
+    // extension so an agent still recognizes the PDF.
     expect(Buffer.byteLength(names[4]!)).toBeLessThanOrEqual(200);
+    expect(names[4]!.endsWith("é.pdf")).toBe(true);
     expect(await readdir(join(layout.caseDirectory, "files", "source"))).toHaveLength(5);
   });
 

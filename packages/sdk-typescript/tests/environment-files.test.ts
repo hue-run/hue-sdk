@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -27,6 +27,7 @@ import {
   type StoredResult,
   type Subject,
 } from "../src/evals.js";
+import { runForcedExitCleanups } from "../src/evals/exit-cleanup.js";
 import { isSafeFileName } from "../src/evals/files.js";
 
 const cli = join(import.meta.dir, "../src/setup/cli.ts");
@@ -154,6 +155,8 @@ function platform(
   const reservations = new Map<string, string>();
   const queue: { runId: string; experimentId: string; state: string; workerId?: string }[] = [];
   let failArtifactCompletions = options.failArtifactCompletions ?? 0;
+  /** Runs while the platform answers a case read, before it responds. */
+  const hooks: { caseRead?: () => void } = {};
   const calls = {
     downloads: [] as string[],
     starts: 0,
@@ -296,10 +299,11 @@ function platform(
           executions.set(execution.id, execution);
           return Response.json(execution);
         }
-        if (experimentMatch[2])
-          return experimentMatch[2] === frozenCase.id
-            ? Response.json(frozenCase)
-            : new Response(null, { status: 404 });
+        if (experimentMatch[2]) {
+          if (experimentMatch[2] !== frozenCase.id) return new Response(null, { status: 404 });
+          hooks.caseRead?.();
+          return Response.json(frozenCase);
+        }
         if (path.endsWith("/items"))
           return Response.json({
             items: [
@@ -577,6 +581,7 @@ function platform(
   return {
     baseUrl: `http://127.0.0.1:${server.port}`,
     calls,
+    hooks,
     artifacts,
     source,
     answerKey,
@@ -803,6 +808,40 @@ describe("environment target files (environment-files:v1)", () => {
     }
     expect(targets).toBe(1);
     expect(existsSync(caseDirectory)).toBe(false);
+  }, 30_000);
+
+  test("a forced exit while a resume loads its case keeps the staged outputs it needs", async () => {
+    const f = platform({ failArtifactCompletions: 1 });
+    const experiment = f.enqueue();
+    const directory = await mkdtemp(join(tmpdir(), "hue-environment-files-forced-resume-"));
+    const outputs = join(
+      directory,
+      `experiment-${experiment.id}`,
+      "files",
+      `world-case-${f.frozenCase.id}`,
+      "outputs",
+    );
+    const target: RunLocalAgentOptions["target"] = async (_inputs, _tools, context) => {
+      const letter = join(context.outputDirectory, "Citacion.docx");
+      await writeFile(letter, "carta de citación");
+      return withFiles({ summary: "letter drafted" }, [
+        { path: letter, filename: "Citacion.docx", contentType: docx, primary: true },
+      ]);
+    };
+    let kept: string[] | undefined;
+    try {
+      await expect(worker(f, directory, { target })).rejects.toMatchObject({ status: 500 });
+      // The resume reads its `uploading` checkpoint, then the case; a second Ctrl+C lands there.
+      f.hooks.caseRead = () => {
+        f.hooks.caseRead = undefined;
+        runForcedExitCleanups();
+        kept = existsSync(outputs) ? readdirSync(outputs) : [];
+      };
+      await worker(f, directory, { target }).catch(() => undefined);
+    } finally {
+      f.stop();
+    }
+    expect(kept).toEqual(["Citacion.docx"]);
   }, 30_000);
 
   test("a file whose bytes do not match the manifest fails the case before an execution or world exists", async () => {

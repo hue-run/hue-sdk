@@ -493,6 +493,10 @@ describe("file-based cases", () => {
     expect(Buffer.byteLength(expected)).toBe(200);
     // One more byte and the emoji no longer fits: it is dropped whole, not cut.
     expect(safeFilename(`${"a".repeat(197)}😀ignored`)).toBe("a".repeat(197));
+    // The stem is shortened, never the extension.
+    const long = safeFilename(`${"é".repeat(99)}.pdf`);
+    expect(long).toBe(`${"é".repeat(98)}.pdf`);
+    expect(Buffer.byteLength(long)).toBe(200);
   });
 
   test("downloads pinned inputs, uploads generated files and grades them locally", async () => {
