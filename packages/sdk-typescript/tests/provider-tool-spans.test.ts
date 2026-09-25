@@ -220,46 +220,52 @@ describe("provider tool spans", () => {
     );
   });
 
-  test("128 failed MCP calls with adversarial error text are recorded in bounded time", async () => {
-    // A run that made the URL pattern's scheme quadratic, filling the 16,384-character window
-    // error text is scrubbed in, from every call a response can carry.
-    const output = Array.from({ length: 128 }, (_, index) => ({
-      type: "mcp_call",
-      id: `mcp-${index}`,
-      name: "search",
-      server_label: "gmail",
-      arguments: "{}",
-      error: "a.".repeat(8_192),
-    }));
-    const endpoint = receiver();
-    const hue = createHue({
-      apiKey,
-      baseUrl: endpoint.url,
-      serviceName: "provider-spans",
-      captureContent: true,
+  // Runs that made a scrubbing pattern quadratic, each filling the 16,384-character window error
+  // text is scrubbed in, from every call a response can carry: `a.a.a…` for the URL scheme, and a
+  // run of `a` for a key-value key tried at every position.
+  for (const [name, error] of [
+    ["a.a.a…", "a.".repeat(8_192)],
+    ["aaa…", "a".repeat(16_384)],
+  ])
+    test(`128 failed MCP calls with error text ${name} are recorded in bounded time`, async () => {
+      const output = Array.from({ length: 128 }, (_, index) => ({
+        type: "mcp_call",
+        id: `mcp-${index}`,
+        name: "search",
+        server_label: "gmail",
+        arguments: "{}",
+        error,
+      }));
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        baseUrl: endpoint.url,
+        serviceName: "provider-spans",
+        captureContent: true,
+      });
+      let elapsed = 0;
+      try {
+        await hue.model(
+          "synthetic-model",
+          async () => {
+            const started = performance.now();
+            hue.recordProviderToolCalls({ output });
+            elapsed = performance.now() - started;
+          },
+          { provider: "openai" },
+        );
+        expect((await hue.flush()).instrumentationFailures).toBe(0);
+      } finally {
+        await hue.shutdown();
+        endpoint.stop();
+      }
+      // Quadratic, these took about 7 s and a minute under Bun; linear, well under one.
+      expect(elapsed).toBeLessThan(2_000);
+      const failed = endpoint.spans.filter((span) => span.name === "execute_tool search");
+      expect(failed).toHaveLength(128);
+      for (const span of failed)
+        expect([...span.status!.message!].length).toBeLessThanOrEqual(1_025);
     });
-    let elapsed = 0;
-    try {
-      await hue.model(
-        "synthetic-model",
-        async () => {
-          const started = performance.now();
-          hue.recordProviderToolCalls({ output });
-          elapsed = performance.now() - started;
-        },
-        { provider: "openai" },
-      );
-      expect((await hue.flush()).instrumentationFailures).toBe(0);
-    } finally {
-      await hue.shutdown();
-      endpoint.stop();
-    }
-    // Quadratic, this took about 7 s under Bun; linear, it takes well under one.
-    expect(elapsed).toBeLessThan(2_000);
-    const failed = endpoint.spans.filter((span) => span.name === "execute_tool search");
-    expect(failed).toHaveLength(128);
-    for (const span of failed) expect([...span.status!.message!].length).toBeLessThanOrEqual(1_025);
-  });
 
   test("server.address keeps an underscore in the MCP server's host name", async () => {
     const { byName } = await record(false);

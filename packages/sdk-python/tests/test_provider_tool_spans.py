@@ -210,9 +210,13 @@ def test_a_large_metadata_only_catalog_keeps_its_summary(receiver):
     )
 
 
-def test_128_failed_mcp_calls_with_adversarial_error_text_are_recorded_in_bounded_time(receiver):
-    # A run that made the URL pattern's scheme quadratic, filling the 16,384-character window
-    # error text is scrubbed in, from every call a response can carry.
+# Runs that made a scrubbing pattern quadratic, each filling the 16,384-character window error text
+# is scrubbed in, from every call a response can carry: ``a.a.a…`` for the URL scheme, and a run
+# of ``a`` for a key-value key tried at every position.
+@pytest.mark.parametrize("error", ["a." * 8_192, "a" * 16_384], ids=["a.a.a", "aaa"])
+def test_128_failed_mcp_calls_with_adversarial_error_text_are_recorded_in_bounded_time(
+    receiver, error
+):
     output = [
         {
             "type": "mcp_call",
@@ -220,7 +224,7 @@ def test_128_failed_mcp_calls_with_adversarial_error_text_are_recorded_in_bounde
             "name": "search",
             "server_label": "gmail",
             "arguments": "{}",
-            "error": "a." * 8_192,
+            "error": error,
         }
         for index in range(128)
     ]
@@ -231,7 +235,8 @@ def test_128_failed_mcp_calls_with_adversarial_error_text_are_recorded_in_bounde
             elapsed = time.perf_counter() - started
         hue.force_flush()
         assert hue.export_status.instrumentation_failures == 0
-    # Quadratic, this took over a minute in CPython; linear, it takes about a second.
+    # Quadratic, these took over a minute and about nine minutes in CPython; linear, about a
+    # second.
     assert elapsed < 10
     failed = named(receiver.spans(), "execute_tool search")
     assert len(failed) == 128

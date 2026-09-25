@@ -74,18 +74,19 @@ _SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 # Schemes WHATWG parses as hierarchical, which both SDKs serialize alike.
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
-# A credential its own prefix identifies wherever it appears: Hue's API, MCP, world and attempt
-# tokens, and OpenAI and Anthropic (``sk-``), Stripe, Slack, Google OAuth, GitHub and GitLab ones.
+# A credential its own prefix identifies wherever it appears, ``%`` escapes included: Hue's API,
+# MCP, world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (``sk-``),
+# Stripe, Slack, Google OAuth, GitHub and GitLab ones.
 _PREFIXED_TOKEN = re.compile(
-    r"\b(?:hue_(?:sk|mcp|world|attempt)_|sk-|[rs]k_(?:live|test)_|xox[abpors]-|xapp-|ya29\."
-    r"|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=-]{8,}",
+    r"\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_"
+    r"|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}",
     re.IGNORECASE | re.ASCII,
 )
 # An authorization scheme followed by its credential, as in an ``Authorization`` header, up to
-# whitespace, a quote, a delimiter or a backslash. The credential cannot start with ``=``, so
-# ``token = value`` is left to the key-value rule.
+# whitespace, a quote, a delimiter or a backslash. The credential cannot start with ``=`` or ``:``,
+# so ``token = value`` and ``Token : value`` are left to the key-value rule.
 _AUTHORIZATION_VALUE = re.compile(
-    rf"\b(bearer|basic|token)([{_JS_SPACE}]+)[^{_JS_SPACE}\"'`<>=,;(){{}}\[\]\\]"
+    rf"\b(bearer|basic|token)([{_JS_SPACE}]+)[^{_JS_SPACE}\"'`<>=:,;(){{}}\[\]\\]"
     rf"[^{_JS_SPACE}\"'`<>,;(){{}}\[\]\\]*",
     re.IGNORECASE | re.ASCII,
 )
@@ -94,7 +95,7 @@ _AUTHORIZATION_VALUE = re.compile(
 # precedes it, so each word is tried once and a long run stays linear. The value is not consumed,
 # so a pair inside another pair's value (``error: token=…``) is found.
 _PAIR_KEY = re.compile(
-    rf"(\\?[\"']|)(?<![a-z0-9_-])([a-z0-9][a-z0-9_-]*)\1([{_JS_SPACE}]*[:=][{_JS_SPACE}]*)",
+    rf"(\\?[\"']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1([{_JS_SPACE}]*[:=][{_JS_SPACE}]*)",
     re.IGNORECASE | re.ASCII,
 )
 # A quoted value to its closing quote on the same line, spaces and escaped quotes included, or one
@@ -158,6 +159,16 @@ def _is_text_credential_key(key: str) -> bool:
     return _is_credential_key(key) or normalized.endswith("authorization") or normalized == "bearer"
 
 
+# ``API key: …``: a credential named in two words, ``key`` right after ``API``.
+_API_BEFORE = re.compile(r"(?:^|[^a-z0-9_])api[ \t]+\Z", re.IGNORECASE | re.ASCII)
+
+
+def _is_api_key_phrase(text: str, key_start: int, key: str) -> bool:
+    return key.lower() == "key" and bool(
+        _API_BEFORE.search(text[max(0, key_start - 16) : key_start])
+    )
+
+
 def _scrub_pairs(text: str) -> str:
     """Replace the value of each pair whose key names a credential."""
     parts: list[str] = []
@@ -165,7 +176,8 @@ def _scrub_pairs(text: str) -> str:
     for match in _PAIR_KEY.finditer(text):
         start = match.end()
         key = match[2]
-        if start < copied or not _is_text_credential_key(key):
+        credential = _is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)
+        if start < copied or not credential:
             continue
         quoted = _QUOTED_VALUE.match(text, start)
         bare = (

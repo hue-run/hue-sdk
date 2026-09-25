@@ -179,6 +179,46 @@
     {
       "input": "retry_https://synthetic-user:synthetic-pass@mcp.example.test/sse?key=synthetic-key failed",
       "expected": "retry_https://mcp.example.test/sse?key=%5Bredacted%5D failed"
+    },
+    {
+      "input": "cli ran with --token=synthetic-dash-1 --password=synthetic-dash-2 --api-key=synthetic-dash-3",
+      "expected": "cli ran with --token=[redacted] --password=[redacted] --api-key=[redacted]"
+    },
+    {
+      "input": "npmrc _authToken=synthetic-npm-1 and _token=synthetic-underscore-2",
+      "expected": "npmrc _authToken=[redacted] and _token=[redacted]"
+    },
+    {
+      "input": "Token : synthetic-spaced-token",
+      "expected": "Token : [redacted]"
+    },
+    {
+      "input": "X-Auth-Token : synthetic-header-token",
+      "expected": "X-Auth-Token : [redacted]"
+    },
+    {
+      "input": "token\t:\tsynthetic-tab-token",
+      "expected": "token\t:\t[redacted]"
+    },
+    {
+      "input": "Slack said xoxc-synthetic-client-token and xoxd-synthetic%2Fcookie-token",
+      "expected": "Slack said [redacted] and [redacted]"
+    },
+    {
+      "input": "Hue said hue_sim_synthetic0123, hue_setup_synthetic0123 and hue_install_synthetic0123",
+      "expected": "Hue said [redacted], [redacted] and [redacted]"
+    },
+    {
+      "input": "OpenAI said sk-synthetic0123%2Fescaped%3D%3D was invalid",
+      "expected": "OpenAI said [redacted] was invalid"
+    },
+    {
+      "input": "API key: synthetic-opaque-key was rejected",
+      "expected": "API key: [redacted] was rejected"
+    },
+    {
+      "input": "the key: value pairs and a tapi key: stay as they are",
+      "expected": "the key: value pairs and a tapi key: stay as they are"
     }
   ]
 }

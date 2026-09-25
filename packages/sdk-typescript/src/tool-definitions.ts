@@ -120,20 +120,21 @@ function scrubTextUrl(url: string, state: ScrubState): string {
   if (specialScheme.test(url)) return scrubUrl(url, state);
   return /[@?#]/.test(url) ? REDACTED : url;
 }
-/** A credential its own prefix identifies wherever it appears: Hue's API, MCP, world and attempt
- * tokens, and OpenAI and Anthropic (`sk-`), Stripe, Slack, Google OAuth, GitHub and GitLab ones. */
+/** A credential its own prefix identifies wherever it appears, `%` escapes included: Hue's API, MCP,
+ * world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (`sk-`), Stripe,
+ * Slack, Google OAuth, GitHub and GitLab ones. */
 const prefixedToken =
-  /\b(?:hue_(?:sk|mcp|world|attempt)_|sk-|[rs]k_(?:live|test)_|xox[abpors]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=-]{8,}/gi;
+  /\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}/gi;
 /** An authorization scheme followed by its credential, as in an `Authorization` header, up to
- * whitespace, a quote, a delimiter or a backslash. The credential cannot start with `=`, so
- * `token = value` is left to the key-value rule. */
+ * whitespace, a quote, a delimiter or a backslash. The credential cannot start with `=` or `:`, so
+ * `token = value` and `Token : value` are left to the key-value rule. */
 const authorizationValue =
-  /\b(bearer|basic|token)(\s+)[^\s"'`<>=,;(){}[\]\\][^\s"'`<>,;(){}[\]\\]*/gi;
+  /\b(bearer|basic|token)(\s+)[^\s"'`<>=:,;(){}[\]\\][^\s"'`<>,;(){}[\]\\]*/gi;
 /** The key and separator of a `key=value` or `key: value` pair, the key optionally quoted, with a
  * backslash-escaped quote too (JSON inside a string). A key starts where no key character precedes
  * it, so each word is tried once and a long run stays linear. The value is not consumed, so a pair
  * inside another pair's value (`error: token=…`) is found. */
-const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9][a-z0-9_-]*)\1(\s*[:=]\s*)/gi;
+const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1(\s*[:=]\s*)/gi;
 /** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
  * one between backslash-escaped quotes. */
 const quotedValue =
@@ -157,6 +158,14 @@ function isTextCredentialKey(key: string): boolean {
   return isCredentialKey(key) || normalized.endsWith("authorization") || normalized === "bearer";
 }
 
+/** `API key: …`: a credential named in two words, `key` right after `API`. */
+const apiBefore = /(?:^|[^a-z0-9_])api[ \t]+$/i;
+function isApiKeyPhrase(text: string, keyStart: number, key: string): boolean {
+  return (
+    key.toLowerCase() === "key" && apiBefore.test(text.slice(Math.max(0, keyStart - 16), keyStart))
+  );
+}
+
 /** Replaces the value of each pair whose key names a credential. */
 function scrubPairs(text: string): string {
   let result = "";
@@ -164,7 +173,9 @@ function scrubPairs(text: string): string {
   for (const match of text.matchAll(pairKey)) {
     const start = match.index + match[0].length;
     const key = match[2]!;
-    if (start < copied || !isTextCredentialKey(key)) continue;
+    const keyStart = match.index + match[1]!.length;
+    if (start < copied || !(isTextCredentialKey(key) || isApiKeyPhrase(text, keyStart, key)))
+      continue;
     quotedValue.lastIndex = start;
     const quoted = quotedValue.exec(text);
     let value = quoted;
