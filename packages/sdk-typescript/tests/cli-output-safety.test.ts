@@ -103,9 +103,11 @@ describe("output collection never follows the agent's links", () => {
   test("a document swapped for a symlink after the listing is refused", async () => {
     const { host, output } = await scene();
     await writeFile(join(output, "a.txt"), "the agent's own text");
-    const outcome = collectDirectOutputs(output, undefined, async () => {
-      await rm(join(output, "a.txt"));
-      await symlink(join(host, "secret.txt"), join(output, "a.txt"));
+    const outcome = collectDirectOutputs(output, undefined, {
+      afterListing: async () => {
+        await rm(join(output, "a.txt"));
+        await symlink(join(host, "secret.txt"), join(output, "a.txt"));
+      },
     });
     await expect(outcome).rejects.toThrow("Generated file a.txt is a symbolic link");
   });
@@ -113,10 +115,12 @@ describe("output collection never follows the agent's links", () => {
   test("a document replaced by another file after the listing is refused", async () => {
     const { host, output } = await scene();
     await writeFile(join(output, "a.txt"), "the agent's own text");
-    const outcome = collectDirectOutputs(output, undefined, async () => {
-      // A hard link or rename puts different bytes under the listed name.
-      await writeFile(join(output, "b.tmp"), readFileSync(join(host, "secret.txt")));
-      await rename(join(output, "b.tmp"), join(output, "a.txt"));
+    const outcome = collectDirectOutputs(output, undefined, {
+      afterListing: async () => {
+        // A hard link or rename puts different bytes under the listed name.
+        await writeFile(join(output, "b.tmp"), readFileSync(join(host, "secret.txt")));
+        await rename(join(output, "b.tmp"), join(output, "a.txt"));
+      },
     });
     await expect(outcome).rejects.toThrow("Generated file a.txt changed while it was collected");
   });
@@ -125,11 +129,57 @@ describe("output collection never follows the agent's links", () => {
     const { host, output } = await scene();
     await mkdir(join(output, "anexos"));
     await writeFile(join(output, "anexos", "secret.txt"), "the agent's own text");
-    const outcome = collectDirectOutputs(output, undefined, async () => {
-      await rm(join(output, "anexos"), { recursive: true });
-      await symlink(host, join(output, "anexos"));
+    const outcome = collectDirectOutputs(output, undefined, {
+      afterListing: async () => {
+        await rm(join(output, "anexos"), { recursive: true });
+        await symlink(host, join(output, "anexos"));
+      },
     });
     await expect(outcome).rejects.toThrow(/changed while it was collected|is a symbolic link/);
+  });
+
+  test("a document or directory that vanishes while it is listed is a clean change error", async () => {
+    const file = await scene();
+    await writeFile(join(file.output, "a.txt"), "text");
+    await expect(
+      collectDirectOutputs(file.output, undefined, {
+        beforeEntry: async (name) => {
+          if (name === "a.txt") await rm(join(file.output, "a.txt"));
+        },
+      }),
+    ).rejects.toThrow("output/a.txt changed while it was collected");
+    const directory = await scene();
+    await mkdir(join(directory.output, "anexos"));
+    await writeFile(join(directory.output, "anexos", "b.txt"), "text");
+    await expect(
+      collectDirectOutputs(directory.output, undefined, {
+        beforeEntry: async (name) => {
+          if (name === "anexos") await rm(join(directory.output, "anexos"), { recursive: true });
+        },
+      }),
+    ).rejects.toThrow("output/anexos changed while it was collected");
+    // A listed directory whose parent became a file no longer resolves: the same clean error.
+    const parent = await scene();
+    await mkdir(join(parent.output, "anexos", "sub"), { recursive: true });
+    await writeFile(join(parent.output, "anexos", "sub", "c.txt"), "text");
+    await expect(
+      collectDirectOutputs(parent.output, undefined, {
+        beforeEntry: async (name) => {
+          if (name !== "anexos/sub") return;
+          await rm(join(parent.output, "anexos"), { recursive: true });
+          await writeFile(join(parent.output, "anexos"), "now a file");
+        },
+      }),
+    ).rejects.toThrow("output/anexos/sub changed while it was collected");
+  });
+
+  test("a case directory replaced by a file fails the case instead of reading as no output", async () => {
+    const { output } = await scene();
+    await rm(join(output, ".."), { recursive: true });
+    await writeFile(join(output, ".."), "now a file");
+    await expect(collectDirectOutputs(output, "stdout answer")).rejects.toThrow(
+      "The output directory changed while it was collected",
+    );
   });
 
   test("a FIFO named like a helper is refused at once instead of hanging", async () => {
@@ -146,9 +196,11 @@ describe("output collection never follows the agent's links", () => {
     const { output } = await scene();
     await writeFile(join(output, "a.txt"), "text");
     const started = performance.now();
-    const outcome = collectDirectOutputs(output, undefined, async () => {
-      await rm(join(output, "a.txt"));
-      mkfifo(join(output, "a.txt"));
+    const outcome = collectDirectOutputs(output, undefined, {
+      afterListing: async () => {
+        await rm(join(output, "a.txt"));
+        mkfifo(join(output, "a.txt"));
+      },
     });
     await expect(outcome).rejects.toThrow(/Generated file a.txt (is not a regular file|changed)/);
     expect(performance.now() - started).toBeLessThan(2_000);

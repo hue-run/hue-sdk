@@ -1186,7 +1186,7 @@ describe("hue eval with a world case that carries files", () => {
       for (const stored of f.artifacts.values())
         expect(Buffer.from(stored.bytes ?? []).toString()).not.toContain("host secret");
       // Removing the case directory removed the link, never what it pointed at.
-      expect(await readdir(hostDirectory)).toEqual(["secret.txt", "summary.txt"]);
+      expect((await readdir(hostDirectory)).sort()).toEqual(["secret.txt", "summary.txt"]);
     } finally {
       f.stop();
     }
