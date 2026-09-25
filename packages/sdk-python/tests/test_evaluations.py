@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,7 +36,7 @@ from hue_sdk.evals import (
     score_locally,
 )
 from hue_sdk.evals._checkpoint import CheckpointStore
-from hue_sdk.evals._json import JsonLimitError, encode, json_value
+from hue_sdk.evals._json import JsonLimitError, _utf16_order, encode, json_value
 
 
 @pytest.fixture
@@ -907,6 +908,27 @@ def test_an_output_too_large_to_serialize_is_refused_by_its_count_before_it_is_s
         json_value([big] * 11)
     assert refused.value.limit == "bytes"
     assert time.perf_counter() - started < 0.5
+
+
+def test_a_huge_key_is_refused_without_copying_it_to_sort_the_keys():
+    # Encoding each key to sort it by UTF-16 code unit copied a 50 MB key twice over.
+    for members in ({"x" * 50_000_000: 1, "b": 2}, {"\uffff" + "x" * 50_000_000: 1, "😀": 2}):
+        tracemalloc.start()
+        try:
+            with pytest.raises(JsonLimitError) as refused:
+                json_value(members)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert refused.value.limit == "bytes"
+        assert peak < 10_000_000
+
+
+def test_keys_sort_by_utf16_code_unit_as_javascript_sorts_them():
+    keys = ["\uffff", "😀", "a", "\ue000b", "𝄞", "z", "\ud7ff"]
+    assert _utf16_order(keys, 1_000) == sorted(
+        keys, key=lambda key: key.encode("utf-16-be", "surrogatepass")
+    )
 
 
 def test_an_output_the_process_cannot_hold_fails_its_case_as_too_large(

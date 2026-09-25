@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -36,6 +37,40 @@ def _text(value: str) -> None:
     # An ASCII string, which CPython knows without scanning, cannot hold a surrogate.
     if "\0" in value or (not value.isascii() and _SURROGATE.search(value)):
         raise ValueError("JSON contains invalid Unicode or NUL.")
+
+
+_ASTRAL = re.compile("[\U00010000-\U0010ffff]")
+_ABOVE_SURROGATES = re.compile("[\ue000-\uffff]")
+
+
+def _utf16_units(character: str) -> tuple[int, ...]:
+    code = ord(character)
+    if code < 0x10000:
+        return (code,)
+    code -= 0x10000
+    return (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
+
+
+def _compare_utf16(left: str, right: str) -> int:
+    for a, b in zip(left, right, strict=False):
+        if a != b:
+            return -1 if _utf16_units(a) < _utf16_units(b) else 1
+    return len(left) - len(right)
+
+
+def _utf16_order(keys: list[str], room: int) -> list[str]:
+    """Keys in UTF-16 code unit order, as JavaScript sorts them, without encoding them."""
+    # Code point order differs only between a character above U+FFFF and one from U+E000.
+    if not (
+        any(_ASTRAL.search(key) for key in keys)
+        and any(_ABOVE_SURROGATES.search(key) for key in keys)
+    ):
+        return sorted(keys)
+    # A key whose JSON text alone is longer than the bytes left is refused before any
+    # comparison can walk it.
+    if any(len(key) + 2 > room for key in keys):
+        raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
+    return sorted(keys, key=functools.cmp_to_key(_compare_utf16))
 
 
 def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
@@ -99,8 +134,7 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             if any(type(key) is not str for key in item):
                 raise ValueError("JSON object keys must be strings.")
             charge(len(item) + 1 if item else 2)
-            # By UTF-16 code unit, as JavaScript sorts, so both SDKs read members in one order.
-            for key in sorted(item, key=lambda key: key.encode("utf-16-be", "surrogatepass")):
+            for key in _utf16_order(list(item), max_bytes - size):
                 _text(key)
                 charge_text(key)
                 charge(1)
