@@ -8,9 +8,9 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.10.0] - 2026-09-25
 
-This section changes a default of the `hue` binary, so it ships as `0.10.0`.
+This release changes a default of the `hue` binary (see Breaking), so it is a `0.MINOR` release.
 
 #### Breaking
 
@@ -180,6 +180,10 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
   any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
   A refused `downloadArtifact` is fetched again the same way and still stops at `maxBytes`.
+- The retry jitter in `EvaluationClient` is written as `Math.random() * 0.5` instead of a bare
+  division, so the release workflow's inspection of the built archive, which refuses ambiguous
+  `/` syntax, accepts the package. The waits are unchanged. CI now runs that inspection on every
+  change.
 
 ### [0.9.0] - 2026-09-24
 
@@ -703,7 +707,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.6.1] - 2026-09-25
 
 #### Fixed
 
@@ -743,6 +747,12 @@ No registry release is claimed until publication and registry acceptance complet
   that long first. Hue does this when its key check is busy, which parallel cases can trigger; such
   a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
   any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
+- The inline-file digest tests skip, rather than fail to collect, when the TypeScript suite's
+  shared fixtures are absent, as the other cross-language tests do. Every cross-language test now
+  finds the TypeScript suite at the same relative place, and the release's installed-wheel check
+  copies its fixtures and content-prefix list there, so the digest, tool-definition, URL and
+  hosted-tool-call fixtures and the prefix list are checked against the installed wheel with none
+  skipped. CI runs that check on every change. The published package is unchanged by this.
 
 ### [0.6.0] - 2026-09-24
 

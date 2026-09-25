@@ -153,8 +153,7 @@ def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
 
 
 HOSTED_TOOL_CALLS_FIXTURE = (
-    Path(__file__).resolve().parents[3]
-    / "packages"
+    Path(__file__).resolve().parents[2]
     / "sdk-typescript"
     / "tests"
     / "fixtures"
@@ -1009,9 +1008,7 @@ def test_content_prefixes_list_every_recognized_key_identically_to_typescript():
         "exception.message",
         "exception.stacktrace",
     )
-    typescript = (
-        Path(__file__).resolve().parents[3] / "packages" / "sdk-typescript" / "src" / "privacy.ts"
-    )
+    typescript = Path(__file__).resolve().parents[2] / "sdk-typescript" / "src" / "privacy.ts"
     if not typescript.is_file():
         pytest.skip("TypeScript source is not part of this checkout")
     block = re.search(r"export const contentPrefixes = \[(.*?)\];", typescript.read_text(), re.S)
@@ -1233,8 +1230,7 @@ def test_tool_definition_too_deeply_nested_to_inspect_drops_its_record(receiver)
 
 
 TOOL_DEFINITIONS_FIXTURE = (
-    Path(__file__).resolve().parents[3]
-    / "packages"
+    Path(__file__).resolve().parents[2]
     / "sdk-typescript"
     / "tests"
     / "fixtures"

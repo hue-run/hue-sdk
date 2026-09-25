@@ -81,6 +81,25 @@ class DocumentationVersionTests(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("stale version 0.4.0", problems[0])
 
+    def test_multi_digit_minor_versions_are_scanned(self):
+        versions = {"typescript": "0.10.1", "python": "0.6.2"}
+        problems = checker.stale_mentions(
+            "packages/sdk-typescript/CLI.md",
+            "TypeScript uses `@hue-run/sdk@0.10.0` and Python `0.6.1`; Python `0.6.2` is current.",
+            versions,
+        )
+        self.assertEqual(len(problems), 2)
+        self.assertIn("stale version 0.10.0", problems[0])
+        self.assertIn("stale version 0.6.1", problems[1])
+        current = "TypeScript `@hue-run/sdk@0.10.1` and Python `0.6.2`."
+        self.assertEqual(checker.stale_mentions("README.md", current, versions), [])
+
+    def test_tool_versions_are_not_sdk_versions(self):
+        line = "Use Node 24, Bun 1.4.2 and uv 0.12.5; the release checks with twine==0.11.0."
+        self.assertEqual(checker.stale_mentions("README.md", line, self.versions), [])
+        stale = "Use uv 0.12.5 with TypeScript 0.12.5."
+        self.assertEqual(len(checker.stale_mentions("README.md", stale, self.versions)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
