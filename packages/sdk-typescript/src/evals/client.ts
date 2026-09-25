@@ -181,23 +181,20 @@ function productRunFields<T>(value: unknown, kind: "run" | "scoring" | "result")
 const REFUSAL_RETRIES = 4;
 /** A refusal asking for a longer wait fails at once rather than holding the caller. */
 const MAX_REFUSAL_RETRY_AFTER_SECONDS = 5;
+/** The whole seconds a 429 or 503 asks the caller to wait, up to a day, when it says. */
+function askedRetryAfter(response: Response): number | undefined {
+  if (response.status !== 429 && response.status !== 503) return undefined;
+  const header = response.headers.get("retry-after")?.trim() ?? "";
+  return /^\d{1,6}$/.test(header) ? Math.min(Number(header), 86_400) : undefined;
+}
 /**
  * The whole-second `Retry-After` of a 429 or 503 asking for at most 5 seconds. Hue sends one only
  * when it refused the request before acting on it, such as a busy key check, so sending any method
  * again is safe. A date, a longer wait or any other failure, a timeout included, is not retried.
  */
-/** The whole seconds a 429 or 503 asks the caller to wait, up to a day, when it says. */
-function askedRetryAfter(response: Response): number | undefined {
-  if (response.status !== 429 && response.status !== 503) return undefined;
-  const header = response.headers.get("retry-after")?.trim() ?? "";
-  return /^\d{1,5}$/.test(header) ? Math.min(Number(header), 86_400) : undefined;
-}
 function refusalRetryAfter(response: Response): number | undefined {
-  if (response.status !== 429 && response.status !== 503) return undefined;
-  const header = response.headers.get("retry-after")?.trim() ?? "";
-  if (!/^\d{1,6}$/.test(header)) return undefined;
-  const seconds = Number(header);
-  return seconds <= MAX_REFUSAL_RETRY_AFTER_SECONDS ? seconds : undefined;
+  const seconds = askedRetryAfter(response);
+  return seconds !== undefined && seconds <= MAX_REFUSAL_RETRY_AFTER_SECONDS ? seconds : undefined;
 }
 /**
  * Typed client for Hue's evaluation REST API: datasets, scorers, experiments, executions, runs,

@@ -968,6 +968,16 @@ describe("installed evaluation API and runner contract", () => {
       expect(busy.seen).toHaveLength(5);
       expect(busy.unused).toBe(1);
 
+      // A zero-padded header of up to six digits is still a short wait.
+      const padded = await exchange([refusal(503, "000000")], () => client.checkConnection());
+      expect(padded.value).toEqual({ id: "synthetic" });
+      expect(padded.seen).toHaveLength(2);
+
+      // A longer wait is not retried here; the error carries it for the caller.
+      const long = await exchange([refusal(429, "60")], () => client.checkConnection());
+      expect(long.error).toMatchObject({ status: 429, retryAfterSeconds: 60 });
+      expect(long.seen).toHaveLength(1);
+
       for (const [status, retryAfter] of [
         [503, "60"],
         [503, undefined],

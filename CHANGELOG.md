@@ -47,6 +47,9 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
+- `hue eval`, `hue login` and `hue mcp` name a missing peer dependency, such as the optional `zod`
+  that `hue eval` needs, with the command that installs it, and exit 2, instead of failing with the
+  runtime's module resolution error.
 - A target output over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32
   levels of nesting) no longer stops the whole run with `OutcomeSerializationError`: that case
   completes as `error` with the type `OutputTooLarge` and, when result content is persisted, a
@@ -66,8 +69,8 @@ refuses to publish a version without a matching entry below.
   503 now reads the artifact until it is ready or leaves verification, completing again while it
   verifies, and up to three more times when a 429, 503 or lost response left it unverified, for up
   to three minutes, honouring a `Retry-After`; a mismatched, cancelled or abandoned artifact, or
-  one a 409 left unverified, is still refused. While Hue is unreachable, each upload now takes
-  those three minutes to fail. A resumed upload whose artifact is already verifying no longer asks
+  one a 409 left unverified, is still refused. A completion that cannot reach Hue now takes those
+  three minutes to fail; a reservation or upload that cannot reach it still fails at once. A resumed upload whose artifact is already verifying no longer asks
   for another upload capability, which Hue refuses then, and settles on the same artifact.
 - `hue eval` exports its own telemetry, and so each case's required trace, with a 30-second
   deadline instead of 10 seconds, retries included, so a slow acknowledgement or a `Retry-After`

@@ -557,6 +557,10 @@ def test_placeholder_copies_attributes_consistently_while_the_span_changes():
     span = provider.get_tracer("customer").start_span(
         "chat", attributes={"gen_ai.operation.name": "chat"}
     )
+    # Fill the span to its limit first, so every snapshot sees eight attributes: taken before the
+    # writer caught up, a snapshot would rightly copy fewer.
+    span.set_attributes({f"custom.{index}": index for index in range(7)})
+    assert len(span.attributes) == 8
     stop = Event()
 
     def application_thread():

@@ -428,10 +428,14 @@ async function settleArtifact(
       current.failureCode !== "mismatch";
     if (current && current.state !== "verifying" && !(unverified && refusedForNow && retries++ < 3))
       return current.state;
-    if (Date.now() >= deadline)
+    if (Date.now() >= deadline) {
+      const seconds = Math.round(timing.settleMillis / 1000);
       throw new Error(
-        `Hue was still verifying generated file ${id} after ${Math.round(timing.settleMillis / 1000)} seconds`,
+        current?.state === "verifying"
+          ? `Hue was still verifying generated file ${id} after ${seconds} seconds`
+          : `Hue had not verified generated file ${id} after ${seconds} seconds (${current ? `it was ${current.state}` : "its state could not be read"})`,
       );
+    }
   }
 }
 
