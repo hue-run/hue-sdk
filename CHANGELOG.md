@@ -17,6 +17,26 @@ refuses to publish a version without a matching entry below.
   `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
   `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
   filled in when omitted; the local runner defers all of them to Hue, as it does v1.
+- Provider tool spans from `recordProviderToolCalls` carry `hue.tool.call.position`, the 0-based
+  position of the call's item in the provider response (the OpenAI `output` index or the Anthropic
+  `content` block index), in both capture modes, so calls from one response that share a start
+  time keep their order. **Wire**
+- A `tools/list` span from `recordProviderToolCalls` with `captureContent: false` carries
+  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
+  any record's tool definitions; before, it carried neither. Descriptions and schemas are still
+  exported only with content capture. **Wire**
+- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
+  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
+  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
+  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
+  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_` and `hue_install_`, and `sk-`, Stripe,
+  Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or `Token`,
+  an `Authorization` header's whole value and the value of a credential-named `key=value` or
+  `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the value
+  quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
+  another pair's value). The `redact` hook sees the text as `status.message`. Without content
+  capture the span keeps `error.type` only. **Wire**
 
 #### Fixed
 
@@ -30,6 +50,12 @@ refuses to publish a version without a matching entry below.
   which throws on Node (from about 3.4 million), leaving the message unhashed, or stops matching
   on Bun (from about 1.1 million), hashing the URL's text. The Python SDK reads the header the
   same way.
+- An OpenAI `mcp_list_tools` tool's null `description`, `input_schema` or `annotations` is left
+  out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record the
+  same definitions and give a catalog the same digest.
+- `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
+  throws when read: the item is skipped and counted, and the other calls are recorded, as the
+  Python SDK does.
 
 ### [0.10.0] - 2026-09-25
 
@@ -732,6 +758,18 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+#### Added
+
+- Provider tool spans from `record_provider_tool_calls` carry `hue.tool.call.position`, the
+  0-based position of the call's item in the provider response, in both capture modes. **Wire**
+- A `tools/list` span from `record_provider_tool_calls` with `capture_content=False` carries
+  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
+  any record's tool definitions. **Wire**
+- With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters exactly as the
+  TypeScript SDK does, after your `redactor` sees it as `status.message`. Without content capture
+  the span keeps `error.type` only. **Wire**
+
 #### Fixed
 
 - `run_experiment` no longer stops the whole run with `OutcomeSerializationError` when a target's
@@ -742,6 +780,9 @@ No registry release is claimed until publication and registry acceptance complet
 - A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
   TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
   `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
+- `server.address` keeps a host name with an underscore, such as a Docker Compose service
+  (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
+  dropped.
 
 ### [0.6.1] - 2026-09-25
 

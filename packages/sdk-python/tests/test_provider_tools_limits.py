@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from hue_sdk._provider_tools import (
@@ -7,7 +10,18 @@ from hue_sdk._provider_tools import (
     _error_code,
     hosted_server_addresses,
     hosted_tool_activity,
+    provider_error_description,
 )
+from hue_sdk._tool_definitions import tool_catalog_summary
+
+ERROR_TEXT_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "sdk-typescript"
+    / "tests"
+    / "fixtures"
+    / "provider-error-text.json"
+)
+LISTING_DIGEST_FIXTURE = ERROR_TEXT_FIXTURE.with_name("provider-tool-listing.json")
 
 
 def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
@@ -259,3 +273,115 @@ class _PydanticV1Model:
 def test_model_dump_falls_back_for_pydantic_v1():
     activity = hosted_tool_activity("openai", _PydanticV1Model(), capture_content=False)
     assert len(activity.calls) == 1
+
+
+def test_each_call_carries_its_items_position_in_the_response():
+    openai = hosted_tool_activity(
+        "openai",
+        {
+            "output": [
+                {"type": "reasoning", "summary": []},
+                {"type": "mcp_list_tools", "server_label": "gmail", "tools": []},
+                {"type": "mcp_call", "id": "mcp-1", "name": "search", "server_label": "gmail"},
+                {"type": "message", "content": []},
+                {"type": "web_search_call", "id": "ws-1", "action": {}},
+                {"type": "mcp_call", "id": "mcp-2", "name": "create", "server_label": "gmail"},
+            ]
+        },
+    )
+    assert [(call.call_id, call.position) for call in openai.calls] == [
+        ("mcp-1", 2),
+        ("ws-1", 4),
+        ("mcp-2", 5),
+    ]
+    anthropic = hosted_tool_activity(
+        "anthropic",
+        {
+            "content": [
+                {"type": "text", "text": "Looking"},
+                {"type": "server_tool_use", "id": "srv-1", "name": "web_search", "input": {}},
+                {"type": "web_search_tool_result", "tool_use_id": "srv-1", "content": []},
+                {"type": "mcp_tool_use", "id": "mcp-1", "name": "post", "server_name": "slack"},
+                {"type": "mcp_tool_result", "tool_use_id": "mcp-1", "content": []},
+            ]
+        },
+    )
+    assert [(call.call_id, call.position) for call in anthropic.calls] == [
+        ("srv-1", 1),
+        ("mcp-1", 3),
+    ]
+
+
+class _UnreadableModel:
+    """An SDK response object that cannot be dumped."""
+
+    def model_dump(self, **_options):
+        raise RuntimeError("synthetic dump failure")
+
+
+def test_an_unreadable_prefix_item_keeps_the_positions_of_the_others():
+    activity = hosted_tool_activity(
+        "openai",
+        {"output": [_UnreadableModel(), {"type": "mcp_call", "id": "a", "name": "tool"}]},
+    )
+    assert [(call.call_id, call.position) for call in activity.calls] == [("a", 1)]
+    assert activity.skipped == 1
+
+
+@pytest.mark.parametrize("capture_content", [True, False])
+def test_failed_mcp_call_error_text_is_read_only_under_content_capture(capture_content):
+    activity = hosted_tool_activity(
+        "openai",
+        {
+            "output": [
+                {"type": "mcp_call", "id": "a", "name": "tool", "error": "Rate limited"},
+                {"type": "mcp_call", "id": "b", "name": "tool", "error": {"message": "Denied"}},
+                {"type": "mcp_call", "id": "c", "name": "tool", "error": {"code": 500}},
+                {"type": "mcp_call", "id": "d", "name": "tool", "error": "   "},
+            ]
+        },
+        capture_content,
+    )
+    assert [(call.error_type, call.error_text) for call in activity.calls] == [
+        ("mcp_error", "Rate limited" if capture_content else None),
+        ("mcp_error", "Denied" if capture_content else None),
+        ("mcp_error", None),
+        ("mcp_error", None),
+    ]
+
+
+def test_error_text_is_scrubbed_and_bounded_identically_to_the_typescript_sdk():
+    for case in json.loads(ERROR_TEXT_FIXTURE.read_text(encoding="utf-8"))["cases"]:
+        assert provider_error_description(case["input"]) == case["expected"]
+    assert provider_error_description("x" * 1_100) == "x" * 1_024 + "\u2026"
+    assert provider_error_description("x" * 1_024) == "x" * 1_024
+    # Scrubbed before the cut: a credential that straddles the bound never shows a prefix.
+    straddling = provider_error_description("a" * 1_015 + " token=synthetic-secret-value")
+    assert "synthetic" not in straddling and straddling.endswith("\u2026")
+    assert len(provider_error_description("\U0001f600" * 1_030)) == 1_025
+
+
+def test_server_address_keeps_an_underscore_in_a_host_name():
+    # WHATWG URL parsing, and so the TypeScript SDK, keeps underscores: they are legal in DNS
+    # labels and name real servers, such as Docker Compose services and internal hosts.
+    assert hosted_server_addresses(
+        "openai",
+        {
+            "tools": [
+                {"server_label": "compose", "server_url": "http://mcp_server:8080/sse"},
+                {
+                    "server_label": "internal",
+                    "server_url": "https://mcp_gateway.internal.example/mcp",
+                },
+            ]
+        },
+    ) == {"compose": "mcp_server", "internal": "mcp_gateway.internal.example"}
+
+
+def test_a_listing_s_null_fields_are_left_out_so_both_sdks_digest_its_catalog_alike():
+    # The TypeScript suite reads the same fixture and checks the same names and digest.
+    fixture = json.loads(LISTING_DIGEST_FIXTURE.read_text(encoding="utf-8"))
+    [listing] = hosted_tool_activity("openai", fixture["response"]).listings
+    for definition in listing.definitions:
+        assert None not in definition.values()
+    assert tool_catalog_summary(json.dumps(listing.definitions)) == fixture["expected"]

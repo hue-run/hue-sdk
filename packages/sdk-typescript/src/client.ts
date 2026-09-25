@@ -20,12 +20,18 @@ import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
 import { HUE_SCOPE } from "./config.js";
-import { hostedServerAddresses, hostedToolActivity, hostedToolProvider } from "./provider-tools.js";
-import { encodeContent, noopSpan, safeSpan } from "./safety.js";
+import {
+  hostedServerAddresses,
+  hostedToolActivity,
+  hostedToolProvider,
+  providerErrorDescription,
+} from "./provider-tools.js";
+import { toolCatalogSummary } from "./tool-definitions.js";
+import { encodeContent, noopSpan, safeSpan, type EncodeLimits } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
-import { MAX_FILE_DATA_BYTES } from "./config.js";
+import { MAX_BODY_BYTES, MAX_FILE_DATA_BYTES } from "./config.js";
 import type {
   ExportReport,
   FileRecord,
@@ -228,6 +234,9 @@ class ContextualTracer implements Tracer {
 }
 
 const propagator = new W3CTraceContextPropagator();
+/** A provider tool listing's bounds before its catalog summary: one export request, 64 levels and
+ * 65,536 values, as the Python SDK's content snapshot. */
+const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, depth: 64 };
 
 /**
  * Hue tracing client. Helpers create spans through a private tracer and local async context, never
@@ -648,11 +657,14 @@ export class HueClient {
    * `hue.tool()` call saw: OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call` and
    * `code_interpreter_call` items, and Anthropic Messages `mcp_tool_use` / `server_tool_use`
    * blocks with their result blocks. Each becomes an `execute_tool {name}` child span of the active
-   * (or given) context with `gen_ai.tool.type` `extension` and `gen_ai.tool.call.id`; MCP calls add
+   * (or given) context with `gen_ai.tool.type` `extension`, `gen_ai.tool.call.id` and
+   * `hue.tool.call.position` (the item's 0-based position in the response); MCP calls add
    * `mcp.server.name` (the provider's label, or the `servers` entry for it). Arguments and results
-   * follow `captureContent`; a failed call carries `error.type` and ERROR status. An OpenAI
-   * `mcp_list_tools` item becomes a `tools/list` child span carrying that server's tools as
-   * `gen_ai.tool.definitions`. Call it inside `hue.model()` so the spans nest under the model call
+   * follow `captureContent`; a failed call carries `error.type` and ERROR status, and with content
+   * capture a failed OpenAI MCP call's status description is the provider's scrubbed, bounded error
+   * text. An OpenAI `mcp_list_tools` item becomes a `tools/list` child span carrying that server's
+   * tools as `gen_ai.tool.definitions`, or without content capture only `hue.tool.names` and
+   * `hue.tool.definitions.sha256`. Call it inside `hue.model()` so the spans nest under the model call
    * and `provider` defaults to its provider; pass `request` to record each server's host as
    * `server.address`. The spans have no duration of their own: the provider ran the tools inside
    * the model request. Unreadable items are skipped and counted; nothing is thrown.
@@ -689,9 +701,12 @@ export class HueClient {
         if (address !== undefined) attributes["server.address"] = address;
         return attributes;
       };
-      const fail = (span: Span, type: string) => {
+      const fail = (span: Span, type: string, description?: string) => {
         span.setAttribute("error.type", type);
-        span.setStatus({ code: SpanStatusCode.ERROR });
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          ...(description === undefined ? {} : { message: description }),
+        });
       };
       for (const call of activity.calls) {
         const span = this.tracer.startSpan(
@@ -703,6 +718,7 @@ export class HueClient {
               "gen_ai.tool.name": call.name,
               "gen_ai.tool.type": "extension",
               ...(call.callId === undefined ? {} : { "gen_ai.tool.call.id": call.callId }),
+              "hue.tool.call.position": call.position,
               ...server(call.server),
             },
           },
@@ -712,7 +728,15 @@ export class HueClient {
           this.setContent(span, "gen_ai.tool.call.arguments", call.arguments);
         if (call.result !== undefined)
           this.setContent(span, "gen_ai.tool.call.result", call.result);
-        if (call.errorType !== undefined) fail(span, call.errorType);
+        if (call.errorType !== undefined)
+          fail(
+            span,
+            call.errorType,
+            // The provider's error text is content: exported only when content is captured.
+            this.captureContent && call.errorText !== undefined
+              ? providerErrorDescription(call.errorText)
+              : undefined,
+          );
         span.end();
       }
       for (const listing of activity.listings) {
@@ -724,7 +748,19 @@ export class HueClient {
           },
           parent,
         );
-        this.setContent(span, "gen_ai.tool.definitions", listing.definitions);
+        if (this.captureContent)
+          this.setContent(span, "gen_ai.tool.definitions", listing.definitions);
+        // Names and the catalog digest are metadata: without content, the listing carries the
+        // summary metadata-only export gives any record's tool definitions, within the summary's
+        // bounds rather than one content field's.
+        else
+          try {
+            span.setAttributes(
+              toolCatalogSummary(encodeContent(listing.definitions, catalogLimits)),
+            );
+          } catch {
+            this.transport.instrumentationFailure();
+          }
         if (listing.errorType !== undefined) fail(span, listing.errorType);
         span.end();
       }
