@@ -23,7 +23,13 @@ import {
 } from "./attempt.js";
 import type { EvaluationClient } from "./client.js";
 import { TargetCancelledError, TargetOutcomeUncertainError } from "./runner.js";
-import type { ExperimentCase, JsonValue, SimulationMcpCapability } from "./types.js";
+import type {
+  ExperimentCase,
+  JsonValue,
+  LocalFile,
+  SimulationMcpCapability,
+  TargetResult,
+} from "./types.js";
 
 export type McpSurfaceKeyV2 = Extract<SurfaceBindingV2["surfaceKey"], `${string}/mcp`>;
 
@@ -127,6 +133,11 @@ export interface EnvironmentTargetContext {
    * gateway world has no MCP surface. */
   mcp?: SimulationMcpCapability;
   connectionBundle?: AttemptConnectionBundleV2;
+  /** Verified copies of the case's agent-visible input files; evaluator-only files are never
+   * among them. Empty when the case has none. */
+  files: LocalFile[];
+  /** Private directory for this case; return generated files with `withFiles`. */
+  outputDirectory: string;
   signal?: AbortSignal;
 }
 
@@ -135,6 +146,8 @@ interface RunnerTargetContext {
   item: ExperimentCase;
   executionId: string;
   span: HueSpan;
+  files: LocalFile[];
+  outputDirectory: string;
 }
 
 export interface RunEnvironmentTargetOptions {
@@ -159,7 +172,7 @@ export interface RunEnvironmentTargetOptions {
   target(
     inputs: JsonValue,
     context: EnvironmentTargetContext,
-  ): JsonValue | undefined | Promise<JsonValue | undefined>;
+  ): JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
 }
 
 /** The completion grace is five seconds; cap an unexpectedly distant timestamp and let reads
@@ -354,7 +367,7 @@ export async function createWorldForExecution(
  */
 export async function runEnvironmentTarget(
   options: RunEnvironmentTargetOptions,
-): Promise<JsonValue | undefined> {
+): Promise<JsonValue | TargetResult | undefined> {
   const { context } = options;
   const environmentVersionId = context.item.environmentVersionId;
   if (!environmentVersionId)
@@ -481,6 +494,8 @@ export async function runEnvironmentTarget(
       ...(world ? { world } : {}),
       ...(mcp ? { mcp } : {}),
       ...(connectionBundle ? { connectionBundle } : {}),
+      files: structuredClone(context.files),
+      outputDirectory: context.outputDirectory,
       signal: options.signal,
     });
     await seal(options.environmentClient, run.id, context.executionId, "completed", timing);

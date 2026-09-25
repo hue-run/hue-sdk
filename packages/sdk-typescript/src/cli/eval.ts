@@ -27,6 +27,7 @@ import type {
 } from "../evals/types.js";
 import { TargetResult } from "../evals/types.js";
 import { CheckpointIdentityError, CheckpointStore } from "../evals/checkpoint.js";
+import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
 import { digest } from "../evals/json.js";
 import { runLocalAgent } from "../evals/local-worker.js";
 import {
@@ -67,7 +68,7 @@ import { envFileArgument, envFileOptions } from "./env-file.js";
 export type EvalAdapter = (
   inputs: JsonValue,
   context: SimulationTargetContext,
-) => JsonValue | undefined | Promise<JsonValue | undefined>;
+) => JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
 
 /**
  * Context of a direct (file) case: pinned input files in, generated documents out. The same
@@ -117,6 +118,9 @@ Agent (exactly one):
                                   HUE_ENVIRONMENT_RUN_ID, HUE_CASE_ID and HUE_CASE_KEY set;
                                   {"inputs","config"} on stdin. HUE_API_KEY and other Hue
                                   control-plane credentials are removed from the child.
+                                  HUE_CASE_DIR, HUE_CASE_INPUTS and HUE_CASE_OUTPUT_DIR name the
+                                  case directory as for direct cases: the case's agent-visible
+                                  files and output/, uploaded after the case
   --allow-hue-credentials         Keep HUE_API_KEY and other Hue control-plane credentials in
                                   the --command child (off by default)
                                   Direct: spawned in a private case directory with HUE_CASE_DIR,
@@ -132,6 +136,8 @@ Modes:
   --agent-key <key>               Agent key (default: slug of the adapter filename)
   --agent-name <name>             Agent display name (default: the key)
   --revision <id>                 Agent revision (default: AGENT_REVISION, git HEAD or "dev")
+  --capability <value>            Extra capability to register (repeatable), for example
+                                  environment-files:v1 and input:pdf for world cases with files
 
 Connection:
   --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first
@@ -195,6 +201,7 @@ function parse(argv: string[]) {
         "max-runs": { type: "string" },
         "agent-key": { type: "string" },
         "agent-name": { type: "string" },
+        capability: { type: "string", multiple: true },
         revision: { type: "string" },
         ...envFileOptions,
         origin: { type: "string" },
@@ -334,9 +341,6 @@ interface RunningCommand {
   settled: Promise<void>;
 }
 const runningCommands = new Set<RunningCommand>();
-/** Owner-only MCP configuration directories not yet disposed; a forced exit removes them, since
- * each holds a world token. */
-const mcpConfigDirectories = new Set<string>();
 
 /** Stops every agent command still running and resolves once each has settled. */
 async function settleCommands(): Promise<void> {
@@ -353,9 +357,11 @@ function warn(message: string) {
  * timeout or Ctrl+C stops the agent the shell started, not only the shell: a survivor would still
  * hold a world token and could write after Hue recorded the case as failed. The group is signalled
  * even once the shell has exited, since a compound command's agent can outlive it, and a stopped
- * command settles only when nothing in the group is left. Once the group is found empty it is
- * never signalled again, since its ID could be reused. Windows has no process group to signal,
- * so the child alone is stopped there.
+ * command settles only when nothing in the group is left. A command that exits normally but
+ * leaves processes behind has them stopped the same way before it settles, so none can touch its
+ * outputs while they are collected. Once the group is found empty it is never signalled again,
+ * since its ID could be reused. Windows has no process group to signal, so the child alone is
+ * stopped there.
  */
 export function spawnAgentCommand(
   command: string,
@@ -519,6 +525,9 @@ export function spawnAgentCommand(
     };
     child.on("close", (code, signal) => {
       closed = { code, signal };
+      // Whatever the command left running is stopped before its answer and files are read, so
+      // nothing it started can still write, swap or link files while they are collected.
+      if (group && !stopping && running()) return stop();
       settle();
     });
   });
@@ -640,18 +649,32 @@ function commandAdapter(
 ): EvalAdapter {
   return async (inputs, context) => {
     const parent = parentEnvironment(options.allowHueCredentials);
+    // The case directory direct cases get: inputs, the verified agent-visible files and
+    // output/. It holds no world credential and the runner removes it after the case.
+    const layout = await stageDirectCase(context.outputDirectory, {
+      inputs,
+      config: context.config,
+      item: context.item,
+      executionId: context.executionId,
+      files: context.files,
+    });
     const identity = {
       HUE_EXECUTION_ID: context.executionId,
       HUE_ENVIRONMENT_RUN_ID: context.environmentRunId,
       HUE_CASE_ID: context.item.id,
       HUE_CASE_KEY: context.item.externalKey,
+      HUE_CASE_DIR: layout.caseDirectory,
+      HUE_CASE_INPUTS: layout.inputsPath,
+      HUE_CASE_OUTPUT_DIR: layout.outputDirectory,
     };
     // The token-bearing file is written inside a private directory registered before any of it
     // exists, so a forced exit at any point removes it.
     const configDirectory = context.world
       ? mkdtempSync(join(tmpdir(), "hue-mcp-config-"))
       : undefined;
-    if (configDirectory) mcpConfigDirectories.add(configDirectory);
+    const untrack = configDirectory
+      ? onForcedExit(() => rmSync(configDirectory, { recursive: true, force: true }))
+      : undefined;
     try {
       const configFile = context.world
         ? await writeMcpConfig(context.world, { directory: configDirectory })
@@ -673,19 +696,16 @@ function commandAdapter(
               : {}),
             ...identity,
           };
-      return parseAnswer(
-        await spawnAgentCommand(command, {
-          env,
-          stdin: JSON.stringify({ inputs, config: context.config }),
-          timeoutSeconds,
-          ...(context.signal ? { signal: context.signal } : {}),
-        }),
-      );
+      const stdout = await spawnAgentCommand(command, {
+        env,
+        stdin: JSON.stringify({ inputs, config: context.config }),
+        timeoutSeconds,
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+      return collectDirectOutputs(layout.outputDirectory, parseAnswer(stdout));
     } finally {
-      if (configDirectory) {
-        await rm(configDirectory, { recursive: true, force: true });
-        mcpConfigDirectories.delete(configDirectory);
-      }
+      if (configDirectory) await rm(configDirectory, { recursive: true, force: true });
+      untrack?.();
     }
   };
 }
@@ -1438,7 +1458,7 @@ async function runWorker(
       key: agent.key,
       name: agent.name,
       revision: agent.revision,
-      capabilities: ["environment:v1"],
+      capabilities: ["environment:v1", ...(values.capability ?? [])],
     },
     scorers: [],
     concurrency,
@@ -1458,6 +1478,8 @@ async function runWorker(
         ...(context.world ? { world: context.world } : {}),
         ...(context.mcp ? { mcp: context.mcp } : {}),
         ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
+        files: context.files,
+        outputDirectory: context.outputDirectory,
         signal,
       });
     },
@@ -1519,8 +1541,9 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     }
     if (performance.now() - firstInterrupt < 50) return;
     for (const command of runningCommands) command.kill();
-    for (const directory of mcpConfigDirectories)
-      rmSync(directory, { recursive: true, force: true });
+    // The exit cannot wait for the normal cleanup: remove the world cases' files, the MCP
+    // configurations holding world tokens and the checkpoint locks now.
+    runForcedExitCleanups();
     process.stderr.write("Interrupted.\n");
     process.exit(130);
   };
@@ -1586,22 +1609,18 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       throw new UsageError(
         "--no-output applies to one-shot runs; a run launched from Hue always stores its outputs",
       );
+    if (!values.worker && values.capability?.length)
+      throw new UsageError("--capability applies to --worker only");
     const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;
     // One adapter module serves both case kinds; the direct context announces itself with `mode`.
     // Outputs are stored by default, so every answer and error message is cleared of the
     // credentials the case handed the agent before it leaves the CLI.
     const agents: Agents = {
       simulation: redacting(
-        loaded
-          ? async (inputs: JsonValue, context: SimulationTargetContext) => {
-              const answer = await loaded(inputs, context);
-              if (answer instanceof TargetResult)
-                throw new Error("The adapter returned generated files for a simulated-world case");
-              return answer;
-            }
-          : commandAdapter(values.command!, timeout, {
-              allowHueCredentials: values["allow-hue-credentials"],
-            }),
+        loaded ??
+          commandAdapter(values.command!, timeout, {
+            allowHueCredentials: values["allow-hue-credentials"],
+          }),
       ),
       direct: redacting(
         loaded ??

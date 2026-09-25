@@ -30,9 +30,11 @@ import type {
   ExperimentCase,
   Identity,
   JsonValue,
+  LocalFile,
   LocalScorer,
   ScorerDefinition,
   SimulationMcpCapability,
+  TargetResult,
 } from "./types.js";
 
 /** Repository-authored scorer identity and its public definition or local binding. */
@@ -158,6 +160,12 @@ export interface SimulationTargetContext {
   /** Credential-bearing provider connections for this callback only. Hue never
    * checkpoints, logs or adds this response to parity digests. */
   connectionBundle?: AttemptConnectionBundleV2;
+  /** Verified copies of the case's agent-visible input files (`source`, templates,
+   * references, originals); evaluator-only files are withheld. Empty when the case has none. */
+  files: LocalFile[];
+  /** Private directory for this case, removed after it; return generated files with
+   * `withFiles`. */
+  outputDirectory: string;
   /** Cancellation is cooperative: pass this signal into the real agent/provider call. */
   signal?: AbortSignal;
 }
@@ -238,11 +246,12 @@ export interface RunSimulationOptions {
     /** Selected MCP surface. */
     surfaceKey: "google.gmail/mcp" | "slack/mcp";
   };
-  /** Invokes the existing local agent exactly once for this attempt. */
+  /** Invokes the existing local agent exactly once for this attempt; return the output, or
+   * `withFiles(output, files)` when it generated files. */
   target(
     inputs: JsonValue,
     context: SimulationTargetContext,
-  ): JsonValue | undefined | Promise<JsonValue | undefined>;
+  ): JsonValue | TargetResult | undefined | Promise<JsonValue | TargetResult | undefined>;
   /** Receives bounded nonsecret lifecycle progress. */
   onProgress?(event: SimulationProgress): void | Promise<void>;
 }
@@ -848,6 +857,8 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
               ...(targetContext.connectionBundle
                 ? { connectionBundle: structuredClone(targetContext.connectionBundle) }
                 : {}),
+              files: structuredClone(targetContext.files),
+              outputDirectory: targetContext.outputDirectory,
               signal: targetContext.signal,
             }),
         }),

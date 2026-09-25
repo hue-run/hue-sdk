@@ -284,6 +284,27 @@ world token, so an adapter that read `HUE_MCP_URL` and `HUE_MCP_TOKEN` keeps wor
 no Hue-native `tools` (Hue refuses them); a world created while the gateway is off keeps its tools
 and the `hue_sim_` capability and emits a one-time `DeprecationWarning`.
 
+A case pinned to a world may also pin input files. Before the case's execution starts, the
+helpers download each agent-visible file (`source`, `attached_template`, `attached_reference`,
+`original`), verify its size and SHA-256 against the case manifest and hand the verified copies to
+the callback as `context.files` beside `context.world`, in a private directory (mode 0700, files
+0600), with a private `context.outputDirectory`. Evaluator-only files (`org_template`,
+`evaluator_reference`) never reach the agent; a local code evaluator's copies are checked before
+the execution starts but saved only after the agent finished. Bytes that differ from the manifest raise
+`CaseFileError` with code `case_file_mismatch`; a name that is not one safe file name (a path
+separator, `.` or `..`, a C0 or C1 control character, a character Windows reserves such as `:` or
+`?`, a Windows device name such as `CON`, a trailing dot or space, more than 200 bytes) raises
+`case_file_name_refused`. Either stops the run before an
+execution or world exists for the case. Return `withFiles(output, files)` to upload what the agent
+produced: the files are published and linked to the execution as `artifactIds` and
+`primaryArtifactId`, within the limits of direct cases (at most 32 files, 25 MiB each, the
+accepted document types). The world token is never written into the case directory, which is
+removed when the case ends; only staged outputs an interrupted upload resumes from are kept until
+it does. `hue eval --command` receives the same files through
+`HUE_CASE_DIR`, `HUE_CASE_INPUTS` and `HUE_CASE_OUTPUT_DIR`. A `runLocalAgent` worker is offered
+such cases only when it declares `environment-files:v1` and `input:<extension>` for each file
+type; see [EVALUATIONS.md](EVALUATIONS.md#direct-cases-and-files).
+
 A refusal such as 409 `simulation_gateway_required` exposes its validated server code as `HueEnvironmentError.diagnostic`.
 
 `agentEnvironment` removes Hue control-plane credentials from the child by default: `HUE_API_KEY`,

@@ -1,4 +1,9 @@
-export { createEvaluationClient, EvaluationClient, HueApiError } from "./evals/client.js";
+export {
+  ArtifactSizeError,
+  createEvaluationClient,
+  EvaluationClient,
+  HueApiError,
+} from "./evals/client.js";
 export type { EvaluationClientOptions } from "./evals/client.js";
 export {
   runExperiment,
@@ -18,12 +23,14 @@ export type {
 } from "./evals/runner.js";
 export { TargetResult, withFiles } from "./evals/types.js";
 export {
+  CaseFileError,
   outputContentTypes,
   outputFileLimits,
   OutputFileError,
   safeFilename,
   targetFileRoles,
 } from "./evals/files.js";
+export type { CaseFileErrorCode } from "./evals/files.js";
 export { runSimulation } from "./evals/simulation.js";
 export type {
   RepositorySimulationCase,

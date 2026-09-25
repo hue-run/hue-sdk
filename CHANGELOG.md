@@ -37,6 +37,67 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   completes and listed in the new `RunnerReport.telemetryNotAccepted` with sanitized issue counts.
   The default, `"stop"`, keeps the previous behavior. Exported types `TelemetryNotAccepted` and
   `TelemetryIssueCount`.
+- Cases pinned to a world can carry input files. `runSimulation` and `runLocalAgent` download
+  the case's agent-visible files before its execution starts, verify each one's size and SHA-256
+  against the case manifest and hand the verified copies to the environment callback as
+  `context.files`, beside the world, with a private `context.outputDirectory`. Evaluator-only
+  files (`org_template`, `evaluator_reference`) never reach the agent. The callback may return
+  `withFiles(output, files)`: the files are uploaded and linked to the execution as `artifactIds`
+  and `primaryArtifactId`, within the limits of direct cases. The world token is never written
+  to the case directory, which is removed when the case ends; only staged outputs an interrupted
+  upload resumes from are kept until it does.
+- `localAgentCapabilities.environmentFiles` (`environment-files:v1`). A worker that declares it,
+  with `input:<extension>` for each file type it accepts, is offered world cases whose manifest
+  holds agent-visible files; it requires `target`. The worker never adds it to a registration
+  itself, so existing registrations keep their capabilities.
+- `CaseFileError`, with the stable `code` `case_file_mismatch` when a downloaded pinned file
+  differs from the manifest's size or SHA-256, and `case_file_name_refused` when a file for an
+  agent in a world is not one safe file name (a path separator, `.` or `..`, a C0 or C1 control
+  character, a character Windows reserves such as `:` or `?`, a Windows device name such as
+  `CON`, a trailing dot or space, or more than 200 bytes). Both are raised before the case's
+  execution starts, so no execution or world is spent on it.
+- `EvaluationClient.downloadArtifact(id, { maxBytes })` stops one byte past `maxBytes` and throws
+  the new `ArtifactSizeError`. Pinned downloads pass the manifest's size, so a longer body is a
+  `case_file_mismatch` without reading the rest.
+- `hue eval` hands a world case's files to the agent: an adapter receives `context.files` and
+  `context.outputDirectory` and may return `withFiles`, and a `--command` also gets
+  `HUE_CASE_DIR`, `HUE_CASE_INPUTS` and `HUE_CASE_OUTPUT_DIR` with the direct-case layout; every
+  file it leaves in `output/` is uploaded. `--worker` registers each repeated
+  `--capability <value>`, such as `environment-files:v1` and `input:pdf`, beside `environment:v1`.
+
+#### Changed
+
+- A downloaded pinned file that differs from its manifest now raises `CaseFileError`
+  (`case_file_mismatch`) instead of a plain `Error`, for direct cases and `rescore` too.
+- Evaluator-only files for a local code evaluator are still checked before the execution starts,
+  but saved only after the target finished, just before scoring, apart from the agent's copies, so
+  they are not on disk while the agent runs. They are downloaded twice as a result. Before, they
+  were saved with the agent's files before the execution started.
+- A generated file declared by `path` is read once as a regular file, its size checked before
+  reading, and staged owner-only (0600) from those bytes; a symlink, FIFO or device is the
+  target's error. Before, it was read whole, then copied with its own mode.
+- `safeFilename` keeps at most 200 UTF-8 bytes instead of 200 characters, so a long multibyte
+  name no longer fails with the operating system's name-length error. A longer name keeps its
+  extension (`.pdf` stays `.pdf`) and its shortened stem ends in `~` and 8 hex digits of the whole
+  name's SHA-256, so two long names stay distinct.
+- A files directory must be owned by the current user and closed to everyone else (mode 0700).
+- `hue eval` stops whatever a command left running in its process group (SIGTERM, then SIGKILL
+  after 5 seconds) before reading its answer and files. A forced exit (a second Ctrl+C) also
+  removes the world case's files and the checkpoint locks, so a rerun is not refused on a stale
+  lock.
+
+#### Security
+
+- `hue eval` collects a command's `output/` without following the agent's links. The output
+  directory must be a real directory and a helper (`manifest.json`, `result.json`, `summary.txt`,
+  …) a regular file; every file is opened without following a final symlink or blocking on a
+  FIFO, must be the file the listing saw and within its limit (checked before reading), and is
+  uploaded from the bytes read. Before, a helper or an output directory linked to a host path
+  sent that host file to Hue, a file swapped for a link after the listing could be uploaded, and
+  a FIFO named like a helper hung the CLI. The listing also stops past 32 documents or 1024
+  entries. This applies to direct cases and world cases alike.
+- Input copies in a direct case directory whose names differ only in case or Unicode
+  normalization no longer overwrite each other on case-insensitive or normalizing filesystems.
 
 #### Fixed
 

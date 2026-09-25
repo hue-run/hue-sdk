@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { copyFile, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { extname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { HueApiError, type EvaluationClient } from "./client.js";
+import { ArtifactSizeError, HueApiError, type EvaluationClient } from "./client.js";
 import type { CaseFile, LocalFile, OutputFile, SubjectFile } from "./types.js";
 
 /** Roles the target receives. Organization templates stay with grading, as in the managed protocol. */
@@ -57,25 +58,157 @@ export class OutputFileError extends Error {
     this.name = "OutputFileError";
   }
 }
+/** Stable codes of a pinned file the runner refuses to hand over. */
+export type CaseFileErrorCode = "case_file_mismatch" | "case_file_name_refused";
+/**
+ * Thrown when a pinned file cannot be used: its downloaded bytes differ from the manifest's size
+ * or SHA-256 (`case_file_mismatch`), or a file meant for an agent working in a world is not
+ * named by one safe file name (`case_file_name_refused`). Raised before the case's execution
+ * starts, so no execution, world or target call is spent on it.
+ */
+export class CaseFileError extends Error {
+  constructor(
+    /** Stable diagnostic code. */
+    readonly code: CaseFileErrorCode,
+    /** Hue artifact identity of the refused file. */
+    readonly artifactId: string,
+    message: string,
+  ) {
+    super(`${message} (${code})`);
+    this.name = "CaseFileError";
+  }
+}
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-/** Reduce a declared file name to a single printable path segment, at most 200 characters. */
+/** A file name quoted for a message: at most 120 characters, controls escaped. */
+const quoted = (name: string) => JSON.stringify([...name].slice(0, 120).join(""));
+/** Names Windows reserves for devices, with or without an extension. */
+const DEVICE_NAME = /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$/iu;
+/** The longest file name the runner writes, in UTF-8 bytes: room is left for the temporary
+ * suffix of an atomic write and a copy counter within the usual 255-byte limit. */
+const MAX_NAME_BYTES = 200;
+/** The longest prefix of `name` that fits in `bytes` UTF-8 bytes, cut between code points. */
+function truncateBytes(name: string, bytes: number): string {
+  let kept = "";
+  let size = 0;
+  for (const character of name) {
+    size += Buffer.byteLength(character);
+    if (size > bytes) break;
+    kept += character;
+  }
+  return kept;
+}
+/**
+ * Whether `name` can be used unchanged as one file name: not empty, `.` or `..`; no `/`, `\`,
+ * C0 or C1 control character, or character Windows reserves (`: < > " | ? *`); no Windows device
+ * name (`CON`, `NUL`, `COM1`, … with any extension); no trailing dot or space, which Windows
+ * drops; at most 200 UTF-8 bytes. An absolute path or a path with a parent step always contains
+ * a separator, so it is refused too.
+ */
+export function isSafeFileName(name: string): boolean {
+  if (typeof name !== "string" || !name || name === "." || name === "..") return false;
+  // eslint-disable-next-line no-control-regex -- control characters are refused
+  if (/[/\\:<>"|?*\x00-\x1f\x7f-\x9f]/u.test(name)) return false;
+  if (name.endsWith(".") || name.endsWith(" ")) return false;
+  if (DEVICE_NAME.test(name.split(".")[0]!.trimEnd())) return false;
+  return Buffer.byteLength(name) <= MAX_NAME_BYTES;
+}
+/** Refuse a pinned file whose name is not one safe file name; see {@link isSafeFileName}. */
+export function assertSafeFileNames(files: readonly Pick<CaseFile, "artifactId" | "filename">[]) {
+  for (const file of files)
+    if (!isSafeFileName(file.filename))
+      throw new CaseFileError(
+        "case_file_name_refused",
+        file.artifactId,
+        `Pinned file ${quoted(String(file.filename))} is not a safe file name`,
+      );
+}
+/**
+ * Reduce a declared file name to a single printable path segment, at most 200 UTF-8 bytes. A
+ * longer name keeps its extension, so `.pdf` stays `.pdf`, and its stem is shortened and marked
+ * with a short hash of the whole name, so two long names never shorten to the same one.
+ */
 export function safeFilename(name: string): string {
   const cleaned = [...name]
     .filter((c) => c.charCodeAt(0) >= 32 && c.charCodeAt(0) !== 127 && c !== "/" && c !== "\\")
     .join("")
     .trim();
-  return cleaned && cleaned !== "." && cleaned !== ".."
-    ? [...cleaned].slice(0, 200).join("")
-    : "file";
+  let kept = cleaned;
+  if (Buffer.byteLength(cleaned) > MAX_NAME_BYTES) {
+    const found = extname(cleaned);
+    const extension = Buffer.byteLength(found) <= 32 ? found : "";
+    const mark = `~${sha256(Buffer.from(cleaned)).slice(0, 8)}`;
+    const room = MAX_NAME_BYTES - Buffer.byteLength(extension) - mark.length;
+    kept = `${truncateBytes(cleaned.slice(0, cleaned.length - extension.length), room)}${mark}${extension}`;
+  }
+  return kept && kept !== "." && kept !== ".." ? kept : "file";
 }
+/** Create `path` if needed and require a directory this user owns that no one else can open. */
 async function privateDirectory(path: string): Promise<string> {
   const root = resolve(path);
   await mkdir(root, { recursive: true, mode: 0o700 });
   const info = await lstat(root);
-  if (!info.isDirectory() || info.isSymbolicLink())
-    throw new Error("Use a private files directory (no symlink)");
+  const uid = process.getuid?.();
+  if (
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    (uid !== undefined && info.uid !== uid) ||
+    (process.platform !== "win32" && (info.mode & 0o077) !== 0)
+  )
+    throw new Error("Use a private files directory (owned by this user, mode 0700, no symlink)");
   return root;
+}
+/** The device and inode a listing saw for a file, compared with the file actually opened. */
+export interface FileIdentity {
+  dev: number;
+  ino: number;
+}
+// A symlink as the last path component fails to open, and a FIFO or device never blocks.
+const AGENT_FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+/**
+ * Read a file an agent wrote without trusting its path: the last component must not be a
+ * symlink and the open file must be a regular file of at most `maxBytes`, checked before any byte
+ * is read, and, when `expected` is given, the very file a listing saw. The bytes come from that
+ * open file. Returns undefined for a missing file only when nothing was expected there; every
+ * other refusal is an `OutputFileError` naming `label`.
+ */
+export async function readAgentFile(
+  path: string,
+  label: string,
+  maxBytes: number,
+  expected?: FileIdentity,
+): Promise<Uint8Array | undefined> {
+  let file;
+  try {
+    file = await open(path, AGENT_FILE_FLAGS);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && !expected) return undefined;
+    if (code === "ELOOP" || code === "EMLINK")
+      throw new OutputFileError(`${label} is a symbolic link`);
+    if (code === "ENOENT") throw new OutputFileError(`${label} changed while it was collected`);
+    throw new OutputFileError(`${label} could not be read`);
+  }
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new OutputFileError(`${label} is not a regular file`);
+    if (expected && (info.dev !== expected.dev || info.ino !== expected.ino))
+      throw new OutputFileError(`${label} changed while it was collected`);
+    if (info.size > maxBytes)
+      throw new OutputFileError(`${label} exceeds ${Math.floor(maxBytes / 1024 / 1024)} MiB`);
+    // One byte past the size seen: a file that is still growing is refused, not read whole.
+    const bytes = Buffer.allocUnsafe(info.size + 1);
+    let total = 0;
+    while (total < bytes.length) {
+      const { bytesRead } = await file.read(bytes, total, bytes.length - total, total);
+      if (!bytesRead) break;
+      total += bytesRead;
+    }
+    if (total !== info.size) throw new OutputFileError(`${label} changed while it was collected`);
+    return bytes.subarray(0, total);
+  } finally {
+    await file.close();
+  }
 }
 async function writePrivate(path: string, bytes: Uint8Array): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
@@ -93,6 +226,37 @@ async function verifiedBytes(path: string, expected: { byteSize: number; sha256:
   if (bytes.byteLength !== expected.byteSize || sha256(bytes) !== expected.sha256)
     throw new Error(`Saved file ${path} no longer matches its verified identity`);
   return bytes;
+}
+
+/** Download one pinned file and check its size and SHA-256 against the manifest. The download
+ * stops one byte past the pinned size. */
+async function downloadVerified(
+  client: EvaluationClient,
+  file: Pick<SubjectFile, "artifactId" | "filename" | "byteSize" | "sha256">,
+): Promise<Uint8Array> {
+  const mismatch = () =>
+    new CaseFileError(
+      "case_file_mismatch",
+      file.artifactId,
+      `Downloaded file ${quoted(file.filename)} does not match its pinned size and SHA-256`,
+    );
+  let bytes: Uint8Array;
+  try {
+    bytes = await client.downloadArtifact(file.artifactId, { maxBytes: file.byteSize });
+  } catch (error) {
+    if (error instanceof ArtifactSizeError) throw mismatch();
+    throw error;
+  }
+  if (bytes.byteLength !== file.byteSize || sha256(bytes) !== file.sha256) throw mismatch();
+  return bytes;
+}
+
+/** Check pinned files against the manifest without keeping them: nothing is written to disk. */
+export async function verifyCaseFiles(
+  client: EvaluationClient,
+  files: readonly SubjectFile[],
+): Promise<void> {
+  for (const file of files) await downloadVerified(client, file);
 }
 
 /**
@@ -116,12 +280,7 @@ export async function downloadCaseFiles(
     } catch {
       present = false;
     }
-    if (!present) {
-      const bytes = await client.downloadArtifact(file.artifactId);
-      if (bytes.byteLength !== file.byteSize || sha256(bytes) !== file.sha256)
-        throw new Error(`Downloaded input ${file.filename} does not match its pinned identity`);
-      await writePrivate(path, bytes);
-    }
+    if (!present) await writePrivate(path, await downloadVerified(client, file));
     saved.push({
       artifactId: file.artifactId,
       role: file.role,
@@ -134,6 +293,34 @@ export async function downloadCaseFiles(
     });
   }
   return saved;
+}
+
+/**
+ * Download a case's needed inputs under `caseDirectory`: the agent-visible roles into `inputs/`
+ * and evaluator-only files into `evaluator-inputs/`, so the directory the target's files live in
+ * never holds an evaluator's file. `all` keeps the manifest order for scorers; `target` is the
+ * agent-visible subset.
+ */
+export async function downloadCaseInputs(
+  client: EvaluationClient,
+  files: CaseFile[],
+  caseDirectory: string,
+): Promise<{ all: LocalFile[]; target: LocalFile[] }> {
+  const visible = (file: CaseFile) => targetFileRoles.includes(file.role);
+  const agentFiles = files.filter(visible);
+  const evaluatorFiles = files.filter((file) => !visible(file));
+  const target = agentFiles.length
+    ? await downloadCaseFiles(client, agentFiles, join(caseDirectory, "inputs"))
+    : [];
+  const evaluator = evaluatorFiles.length
+    ? await downloadCaseFiles(client, evaluatorFiles, join(caseDirectory, "evaluator-inputs"))
+    : [];
+  const saved = [...target, ...evaluator];
+  const all = files.map(
+    (file) =>
+      saved.find((entry) => entry.artifactId === file.artifactId && entry.role === file.role)!,
+  );
+  return { all, target };
 }
 
 /** Copy the target's generated files next to the checkpoint and record their identities. */
@@ -159,21 +346,16 @@ export async function stageOutputFiles(
     names.add(filename);
     if (!outputContentTypes.includes(file.contentType))
       throw new OutputFileError(`Unsupported generated file type ${String(file.contentType)}`);
-    let bytes: Uint8Array;
-    try {
-      bytes = file.bytes ?? (await readFile(file.path));
-    } catch {
-      throw new OutputFileError(`Generated file ${filename} could not be read`);
-    }
+    // A path is read once, as a regular file within the limit, and staged from those bytes.
+    const bytes =
+      file.bytes ??
+      (await readAgentFile(file.path, `Generated file ${filename}`, outputFileLimits.bytes));
+    if (!bytes) throw new OutputFileError(`Generated file ${filename} could not be read`);
     if (!bytes.byteLength) throw new OutputFileError(`Generated file ${filename} is empty`);
     if (bytes.byteLength > outputFileLimits.bytes)
       throw new OutputFileError(`Generated file ${filename} exceeds 25 MiB`);
     const path = join(root, filename);
-    if (file.bytes) await writePrivate(path, bytes);
-    else {
-      await copyFile(file.path, path);
-      await verifiedBytes(path, { byteSize: bytes.byteLength, sha256: sha256(bytes) });
-    }
+    await writePrivate(path, bytes);
     staged.push({
       filename,
       contentType: file.contentType,

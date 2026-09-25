@@ -1,7 +1,8 @@
-import { constants } from "node:fs";
+import { constants, rmSync } from "node:fs";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { onForcedExit } from "./exit-cleanup.js";
 import { digest } from "./json.js";
 
 const CONTENT_POLICY = ["persistResultContent", "captureContent"] as const;
@@ -35,8 +36,10 @@ function contentPolicyOnly(prior: unknown, identity: unknown) {
   return Object.fromEntries(CONTENT_POLICY.map((key) => [key, before[key]]));
 }
 
-/** One owner per directory. A crash leaves .lock for explicit operator recovery. */
+/** One owner per directory. A crash leaves .lock for explicit operator recovery; a forced exit of
+ * `hue eval`, which stops its agents first, releases it. */
 export class CheckpointStore {
+  private untrack = () => {};
   private constructor(readonly directory: string) {}
   static async acquire(directory: string, identity: unknown): Promise<CheckpointStore> {
     const root = resolve(directory);
@@ -47,6 +50,9 @@ export class CheckpointStore {
     const store = new CheckpointStore(root);
     try {
       await mkdir(join(root, ".lock"), { mode: 0o700 });
+      store.untrack = onForcedExit(() =>
+        rmSync(join(root, ".lock"), { recursive: true, force: true }),
+      );
     } catch {
       throw new Error(
         "Checkpoint directory is locked; confirm its owner stopped before explicitly removing .lock",
@@ -113,5 +119,6 @@ export class CheckpointStore {
   }
   async release(): Promise<void> {
     await rm(join(this.directory, ".lock"), { recursive: true });
+    this.untrack();
   }
 }
