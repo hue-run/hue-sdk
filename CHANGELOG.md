@@ -8,6 +8,24 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Added
+
+- `normalizeScorerDefinitionForPublication` and the `ScorerDefinition` type know every
+  Hue-executed `world_outcome` entry: `hue.conversion_outcome.v2`,
+  `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
+  `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
+  filled in when omitted; the local runner defers all of them to Hue, as it does v1.
+
+#### Fixed
+
+- A target output over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32
+  levels of nesting) no longer stops the whole run with `OutcomeSerializationError`: that case
+  completes as `error` with the type `OutputTooLarge` and, when result content is persisted, a
+  message naming the bound, and the other cases keep running. Output within the bounds that is not
+  JSON still raises `OutcomeSerializationError`.
+
 ### [0.10.0] - 2026-09-25
 
 This release changes a default of the `hue` binary (see Breaking), so it is a `0.MINOR` release.
@@ -706,6 +724,16 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### Unreleased
+
+#### Fixed
+
+- `run_experiment` no longer stops the whole run with `OutcomeSerializationError` when a target's
+  output is over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels
+  of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
+  content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
+  running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
 
 ### [0.6.1] - 2026-09-25
 

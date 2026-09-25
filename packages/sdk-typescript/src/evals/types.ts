@@ -219,6 +219,36 @@ export type ScorerDefinition =
       metrics: MetricDefinition[];
     }
   | {
+      /** Scored inside Hue using immutable world evidence; the local runner defers it. */
+      kind: "world_outcome";
+      /** v1's rubric with the destination reported as `recipient`, `thread` and `subject`. */
+      entry: "hue.conversion_outcome.v2";
+      /** The ten fixed boolean metrics defined by the entry. */
+      metrics: MetricDefinition[];
+    }
+  | {
+      /** A case's reviewed outcome assertions, scored inside Hue; the local runner defers it. */
+      kind: "world_outcome";
+      /** Pinned Hue-executed assertions evaluator. */
+      entry: "hue.outcome_assertions.v2";
+      /** `task_success` and the fixed assertion counts defined by the entry. */
+      metrics: MetricDefinition[];
+    }
+  | {
+      /** The v2 assertions plus the case's calibrated judges, scored inside Hue; the local runner
+       * defers it. */
+      kind: "world_outcome";
+      /** Pinned Hue-executed assertions-and-judges evaluator. */
+      entry: "hue.outcome_assertions.v3";
+      /** `task_success`, the assertion counts and the judge counts defined by the entry. */
+      metrics: MetricDefinition[];
+      /** The judge pin: model, template and sampling policy belong to the version. */
+      config: {
+        /** The judge every case scored by this version uses. */
+        judge: OutcomeJudgeConfig;
+      };
+    }
+  | {
       /** Scored by a person in Hue; the local runner defers it. */
       kind: "manual";
       /** Metrics the reviewer records. */
@@ -232,6 +262,23 @@ export type ScorerDefinition =
       /** Metrics the judge reports. */
       metrics: MetricDefinition[];
     };
+/** The judge a `hue.outcome_assertions.v3` version pins. */
+export interface OutcomeJudgeConfig {
+  /** A provider-prefixed model id, such as `anthropic/claude-fable-5.1`. */
+  model: string;
+  /** The model's provider. */
+  provider: string;
+  /** SHA-256 hex digest of the judge template: its fixed instructions and evidence rendering. */
+  template: string;
+  /** Answers sampled per rubric item, 1–9; a majority decides. */
+  samples: number;
+  /** Sampling temperature, 0–2. */
+  temperature: number;
+  /** Output token limit per answer. */
+  maxOutputTokens: number;
+  /** Per-answer timeout in milliseconds. */
+  timeoutMs: number;
+}
 /** Configuration of a hosted judge scorer. */
 export interface JudgeConfig {
   /** Judge model identifier. */
