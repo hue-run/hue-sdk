@@ -173,6 +173,12 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
 - `EvaluationClient.registerLocalAgent` reads the registered key from the response's `agentKey`
   when it has no `key`, so `RegisteredLocalAgent.key` is set and `hue eval --worker` no longer
   prints "Registered agent undefined".
+- `EvaluationClient` sends a request again, up to four times, when Hue refused it before acting on
+  it with a short `Retry-After` (HTTP 429 or 503 asking for at most 5 seconds), and waits at least
+  that long first. Hue does this when its key check is busy, which parallel cases can trigger; such
+  a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
+  any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
+  A refused `downloadArtifact` is fetched again the same way and still stops at `maxBytes`.
 
 ### [0.9.0] - 2026-09-24
 
@@ -731,6 +737,11 @@ No registry release is claimed until publication and registry acceptance complet
   hosts the exported text and `hue.tool.definitions.sha256` now match the TypeScript SDK's; some
   internationalized hosts still differ, as the README describes, and an IDN host longer than
   1,024 characters is refused before any IDNA work.
+- `EvaluationClient` sends a request again, up to four times, when Hue refused it before acting on
+  it with a short `Retry-After` (HTTP 429 or 503 asking for at most 5 seconds), and waits at least
+  that long first. Hue does this when its key check is busy, which parallel cases can trigger; such
+  a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
+  any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
 
 ### [0.6.0] - 2026-09-24
 
@@ -925,6 +936,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- Unreleased metadata: recommend one **Read and write** project key for development instead of **Tracing only**. The invite-only check looks for a Hue project and a project key configured as `HUE_API_KEY`, names **Read and write** as the recommended preset and still admits a key of any preset. The one **Read and write** key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server, where it is configured as `HUE_MCP_KEY` (a **Read** key suffices for inspect-only access). Before the application runs on a production server, the user creates a separate **Tracing only** key for that server's `HUE_API_KEY`. The fix for a rejected export is a **Read and write** key for development and evaluation, or **Tracing only** on a production server.
 - 0.4.3 (2026-09-25): the evaluation section says that from `@hue-run/sdk` 0.10.0 one-shot `hue eval` stores case outputs, error messages and explanations by default, the command's stdout being its stored answer with the credentials it was handed redacted, and `--no-output` opts out (earlier versions store them only with `--content`); that files written to `output/` are uploaded and not fully redacted, so they must never hold credentials; and that an evaluator that does not apply to a case shows `n/a` and neither passes nor fails it.
 - 0.4.2 (2026-09-24): recommend full traces. The capture section, now headed "Capture and instrument full traces", tells agents to recommend `captureContent: true` / `capture_content=True` in the plan shown to the user and to state what it sends (prompts/messages, responses and tool inputs/outputs alongside model, usage, timing and errors); the user's approval authorizes it. Metadata-only (`false`) remains the opt-out when the user declines or an existing application policy forbids sending that content. The value is still required, and redaction and credential filtering apply in both modes. Agents instrument every request path that calls a model or tool, not only one, verify at least one real request and report the instrumented paths they did not exercise. Also collects the unreleased metadata changes merged since 0.4.1: find published cases with the Hue MCP tools `list_cases` and `get_case` (the earlier `list_scenarios` and `get_scenario` names remain aliases), and name Hue's consolidated access presets. Evaluation workflows use **Read and write** (formerly **Tracing and evaluations**); tracing still uses **Tracing only**. A **Read** key (formerly **Coding agent (read-only)**) cannot send telemetry.
 - 0.4.1, unchanged metadata (2026-09-22): Hue Cloud is invite-only. The one-command onboarding guidance (`setup --agent`, `resume`, `hue claim`) is replaced by an invite-only section: an agent whose user has no Hue project and **Tracing only** key relays the reply from https://docs.hue.run/guides/agent-setup.md and stops. The published CLI is unchanged.
