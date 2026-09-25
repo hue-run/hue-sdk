@@ -84,8 +84,7 @@ function slowArtifacts(verifyMillis: number) {
         stored.state = "verifying";
         const verified = new Promise<void>((resolve) =>
           setTimeout(() => {
-            stored.state =
-              sha256(stored.bytes!) === stored.body.sha256 ? "ready" : "reserved";
+            stored.state = sha256(stored.bytes!) === stored.body.sha256 ? "ready" : "reserved";
             resolve();
           }, verifyMillis),
         );
@@ -96,7 +95,12 @@ function slowArtifacts(verifyMillis: number) {
       return Response.json(view(stored));
     },
   });
-  return { baseUrl: `http://127.0.0.1:${server.port}`, calls, artifacts, stop: () => server.stop(true) };
+  return {
+    baseUrl: `http://127.0.0.1:${server.port}`,
+    calls,
+    artifacts,
+    stop: () => server.stop(true),
+  };
 }
 
 let directory: string | undefined;
@@ -126,7 +130,11 @@ test("a verification that outlasts the request is waited out, not failed", async
   const hue = slowArtifacts(800);
   try {
     // The completion request times out after 200 ms; Hue finishes verifying at 800 ms.
-    const client = new EvaluationClient({ apiKey: "hue_sk_test", baseUrl: hue.baseUrl, timeoutMillis: 200 });
+    const client = new EvaluationClient({
+      apiKey: "hue_sk_test",
+      baseUrl: hue.baseUrl,
+      timeoutMillis: 200,
+    });
     const file = await stagedFile();
     let saves = 0;
     await uploadOutputFiles(client, randomUUID(), [file], async () => void saves++, fast);
@@ -143,7 +151,11 @@ test("a verification that outlasts the request is waited out, not failed", async
 test("a resume adopts the verification an earlier attempt stopped waiting for", async () => {
   const hue = slowArtifacts(1500);
   try {
-    const client = new EvaluationClient({ apiKey: "hue_sk_test", baseUrl: hue.baseUrl, timeoutMillis: 200 });
+    const client = new EvaluationClient({
+      apiKey: "hue_sk_test",
+      baseUrl: hue.baseUrl,
+      timeoutMillis: 200,
+    });
     const file = await stagedFile();
     const executionId = randomUUID();
     // The first attempt gives up while Hue is still verifying.
@@ -168,7 +180,11 @@ test("a resume adopts the verification an earlier attempt stopped waiting for", 
 test("a verification that never ends fails within its bound", async () => {
   const hue = slowArtifacts(60_000);
   try {
-    const client = new EvaluationClient({ apiKey: "hue_sk_test", baseUrl: hue.baseUrl, timeoutMillis: 200 });
+    const client = new EvaluationClient({
+      apiKey: "hue_sk_test",
+      baseUrl: hue.baseUrl,
+      timeoutMillis: 200,
+    });
     const file = await stagedFile();
     const started = Date.now();
     await expect(

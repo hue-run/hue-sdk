@@ -393,11 +393,17 @@ Failing cases print the scorer explanation. An evaluator Hue records as not appl
 (its outcome scoring has no outcome criteria or conversion rubric to grade there) shows `n/a` in
 that case's columns and neither passes nor fails it, so in a mixed eval set a case is decided by
 the evaluators that apply to it; the pass line counts the not-applicable results. A case that no
-pinned evaluator applies to is an error that names what they need. `--baseline <experiment id|url>` adds improvement,
+pinned evaluator applies to is an error that names what they need. A result Hue marks advisory
+(its evidence says `advisory: true`, as every judge's does today) is shown in its column, which is
+marked `(advisory)`, but never decides a case or the exit code; the pass line counts advisory
+failures as not counted, and a case only advisory results scored is an error. A metric name that
+several evaluators report, such as two judges' `verdict`, gets a column per evaluator, labelled
+with the version's first eight characters. `--baseline <experiment id|url>` adds improvement,
 regression and unchanged counts with per-case deltas. `--json` prints one JSON document
 (`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout
 and sends progress to stderr; each case lists its not-applicable evaluator versions in
-`notApplicable`, and `totals.notApplicable` counts them; a case failed for its telemetry has `state: "error"`,
+`notApplicable` and its advisory ones in `advisory`, and `totals.notApplicable` counts the
+former; a case failed for its telemetry has `state: "error"`,
 `passed: false` and
 `telemetry: { code: "telemetry_not_accepted", issues: [{ signal, kind, status?, count }] }`. `--wait <seconds>` (default 300) bounds the verdict wait because
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
@@ -475,7 +481,9 @@ case also keeps the agent's raw `output/` files on disk under its checkpoint dir
 Trace evidence is required for every case: when Hue does not accept a case's traces or logs, the
 case is completed as failed (error `TelemetryNotAccepted`, evidence omitted as
 `telemetry_not_accepted`, no output or generated files attached) instead of being left started,
-and the run goes on. Stderr names the case as it completes, with the export
+and the run goes on. Each export of the CLI's own telemetry may take 30 seconds, retries
+included, so a slow acknowledgement or a `Retry-After` within that is waited out; a refusal fails
+the case at once. Stderr names the case as it completes, with the export
 issue counts, for example
 `[refund] telemetry not accepted, case failed: telemetry_not_accepted: traces failed 1 (HTTP 400)`;
 the case counts as an error in the table and JSON whatever its scores, and the command exits 1.
@@ -485,8 +493,9 @@ inside `.hue/eval/`); `--checkpoint-dir` overrides the root. Rerunning the same 
 an interrupted run without invoking the agent again; a different selection is refused until the
 unfinished one is resumed or its directory is removed.
 
-Exit codes: `0` every case passed the evaluators that apply to it, `1` a case failed, errored
-(including one no pinned evaluator applies to), was skipped or Hue's checks were
+Exit codes: `0` every case passed the evaluators that apply to it (advisory ones never count),
+`1` a case failed, errored (including one no pinned evaluator applies to or decides), was skipped
+or Hue's checks were
 still pending at `--wait`, `2` usage or configuration error (including a missing key), `130`
 interrupted. On Node.js 22, load TypeScript adapters with `NODE_OPTIONS=--experimental-strip-types`;
 non-erasable syntax (enums, parameter properties, namespaces) needs a loader such as `--import tsx`

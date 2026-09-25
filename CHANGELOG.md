@@ -8,6 +8,35 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Added
+
+- `VerdictResult.advisory` and `CaseVerdict.advisory`: a result whose evidence says
+  `advisory: true`, as Hue records for every judge today, is listed with its metrics but never
+  decides its case.
+
+#### Fixed
+
+- An advisory judge's `false` verdict no longer fails a case or the run. Hue reports a judge's
+  `verdict` without `passed` and marks the result advisory, so a judge never decides a case;
+  `summarizeVerdicts`, and so `hue eval`, counted the boolean anyway, so a judge pinned across an
+  eval set failed every case it had nothing to grade and `hue eval` exited 1. Advisory results are
+  now shown and never counted; a case only advisory results scored is an error. The `hue eval`
+  table gives each evaluator its own column when several report a metric of the same name (two
+  judges' `verdict`), marks advisory columns, and counts advisory failures as not counted.
+- An artifact whose verification outlasts a request no longer fails the upload. Hue verifies
+  within a two-minute lease, and a 47-second verification failed at the client's 10-second
+  timeout. A completion that times out, finds verification running (409) or is refused with 429 or
+  503 now reads the artifact until it is ready or leaves verification, completing again while it
+  verifies, for up to three minutes; a mismatched, cancelled or abandoned artifact is still
+  refused. A resumed upload whose artifact is already verifying no longer asks for another upload
+  capability, which Hue refuses then, and settles on the same artifact.
+- `hue eval` exports its own telemetry, and so each case's required trace, with a 30-second
+  deadline instead of 10 seconds, retries included, so a slow acknowledgement or a `Retry-After`
+  within it no longer fails the case as `TelemetryNotAccepted`. The retry count is unchanged, and
+  a refusal (4xx or rejected records) still fails the case at once.
+
 ### [0.10.0] - 2026-09-25
 
 This release changes a default of the `hue` binary (see Breaking), so it is a `0.MINOR` release.

@@ -4,13 +4,7 @@ import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ArtifactSizeError, HueApiError, type EvaluationClient } from "./client.js";
-import type {
-  ArtifactReservation,
-  CaseFile,
-  LocalFile,
-  OutputFile,
-  SubjectFile,
-} from "./types.js";
+import type { ArtifactReservation, CaseFile, LocalFile, OutputFile, SubjectFile } from "./types.js";
 
 /** Roles the target receives. Organization templates stay with grading, as in the managed protocol. */
 export const targetFileRoles: readonly CaseFile["role"][] = [
