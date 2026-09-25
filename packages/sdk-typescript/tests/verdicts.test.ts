@@ -377,6 +377,41 @@ describe("evaluators that do not apply", () => {
     expect(byItem.get(items[1]!.id)).not.toHaveProperty("requires");
   });
 
+  test("the flag never turns an errored or failing result into a pass", async () => {
+    const { runId, pins, items, client, record } = run({ itemCount: 2, pins: 2 });
+    const flagged = { notApplicable: true, evidence: notApplicable.evidence };
+    for (const value of items) record(value.id, pins[0]!, {});
+    record(items[0]!.id, pins[1]!, {
+      ...flagged,
+      state: "error",
+      metrics: [],
+      error: { type: "ScorerError" },
+    });
+    record(items[1]!.id, pins[1]!, {
+      ...flagged,
+      metrics: [{ name: "resolved", value: false, passed: false }],
+    });
+    const results = await waitForResults(client, { runId, scorerVersionIds: pins });
+    expect(results.results.filter((result) => result.notApplicable)).toEqual([]);
+    expect(results.results.some((result) => "requires" in result)).toBe(false);
+    const cases = [item("errored", items[0]!.subjectId), item("failing", items[1]!.subjectId)];
+    const summary = summarizeVerdicts(results, { experimentItems: cases, scorerVersionIds: pins });
+    expect(summary.cases.map((row) => [row.state, row.notApplicable])).toEqual([
+      ["error", []],
+      ["failed", []],
+    ]);
+    // A hand-built result gets the same treatment from summarizeVerdicts itself.
+    const forged = summarizeVerdicts(
+      {
+        ...results,
+        results: results.results.map((result) => ({ ...result, notApplicable: true })),
+      },
+      { experimentItems: cases, scorerVersionIds: pins },
+    );
+    expect(forged.cases.map((row) => row.state)).toEqual(["error", "failed"]);
+    expect(forged.totals.notApplicable).toBe(0);
+  });
+
   test("a mixed set passes each case on its own evaluator; none applying is an error", () => {
     const [outcome, rubric] = [randomUUID(), randomUUID()];
     const traced = item("trace-built", randomUUID());

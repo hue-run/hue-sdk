@@ -343,8 +343,8 @@ Recorded messages can inline files: GenAI `blob` parts in `gen_ai.input.messages
 `gen_ai.output.messages` (what the AI SDK 7 adapter records for a file part) and AI SDK 6 `file`
 parts in `ai.prompt.messages`. A span whose messages exceed 256 KiB would be rejected, so when a
 record is queued Hue replaces the `content`/`data` of any such part longer than 64 KiB with the
-file's `sha256` (of the decoded bytes for base64 and `data:` URLs, of the UTF-8 text otherwise) and
-`size`, keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
+file's `sha256` and `size`, both of the file's own bytes whatever its media type (base64 content
+and `;base64` `data:` URLs decoded, other `data:` URLs percent-decoded, anything else as UTF-8 text), keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
 files are exported as recorded. The digest matches `hue.recordFile`'s `hue.file.sha256` for the same
 bytes, so a file can be recognized wherever it appears. The replacement happens before the record is
 charged to the queue budget, so a large file does not drop its span. It is bounded: a message

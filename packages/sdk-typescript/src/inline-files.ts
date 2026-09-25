@@ -21,28 +21,44 @@ export function isMessageKey(key: string): boolean {
 
 /** Strict base64: alphabet characters only, padded to a multiple of four. */
 const base64 = /^[A-Za-z0-9+/]*={0,2}$/;
-const base64DataUrl = /^data:[^,]*;base64,/;
+/** An RFC 2397 `data:` URL's media type and parameters, up to the comma before its data. */
+const dataUrl = /^data:([^;,]*)((?:;[^;,]*)*),/;
+const hexPair = /^[0-9A-Fa-f]{2}$/;
 
-function binaryMimeType(value: unknown): boolean {
-  return (
-    typeof value === "string" &&
-    !/^text\//i.test(value) &&
-    value.toLowerCase() !== "application/json"
-  );
+/** RFC 2397 data without `;base64`: percent-escaped octets, other characters as UTF-8. Undefined
+ * when a `%` does not start an escape. */
+function percentDecoded(payload: string): Buffer | undefined {
+  // Escapes only shrink the text, so its UTF-8 length bounds the bytes.
+  const bytes = Buffer.alloc(Buffer.byteLength(payload, "utf8"));
+  let length = 0;
+  let start = 0;
+  for (let index = payload.indexOf("%"); index !== -1; index = payload.indexOf("%", start)) {
+    const hex = payload.slice(index + 1, index + 3);
+    if (!hexPair.test(hex)) return undefined;
+    length += bytes.write(payload.slice(start, index), length, "utf8");
+    bytes[length++] = Number.parseInt(hex, 16);
+    start = index + 3;
+  }
+  length += bytes.write(payload.slice(start), length, "utf8");
+  return bytes.subarray(0, length);
 }
 
 /**
- * The bytes an inline file part carries: base64 (plain or as a `data:` URL) is decoded, and
- * anything else, such as a text file's content, is taken as UTF-8.
+ * The bytes an inline file part carries, the file's own bytes whatever its media type: a `data:`
+ * URL decoded by its own encoding (base64 with `;base64`, percent-escapes otherwise), content in
+ * the base64 alphabet decoded, and anything else, such as a text file's own text, as UTF-8. A
+ * `data:` URL whose data does not decode is taken as UTF-8 too.
  */
-function fileBytes(content: string, mimeType: unknown): Buffer {
-  const prefix = base64DataUrl.exec(content)?.[0].length ?? 0;
-  const payload = content.slice(prefix);
-  return (prefix > 0 || binaryMimeType(mimeType)) &&
-    payload.length % 4 === 0 &&
-    base64.test(payload)
-    ? Buffer.from(payload, "base64")
-    : Buffer.from(content, "utf8");
+function fileBytes(content: string): Buffer {
+  const url = dataUrl.exec(content);
+  const payload = url ? content.slice(url[0].length) : content;
+  const decoded =
+    url && !url[2]!.split(";").includes("base64")
+      ? percentDecoded(payload)
+      : payload.length % 4 === 0 && base64.test(payload)
+        ? Buffer.from(payload, "base64")
+        : undefined;
+  return decoded ?? Buffer.from(content, "utf8");
 }
 
 interface HashState {
@@ -61,9 +77,8 @@ function hashNode(value: unknown, state: HashState, depth: number): unknown {
   const part = value as Record<string, unknown>;
   const key = contentKey(part);
   const inline = key === undefined ? undefined : part[key];
-  const mimeType = part.mime_type ?? part.mediaType;
   if (key !== undefined && typeof inline === "string") {
-    const bytes = fileBytes(inline, mimeType);
+    const bytes = fileBytes(inline);
     if (bytes.byteLength > INLINE_FILE_LIMIT) {
       const { [key]: _omitted, ...rest } = part;
       state.changed = true;

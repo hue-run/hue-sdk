@@ -28,8 +28,11 @@ export type ScenarioClient = Pick<
 >;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** Scenarios listed while resolving a name; bounds the registry reads of one selection. */
+/** Published Scenarios a name is matched against; bounds the registry reads of one selection. */
 const MAX_LISTED = 200;
+/** Scenarios, drafts included, one selection lists at most: a case ID is found among them, and a
+ * mistyped one ends after a bounded number of reads. */
+const MAX_SCANNED = 1000;
 
 /** Lists Scenarios of the project; requires a Read and write key. */
 export function listScenarios(
@@ -122,15 +125,28 @@ export function matchByName<T extends NamedCandidate>(candidates: T[], name: str
   };
 }
 
-async function listPublishedScenarios(client: ScenarioClient): Promise<CaseConversionSummary[]> {
-  const items: CaseConversionSummary[] = [];
+/** Published Scenario summaries in listing order, page by page, ending after
+ * {@link MAX_SCANNED} Scenarios, at an empty page or when the listing repeats a cursor. */
+async function* publishedScenarios(client: ScenarioClient): AsyncGenerator<CaseConversionSummary> {
+  const cursors = new Set<string>();
+  let listed = 0;
   let after: string | undefined;
   for (;;) {
     const page = await client.listCaseConversions({ after, limit: 100 });
-    items.push(...page.items.filter((item) => item.status === "published"));
-    if (!page.nextCursor || items.length >= MAX_LISTED) return items.slice(0, MAX_LISTED);
+    for (const item of page.items) {
+      if (++listed > MAX_SCANNED) return;
+      if (item.status === "published") yield item;
+    }
+    if (!page.items.length || !page.nextCursor || cursors.has(page.nextCursor)) return;
+    cursors.add(page.nextCursor);
     after = page.nextCursor;
   }
+}
+
+async function listPublishedScenarios(client: ScenarioClient): Promise<CaseConversionSummary[]> {
+  const items: CaseConversionSummary[] = [];
+  for await (const item of publishedScenarios(client)) if (items.push(item) >= MAX_LISTED) break;
+  return items;
 }
 
 /** A listed Scenario, or undefined when it can no longer be read (removed since the listing). */
@@ -145,24 +161,18 @@ async function readListed(client: ScenarioClient, id: string): Promise<CaseConve
 
 /**
  * The published Scenario whose eval set case has this ID, the one Hue shows on the case page.
- * Every published Scenario is read, page by page, until one matches: an exact ID is never cut
- * off by the bound a name search uses.
+ * Published Scenarios are read in listing order until one matches, past the bound a name search
+ * uses; undefined when none does within {@link MAX_SCANNED}.
  */
 async function scenarioOfPublishedCase(
   client: ScenarioClient,
   caseId: string,
 ): Promise<CaseConversion | undefined> {
-  let after: string | undefined;
-  for (;;) {
-    const page = await client.listCaseConversions({ after, limit: 100 });
-    for (const summary of page.items) {
-      if (summary.status !== "published") continue;
-      const scenario = await readListed(client, summary.id);
-      if (scenario?.publication?.caseId.toLowerCase() === caseId) return scenario;
-    }
-    if (!page.nextCursor || page.nextCursor === after || !page.items.length) return undefined;
-    after = page.nextCursor;
+  for await (const summary of publishedScenarios(client)) {
+    const scenario = await readListed(client, summary.id);
+    if (scenario?.publication?.caseId.toLowerCase() === caseId) return scenario;
   }
+  return undefined;
 }
 
 const describe = (candidates: { name: string; id: string }[]) =>

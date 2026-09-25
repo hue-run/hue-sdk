@@ -239,6 +239,54 @@ describe("resolveScenarioPins", () => {
     await expect(resolveScenarioPins(failing, last.caseId)).rejects.toMatchObject({ status: 503 });
   });
 
+  test("a repeating or endless listing ends a case-ID lookup in the original 404", async () => {
+    const fixture = registry();
+    fixture.scenario("Refund flow");
+    const [summary] = (await fixture.client.listCaseConversions()).items;
+    let reads = { list: 0, get: 0 };
+    // Every page lists the same published Scenario, which is not the one asked for.
+    const listing = (next: (after?: string) => string, size: number): ScenarioClient => ({
+      ...fixture.client,
+      listCaseConversions: async (options) => {
+        reads.list++;
+        return {
+          items: Array.from({ length: size }, () => summary!),
+          nextCursor: next(options?.after),
+        };
+      },
+      getCaseConversion: async (id) => {
+        reads.get++;
+        return fixture.client.getCaseConversion(id);
+      },
+    });
+    const missing = randomUUID();
+    // Cursors A → B → A: the repeat ends the listing.
+    const cycle = await resolveScenarioPins(
+      listing((after) => (after === "A" ? "B" : "A"), 1),
+      missing,
+    ).catch((error: unknown) => error);
+    expect(cycle).toBeInstanceOf(HueApiError);
+    expect((cycle as HueApiError).status).toBe(404);
+    expect(reads).toEqual({ list: 3, get: 1 + 3 });
+    // A fresh cursor on every page: the scan ends after 1000 Scenarios.
+    reads = { list: 0, get: 0 };
+    const endless = await resolveScenarioPins(
+      listing(() => randomUUID(), 100),
+      missing,
+    ).catch((error: unknown) => error);
+    expect((endless as HueApiError).status).toBe(404);
+    expect(reads).toEqual({ list: 11, get: 1 + 1000 });
+    // A name search ends on the same cycle rather than paging for more published Scenarios.
+    reads = { list: 0, get: 0 };
+    await expect(
+      resolveScenarioPins(
+        listing((after) => (after === "A" ? "B" : "A"), 1),
+        "Billing",
+      ),
+    ).rejects.toThrow('No published Scenario matches "Billing"');
+    expect(reads.list).toBe(3);
+  });
+
   test("pins every scorer version a publication lists, the outcome scorer first", async () => {
     const fixture = registry();
     const published = fixture.scenario("Refund flow with judges", { listedScorers: 2 });
