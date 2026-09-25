@@ -7,7 +7,7 @@ import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { createHue, HueExportError } from "../src/index.js";
-import { CheckpointStore } from "../src/evals/checkpoint.js";
+import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoint.js";
 import {
   builtins,
   createEvaluationClient,
@@ -457,6 +457,33 @@ describe("local evaluation scorers", () => {
         ],
       }),
     ).toEqual({ state: "error", error: { type: "LocalScorerError" } });
+  });
+});
+
+describe("checkpoint identity", () => {
+  test("a resume with another content policy names the policy the run started with", async () => {
+    const dir = await directory();
+    const identity = { experimentId: "e1", persistResultContent: false, captureContent: true };
+    await (await CheckpointStore.acquire(dir, identity)).release();
+    const policy = await CheckpointStore.acquire(dir, { ...identity, persistResultContent: true })
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+    expect(policy).toBeInstanceOf(CheckpointIdentityError);
+    expect((policy as CheckpointIdentityError).startedWith).toEqual({
+      persistResultContent: false,
+      captureContent: true,
+    });
+    // Anything else that differs keeps the general refusal without a policy to suggest.
+    const other = await CheckpointStore.acquire(dir, { ...identity, experimentId: "e2" })
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+    expect(other).toBeInstanceOf(CheckpointIdentityError);
+    expect((other as CheckpointIdentityError).startedWith).toBeUndefined();
+    expect((other as Error).message).toBe(
+      "Checkpoint identity differs from this project, run, pins or content policy",
+    );
+    // The same identity still resumes.
+    await (await CheckpointStore.acquire(dir, identity)).release();
   });
 });
 

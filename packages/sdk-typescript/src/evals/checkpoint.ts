@@ -1,11 +1,45 @@
-import { constants } from "node:fs";
+import { constants, rmSync } from "node:fs";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { onForcedExit } from "./exit-cleanup.js";
 import { digest } from "./json.js";
 
-/** One owner per directory. A crash leaves .lock for explicit operator recovery. */
+const CONTENT_POLICY = ["persistResultContent", "captureContent"] as const;
+
+/** The checkpoint belongs to a run started with a different identity. When only its content
+ * policy differs, `startedWith` holds the policy the unfinished run was started with. */
+export class CheckpointIdentityError extends Error {
+  constructor(readonly startedWith?: { persistResultContent?: unknown; captureContent?: unknown }) {
+    super(
+      startedWith
+        ? "Checkpoint content policy differs from the one this unfinished run was started with"
+        : "Checkpoint identity differs from this project, run, pins or content policy",
+    );
+    this.name = "CheckpointIdentityError";
+  }
+}
+
+/** The prior policy when two identities differ only in their content policy. */
+function contentPolicyOnly(prior: unknown, identity: unknown) {
+  if (!prior || !identity || typeof prior !== "object" || typeof identity !== "object")
+    return undefined;
+  const before = prior as Record<string, unknown>;
+  const after = identity as Record<string, unknown>;
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys)
+    if (
+      !(CONTENT_POLICY as readonly string[]).includes(key) &&
+      JSON.stringify(before[key]) !== JSON.stringify(after[key])
+    )
+      return undefined;
+  return Object.fromEntries(CONTENT_POLICY.map((key) => [key, before[key]]));
+}
+
+/** One owner per directory. A crash leaves .lock for explicit operator recovery; a forced exit of
+ * `hue eval`, which stops its agents first, releases it. */
 export class CheckpointStore {
+  private untrack = () => {};
   private constructor(readonly directory: string) {}
   static async acquire(directory: string, identity: unknown): Promise<CheckpointStore> {
     const root = resolve(directory);
@@ -16,6 +50,9 @@ export class CheckpointStore {
     const store = new CheckpointStore(root);
     try {
       await mkdir(join(root, ".lock"), { mode: 0o700 });
+      store.untrack = onForcedExit(() =>
+        rmSync(join(root, ".lock"), { recursive: true, force: true }),
+      );
     } catch {
       throw new Error(
         "Checkpoint directory is locked; confirm its owner stopped before explicitly removing .lock",
@@ -26,8 +63,8 @@ export class CheckpointStore {
       const expected = { format: 1, identity, digest: digest(identity) };
       const prior = await store.read<typeof expected>("manifest");
       if (prior && (prior.format !== 1 || prior.digest !== expected.digest))
-        throw new Error(
-          "Checkpoint identity differs from this project, run, pins or content policy",
+        throw new CheckpointIdentityError(
+          prior.format === 1 ? contentPolicyOnly(prior.identity, identity) : undefined,
         );
       if (!prior) await store.write("manifest", expected);
       return store;
@@ -82,5 +119,6 @@ export class CheckpointStore {
   }
   async release(): Promise<void> {
     await rm(join(this.directory, ".lock"), { recursive: true });
+    this.untrack();
   }
 }

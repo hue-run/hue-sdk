@@ -487,11 +487,30 @@ function fixture(options: {
 }
 
 describe("file-based cases", () => {
-  test("filename truncation preserves a Unicode code point at the boundary", () => {
-    const expected = `${"a".repeat(199)}😀`;
-    const filename = safeFilename(`${expected}ignored`);
-    expect(filename).toBe(expected);
-    expect([...filename]).toHaveLength(200);
+  test("filename truncation keeps 200 UTF-8 bytes and never splits a code point", () => {
+    // A name that fits, 200 bytes exactly, is unchanged.
+    const fits = `${"a".repeat(196)}😀`;
+    expect(Buffer.byteLength(fits)).toBe(200);
+    expect(safeFilename(fits)).toBe(fits);
+    // A longer one is shortened to leave room for the hash mark; the emoji that no longer fits
+    // is dropped whole, not cut.
+    const shortened = safeFilename(`${"a".repeat(188)}😀😀ignored`);
+    expect(shortened).toMatch(/^a{188}~[0-9a-f]{8}$/u);
+    // A longer name keeps its extension, and its shortened stem is marked by a hash of the
+    // whole name, so two long names stay distinct.
+    const long = safeFilename(`${"é".repeat(99)}.pdf`);
+    expect(long).toMatch(/^é+~[0-9a-f]{8}\.pdf$/u);
+    expect(Buffer.byteLength(long)).toBeLessThanOrEqual(200);
+    expect(safeFilename(`${"é".repeat(99)}.pdf`)).toBe(long);
+    const first = safeFilename(`${"x".repeat(197)}.pdf`);
+    const second = safeFilename(`${"x".repeat(198)}.pdf`);
+    expect(first).not.toBe(second);
+    for (const name of [first, second]) {
+      expect(name.endsWith(".pdf")).toBe(true);
+      expect(Buffer.byteLength(name)).toBeLessThanOrEqual(200);
+    }
+    // A name that fits is unchanged.
+    expect(safeFilename(`${"x".repeat(196)}.pdf`)).toBe(`${"x".repeat(196)}.pdf`);
   });
 
   test("downloads pinned inputs, uploads generated files and grades them locally", async () => {
@@ -557,9 +576,15 @@ describe("file-based cases", () => {
       });
       expect(report.subjectIds).toHaveLength(1);
       expect(f.calls.environmentReads).toBe(0);
-      // Every pinned input was downloaded once, including the evaluator-only template.
+      // Every pinned input was downloaded; the evaluator-only template twice: checked before the
+      // execution started, then saved for the grader after the target finished.
       expect([...f.calls.downloads].sort()).toEqual(
-        [f.inputs.source.id, f.inputs.template.id, f.inputs.evaluatorOnly.id].sort(),
+        [
+          f.inputs.source.id,
+          f.inputs.template.id,
+          f.inputs.evaluatorOnly.id,
+          f.inputs.evaluatorOnly.id,
+        ].sort(),
       );
       expect(f.calls.reserves).toBe(2);
       expect(f.calls.uploads).toBe(2);

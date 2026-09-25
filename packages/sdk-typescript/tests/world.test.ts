@@ -567,6 +567,8 @@ describe("environment target with a gateway world", () => {
             } as never,
             executionId,
             span,
+            files: [],
+            outputDirectory: "/nonexistent/hue-case",
           },
           target: async (_inputs, context) => {
             seen = context;

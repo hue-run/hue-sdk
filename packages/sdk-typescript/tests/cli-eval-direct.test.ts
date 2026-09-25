@@ -532,7 +532,7 @@ function hue(args: string[], options: { cwd: string; env?: Record<string, string
 }
 
 /** Stands in for August's adapter: reads the case directory, writes the letters and a summary. */
-const agentSource = `import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+const agentSource = `import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const dir = process.env.HUE_CASE_DIR;
 const inputs = JSON.parse(readFileSync(process.env.HUE_CASE_INPUTS, "utf8"));
@@ -541,7 +541,8 @@ const out = process.env.HUE_CASE_OUTPUT_DIR;
 if (process.env.WRITE_UNSUPPORTED) writeFileSync(join(out, "notes.xyz"), "bytes");
 writeFileSync(join(out, "Citacion.docx"), "carta de citación para " + process.env.HUE_CASE_KEY);
 if (inputs.tipo_diligencia === "Virtual") writeFileSync(join(out, "Cuestionario descargos.docx"), "cuestionario");
-writeFileSync(join(out, "summary.txt"), "verificación de negrilla: 0 párrafos largos en negrilla\\nadvertencias para revisión: 0\\n");
+if (process.env.LINK_SUMMARY) symlinkSync(process.env.LINK_SUMMARY, join(out, "summary.txt"));
+else writeFileSync(join(out, "summary.txt"), "verificación de negrilla: 0 párrafos largos en negrilla\\nadvertencias para revisión: 0\\n");
 writeFileSync(join(out, "manifest.json"), JSON.stringify({ primary: "Citacion.docx" }));
 process.stdout.write(JSON.stringify({ roles, corpusVisible: existsSync(join(dir, "files", "evaluator_reference")), executionId: typeof process.env.HUE_EXECUTION_ID }));
 `;
@@ -652,8 +653,10 @@ describe("hue eval on a document eval set", () => {
         "Citacion.docx",
       );
       expect(standIn.calls.uploads).toBe(2);
-      // Output stays off the wire without --content; the summary file is the recorded output when it is on.
-      expect(completion).not.toHaveProperty("output");
+      // The output is stored by default: the summary file is the recorded output.
+      expect(completion).toMatchObject({
+        output: { summary: expect.stringContaining("advertencias para revisión: 0") },
+      });
       const content = await hue(
         [
           "--set",
@@ -664,7 +667,7 @@ describe("hue eval on a document eval set", () => {
           standIn.scorerVersions[1]!.id,
           "--command",
           `${process.execPath} ${join(cwd, "agent.mjs")}`,
-          "--content",
+          "--no-output",
           "--wait",
           "30",
           "--baseline",
@@ -677,9 +680,8 @@ describe("hue eval on a document eval set", () => {
         datasetVersionId: standIn.dataset.versions[0]!.id,
         scorerVersionIds: [standIn.scorerVersions[1]!.id],
       });
-      expect(standIn.calls.completions[1]).toMatchObject({
-        output: { summary: expect.stringContaining("advertencias para revisión: 0") },
-      });
+      // --no-output keeps the output off the wire; the documents are still uploaded and graded.
+      expect(standIn.calls.completions[1]).not.toHaveProperty("output");
       expect(content.stdout).toContain("PASSED");
       expect(content.stdout).toContain("1 of 1 case passed");
       expect(content.stdout).toMatch(/Baseline .*: 0 improved, 0 regressed, 1 unchanged/);
@@ -689,6 +691,45 @@ describe("hue eval on a document eval set", () => {
       standIn.stop();
     }
   }, 120_000);
+
+  test("a summary linked to a host file fails the case instead of sending the file to Hue", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-link-"));
+    await writeFile(join(cwd, "agent.mjs"), agentSource);
+    const hostFile = join(cwd, "host-secret.txt");
+    await writeFile(hostFile, "host secret: never sent");
+    try {
+      const run = await hue(
+        [
+          "--set",
+          "gia-d1-citation",
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--content",
+          "--json",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl, LINK_SUMMARY: hostFile } },
+      );
+      expect(run.status).toBe(1);
+      expect(standIn.calls.completions[0]).toMatchObject({
+        state: "error",
+        error: {
+          type: "TargetError",
+          message: "output/summary.txt is not a regular file; the agent must write it itself",
+        },
+        filenames: [],
+      });
+      expect(JSON.stringify(standIn.calls.completions)).not.toContain("host secret");
+      for (const stored of standIn.artifacts.values())
+        expect(Buffer.from(stored.bytes ?? []).toString()).not.toContain("host secret");
+    } finally {
+      standIn.stop();
+    }
+  }, 60_000);
 
   test("an unsupported generated file and a failing verdict are reported as the case's own result", async () => {
     const standIn = documentStandIn({ verdict: "fail" });
@@ -710,15 +751,39 @@ describe("hue eval on a document eval set", () => {
         { cwd, env: { HUE_BASE_URL: standIn.baseUrl, WRITE_UNSUPPORTED: "1" } },
       );
       expect(unsupported.status).toBe(1);
-      // Without --content the error message stays off the wire; the type and the empty upload remain.
+      // The error message is stored by default, with the type and the empty upload.
       expect(standIn.calls.completions[0]).toMatchObject({
+        state: "error",
+        error: {
+          type: "TargetError",
+          message: expect.stringContaining("Hue does not accept as generated documents"),
+        },
+        filenames: [],
+      });
+      const report = JSON.parse(unsupported.stdout) as { cases: { state: string }[] };
+      expect(report.cases[0]!.state).not.toBe("passed");
+      // With --no-output it stays off the wire; the type and the empty upload remain.
+      const quiet = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--no-output",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl, WRITE_UNSUPPORTED: "1" } },
+      );
+      expect(quiet.status).toBe(1);
+      expect(standIn.calls.completions[1]).toMatchObject({
         state: "error",
         error: { type: "TargetError" },
         filenames: [],
       });
-      expect(standIn.calls.completions[0]).not.toHaveProperty("error.message");
-      const report = JSON.parse(unsupported.stdout) as { cases: { state: string }[] };
-      expect(report.cases[0]!.state).not.toBe("passed");
+      expect(standIn.calls.completions[1]).not.toHaveProperty("error.message");
       const failing = await hue(
         [
           "--set",
@@ -794,6 +859,39 @@ describe("hue eval on a document eval set", () => {
         telemetry: { code: "telemetry_not_accepted" },
       });
       expect(report.totals).toMatchObject({ passed: 0, error: 1 });
+    } finally {
+      standIn.stop();
+    }
+  }, 120_000);
+
+  test("a direct case's stored answer never keeps the project key it was handed", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
+    await writeFile(
+      join(cwd, "leaky.mjs"),
+      `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.HUE_CASE_OUTPUT_DIR + "/result.json", JSON.stringify({ key: process.env.HUE_API_KEY }));
+process.stdout.write(process.env.HUE_API_KEY);
+`,
+    );
+    try {
+      const result = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "leaky.mjs")}`,
+          "--allow-hue-credentials",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      expect(result.stdout).not.toContain(key);
+      expect(standIn.calls.completions[0]).toMatchObject({ output: { key: "[redacted]" } });
+      expect(JSON.stringify(standIn.calls.completions)).not.toContain(key);
     } finally {
       standIn.stop();
     }
@@ -890,7 +988,7 @@ describe("hue eval on a document eval set", () => {
     expect(single.output).toEqual({ ok: true });
     expect(single.files).toEqual([
       {
-        path: join(layout.outputDirectory, "Letter.docx"),
+        bytes: new Uint8Array(Buffer.from("letter")),
         filename: "Letter.docx",
         contentType: docx,
         primary: true,
@@ -912,7 +1010,7 @@ describe("hue eval on a document eval set", () => {
       "Letter.docx",
       "anexos%2FSoporte.pdf",
     ]);
-    expect(nested.files[2]!.path).toBe(join(layout.outputDirectory, "anexos", "Soporte.pdf"));
+    expect(Buffer.from(nested.files[2]!.bytes!).toString()).toBe("%PDF");
     await writeFile(
       join(layout.outputDirectory, "manifest.json"),
       JSON.stringify({ primary: "anexos/Soporte.pdf" }),

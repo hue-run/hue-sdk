@@ -2,10 +2,14 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnAgentCommand } from "../src/cli/eval.js";
+import { gunzipSync } from "node:zlib";
+import protobuf from "protobufjs/light.js";
+import schema from "./fixtures/otlp-schema.json" with { type: "json" };
+import { explain, spawnAgentCommand } from "../src/cli/eval.js";
+import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
 import { TargetCancelledError } from "../src/evals.js";
 import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
 
@@ -17,6 +21,10 @@ const digest = "d".repeat(64);
 const SPAWN_TIMEOUT = 90_000;
 
 type Verdict = "pass" | "fail" | "error" | "none";
+
+const traceRequest = protobuf.Root.fromJSON(schema).lookupType(
+  "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
+);
 
 /** Loopback Hue stand-in: one published Scenario, worlds, executions and deferred verdicts. */
 function hueStandIn(
@@ -115,6 +123,8 @@ function hueStandIn(
     completions: [] as Record<string, unknown>[],
     /** Trace evidence each completion declared, in completion order. */
     evidence: [] as Record<string, unknown>[],
+    /** Exported spans, decoded: name and attribute keys. */
+    spans: [] as { name: string; attributes: string[] }[],
     worldCreates: [] as Record<string, unknown>[],
     experiments: [] as Record<string, unknown>[],
     register: [] as Record<string, unknown>[],
@@ -167,7 +177,22 @@ function hueStandIn(
         });
       if (path.startsWith("/otlp/")) {
         calls.otlp++;
-        await request.arrayBuffer();
+        let bytes = Buffer.from(await request.arrayBuffer());
+        if (path.endsWith("/traces")) {
+          if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
+          const decoded = traceRequest.toObject(traceRequest.decode(bytes)) as {
+            resourceSpans?: {
+              scopeSpans?: { spans?: { name: string; attributes?: { key: string }[] }[] }[];
+            }[];
+          };
+          for (const resource of decoded.resourceSpans ?? [])
+            for (const scope of resource.scopeSpans ?? [])
+              for (const span of scope.spans ?? [])
+                calls.spans.push({
+                  name: span.name,
+                  attributes: (span.attributes ?? []).map((attribute) => attribute.key),
+                });
+        }
         if (path.endsWith("/traces") && options.traces === "refuse")
           return new Response(null, { status: 400 });
         if (path.endsWith("/traces") && options.traces === "drop")
@@ -682,12 +707,52 @@ if (process.env.HUE_TEST_CONFIG_RECORD)
 setInterval(() => {}, 1_000);
 `;
 
+/** Prints its credentials, as a careless agent or a debug log would. */
+const leakySource = `import { readFileSync } from "node:fs";
+process.stdout.write(JSON.stringify({
+  worldToken: process.env.HUE_WORLD_TOKEN ?? null,
+  mcpToken: process.env.HUE_MCP_TOKEN ?? null,
+  apiKey: process.env.HUE_API_KEY ?? null,
+  config: process.env.HUE_MCP_CONFIG ? readFileSync(process.env.HUE_MCP_CONFIG, "utf8") : null,
+}));
+`;
+
+/** Answers through a result file that carries the world token. */
+const resultFileSource = `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+writeFileSync(
+  join(process.env.HUE_CASE_OUTPUT_DIR, "result.json"),
+  JSON.stringify({ token: process.env.HUE_WORLD_TOKEN }),
+);
+`;
+
+/** Throws with the world token in its message. */
+const throwingAdapterSource = `export default async function runMyAgent(_inputs, context) {
+  throw new Error("could not reach the mirror with " + context.world.token + " and " + process.env.HUE_API_KEY);
+}
+`;
+
+/** Every file under a directory whose text contains one of the values. */
+async function filesContaining(directory: string, values: string[]): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true }))
+    if (entry.isFile()) {
+      const path = join(entry.parentPath, entry.name);
+      const text = await readFile(path, "utf8");
+      if (values.some((value) => text.includes(value))) found.push(path);
+    }
+  return found;
+}
+
 async function workspace() {
   const directory = await mkdtemp(join(tmpdir(), "hue-cli-eval-"));
   await writeFile(join(directory, "hue-agent.ts"), adapterSource);
   await writeFile(join(directory, "agent-command.mjs"), commandSource);
   await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
   await writeFile(join(directory, "agent-stubborn.mjs"), stubbornSource);
+  await writeFile(join(directory, "agent-leaky.mjs"), leakySource);
+  await writeFile(join(directory, "agent-result-file.mjs"), resultFileSource);
+  await writeFile(join(directory, "hue-throwing.mjs"), throwingAdapterSource);
   return directory;
 }
 
@@ -757,11 +822,17 @@ describe("hue eval", () => {
         expect([...f.worlds.values()].map((world) => [world.status, world.steps])).toEqual([
           ["completed", [{ action: "save", args: { note: "refund charge ch_2" } }]],
         ]);
-        // Metadata-only by default: the completion carries no output.
+        // The output is stored by default, while span content stays off without --content.
         expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
         expect(f.calls.evidence).toEqual([{ traceEvidence: "required" }]);
-        expect(f.calls.completions[0]).not.toHaveProperty("output");
+        expect(f.calls.completions[0]).toMatchObject({
+          output: { answer: "saved", caseKey: "refund", hasMcp: true },
+        });
         expect(f.calls.otlp).toBeGreaterThan(0);
+        const caseSpan = f.calls.spans.find((span) => span.name === "hue.experiment.case")!;
+        expect(caseSpan).toBeDefined();
+        expect(caseSpan.attributes).not.toContain("input.value");
+        expect(caseSpan.attributes).not.toContain("output.value");
         expect(await readFile(join(cwd, ".hue", "eval", ".gitignore"), "utf8")).toBe("*\n");
         expect(f.calls.requests.filter((line) => line === "GET /case-conversions")).toHaveLength(1);
       } finally {
@@ -910,10 +981,11 @@ describe("hue eval", () => {
         const mirror = `${f.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
         const [completion] = f.calls.completions;
         const env = (completion!.output as { env: Record<string, unknown> }).env;
+        // The agent saw the token; the stored output does not keep it, nor its MCP header.
         expect(env).toMatchObject({
           hasToken: false,
           url: mirror,
-          worldToken,
+          worldToken: "[redacted]",
           gmailMirror: mirror,
           hasApiKey: false,
           executionId: world!.executionId,
@@ -923,11 +995,13 @@ describe("hue eval", () => {
               "gmail-primary": {
                 type: "http",
                 url: mirror,
-                headers: { Authorization: `Bearer ${worldToken}` },
+                headers: { Authorization: "[redacted]" },
               },
             },
           },
         });
+        expect(JSON.stringify(f.calls.completions)).not.toContain(worldToken);
+        expect(await filesContaining(join(cwd, ".hue"), [worldToken])).toEqual([]);
         // The owner-only file is gone after the case; no legacy capability was minted; the
         // world was created with the agent revision and the case span's context.
         expect(existsSync(String(env.mcpConfigPath))).toBe(false);
@@ -979,8 +1053,12 @@ describe("hue eval", () => {
         );
         expect(result.status).toBe(1);
         expectNoSecrets(result);
+        // Error messages are stored by default too.
         expect(crashing.calls.completions).toEqual([
-          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+          expect.objectContaining({
+            state: "error",
+            error: { type: "TargetError", message: "The agent command exited with code 3" },
+          }),
         ]);
         expect([...crashing.worlds.values()][0]?.status).toBe("abandoned");
         const document = JSON.parse(result.stdout) as Record<string, any>;
@@ -1053,7 +1131,10 @@ describe("hue eval", () => {
         expect(result.status).toBe(1);
         expectNoSecrets(result);
         expect(f.calls.completions).toEqual([
-          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+          expect.objectContaining({
+            state: "error",
+            error: { type: "TargetError", message: "The agent command timed out after 1 seconds" },
+          }),
         ]);
         // The grandchild writes 2500 ms after the agent starts. Signalling only the shell
         // would leave it holding HUE_MCP_TOKEN and writing after Hue failed the case.
@@ -1097,7 +1178,13 @@ describe("hue eval", () => {
           expect(result.status).toBe(1);
           expectNoSecrets(result);
           expect(f.calls.completions).toEqual([
-            expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+            expect.objectContaining({
+              state: "error",
+              error: {
+                type: "TargetError",
+                message: "The agent command timed out after 1 seconds",
+              },
+            }),
           ]);
           pid = Number(await readFile(survivor, "utf8"));
           // The shell exits on SIGTERM; the agent it started does not, and would keep its world
@@ -1143,7 +1230,13 @@ describe("hue eval", () => {
           expect(text.status).toBe(1);
           // The case is failed, not left started: the outcome is kept and the evidence omitted.
           expect(f.calls.completions).toEqual([
-            expect.objectContaining({ state: "error", error: { type: "TelemetryNotAccepted" } }),
+            expect.objectContaining({
+              state: "error",
+              error: {
+                type: "TelemetryNotAccepted",
+                message: expect.stringMatching(/^telemetry_not_accepted: traces failed/),
+              },
+            }),
           ]);
           // Without its evidence the case keeps no output a grader could pass.
           expect(f.calls.completions[0]).not.toHaveProperty("output");
@@ -1185,6 +1278,152 @@ describe("hue eval", () => {
       },
       SPAWN_TIMEOUT * 2,
     );
+
+  test(
+    "--no-output keeps outputs and error messages out of Hue; --worker refuses it",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      try {
+        const args = [
+          "--scenario",
+          "Refund flow",
+          "--command",
+          `${process.execPath} agent-command.mjs`,
+          "--origin",
+          f.baseUrl,
+          "--wait",
+          "0",
+          "--no-output",
+        ];
+        const answered = await hue([...args, "--checkpoint-dir", join(cwd, "answered")], { cwd });
+        expect(answered.status).toBe(0);
+        const crashed = await hue([...args, "--checkpoint-dir", join(cwd, "crashed")], {
+          cwd,
+          env: { FAIL_AGENT: "1" },
+        });
+        expect(crashed.status).toBe(1);
+        expect(f.calls.completions).toEqual([
+          expect.objectContaining({ state: "succeeded" }),
+          expect.objectContaining({ state: "error", error: { type: "TargetError" } }),
+        ]);
+        expect(f.calls.completions[0]).not.toHaveProperty("output");
+        expect(f.calls.completions[1]).not.toHaveProperty("error.message");
+        const worker = await hue(
+          ["--worker", "./hue-agent.ts", "--origin", f.baseUrl, "--no-output"],
+          {
+            cwd,
+          },
+        );
+        expect(worker.status).toBe(2);
+        expect(worker.stderr).toContain("--no-output applies to one-shot runs");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test("a resume with another --no-output or --content choice names the flags to repeat", () => {
+    // An unfinished run keeps its content policy (the checkpoint refuses a change); the message
+    // says which flags resume it.
+    const message = (persistResultContent: boolean, captureContent: boolean) =>
+      explain(new CheckpointIdentityError({ persistResultContent, captureContent }));
+    expect(message(false, false)).toBe(
+      "This unfinished run was started with --no-output; rerun with the same flags to resume it, or remove its checkpoint directory to start over",
+    );
+    expect(message(false, true)).toStartWith(
+      "This unfinished run was started with --no-output and --content;",
+    );
+    expect(message(true, false)).toStartWith(
+      "This unfinished run was started without --no-output or --content;",
+    );
+    expect(explain(new CheckpointIdentityError())).toBe(
+      "Checkpoint identity differs from this project, run, pins or content policy",
+    );
+  });
+
+  test(
+    "credentials the case handed the agent are never stored with its answer or error",
+    async () => {
+      const cwd = await workspace();
+      const legacy = hueStandIn();
+      const gateway = hueStandIn({ gateway: true });
+      try {
+        // A legacy world's hue_sim_ token and, with --allow-hue-credentials, the project key.
+        const leaky = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-leaky.mjs`,
+            "--origin",
+            legacy.baseUrl,
+            "--allow-hue-credentials",
+            "--wait",
+            "0",
+          ],
+          { cwd },
+        );
+        expect(leaky.status).toBe(0);
+        expect(legacy.calls.completions[0]).toMatchObject({
+          output: { mcpToken: "[redacted]", apiKey: "[redacted]" },
+        });
+        // An adapter that throws with the world token and the key in its message.
+        const throwing = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "./hue-throwing.mjs",
+            "--origin",
+            gateway.baseUrl,
+            "--wait",
+            "0",
+          ],
+          { cwd },
+        );
+        expect(throwing.status).toBe(1);
+        expect(gateway.calls.completions[0]).toMatchObject({
+          state: "error",
+          error: {
+            type: "TargetError",
+            message: "could not reach the mirror with [redacted] and [redacted]",
+          },
+        });
+        const stored = JSON.stringify([legacy.calls.completions, gateway.calls.completions]);
+        for (const secret of [key, mcpToken, worldToken]) expect(stored).not.toContain(secret);
+        expect(await filesContaining(join(cwd, ".hue"), [key, mcpToken, worldToken])).toEqual([]);
+        // A world case's command answering through a result file is redacted the same way.
+        const filed = hueStandIn({ gateway: true });
+        try {
+          const written = await hue(
+            [
+              "--scenario",
+              "Refund flow",
+              "--command",
+              `${process.execPath} agent-result-file.mjs`,
+              "--origin",
+              filed.baseUrl,
+              "--wait",
+              "0",
+            ],
+            { cwd },
+          );
+          expect(written.status).toBe(0);
+          expect(filed.calls.completions[0]).toMatchObject({ output: { token: "[redacted]" } });
+          expect(JSON.stringify(filed.calls.completions)).not.toContain(worldToken);
+        } finally {
+          filed.stop();
+        }
+      } finally {
+        legacy.stop();
+        gateway.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
 
   test(
     "a second interrupt during the stop kills the agent's whole group at once",

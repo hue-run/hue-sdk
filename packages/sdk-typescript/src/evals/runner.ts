@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ROOT_CONTEXT } from "@opentelemetry/api";
 import type { HueClient } from "../client.js";
@@ -8,9 +9,13 @@ import type { HueSpan } from "../types.js";
 import { EvaluationClient, HueApiError } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
 import { CheckpointStore } from "./checkpoint.js";
+import { onForcedExit } from "./exit-cleanup.js";
 import {
+  assertSafeFileNames,
   downloadCaseFiles,
+  downloadCaseInputs,
   localOutputFiles,
+  verifyCaseFiles,
   OutputFileError,
   stageOutputFiles,
   targetFileRoles,
@@ -128,6 +133,34 @@ function neededInputFiles(
   return codeEvaluatorRunsHere
     ? files
     : files.filter((file) => (targetFileRoles as readonly string[]).includes(file.role));
+}
+
+/** Remove a case's files; a failure is reported as a warning and never fails the case. */
+async function removeCaseFiles(directory: string): Promise<void> {
+  try {
+    await rm(directory, { recursive: true, force: true });
+  } catch {
+    process.emitWarning(`Could not remove the case files in ${directory}`, {
+      code: "HUE_CASE_FILES_NOT_REMOVED",
+    });
+  }
+}
+/** What a world case keeps when it ends early: the staged outputs its `uploading` checkpoint
+ * resumes from, until `prepared` records their artifacts. It starts set until the saved
+ * checkpoint is read, and is set again before that checkpoint is written, so a resume never finds
+ * them gone. */
+interface CaseFiles {
+  keepOutputs: boolean;
+}
+/** Everything of a world case's directory except the staged outputs. */
+const WORK_PARTS = ["inputs", "evaluator-inputs", "work"];
+async function releaseWorldFiles(directory: string, keepOutputs: boolean): Promise<void> {
+  if (!keepOutputs) return removeCaseFiles(directory);
+  for (const part of WORK_PARTS) await removeCaseFiles(join(directory, part));
+}
+function releaseWorldFilesSync(directory: string, keepOutputs: boolean): void {
+  for (const path of keepOutputs ? WORK_PARTS.map((part) => join(directory, part)) : [directory])
+    rmSync(path, { recursive: true, force: true });
 }
 
 /** Immutable case context passed to a direct experiment target. */
@@ -524,7 +557,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     ): Promise<Prepared> {
       const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
       const inputs = needed.length
-        ? await downloadCaseFiles(options.client, needed, join(caseDirectory, "inputs"))
+        ? (await downloadCaseInputs(options.client, needed, caseDirectory)).all
         : [];
       await uploadOutputFiles(options.client, saved.executionId, saved.files, () =>
         store.write(file, saved),
@@ -573,10 +606,24 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       await store.write(file, prepared);
       return prepared;
     }
-    await pool(items, concurrency, async (item) => {
+    // A case pinned to a world keeps its files apart and removes them when it ends: the agent's
+    // copies of its inputs, its work, the evaluator's downloads and the staged outputs.
+    const worldDirectoryOf = (itemId: string) => join(filesRoot, `world-case-${uuid(itemId)}`);
+    const runCase = async (item: (typeof items)[number], files: CaseFiles) => {
       const file = `case-${uuid(item.id)}`;
-      const caseDirectory = join(filesRoot, `case-${uuid(item.id)}`);
-      let checkpoint = await store.read<CaseCheckpoint>(file);
+      const worldDirectory = worldDirectoryOf(item.id);
+      const caseDirectoryOf = (frozen: ExperimentCase) =>
+        frozen.environmentVersionId ? worldDirectory : join(filesRoot, `case-${uuid(item.id)}`);
+      let checkpoint: CaseCheckpoint | undefined;
+      try {
+        checkpoint = await store.read<CaseCheckpoint>(file);
+      } catch (error) {
+        // A checkpoint that is unsafe or fails its integrity check is never resumed from, so its
+        // staged outputs are not kept; an I/O failure may pass, so they are.
+        if (!(error as NodeJS.ErrnoException).code) files.keepOutputs = false;
+        throw error;
+      }
+      files.keepOutputs = checkpoint?.stage === "uploading";
       if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
         if (checkpoint.stage === "serialization_failed")
           throw new OutcomeSerializationError(checkpoint.executionId);
@@ -595,7 +642,14 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         if (checkpoint.hasOutput && checkpoint.output === undefined)
           throw new UncertainExecutionError(item.id, checkpoint.executionId);
         const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
-        checkpoint = await prepare(file, checkpoint, frozenCase, caseDirectory, checkpoint.output);
+        checkpoint = await prepare(
+          file,
+          checkpoint,
+          frozenCase,
+          caseDirectoryOf(frozenCase),
+          checkpoint.output,
+        );
+        files.keepOutputs = false;
       }
       if (!checkpoint) {
         if (item.execution) throw new UncertainExecutionError(item.id, item.execution.id);
@@ -606,10 +660,23 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         // target failures and cannot consume a case's execution slot.
         const targetInputs = json(frozenCase.inputs);
         const targetConfig = json(experiment.config);
-        // Pinned input files are verified on disk before an execution exists for the same reason.
+        // Pinned input files are verified before an execution exists for the same reason. Only
+        // the agent-visible ones are saved now: evaluator-only files a local code evaluator needs
+        // are checked and dropped, and saved for scoring after the target finished, so they are
+        // not on disk while it runs.
+        const caseDirectory = caseDirectoryOf(frozenCase);
+        const isTargetFile = (entry: CaseFile) =>
+          (targetFileRoles as readonly string[]).includes(entry.role);
         const needed = neededInputFiles(frozenCase.inputFiles, versions, options);
-        const inputFiles = needed.length
-          ? await downloadCaseFiles(options.client, needed, join(caseDirectory, "inputs"))
+        const agentFiles = needed.filter(isTargetFile);
+        // An agent working in a world receives its files by name: each must be one safe name.
+        if (frozenCase.environmentVersionId) assertSafeFileNames(agentFiles);
+        await verifyCaseFiles(
+          options.client,
+          needed.filter((entry) => !isTargetFile(entry)),
+        );
+        const inputFiles = agentFiles.length
+          ? (await downloadCaseInputs(options.client, agentFiles, caseDirectory)).target
           : [];
         const outputDirectory = join(caseDirectory, "work");
         await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
@@ -638,11 +705,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 item: structuredClone(frozenCase),
                 span,
                 executionId: execution.id,
-                files: structuredClone(
-                  inputFiles.filter((entry) =>
-                    (targetFileRoles as readonly string[]).includes(entry.role),
-                  ),
-                ),
+                files: structuredClone(inputFiles),
                 outputDirectory,
               });
               if (result instanceof TargetResult) {
@@ -694,6 +757,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             };
             // Without persisted result content a restart cannot reconstruct the outcome; the
             // saved stage then reports the execution as uncertain instead of guessing.
+            files.keepOutputs = true;
             await store.write(file, uploading);
             return prepare(file, uploading, frozenCase, caseDirectory, output);
           },
@@ -703,6 +767,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             attributes: { "hue.experiment.id": experiment.id, "hue.dataset.case.id": item.id },
           },
         );
+        files.keepOutputs = false;
         // End root before waiting for both OTLP signals. Export failure leaves the prepared checkpoint intact.
         let exportError: Error | undefined;
         try {
@@ -801,6 +866,23 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       );
       report.subjectIds.push(prepared.completion.subjectId);
       report.resultIds.push(...results);
+    };
+    await pool(items, concurrency, async (item) => {
+      // A world case's directory goes however the case ends, a forced exit included. An
+      // interrupted upload keeps only the staged outputs it resumes from; inputs are downloaded
+      // anew for scoring. A direct case has no such directory, so nothing is removed for it.
+      const worldDirectory = worldDirectoryOf(item.id);
+      const files: CaseFiles = { keepOutputs: true };
+      const untrack = onForcedExit(() => releaseWorldFilesSync(worldDirectory, files.keepOutputs));
+      try {
+        await runCase(item, files);
+        await releaseWorldFiles(worldDirectory, false);
+      } catch (error) {
+        await releaseWorldFiles(worldDirectory, files.keepOutputs);
+        throw error;
+      } finally {
+        untrack();
+      }
     });
     let finish = await store.read<{ key: string }>("finish");
     if (!finish) {

@@ -1,6 +1,13 @@
-import { copyFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, lstat, mkdir, opendir, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
-import { outputContentTypes } from "../evals/files.js";
+import {
+  outputContentTypes,
+  outputFileLimits,
+  readAgentFile,
+  safeFilename,
+  type FileIdentity,
+} from "../evals/files.js";
 import type { LocalFile, OutputFile, TargetResult } from "../evals/types.js";
 import { withFiles } from "../evals/types.js";
 import type { JsonValue } from "../types.js";
@@ -48,6 +55,11 @@ for (const type of Object.values(outputExtensions))
 
 const HELPER_FILES = new Set(["manifest.json", "result.json", "output.json"]);
 const SUMMARY_FILES = ["summary.txt", "summary.md", "final.txt", "resumen.txt"];
+/** The most a helper (`manifest.json`, `result.json`, `summary.txt`, …) may hold: the same bound
+ * as the command's stdout. */
+const HELPER_BYTES = 4 * 1024 * 1024;
+/** Entries a collection visits at most, hidden and skipped ones included. */
+const MAX_ENTRIES = 1024;
 
 export interface DirectCaseLayout {
   caseDirectory: string;
@@ -72,21 +84,25 @@ export async function stageDirectCase(
   await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
   const inputsPath = join(caseDirectory, "inputs.json");
   await writeFile(inputsPath, JSON.stringify(input.inputs, null, 2), { mode: 0o600 });
+  // Names that differ only in case or Unicode normalization are the same file on macOS and
+  // Windows filesystems; keep both inputs under distinct names, and never overwrite one.
   const used = new Set<string>();
+  const key = (folder: string, name: string) => `${folder}/${name.normalize("NFC").toLowerCase()}`;
   const files: DirectCaseLayout["files"] = [];
   for (const file of input.files) {
     const folder = join(caseDirectory, "files", file.role);
     await mkdir(folder, { recursive: true, mode: 0o700 });
     // Two inputs may share a filename (two incident reports, say); keep both.
-    const name = basename(file.filename);
+    const name = safeFilename(basename(file.filename));
     const extension = extname(name);
     const stem = name.slice(0, name.length - extension.length);
-    let target = join(folder, name);
-    for (let copy = 2; used.has(target); copy++)
-      target = join(folder, `${stem} (${copy})${extension}`);
-    used.add(target);
-    await copyFile(file.path, target);
-    files.push({ role: file.role, filename: basename(target), path: target });
+    let target = name;
+    for (let copy = 2; used.has(key(folder, target)); copy++)
+      target = `${stem} (${copy})${extension}`;
+    used.add(key(folder, target));
+    const path = join(folder, target);
+    await copyFile(file.path, path, constants.COPYFILE_EXCL);
+    files.push({ role: file.role, filename: target, path });
   }
   await writeFile(
     join(caseDirectory, "case.json"),
@@ -107,31 +123,136 @@ export async function stageDirectCase(
   return { caseDirectory, inputsPath, outputDirectory, files };
 }
 
-async function readJsonFile(path: string): Promise<JsonValue | undefined> {
+/** A regular file the listing found under the output directory, with the identity it saw. */
+interface ListedFile {
+  /** `/`-joined path relative to the output directory. */
+  name: string;
+  path: string;
+  identity: FileIdentity;
+}
+const identityOf = (info: { dev: number; ino: number }): FileIdentity => ({
+  dev: info.dev,
+  ino: info.ino,
+});
+const sameIdentity = (a: FileIdentity, b: FileIdentity) => a.dev === b.dev && a.ino === b.ino;
+
+/** A real directory (not a symlink) and its identity, or undefined when `path` is absent. A
+ * parent that is no longer a directory (ENOTDIR) is a change, never an absent directory: a case
+ * directory replaced by a file must not read as "wrote nothing". */
+async function directoryIdentity(path: string, label: string): Promise<FileIdentity | undefined> {
+  let info;
   try {
-    return JSON.parse(await readFile(path, "utf8")) as JsonValue;
+    info = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw new Error(`${basename(path)} in the output directory is not valid JSON`);
+    throw unexamined(label, error);
   }
+  if (info.isSymbolicLink() || !info.isDirectory())
+    throw new Error(`${label} is not a directory; a symbolic link or file is never collected`);
+  return identityOf(info);
 }
 
-/** Regular files anywhere under the output directory, named by their `/`-joined relative path.
- * Hidden and lock entries (dot names, `~$…`) and symlinks are skipped at every level. */
+/** Test seams: `beforeEntry` runs before each listed entry is examined, `afterListing` between
+ * the listing and the reads. */
+export interface CollectionSeams {
+  beforeEntry?: (name: string) => Promise<void>;
+  afterListing?: () => Promise<void>;
+}
+
+/** The error for an entry that vanished or changed kind while it was being collected, or could
+ * not be examined at all. */
+function unexamined(label: string, error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException).code;
+  return new Error(
+    code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP"
+      ? `${label} changed while it was collected`
+      : `${label} could not be read`,
+  );
+}
+
+/**
+ * Regular files anywhere under the output directory, named by their `/`-joined relative path,
+ * with the device and inode each had when listed. Hidden and lock entries (dot names, `~$…`),
+ * symlinks and anything that is neither a regular file nor a directory are skipped at every
+ * level, except that a top-level helper name must be a regular file when present. The walk stops
+ * past 32 documents or 1024 entries, and an entry that vanished or a directory that changed while
+ * it was listed is refused.
+ */
 async function listOutputFiles(
-  directory: string,
-  prefix = "",
-): Promise<{ name: string; path: string }[]> {
-  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-  const found: { name: string; path: string }[] = [];
-  for (const entry of entries) {
-    if (entry.name.startsWith(".") || entry.name.startsWith("~$")) continue;
-    const path = join(directory, entry.name);
-    const name = `${prefix}${entry.name}`;
-    if (entry.isDirectory()) found.push(...(await listOutputFiles(path, `${name}/`)));
-    else if (entry.isFile()) found.push({ name, path });
+  root: string,
+  rootIdentity: FileIdentity,
+  seams: CollectionSeams,
+): Promise<ListedFile[]> {
+  const found: ListedFile[] = [];
+  const directories: { path: string; label: string; identity: FileIdentity }[] = [
+    { path: root, label: "output/", identity: rootIdentity },
+  ];
+  let visited = 0;
+  let documents = 0;
+  for (let index = 0; index < directories.length; index++) {
+    const directory = directories[index]!;
+    const prefix = index === 0 ? "" : `${directory.label.slice("output/".length)}`;
+    let entries;
+    try {
+      entries = await opendir(directory.path);
+    } catch (error) {
+      throw unexamined(directory.label, error);
+    }
+    for await (const entry of entries) {
+      if (++visited > MAX_ENTRIES)
+        throw new Error(`The output directory holds more than ${MAX_ENTRIES} entries`);
+      const name = `${prefix}${entry.name}`;
+      const helper = index === 0 && (HELPER_FILES.has(name) || SUMMARY_FILES.includes(name));
+      if (!helper && (entry.name.startsWith(".") || entry.name.startsWith("~$"))) continue;
+      const path = join(directory.path, entry.name);
+      if (helper && !entry.isFile())
+        throw new Error(`output/${name} is not a regular file; the agent must write it itself`);
+      if (entry.isDirectory() || entry.isFile()) await seams.beforeEntry?.(name);
+      if (entry.isDirectory()) {
+        const identity = await directoryIdentity(path, `output/${name}`);
+        if (!identity) throw new Error(`output/${name} changed while it was collected`);
+        directories.push({ path, label: `output/${name}/`, identity });
+      } else if (entry.isFile()) {
+        let info;
+        try {
+          info = await lstat(path);
+        } catch (error) {
+          throw unexamined(`output/${name}`, error);
+        }
+        if (!info.isFile()) throw new Error(`output/${name} changed while it was collected`);
+        found.push({ name, path, identity: identityOf(info) });
+        if (!helper && ++documents > outputFileLimits.count)
+          throw new Error(`The agent wrote more than ${outputFileLimits.count} files`);
+      }
+    }
+  }
+  // Every directory must still be the one listed: none was swapped for a link meanwhile.
+  for (const directory of directories) {
+    const now = await directoryIdentity(directory.path, directory.label);
+    if (!now || !sameIdentity(now, directory.identity))
+      throw new Error(`${directory.label} changed while it was collected`);
   }
   return found;
+}
+
+async function readHelper(listed: ListedFile | undefined): Promise<string | undefined> {
+  if (!listed) return undefined;
+  const bytes = await readAgentFile(
+    listed.path,
+    `output/${listed.name}`,
+    HELPER_BYTES,
+    listed.identity,
+  );
+  return Buffer.from(bytes!).toString("utf8");
+}
+
+function parseHelper(listed: ListedFile | undefined, text: string | undefined) {
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text) as JsonValue;
+  } catch {
+    throw new Error(`${listed!.name} in the output directory is not valid JSON`);
+  }
 }
 
 /** Artifact filenames cannot contain path separators or controls. Encode only those forbidden
@@ -154,12 +275,22 @@ function artifactFilename(relativePath: string): string {
  * becomes a generated file; an unsupported extension is the agent's error rather than a silently
  * dropped document. `fallbackOutput` (for example the command's stdout) is used when no JSON
  * output or summary file was written.
+ *
+ * Nothing here trusts a path the agent could have changed: the output directory must be a real
+ * directory, every file is opened without following a final symlink or blocking on a FIFO, must
+ * be the regular file the listing saw and within its size limit, and the result carries the bytes
+ * read from that open file. `seams` are for tests only.
  */
 export async function collectDirectOutputs(
   outputDirectory: string,
   fallbackOutput?: JsonValue,
+  seams: CollectionSeams = {},
 ): Promise<TargetResult> {
-  const manifest = await readJsonFile(join(outputDirectory, "manifest.json"));
+  const rootIdentity = await directoryIdentity(outputDirectory, "The output directory");
+  const listed = rootIdentity ? await listOutputFiles(outputDirectory, rootIdentity, seams) : [];
+  await seams.afterListing?.();
+  const top = (name: string) => listed.find((entry) => entry.name === name);
+  const manifest = parseHelper(top("manifest.json"), await readHelper(top("manifest.json")));
   const declaredPrimary =
     manifest && typeof manifest === "object" && !Array.isArray(manifest)
       ? manifest.primary
@@ -170,11 +301,11 @@ export async function collectDirectOutputs(
       : undefined;
   let output: JsonValue | undefined =
     declaredOutput ??
-    (await readJsonFile(join(outputDirectory, "result.json"))) ??
-    (await readJsonFile(join(outputDirectory, "output.json")));
+    parseHelper(top("result.json"), await readHelper(top("result.json"))) ??
+    parseHelper(top("output.json"), await readHelper(top("output.json")));
   if (output === undefined)
     for (const name of SUMMARY_FILES) {
-      const text = await readFile(join(outputDirectory, name), "utf8").catch(() => undefined);
+      const text = await readHelper(top(name));
       if (text !== undefined) {
         output = { summary: text };
         break;
@@ -182,7 +313,7 @@ export async function collectDirectOutputs(
     }
   if (output === undefined) output = fallbackOutput;
   // Helper and summary names are reserved at the top level only; a nested one is a document.
-  const entries = (await listOutputFiles(outputDirectory)).filter(
+  const entries = listed.filter(
     (entry) => !HELPER_FILES.has(entry.name) && !SUMMARY_FILES.includes(entry.name),
   );
   // Directory order differs between filesystems; keep uploads stable.
@@ -196,10 +327,15 @@ export async function collectDirectOutputs(
     );
   const files: OutputFile[] = [];
   for (const entry of entries) {
-    if ((await stat(entry.path)).size === 0)
-      throw new Error(`The agent wrote an empty file: ${entry.name}`);
+    const bytes = (await readAgentFile(
+      entry.path,
+      `Generated file ${entry.name}`,
+      outputFileLimits.bytes,
+      entry.identity,
+    ))!;
+    if (!bytes.byteLength) throw new Error(`The agent wrote an empty file: ${entry.name}`);
     files.push({
-      path: entry.path,
+      bytes,
       filename: artifactFilename(entry.name),
       contentType: outputExtensions[extname(entry.name).toLowerCase()]!,
     });
@@ -212,5 +348,11 @@ export async function collectDirectOutputs(
       );
     files[primaryIndex]!.primary = true;
   } else if (files.length === 1) files[0]!.primary = true;
+  // The directory must still be the one listed when every byte has been read.
+  if (rootIdentity) {
+    const now = await directoryIdentity(outputDirectory, "The output directory");
+    if (!now || !sameIdentity(now, rootIdentity))
+      throw new Error("The output directory changed while it was collected");
+  }
   return withFiles(output, files);
 }
