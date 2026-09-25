@@ -43,13 +43,13 @@ def main() -> None:
     # installed separately, without an editable package or source-path fallback.
     with tempfile.TemporaryDirectory(prefix="hue-python-release-") as temporary:
         root = Path(temporary)
-        # Cross-language tests read the TypeScript suite's shared fixtures at
-        # ../sdk-typescript/tests/fixtures relative to their directory; copy them
-        # there so those checks run against the installed SDK instead of skipping.
-        shutil.copytree(
-            repository / "packages/sdk-typescript/tests/fixtures",
-            root / "sdk-typescript/tests/fixtures",
-        )
+        # Cross-language tests read the TypeScript suite's shared fixtures and its
+        # content-prefix list at ../sdk-typescript relative to their directory; copy
+        # them there so those checks run against the installed SDK instead of skipping.
+        typescript = repository / "packages/sdk-typescript"
+        shutil.copytree(typescript / "tests/fixtures", root / "sdk-typescript/tests/fixtures")
+        (root / "sdk-typescript/src").mkdir()
+        shutil.copy2(typescript / "src/privacy.ts", root / "sdk-typescript/src/privacy.ts")
         requirements = root / "requirements.txt"
         run(
             "uv",

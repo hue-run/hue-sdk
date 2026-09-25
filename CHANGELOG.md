@@ -748,10 +748,11 @@ No registry release is claimed until publication and registry acceptance complet
   a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
   any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
 - The inline-file digest tests skip, rather than fail to collect, when the TypeScript suite's
-  shared fixtures are absent, as the other cross-language tests do. The release's installed-wheel
-  check now copies those fixtures beside the tests, so the digest, tool-definition and URL
-  fixtures are checked against the installed wheel, and CI runs that check on every change. The
-  published package is unchanged by this.
+  shared fixtures are absent, as the other cross-language tests do. Every cross-language test now
+  finds the TypeScript suite at the same relative place, and the release's installed-wheel check
+  copies its fixtures and content-prefix list there, so the digest, tool-definition, URL and
+  hosted-tool-call fixtures and the prefix list are checked against the installed wheel with none
+  skipped. CI runs that check on every change. The published package is unchanged by this.
 
 ### [0.6.0] - 2026-09-24
 
