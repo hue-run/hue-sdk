@@ -17,6 +17,26 @@ refuses to publish a version without a matching entry below.
   `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
   `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
   filled in when omitted; the local runner defers all of them to Hue, as it does v1.
+- Provider tool spans from `recordProviderToolCalls` carry `hue.tool.call.position`, the 0-based
+  position of the call's item in the provider response (the OpenAI `output` index or the Anthropic
+  `content` block index), in both capture modes, so calls from one response that share a start
+  time keep their order. **Wire**
+- A `tools/list` span from `recordProviderToolCalls` with `captureContent: false` carries
+  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
+  any record's tool definitions; before, it carried neither. Descriptions and schemas are still
+  exported only with content capture. **Wire**
+- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
+  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
+  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
+  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
+  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_` and `hue_install_`, and `sk-`, Stripe,
+  Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or `Token`,
+  an `Authorization` header's whole value and the value of a credential-named `key=value` or
+  `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the value
+  quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
+  another pair's value). The `redact` hook sees the text as `status.message`. Without content
+  capture the span keeps `error.type` only. **Wire**
 
 #### Fixed
 
@@ -30,6 +50,12 @@ refuses to publish a version without a matching entry below.
   which throws on Node (from about 3.4 million), leaving the message unhashed, or stops matching
   on Bun (from about 1.1 million), hashing the URL's text. The Python SDK reads the header the
   same way.
+- An OpenAI `mcp_list_tools` tool's null `description`, `input_schema` or `annotations` is left
+  out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record the
+  same definitions and give a catalog the same digest.
+- `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
+  throws when read: the item is skipped and counted, and the other calls are recorded, as the
+  Python SDK does.
 
 ### [0.10.0] - 2026-09-25
 
@@ -101,27 +127,6 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   or errored result keeps its verdict whatever flag it carries, and a skip without the flag, such
   as one for an incomplete environment, is still a skip.
 
-- Provider tool spans from `recordProviderToolCalls` carry `hue.tool.call.position`, the 0-based
-  position of the call's item in the provider response (the OpenAI `output` index or the Anthropic
-  `content` block index), in both capture modes, so calls from one response that share a start
-  time keep their order. **Wire**
-- A `tools/list` span from `recordProviderToolCalls` with `captureContent: false` carries
-  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
-  any record's tool definitions; before, it carried neither. Descriptions and schemas are still
-  exported only with content capture. **Wire**
-- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
-  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
-  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
-  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
-  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_` and `hue_install_`, and `sk-`, Stripe,
-  Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or `Token`,
-  an `Authorization` header's whole value and the value of a credential-named `key=value` or
-  `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the value
-  quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
-  another pair's value). The `redact` hook sees the text as `status.message`. Without content capture the span
-  keeps `error.type` only. **Wire**
-
 #### Changed
 
 - A downloaded pinned file that differs from its manifest now raises `CaseFileError`
@@ -169,12 +174,6 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   even under a text media type, as Hue reads it, so such a text (`AAAA…`, for example) is hashed
   as the bytes it decodes to and stays inline while those fit in 64 KiB. A text file's own text
   is still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
-- An OpenAI `mcp_list_tools` tool's null `description`, `input_schema` or `annotations` is left
-  out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record the
-  same definitions and give a catalog the same digest.
-- `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
-  throws when read: the item is skipped and counted, and the other calls are recorded, as the
-  Python SDK does.
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
   `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
   the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
@@ -759,19 +758,6 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
-#### Fixed
-
-- `run_experiment` no longer stops the whole run with `OutcomeSerializationError` when a target's
-  output is over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels
-  of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
-  content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
-  running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
-- A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
-  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
-  `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
-
-### [0.6.1] - 2026-09-25
-
 #### Added
 
 - Provider tool spans from `record_provider_tool_calls` carry `hue.tool.call.position`, the
@@ -786,6 +772,22 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Fixed
 
+- `run_experiment` no longer stops the whole run with `OutcomeSerializationError` when a target's
+  output is over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels
+  of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
+  content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
+  running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
+- A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
+  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
+  `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
+- `server.address` keeps a host name with an underscore, such as a Docker Compose service
+  (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
+  dropped.
+
+### [0.6.1] - 2026-09-25
+
+#### Fixed
+
 - **Wire.** A large inline file part in a recorded message is exported with the `sha256` and
   `size` of the file's own bytes whatever its media type. Base64 content is decoded for text,
   JSON and untyped parts too, and a `data:` URL without `;base64` is percent-decoded. Before,
@@ -795,9 +797,6 @@ No registry release is claimed until publication and registry acceptance complet
   text (`AAAA…`, for example) is hashed as the bytes it decodes to and stays inline while those
   fit in 64 KiB. A text file's own text is still hashed as UTF-8. This matches the TypeScript
   SDK, checked against a shared fixture.
-- `server.address` keeps a host name with an underscore, such as a Docker Compose service
-  (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
-  dropped.
 - Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation
