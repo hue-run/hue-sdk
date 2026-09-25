@@ -158,6 +158,19 @@ describe("output collection never follows the agent's links", () => {
         },
       }),
     ).rejects.toThrow("output/anexos changed while it was collected");
+    // A listed directory whose parent became a file no longer resolves: the same clean error.
+    const parent = await scene();
+    await mkdir(join(parent.output, "anexos", "sub"), { recursive: true });
+    await writeFile(join(parent.output, "anexos", "sub", "c.txt"), "text");
+    await expect(
+      collectDirectOutputs(parent.output, undefined, {
+        beforeEntry: async (name) => {
+          if (name !== "anexos/sub") return;
+          await rm(join(parent.output, "anexos"), { recursive: true });
+          await writeFile(join(parent.output, "anexos"), "now a file");
+        },
+      }),
+    ).rejects.toThrow("output/anexos/sub changed while it was collected");
   });
 
   test("a FIFO named like a helper is refused at once instead of hanging", async () => {

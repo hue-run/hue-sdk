@@ -136,14 +136,16 @@ const identityOf = (info: { dev: number; ino: number }): FileIdentity => ({
 });
 const sameIdentity = (a: FileIdentity, b: FileIdentity) => a.dev === b.dev && a.ino === b.ino;
 
-/** A real directory (not a symlink) and its identity, or undefined when `path` is absent. */
+/** A real directory (not a symlink) and its identity, or undefined when `path` no longer
+ * resolves: absent, or a parent that is no longer a directory. */
 async function directoryIdentity(path: string, label: string): Promise<FileIdentity | undefined> {
   let info;
   try {
     info = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+    throw unexamined(label, error);
   }
   if (info.isSymbolicLink() || !info.isDirectory())
     throw new Error(`${label} is not a directory; a symbolic link or file is never collected`);
