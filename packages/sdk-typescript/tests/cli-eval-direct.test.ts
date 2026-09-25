@@ -901,6 +901,7 @@ writeFileSync(out + "/notes.txt", "\\ufeffcalled with " + key + "\\n");
 writeFileSync(out + "/rows.json", JSON.stringify([{ key }]));
 writeFileSync(out + "/latin1.txt", Buffer.concat([Buffer.from([0xff]), Buffer.from(key)]));
 writeFileSync(out + "/chart.png", Buffer.concat([Buffer.from([0x89, 0x50]), Buffer.from(key)]));
+writeFileSync(out + "/report-" + key + ".csv", "a,b\\n");
 process.stdout.write(key);
 `,
     );
@@ -931,6 +932,10 @@ process.stdout.write(key);
       expect(JSON.parse(uploaded("rows.json").toString())).toEqual([{ key: "[redacted]" }]);
       expect(uploaded("latin1.txt").subarray(1).toString()).toBe(key);
       expect(uploaded("chart.png").subarray(2).toString()).toBe(key);
+      // A generated file's name is cleared of it too.
+      const names = [...standIn.artifacts.values()].map((stored) => stored.filename);
+      expect(names).toContain("report-[redacted].csv");
+      expect(names.join("\n")).not.toContain(key);
     } finally {
       standIn.stop();
     }

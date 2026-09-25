@@ -74,7 +74,8 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   not-applicable results in its pass line and `--json`, and exits 0 when every case passed the
   evaluators that apply to it. Before, such a result was an ordinary skip: its columns showed `-`,
   its explanation was printed with a failing case's own, and a case no pinned evaluator applied to
-  was reported as skipped. Only Hue's flag marks a result not applicable; a skip without it, such
+  was reported as skipped. Only Hue's flag on a skipped result marks it not applicable: a scored
+  or errored result keeps its verdict whatever flag it carries, and a skip without the flag, such
   as one for an incomplete environment, is still a skip.
 
 #### Changed
@@ -119,9 +120,11 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   `size` of the file's own bytes whatever its media type. Base64 content is decoded for text,
   JSON and untyped parts too, and a `data:` URL without `;base64` is percent-decoded. Before,
   those were hashed as the UTF-8 of their base64 or URL text, so the digest did not match the
-  file's bytes, and a text file sent as base64 could not be linked to its upload. Content in the
-  base64 alphabet is now read as base64 even under a text media type; a text file's own text is
-  still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
+  file's bytes, and a text file sent as base64 could not be linked to its upload. Behavior change:
+  content made only of base64 characters and padded to a multiple of four is now read as base64
+  even under a text media type, as Hue reads it, so such a text (`AAAA…`, for example) is hashed
+  as the bytes it decodes to and stays inline while those fit in 64 KiB. A text file's own text
+  is still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
   `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
   the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
@@ -153,16 +156,20 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   at once and exits with 130 instead of ending the CLI and leaving the agent running.
 - `hue eval` replaces an adapter error whose message cannot be reassigned (a frozen error, or one
   whose `message` is a getter) with a new `Error` carrying the redacted message and name, instead
-  of storing the unredacted message. Values shorter than 16 characters are no longer treated as
-  credentials, so a short environment value no longer redacts ordinary text in the answer.
+  of storing the unredacted message. An error's name, which the case span exports as its error
+  type, is redacted the same way as its message. Values shorter than 16 characters are no longer
+  treated as credentials, so a short environment value no longer redacts ordinary text in the
+  answer.
 - `hue eval` also replaces the credentials it redacts from the answer in the UTF-8 `.txt`, `.csv`
-  and `.json` documents it collects from `output/` before uploading them. PDF, Office and image
+  and `.json` documents it collects from `output/`, and in every generated file's name, before
+  uploading them. PDF, Office and image
   documents and files an adapter returns by `path` are uploaded as written, so an agent must still
   never write credentials to `output/`.
 - `hue eval --case` and `resolveScenarioPins` accept the published eval set case's own ID, the one
   Hue shows on the case page, and URLs naming `/cases/<id>` or `/case-conversions/<id>`. Before,
   only the case conversion's ID or a `/scenarios/<id>` URL resolved, and the case's own ID failed
-  with HTTP 404.
+  with HTTP 404. A case ID is looked up among the first 1,000 Scenarios listed, and a listing that
+  repeats a cursor ends the lookup, or a name search, instead of paging forever.
 - `EvaluationClient.registerLocalAgent` reads the registered key from the response's `agentKey`
   when it has no `key`, so `RegisteredLocalAgent.key` is set and `hue eval --worker` no longer
   prints "Registered agent undefined".
@@ -697,9 +704,11 @@ No registry release is claimed until publication and registry acceptance complet
   `size` of the file's own bytes whatever its media type. Base64 content is decoded for text,
   JSON and untyped parts too, and a `data:` URL without `;base64` is percent-decoded. Before,
   those were hashed as the UTF-8 of their base64 or URL text, so the digest did not match the
-  file's bytes. Content in the base64 alphabet is now read as base64 even under a text media
-  type; a text file's own text is still hashed as UTF-8. This matches the TypeScript SDK,
-  checked against a shared fixture.
+  file's bytes. Behavior change: content made only of base64 characters and padded to a
+  multiple of four is now read as base64 even under a text media type, as Hue reads it, so such a
+  text (`AAAA…`, for example) is hashed as the bytes it decodes to and stays inline while those
+  fit in 64 KiB. A text file's own text is still hashed as UTF-8. This matches the TypeScript
+  SDK, checked against a shared fixture.
 - Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation

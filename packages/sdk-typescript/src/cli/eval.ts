@@ -598,9 +598,12 @@ function redactSecrets(text: string, secrets: string[]): string {
 
 const TEXT_CONTENT_TYPES = new Set(["text/plain", "text/csv", "application/json"]);
 
-/** A text document held in memory, cleared of the case's credentials. Other documents, a file
- * declared by path and text that is not UTF-8 are uploaded as written. */
+/** A generated file with its name, and a text document held in memory with its text, cleared of
+ * the case's credentials. Other documents, a file declared by path and text that is not UTF-8
+ * are uploaded as written. */
 function redactFile(file: OutputFile, secrets: string[]): OutputFile {
+  const filename = redactSecrets(file.filename, secrets);
+  if (filename !== file.filename) file = { ...file, filename };
   if (!file.bytes || !TEXT_CONTENT_TYPES.has(file.contentType)) return file;
   let text: string;
   try {
@@ -645,16 +648,19 @@ function redacting<Context, Answer>(
       return redactAnswer(await adapter(inputs, context), secrets) as Answer;
     } catch (error) {
       if (!(error instanceof Error)) throw error;
+      // The name is exported too, as the span's error type, so it is cleared like the message.
       const message = redactSecrets(error.message, secrets);
-      if (message === error.message) throw error;
+      const name = redactSecrets(String(error.name), secrets);
+      if (message === error.message && name === String(error.name)) throw error;
       try {
-        error.message = message;
+        if (message !== error.message) error.message = message;
+        if (name !== String(error.name)) error.name = name;
       } catch {
-        // A frozen error, or one whose message is a getter, keeps its text; replace it below.
+        // A frozen error, or one whose message or name is a getter, keeps its text; replace it.
       }
-      if (error.message === message) throw error;
+      if (error.message === message && String(error.name) === name) throw error;
       const replacement = new Error(message);
-      replacement.name = redactSecrets(String(error.name), secrets);
+      replacement.name = name;
       throw replacement;
     }
   };

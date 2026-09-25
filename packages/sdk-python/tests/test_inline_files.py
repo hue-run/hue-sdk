@@ -27,7 +27,10 @@ def test_the_shared_digest_fixture_uses_the_sdk_inline_file_limit() -> None:
 @pytest.mark.parametrize("case", DIGEST_FIXTURE["cases"], ids=lambda case: case["name"])
 def test_inline_file_digest_matches_the_shared_fixture(case: dict[str, Any]) -> None:
     spec = case["content"]
-    part = {**case["part"], case["key"]: spec["prefix"] + spec["unit"] * spec["times"] + spec["suffix"]}
+    part = {
+        **case["part"],
+        case["key"]: spec["prefix"] + spec["unit"] * spec["times"] + spec["suffix"],
+    }
     file = case["part"]["type"] == "file"
     message = {"role": "user", "content": [part]} if file else {"role": "user", "parts": [part]}
     value = json.dumps([message])

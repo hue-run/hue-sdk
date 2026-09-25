@@ -136,8 +136,9 @@ export async function waitForResults(
           const id = found.get(`${item.id}:${pin}`);
           if (!id) continue;
           const stored = await client.getResult(id);
-          // Only Hue's own flag marks a result not applicable; its evidence alone never does.
-          const notApplicable = stored.notApplicable === true;
+          // Only Hue's own flag on a skipped result marks it not applicable; the evidence alone
+          // never does, and a scored or errored result keeps its verdict whatever it carries.
+          const notApplicable = stored.state === "skipped" && stored.notApplicable === true;
           const evidence = stored.evidence as { requires?: unknown } | null;
           results.push({
             id: stored.id,
@@ -248,8 +249,10 @@ export function summarizeVerdicts(
       result.metrics.map((metric) => ({ ...metric, scorerVersionId: result.scorerVersionId })),
     );
     // An evaluator that does not apply to the case neither passes nor fails it.
-    const inapplicable = own.filter((result) => result.notApplicable);
-    const applicable = own.filter((result) => !result.notApplicable);
+    const skippedAsInapplicable = (result: VerdictResult) =>
+      result.state === "skipped" && result.notApplicable === true;
+    const inapplicable = own.filter(skippedAsInapplicable);
+    const applicable = own.filter((result) => !skippedAsInapplicable(result));
     const errors = applicable.filter((result) => result.state === "error");
     const scored = applicable.filter((result) => result.state === "scored");
     const failing = scored.filter((result) => !result.metrics.every(metricPassed));

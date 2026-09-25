@@ -381,8 +381,8 @@ hue eval --worker ./hue-agent.ts --agent-key support-agent --content --env-file 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
 
 The one-shot mode resolves the selection (`--case` by name, or by the ID or URL of the published
-case or of the case conversion that published it; `--set` by name, ID or
-URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
+case or of the case conversion that published it, among the project's first 1,000 Scenarios;
+`--set` by name, ID or URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
 creates a fresh run from those immutable pins named `<agent key> @ <revision>` (a commit hash is
 shortened to 7 characters)
 (`--name` overrides), prints `Run: <url>` and `Experiment: <id>` as soon as the experiment exists,
@@ -456,9 +456,9 @@ its run page. A `--command`'s stdout is its answer unless it writes a result fil
 so it must not print credentials or debug logs there; before storing, `hue eval` replaces the
 credentials it handed the case (the world token and MCP headers, a legacy MCP token, attempt
 bearers) and every Hue control-plane credential in its environment with `[redacted]`, in the
-answer, an adapter's thrown message and the local checkpoint. `--no-output` keeps outputs, error
-messages and explanations out of a one-shot run's stored results; with `--content` the case span
-still carries the output. `--worker` always stores them, because a run launched from Hue is read
+answer, an adapter's thrown message and name, generated file names and the local checkpoint.
+`--no-output` keeps outputs, error messages and explanations out of a one-shot run's stored
+results; with `--content` the case span still carries the output. `--worker` always stores them, because a run launched from Hue is read
 on its run page (that is `runLocalAgent()`'s contract), and refuses `--no-output`. An interrupted
 one-shot run keeps the choice it started with, so one run never mixes stored and unstored outputs:
 rerunning it with other `--no-output` or `--content` flags is refused with the flags it started
