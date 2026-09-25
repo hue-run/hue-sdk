@@ -388,7 +388,9 @@ numbers as values, text and category metrics as-is, an overall result per case a
 Failing cases print the scorer explanation. `--baseline <experiment id|url>` adds improvement,
 regression and unchanged counts with per-case deltas. `--json` prints one JSON document
 (`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout
-and sends progress to stderr. `--wait <seconds>` (default 300) bounds the verdict wait because
+and sends progress to stderr; a case failed for its telemetry has `state: "error"`,
+`passed: false` and
+`telemetry: { code: "telemetry_not_accepted", issues: [{ signal, kind, status?, count }] }`. `--wait <seconds>` (default 300) bounds the verdict wait because
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
 every case of the saved version; there is no case subset.
 
@@ -426,7 +428,14 @@ examples pass it so the run's case spans carry content. Model and tool spans ins
 only from the agent's own instrumentation. In one-shot mode `--content` also decides whether case
 outputs, error messages and explanations are persisted to Hue. `--worker` always persists them,
 because a run launched from Hue is read on its run page: that is `runLocalAgent()`'s contract and
-`--content` does not change it. Trace evidence is required for every case.
+`--content` does not change it. Trace evidence is required for every case: when Hue does not
+accept a case's traces or logs, the case is completed as failed (error `TelemetryNotAccepted`,
+evidence omitted as `telemetry_not_accepted`, no output or generated files attached) instead of
+being left started, and the run goes on. Stderr names the case as it completes, with the export
+issue counts, for example
+`[refund] telemetry not accepted, case failed: telemetry_not_accepted: traces failed 1 (HTTP 400)`;
+the case counts as an error in the table and JSON whatever its scores, and the command exits 1.
+Counts carry signals, kinds, HTTP statuses and record numbers only, never content or credentials.
 Resumable checkpoints live in `.hue/eval/<agent-key>/<project id>/` (a `.gitignore` is written
 inside `.hue/eval/`); `--checkpoint-dir` overrides the root. Rerunning the same selection resumes
 an interrupted run without invoking the agent again; a different selection is refused until the

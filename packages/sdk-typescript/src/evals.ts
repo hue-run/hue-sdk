@@ -13,6 +13,8 @@ export type {
   RunExperimentTargetContext,
   RescoreOptions,
   RunnerReport,
+  TelemetryIssueCount,
+  TelemetryNotAccepted,
 } from "./evals/runner.js";
 export { TargetResult, withFiles } from "./evals/types.js";
 export {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ import {
   runExperiment,
   scoreLocally,
   sourceDigest,
+  TargetOutcomeUncertainError,
   UncertainExecutionError,
   type Completion,
   type EvaluationRun,
@@ -505,6 +506,153 @@ describe("installed evaluation API and runner contract", () => {
       expect(calls).toBe(1);
     } finally {
       await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("fail_case completes a case whose telemetry was not accepted as failed, once", async () => {
+    const f = fixture();
+    const exp = f.create();
+    let calls = 0;
+    let notified = 0;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "failed-evidence",
+      captureContent: false,
+    });
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory: await directory(),
+      persistResultContent: true,
+      traceEvidence: { mode: "required" as const },
+      traceNotAccepted: "fail_case" as const,
+      onTelemetryNotAccepted: () => void notified++,
+      target: async () => {
+        // Only the first case's telemetry is refused; the other case is unaffected.
+        if (++calls === 1) f.failTelemetry();
+        return "known completed output";
+      },
+    };
+    const completions = () =>
+      f.requests
+        .filter((request) => request.path.endsWith("/complete"))
+        .map((request) => request.body);
+    try {
+      const report = await runExperiment(options);
+      expect(completions()).toEqual([
+        expect.objectContaining({
+          state: "error",
+          error: {
+            type: "TelemetryNotAccepted",
+            message: expect.stringMatching(/^telemetry_not_accepted: traces failed 1 \(HTTP 401\)/),
+          },
+          traceEvidence: "omit",
+          omissionReason: expect.stringMatching(/^telemetry_not_accepted: traces failed 1/),
+        }),
+        expect.objectContaining({ state: "succeeded", traceEvidence: "required" }),
+      ]);
+      // The failed case keeps no output a scorer could pass; the other case keeps its own.
+      expect(completions()[0]).not.toHaveProperty("output");
+      expect(completions()[1]).toMatchObject({ output: "known completed output" });
+      expect(completions()[1]).not.toHaveProperty("omissionReason");
+      expect(report.telemetryNotAccepted).toEqual([
+        {
+          caseId: expect.any(String),
+          caseKey: expect.any(String),
+          executionId: expect.any(String),
+          issues: [{ signal: "traces", kind: "failed", status: 401, count: 1 }],
+        },
+      ]);
+      expect(notified).toBe(1);
+      // Resuming finds both cases completed: no target runs, nothing is completed again and the
+      // callback is not repeated, while the resumed call's report still lists the failed case.
+      const resumed = await runExperiment(options);
+      expect(calls).toBe(2);
+      expect(completions()).toHaveLength(2);
+      expect(notified).toBe(1);
+      expect(resumed.telemetryNotAccepted).toEqual(report.telemetryNotAccepted);
+    } finally {
+      await hue.shutdownSafe();
+      f.server.stop(true);
+    }
+  });
+  test("fail_case names a failed case as it completes, before a later case stops the run", async () => {
+    const f = fixture();
+    const exp = f.create();
+    let calls = 0;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "failed-evidence",
+      captureContent: false,
+    });
+    const named: string[] = [];
+    try {
+      await expect(
+        runExperiment({
+          client: f.client,
+          hue,
+          experimentId: exp.id,
+          checkpointDirectory: await directory(),
+          persistResultContent: true,
+          traceEvidence: { mode: "required" },
+          traceNotAccepted: "fail_case",
+          onTelemetryNotAccepted: (entry) => void named.push(entry.caseKey),
+          target: async (_inputs, context) => {
+            if (++calls === 1) {
+              f.failTelemetry();
+              return "known completed output";
+            }
+            throw new TargetOutcomeUncertainError(context.executionId);
+          },
+        }),
+      ).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+      expect(named).toHaveLength(1);
+    } finally {
+      await hue.shutdownSafe();
+      f.server.stop(true);
+    }
+  });
+
+  test("fail_case raises a checkpoint that cannot be saved instead of failing the case", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "failed-checkpoint",
+      captureContent: false,
+    });
+    // Telemetry is accepted; only saving the acknowledgement fails, as on a full disk.
+    const write = CheckpointStore.prototype.write;
+    const spy = spyOn(CheckpointStore.prototype, "write").mockImplementation(async function (
+      this: CheckpointStore,
+      name: string,
+      value: unknown,
+    ) {
+      if ((value as { exportState?: string }).exportState === "accepted")
+        throw new Error("No space left on device");
+      return write.call(this, name, value);
+    });
+    try {
+      await expect(
+        runExperiment({
+          client: f.client,
+          hue,
+          experimentId: exp.id,
+          checkpointDirectory: await directory(),
+          persistResultContent: true,
+          traceEvidence: { mode: "required" },
+          traceNotAccepted: "fail_case",
+          target: async () => "known completed output",
+        }),
+      ).rejects.toThrow("No space left on device");
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await hue.shutdownSafe();
       f.server.stop(true);
     }
   });

@@ -342,6 +342,8 @@
             "TargetCancelledError",
             "TargetOutcomeUncertainError",
             "TargetResult",
+            "TelemetryIssueCount",
+            "TelemetryNotAccepted",
             "TerminalState",
             "TypedError",
             "UncertainExecutionError",

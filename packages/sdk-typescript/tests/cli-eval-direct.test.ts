@@ -38,7 +38,15 @@ type Stored = {
  * grader that posts the deferred result a few polls after the letter is uploaded.
  */
 function documentStandIn(
-  options: { gradedAfterPolls?: number; verdict?: "pass" | "fail"; failCompletions?: number } = {},
+  options: {
+    gradedAfterPolls?: number;
+    verdict?: "pass" | "fail";
+    failCompletions?: number;
+    /** Refuse trace exports with 400. */
+    refuseTraces?: boolean;
+    /** Grade as a scorer that never reads the execution state. */
+    ignoreExecutionState?: boolean;
+  } = {},
 ) {
   const projectId = randomUUID();
   const dataset = {
@@ -184,6 +192,8 @@ function documentStandIn(
         });
       if (path.startsWith("/otlp/")) {
         await request.arrayBuffer();
+        if (options.refuseTraces && path.endsWith("/traces"))
+          return new Response(null, { status: 400 });
         return new Response(new Uint8Array(), {
           headers: { "Content-Type": "application/x-protobuf" },
         });
@@ -429,7 +439,9 @@ function documentStandIn(
           .get(experiment.evaluation.id)!
           .push({ id: evaluationItemId, subjectId, hasOutput, traceSnapshotId: randomUUID() });
         // Hue's grading worker posts the deferred code-evaluator result later; the CLI waits for it.
-        const failed = options.verdict === "fail" || body.state !== "succeeded";
+        const failed =
+          options.verdict === "fail" ||
+          (!options.ignoreExecutionState && body.state !== "succeeded");
         for (const version of experiment.evaluation.scorerVersions)
           results.get(experiment.evaluation.id)!.push({
             id: randomUUID(),
@@ -732,6 +744,56 @@ describe("hue eval on a document eval set", () => {
       expect(forced.status).toBe(2);
       expect(forced.stderr).toContain('No evaluator matches "nope"');
       expect(standIn.calls.experiments).toHaveLength(before);
+    } finally {
+      standIn.stop();
+    }
+  }, 120_000);
+
+  test("a case whose trace Hue refuses fails and exits 1 even when its grader passes it", async () => {
+    // The grader never reads the execution state, so only the CLI can keep the case failing.
+    const standIn = documentStandIn({ refuseTraces: true, ignoreExecutionState: true });
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
+    await writeFile(join(cwd, "agent.mjs"), agentSource);
+    try {
+      const result = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--json",
+          "--content",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(
+        /\] telemetry not accepted, case failed: telemetry_not_accepted: traces failed \d+ \(HTTP 400\)/,
+      );
+      // Completed as failed, without the output or documents a grader could pass.
+      const completion = standIn.calls.completions[0]!;
+      expect(completion).toMatchObject({
+        state: "error",
+        error: { type: "TelemetryNotAccepted" },
+        traceEvidence: "omit",
+        filenames: [],
+      });
+      expect(completion).not.toHaveProperty("output");
+      expect(completion).not.toHaveProperty("artifactIds");
+      const report = JSON.parse(result.stdout) as {
+        cases: Record<string, unknown>[];
+        totals: { passed: number; error: number };
+      };
+      expect(report.cases[0]).toMatchObject({
+        state: "error",
+        passed: false,
+        telemetry: { code: "telemetry_not_accepted" },
+      });
+      expect(report.totals).toMatchObject({ passed: 0, error: 1 });
     } finally {
       standIn.stop();
     }

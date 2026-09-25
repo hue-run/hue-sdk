@@ -165,6 +165,19 @@ export interface RunExperimentOptions extends RunnerOptions {
         /** Why evidence is omitted, up to 4000 characters. */
         reason: string;
       };
+  /**
+   * What a case does when evidence is required and its trace or logs are not fully accepted.
+   * `"stop"` (the default) keeps the saved outcome, leaves the execution started for recovery and
+   * rejects. `"fail_case"` completes the execution as failed instead, with the evidence omitted
+   * under the reason `telemetry_not_accepted` and without its output or generated files, so no
+   * scorer can pass it; reports it in {@link RunnerReport.telemetryNotAccepted} and goes on with
+   * the other cases.
+   */
+  traceNotAccepted?: "stop" | "fail_case";
+  /** Called when this call completes a case as failed under `traceNotAccepted: "fail_case"`,
+   * before the run goes on, so the failure is known even if a later case stops the run. A call
+   * that resumes an already completed case lists it in the report without calling again. */
+  onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
   /** Runs the application for one frozen case; return the output, `withFiles(output, files)`
    * when it generated files, or `undefined` when unavailable. */
   target(
@@ -187,6 +200,68 @@ export interface RunnerReport {
   resultIds: string[];
   /** Pins without a local implementation, left pending for their authorized executor. */
   deferredScorerVersionIds: string[];
+  /** Cases completed as failed because their telemetry was not accepted, under
+   * `traceNotAccepted: "fail_case"`; absent when there were none. */
+  telemetryNotAccepted?: TelemetryNotAccepted[];
+}
+
+/** Export issue counts, never content: which signal, what happened, the HTTP status when Hue
+ * answered, and how many records. */
+export interface TelemetryIssueCount {
+  /** Signal the records belong to. */
+  signal: "traces" | "logs";
+  /** `rejected` by Hue, `failed` to deliver, `dropped` from the queue, or an `invalid` record. */
+  kind: "rejected" | "failed" | "dropped" | "invalid";
+  /** HTTP status when the issue came from Hue's answer. */
+  status?: number;
+  /** Records affected. */
+  count: number;
+}
+
+/** A case whose trace or logs were not fully accepted, completed as failed. */
+export interface TelemetryNotAccepted {
+  /** Experiment case (item) ID. */
+  caseId: string;
+  /** The case's caller-chosen key. */
+  caseKey: string;
+  /** Execution completed as failed. */
+  executionId: string;
+  /** Sanitized issues the transport reported while the case's telemetry was exported. */
+  issues: TelemetryIssueCount[];
+}
+
+/** Stable reason, and first word of the omission reason, of a case failed for its telemetry. */
+export const TELEMETRY_NOT_ACCEPTED = "telemetry_not_accepted";
+
+/** The issues of a failed export, summed by signal, kind and status. */
+export function telemetryIssueCounts(error: unknown): TelemetryIssueCount[] {
+  if (!(error instanceof HueExportError)) return [];
+  const counts = new Map<string, TelemetryIssueCount>();
+  for (const issue of error.issues) {
+    if (issue.kind === "warning") continue;
+    const key = `${issue.signal}:${issue.kind}:${issue.status ?? ""}`;
+    const entry = counts.get(key) ?? {
+      signal: issue.signal,
+      kind: issue.kind,
+      ...(issue.status === undefined ? {} : { status: issue.status }),
+      count: 0,
+    };
+    entry.count += issue.count;
+    counts.set(key, entry);
+  }
+  // A zero-count entry, such as the processor's own flush failure, only repeats a signal that
+  // already has counted records.
+  const counted = new Set([...counts.values()].filter((entry) => entry.count).map((e) => e.signal));
+  return [...counts.values()].filter((entry) => entry.count || !counted.has(entry.signal));
+}
+
+/** `telemetry_not_accepted`, then the issue counts, for example `traces failed 1 (HTTP 400)`. */
+export function describeTelemetryIssues(issues: TelemetryIssueCount[]): string {
+  const parts = issues.map(
+    (issue) =>
+      `${issue.signal} ${issue.kind} ${issue.count}${issue.status === undefined ? "" : ` (HTTP ${issue.status})`}`,
+  );
+  return parts.length ? `${TELEMETRY_NOT_ACCEPTED}: ${parts.join(", ")}` : TELEMETRY_NOT_ACCEPTED;
 }
 type SavedResult = {
   payload: Omit<Result, "evaluationItemId"> & { evaluationItemId?: string };
@@ -199,7 +274,10 @@ interface Prepared {
   complete: CompleteExecution;
   completion?: Completion;
   scores: SavedResult[];
-  exportState: "pending" | "accepted";
+  /** `not_accepted`: the case is completed as failed with its evidence omitted. */
+  exportState: "pending" | "accepted" | "not_accepted";
+  /** The issues behind a `not_accepted` export. */
+  telemetryIssues?: TelemetryIssueCount[];
 }
 /** The target finished and its generated files are staged; publication and scoring can resume. */
 interface Uploading {
@@ -626,6 +704,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           },
         );
         // End root before waiting for both OTLP signals. Export failure leaves the prepared checkpoint intact.
+        let exportError: Error | undefined;
         try {
           await options.hue.flush();
           // Another concurrent flush may already have surfaced this failure. OTLP
@@ -639,11 +718,50 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
                 ),
               options.hue.transport.getReport(),
             );
-          checkpoint.exportState = "accepted";
-          await store.write(file, checkpoint);
+        } catch (error) {
+          exportError = error as Error;
+        }
+        try {
+          if (exportError === undefined) {
+            checkpoint.exportState = "accepted";
+            await store.write(file, checkpoint);
+          }
         } catch (error) {
           // The explicitly chosen omission policy can complete without acknowledged telemetry.
           if (options.traceEvidence.mode !== "omit") throw error;
+        }
+        if (exportError !== undefined && options.traceEvidence.mode !== "omit") {
+          if (options.traceNotAccepted !== "fail_case") throw exportError;
+          // Required evidence that Hue did not accept fails the case rather than leaving its
+          // execution started: the outcome is kept, the evidence is declared omitted. Only an
+          // export failure takes this path; a checkpoint that cannot be saved is raised above.
+          const failed = checkpoint as Prepared;
+          const issues = telemetryIssueCounts(exportError);
+          // Without its evidence the case fails whatever it answered: the output and generated
+          // files are not attached, so no scorer can pass it, and local scores taken of them go.
+          const {
+            traceEvidence: _required,
+            output: _output,
+            artifactIds: _artifacts,
+            primaryArtifactId: _primary,
+            ...complete
+          } = failed.complete;
+          failed.scores = [];
+          if (complete.state === "succeeded") {
+            complete.state = "error";
+            complete.error = {
+              type: "TelemetryNotAccepted",
+              ...(options.persistResultContent ? { message: describeTelemetryIssues(issues) } : {}),
+            };
+          }
+          failed.complete = {
+            ...complete,
+            traceEvidence: "omit",
+            omissionReason: describeTelemetryIssues(issues).slice(0, 4000),
+          };
+          failed.exportState = "not_accepted";
+          failed.telemetryIssues = issues;
+          await store.write(file, failed);
         }
       }
       const prepared = checkpoint as Prepared;
@@ -653,6 +771,15 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           "Target outcome is saved but trace export acknowledgement is unavailable. Restore/export the trace or explicitly complete with omitted evidence through the client; never rerun the target.",
         );
       const save = () => store.write(file, prepared);
+      const notAccepted: TelemetryNotAccepted | undefined =
+        prepared.exportState === "not_accepted"
+          ? {
+              caseId: item.id,
+              caseKey: item.externalKey,
+              executionId: prepared.executionId,
+              issues: prepared.telemetryIssues ?? [],
+            }
+          : undefined;
       if (!prepared.completion) {
         prepared.completion = await options.client.completeExecution(
           prepared.executionId,
@@ -661,7 +788,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         for (const score of prepared.scores)
           score.payload.evaluationItemId = prepared.completion.evaluationItemId;
         await save();
+        // Once per failed case: a resumed call finds the completion and only reports it.
+        if (notAccepted) await options.onTelemetryNotAccepted?.(notAccepted);
       }
+      if (notAccepted) (report.telemetryNotAccepted ??= []).push(notAccepted);
       const results = await uploadScores(
         options,
         experiment.evaluation.id,
