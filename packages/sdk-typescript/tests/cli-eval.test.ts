@@ -717,6 +717,15 @@ process.stdout.write(JSON.stringify({
 }));
 `;
 
+/** Answers through a result file that carries the world token. */
+const resultFileSource = `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+writeFileSync(
+  join(process.env.HUE_CASE_OUTPUT_DIR, "result.json"),
+  JSON.stringify({ token: process.env.HUE_WORLD_TOKEN }),
+);
+`;
+
 /** Throws with the world token in its message. */
 const throwingAdapterSource = `export default async function runMyAgent(_inputs, context) {
   throw new Error("could not reach the mirror with " + context.world.token + " and " + process.env.HUE_API_KEY);
@@ -742,6 +751,7 @@ async function workspace() {
   await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
   await writeFile(join(directory, "agent-stubborn.mjs"), stubbornSource);
   await writeFile(join(directory, "agent-leaky.mjs"), leakySource);
+  await writeFile(join(directory, "agent-result-file.mjs"), resultFileSource);
   await writeFile(join(directory, "hue-throwing.mjs"), throwingAdapterSource);
   return directory;
 }
@@ -1392,7 +1402,7 @@ describe("hue eval", () => {
               "--scenario",
               "Refund flow",
               "--command",
-              `${process.execPath} -e 'require("fs").writeFileSync(process.env.HUE_CASE_OUTPUT_DIR + "/result.json", JSON.stringify({ token: process.env.HUE_WORLD_TOKEN }))'`,
+              `${process.execPath} agent-result-file.mjs`,
               "--origin",
               filed.baseUrl,
               "--wait",
