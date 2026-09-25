@@ -35,8 +35,9 @@ function hueStandIn(
     frozen?: boolean;
     /** Answer creates as a deployment whose simulation gateway serves the world. */
     gateway?: boolean;
-    /** Refuse trace exports with 400, or drop their connection without an answer. */
-    traces?: "refuse" | "drop";
+    /** Refuse trace exports with 400, drop their connection without an answer, or answer the
+     * first with 503 and `Retry-After: 11`, past the SDK's default 10-second export deadline. */
+    traces?: "refuse" | "drop" | "retry-after";
     /** Grade as a scorer that never reads the execution state. */
     ignoreExecutionState?: boolean;
   } = {},
@@ -128,6 +129,7 @@ function hueStandIn(
     spans: [] as { name: string; attributes: string[] }[],
     /** Every OTLP request body, decompressed. */
     otlpBodies: [] as Buffer[],
+    traceRetries: 0,
     worldCreates: [] as Record<string, unknown>[],
     experiments: [] as Record<string, unknown>[],
     register: [] as Record<string, unknown>[],
@@ -199,6 +201,8 @@ function hueStandIn(
         }
         if (path.endsWith("/traces") && options.traces === "refuse")
           return new Response(null, { status: 400 });
+        if (path.endsWith("/traces") && options.traces === "retry-after" && !calls.traceRetries++)
+          return new Response(null, { status: 503, headers: { "Retry-After": "11" } });
         if (path.endsWith("/traces") && options.traces === "drop")
           // A body that fails after the headers: the server ends the connection mid-answer.
           return new Response(
@@ -1226,6 +1230,42 @@ describe("hue eval", () => {
       SPAWN_TIMEOUT * 2,
     );
   }
+
+  test(
+    "a case trace Hue asks to retry after 11 seconds is still accepted",
+    async () => {
+      const f = hueStandIn({ traces: "retry-after" });
+      const cwd = await workspace();
+      try {
+        const started = Date.now();
+        const result = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--wait",
+            "5",
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        // The export waited out the 503 and was acknowledged: the case keeps its evidence.
+        expect(f.calls.traceRetries).toBeGreaterThan(1);
+        expect(Date.now() - started).toBeGreaterThan(11_000);
+        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
+        expect(f.calls.evidence).not.toContainEqual(
+          expect.objectContaining({ traceEvidence: "omit" }),
+        );
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
 
   for (const traces of ["refuse", "drop"] as const)
     test(

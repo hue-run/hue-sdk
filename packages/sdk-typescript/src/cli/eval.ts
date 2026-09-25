@@ -563,6 +563,10 @@ interface CaseCredentials {
   connectionBundle?: unknown;
 }
 const MIN_SECRET_LENGTH = 16;
+/** Each export of the CLI's own telemetry, retries included, may take this long. A case's trace
+ * is required evidence, and Hue can acknowledge it slowly or ask for a retry after a few seconds,
+ * which the 10-second default leaves no room for. A refusal still fails at once. */
+const CASE_TRACE_EXPORT_MILLIS = 30_000;
 function caseSecrets(context: CaseCredentials): string[] {
   const values = new Set<string>();
   // Hue issues long credentials; a short value would redact ordinary text around it.
@@ -1742,7 +1746,13 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
           }),
       ),
     };
-    hue = createHue({ apiKey, baseUrl, serviceName: key, captureContent: values.content });
+    hue = createHue({
+      apiKey,
+      baseUrl,
+      serviceName: key,
+      captureContent: values.content,
+      timeoutMillis: CASE_TRACE_EXPORT_MILLIS,
+    });
     return values.worker
       ? await runWorker(
           values,
