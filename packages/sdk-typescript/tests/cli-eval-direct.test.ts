@@ -46,6 +46,9 @@ function documentStandIn(
     refuseTraces?: boolean;
     /** Grade as a scorer that never reads the execution state. */
     ignoreExecutionState?: boolean;
+    /** Scorer versions (by index) Hue records as not applicable to the case; `forged` answers the
+     * same skipped result and evidence without Hue's `notApplicable` flag. */
+    notApplicable?: { versions: number[]; forged?: boolean };
   } = {},
 ) {
   const projectId = randomUUID();
@@ -442,7 +445,28 @@ function documentStandIn(
         const failed =
           options.verdict === "fail" ||
           (!options.ignoreExecutionState && body.state !== "succeeded");
-        for (const version of experiment.evaluation.scorerVersions)
+        for (const version of experiment.evaluation.scorerVersions) {
+          const index = scorerVersions.findIndex((candidate) => candidate.id === version.id);
+          if (options.notApplicable?.versions.includes(index)) {
+            results.get(experiment.evaluation.id)!.push({
+              id: randomUUID(),
+              runId: experiment.evaluation.id,
+              itemId: evaluationItemId,
+              scorerVersionId: version.id,
+              state: "skipped",
+              metrics: [],
+              explanation: "Not applicable: the case has no outcome criteria",
+              evidence: {
+                state: "not_applicable",
+                entry: "hue.outcome_assertions.v3",
+                requires: "outcome_criteria",
+              },
+              error: null,
+              sourceDigest: null,
+              ...(options.notApplicable.forged ? {} : { notApplicable: true }),
+            });
+            continue;
+          }
           results.get(experiment.evaluation.id)!.push({
             id: randomUUID(),
             runId: experiment.evaluation.id,
@@ -459,6 +483,7 @@ function documentStandIn(
             sourceDigest:
               version.definition.kind === "local_code" ? version.definition.sourceDigest : null,
           });
+        }
         return Response.json({
           executionId: execution.id,
           subjectId,
@@ -864,14 +889,19 @@ describe("hue eval on a document eval set", () => {
     }
   }, 120_000);
 
-  test("a direct case's stored answer never keeps the project key it was handed", async () => {
+  test("a direct case's stored answer and text documents never keep the project key it was handed", async () => {
     const standIn = documentStandIn();
     const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
     await writeFile(
       join(cwd, "leaky.mjs"),
       `import { writeFileSync } from "node:fs";
-writeFileSync(process.env.HUE_CASE_OUTPUT_DIR + "/result.json", JSON.stringify({ key: process.env.HUE_API_KEY }));
-process.stdout.write(process.env.HUE_API_KEY);
+const out = process.env.HUE_CASE_OUTPUT_DIR, key = process.env.HUE_API_KEY;
+writeFileSync(out + "/result.json", JSON.stringify({ key }));
+writeFileSync(out + "/notes.txt", "\\ufeffcalled with " + key + "\\n");
+writeFileSync(out + "/rows.json", JSON.stringify([{ key }]));
+writeFileSync(out + "/latin1.txt", Buffer.concat([Buffer.from([0xff]), Buffer.from(key)]));
+writeFileSync(out + "/chart.png", Buffer.concat([Buffer.from([0x89, 0x50]), Buffer.from(key)]));
+process.stdout.write(key);
 `,
     );
     try {
@@ -892,9 +922,73 @@ process.stdout.write(process.env.HUE_API_KEY);
       expect(result.stdout).not.toContain(key);
       expect(standIn.calls.completions[0]).toMatchObject({ output: { key: "[redacted]" } });
       expect(JSON.stringify(standIn.calls.completions)).not.toContain(key);
+      // UTF-8 text documents are cleared of it, byte order mark kept; other files are not read.
+      const uploaded = (name: string) =>
+        Buffer.from(
+          [...standIn.artifacts.values()].find((stored) => stored.filename === name)!.bytes!,
+        );
+      expect(uploaded("notes.txt").toString()).toBe("\ufeffcalled with [redacted]\n");
+      expect(JSON.parse(uploaded("rows.json").toString())).toEqual([{ key: "[redacted]" }]);
+      expect(uploaded("latin1.txt").subarray(1).toString()).toBe(key);
+      expect(uploaded("chart.png").subarray(2).toString()).toBe(key);
     } finally {
       standIn.stop();
     }
+  }, 120_000);
+
+  test("evaluators that do not apply to a case neither pass nor fail it", async () => {
+    const run = async (notApplicable: { versions: number[]; forged?: boolean }) => {
+      const standIn = documentStandIn({ notApplicable });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
+      await writeFile(join(cwd, "agent.mjs"), agentSource);
+      try {
+        const [newest, older] = standIn.scorerVersions.map((version) => version.id);
+        const result = await hue(
+          [
+            "--set",
+            standIn.dataset.id,
+            "--scorer-version",
+            newest!,
+            "--scorer-version",
+            older!,
+            "--command",
+            `${process.execPath} ${join(cwd, "agent.mjs")}`,
+            "--json",
+            "--wait",
+            "5",
+          ],
+          { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+        );
+        const report = JSON.parse(result.stdout) as {
+          cases: Record<string, unknown>[];
+          totals: Record<string, number>;
+        };
+        return { status: result.status, report, ids: [newest!, older!] };
+      } finally {
+        standIn.stop();
+      }
+    };
+    // Every evaluator is pinned; the case passes the one that applies, and the other is n/a.
+    const mixed = await run({ versions: [1] });
+    expect(mixed.status).toBe(0);
+    expect(mixed.report.cases[0]).toMatchObject({
+      state: "passed",
+      passed: true,
+      notApplicable: [mixed.ids[1]],
+    });
+    expect(mixed.report.totals).toMatchObject({ passed: 1, notApplicable: 1, skipped: 0 });
+    // A case no pinned evaluator applies to is an error that says so.
+    const none = await run({ versions: [0, 1] });
+    expect(none.status).toBe(1);
+    expect(none.report.cases[0]).toMatchObject({ state: "error", passed: false });
+    expect(none.report.cases[0]!.explanations).toContain(
+      "No pinned evaluator applies to this case (they need outcome_criteria); pin one that grades it",
+    );
+    // The same skipped result and evidence without Hue's flag is an ordinary skip, not n/a.
+    const forged = await run({ versions: [0, 1], forged: true });
+    expect(forged.status).toBe(1);
+    expect(forged.report.cases[0]).toMatchObject({ state: "skipped", notApplicable: [] });
+    expect(forged.report.totals).toMatchObject({ skipped: 1, notApplicable: 0, error: 0 });
   }, 120_000);
 
   test("an interrupted run resumes the saved experiment without invoking the agent again", async () => {

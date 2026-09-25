@@ -186,6 +186,59 @@ describe("resolveScenarioPins", () => {
     expect(fixture.calls.list).toBe(0);
   });
 
+  test("resolves a published Scenario by the ID or case page URL of the case it published", async () => {
+    const fixture = registry();
+    fixture.scenario("Billing dispute");
+    const published = fixture.scenario("Refund flow");
+    const pins = await resolveScenarioPins(fixture.client, published.id);
+    expect(fixture.calls.list).toBe(0);
+    // Hue shows the published eval set case's own ID, not the Scenario's, on the case page.
+    expect(await resolveScenarioPins(fixture.client, published.caseId.toUpperCase())).toEqual(pins);
+    expect(
+      await resolveScenarioPins(
+        fixture.client,
+        `https://app.hue.run/evals/${published.datasetId}/cases/${published.caseId}`,
+      ),
+    ).toEqual(pins);
+    expect(
+      await resolveScenarioPins(
+        fixture.client,
+        `https://app.hue.run/case-conversions/${published.id}`,
+      ),
+    ).toEqual(pins);
+    // A draft's case is not published, so its ID resolves nothing.
+    const draft = fixture.scenario("Draft only", { published: false });
+    await expect(resolveScenarioPins(fixture.client, draft.caseId)).rejects.toBeInstanceOf(
+      HueApiError,
+    );
+  });
+
+  test("finds a published case past the name search's bound and past a vanished Scenario", async () => {
+    const fixture = registry();
+    const gone = fixture.scenario("Removed after listing");
+    for (let index = 0; index < 200; index++) fixture.scenario(`Filler ${index}`);
+    const last = fixture.scenario("Refund flow");
+    // A Scenario listed but no longer readable is skipped rather than failing the lookup.
+    const client: ScenarioClient = {
+      ...fixture.client,
+      getCaseConversion: async (id) => {
+        if (id === gone.id) throw new HueApiError(404);
+        return fixture.client.getCaseConversion(id);
+      },
+    };
+    expect((await resolveScenarioPins(client, last.caseId)).scenarioId).toBe(last.id);
+    expect((await resolveScenarioPins(client, "Filler 7")).name).toBe("Filler 7");
+    // Another failure still surfaces.
+    const failing: ScenarioClient = {
+      ...client,
+      getCaseConversion: async (id) => {
+        if (id !== last.id) throw new HueApiError(503);
+        return fixture.client.getCaseConversion(id);
+      },
+    };
+    await expect(resolveScenarioPins(failing, last.caseId)).rejects.toMatchObject({ status: 503 });
+  });
+
   test("pins every scorer version a publication lists, the outcome scorer first", async () => {
     const fixture = registry();
     const published = fixture.scenario("Refund flow with judges", { listedScorers: 2 });

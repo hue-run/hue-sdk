@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.4.2"
+  version: "0.4.3"
 ---
 
 # Hue tracing
@@ -125,9 +125,15 @@ simulated world and grades the sealed outcome. Scenario review and publication s
    ```
 
 Exit code 0 means every case passed; 1 means a case failed, errored or Hue's checks were still
-pending; 2 is a usage error. Content capture stays off unless `--content` is passed, and in
-one-shot mode so does persisting case outputs and explanations to Hue; `--worker` always persists
-them so a run launched from Hue can be read on its run page. Report the run URL and the printed verdicts; do not claim a pass without them.
+pending; 2 is a usage error. From `@hue-run/sdk` 0.10.0, an evaluator that does not apply to a
+case shows `n/a` and neither passes nor fails it, and a case no pinned evaluator applies to is an
+error. Telemetry content capture stays off unless `--content` is passed. From `@hue-run/sdk`
+0.10.0, one-shot mode stores case outputs, error messages and explanations in Hue by default, as
+`--worker` always does: the command's stdout is its stored answer, with the credentials `hue eval`
+handed it redacted, so the agent must not print credentials or debug logs there, and `--no-output`
+opts a one-shot run out. Earlier versions store one-shot outputs only with `--content`. Files the
+agent writes to `output/` are uploaded either way and are not fully redacted, so never write
+credentials there. Report the run URL and the printed verdicts; do not claim a pass without them.
 
 ## Evaluate a document eval set
 

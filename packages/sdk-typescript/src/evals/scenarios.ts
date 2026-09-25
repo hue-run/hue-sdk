@@ -1,4 +1,4 @@
-import type { EvaluationClient } from "./client.js";
+import { HueApiError, type EvaluationClient } from "./client.js";
 import type { CaseConversion, CaseConversionSummary, Dataset, Page, PageOptions } from "./types.js";
 
 /** Immutable pins resolved from a published Scenario or a saved eval set. */
@@ -133,6 +133,38 @@ async function listPublishedScenarios(client: ScenarioClient): Promise<CaseConve
   }
 }
 
+/** A listed Scenario, or undefined when it can no longer be read (removed since the listing). */
+async function readListed(client: ScenarioClient, id: string): Promise<CaseConversion | undefined> {
+  try {
+    return await client.getCaseConversion(id);
+  } catch (error) {
+    if (error instanceof HueApiError && error.status === 404) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * The published Scenario whose eval set case has this ID, the one Hue shows on the case page.
+ * Every published Scenario is read, page by page, until one matches: an exact ID is never cut
+ * off by the bound a name search uses.
+ */
+async function scenarioOfPublishedCase(
+  client: ScenarioClient,
+  caseId: string,
+): Promise<CaseConversion | undefined> {
+  let after: string | undefined;
+  for (;;) {
+    const page = await client.listCaseConversions({ after, limit: 100 });
+    for (const summary of page.items) {
+      if (summary.status !== "published") continue;
+      const scenario = await readListed(client, summary.id);
+      if (scenario?.publication?.caseId.toLowerCase() === caseId) return scenario;
+    }
+    if (!page.nextCursor || page.nextCursor === after || !page.items.length) return undefined;
+    after = page.nextCursor;
+  }
+}
+
 const describe = (candidates: { name: string; id: string }[]) =>
   candidates.map((candidate) => `${candidate.name} (${candidate.id})`).join(", ");
 
@@ -162,19 +194,29 @@ async function pinsFromScenario(
 }
 
 /**
- * Resolves a published Scenario's immutable pins from its ID, its Hue URL or its name. A name
- * matches the dataset name of published Scenarios case-insensitively: exact matches first, then
- * a unique prefix or substring.
+ * Resolves a published Scenario's immutable pins from its ID, the ID of the eval set case it
+ * published, a Hue URL naming either (`/scenarios/<id>`, `/case-conversions/<id>` or
+ * `/cases/<id>`) or its name. A name matches the dataset name of published Scenarios
+ * case-insensitively: exact matches first, then a unique prefix or substring.
  *
- * @throws Error when no Scenario matches, several match, or the Scenario is an unpublished draft.
+ * @throws Error when no Scenario matches, several match, or the Scenario is an unpublished draft;
+ * {@link HueApiError} with status 404 when neither a Scenario nor a published case has the ID.
  */
 export async function resolveScenarioPins(
   client: ScenarioClient,
   selector: string,
 ): Promise<ScenarioPins> {
-  const parsed = parseScenarioSelector(selector);
+  const parsed = parseScenarioSelector(selector, ["scenarios", "case-conversions", "cases"]);
   if (parsed.kind === "id") {
-    const scenario = await client.getCaseConversion(parsed.id);
+    let scenario: CaseConversion;
+    try {
+      scenario = await client.getCaseConversion(parsed.id);
+    } catch (error) {
+      if (!(error instanceof HueApiError && error.status === 404)) throw error;
+      const published = await scenarioOfPublishedCase(client, parsed.id);
+      if (!published) throw error;
+      scenario = published;
+    }
     if (!scenario.publication)
       throw new Error(
         `Scenario ${scenario.id} is a draft without published pins; publish it in Hue first`,
@@ -189,8 +231,8 @@ export async function resolveScenarioPins(
   const datasets = new Map<string, Dataset>();
   const candidates: { name: string; id: string; scenario: CaseConversion; dataset: Dataset }[] = [];
   for (const summary of published) {
-    const scenario = await client.getCaseConversion(summary.id);
-    if (!scenario.publication) continue;
+    const scenario = await readListed(client, summary.id);
+    if (!scenario?.publication) continue;
     let dataset = datasets.get(scenario.publication.datasetId);
     if (!dataset) {
       dataset = await client.getDataset(scenario.publication.datasetId);

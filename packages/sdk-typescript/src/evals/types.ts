@@ -281,6 +281,10 @@ export interface StoredResult extends ResultSummary {
   error: TypedError | null;
   /** Source digest of the local scorer that produced it, when applicable. */
   sourceDigest: string | null;
+  /** True only for a `skipped` result Hue's own outcome scoring recorded because the evaluator
+   * does not apply to the case (it has no outcome criteria or conversion rubric to grade); a
+   * submitted result never reads true. Absent from servers that predate it. */
+  notApplicable?: boolean;
 }
 /** A hosted judge job and its charge accounting. */
 export interface JudgeJob {
