@@ -35,7 +35,7 @@ import { createHue, HueExportError } from "@hue-run/sdk";
 const hue = createHue({
   apiKey: process.env.HUE_API_KEY!, // a project service key, on the server only
   serviceName: "my-agent",
-  captureContent: false, // required: explicitly choose true or false
+  captureContent: true, // required: true records content; false sends metadata only
   onExportIssue: (issue) => console.error(issue), // sanitized counts, never server bodies
 });
 
@@ -57,6 +57,11 @@ try {
 }
 await hue.shutdown(); // flushes and releases providers owned by this client
 ```
+
+`captureContent` is required. The example sets `true`, the recommended choice: trace inspection,
+evaluations and judges read the prompts, responses and tool inputs/outputs it records. Choose
+`false` for metadata only when a policy forbids sending that content; see
+[Privacy and content](#privacy-and-content).
 
 The default destination is `https://app.hue.run`. Data goes to
 `/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` with a Bearer project key.
@@ -287,6 +292,12 @@ outputs and exports through Hue's attached processors keeps the label.
 
 ## Privacy and content
 
+Set `captureContent: true` for full traces: prompts and messages, responses and tool inputs/outputs,
+alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that
+content. Choose `false`, metadata-only mode, when your users decline or an application or data
+policy forbids sending that content to another service. `redact` and the credential filtering
+described below apply in both modes.
+
 `captureContent: false` disables manual input/output/messages/tool content and
 removes recognized GenAI, Vercel, OpenInference and OpenLLMetry content attributes,
 legacy GenAI content events, log bodies, status messages and exception text before
@@ -373,7 +384,7 @@ import { createHue, createHueTransport } from "@hue-run/sdk";
 const transport = createHueTransport({
   apiKey: process.env.HUE_API_KEY!,
   serviceName: "existing-app",
-  captureContent: false,
+  captureContent: true, // false sends metadata only
 });
 const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
 const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
@@ -604,16 +615,18 @@ their agents with `runLocalAgent()`; setup does not register workers or launch s
 ### Command-line evaluation
 
 The unreleased `hue eval` command wraps `runSimulation()` and `runLocalAgent()` for an adapter
-file or a shell command: `hue eval --case "<name>" ./hue-agent.ts` creates a fresh run
+file or a shell command: `hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run
 from a published case's immutable pins, runs the agent in one isolated world per case, waits
 for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
 `--worker` registers the same adapter for runs launched from Hue. It needs a Read and
-write key in `HUE_API_KEY` (never printed) and keeps content capture off unless `--content`
-is passed. See [Evaluate an agent against a case](CLI.md#evaluate-an-agent-against-a-case).
+write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is
+passed; the example passes it so case spans carry content and, in one-shot mode, case outputs and
+explanations are persisted to Hue. Instrument the agent itself for its model and tool spans. See
+[Evaluate an agent against a case](CLI.md#evaluate-an-agent-against-a-case).
 Eval sets whose cases pin files instead of a world run as direct cases through `runExperiment()`:
-`hue eval --set <slug> --scorer <slug> --command "…"` hands the agent each case's pinned files in a
-private directory, uploads the documents it writes and waits for Hue's grading executor to score
-them. See [Evaluate a document eval set](CLI.md#evaluate-a-document-eval-set).
+`hue eval --set <slug> --scorer <slug> --command "…" --content` hands the agent each case's
+pinned files in a private directory, uploads the documents it writes and waits for Hue's grading
+executor to score them. See [Evaluate a document eval set](CLI.md#evaluate-a-document-eval-set).
 
 ## Managed targets
 

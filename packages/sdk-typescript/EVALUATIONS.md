@@ -18,7 +18,8 @@ import { builtins, createEvaluationClient, runExperiment, rescore } from "@hue-r
 
 const connection = { apiKey: process.env.HUE_API_KEY! };
 const client = createEvaluationClient(connection);
-const hue = createHue({ ...connection, serviceName: "evaluation-demo", captureContent: false });
+// captureContent: false sends metadata only.
+const hue = createHue({ ...connection, serviceName: "evaluation-demo", captureContent: true });
 
 // Registry writes use optimistic revisions; they do not have automatic retries.
 const dataset = await client.createDataset({ name: "Greetings", slug: "greetings" });
@@ -215,7 +216,8 @@ import { createEvaluationClient, runLocalAgent } from "@hue-run/sdk/evals";
 import { runMyAgent } from "./agent.js"; // Your existing application entry point.
 
 const connection = { apiKey: process.env.HUE_API_KEY! };
-const hue = createHue({ ...connection, serviceName: "local-worker", captureContent: false });
+// captureContent: false sends metadata only.
+const hue = createHue({ ...connection, serviceName: "local-worker", captureContent: true });
 try {
   await runLocalAgent({
     client: createEvaluationClient(connection),
