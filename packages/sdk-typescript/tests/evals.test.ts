@@ -1,6 +1,8 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -9,6 +11,7 @@ import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { createHue, HueExportError } from "../src/index.js";
 import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoint.js";
 import {
+  ArtifactSizeError,
   builtins,
   createEvaluationClient,
   defineLocalScorer,
@@ -911,6 +914,167 @@ describe("installed evaluation API and runner contract", () => {
     } finally {
       redirect.stop(true);
       target.stop(true);
+    }
+  });
+  test("requests Hue refused with a short Retry-After are sent again; other failures are not", async () => {
+    const seen: string[] = [];
+    let replies: (() => Response)[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        seen.push(`${request.method} ${new URL(request.url).pathname} ${await request.text()}`);
+        return (replies.shift() ?? (() => Response.json({ id: "synthetic" })))();
+      },
+    });
+    const refusal = (status: number, retryAfter?: string) => () =>
+      Response.json(
+        { error: "refused" },
+        { status, headers: retryAfter === undefined ? {} : { "Retry-After": retryAfter } },
+      );
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    const exchange = async (planned: (() => Response)[], call: () => Promise<unknown>) => {
+      replies = planned;
+      seen.length = 0;
+      const outcome = await call().then(
+        (value) => ({ value, error: undefined }),
+        (error: unknown) => ({ value: undefined, error }),
+      );
+      return { ...outcome, seen: [...seen], unused: replies.length };
+    };
+    try {
+      const read = await exchange([refusal(503, "0"), refusal(429, "0")], () =>
+        client.checkConnection(),
+      );
+      expect(read.value).toEqual({ id: "synthetic" });
+      expect(read.seen).toEqual(Array(3).fill("GET /api/v1/projects/current "));
+
+      // A mutation Hue refused before acting on it is sent again with the same body.
+      const write = await exchange([refusal(503, "0")], () =>
+        client.createDataset({ name: "Greetings", slug: "greetings" }),
+      );
+      expect(write.value).toEqual({ id: "synthetic" });
+      expect(write.seen).toEqual(
+        Array(2).fill('POST /api/v1/datasets {"name":"Greetings","slug":"greetings"}'),
+      );
+
+      // Four more attempts at most, then the refusal is the caller's error.
+      const busy = await exchange(Array(6).fill(refusal(503, "0")), () => client.checkConnection());
+      expect(busy.error).toBeInstanceOf(HueApiError);
+      expect(busy.error).toMatchObject({ status: 503 });
+      expect(busy.seen).toHaveLength(5);
+      expect(busy.unused).toBe(1);
+
+      for (const [status, retryAfter] of [
+        [503, "60"],
+        [503, undefined],
+        [503, "1.5"],
+        [503, "\u00b2"],
+        [429, "Wed, 21 Oct 2026 07:28:00 GMT"],
+        [500, "0"],
+        [502, "0"],
+      ] as const) {
+        const failed = await exchange([refusal(status, retryAfter)], () =>
+          client.createDataset({ name: "Greetings", slug: "greetings" }),
+        );
+        expect(failed.error).toMatchObject({ status });
+        expect(failed.seen).toHaveLength(1);
+      }
+
+      const started = performance.now();
+      const waited = await exchange([refusal(429, "1")], () => client.checkConnection());
+      expect(waited.value).toEqual({ id: "synthetic" });
+      expect(performance.now() - started).toBeGreaterThanOrEqual(990);
+    } finally {
+      server.stop(true);
+    }
+  });
+  test("an artifact download Hue refused with a short Retry-After is fetched again and still stops at maxBytes", async () => {
+    let hits = 0;
+    let sent = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        hits++;
+        if (hits % 2 === 1)
+          return Response.json({ error: "busy" }, { status: 503, headers: { "Retry-After": "0" } });
+        // Second request of each pair: the first pair gets five bytes, the second an endless body.
+        if (hits === 2) return new Response("bytes");
+        const stream = new ReadableStream({
+          pull(controller) {
+            sent += 64 * 1024;
+            controller.enqueue(new Uint8Array(64 * 1024));
+          },
+        });
+        return new Response(stream);
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    try {
+      expect(new TextDecoder().decode(await client.downloadArtifact(randomUUID()))).toBe("bytes");
+      expect(hits).toBe(2);
+      await expect(client.downloadArtifact(randomUUID(), { maxBytes: 10 })).rejects.toBeInstanceOf(
+        ArtifactSizeError,
+      );
+      expect(hits).toBe(4);
+      expect(sent).toBeLessThan(25 * 1024 * 1024);
+    } finally {
+      server.stop(true);
+    }
+  });
+  test("a write whose connection drops or times out is sent once and fails with HueApiError", async () => {
+    // Hue may have acted on a request that got no answer, so neither failure may send it again.
+    const seen: string[] = [];
+    let answer: "reply" | "drop" | "hang" = "reply";
+    const server = createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      seen.push(`${request.method} ${request.url} ${body}`);
+      if (answer === "drop") request.socket.destroy();
+      else if (answer === "reply") response.end("{}");
+    });
+    await new Promise<void>((listening) => server.listen(0, "127.0.0.1", listening));
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      timeoutMillis: 200,
+    });
+    const write = 'POST /api/v1/datasets {"name":"Greetings","slug":"greetings"}';
+    const failure = async () => {
+      const error = await client.createDataset({ name: "Greetings", slug: "greetings" }).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(HueApiError);
+      expect((error as HueApiError).status).toBeUndefined();
+    };
+    try {
+      answer = "drop";
+      await failure();
+      expect(seen).toEqual([write]);
+
+      // A connection kept alive from an earlier answer is where HTTP clients tend to resend.
+      seen.length = 0;
+      answer = "reply";
+      await client.checkConnection();
+      answer = "drop";
+      await failure();
+      expect(seen).toEqual(["GET /api/v1/projects/current ", write]);
+
+      seen.length = 0;
+      answer = "hang";
+      await failure();
+      expect(seen).toEqual([write]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((closed) => server.close(closed));
     }
   });
   test("public dataset/scorer registry methods preserve null and revision", async () => {

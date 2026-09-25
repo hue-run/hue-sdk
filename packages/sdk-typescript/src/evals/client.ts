@@ -175,10 +175,28 @@ function productRunFields<T>(value: unknown, kind: "run" | "scoring" | "result")
     result.scoring = result.evaluation;
   return result as T;
 }
+/** Times a refused request is sent again before its refusal is the caller's error. */
+const REFUSAL_RETRIES = 4;
+/** A refusal asking for a longer wait fails at once rather than holding the caller. */
+const MAX_REFUSAL_RETRY_AFTER_SECONDS = 5;
+/**
+ * The whole-second `Retry-After` of a 429 or 503 asking for at most 5 seconds. Hue sends one only
+ * when it refused the request before acting on it, such as a busy key check, so sending any method
+ * again is safe. A date, a longer wait or any other failure, a timeout included, is not retried.
+ */
+function refusalRetryAfter(response: Response): number | undefined {
+  if (response.status !== 429 && response.status !== 503) return undefined;
+  const header = response.headers.get("retry-after")?.trim() ?? "";
+  if (!/^\d{1,6}$/.test(header)) return undefined;
+  const seconds = Number(header);
+  return seconds <= MAX_REFUSAL_RETRY_AFTER_SECONDS ? seconds : undefined;
+}
 /**
  * Typed client for Hue's evaluation REST API: datasets, scorers, experiments, executions, runs,
  * results and hosted judge jobs. No implicit mutation retry: callers retain stable idempotency keys
- * for experiments and results. Responses are bounded to 4 MiB.
+ * for experiments and results. The one exception is a request Hue refused before acting on it with
+ * a short `Retry-After` (HTTP 429 or 503, at most 5 seconds): it is sent again after that wait, up
+ * to four times. Responses are bounded to 4 MiB.
  */
 export class EvaluationClient {
   /** Validated Hue origin. */
@@ -194,6 +212,23 @@ export class EvaluationClient {
     this.baseUrl = validated.baseUrl;
     this.apiKey = validated.apiKey;
     this.timeoutMillis = validated.timeoutMillis;
+  }
+  /** Sends one request to Hue, again after the wait while Hue refuses it with a short
+   * `Retry-After`. `init` runs for every attempt, so each has its own timeout. */
+  private async send(url: string, init: () => RequestInit): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      let response: Response;
+      try {
+        response = await fetch(url, init());
+      } catch {
+        throw new HueApiError();
+      }
+      const seconds = attempt < REFUSAL_RETRIES ? refusalRetryAfter(response) : undefined;
+      if (seconds === undefined) return response;
+      await response.body?.cancel().catch(() => undefined);
+      // Never sooner than asked; the jitter spreads out parallel requests refused together.
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000 * (1 + Math.random() / 2)));
+    }
   }
   private async request<T>(
     method: string,
@@ -213,21 +248,16 @@ export class EvaluationClient {
               bounds,
             ),
           );
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}/api/v1${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          ...(payload ? { "Content-Type": "application/json" } : {}),
-        },
-        body: payload,
-        redirect: "error",
-        signal: AbortSignal.timeout(this.timeoutMillis),
-      });
-    } catch {
-      throw new HueApiError();
-    }
+    const response = await this.send(`${this.baseUrl}/api/v1${path}`, () => ({
+      method,
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        ...(payload ? { "Content-Type": "application/json" } : {}),
+      },
+      body: payload,
+      redirect: "error",
+      signal: AbortSignal.timeout(this.timeoutMillis),
+    }));
     if (!response.ok) {
       await response.body?.cancel();
       throw new HueApiError(response.status);
@@ -259,17 +289,15 @@ export class EvaluationClient {
     const expected = options.maxBytes;
     if (expected !== undefined && (!Number.isSafeInteger(expected) || expected < 0))
       throw new RangeError("maxBytes must be a non-negative integer");
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`, {
+    const response = await this.send(
+      `${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`,
+      () => ({
         method: "GET",
         headers: { Authorization: `Bearer ${this.apiKey}` },
         redirect: "error",
         signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
-      });
-    } catch {
-      throw new HueApiError();
-    }
+      }),
+    );
     if (!response.ok) {
       await response.body?.cancel();
       throw new HueApiError(response.status);

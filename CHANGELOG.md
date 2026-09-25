@@ -159,6 +159,12 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
 - `EvaluationClient.registerLocalAgent` reads the registered key from the response's `agentKey`
   when it has no `key`, so `RegisteredLocalAgent.key` is set and `hue eval --worker` no longer
   prints "Registered agent undefined".
+- `EvaluationClient` sends a request again, up to four times, when Hue refused it before acting on
+  it with a short `Retry-After` (HTTP 429 or 503 asking for at most 5 seconds), and waits at least
+  that long first. Hue does this when its key check is busy, which parallel cases can trigger; such
+  a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
+  any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
+  A refused `downloadArtifact` is fetched again the same way and still stops at `maxBytes`.
 
 ### [0.9.0] - 2026-09-24
 
@@ -708,6 +714,11 @@ No registry release is claimed until publication and registry acceptance complet
   hosts the exported text and `hue.tool.definitions.sha256` now match the TypeScript SDK's; some
   internationalized hosts still differ, as the README describes, and an IDN host longer than
   1,024 characters is refused before any IDNA work.
+- `EvaluationClient` sends a request again, up to four times, when Hue refused it before acting on
+  it with a short `Retry-After` (HTTP 429 or 503 asking for at most 5 seconds), and waits at least
+  that long first. Hue does this when its key check is busy, which parallel cases can trigger; such
+  a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
+  any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
 
 ### [0.6.0] - 2026-09-24
 
