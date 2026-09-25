@@ -111,12 +111,11 @@ _BARE_VALUE = re.compile(
     rf"[^{_JS_SPACE}\"',;&}})\]]+",
     re.IGNORECASE | re.ASCII,
 )
-# An ``Authorization`` header's unquoted value: a scheme word of letters and dashes and the
-# credential after it (``Bot …``, ``Api-Key …``), or a lone credential. One already replaced is
-# left alone.
+# An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
+# ``OAuth1 …``), or a lone credential. One already replaced is left alone.
 _AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)(?:[A-Za-z][A-Za-z-]*[ \t]+"
-    rf"(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+)|[^{_JS_SPACE}\"',;}})\]]+)"
+    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)[^{_JS_SPACE}\"',;}})\]]+"
+    rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
 )
 
 

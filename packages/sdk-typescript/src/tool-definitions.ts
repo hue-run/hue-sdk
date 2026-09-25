@@ -143,11 +143,10 @@ const quotedValue =
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
   /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
-/** An `Authorization` header's unquoted value: a scheme word of letters and dashes and the
- * credential after it (`Bot …`, `Api-Key …`), or a lone credential. One already replaced is left
- * alone. */
+/** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
+ * `OAuth1 …`), or a lone credential. One already replaced is left alone. */
 const authorizationBare =
-  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)(?:[A-Za-z][A-Za-z-]*[ \t]+(?:\[redacted\]|[^\s"',;})\]]+)|[^\s"',;})\]]+)/y;
+  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)[^\s"',;})\]]+(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
 
 function normalizedKey(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, "");

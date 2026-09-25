@@ -229,12 +229,16 @@
       "expected": "Hue said [redacted] is invalid"
     },
     {
-      "input": "Authorization: xoxb-synthetic-0123 was rejected",
+      "input": "Authorization: Api-Key synthetic-api-key was rejected",
       "expected": "Authorization: [redacted] was rejected"
     },
     {
-      "input": "Authorization: Api-Key synthetic-api-key was rejected",
-      "expected": "Authorization: [redacted] was rejected"
+      "input": "Authorization: OAuth1 synthetic-oauth-credential",
+      "expected": "Authorization: [redacted]"
+    },
+    {
+      "input": "Authorization: AWS4-HMAC-SHA256 synthetic-aws-credential",
+      "expected": "Authorization: [redacted]"
     }
   ]
 }
