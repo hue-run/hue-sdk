@@ -17,12 +17,24 @@ test("a command whose peer is not installed names it and how to install it", asy
   );
   const api = await loadCommand(
     "mcp",
-    failing('Cannot find module "@opentelemetry/api/build/src/index.js" from "/app/cli.js"'),
+    failing('Cannot find package "@opentelemetry/api" from "/app/node_modules/@hue-run/sdk/x.js"'),
   ).catch((error: unknown) => error);
   expect(api).toMatchObject({
     peer: "@opentelemetry/api",
     range: pkg.peerDependencies["@opentelemetry/api"],
   });
+});
+
+test("a missing file of an installed peer keeps its own error", async () => {
+  // The peer is installed; a file or subpath inside it is not, which installing it again won't fix.
+  for (const message of [
+    'Cannot find module "@opentelemetry/api/build/src/index.js" from "/app/cli.js"',
+    "Cannot find module '/app/node_modules/zod/v4/index.js' imported from /app/x.js",
+    "Cannot find package 'zod/v4' imported from /app/x.js",
+  ]) {
+    const error = new Error(message);
+    await expect(loadCommand("eval", () => Promise.reject(error))).rejects.toBe(error);
+  }
 });
 
 test("any other failure, and a missing package that is not a peer, is left as it was", async () => {

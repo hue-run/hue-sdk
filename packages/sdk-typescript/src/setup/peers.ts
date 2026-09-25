@@ -36,7 +36,9 @@ export async function loadCommand<T>(command: string, load: () => Promise<T>): P
   try {
     return await load();
   } catch (error) {
-    const missing = /Cannot find (?:package|module) ['"]((?:@[^/'"]+\/)?[^/'"]+)/.exec(
+    // Only a package that cannot be found at all; "Cannot find module" for a file or subpath of
+    // an installed package is another failure and keeps its own message.
+    const missing = /Cannot find package ['"]((?:@[^/'"]+\/)?[^/'"]+)['"]/.exec(
       error instanceof Error ? error.message : "",
     )?.[1];
     const range = missing === undefined ? undefined : peerRange(missing);

@@ -185,7 +185,7 @@ const MAX_REFUSAL_RETRY_AFTER_SECONDS = 5;
 function askedRetryAfter(response: Response): number | undefined {
   if (response.status !== 429 && response.status !== 503) return undefined;
   const header = response.headers.get("retry-after")?.trim() ?? "";
-  return /^\d{1,5}$/.test(header) ? Math.min(Number(header), 86_400) : undefined;
+  return /^\d{1,6}$/.test(header) ? Math.min(Number(header), 86_400) : undefined;
 }
 /**
  * The whole-second `Retry-After` of a 429 or 503 asking for at most 5 seconds. Hue sends one only
