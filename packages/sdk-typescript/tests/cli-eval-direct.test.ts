@@ -653,8 +653,10 @@ describe("hue eval on a document eval set", () => {
         "Citacion.docx",
       );
       expect(standIn.calls.uploads).toBe(2);
-      // Output stays off the wire without --content; the summary file is the recorded output when it is on.
-      expect(completion).not.toHaveProperty("output");
+      // The output is stored by default: the summary file is the recorded output.
+      expect(completion).toMatchObject({
+        output: { summary: expect.stringContaining("advertencias para revisión: 0") },
+      });
       const content = await hue(
         [
           "--set",
@@ -665,7 +667,7 @@ describe("hue eval on a document eval set", () => {
           standIn.scorerVersions[1]!.id,
           "--command",
           `${process.execPath} ${join(cwd, "agent.mjs")}`,
-          "--content",
+          "--no-output",
           "--wait",
           "30",
           "--baseline",
@@ -678,9 +680,8 @@ describe("hue eval on a document eval set", () => {
         datasetVersionId: standIn.dataset.versions[0]!.id,
         scorerVersionIds: [standIn.scorerVersions[1]!.id],
       });
-      expect(standIn.calls.completions[1]).toMatchObject({
-        output: { summary: expect.stringContaining("advertencias para revisión: 0") },
-      });
+      // --no-output keeps the output off the wire; the documents are still uploaded and graded.
+      expect(standIn.calls.completions[1]).not.toHaveProperty("output");
       expect(content.stdout).toContain("PASSED");
       expect(content.stdout).toContain("1 of 1 case passed");
       expect(content.stdout).toMatch(/Baseline .*: 0 improved, 0 regressed, 1 unchanged/);
@@ -750,15 +751,39 @@ describe("hue eval on a document eval set", () => {
         { cwd, env: { HUE_BASE_URL: standIn.baseUrl, WRITE_UNSUPPORTED: "1" } },
       );
       expect(unsupported.status).toBe(1);
-      // Without --content the error message stays off the wire; the type and the empty upload remain.
+      // The error message is stored by default, with the type and the empty upload.
       expect(standIn.calls.completions[0]).toMatchObject({
+        state: "error",
+        error: {
+          type: "TargetError",
+          message: expect.stringContaining("Hue does not accept as generated documents"),
+        },
+        filenames: [],
+      });
+      const report = JSON.parse(unsupported.stdout) as { cases: { state: string }[] };
+      expect(report.cases[0]!.state).not.toBe("passed");
+      // With --no-output it stays off the wire; the type and the empty upload remain.
+      const quiet = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--no-output",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl, WRITE_UNSUPPORTED: "1" } },
+      );
+      expect(quiet.status).toBe(1);
+      expect(standIn.calls.completions[1]).toMatchObject({
         state: "error",
         error: { type: "TargetError" },
         filenames: [],
       });
-      expect(standIn.calls.completions[0]).not.toHaveProperty("error.message");
-      const report = JSON.parse(unsupported.stdout) as { cases: { state: string }[] };
-      expect(report.cases[0]!.state).not.toBe("passed");
+      expect(standIn.calls.completions[1]).not.toHaveProperty("error.message");
       const failing = await hue(
         [
           "--set",
@@ -834,6 +859,39 @@ describe("hue eval on a document eval set", () => {
         telemetry: { code: "telemetry_not_accepted" },
       });
       expect(report.totals).toMatchObject({ passed: 0, error: 1 });
+    } finally {
+      standIn.stop();
+    }
+  }, 120_000);
+
+  test("a direct case's stored answer never keeps the project key it was handed", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
+    await writeFile(
+      join(cwd, "leaky.mjs"),
+      `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.HUE_CASE_OUTPUT_DIR + "/result.json", JSON.stringify({ key: process.env.HUE_API_KEY }));
+process.stdout.write(process.env.HUE_API_KEY);
+`,
+    );
+    try {
+      const result = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "leaky.mjs")}`,
+          "--allow-hue-credentials",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      expect(result.stdout).not.toContain(key);
+      expect(standIn.calls.completions[0]).toMatchObject({ output: { key: "[redacted]" } });
+      expect(JSON.stringify(standIn.calls.completions)).not.toContain(key);
     } finally {
       standIn.stop();
     }
