@@ -42,6 +42,11 @@ export interface VerdictResult {
   explanation: string | null;
   /** Scorer failure for `state: "error"`, otherwise `null`. */
   error: TypedError | null;
+  /** Whether Hue recorded that the evaluator does not apply to the case; such a result counts as
+   * neither a pass nor a failure. Absent means false. */
+  notApplicable?: boolean;
+  /** What a not-applicable evaluator needs that the case lacks, such as `outcome_criteria`. */
+  requires?: string;
 }
 
 /** Outcome of {@link waitForResults}. */
@@ -131,6 +136,9 @@ export async function waitForResults(
           const id = found.get(`${item.id}:${pin}`);
           if (!id) continue;
           const stored = await client.getResult(id);
+          // Only Hue's own flag marks a result not applicable; its evidence alone never does.
+          const notApplicable = stored.notApplicable === true;
+          const evidence = stored.evidence as { requires?: unknown } | null;
           results.push({
             id: stored.id,
             itemId: stored.itemId,
@@ -140,6 +148,10 @@ export async function waitForResults(
             metrics: stored.state === "scored" ? stored.metrics : [],
             explanation: stored.explanation ?? null,
             error: stored.error ?? null,
+            notApplicable,
+            ...(notApplicable && typeof evidence?.requires === "string"
+              ? { requires: evidence.requires }
+              : {}),
           });
         }
       return { complete, items, results };
@@ -156,10 +168,15 @@ export interface CaseVerdict {
   externalKey: string;
   /** Subject scored for the case, or `null` before completion. */
   subjectId: string | null;
-  /** `passed` and `failed` are scored verdicts; `error`, `skipped` and `pending` carry no verdict. */
+  /** `passed` and `failed` are scored verdicts; `error`, `skipped` and `pending` carry no verdict.
+   * Only the evaluators that apply to the case decide it; one where none applies is an error. */
   state: "passed" | "failed" | "error" | "skipped" | "pending";
-  /** True only for `state: "passed"`: every scored metric passed and no pin errored or is missing. */
+  /** True only for `state: "passed"`: every scored metric of an applicable pin passed and no
+   * applicable pin errored or is missing. */
   passed: boolean;
+  /** Pinned scorer versions Hue recorded as not applicable to the case; always set by
+   * {@link summarizeVerdicts}. */
+  notApplicable?: string[];
   /** Reported metrics across pinned scorers, in result order. */
   metrics: (Metric & {
     /** Scorer version that reported the metric. */
@@ -189,6 +206,9 @@ export interface VerdictSummary {
     skipped: number;
     /** Cases still missing a result. */
     pending: number;
+    /** Results of evaluators that do not apply to their case, a case can have several; always
+     * set by {@link summarizeVerdicts}. */
+    notApplicable?: number;
   };
 }
 
@@ -227,35 +247,62 @@ export function summarizeVerdicts(
     const metrics = own.flatMap((result) =>
       result.metrics.map((metric) => ({ ...metric, scorerVersionId: result.scorerVersionId })),
     );
-    const errors = own.filter((result) => result.state === "error");
-    const scored = own.filter((result) => result.state === "scored");
+    // An evaluator that does not apply to the case neither passes nor fails it.
+    const inapplicable = own.filter((result) => result.notApplicable);
+    const applicable = own.filter((result) => !result.notApplicable);
+    const errors = applicable.filter((result) => result.state === "error");
+    const scored = applicable.filter((result) => result.state === "scored");
     const failing = scored.filter((result) => !result.metrics.every(metricPassed));
     const missing = [...pins].some((pin) => !own.some((result) => result.scorerVersionId === pin));
-    const state: CaseVerdict["state"] = errors.length
-      ? "error"
-      : failing.length
-        ? "failed"
-        : missing || !own.length
-          ? "pending"
-          : scored.length
-            ? "passed"
-            : "skipped";
+    const noneApplies = !missing && own.length > 0 && !applicable.length;
+    const state: CaseVerdict["state"] =
+      errors.length || noneApplies
+        ? "error"
+        : failing.length
+          ? "failed"
+          : missing || !own.length
+            ? "pending"
+            : scored.length
+              ? "passed"
+              : "skipped";
+    const requires = [
+      ...new Set(inapplicable.flatMap((result) => (result.requires ? [result.requires] : []))),
+    ];
     return {
       caseId: item.id,
       externalKey: item.externalKey,
       subjectId,
       state,
       passed: state === "passed",
+      notApplicable: inapplicable.map((result) => result.scorerVersionId),
       metrics,
-      explanations: own
-        .filter((result) => result.state !== "scored" || failing.includes(result))
-        .map((result) => result.explanation)
-        .filter((explanation): explanation is string => !!explanation),
+      explanations: [
+        ...(noneApplies
+          ? [
+              `No pinned evaluator applies to this case${requires.length ? ` (they need ${requires.join(" or ")})` : ""}; pin one that grades it`,
+            ]
+          : []),
+        ...applicable
+          .filter((result) => result.state !== "scored" || failing.includes(result))
+          .map((result) => result.explanation)
+          .filter((explanation): explanation is string => !!explanation),
+      ],
       errors: errors.map((result) => result.error?.type ?? "ScorerError"),
     };
   });
-  const totals = { cases: cases.length, passed: 0, failed: 0, error: 0, skipped: 0, pending: 0 };
-  for (const item of cases) totals[item.state]++;
+  const totals = {
+    cases: cases.length,
+    passed: 0,
+    failed: 0,
+    error: 0,
+    skipped: 0,
+    pending: 0,
+    notApplicable: 0,
+  };
+  for (const item of cases) {
+    totals[item.state]++;
+    totals.notApplicable += item.notApplicable?.length ?? 0;
+  }
   return { cases, totals };
 }
 

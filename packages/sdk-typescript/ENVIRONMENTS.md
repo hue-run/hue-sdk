@@ -76,9 +76,11 @@ bound `local_code` pins.
 Hue grades `world_outcome` pins after the world seals, so the runner's report precedes the
 verdicts. `waitForResults(client, { runId, scorerVersionIds, subjectIds, timeoutMillis })` polls
 until every item has a terminal result for every pin or the budget elapses (`complete: false`);
-`summarizeVerdicts` turns results into per-case rows with `passed` and totals; `compareVerdicts`
-diffs two summaries by case key; and `collectExperimentVerdicts` combines those reads for one
-experiment. The `hue eval` command uses the same path; see
+`summarizeVerdicts` turns results into per-case rows with `passed` and totals; a result Hue marks
+`notApplicable` (the evaluator has no outcome criteria or conversion rubric to grade in that case)
+neither passes nor fails its case and is listed in the row's `notApplicable`, and a case no pinned
+evaluator applies to is an error. `compareVerdicts` diffs two summaries by case key, and
+`collectExperimentVerdicts` combines those reads for one experiment. The `hue eval` command uses the same path; see
 [Evaluate an agent against a case](CLI.md#evaluate-an-agent-against-a-case).
 
 ### Pinned provider-profile preflight

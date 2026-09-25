@@ -836,8 +836,15 @@ export class EvaluationClient {
     return this.request<JudgeBudget>("GET", "/judge-budget");
   }
   /** Register or refresh the fixed local agent key and revision. */
-  registerLocalAgent(input: LocalAgentRegistration) {
-    return this.request<RegisteredLocalAgent>("POST", "/local-agent-worker/register", input);
+  async registerLocalAgent(input: LocalAgentRegistration): Promise<RegisteredLocalAgent> {
+    const agent = await this.request<
+      Omit<RegisteredLocalAgent, "key"> & {
+        key?: string;
+        agentKey?: string;
+      }
+    >("POST", "/local-agent-worker/register", input);
+    // Hue's response names the key `agentKey`; read either name.
+    return { ...agent, key: agent.key ?? agent.agentKey ?? input.key };
   }
   /** Claim a queued run for this agent and durable worker identity. */
   claimLocalAgentRun(input: { agentId: string; workerId: string }) {
