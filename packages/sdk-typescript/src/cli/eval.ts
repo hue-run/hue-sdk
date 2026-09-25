@@ -11,6 +11,7 @@ import { createEnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
 import {
   agentEnvironment,
+  isHueControlPlaneCredential,
   stripHueControlPlaneCredentials,
   writeMcpConfig,
 } from "../environment/world.js";
@@ -122,6 +123,8 @@ Agent (exactly one):
                                   HUE_CASE_INPUTS, HUE_CASE_OUTPUT_DIR, HUE_CASE_ID, HUE_CASE_KEY
                                   and HUE_EXECUTION_ID set; files/<role>/ hold the pinned inputs
                                   and every file written to output/ is uploaded to Hue
+                                  Stdout is the case's answer and is stored: print no secrets or
+                                  debug logs there (credentials hue eval knows are redacted)
 
 Modes:
   --worker                        Register the agent and poll for runs launched from Hue
@@ -141,7 +144,8 @@ Output and limits:
   --json                          Print one JSON document on stdout; progress goes to stderr
   --content                       Capture telemetry content (span inputs, outputs and messages)
   --no-output                     One-shot: do not store case outputs, error messages and
-                                  explanations in Hue (stored by default; --worker always stores)
+                                  explanations (stored by default; --worker always stores); with
+                                  --content the case span still carries the output
   --save-version                  Freeze an unsaved eval-set version before running
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
   --concurrency <n>               Cases in flight, 1-64 (default: 1)
@@ -536,6 +540,87 @@ function parseAnswer(text: string): JsonValue | undefined {
  * the CLI unless `--allow-hue-credentials` is passed. A world created while the gateway is off
  * still gets the `hue_sim_` capability under the same `HUE_MCP_*` names.
  */
+/**
+ * Credential values a case's answer must never carry into Hue or a checkpoint: the world token
+ * and MCP headers handed to the case, its legacy MCP token and attempt bearers, and every Hue
+ * control-plane credential in the CLI's environment, which an in-process adapter can read and
+ * `--allow-hue-credentials` hands to a command. Longest first, so a header is replaced whole.
+ */
+interface CaseCredentials {
+  world?: { token?: unknown; mcpConfig?: { mcpServers?: Record<string, { headers?: unknown }> } };
+  mcp?: { token?: unknown };
+  connectionBundle?: unknown;
+}
+function caseSecrets(context: CaseCredentials): string[] {
+  const values = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim()) values.add(value).add(value.trim());
+  };
+  for (const [name, value] of Object.entries(process.env))
+    if (isHueControlPlaneCredential(name, value)) add(value);
+  add(context.world?.token);
+  for (const server of Object.values(context.world?.mcpConfig?.mcpServers ?? {}))
+    if (server.headers && typeof server.headers === "object")
+      for (const header of Object.values(server.headers)) add(header);
+  add(context.mcp?.token);
+  const bearers = (value: unknown, depth: number): void => {
+    if (depth > 16 || !value || typeof value !== "object") return;
+    for (const [key, item] of Object.entries(value))
+      if (key === "bearer" || key === "token") add(item);
+      else bearers(item, depth + 1);
+  };
+  bearers(context.connectionBundle, 0);
+  return [...values].sort((a, b) => b.length - a.length);
+}
+
+/** Each secret's exact value, as written and as JSON escapes it, replaced with `[redacted]`. */
+function redactSecrets(text: string, secrets: string[]): string {
+  for (const secret of secrets) {
+    text = text.replaceAll(secret, "[redacted]");
+    const escaped = JSON.stringify(secret).slice(1, -1);
+    if (escaped !== secret) text = text.replaceAll(escaped, "[redacted]");
+  }
+  return text;
+}
+
+/** An answer with its strings redacted, keys included. Deeper than any output the runner
+ * accepts, a value is left for the runner to refuse. */
+function redactAnswer(value: unknown, secrets: string[], depth = 0): unknown {
+  if (typeof value === "string") return redactSecrets(value, secrets);
+  if (depth > 64 || !value || typeof value !== "object") return value;
+  if (value instanceof TargetResult)
+    return new TargetResult(
+      redactAnswer(value.output, secrets, depth + 1) as JsonValue | undefined,
+      value.files,
+    );
+  if (Array.isArray(value)) return value.map((item) => redactAnswer(item, secrets, depth + 1));
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+    return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      redactSecrets(key, secrets),
+      redactAnswer(item, secrets, depth + 1),
+    ]),
+  );
+}
+
+/** Runs an adapter with its answer and any error it throws cleared of the case's credentials,
+ * before either reaches Hue, the case's error message or a checkpoint. */
+function redacting<Context, Answer>(
+  adapter: (inputs: JsonValue, context: Context) => Answer | Promise<Answer>,
+): (inputs: JsonValue, context: Context) => Promise<Answer> {
+  return async (inputs, context) => {
+    // A direct case's context carries no world; its answer is still cleared of the CLI's own.
+    const secrets = caseSecrets(context as CaseCredentials);
+    try {
+      return redactAnswer(await adapter(inputs, context), secrets) as Answer;
+    } catch (error) {
+      if (error instanceof Error) error.message = redactSecrets(error.message, secrets);
+      throw error;
+    }
+  };
+}
+
 /** The parent environment an agent child starts from: without Hue control-plane credentials
  * unless `--allow-hue-credentials` was passed. */
 function parentEnvironment(allowHueCredentials: boolean): Record<string, string> {
@@ -1503,22 +1588,27 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       );
     const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;
     // One adapter module serves both case kinds; the direct context announces itself with `mode`.
+    // Outputs are stored by default, so every answer and error message is cleared of the
+    // credentials the case handed the agent before it leaves the CLI.
     const agents: Agents = {
-      simulation: loaded
-        ? async (inputs, context) => {
-            const answer = await loaded(inputs, context);
-            if (answer instanceof TargetResult)
-              throw new Error("The adapter returned generated files for a simulated-world case");
-            return answer;
-          }
-        : commandAdapter(values.command!, timeout, {
+      simulation: redacting(
+        loaded
+          ? async (inputs: JsonValue, context: SimulationTargetContext) => {
+              const answer = await loaded(inputs, context);
+              if (answer instanceof TargetResult)
+                throw new Error("The adapter returned generated files for a simulated-world case");
+              return answer;
+            }
+          : commandAdapter(values.command!, timeout, {
+              allowHueCredentials: values["allow-hue-credentials"],
+            }),
+      ),
+      direct: redacting(
+        loaded ??
+          directCommandAdapter(values.command!, timeout, {
             allowHueCredentials: values["allow-hue-credentials"],
           }),
-      direct:
-        loaded ??
-        directCommandAdapter(values.command!, timeout, {
-          allowHueCredentials: values["allow-hue-credentials"],
-        }),
+      ),
     };
     hue = createHue({ apiKey, baseUrl, serviceName: key, captureContent: values.content });
     return values.worker

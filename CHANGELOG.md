@@ -10,15 +10,23 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
-#### Changed
+This section changes a default of the `hue` binary, so it ships as `0.10.0`.
 
-- Behavior change: one-shot `hue eval` stores each case's output, error message and explanations in
-  Hue by default, as `--worker` already did, so answer checks can grade the output and the run page
-  shows it. `--content` now governs only telemetry content capture, which stays off by default.
-  `--no-output` keeps outputs, error messages and explanations out of a one-shot run; `--worker`
-  refuses it. Migration: an interrupted one-shot run keeps the choice it started with, so resume
-  one started without `--content` by an earlier version with `--no-output`; a rerun with other
-  flags is refused with a message naming the flags the run started with.
+#### Breaking
+
+- One-shot `hue eval` stores each case's output, error message and explanations in Hue by default,
+  as `--worker` already did, so answer checks can grade the output and the run page shows it.
+  Everything the command prints on stdout is its answer and is stored, so an agent must not print
+  credentials or debug logs there. Before storing, `hue eval` replaces with `[redacted]` the
+  credentials it handed the case (the world token and MCP headers, a legacy MCP token, attempt
+  bearers) and every Hue control-plane credential in its environment, in the answer, in an
+  adapter's thrown message and in the checkpoint. `--content` now governs only telemetry content
+  capture, which stays off by default. `--no-output` keeps outputs, error messages and
+  explanations out of a one-shot run's stored results (with `--content`, the case span still
+  carries the output); `--worker` refuses it. Migration: pass `--no-output` to keep the previous
+  default. An interrupted one-shot run keeps the choice it started with, so resume one started
+  without `--content` by an earlier version with `--no-output`; a rerun with other flags is refused
+  with a message naming the flags the run started with.
 
 #### Added
 

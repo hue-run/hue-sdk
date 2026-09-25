@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -707,12 +707,42 @@ if (process.env.HUE_TEST_CONFIG_RECORD)
 setInterval(() => {}, 1_000);
 `;
 
+/** Prints its credentials, as a careless agent or a debug log would. */
+const leakySource = `import { readFileSync } from "node:fs";
+process.stdout.write(JSON.stringify({
+  worldToken: process.env.HUE_WORLD_TOKEN ?? null,
+  mcpToken: process.env.HUE_MCP_TOKEN ?? null,
+  apiKey: process.env.HUE_API_KEY ?? null,
+  config: process.env.HUE_MCP_CONFIG ? readFileSync(process.env.HUE_MCP_CONFIG, "utf8") : null,
+}));
+`;
+
+/** Throws with the world token in its message. */
+const throwingAdapterSource = `export default async function runMyAgent(_inputs, context) {
+  throw new Error("could not reach the mirror with " + context.world.token + " and " + process.env.HUE_API_KEY);
+}
+`;
+
+/** Every file under a directory whose text contains one of the values. */
+async function filesContaining(directory: string, values: string[]): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true }))
+    if (entry.isFile()) {
+      const path = join(entry.parentPath, entry.name);
+      const text = await readFile(path, "utf8");
+      if (values.some((value) => text.includes(value))) found.push(path);
+    }
+  return found;
+}
+
 async function workspace() {
   const directory = await mkdtemp(join(tmpdir(), "hue-cli-eval-"));
   await writeFile(join(directory, "hue-agent.ts"), adapterSource);
   await writeFile(join(directory, "agent-command.mjs"), commandSource);
   await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
   await writeFile(join(directory, "agent-stubborn.mjs"), stubbornSource);
+  await writeFile(join(directory, "agent-leaky.mjs"), leakySource);
+  await writeFile(join(directory, "hue-throwing.mjs"), throwingAdapterSource);
   return directory;
 }
 
@@ -941,10 +971,11 @@ describe("hue eval", () => {
         const mirror = `${f.baseUrl}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
         const [completion] = f.calls.completions;
         const env = (completion!.output as { env: Record<string, unknown> }).env;
+        // The agent saw the token; the stored output does not keep it, nor its MCP header.
         expect(env).toMatchObject({
           hasToken: false,
           url: mirror,
-          worldToken,
+          worldToken: "[redacted]",
           gmailMirror: mirror,
           hasApiKey: false,
           executionId: world!.executionId,
@@ -954,11 +985,13 @@ describe("hue eval", () => {
               "gmail-primary": {
                 type: "http",
                 url: mirror,
-                headers: { Authorization: `Bearer ${worldToken}` },
+                headers: { Authorization: "[redacted]" },
               },
             },
           },
         });
+        expect(JSON.stringify(f.calls.completions)).not.toContain(worldToken);
+        expect(await filesContaining(join(cwd, ".hue"), [worldToken])).toEqual([]);
         // The owner-only file is gone after the case; no legacy capability was minted; the
         // world was created with the agent revision and the case span's context.
         expect(existsSync(String(env.mcpConfigPath))).toBe(false);
@@ -1300,6 +1333,65 @@ describe("hue eval", () => {
       "Checkpoint identity differs from this project, run, pins or content policy",
     );
   });
+
+  test(
+    "credentials the case handed the agent are never stored with its answer or error",
+    async () => {
+      const cwd = await workspace();
+      const legacy = hueStandIn();
+      const gateway = hueStandIn({ gateway: true });
+      try {
+        // A legacy world's hue_sim_ token and, with --allow-hue-credentials, the project key.
+        const leaky = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "--command",
+            `${process.execPath} agent-leaky.mjs`,
+            "--origin",
+            legacy.baseUrl,
+            "--allow-hue-credentials",
+            "--wait",
+            "0",
+          ],
+          { cwd },
+        );
+        expect(leaky.status).toBe(0);
+        expect(legacy.calls.completions[0]).toMatchObject({
+          output: { mcpToken: "[redacted]", apiKey: "[redacted]" },
+        });
+        // An adapter that throws with the world token and the key in its message.
+        const throwing = await hue(
+          [
+            "--scenario",
+            "Refund flow",
+            "./hue-throwing.mjs",
+            "--origin",
+            gateway.baseUrl,
+            "--wait",
+            "0",
+          ],
+          { cwd },
+        );
+        expect(throwing.status).toBe(1);
+        expect(gateway.calls.completions[0]).toMatchObject({
+          state: "error",
+          error: {
+            type: "TargetError",
+            message: "could not reach the mirror with [redacted] and [redacted]",
+          },
+        });
+        const stored = JSON.stringify([legacy.calls.completions, gateway.calls.completions]);
+        for (const secret of [key, mcpToken, worldToken]) expect(stored).not.toContain(secret);
+        expect(await filesContaining(join(cwd, ".hue"), [key, mcpToken, worldToken])).toEqual([]);
+      } finally {
+        legacy.stop();
+        gateway.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
 
   test(
     "a second interrupt during the stop kills the agent's whole group at once",

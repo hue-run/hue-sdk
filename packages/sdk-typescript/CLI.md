@@ -427,7 +427,12 @@ overrides the origin. Telemetry content capture stays off unless `--content` is 
 examples pass it so the run's case spans carry content. Model and tool spans inside the agent come
 only from the agent's own instrumentation. Case outputs, error messages and explanations are
 stored in Hue whether or not `--content` is passed, so a case's answer can be graded and read on
-its run page; `--no-output` keeps them out in one-shot mode. `--worker` always stores them, because
+its run page. Everything a `--command` prints on stdout is its answer and is stored, so it must not
+print credentials or debug logs there; before storing, `hue eval` replaces the credentials it handed
+the case (the world token and MCP headers, a legacy MCP token, attempt bearers) and every Hue
+control-plane credential in its environment with `[redacted]`, in the answer, an adapter's thrown
+message and the local checkpoint. `--no-output` keeps outputs, error messages and explanations out
+of a one-shot run's stored results; with `--content` the case span still carries the output. `--worker` always stores them, because
 a run launched from Hue is read on its run page (that is `runLocalAgent()`'s contract), and refuses
 `--no-output`. An interrupted one-shot run keeps the choice it started with, so one run never
 mixes stored and unstored outputs: rerunning it with other `--no-output` or `--content` flags is

@@ -824,6 +824,39 @@ describe("hue eval on a document eval set", () => {
     }
   }, 120_000);
 
+  test("a direct case's stored answer never keeps the project key it was handed", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
+    await writeFile(
+      join(cwd, "leaky.mjs"),
+      `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.HUE_CASE_OUTPUT_DIR + "/result.json", JSON.stringify({ key: process.env.HUE_API_KEY }));
+process.stdout.write(process.env.HUE_API_KEY);
+`,
+    );
+    try {
+      const result = await hue(
+        [
+          "--set",
+          standIn.dataset.id,
+          "--scorer",
+          "gia-d1-citation",
+          "--command",
+          `${process.execPath} ${join(cwd, "leaky.mjs")}`,
+          "--allow-hue-credentials",
+          "--wait",
+          "5",
+        ],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      expect(result.stdout).not.toContain(key);
+      expect(standIn.calls.completions[0]).toMatchObject({ output: { key: "[redacted]" } });
+      expect(JSON.stringify(standIn.calls.completions)).not.toContain(key);
+    } finally {
+      standIn.stop();
+    }
+  }, 120_000);
+
   test("an interrupted run resumes the saved experiment without invoking the agent again", async () => {
     const standIn = documentStandIn({ failCompletions: 1 });
     const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));

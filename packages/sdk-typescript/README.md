@@ -621,7 +621,9 @@ for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts 
 `--worker` registers the same adapter for runs launched from Hue. It needs a Read and
 write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is
 passed; the example passes it so case spans carry content. Case outputs, error messages and
-explanations are stored in Hue either way (`--no-output` keeps them out of a one-shot run).
+explanations are stored in Hue either way (`--no-output` keeps them out of a one-shot run's
+results); a command's stdout is its stored answer, with the credentials `hue eval` handed the case
+replaced by `[redacted]`.
 Instrument the agent itself for its model and tool spans. See
 [Evaluate an agent against a case](CLI.md#evaluate-an-agent-against-a-case).
 Eval sets whose cases pin files instead of a world run as direct cases through `runExperiment()`:
