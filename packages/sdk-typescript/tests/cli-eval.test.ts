@@ -10,6 +10,7 @@ import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { explain, renderTable, spawnAgentCommand } from "../src/cli/eval.js";
 import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
+import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
 import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
 
@@ -1351,56 +1352,123 @@ describe("hue eval", () => {
     SPAWN_TIMEOUT * 2,
   );
 
-  test("the verdict table shows n/a where an evaluator does not apply to the case", () => {
-    const [outcome, rubric, judge] = [randomUUID(), randomUUID(), randomUUID()];
-    const row = (externalKey: string, metric: string, pin: string, skip: string[]) => ({
-      caseId: randomUUID(),
-      externalKey,
-      subjectId: randomUUID(),
-      state: "passed" as const,
-      passed: true,
-      notApplicable: skip,
-      metrics: [{ name: metric, value: true, scorerVersionId: pin }],
-      explanations: [],
-      errors: [],
-    });
+  /** Renders a hand-built summary and returns the printed lines. */
+  const table = (
+    cases: CaseVerdict[],
+    totals: Partial<ExperimentVerdicts["summary"]["totals"]> = {},
+  ) => {
     const lines: string[] = [];
     renderTable(
       {
         experimentId: randomUUID(),
         runId: randomUUID(),
-        scorerVersionIds: [outcome, rubric, judge],
+        scorerVersionIds: [],
         results: { complete: true, items: [], results: [] },
         summary: {
-          cases: [
-            row("trace-built", "outcome", outcome, [rubric]),
-            row("hand-authored", "rubric", rubric, [outcome, judge]),
-            // A second evaluator reports a metric of the same name.
-            row("judged", "outcome", judge, [rubric]),
-            // One evaluator of the outcome column applies here but reported nothing: not n/a.
-            row("partly", "rubric", rubric, [outcome]),
-            row("unjudged", "rubric", rubric, [judge]),
-          ],
+          cases,
           totals: {
-            cases: 5,
-            passed: 5,
+            cases: cases.length,
+            passed: cases.length,
             failed: 0,
             error: 0,
             skipped: 0,
             pending: 0,
-            notApplicable: 6,
+            ...totals,
           },
         },
       },
       { log: (line) => lines.push(line), error: (line) => lines.push(line) },
     );
-    expect(lines[0]).toBe("Case           outcome  rubric  Result");
-    expect(lines[2]).toBe("trace-built    PASS     n/a     PASSED");
-    expect(lines[3]).toBe("hand-authored  n/a      PASS    PASSED");
-    expect(lines[4]).toBe("judged         PASS     n/a     PASSED");
-    expect(lines[5]).toBe("partly         -        PASS    PASSED");
-    expect(lines[6]).toBe("unjudged       -        PASS    PASSED");
+    return lines;
+  };
+  const verdictRow = (
+    externalKey: string,
+    metrics: { name: string; value: boolean; scorerVersionId: string }[],
+    extra: Partial<CaseVerdict> = {},
+  ): CaseVerdict => ({
+    caseId: randomUUID(),
+    externalKey,
+    subjectId: randomUUID(),
+    state: "passed",
+    passed: true,
+    notApplicable: [],
+    advisory: [],
+    metrics,
+    explanations: [],
+    errors: [],
+    ...extra,
+  });
+  /** A table line from cells padded to the given widths, as the CLI prints it. */
+  const tableLine = (widths: number[], cells: string[]) =>
+    cells
+      .map((cell, index) => cell.padEnd(widths[index]!))
+      .join("  ")
+      .trimEnd();
+
+  test("the verdict table shows n/a where an evaluator does not apply to the case", () => {
+    const outcome = "11111111-1111-4111-8111-111111111111";
+    const rubric = "22222222-2222-4222-8222-222222222222";
+    const judge = "33333333-3333-4333-8333-333333333333";
+    const row = (externalKey: string, metric: string, pin: string, skip: string[]) =>
+      verdictRow(externalKey, [{ name: metric, value: true, scorerVersionId: pin }], {
+        notApplicable: skip,
+      });
+    const lines = table(
+      [
+        row("trace-built", "outcome", outcome, [rubric]),
+        row("hand-authored", "rubric", rubric, [outcome, judge]),
+        // A second evaluator reports a metric of the same name: each gets its own column.
+        row("judged", "outcome", judge, [rubric]),
+        // An evaluator that applies but reported nothing shows "-", not n/a.
+        row("partly", "rubric", rubric, [outcome]),
+        row("unjudged", "rubric", rubric, [judge]),
+      ],
+      { notApplicable: 6 },
+    );
+    const widths = [13, 16, 16, 6, 6];
+    expect(lines[0]).toBe(
+      tableLine(widths, ["Case", "outcome 11111111", "outcome 33333333", "rubric", "Result"]),
+    );
+    expect(lines.slice(2, 7)).toEqual([
+      tableLine(widths, ["trace-built", "PASS", "-", "n/a", "PASSED"]),
+      tableLine(widths, ["hand-authored", "n/a", "n/a", "PASS", "PASSED"]),
+      tableLine(widths, ["judged", "-", "PASS", "n/a", "PASSED"]),
+      tableLine(widths, ["partly", "n/a", "-", "PASS", "PASSED"]),
+      tableLine(widths, ["unjudged", "-", "n/a", "PASS", "PASSED"]),
+    ]);
     expect(lines.at(-1)).toBe("5 of 5 cases passed (6 evaluator results not applicable)");
+  });
+
+  test("the verdict table shows each advisory judge's verdict, marked and not counted", () => {
+    const task = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const grounded = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const brief = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const row = (externalKey: string, briefVerdict: boolean) =>
+      verdictRow(
+        externalKey,
+        [
+          { name: "task_success", value: true, scorerVersionId: task },
+          { name: "verdict", value: true, scorerVersionId: grounded },
+          { name: "verdict", value: briefVerdict, scorerVersionId: brief },
+        ],
+        { advisory: [grounded, brief] },
+      );
+    const lines = table([row("document", true), row("reply", false)]);
+    const widths = [8, 12, 27, 27, 6];
+    expect(lines[0]).toBe(
+      tableLine(widths, [
+        "Case",
+        "task_success",
+        "verdict bbbbbbbb (advisory)",
+        "verdict cccccccc (advisory)",
+        "Result",
+      ]),
+    );
+    expect(lines.slice(2, 4)).toEqual([
+      tableLine(widths, ["document", "PASS", "PASS", "PASS", "PASSED"]),
+      tableLine(widths, ["reply", "PASS", "PASS", "FAIL", "PASSED"]),
+    ]);
+    expect(lines.at(-1)).toBe("2 of 2 cases passed (1 advisory failure not counted)");
   });
 
   test("a resume with another --no-output or --content choice names the flags to repeat", () => {

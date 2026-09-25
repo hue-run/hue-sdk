@@ -47,6 +47,10 @@ export interface VerdictResult {
   notApplicable?: boolean;
   /** What a not-applicable evaluator needs that the case lacks, such as `outcome_criteria`. */
   requires?: string;
+  /** Whether Hue recorded the result as advisory (its evidence says `advisory: true`), as it does
+   * for every judge today: shown with its verdict, but it never decides a case. Absent means
+   * false. */
+  advisory?: boolean;
 }
 
 /** Outcome of {@link waitForResults}. */
@@ -139,7 +143,7 @@ export async function waitForResults(
           // Only Hue's own flag on a skipped result marks it not applicable; the evidence alone
           // never does, and a scored or errored result keeps its verdict whatever it carries.
           const notApplicable = stored.state === "skipped" && stored.notApplicable === true;
-          const evidence = stored.evidence as { requires?: unknown } | null;
+          const evidence = stored.evidence as { requires?: unknown; advisory?: unknown } | null;
           results.push({
             id: stored.id,
             itemId: stored.itemId,
@@ -150,6 +154,7 @@ export async function waitForResults(
             explanation: stored.explanation ?? null,
             error: stored.error ?? null,
             notApplicable,
+            advisory: evidence?.advisory === true,
             ...(notApplicable && typeof evidence?.requires === "string"
               ? { requires: evidence.requires }
               : {}),
@@ -178,6 +183,9 @@ export interface CaseVerdict {
   /** Pinned scorer versions Hue recorded as not applicable to the case; always set by
    * {@link summarizeVerdicts}. */
   notApplicable?: string[];
+  /** Pinned scorer versions whose results for the case are advisory: their metrics are listed
+   * but never decide the case; always set by {@link summarizeVerdicts}. */
+  advisory?: string[];
   /** Reported metrics across pinned scorers, in result order. */
   metrics: (Metric & {
     /** Scorer version that reported the metric. */
@@ -253,13 +261,17 @@ export function summarizeVerdicts(
       result.state === "skipped" && result.notApplicable === true;
     const inapplicable = own.filter(skippedAsInapplicable);
     const applicable = own.filter((result) => !skippedAsInapplicable(result));
-    const errors = applicable.filter((result) => result.state === "error");
-    const scored = applicable.filter((result) => result.state === "scored");
+    // An advisory result, such as a judge's, is shown but never decides the case, as in Hue.
+    const advisory = applicable.filter((result) => result.advisory === true);
+    const deciding = applicable.filter((result) => result.advisory !== true);
+    const errors = deciding.filter((result) => result.state === "error");
+    const scored = deciding.filter((result) => result.state === "scored");
     const failing = scored.filter((result) => !result.metrics.every(metricPassed));
     const missing = [...pins].some((pin) => !own.some((result) => result.scorerVersionId === pin));
     const noneApplies = !missing && own.length > 0 && !applicable.length;
+    const noneDecides = !missing && applicable.length > 0 && !deciding.length;
     const state: CaseVerdict["state"] =
-      errors.length || noneApplies
+      errors.length || noneApplies || noneDecides
         ? "error"
         : failing.length
           ? "failed"
@@ -278,6 +290,7 @@ export function summarizeVerdicts(
       state,
       passed: state === "passed",
       notApplicable: inapplicable.map((result) => result.scorerVersionId),
+      advisory: advisory.map((result) => result.scorerVersionId),
       metrics,
       explanations: [
         ...(noneApplies
@@ -285,7 +298,12 @@ export function summarizeVerdicts(
               `No pinned evaluator applies to this case${requires.length ? ` (they need ${requires.join(" or ")})` : ""}; pin one that grades it`,
             ]
           : []),
-        ...applicable
+        ...(noneDecides
+          ? [
+              "Only advisory evaluators scored this case, and they never decide it; pin one that grades it",
+            ]
+          : []),
+        ...deciding
           .filter((result) => result.state !== "scored" || failing.includes(result))
           .map((result) => result.explanation)
           .filter((explanation): explanation is string => !!explanation),

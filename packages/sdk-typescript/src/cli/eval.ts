@@ -826,28 +826,43 @@ const STATE_LABEL: Record<CaseVerdict["state"], string> = {
 };
 
 export function renderTable(verdicts: ExperimentVerdicts, output: Output): void {
-  const names: string[] = [];
-  // The evaluators that report each metric: a case none of them applies to shows n/a there, and
-  // one an evaluator applies to without reporting the metric shows "-".
-  const reportedBy = new Map<string, Set<string>>();
-  for (const item of verdicts.summary.cases)
+  const cases = verdicts.summary.cases;
+  // A column per metric name; a name several evaluators report, such as two judges' `verdict`,
+  // gets a column per evaluator so each one's value shows.
+  const reporters = new Map<string, string[]>();
+  for (const item of cases)
     for (const metric of item.metrics) {
-      if (!names.includes(metric.name)) names.push(metric.name);
-      reportedBy.set(
-        metric.name,
-        (reportedBy.get(metric.name) ?? new Set()).add(metric.scorerVersionId),
-      );
+      const versions = reporters.get(metric.name) ?? [];
+      if (!versions.includes(metric.scorerVersionId)) versions.push(metric.scorerVersionId);
+      reporters.set(metric.name, versions);
     }
-  const header = ["Case", ...names, "Result"];
-  const rows = verdicts.summary.cases.map((item) => [
+  const columns = [...reporters].flatMap(([name, versions]) =>
+    versions.map((version) => ({
+      name,
+      version,
+      label: versions.length === 1 ? name : `${name} ${version.slice(0, 8)}`,
+    })),
+  );
+  // An advisory evaluator's values are shown, marked, and never decide a case.
+  const advisory = new Set(cases.flatMap((item) => item.advisory ?? []));
+  const header = [
+    "Case",
+    ...columns.map((column) =>
+      advisory.has(column.version) ? `${column.label} (advisory)` : column.label,
+    ),
+    "Result",
+  ];
+  const rows = cases.map((item) => [
     item.externalKey,
-    ...names.map((name) => {
-      const metric = item.metrics.find((candidate) => candidate.name === name);
+    ...columns.map((column) => {
+      const metric = item.metrics.find(
+        (candidate) =>
+          candidate.name === column.name && candidate.scorerVersionId === column.version,
+      );
       if (metric) return metricText(metric);
-      const notApplicable = new Set(item.notApplicable);
-      return [...reportedBy.get(name)!].every((version) => notApplicable.has(version))
-        ? "n/a"
-        : "-";
+      // A case the column's evaluator does not apply to shows n/a; one it applies to without
+      // reporting the metric shows "-".
+      return item.notApplicable?.includes(column.version) ? "n/a" : "-";
     }),
     STATE_LABEL[item.state],
   ]);
@@ -869,12 +884,23 @@ export function renderTable(verdicts: ExperimentVerdicts, output: Output): void 
       output.log(`  ${item.externalKey}: ${detail}`);
   }
   const totals = verdicts.summary.totals;
+  const advisoryFailures = cases.reduce(
+    (count, item) =>
+      count +
+      item.metrics.filter(
+        (metric) => item.advisory?.includes(metric.scorerVersionId) && !metricPassed(metric),
+      ).length,
+    0,
+  );
   const extra = [
     totals.error ? `${totals.error} error` : "",
     totals.skipped ? `${totals.skipped} skipped` : "",
     totals.pending ? `${totals.pending} pending` : "",
     totals.notApplicable
       ? `${totals.notApplicable} evaluator result${totals.notApplicable === 1 ? "" : "s"} not applicable`
+      : "",
+    advisoryFailures
+      ? `${advisoryFailures} advisory failure${advisoryFailures === 1 ? "" : "s"} not counted`
       : "",
   ].filter(Boolean);
   output.log(
