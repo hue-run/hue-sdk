@@ -169,15 +169,15 @@ def _is_api_key_phrase(text: str, key_start: int, key: str) -> bool:
     )
 
 
-def _scrub_pairs(text: str) -> str:
-    """Replace the value of each pair whose key names a credential."""
-    parts: list[str] = []
-    copied = 0
+def _pair_spans(text: str) -> list[tuple[int, int]]:
+    """The value of each pair whose key names a credential, without its quotes."""
+    spans: list[tuple[int, int]] = []
+    covered = 0
     for match in _PAIR_KEY.finditer(text):
         start = match.end()
         key = match[2]
         credential = _is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)
-        if start < copied or not credential:
+        if start < covered or not credential:
             continue
         quoted = _QUOTED_VALUE.match(text, start)
         bare = (
@@ -186,12 +186,29 @@ def _scrub_pairs(text: str) -> str:
         value = quoted or bare.match(text, start)
         if value is None:
             continue
-        if quoted:
-            quote = '\\"' if quoted[0].startswith("\\") else quoted[0][0]
-            parts.append(f"{text[copied:start]}{quote}{REDACTED}{quote}")
-        else:
-            parts.append(f"{text[copied:start]}{value[1]}{REDACTED}")
-        copied = value.end()
+        opening = (2 if quoted[0].startswith("\\") else 1) if quoted else len(value[1])
+        spans.append((start + opening, value.end() - (opening if quoted else 0)))
+        covered = value.end()
+    return spans
+
+
+def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """Replace the union of the spans with ``[redacted]``, each run of overlapping or touching
+    spans once."""
+    parts: list[str] = []
+    copied = 0
+    run: list[int] | None = None
+    for start, end in sorted(spans):
+        if run is not None and start <= run[1]:
+            run[1] = max(run[1], end)
+            continue
+        if run is not None:
+            parts.append(text[copied : run[0]] + REDACTED)
+            copied = run[1]
+        run = [start, end]
+    if run is not None:
+        parts.append(text[copied : run[0]] + REDACTED)
+        copied = run[1]
     parts.append(text[copied:])
     return "".join(parts)
 
@@ -209,12 +226,20 @@ def scrub_credential_text(text: str) -> str:
     ``key=value`` or ``key: value`` pair whose key names a credential (quoted, escaped-quoted or
     bare) become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
-    # Pairs before prefixed tokens, so a token glued to a following key cannot swallow the key and
-    # shield its value; prefixed tokens before an authorization scheme's credential, so a token
-    # ending in ``-token`` is not read as the scheme ``Token`` followed by a credential.
-    text = _scrub_pairs(_scrub_text_urls(text))
-    text = _PREFIXED_TOKEN.sub(REDACTED, text)
-    return _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
+    text = _scrub_text_urls(text)
+    # Every rule reads the same text and their matches are replaced together, so no rule's
+    # replacement can hide text another rule would have matched.
+    return _redact_spans(
+        text,
+        [
+            *_pair_spans(text),
+            *(match.span() for match in _PREFIXED_TOKEN.finditer(text)),
+            *(
+                (match.start() + len(match[1]) + len(match[2]), match.end())
+                for match in _AUTHORIZATION_VALUE.finditer(text)
+            ),
+        ],
+    )
 
 
 def _is_url_key(key: Any) -> bool:

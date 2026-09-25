@@ -166,15 +166,18 @@ function isApiKeyPhrase(text: string, keyStart: number, key: string): boolean {
   );
 }
 
-/** Replaces the value of each pair whose key names a credential. */
-function scrubPairs(text: string): string {
-  let result = "";
-  let copied = 0;
+/** A run of text to replace with `[redacted]`: its start and end offsets. */
+type Span = [start: number, end: number];
+
+/** The value of each pair whose key names a credential, without its quotes. */
+function pairSpans(text: string): Span[] {
+  const spans: Span[] = [];
+  let covered = 0;
   for (const match of text.matchAll(pairKey)) {
     const start = match.index + match[0].length;
     const key = match[2]!;
     const keyStart = match.index + match[1]!.length;
-    if (start < copied || !(isTextCredentialKey(key) || isApiKeyPhrase(text, keyStart, key)))
+    if (start < covered || !(isTextCredentialKey(key) || isApiKeyPhrase(text, keyStart, key)))
       continue;
     quotedValue.lastIndex = start;
     const quoted = quotedValue.exec(text);
@@ -185,10 +188,45 @@ function scrubPairs(text: string): string {
       value = bare.exec(text);
     }
     if (!value) continue;
-    const quote = quoted ? (quoted[0].startsWith("\\") ? '\\"' : quoted[0][0]!) : value[1]!;
-    result += `${text.slice(copied, start)}${quote}${REDACTED}${quoted ? quote : ""}`;
-    copied = start + value[0].length;
+    const open = quoted ? (quoted[0].startsWith("\\") ? 2 : 1) : value[1]!.length;
+    spans.push([start + open, start + value[0].length - (quoted ? open : 0)]);
+    covered = start + value[0].length;
   }
+  return spans;
+}
+
+/** Each match of a global pattern, from `skip(match)` characters into it. */
+function matchSpans(
+  text: string,
+  pattern: RegExp,
+  skip: (match: RegExpExecArray) => number = () => 0,
+): Span[] {
+  return [...text.matchAll(pattern)].map((match) => [
+    match.index + skip(match),
+    match.index + match[0].length,
+  ]);
+}
+
+/** Replaces the union of the spans with `[redacted]`, each run of overlapping or touching spans
+ * once. */
+function redactSpans(text: string, spans: Span[]): string {
+  spans.sort(([a, b], [c, d]) => a - c || b - d);
+  let result = "";
+  let copied = 0;
+  let run: Span | undefined;
+  const flush = () => {
+    if (!run) return;
+    result += `${text.slice(copied, run[0])}${REDACTED}`;
+    copied = run[1];
+  };
+  for (const [start, end] of spans) {
+    if (run && start <= run[1]) run[1] = Math.max(run[1], end);
+    else {
+      flush();
+      run = [start, end];
+    }
+  }
+  flush();
   return result + text.slice(copied);
 }
 
@@ -204,13 +242,14 @@ function scrubPairs(text: string): string {
  * become `[redacted]`.
  */
 export function scrubCredentialText(text: string): string {
-  const state: ScrubState = { changed: false };
-  // Pairs before prefixed tokens, so a token glued to a following key cannot swallow the key and
-  // shield its value; prefixed tokens before an authorization scheme's credential, so a token
-  // ending in `-token` is not read as the scheme `Token` followed by a credential.
-  return scrubPairs(scrubTextUrls(text, state))
-    .replace(prefixedToken, REDACTED)
-    .replace(authorizationValue, `$1$2${REDACTED}`);
+  const scrubbed = scrubTextUrls(text, { changed: false });
+  // Every rule reads the same text and their matches are replaced together, so no rule's
+  // replacement can hide text another rule would have matched.
+  return redactSpans(scrubbed, [
+    ...pairSpans(scrubbed),
+    ...matchSpans(scrubbed, prefixedToken),
+    ...matchSpans(scrubbed, authorizationValue, (match) => match[1]!.length + match[2]!.length),
+  ]);
 }
 
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */

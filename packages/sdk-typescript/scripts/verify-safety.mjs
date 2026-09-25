@@ -70,10 +70,8 @@ console.log(redactionProbe.stdout.trim());
   const { json } = await import(
     pathToFileURL(join(consumer, "node_modules/@hue-run/sdk/dist/evals/json.js")).href
   );
-  assert.throws(() => json(Array(11).fill("x".repeat(50_000_000))), {
-    name: "RangeError",
-    message: "JSON exceeds byte limit",
-  });
+  for (const output of [Array(11).fill("x".repeat(50_000_000)), "\u0001".repeat(120_000_000)])
+    assert.throws(() => json(output), { name: "RangeError", message: "JSON exceeds byte limit" });
   console.log(JSON.stringify({ nodeOnlyLimits: "passed" }));
 }
 // Exercise the installed snapshot with a genuinely concurrent growing view.

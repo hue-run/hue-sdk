@@ -39,3 +39,49 @@ test("an array with more elements than values allowed is refused before its keys
   // Listing five million keys first took seconds and hundreds of megabytes.
   expect(elapsed).toBeLessThan(100);
 });
+
+test("an object with more members than values allowed is refused before its keys are sorted", () => {
+  const members = Object.fromEntries(
+    Array.from({ length: 30_000 }, (_, index) => [`k${index}`, 0]),
+  );
+  const sort = Array.prototype.sort;
+  let longestSorted = 0;
+  Array.prototype.sort = function (this: unknown[], ...args) {
+    longestSorted = Math.max(longestSorted, this.length);
+    return sort.apply(this, args as [((a: unknown, b: unknown) => number)?]);
+  } as typeof sort;
+  try {
+    expect(() => json(members)).toThrow(new RangeError("JSON exceeds depth/node limits"));
+  } finally {
+    Array.prototype.sort = sort;
+  }
+  expect(longestSorted).toBe(0);
+});
+
+test("both SDKs refuse an output for the same reason", () => {
+  // The Python suite checks the same outputs. Values are read in order, members by key, and each
+  // is checked for its type before it is counted.
+  const big = "x".repeat(300_000);
+  const cases: [unknown, "bytes" | "structure" | "not JSON"][] = [
+    [[big, Number.NaN], "bytes"],
+    [[Number.NaN, big], "not JSON"],
+    [{ b: Array(25_000).fill(0), a: big }, "bytes"],
+    [[big, ...Array(25_000).fill(0)], "structure"],
+    [{ "key\u0000": 1 }, "not JSON"],
+    [{ "\ud800": 1 }, "not JSON"],
+  ];
+  for (const [value, reason] of cases) {
+    let outcome = "accepted";
+    try {
+      json(value);
+    } catch (error) {
+      outcome =
+        error instanceof RangeError
+          ? error.message === "JSON exceeds byte limit"
+            ? "bytes"
+            : "structure"
+          : "not JSON";
+    }
+    expect(outcome).toBe(reason);
+  }
+});

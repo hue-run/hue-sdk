@@ -91,8 +91,8 @@ refuses to publish a version without a matching entry below.
 - An output too long for the runtime to serialize (on Node, JSON longer than V8's longest string,
   such as 120 MB of control characters) completes its case as `OutputTooLarge`; before, Node's
   `Invalid string length` stopped the run with `OutcomeSerializationError` and a resume kept
-  refusing. The JSON byte length is counted as the output is read, and an array with more elements
-  than values allowed is refused before its keys are listed.
+  refusing. The JSON byte length is counted as the output is read, and an array or object with
+  more elements than values allowed is refused before its keys are listed or sorted.
 
 ### [0.10.0] - 2026-09-25
 
@@ -820,9 +820,13 @@ No registry release is claimed until publication and registry acceptance complet
 - `server.address` keeps a host name with an underscore, such as a Docker Compose service
   (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
   dropped.
-- Object keys no longer count toward an output's 20,000 values, as in the TypeScript SDK, so an
-  object of more than 10,000 members is no longer `OutputTooLarge`. A list or object with more
-  elements than values left is refused before its children are read.
+- An output's JSON byte length is counted as the output is read, as in the TypeScript SDK, so an
+  output too large to serialize is refused without serializing it (eleven references to a 50 MB
+  string took tens of seconds and a gigabyte); an output the process cannot hold in memory
+  completes its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values,
+  so an object of more than 10,000 members is no longer `OutputTooLarge`, and a list or object
+  with more elements than values left is refused before it is read. The output is read in the
+  TypeScript SDK's order, so both SDKs refuse an output for the same reason.
 - A large inline file's lone surrogates are replaced once for the whole part rather than in each
   percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
 

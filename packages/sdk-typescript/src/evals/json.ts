@@ -60,7 +60,12 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
       if (Object.getOwnPropertySymbols(item).length)
         throw new TypeError("JSON cannot contain symbol properties");
       const result: Record<string, JsonValue> = Object.create(null);
-      const keys = Object.keys(item).sort();
+      // Each member is a value: an object with more than the values left is refused before its
+      // keys are sorted.
+      const keys = Object.keys(item);
+      if (keys.length > bounds.nodes - nodes)
+        throw new RangeError("JSON exceeds depth/node limits");
+      keys.sort();
       charge(keys.length ? keys.length + 1 : 2);
       for (const key of keys) {
         if (!isText(key))

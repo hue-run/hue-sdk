@@ -202,7 +202,7 @@
     },
     {
       "input": "Slack said xoxc-synthetic-client-token and xoxd-synthetic%2Fcookie-token",
-      "expected": "Slack said [redacted] and [redacted]"
+      "expected": "Slack said [redacted] [redacted] [redacted]"
     },
     {
       "input": "Hue said hue_sim_synthetic0123, hue_setup_synthetic0123 and hue_install_synthetic0123",
@@ -239,6 +239,18 @@
     {
       "input": "Authorization: AWS4-HMAC-SHA256 synthetic-aws-credential",
       "expected": "Authorization: [redacted]"
+    },
+    {
+      "input": "password=synthetic-pw(Bearer synthetic-bearer-glued)",
+      "expected": "password=[redacted] [redacted])"
+    },
+    {
+      "input": "secret=synthetic-s{Token synthetic-token-glued}",
+      "expected": "secret=[redacted] [redacted]}"
+    },
+    {
+      "input": "api_key=synthetic-k[Basic c3ludGhldGljOmdsdWVk]",
+      "expected": "api_key=[redacted] [redacted]]"
     }
   ]
 }

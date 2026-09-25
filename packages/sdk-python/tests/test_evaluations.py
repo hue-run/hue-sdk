@@ -35,7 +35,7 @@ from hue_sdk.evals import (
     score_locally,
 )
 from hue_sdk.evals._checkpoint import CheckpointStore
-from hue_sdk.evals._json import JsonLimitError, json_value
+from hue_sdk.evals._json import JsonLimitError, encode, json_value
 
 
 @pytest.fixture
@@ -860,6 +860,73 @@ def test_a_container_with_more_elements_than_values_left_is_refused_before_it_is
     assert refused.value.limit == "structure"
     # Queueing five million children first took about a second and hundreds of megabytes.
     assert time.perf_counter() - started < 0.1
+
+
+def test_both_sdks_refuse_an_output_for_the_same_reason():
+    # The TypeScript suite checks the same outputs. Values are read in order, members by key, and
+    # each is checked for its type before it is counted.
+    big = "x" * 300_000
+    cases = [
+        ([big, float("nan")], "bytes"),
+        ([float("nan"), big], "not JSON"),
+        ({"b": [0] * 25_000, "a": big}, "bytes"),
+        ([big, *[0] * 25_000], "structure"),
+        ({"key\x00": 1}, "not JSON"),
+        ({"\ud800": 1}, "not JSON"),
+    ]
+    for value, reason in cases:
+        try:
+            json_value(value)
+            outcome = "accepted"
+        except JsonLimitError as error:
+            outcome = error.limit
+        except ValueError:
+            outcome = "not JSON"
+        assert outcome == reason
+
+
+def test_the_byte_bound_is_the_exact_length_of_the_json_text():
+    # A quote or backslash escapes to two bytes, a control character to six; é, € and 😀 take two,
+    # three and four bytes.
+    sample = {'k"\\': ['"\\\n\u0001é€😀', 1.5, 1e-07, True, False, None, [], {}]}
+    exact = len(encode(sample))
+    json_value(sample, exact)
+    with pytest.raises(JsonLimitError) as refused:
+        json_value(sample, exact - 1)
+    assert refused.value.limit == "bytes"
+
+
+def test_an_output_too_large_to_serialize_is_refused_by_its_count_before_it_is_serialized():
+    # Checking and serializing each of eleven references to a 50 MB string took tens of seconds
+    # and a gigabyte.
+    big = "x" * 50_000_000
+    started = time.perf_counter()
+    with pytest.raises(JsonLimitError) as refused:
+        json_value([big] * 11)
+    assert refused.value.limit == "bytes"
+    assert time.perf_counter() - started < 0.5
+
+
+def test_an_output_the_process_cannot_hold_fails_its_case_as_too_large(
+    evaluation_receiver, tmp_path, monkeypatch
+):
+    output = "an output the process cannot hold"
+    checked = runner_module.json_value
+
+    def exhausted(value, *args):
+        if value == output:
+            raise MemoryError
+        return checked(value, *args)
+
+    monkeypatch.setattr(runner_module, "json_value", exhausted)
+    arguments = options(evaluation_receiver, tmp_path, lambda *_args: output, persist=False)
+    try:
+        run_experiment(**arguments)
+        body = evaluation_receiver.complete_body
+        assert body["state"] == "error" and body["error"] == {"type": "OutputTooLarge"}
+        assert any(path.endswith("/finish") for _, path, *_ in evaluation_receiver.requests)
+    finally:
+        arguments["hue"].shutdown()
 
 
 def test_fresh_exporter_cannot_acknowledge_a_prior_failed_trace(evaluation_receiver, tmp_path):
