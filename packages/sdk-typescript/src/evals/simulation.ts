@@ -23,7 +23,7 @@ import {
   requestedAttemptV2,
   runEnvironmentTarget,
 } from "./environment-target.js";
-import { runExperiment, type RunnerReport } from "./runner.js";
+import { runExperiment, type RunnerReport, type TelemetryNotAccepted } from "./runner.js";
 import type {
   CaseWrite,
   DatasetCase,
@@ -195,6 +195,9 @@ export interface RunSimulationOptions {
   /** What a case does when required telemetry is not accepted; see
    * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */
   traceNotAccepted?: "stop" | "fail_case";
+  /** Called as each case is failed for its telemetry; see `onTelemetryNotAccepted` of
+   * {@link runExperiment}. */
+  onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
   /** Local scorer callbacks bound by their declared source digests. */
   localScorers?: LocalScorer[];
   /** Cases in flight, 1–64; defaults to 1. */
@@ -792,6 +795,12 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       persistResultContent: options.persistResultContent,
       traceEvidence: options.traceEvidence,
       ...(options.traceNotAccepted ? { traceNotAccepted: options.traceNotAccepted } : {}),
+      ...(options.onTelemetryNotAccepted
+        ? {
+            onTelemetryNotAccepted: (entry: TelemetryNotAccepted) =>
+              options.onTelemetryNotAccepted!(entry),
+          }
+        : {}),
       environmentEvidence: "required",
       scorers: bindings,
       concurrency: options.concurrency,

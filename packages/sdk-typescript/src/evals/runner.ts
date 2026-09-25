@@ -169,10 +169,14 @@ export interface RunExperimentOptions extends RunnerOptions {
    * What a case does when evidence is required and its trace or logs are not fully accepted.
    * `"stop"` (the default) keeps the saved outcome, leaves the execution started for recovery and
    * rejects. `"fail_case"` completes the execution as failed instead, with the evidence omitted
-   * under the reason `telemetry_not_accepted`, reports it in
-   * {@link RunnerReport.telemetryNotAccepted} and goes on with the other cases.
+   * under the reason `telemetry_not_accepted` and without its output or generated files, so no
+   * scorer can pass it; reports it in {@link RunnerReport.telemetryNotAccepted} and goes on with
+   * the other cases.
    */
   traceNotAccepted?: "stop" | "fail_case";
+  /** Called once a case is completed as failed under `traceNotAccepted: "fail_case"`, before the
+   * run goes on, so the failure is known even if a later case stops the run. */
+  onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
   /** Runs the application for one frozen case; return the output, `withFiles(output, files)`
    * when it generated files, or `undefined` when unavailable. */
   target(
@@ -732,15 +736,22 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           // export failure takes this path; a checkpoint that cannot be saved is raised above.
           const failed = checkpoint as Prepared;
           const issues = telemetryIssueCounts(exportError);
-          const { traceEvidence: _required, ...complete } = failed.complete;
+          // Without its evidence the case fails whatever it answered: the output and generated
+          // files are not attached, so no scorer can pass it, and local scores taken of them go.
+          const {
+            traceEvidence: _required,
+            output: _output,
+            artifactIds: _artifacts,
+            primaryArtifactId: _primary,
+            ...complete
+          } = failed.complete;
+          failed.scores = [];
           if (complete.state === "succeeded") {
             complete.state = "error";
             complete.error = {
               type: "TelemetryNotAccepted",
               ...(options.persistResultContent ? { message: describeTelemetryIssues(issues) } : {}),
             };
-            // Local scores were taken of a succeeded outcome that is now a failure.
-            failed.scores = [];
           }
           failed.complete = {
             ...complete,
@@ -768,6 +779,16 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           score.payload.evaluationItemId = prepared.completion.evaluationItemId;
         await save();
       }
+      if (prepared.exportState === "not_accepted") {
+        const entry: TelemetryNotAccepted = {
+          caseId: item.id,
+          caseKey: item.externalKey,
+          executionId: prepared.executionId,
+          issues: prepared.telemetryIssues ?? [],
+        };
+        (report.telemetryNotAccepted ??= []).push(entry);
+        await options.onTelemetryNotAccepted?.(entry);
+      }
       const results = await uploadScores(
         options,
         experiment.evaluation.id,
@@ -777,13 +798,6 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       );
       report.subjectIds.push(prepared.completion.subjectId);
       report.resultIds.push(...results);
-      if (prepared.exportState === "not_accepted")
-        (report.telemetryNotAccepted ??= []).push({
-          caseId: item.id,
-          caseKey: item.externalKey,
-          executionId: prepared.executionId,
-          issues: prepared.telemetryIssues ?? [],
-        });
     });
     let finish = await store.read<{ key: string }>("finish");
     if (!finish) {

@@ -24,6 +24,7 @@ import {
   UncertainExecutionError,
   type RunExperimentTargetContext,
   type RunnerReport,
+  type TelemetryNotAccepted,
 } from "./runner.js";
 import type {
   ExperimentCase,
@@ -160,6 +161,9 @@ export interface RunLocalAgentOptions {
   /** What a case does when its telemetry is not accepted; see
    * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */
   traceNotAccepted?: "stop" | "fail_case";
+  /** Called as each case is failed for its telemetry; see `onTelemetryNotAccepted` of
+   * {@link runExperiment}. */
+  onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
   /** Polling interval in milliseconds, 250–60000; defaults to 2000. */
   pollIntervalMillis?: number;
   /** Stops polling cooperatively; does not cancel an active callback. */
@@ -347,6 +351,12 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           environmentEvidence: options.directTarget ? "when_pinned" : "required",
           traceEvidence: { mode: "required" },
           ...(options.traceNotAccepted ? { traceNotAccepted: options.traceNotAccepted } : {}),
+          ...(options.onTelemetryNotAccepted
+            ? {
+                onTelemetryNotAccepted: (entry: TelemetryNotAccepted) =>
+                  options.onTelemetryNotAccepted!(entry),
+              }
+            : {}),
           scorers: options.scorers,
           concurrency: options.concurrency,
           target: (inputs, context) => {

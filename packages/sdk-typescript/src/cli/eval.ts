@@ -929,12 +929,27 @@ function toJson(
   };
 }
 
-/** Says which cases failed because Hue did not accept their telemetry, with sanitized counts. */
-function reportTelemetry(telemetry: TelemetryNotAccepted[] | undefined, output: Output) {
-  for (const entry of telemetry ?? [])
-    output.error(
-      `[${entry.caseKey}] telemetry not accepted, case failed: ${describeTelemetryIssues(entry.issues)}`,
-    );
+/** Says that a case failed because Hue did not accept its telemetry, with sanitized counts. */
+function reportTelemetry(entry: TelemetryNotAccepted, output: Output) {
+  output.error(
+    `[${entry.caseKey}] telemetry not accepted, case failed: ${describeTelemetryIssues(entry.issues)}`,
+  );
+}
+
+/** A case without trace evidence fails whatever its scores say: a scorer that grades only the
+ * world or ignores the execution state could still pass it. */
+function withTelemetryFailures(
+  verdicts: ExperimentVerdicts,
+  telemetry: TelemetryNotAccepted[] = [],
+): ExperimentVerdicts {
+  if (!telemetry.length) return verdicts;
+  const failed = new Set(telemetry.map((entry) => entry.caseId));
+  const cases = verdicts.summary.cases.map((item) =>
+    failed.has(item.caseId) ? { ...item, state: "error" as const, passed: false } : item,
+  );
+  const totals = { cases: cases.length, passed: 0, failed: 0, error: 0, skipped: 0, pending: 0 };
+  for (const item of cases) totals[item.state]++;
+  return { ...verdicts, summary: { cases, totals } };
 }
 
 /** Waits for Hue's verdicts, prints them (table or JSON, with the optional baseline) and returns the exit code. */
@@ -954,12 +969,15 @@ async function reportVerdicts(
 ): Promise<number> {
   const wait = integer("wait", values.wait, 300, 0, 86_400);
   output.log("Waiting for Hue checks...");
-  const verdicts = await collectExperimentVerdicts(client, {
-    experimentId: run.experimentId,
-    subjectIds: run.subjectIds,
-    timeoutMillis: wait * 1000,
-    signal,
-  });
+  const verdicts = withTelemetryFailures(
+    await collectExperimentVerdicts(client, {
+      experimentId: run.experimentId,
+      subjectIds: run.subjectIds,
+      timeoutMillis: wait * 1000,
+      signal,
+    }),
+    run.telemetryNotAccepted,
+  );
   // The wait returns its partial state on abort rather than throwing, so Ctrl+C here must not
   // fall through to a baseline read and a verdict table that nobody asked to finish.
   if (signal.aborted) {
@@ -987,6 +1005,7 @@ async function reportVerdicts(
     output.log(`Run: ${run.runUrl}`);
   }
   const totals = verdicts.summary.totals;
+  if (run.telemetryNotAccepted?.length) return 1;
   return verdicts.results.complete && totals.cases > 0 && totals.passed === totals.cases ? 0 : 1;
 }
 
@@ -1071,6 +1090,7 @@ async function runOnce(
     traceEvidence: { mode: "required" },
     // A case whose telemetry Hue did not accept fails instead of staying started.
     traceNotAccepted: "fail_case",
+    onTelemetryNotAccepted: (entry) => reportTelemetry(entry, output),
     concurrency,
     agentRevision: agent.revision,
     // The CLI adapts to whatever the deployment serves; the library warning is for code that
@@ -1103,7 +1123,6 @@ async function runOnce(
         output.log(`[${label}] attempt prepared: ${event.status}`);
     },
   });
-  reportTelemetry(report.telemetryNotAccepted, output);
   return reportVerdicts(
     client,
     values,
@@ -1206,6 +1225,7 @@ async function runDirect(
       persistResultContent: values.content,
       traceEvidence: { mode: "required" },
       traceNotAccepted: "fail_case",
+      onTelemetryNotAccepted: (entry) => reportTelemetry(entry, output),
       concurrency: run.concurrency,
       scorers: [],
       deferUnboundLocalScorers: true,
@@ -1242,7 +1262,6 @@ async function runDirect(
     output.log(
       `${report.deferredScorerVersionIds.length} evaluator version${report.deferredScorerVersionIds.length === 1 ? "" : "s"} left to Hue's executor`,
     );
-  reportTelemetry(report.telemetryNotAccepted, output);
   return reportVerdicts(
     client,
     values,
@@ -1309,6 +1328,7 @@ async function runWorker(
     scorers: [],
     concurrency,
     traceNotAccepted: "fail_case",
+    onTelemetryNotAccepted: (entry) => reportTelemetry(entry, output),
     deprecationWarnings: false,
     signal,
     ...(maxRuns === undefined ? {} : { maxRuns }),
@@ -1330,16 +1350,18 @@ async function runWorker(
       output.log(
         `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
       );
-      reportTelemetry(report.telemetryNotAccepted, output);
       if (!current) return;
       output.log("Waiting for Hue checks...");
       try {
-        const verdicts = await collectExperimentVerdicts(client, {
-          experimentId: current.experimentId,
-          subjectIds: report.subjectIds,
-          timeoutMillis: wait * 1000,
-          signal,
-        });
+        const verdicts = withTelemetryFailures(
+          await collectExperimentVerdicts(client, {
+            experimentId: current.experimentId,
+            subjectIds: report.subjectIds,
+            timeoutMillis: wait * 1000,
+            signal,
+          }),
+          report.telemetryNotAccepted,
+        );
         if (signal.aborted) return;
         if (values.json)
           process.stdout.write(

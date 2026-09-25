@@ -14,16 +14,18 @@ refuses to publish a version without a matching entry below.
 
 - `traceNotAccepted: "fail_case"` for `runExperiment`, `runSimulation` and `runLocalAgent`: a case
   whose required telemetry Hue did not accept is completed as failed (error `TelemetryNotAccepted`,
-  evidence omitted with a reason starting `telemetry_not_accepted`) instead of being left started,
-  and is listed in the new `RunnerReport.telemetryNotAccepted` with sanitized issue counts. The
-  default, `"stop"`, keeps the previous behavior. Exported types `TelemetryNotAccepted` and
+  evidence omitted with a reason starting `telemetry_not_accepted`, no output or generated files
+  attached) instead of being left started, reported to the new `onTelemetryNotAccepted(entry)` as it
+  completes and listed in the new `RunnerReport.telemetryNotAccepted` with sanitized issue counts.
+  The default, `"stop"`, keeps the previous behavior. Exported types `TelemetryNotAccepted` and
   `TelemetryIssueCount`.
 
 #### Fixed
 
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
-  `telemetry_not_accepted`, prints the export issue counts for it (and adds them to the case's
-  `--json` entry), and goes on with the run. Before, the run stopped with "Hue could not accept all
+  `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
+  the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
+  the run. Before, the run stopped with "Hue could not accept all
   telemetry. Inspect issues and report for sanitized counts.", pointing at a report the CLI never
   printed, and the case's execution stayed started. Other export errors now print their counts
   too.

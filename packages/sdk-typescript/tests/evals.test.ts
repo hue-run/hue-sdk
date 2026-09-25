@@ -18,6 +18,7 @@ import {
   runExperiment,
   scoreLocally,
   sourceDigest,
+  TargetOutcomeUncertainError,
   UncertainExecutionError,
   type Completion,
   type EvaluationRun,
@@ -541,7 +542,6 @@ describe("installed evaluation API and runner contract", () => {
       expect(completions()).toEqual([
         expect.objectContaining({
           state: "error",
-          output: "known completed output",
           error: {
             type: "TelemetryNotAccepted",
             message: expect.stringMatching(/^telemetry_not_accepted: traces failed 1 \(HTTP 401\)/),
@@ -551,6 +551,9 @@ describe("installed evaluation API and runner contract", () => {
         }),
         expect.objectContaining({ state: "succeeded", traceEvidence: "required" }),
       ]);
+      // The failed case keeps no output a scorer could pass; the other case keeps its own.
+      expect(completions()[0]).not.toHaveProperty("output");
+      expect(completions()[1]).toMatchObject({ output: "known completed output" });
       expect(completions()[1]).not.toHaveProperty("omissionReason");
       expect(report.telemetryNotAccepted).toEqual([
         {
@@ -569,6 +572,44 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("fail_case names a failed case as it completes, before a later case stops the run", async () => {
+    const f = fixture();
+    const exp = f.create();
+    let calls = 0;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "failed-evidence",
+      captureContent: false,
+    });
+    const named: string[] = [];
+    try {
+      await expect(
+        runExperiment({
+          client: f.client,
+          hue,
+          experimentId: exp.id,
+          checkpointDirectory: await directory(),
+          persistResultContent: true,
+          traceEvidence: { mode: "required" },
+          traceNotAccepted: "fail_case",
+          onTelemetryNotAccepted: (entry) => void named.push(entry.caseKey),
+          target: async (_inputs, context) => {
+            if (++calls === 1) {
+              f.failTelemetry();
+              return "known completed output";
+            }
+            throw new TargetOutcomeUncertainError(context.executionId);
+          },
+        }),
+      ).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+      expect(named).toHaveLength(1);
+    } finally {
+      await hue.shutdownSafe();
+      f.server.stop(true);
+    }
+  });
+
   test("fail_case raises a checkpoint that cannot be saved instead of failing the case", async () => {
     const f = fixture();
     const exp = f.create();

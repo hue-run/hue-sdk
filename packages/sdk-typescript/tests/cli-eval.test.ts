@@ -28,6 +28,8 @@ function hueStandIn(
     gateway?: boolean;
     /** Refuse trace exports with 400, or drop their connection without an answer. */
     traces?: "refuse" | "drop";
+    /** Grade as a scorer that never reads the execution state. */
+    ignoreExecutionState?: boolean;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
@@ -458,7 +460,8 @@ function hueStandIn(
           .push({ id: evaluationItemId, subjectId, hasOutput, traceSnapshotId: randomUUID() });
         // Hue grades world_outcome pins after the seal; the CLI must wait for them.
         const verdict = state.verdict;
-        const failed = verdict === "fail" || body.state !== "succeeded";
+        const failed =
+          verdict === "fail" || (!options.ignoreExecutionState && body.state !== "succeeded");
         if (verdict !== "none")
           results.get(experiment.evaluation.id)!.push({
             id: randomUUID(),
@@ -1114,7 +1117,8 @@ describe("hue eval", () => {
     test(
       `a case whose trace Hue ${traces === "refuse" ? "refuses" : "drops"} is completed as failed, with its counts`,
       async () => {
-        const f = hueStandIn({ traces });
+        // The grader never reads the execution state, so only the CLI can keep the case failing.
+        const f = hueStandIn({ traces, ignoreExecutionState: true });
         const cwd = await workspace();
         try {
           const run = (json: boolean) =>
@@ -1141,6 +1145,8 @@ describe("hue eval", () => {
           expect(f.calls.completions).toEqual([
             expect.objectContaining({ state: "error", error: { type: "TelemetryNotAccepted" } }),
           ]);
+          // Without its evidence the case keeps no output a grader could pass.
+          expect(f.calls.completions[0]).not.toHaveProperty("output");
           expect(f.calls.evidence).toEqual([
             {
               traceEvidence: "omit",
@@ -1161,6 +1167,8 @@ describe("hue eval", () => {
           const [entry] = (JSON.parse(json.stdout) as { cases: Record<string, unknown>[] }).cases;
           expect(entry).toMatchObject({
             externalKey: "refund",
+            state: "error",
+            passed: false,
             telemetry: {
               code: "telemetry_not_accepted",
               issues: [
