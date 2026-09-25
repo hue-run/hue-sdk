@@ -599,9 +599,9 @@ an uncertain preparation. See the
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
 
-An unreleased `directTarget` callback extends the same worker to cases without a world: the runner
-verifies the case's pinned input files, hands them to the agent, and uploads the documents it
-returns as verified Hue artifacts for scoring. See
+The `directTarget` callback, shipped in TypeScript `0.5.0`, extends the same worker to cases
+without a world: the runner verifies the case's pinned input files, hands them to the agent, and
+uploads the documents it returns as verified Hue artifacts for scoring. See
 [direct cases and files](EVALUATIONS.md#direct-cases-and-files).
 
 Scorer deferral shipped in TypeScript `0.3.1`. Only built-ins
@@ -614,8 +614,8 @@ their agents with `runLocalAgent()`; setup does not register workers or launch s
 
 ### Command-line evaluation
 
-The unreleased `hue eval` command wraps `runSimulation()` and `runLocalAgent()` for an adapter
-file or a shell command: `hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run
+The `hue eval` command, shipped in TypeScript `0.5.0`, wraps `runSimulation()` and
+`runLocalAgent()` for an adapter file or a shell command: `hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run
 from a published case's immutable pins, runs the agent in one isolated world per case, waits
 for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
 `--worker` registers the same adapter for runs launched from Hue. It needs a Read and

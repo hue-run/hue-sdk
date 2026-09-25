@@ -8,9 +8,9 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.10.0] - 2026-09-25
 
-This section changes a default of the `hue` binary, so it ships as `0.10.0`.
+This release changes a default of the `hue` binary (see Breaking), so it is a `0.MINOR` release.
 
 #### Breaking
 
@@ -703,7 +703,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.6.1] - 2026-09-25
 
 #### Fixed
 

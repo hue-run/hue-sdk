@@ -264,8 +264,8 @@ installed-registry-package to hosted-facade acceptance remains a post-publicatio
 ## Direct cases and files
 
 Cases without a simulated world — document workflows whose inputs are a task plus pinned files —
-run on the same runner under the same checkpoint rules. This is unreleased and ships in the next
-`@hue-run/sdk` release. It requires a Hue deployment that serves case `inputFiles` on experiment
+run on the same runner under the same checkpoint rules. They shipped in `@hue-run/sdk` `0.5.0`
+and require a Hue deployment that serves case `inputFiles` on experiment
 items, subject `files`, and the artifact reservation, upload, completion and download APIs. The
 Python SDK has no equivalent.
 
