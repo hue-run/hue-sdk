@@ -15,8 +15,7 @@ from hue_sdk._provider_tools import (
 from hue_sdk._tool_definitions import tool_catalog_summary
 
 ERROR_TEXT_FIXTURE = (
-    Path(__file__).resolve().parents[3]
-    / "packages"
+    Path(__file__).resolve().parents[2]
     / "sdk-typescript"
     / "tests"
     / "fixtures"
@@ -352,8 +351,6 @@ def test_failed_mcp_call_error_text_is_read_only_under_content_capture(capture_c
 
 
 def test_error_text_is_scrubbed_and_bounded_identically_to_the_typescript_sdk():
-    if not ERROR_TEXT_FIXTURE.is_file():
-        pytest.skip("Shared fixtures are not part of this checkout")
     for case in json.loads(ERROR_TEXT_FIXTURE.read_text(encoding="utf-8"))["cases"]:
         assert provider_error_description(case["input"]) == case["expected"]
     assert provider_error_description("x" * 1_100) == "x" * 1_024 + "\u2026"
