@@ -1,0 +1,224 @@
+{
+  "cases": [
+    {
+      "input": "Tool 'search_threads' failed: upstream timeout after 30s",
+      "expected": "Tool 'search_threads' failed: upstream timeout after 30s"
+    },
+    {
+      "input": "401 Unauthorized calling https://synthetic-user:synthetic-pass@mcp.example.test/sse?api_key=synthetic-key&x=1#frag",
+      "expected": "401 Unauthorized calling https://mcp.example.test/sse?api_key=%5Bredacted%5D&x=%5Bredacted%5D"
+    },
+    {
+      "input": "Authorization: Bearer synthetic-bearer-token was rejected",
+      "expected": "Authorization: [redacted] was rejected"
+    },
+    {
+      "input": "{\"error\":\"invalid_grant\",\"access_token\":\"synthetic-access\",\"note\":\"x\"}",
+      "expected": "{\"error\":\"invalid_grant\",\"access_token\":\"[redacted]\",\"note\":\"x\"}"
+    },
+    {
+      "input": "password=synthetic-pw&user=bob; X-Api-Key: synthetic-api-key",
+      "expected": "password=[redacted]&user=bob; X-Api-Key: [redacted]"
+    },
+    {
+      "input": "token = 'synthetic-token-2'",
+      "expected": "token = '[redacted]'"
+    },
+    {
+      "input": "Basic c3ludGhldGljOnBhc3M= denied",
+      "expected": "Basic [redacted] denied"
+    },
+    {
+      "input": "see http://[::1]:8080/path?token=synthetic-ipv6#x",
+      "expected": "see http://[::1]:8080/path?token=%5Bredacted%5D"
+    },
+    {
+      "input": "connect http://synthetic:secret@[bad/path failed",
+      "expected": "connect [redacted] failed"
+    },
+    {
+      "input": "Failed to reach https://mcp.example.test/sse.",
+      "expected": "Failed to reach https://mcp.example.test/sse."
+    },
+    {
+      "input": "bad \u0000 nul \ud800 lone",
+      "expected": "bad  nul \ufffd lone"
+    },
+    {
+      "input": "Upstream said: {'client_secret': 'synthetic-client-secret', 'status': 403}",
+      "expected": "Upstream said: {'client_secret': '[redacted]', 'status': 403}"
+    },
+    {
+      "input": "refresh_token=synthetic-refresh, retry later",
+      "expected": "refresh_token=[redacted], retry later"
+    },
+    {
+      "input": "Token synthetic-token-value is expired",
+      "expected": "Token [redacted] is expired"
+    },
+    {
+      "input": "wss://synthetic-user@realtime.example.test/socket?session=abc rejected",
+      "expected": "wss://realtime.example.test/socket?session=%5Bredacted%5D rejected"
+    },
+    {
+      "input": "\u00dcn\u00efc\u00f6d\u00e9 message with \ud83d\ude00 emoji and no secrets",
+      "expected": "\u00dcn\u00efc\u00f6d\u00e9 message with \ud83d\ude00 emoji and no secrets"
+    },
+    {
+      "input": "HTTP 502 from mcp_server:8080 (Bad Gateway)",
+      "expected": "HTTP 502 from mcp_server:8080 (Bad Gateway)"
+    },
+    {
+      "input": "Upstream said: password=\"synthetic two words\" and retried",
+      "expected": "Upstream said: password=\"[redacted]\" and retried"
+    },
+    {
+      "input": "{\"password\": \"synthetic two words\", \"user\": \"bob\"}",
+      "expected": "{\"password\": \"[redacted]\", \"user\": \"bob\"}"
+    },
+    {
+      "input": "secret=\"synthetic\\\"escaped value\" was refused",
+      "expected": "secret=\"[redacted]\" was refused"
+    },
+    {
+      "input": "password=\"\" is empty",
+      "expected": "password=\"\" is empty"
+    },
+    {
+      "input": "password=\"synthetic-unclosed and more",
+      "expected": "password=\"[redacted] and more"
+    },
+    {
+      "input": "\"authorization\": \"Bearer synthetic two words\"",
+      "expected": "\"authorization\": \"[redacted]\""
+    },
+    {
+      "input": "error: token=synthetic-chained-token",
+      "expected": "error: token=[redacted]"
+    },
+    {
+      "input": "status:password=synthetic-pw-2; retrying",
+      "expected": "status:password=[redacted]; retrying"
+    },
+    {
+      "input": "token=password = synthetic-pw-3",
+      "expected": "token=[redacted] = [redacted]"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token=\"synthetic-query-secret\" next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token='synthetic two words' next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "postgres://synthetic:secret@db.example.test/app refused the connection",
+      "expected": "[redacted] refused the connection"
+    },
+    {
+      "input": "redis://cache.example.test:6379/0 refused",
+      "expected": "redis://cache.example.test:6379/0 refused"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token=\"synthetic-unclosed-query next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "world token hue_world_synthetic0000000000.signature111 and key hue_sk_test_synthetic_key_0123 were refused",
+      "expected": "world token [redacted] and key [redacted] were refused"
+    },
+    {
+      "input": "Slack said xoxb-0000-1111-synthetic; Google said ya29.a0Synthetic_token-123",
+      "expected": "Slack said [redacted]; Google said [redacted]"
+    },
+    {
+      "input": "API key: sk-proj-synthetic0123456789 was rejected",
+      "expected": "API key: [redacted] was rejected"
+    },
+    {
+      "input": "Anthropic said sk-ant-api03-synthetic_key-0123 is invalid; GitHub ghp_synthetic0123456789 expired",
+      "expected": "Anthropic said [redacted] is invalid; GitHub [redacted] expired"
+    },
+    {
+      "input": "Authorization: ApiKey synthetic-apikey-value was rejected",
+      "expected": "Authorization: [redacted] was rejected"
+    },
+    {
+      "input": "Authorization: Bot synthetic-bot-token, retrying",
+      "expected": "Authorization: [redacted], retrying"
+    },
+    {
+      "input": "Proxy-Authorization: Basic c3ludGhldGljOnBhc3M=",
+      "expected": "Proxy-Authorization: [redacted]"
+    },
+    {
+      "input": "upstream body {\\\"api_key\\\":\\\"synthetic escaped key\\\",\\\"user\\\":\\\"bob\\\"}",
+      "expected": "upstream body {\\\"api_key\\\":\\\"[redacted]\\\",\\\"user\\\":\\\"bob\\\"}"
+    },
+    {
+      "input": "Bearer: synthetic-bearer-colon",
+      "expected": "Bearer: [redacted]"
+    },
+    {
+      "input": "Bearer synthetic%2Fbearer%3D%3D rejected",
+      "expected": "Bearer [redacted] rejected"
+    },
+    {
+      "input": "1token=synthetic-digit-led-key",
+      "expected": "1token=[redacted]"
+    },
+    {
+      "input": "risk-assessment and sk-learn ask-me; the Authorization header was missing",
+      "expected": "risk-assessment and sk-learn ask-me; the Authorization header was missing"
+    },
+    {
+      "input": "failed at xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa://synthetic-user:synthetic-pass@mcp.example.test/sse",
+      "expected": "failed at xaaaaaaaaaaaaaaaa[redacted]"
+    },
+    {
+      "input": "retry_https://synthetic-user:synthetic-pass@mcp.example.test/sse?key=synthetic-key failed",
+      "expected": "retry_https://mcp.example.test/sse?key=%5Bredacted%5D failed"
+    },
+    {
+      "input": "cli ran with --token=synthetic-dash-1 --password=synthetic-dash-2 --api-key=synthetic-dash-3",
+      "expected": "cli ran with --token=[redacted] --password=[redacted] --api-key=[redacted]"
+    },
+    {
+      "input": "npmrc _authToken=synthetic-npm-1 and _token=synthetic-underscore-2",
+      "expected": "npmrc _authToken=[redacted] and _token=[redacted]"
+    },
+    {
+      "input": "Token : synthetic-spaced-token",
+      "expected": "Token : [redacted]"
+    },
+    {
+      "input": "X-Auth-Token : synthetic-header-token",
+      "expected": "X-Auth-Token : [redacted]"
+    },
+    {
+      "input": "token\t:\tsynthetic-tab-token",
+      "expected": "token\t:\t[redacted]"
+    },
+    {
+      "input": "Slack said xoxc-synthetic-client-token and xoxd-synthetic%2Fcookie-token",
+      "expected": "Slack said [redacted] and [redacted]"
+    },
+    {
+      "input": "Hue said hue_sim_synthetic0123, hue_setup_synthetic0123 and hue_install_synthetic0123",
+      "expected": "Hue said [redacted], [redacted] and [redacted]"
+    },
+    {
+      "input": "OpenAI said sk-synthetic0123%2Fescaped%3D%3D was invalid",
+      "expected": "OpenAI said [redacted] was invalid"
+    },
+    {
+      "input": "API key: synthetic-opaque-key was rejected",
+      "expected": "API key: [redacted] was rejected"
+    },
+    {
+      "input": "the key: value pairs and a tapi key: stay as they are",
+      "expected": "the key: value pairs and a tapi key: stay as they are"
+    }
+  ]
+}

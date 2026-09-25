@@ -155,12 +155,22 @@ await hue.model(
 
 Each OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call` or `code_interpreter_call`
 item, and each Anthropic `mcp_tool_use` or `server_tool_use` block with its result, becomes an
-`execute_tool {name}` child span with `gen_ai.tool.type` `extension`, `gen_ai.tool.call.id` and,
-for MCP calls, `mcp.server.name` (the provider's label). Arguments and results follow
-`captureContent`; a failed call carries `error.type` (`mcp_error`, the provider's status or error
-code) and ERROR status. An `mcp_list_tools` item becomes a `tools/list` child span with that
-server's `gen_ai.tool.definitions`. Pass the request so each server's host is recorded as
-`server.address` (only server URLs are read, never credentials), and `servers` to record a
+`execute_tool {name}` child span with `gen_ai.tool.type` `extension`, `gen_ai.tool.call.id`,
+`hue.tool.call.position` (the 0-based position of its item in the response: the OpenAI `output`
+index or the Anthropic `content` block index, in both capture modes) and, for MCP calls,
+`mcp.server.name` (the provider's label). Arguments and results follow `captureContent`; a failed
+call carries `error.type` (`mcp_error`, the provider's status or error code) and ERROR status. With
+`captureContent: true`, a failed OpenAI MCP call's status description is the provider's error
+text, credentials scrubbed (URL userinfo, query values and fragments, or the whole URL for a scheme
+other than `http(s)`, `ws(s)` and `ftp`; tokens with a known credential prefix such as `hue_sk_`,
+`sk-` or `xoxb-`; authorization-scheme credentials and an `Authorization` header's whole value;
+the value of a credential-named `key=value` or `key: value` pair, quoted or not) and cut to 1,024
+characters. An `mcp_list_tools`
+item becomes a `tools/list` child span with that server's `gen_ai.tool.definitions`; with
+`captureContent: false` it carries only `hue.tool.names` and `hue.tool.definitions.sha256`, the
+summary described below. Pass the request so each server's host is recorded as `server.address`
+(only server URLs are read, never credentials; a host name keeps its underscores, as WHATWG URL
+parsing does), and `servers` to record a
 server's real `name`, `version`, Hue `provider` and `surface` under its label. `provider` defaults
 to the enclosing `model()` call's provider (`openai` or `anthropic`). The spans have no duration of
 their own: the provider ran the tools inside the model request.
@@ -343,8 +353,8 @@ Recorded messages can inline files: GenAI `blob` parts in `gen_ai.input.messages
 `gen_ai.output.messages` (what the AI SDK 7 adapter records for a file part) and AI SDK 6 `file`
 parts in `ai.prompt.messages`. A span whose messages exceed 256 KiB would be rejected, so when a
 record is queued Hue replaces the `content`/`data` of any such part longer than 64 KiB with the
-file's `sha256` (of the decoded bytes for base64 and `data:` URLs, of the UTF-8 text otherwise) and
-`size`, keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
+file's `sha256` and `size`, both of the file's own bytes whatever its media type (base64 content
+and `;base64` `data:` URLs decoded, other `data:` URLs percent-decoded, anything else as UTF-8 text), keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
 files are exported as recorded. The digest matches `hue.recordFile`'s `hue.file.sha256` for the same
 bytes, so a file can be recognized wherever it appears. The replacement happens before the record is
 charged to the queue budget, so a large file does not drop its span. It is bounded: a message
@@ -599,9 +609,9 @@ an uncertain preparation. See the
 an issued facade endpoint or the official Gmail service, and do not claim universal provider
 parity.
 
-An unreleased `directTarget` callback extends the same worker to cases without a world: the runner
-verifies the case's pinned input files, hands them to the agent, and uploads the documents it
-returns as verified Hue artifacts for scoring. See
+The `directTarget` callback, shipped in TypeScript `0.5.0`, extends the same worker to cases
+without a world: the runner verifies the case's pinned input files, hands them to the agent, and
+uploads the documents it returns as verified Hue artifacts for scoring. See
 [direct cases and files](EVALUATIONS.md#direct-cases-and-files).
 
 Scorer deferral shipped in TypeScript `0.3.1`. Only built-ins
@@ -614,9 +624,10 @@ their agents with `runLocalAgent()`; setup does not register workers or launch s
 
 ### Command-line evaluation
 
-The unreleased `hue eval` command wraps `runSimulation()` and `runLocalAgent()` for an adapter
-file or a shell command: `hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run
-from a published case's immutable pins, runs the agent in one isolated world per case, waits
+The `hue eval` command, shipped in TypeScript `0.5.0` (`--case` since `0.6.0`, `--scenario`
+before), wraps `runSimulation()` and `runLocalAgent()` for an adapter file or a shell command:
+`hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run from a published case's
+immutable pins, runs the agent in one isolated world per case, waits
 for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
 `--worker` registers the same adapter for runs launched from Hue. It needs a Read and
 write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is

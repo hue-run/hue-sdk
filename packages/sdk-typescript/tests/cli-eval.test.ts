@@ -125,6 +125,8 @@ function hueStandIn(
     evidence: [] as Record<string, unknown>[],
     /** Exported spans, decoded: name and attribute keys. */
     spans: [] as { name: string; attributes: string[] }[],
+    /** Every OTLP request body, decompressed. */
+    otlpBodies: [] as Buffer[],
     worldCreates: [] as Record<string, unknown>[],
     experiments: [] as Record<string, unknown>[],
     register: [] as Record<string, unknown>[],
@@ -178,8 +180,9 @@ function hueStandIn(
       if (path.startsWith("/otlp/")) {
         calls.otlp++;
         let bytes = Buffer.from(await request.arrayBuffer());
+        if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
+        calls.otlpBodies.push(bytes);
         if (path.endsWith("/traces")) {
-          if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
           const decoded = traceRequest.toObject(traceRequest.decode(bytes)) as {
             resourceSpans?: {
               scopeSpans?: { spans?: { name: string; attributes?: { key: string }[] }[] }[];
@@ -737,6 +740,12 @@ const throwingAdapterSource = `export default async function runMyAgent(_inputs,
 
 /** Throws errors whose message cannot be reassigned, with the world token and the key. */
 const frozenAdapterSource = `export default async function runMyAgent(_inputs, context) {
+  if (process.env.HUE_TEST_NAMED_ERROR) {
+    // A credential in the name alone, which the span exports as its error type.
+    const named = new Error("mirror refused");
+    named.name = "Refused " + context.world.token;
+    throw process.env.HUE_TEST_NAMED_ERROR === "frozen" ? Object.freeze(named) : named;
+  }
   const text = "mirror refused " + context.world.token + " for " + process.env.HUE_API_KEY;
   if (process.env.HUE_TEST_DOM_EXCEPTION) throw new DOMException(text, "DataCloneError");
   throw Object.freeze(new Error(text));
@@ -1522,6 +1531,36 @@ describe("hue eval", () => {
                 message: "mirror refused [redacted] for [redacted]",
               },
             });
+          } finally {
+            f.stop();
+          }
+        }
+        // A credential in the error's name alone, on a plain and a frozen error.
+        for (const named of ["plain", "frozen"]) {
+          const f = hueStandIn({ gateway: true });
+          try {
+            const result = await hue(
+              [
+                "--scenario",
+                "Refund flow",
+                "./hue-frozen.mjs",
+                "--origin",
+                f.baseUrl,
+                "--wait",
+                "0",
+              ],
+              { cwd, env: { HUE_TEST_NAMED_ERROR: named } },
+            );
+            expect(result.status).toBe(1);
+            expect(f.calls.completions[0]).toMatchObject({
+              state: "error",
+              error: { message: "mirror refused" },
+            });
+            expect(f.calls.otlpBodies.length).toBeGreaterThan(0);
+            for (const body of f.calls.otlpBodies) expect(body.includes(worldToken)).toBe(false);
+            expect(Buffer.concat(f.calls.otlpBodies).includes("Refused [redacted]")).toBe(true);
+            expect(JSON.stringify(f.calls.completions)).not.toContain(worldToken);
+            expect(`${result.stdout}${result.stderr}`).not.toContain(worldToken);
           } finally {
             f.stop();
           }

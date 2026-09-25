@@ -13,7 +13,15 @@ from opentelemetry.context import Context
 
 from ..client import Hue
 from ._checkpoint import CheckpointStore
-from ._json import MISSING, json_value, uuid
+from ._json import (
+    MISSING,
+    VALUE_BYTES,
+    VALUE_DEPTH,
+    VALUE_NODES,
+    JsonLimitError,
+    json_value,
+    uuid,
+)
 from .client import EvaluationClient
 from .scorers import invoke, persisted_score, score_locally, validate_bindings
 from .types import LocalScorer, RunnerReport, ScoreContext, TargetContext, TraceEvidence
@@ -179,6 +187,23 @@ def _upload(
         save()
 
 
+class OutputTooLargeError(ValueError):
+    """A target's output beyond what Hue stores for one case.
+
+    Recorded as that case's error (type ``OutputTooLarge``), never raised: the other cases keep
+    running. The message is the TypeScript SDK's.
+    """
+
+    def __init__(self, limit: str) -> None:
+        super().__init__(
+            f"The output is larger than {VALUE_BYTES:,} bytes of JSON, the most Hue stores for "
+            "one case; return a large result as a generated file"
+            if limit == "bytes"
+            else f"The output has more than {VALUE_NODES:,} JSON values or nests deeper than "
+            f"{VALUE_DEPTH} levels, the most Hue stores for one case"
+        )
+
+
 def _error_message(error: Exception) -> str:
     # The caller opted into storing result content; the API still rejects NUL and lone surrogates.
     return "".join(
@@ -321,12 +346,20 @@ def run_experiment(
                 if output is not MISSING:
                     try:
                         json_value(output)
+                    except JsonLimitError as error:
+                        # An output over the size, count or depth bounds is the target's own
+                        # failure: the case completes as an error and the run goes on. Output that
+                        # is not JSON at all still stops the run for inspection.
+                        state, output = "error", MISSING
+                        target_error = OutputTooLargeError(error.limit)
+                        span.record_error(target_error)
                     except (ValueError, TypeError, RecursionError):
                         store.write(
                             file, {"stage": "serialization_failed", "executionId": execution["id"]}
                         )
                         raise OutcomeSerializationError(execution["id"]) from None
-                    span.set_output(output)
+                    else:
+                        span.set_output(output)
                 scores = _scores(
                     versions,
                     {
@@ -353,7 +386,11 @@ def run_experiment(
                     **(
                         {
                             "error": {
-                                "type": "TargetError",
+                                "type": (
+                                    "OutputTooLarge"
+                                    if isinstance(target_error, OutputTooLargeError)
+                                    else "TargetError"
+                                ),
                                 **(
                                     {"message": _error_message(target_error)}
                                     if persist_result_content

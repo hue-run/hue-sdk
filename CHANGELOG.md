@@ -10,7 +10,56 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
-This section changes a default of the `hue` binary, so it ships as `0.10.0`.
+#### Added
+
+- `normalizeScorerDefinitionForPublication` and the `ScorerDefinition` type know every
+  Hue-executed `world_outcome` entry: `hue.conversion_outcome.v2`,
+  `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
+  `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
+  filled in when omitted; the local runner defers all of them to Hue, as it does v1.
+- Provider tool spans from `recordProviderToolCalls` carry `hue.tool.call.position`, the 0-based
+  position of the call's item in the provider response (the OpenAI `output` index or the Anthropic
+  `content` block index), in both capture modes, so calls from one response that share a start
+  time keep their order. **Wire**
+- A `tools/list` span from `recordProviderToolCalls` with `captureContent: false` carries
+  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
+  any record's tool definitions; before, it carried neither. Descriptions and schemas are still
+  exported only with content capture. **Wire**
+- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
+  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
+  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
+  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
+  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_` and `hue_install_`, and `sk-`, Stripe,
+  Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or `Token`,
+  an `Authorization` header's whole value and the value of a credential-named `key=value` or
+  `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the value
+  quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
+  another pair's value). The `redact` hook sees the text as `status.message`. Without content
+  capture the span keeps `error.type` only. **Wire**
+
+#### Fixed
+
+- A target output over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32
+  levels of nesting) no longer stops the whole run with `OutcomeSerializationError`: that case
+  completes as `error` with the type `OutputTooLarge` and, when result content is persisted, a
+  message naming the bound, and the other cases keep running. Output within the bounds that is not
+  JSON still raises `OutcomeSerializationError`.
+- A large inline file whose `data:` URL has a pathological number of `;` parameters is hashed as
+  the bytes its own encoding gives. The header was read with a pattern repeated per parameter,
+  which throws on Node (from about 3.4 million), leaving the message unhashed, or stops matching
+  on Bun (from about 1.1 million), hashing the URL's text. The Python SDK reads the header the
+  same way.
+- An OpenAI `mcp_list_tools` tool's null `description`, `input_schema` or `annotations` is left
+  out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record the
+  same definitions and give a catalog the same digest.
+- `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
+  throws when read: the item is skipped and counted, and the other calls are recorded, as the
+  Python SDK does.
+
+### [0.10.0] - 2026-09-25
+
+This release changes a default of the `hue` binary (see Breaking), so it is a `0.MINOR` release.
 
 #### Breaking
 
@@ -74,7 +123,8 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   not-applicable results in its pass line and `--json`, and exits 0 when every case passed the
   evaluators that apply to it. Before, such a result was an ordinary skip: its columns showed `-`,
   its explanation was printed with a failing case's own, and a case no pinned evaluator applied to
-  was reported as skipped. Only Hue's flag marks a result not applicable; a skip without it, such
+  was reported as skipped. Only Hue's flag on a skipped result marks it not applicable: a scored
+  or errored result keeps its verdict whatever flag it carries, and a skip without the flag, such
   as one for an incomplete environment, is still a skip.
 
 #### Changed
@@ -115,6 +165,15 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
 
 #### Fixed
 
+- **Wire.** A large inline file part in a recorded message is exported with the `sha256` and
+  `size` of the file's own bytes whatever its media type. Base64 content is decoded for text,
+  JSON and untyped parts too, and a `data:` URL without `;base64` is percent-decoded. Before,
+  those were hashed as the UTF-8 of their base64 or URL text, so the digest did not match the
+  file's bytes, and a text file sent as base64 could not be linked to its upload. Behavior change:
+  content made only of base64 characters and padded to a multiple of four is now read as base64
+  even under a text media type, as Hue reads it, so such a text (`AAAA…`, for example) is hashed
+  as the bytes it decodes to and stays inline while those fit in 64 KiB. A text file's own text
+  is still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
   `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
   the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
@@ -146,16 +205,21 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   at once and exits with 130 instead of ending the CLI and leaving the agent running.
 - `hue eval` replaces an adapter error whose message cannot be reassigned (a frozen error, or one
   whose `message` is a getter) with a new `Error` carrying the redacted message and name, instead
-  of storing the unredacted message. Values shorter than 16 characters are no longer treated as
-  credentials, so a short environment value no longer redacts ordinary text in the answer.
+  of storing the unredacted message. An error's name, which the case span exports as its error
+  type, is redacted the same way as its message. Values shorter than 16 characters are no longer
+  treated as credentials, so a short environment value no longer redacts ordinary text in the
+  answer.
 - `hue eval` also replaces the credentials it redacts from the answer in the UTF-8 `.txt`, `.csv`
-  and `.json` documents it collects from `output/` before uploading them. PDF, Office and image
-  documents and files an adapter returns by `path` are uploaded as written, so an agent must still
-  never write credentials to `output/`.
+  and `.json` documents it collects from `output/`, and in every generated file's name, before
+  uploading them; a name that redaction makes equal to another file's gains `-2`, `-3`, … before
+  its extension, so both are still uploaded. PDF, Office and image documents and files an adapter
+  returns by `path` are uploaded as written, so an agent must still never write credentials to
+  `output/`.
 - `hue eval --case` and `resolveScenarioPins` accept the published eval set case's own ID, the one
   Hue shows on the case page, and URLs naming `/cases/<id>` or `/case-conversions/<id>`. Before,
   only the case conversion's ID or a `/scenarios/<id>` URL resolved, and the case's own ID failed
-  with HTTP 404.
+  with HTTP 404. A case ID is looked up among the first 1,000 Scenarios listed, and a listing that
+  repeats a cursor ends the lookup, or a name search, instead of paging forever.
 - `EvaluationClient.registerLocalAgent` reads the registered key from the response's `agentKey`
   when it has no `key`, so `RegisteredLocalAgent.key` is set and `hue eval --worker` no longer
   prints "Registered agent undefined".
@@ -165,6 +229,10 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
   any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
   A refused `downloadArtifact` is fetched again the same way and still stops at `maxBytes`.
+- The retry jitter in `EvaluationClient` is written as `Math.random() * 0.5` instead of a bare
+  division, so the release workflow's inspection of the built archive, which refuses ambiguous
+  `/` syntax, accepts the package. The waits are unchanged. CI now runs that inspection on every
+  change.
 
 ### [0.9.0] - 2026-09-24
 
@@ -690,8 +758,45 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+#### Added
+
+- Provider tool spans from `record_provider_tool_calls` carry `hue.tool.call.position`, the
+  0-based position of the call's item in the provider response, in both capture modes. **Wire**
+- A `tools/list` span from `record_provider_tool_calls` with `capture_content=False` carries
+  `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
+  any record's tool definitions. **Wire**
+- With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters exactly as the
+  TypeScript SDK does, after your `redactor` sees it as `status.message`. Without content capture
+  the span keeps `error.type` only. **Wire**
+
 #### Fixed
 
+- `run_experiment` no longer stops the whole run with `OutcomeSerializationError` when a target's
+  output is over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels
+  of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
+  content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
+  running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
+- A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
+  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
+  `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
+- `server.address` keeps a host name with an underscore, such as a Docker Compose service
+  (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
+  dropped.
+
+### [0.6.1] - 2026-09-25
+
+#### Fixed
+
+- **Wire.** A large inline file part in a recorded message is exported with the `sha256` and
+  `size` of the file's own bytes whatever its media type. Base64 content is decoded for text,
+  JSON and untyped parts too, and a `data:` URL without `;base64` is percent-decoded. Before,
+  those were hashed as the UTF-8 of their base64 or URL text, so the digest did not match the
+  file's bytes. Behavior change: content made only of base64 characters and padded to a
+  multiple of four is now read as base64 even under a text media type, as Hue reads it, so such a
+  text (`AAAA…`, for example) is hashed as the bytes it decodes to and stays inline while those
+  fit in 64 KiB. A text file's own text is still hashed as UTF-8. This matches the TypeScript
+  SDK, checked against a shared fixture.
 - Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation
@@ -719,6 +824,12 @@ No registry release is claimed until publication and registry acceptance complet
   that long first. Hue does this when its key check is busy, which parallel cases can trigger; such
   a request previously failed the run. A refusal that asks for longer or gives a date, a timeout and
   any other failure still fail at once, so a write whose outcome is uncertain is never sent twice.
+- The inline-file digest tests skip, rather than fail to collect, when the TypeScript suite's
+  shared fixtures are absent, as the other cross-language tests do. Every cross-language test now
+  finds the TypeScript suite at the same relative place, and the release's installed-wheel check
+  copies its fixtures and content-prefix list there, so the digest, tool-definition, URL and
+  hosted-tool-call fixtures and the prefix list are checked against the installed wheel with none
+  skipped. CI runs that check on every change. The published package is unchanged by this.
 
 ### [0.6.0] - 2026-09-24
 
@@ -913,7 +1024,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
-- Unreleased metadata: recommend one **Read and write** project key for development instead of **Tracing only**. The invite-only check looks for a Hue project and a project key configured as `HUE_API_KEY`, names **Read and write** as the recommended preset and still admits a key of any preset. The one **Read and write** key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server, where it is configured as `HUE_MCP_KEY` (a **Read** key suffices for inspect-only access). Before the application runs on a production server, the user creates a separate **Tracing only** key for that server's `HUE_API_KEY`. The fix for a rejected export is a **Read and write** key for development and evaluation, or **Tracing only** on a production server.
+- 0.4.4 (2026-09-25): `@hue-run/sdk` 0.10.0 is published, so the evaluation section says what changed "since" it rather than "from" it: an evaluator that does not apply to a case shows `n/a`, and one-shot `hue eval` stores outputs by default. Also collects the unreleased metadata change merged since 0.4.3: recommend one **Read and write** project key for development instead of **Tracing only**. The invite-only check looks for a Hue project and a project key configured as `HUE_API_KEY`, names **Read and write** as the recommended preset and still admits a key of any preset. The one **Read and write** key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server, where it is configured as `HUE_MCP_KEY` (a **Read** key suffices for inspect-only access). Before the application runs on a production server, the user creates a separate **Tracing only** key for that server's `HUE_API_KEY`. The fix for a rejected export is a **Read and write** key for development and evaluation, or **Tracing only** on a production server.
 - 0.4.3 (2026-09-25): the evaluation section says that from `@hue-run/sdk` 0.10.0 one-shot `hue eval` stores case outputs, error messages and explanations by default, the command's stdout being its stored answer with the credentials it was handed redacted, and `--no-output` opts out (earlier versions store them only with `--content`); that files written to `output/` are uploaded and not fully redacted, so they must never hold credentials; and that an evaluator that does not apply to a case shows `n/a` and neither passes nor fails it.
 - 0.4.2 (2026-09-24): recommend full traces. The capture section, now headed "Capture and instrument full traces", tells agents to recommend `captureContent: true` / `capture_content=True` in the plan shown to the user and to state what it sends (prompts/messages, responses and tool inputs/outputs alongside model, usage, timing and errors); the user's approval authorizes it. Metadata-only (`false`) remains the opt-out when the user declines or an existing application policy forbids sending that content. The value is still required, and redaction and credential filtering apply in both modes. Agents instrument every request path that calls a model or tool, not only one, verify at least one real request and report the instrumented paths they did not exercise. Also collects the unreleased metadata changes merged since 0.4.1: find published cases with the Hue MCP tools `list_cases` and `get_case` (the earlier `list_scenarios` and `get_scenario` names remain aliases), and name Hue's consolidated access presets. Evaluation workflows use **Read and write** (formerly **Tracing and evaluations**); tracing still uses **Tracing only**. A **Read** key (formerly **Coding agent (read-only)**) cannot send telemetry.
 - 0.4.1, unchanged metadata (2026-09-22): Hue Cloud is invite-only. The one-command onboarding guidance (`setup --agent`, `resume`, `hue claim`) is replaced by an invite-only section: an agent whose user has no Hue project and **Tracing only** key relays the reply from https://docs.hue.run/guides/agent-setup.md and stops. The published CLI is unchanged.

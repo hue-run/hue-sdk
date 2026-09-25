@@ -10,7 +10,7 @@ The SDK packages use the MIT license. A workflow file or a passing build does no
 2. Run **Release SDK** (`.github/workflows/release.yml`) from `main`, selecting the language and exact committed stable version. Leave **publish** unchecked to prepare downloadable artifacts without publishing. The workflow always checks out its immutable triggering commit; it cannot publish a feature branch.
 3. Preparation builds once, tests installed packages, inspects the distribution inventory, and records `release-manifest.json` plus `SHA256SUMS`. TypeScript runs both supported AI SDK/OTel patch pairs and the Node reference chatbot. Python installs the same wheel using both pip and uv on Python 3.10 and 3.14, exercising tracing, logs, evaluation, privacy, acknowledgements and cloud configuration against synthetic loopback services.
 4. After registry setup, select **publish** to prepare, verify and publish. Only the isolated publishing jobs receive `id-token: write`. They download the verified artifacts, check hashes and publish unchanged bytes; they do not check out source or rebuild packages. The npm job disables lifecycle scripts. Ordinary TypeScript releases retain the default `latest` tag; an activation-gated release selects the closed `hue-onboarding-candidate` tag instead. TypeScript `0.4.0` additionally requires `prepared_run_id` identifying its accepted, successful `publish=false` run on the same immutable main commit; publication downloads and rechecks that archive without rebuilding it. Reuse requires exactly three regular, non-symlink files: the named tarball, its manifest and matching `SHA256SUMS`. The GitHub evidence-read token is scoped to identity verification; installed-package tests run separately without it.
-5. Public registry acceptance fetches the published archives and verifies their SHA-256 against the tested artifacts. For npm it also requires provenance attestations on the published version. Fresh consumers then install by package name and exact version, without GitHub credentials or local archive overrides, and rerun behavioral checks.
+5. Public registry acceptance first waits, for up to 10 minutes, until the registry serves the version to its runner (`scripts/wait-for-registry.py`: npm's version and install documents with the dist-tag, or PyPI's simple index with pip's headers and its version document), since both registries answer from caches that lag a publish. It then fetches the published archives and verifies their SHA-256 against the tested artifacts. For npm it also requires provenance attestations on the published version. Fresh consumers then install by package name and exact version, without GitHub credentials or local archive overrides, and rerun behavioral checks.
 6. After registry acceptance, the workflow creates or updates the language-specific GitHub release (for example `typescript-v0.1.2` and `python-v0.1.0`) from the changelog entry, attaching the archive, `release-manifest.json` and `SHA256SUMS`. Update public availability statements only after registry acceptance succeeds.
 
 Publication is not rolled back automatically if acceptance fails. Investigate the published version, correct the issue in a reviewed patch release, and use registry deprecation/yank controls deliberately if needed. Do not retry publication with different bytes under the same version.
@@ -201,12 +201,13 @@ All integration checks use synthetic services. No paid model API or production H
 
 ## Registry aliases
 
-`packages/aliases/npm-hue-run` and `packages/aliases/pypi-hue-sdk` are thin alias packages that have
-not been published yet: `hue-run` on npm will re-export `@hue-run/sdk`, and `hue-sdk` on PyPI will
-depend on `hue-run`. Once published, they will make the sibling name on each registry resolve to the
-real SDK instead of an unrelated or squatted package (the Python import module is `hue_sdk`). Until
-then, `npm install hue-run` and `pip install hue-sdk` do not install Hue's SDK; use `@hue-run/sdk` and
-`hue-run`. The aliases are not part of the verified release workflow above.
+`packages/aliases/npm-hue-run` and `packages/aliases/pypi-hue-sdk` are thin alias packages: `hue-run`
+on npm re-exports `@hue-run/sdk`, and `hue-sdk` on PyPI depends on `hue-run`. Published, they make the
+sibling name on each registry resolve to the real SDK instead of an unrelated or squatted package (the
+Python import module is `hue_sdk`). Only the npm alias's early `0.2.x` versions have been published, so
+`npm install hue-run` installs `@hue-run/sdk` `0.2.x`, and `hue-sdk` is not on PyPI, so
+`pip install hue-sdk` does not install Hue's SDK; use `@hue-run/sdk` and `hue-run`. The aliases are
+not part of the verified release workflow above.
 
 For the first publication, and again whenever a package releases afterwards, bump the alias to the
 same version and its pinned dependency, then publish it by hand with the authorized account (npm

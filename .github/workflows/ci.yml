@@ -42,10 +42,15 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun audit --audit-level=high
-      - run: node packages/sdk-typescript/scripts/verify-package.mjs
+      - run: node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifacts
         # The installed CLI matrix includes the existing published Flask runtime through uv.
         env:
           HUE_JUNIT_DIR: ${{ runner.temp }}/junit
+      - name: Release inventory and syntax gate on the tested archive
+        # The release workflow's own inspection, run on every change so a release never meets it first.
+        run: |
+          version=$(node -p 'require("./packages/sdk-typescript/package.json").version')
+          python3 scripts/release-artifacts.py inspect typescript "$version" .artifacts
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -143,7 +148,7 @@ jobs:
   python:
     name: Python ${{ matrix.python }} source and installed wheel
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -165,7 +170,17 @@ jobs:
           uv run --frozen --all-groups ruff check src tests ../../examples/python-agent ../../examples/python-evaluation
           uv run --frozen --all-groups ruff format --check src tests ../../examples/python-agent ../../examples/python-evaluation
           uv run --frozen --all-groups mypy
-          uv run --frozen --all-groups python -m build --no-isolation
+          uv run --frozen --all-groups python -m build --no-isolation --outdir ../../.artifacts
+          uvx --from twine==7.0.0 twine check --strict ../../.artifacts/*
+      - name: Release inventory gate and the release's fresh pip and uv consumers
+        # The release workflow's own checks on the built distributions, run on every change so a
+        # release never meets them first.
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("packages/sdk-python/pyproject.toml", "rb"))["project"]["version"])')
+          python3 scripts/release-artifacts.py inspect python "$version" .artifacts
+          python3 scripts/verify-python-release.py --wheel ".artifacts/hue_run-${version}-py3-none-any.whl" --python "$PYTHON_VERSION"
   python-lowest-bounds:
     name: Python ${{ matrix.python }} at the lowest OpenTelemetry bound
     runs-on: ${{ github.repository_owner == 'hue-run' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}

@@ -153,8 +153,7 @@ def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
 
 
 HOSTED_TOOL_CALLS_FIXTURE = (
-    Path(__file__).resolve().parents[3]
-    / "packages"
+    Path(__file__).resolve().parents[2]
     / "sdk-typescript"
     / "tests"
     / "fixtures"
@@ -1009,9 +1008,7 @@ def test_content_prefixes_list_every_recognized_key_identically_to_typescript():
         "exception.message",
         "exception.stacktrace",
     )
-    typescript = (
-        Path(__file__).resolve().parents[3] / "packages" / "sdk-typescript" / "src" / "privacy.ts"
-    )
+    typescript = Path(__file__).resolve().parents[2] / "sdk-typescript" / "src" / "privacy.ts"
     if not typescript.is_file():
         pytest.skip("TypeScript source is not part of this checkout")
     block = re.search(r"export const contentPrefixes = \[(.*?)\];", typescript.read_text(), re.S)
@@ -1109,22 +1106,6 @@ def test_large_inline_files_in_messages_export_as_their_digest(receiver):
     assert image_base64 in values["input.value"].string_value
     telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
     assert base64.b64encode(document)[:64] not in telemetry
-
-
-def test_long_ascii_text_is_hashed_as_utf8_not_guessed_as_base64():
-    from hue_sdk._inline_files import hash_inline_files
-
-    content = "A" * (64 * 1024 + 4)
-    value = json.dumps(
-        [{"type": "file", "mediaType": "text/plain", "data": content}], separators=(",", ":")
-    )
-    [file] = json.loads(hash_inline_files("ai.prompt.messages", value))
-    assert file == {
-        "type": "file",
-        "mediaType": "text/plain",
-        "sha256": hashlib.sha256(content.encode()).hexdigest(),
-        "size": len(content.encode()),
-    }
 
 
 def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
@@ -1249,8 +1230,7 @@ def test_tool_definition_too_deeply_nested_to_inspect_drops_its_record(receiver)
 
 
 TOOL_DEFINITIONS_FIXTURE = (
-    Path(__file__).resolve().parents[3]
-    / "packages"
+    Path(__file__).resolve().parents[2]
     / "sdk-typescript"
     / "tests"
     / "fixtures"

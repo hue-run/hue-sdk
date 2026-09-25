@@ -3,7 +3,7 @@ name: hue
 description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.4.4"
+  version: "0.4.5"
 ---
 
 # Hue tracing
@@ -125,20 +125,15 @@ simulated world and grades the sealed outcome. Review and publish cases in the H
    ```
 
 Exit code 0 means every case passed; 1 means a case failed, errored or Hue's checks were still
-pending; 2 is a usage error. Check the installed version before describing storage:
-
-- Published `@hue-run/sdk` 0.9.0 stores one-shot case outputs and explanations only with
-  `--content`; `--worker` always stores them so the run can be read in Hue.
-- Current development builds for 0.10.0 store one-shot outputs, error messages and explanations
-  by default. `--content` controls telemetry capture only; `--no-output` opts one-shot runs
-  out of storing their answer text. Verify that the installed CLI lists `--no-output` before
-  using it. Generated files under `output/` are uploaded independently of that flag. An evaluator
-  that does not apply to a case shows `n/a`; a case with no applicable pinned evaluator is an error.
-
-Telemetry content capture stays off unless `--content` is passed in both versions. Do not infer
-that answer storage is disabled from that flag alone. Keep credentials out of stdout, agent
-outputs and generated files. Report the run URL and printed verdicts; do not claim a pass
-without them.
+pending; 2 is a usage error. Since `@hue-run/sdk` 0.10.0, an evaluator that does not apply to a
+case shows `n/a` and neither passes nor fails it, and a case no pinned evaluator applies to is an
+error. Telemetry content capture stays off unless `--content` is passed. Since `@hue-run/sdk`
+0.10.0, one-shot mode stores case outputs, error messages and explanations in Hue by default, as
+`--worker` always does: the command's stdout is its stored answer, with the credentials `hue eval`
+handed it redacted, so the agent must not print credentials or debug logs there, and `--no-output`
+opts a one-shot run out. Earlier versions store one-shot outputs only with `--content`. Files the
+agent writes to `output/` are uploaded either way and are not fully redacted, so never write
+credentials there. Report the run URL and the printed verdicts; do not claim a pass without them.
 
 ## Evaluate a document eval set
 

@@ -4,11 +4,12 @@
 
 # hue-sdk (PyPI alias)
 
-`hue-sdk` is an alias of [`hue-run`](https://pypi.org/project/hue-run/), published so that the name
-matching the `hue_sdk` import module resolves to the real Hue SDK. Installing it installs `hue-run`:
+`hue-sdk` is an alias of [`hue-run`](https://pypi.org/project/hue-run/), prepared so that the name
+matching the `hue_sdk` import module can resolve to the real Hue SDK. It has not been published to
+PyPI, so `pip install hue-sdk` does not install Hue's SDK. Install the real package:
 
 ```bash
-pip install hue-sdk   # equivalent to: pip install hue-run
+pip install hue-run
 ```
 
 Install `hue-run` directly in new projects. The alias tracks the `hue-run` version and is maintained

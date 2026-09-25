@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:ce7d6dcf5344f29bb51e9ae3606df54afa2240edecade71cf5b0d143baa6609d",
+    "sha256": "sha256:91a6a6b9876e50afa515cf473a7f6ca2e5a8b252e283b13642ff5883e89d151e",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -102,7 +102,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.6.0"
+      "version": "0.6.1"
     },
     "typescript": {
       "bins": {
@@ -287,6 +287,7 @@
             "MetricDefinition",
             "NameMatch",
             "NamedCandidate",
+            "OutcomeJudgeConfig",
             "OutcomeSerializationError",
             "OutputFile",
             "OutputFileError",
@@ -493,7 +494,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.9.0"
+      "version": "0.10.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -502,10 +503,10 @@
     "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.4.4"
+      "version": "0.4.5"
     },
     "name": "hue",
-    "sha256": "sha256:e4004597a53d53d379f13983805dde5f13f3114bb7ed5a063fd9769b55bce4e8",
+    "sha256": "sha256:aa5633482910d71448de8b8ad9f5084de0caca3320a8ce2c0707dff974725f69",
     "source": "skills/hue/SKILL.md"
   }
 }

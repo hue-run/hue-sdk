@@ -159,7 +159,7 @@ built-ins keep their usual missing-output behavior. See
 
 Scorer deferral shipped in TypeScript `0.3.1`: the local runner executes only the three known built-in entries and bound `local_code` scorers. It leaves every other pin pending and reports its ID in `deferredScorerVersionIds`, including kinds and built-in entries introduced by a newer server. It never uploads a placeholder result that would occupy the immutable result slot, including placeholders already saved in an older SDK's checkpoint. Direct `scoreLocally()` calls reject pins that require another executor.
 
-`world_outcome` pins run inside Hue and need no local callback or executable source digest. A supporting server owns their execution from saved world evidence. Legacy `local_code` pins still require the exact registered callback; changing the worker cannot convert those immutable pins into hosted ones.
+`world_outcome` pins (`hue.conversion_outcome.v1` and `.v2`, and the `hue.outcome_assertions.v2` and `.v3` case-outcome evaluators, `.v3` with its pinned judge in `config.judge`) run inside Hue and need no local callback or executable source digest. A supporting server owns their execution from saved world evidence. Legacy `local_code` pins still require the exact registered callback; changing the worker cannot convert those immutable pins into hosted ones.
 
 Manual results require a human session. Hosted model-judge dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
 
@@ -183,7 +183,7 @@ An exclusive `.lock` prevents two processes from invoking targets through the sa
 
 The runner saves a starting marker before `start`, and a running marker before invoking a target. If an outcome is not durably saved, resume throws `UncertainExecutionError` and never reruns the target. Replaying an original start key only recovers its execution ID. The low-level `startExecution` API requires an explicit `previousExecutionId`; replacing a still-started attempt additionally requires `allowUncertainRetry:true`. The convenience runner does not automatically adopt externally created attempts. Create a fresh experiment for a fresh target run after investigating side effects.
 
-After a target completes and local scoring finishes, the runner saves the allowed completion/result payloads before uploading. Network/API errors leave those payloads and stable keys available for another call to `runExperiment` with the same directory. Saved receipt IDs prevent duplicate result writes. Serialization failure raises `OutcomeSerializationError` with the execution ID; it does not relabel the target as failed or invoke it again. Scoring/upload failures never change target state.
+After a target completes and local scoring finishes, the runner saves the allowed completion/result payloads before uploading. Network/API errors leave those payloads and stable keys available for another call to `runExperiment` with the same directory. Saved receipt IDs prevent duplicate result writes. An output beyond what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels of nesting) is that case's own failure: the case completes as `error` with the error type `OutputTooLarge` (and, when result content is persisted, a message naming the bound), no output is stored and the other cases keep running; return a large result as a generated file instead. Output within those bounds that is not JSON (a cycle, a class instance, a non-finite number) raises `OutcomeSerializationError` with the execution ID; the bounds are checked as the output is read, so one past the value or depth bound is `OutputTooLarge` whatever lies beyond it. `OutcomeSerializationError` never relabels the target as failed or invokes it again. Scoring/upload failures never change target state.
 
 A crash between target completion and saving its permitted result still leaves an uncertain outcome; metadata-only mode intentionally cannot reconstruct discarded output. Export acknowledgement is saved separately. If required telemetry export was not acknowledged, a fresh empty exporter is not evidence of prior receipt: automatic completion is refused. Inspect/export the original trace or use the low-level completion API with an explicit omission policy; do not rerun a known completed target to manufacture telemetry. API completion/results retain their own idempotency guarantees for explicit recovery.
 
@@ -264,8 +264,8 @@ installed-registry-package to hosted-facade acceptance remains a post-publicatio
 ## Direct cases and files
 
 Cases without a simulated world — document workflows whose inputs are a task plus pinned files —
-run on the same runner under the same checkpoint rules. This is unreleased and ships in the next
-`@hue-run/sdk` release. It requires a Hue deployment that serves case `inputFiles` on experiment
+run on the same runner under the same checkpoint rules. They shipped in `@hue-run/sdk` `0.5.0`
+and require a Hue deployment that serves case `inputFiles` on experiment
 items, subject `files`, and the artifact reservation, upload, completion and download APIs. The
 Python SDK has no equivalent.
 

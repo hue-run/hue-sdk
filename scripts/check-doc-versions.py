@@ -24,6 +24,8 @@ ALLOWED_CONTEXT = re.compile(
     r"|OpenInference|instrumentation|dependency from|for example|unreleased|next releases?|published|^\s*version:)",
     re.I,
 )
+# Tools named with a version of the same 0.x shape as an SDK release, such as `uv 0.12.5`.
+TOOL_VERSION = re.compile(r"\b(?:uv|uvx|twine|zizmor)(?:==|[ =@])v?$", re.I)
 LANGUAGE_CONTEXT = re.compile(
     r"(?P<typescript>TypeScript|@hue-run/sdk|\bnpm\b|runLocalAgent)"
     r"|(?P<python>Python|hue_sdk|\bPyPI\b|`hue-run`)",
@@ -61,9 +63,11 @@ def stale_mentions(name: str, text: str, versions: dict[str, str]) -> list[str]:
 
     problems: list[str] = []
     for number, line in enumerate(text.splitlines(), start=1):
-        # Hue is pre-1.0 and currently uses one-digit minor lines. Excluding 0.0.x
-        # and multi-digit minors avoids mistaking fixture/tool versions for SDKs.
-        for match in re.finditer(r"\b0\.[1-9]\.\d+\b", line):
+        # Hue is pre-1.0; a minor can have several digits (0.10.0). 0.0.x is never an
+        # SDK release, and a tool's own version is excluded by the tool's name.
+        for match in re.finditer(r"\b0\.[1-9]\d*\.\d+\b", line):
+            if TOOL_VERSION.search(line[: match.start()]):
+                continue
             languages = languages_for(name, line[: match.start()])
             expected = {versions[language] for language in languages} or set(versions.values())
             value = match.group(0)

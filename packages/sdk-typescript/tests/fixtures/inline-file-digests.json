@@ -1,0 +1,280 @@
+{
+  "limit": 65536,
+  "cases": [
+    {
+      "name": "base64 of a text file, typed text/plain",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "UXVhcnRlcmx5IHVwZGF0ZSwgbGluZSDinJMK",
+        "times": 2600,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "6085a7ba313f8f484589b9a27da1b8d626206a15443a9feec2d0fc037db5757b",
+        "size": 70200
+      }
+    },
+    {
+      "name": "base64 without a media type",
+      "part": {
+        "type": "blob",
+        "modality": "document"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/wD/",
+        "times": 300,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "ab3142fc9ba02107f629c8c531ef395bd629665529c52d9eec17a62e28a8c3e3",
+        "size": 77400
+      }
+    },
+    {
+      "name": "base64 of a JSON file in an AI SDK 6 file part",
+      "part": {
+        "type": "file",
+        "mediaType": "application/json",
+        "filename": "rows.json"
+      },
+      "key": "data",
+      "content": {
+        "prefix": "",
+        "unit": "eyJyb3ciOiAxLCAibmFtZSI6ICLDqXTDqSJ9LAog",
+        "times": 2400,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "ef22be92205e8cbc546a6bec85941c14794114b4c84facd4d5d12e74e3987300",
+        "size": 72000
+      }
+    },
+    {
+      "name": "base64 of an image",
+      "part": {
+        "type": "blob",
+        "modality": "image",
+        "mime_type": "image/png"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/wD/",
+        "times": 300,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "ab3142fc9ba02107f629c8c531ef395bd629665529c52d9eec17a62e28a8c3e3",
+        "size": 77400
+      }
+    },
+    {
+      "name": "base64 data: URL with a parameter before base64",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/csv"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/csv;charset=utf-8;base64,",
+        "unit": "UXVhcnRlcmx5IHVwZGF0ZSwgbGluZSDinJMK",
+        "times": 2600,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "6085a7ba313f8f484589b9a27da1b8d626206a15443a9feec2d0fc037db5757b",
+        "size": 70200
+      }
+    },
+    {
+      "name": "base64 data: URL with a parameter after base64",
+      "part": {
+        "type": "blob",
+        "modality": "document"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/plain;base64;x-name=notes.txt,",
+        "unit": "UXVhcnRlcmx5IHVwZGF0ZSwgbGluZSDinJMK",
+        "times": 2600,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "6085a7ba313f8f484589b9a27da1b8d626206a15443a9feec2d0fc037db5757b",
+        "size": 70200
+      }
+    },
+    {
+      "name": "percent-escaped data: URL",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/plain;charset=utf-8,",
+        "unit": "Café%20notes%20%E2%9C%93%20🙂%2050%25%20done%0A",
+        "times": 2400,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "f7d9fda08412b39f8bad5073cb7892531bd615e0302f769817e1e3e3bc51d42c",
+        "size": 72000
+      }
+    },
+    {
+      "name": "a text file's own text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "Plain text, not base64: line ✓\n",
+        "times": 2400,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "1809dd05af7454fd0ba4549ee2bbc725775c9cef0d9ff99cd4e4f2f9ca1cdeb6",
+        "size": 79200
+      }
+    },
+    {
+      "name": "text in the base64 alphabet decodes to 48 KiB and stays inline",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "AAAA",
+        "times": 16385,
+        "suffix": ""
+      },
+      "expected": null
+    },
+    {
+      "name": "a base64 data: URL that is not base64 is its text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "application/pdf"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:application/pdf;base64,",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": "!"
+      },
+      "expected": {
+        "sha256": "1effc996e48bfb94d821ce9fa8477f82a0190a27d0cb3000f20370fbbcb6223d",
+        "size": 68029
+      }
+    },
+    {
+      "name": "a data: URL with a broken escape is its text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/plain,",
+        "unit": "x%20",
+        "times": 17000,
+        "suffix": "%zz"
+      },
+      "expected": {
+        "sha256": "833659d7dde421c105b0a385bce14e1ecf162e6ef81c5f0737d0935a63738e81",
+        "size": 68019
+      }
+    },
+    {
+      "name": "base64 characters before a final newline are text",
+      "part": {
+        "type": "blob",
+        "modality": "document"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": "QUI\n"
+      },
+      "expected": {
+        "sha256": "23c5588e105a1766816cf6ca7c6039e7fcbd1dab475afa14eb339783ad6e4726",
+        "size": 68004
+      }
+    },
+    {
+      "name": "a data: URL with millions of parameters: its 7-byte file stays inline",
+      "part": {
+        "type": "blob",
+        "modality": "document"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:application/octet-stream",
+        "unit": ";",
+        "times": 3400000,
+        "suffix": ";base64,AAECAwQFBg=="
+      },
+      "expected": null
+    },
+    {
+      "name": "text with a lone surrogate, written as U+FFFD",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "",
+        "unit": "Notes \ud800 line\n",
+        "times": 5100,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "c8ca5a046c31c451b68564ae481c92bb3123f62038ebc1c24119dc0bc5197c36",
+        "size": 76500
+      }
+    },
+    {
+      "name": "a percent-encoded data: URL with a lone surrogate, written as U+FFFD",
+      "part": {
+        "type": "file",
+        "mediaType": "text/plain",
+        "filename": "notes.txt"
+      },
+      "key": "data",
+      "content": {
+        "prefix": "data:text/plain,",
+        "unit": "caf%C3%A9 \udc00 ",
+        "times": 7000,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "747fc6522365e9f05ce67135a3914865176bcc5a72c1b5fde796bac0877fdfc5",
+        "size": 70000
+      }
+    }
+  ]
+}

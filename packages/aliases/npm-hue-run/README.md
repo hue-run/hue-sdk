@@ -5,8 +5,9 @@
 # hue-run (npm alias)
 
 `hue-run` is an alias of [`@hue-run/sdk`](https://www.npmjs.com/package/@hue-run/sdk), prepared so
-that the name used by the Python distribution can resolve to the real Hue SDK on npm too. This alias
-has not been published; use the scoped package for public installations. Every entry point re-exports it:
+that the name used by the Python distribution can resolve to the real Hue SDK on npm too. Only its
+early `0.2.x` versions are on npm, pinned to `@hue-run/sdk` `0.2.x` and not updated since; use the
+scoped package for public installations. Every entry point re-exports it:
 
 ```js
 import { createHue } from "hue-run"; // same as "@hue-run/sdk"

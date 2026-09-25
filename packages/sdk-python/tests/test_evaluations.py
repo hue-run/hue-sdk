@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
 import os
@@ -66,6 +67,8 @@ def evaluation_receiver():
         config={"answer": None},
         deferred=[],
         historical=None,
+        # Further cases after ``case_id``, each with its own execution: id -> state.
+        extra_cases={},
         lock=Lock(),
     )
     state.versions = [
@@ -77,7 +80,46 @@ def evaluation_receiver():
         }
     ]
 
+    def extra_case(path, body):
+        for case_id, case in state.extra_cases.items():
+            if path.endswith(f"/items/{case_id}"):
+                return 200, {
+                    "id": case_id,
+                    "externalKey": f"case-{case_id}",
+                    "datasetVersionId": state.version_id,
+                    "inputs": state.inputs,
+                    "metadata": {},
+                    "hasExpected": state.include_expected,
+                    **({"expected": None} if state.include_expected else {}),
+                }
+            if path.endswith(f"/items/{case_id}/start"):
+                case.setdefault(
+                    "execution",
+                    {"id": str(uuid4()), "state": "started", "attempt": 1, **body},
+                )
+                return 200, case["execution"]
+            execution = case.get("execution")
+            if execution and f"/experiment-executions/{execution['id']}" in path:
+                if not path.endswith("/complete"):
+                    return 200, execution
+                case.setdefault("complete_body", body)
+                execution["state"] = case["complete_body"]["state"]
+                case.setdefault(
+                    "completion",
+                    {
+                        "executionId": execution["id"],
+                        "subjectId": str(uuid4()),
+                        "evaluationItemId": str(uuid4()),
+                        "traceSnapshotId": str(uuid4()),
+                    },
+                )
+                return 200, case["completion"]
+        return None
+
     def dispatch(method, path, body):
+        handled = extra_case(path, body)
+        if handled is not None:
+            return handled
         registry_version = {
             "id": state.version_id,
             "datasetId": state.dataset_id,
@@ -151,7 +193,7 @@ def evaluation_receiver():
             return 200, {
                 "id": state.experiment_id,
                 "datasetVersionId": state.version_id,
-                "caseCount": 1,
+                "caseCount": 1 + len(state.extra_cases),
                 "config": state.config,
                 "configDigest": "c" * 64,
                 "evaluation": {"id": state.run_id, "scorerVersions": state.versions},
@@ -165,7 +207,13 @@ def evaluation_receiver():
             }
         if path.endswith(f"/experiments/{state.experiment_id}/items"):
             return 200, {
-                "items": [{"id": state.case_id, "execution": state.execution}],
+                "items": [
+                    {"id": state.case_id, "execution": state.execution},
+                    *(
+                        {"id": case_id, "execution": case.get("execution")}
+                        for case_id, case in state.extra_cases.items()
+                    ),
+                ],
                 "nextCursor": None,
             }
         if path.endswith(f"/items/{state.case_id}"):
@@ -681,6 +729,56 @@ def test_start_ambiguity_and_serialization_failure_never_reinvoke(evaluation_rec
         with pytest.raises(UncertainExecutionError) as uncertain:
             run_experiment(**arguments)
         assert uncertain.value.execution_id == receiver.execution["id"] and calls == []
+    finally:
+        arguments["hue"].shutdown()
+
+
+@pytest.mark.parametrize("persist", [True, False])
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        (
+            "x" * 250_000,
+            "The output is larger than 200,000 bytes of JSON, the most Hue stores for one case; "
+            "return a large result as a generated file",
+        ),
+        (
+            functools.reduce(lambda inner, _: [inner], range(40), "leaf"),
+            "The output has more than 20,000 JSON values or nests deeper than 32 levels, the most "
+            "Hue stores for one case",
+        ),
+    ],
+    ids=["bytes", "structure"],
+)
+def test_output_over_the_case_bounds_fails_that_case_and_the_run_goes_on(
+    evaluation_receiver, tmp_path, persist, output, message
+):
+    later = str(uuid4())
+    evaluation_receiver.extra_cases[later] = {}
+    calls = []
+
+    def target(_inputs, context):
+        calls.append(context.item["id"])
+        return output if context.item["id"] == evaluation_receiver.case_id else "fits"
+
+    arguments = options(evaluation_receiver, tmp_path, target, persist=persist)
+    try:
+        report = run_experiment(**arguments)
+        body = evaluation_receiver.complete_body
+        assert body["state"] == "error" and "output" not in body
+        assert body["error"] == (
+            {"type": "OutputTooLarge", "message": message}
+            if persist
+            else {"type": "OutputTooLarge"}
+        )
+        # The later case still ran and succeeded, and the run finished.
+        assert calls == [evaluation_receiver.case_id, later]
+        completed = evaluation_receiver.extra_cases[later]["complete_body"]
+        assert completed["state"] == "succeeded"
+        assert completed.get("output") == ("fits" if persist else None)
+        assert any(path.endswith("/finish") for _, path, *_ in evaluation_receiver.requests)
+        # The saved outcomes resume without invoking the target again.
+        assert run_experiment(**arguments) == report and len(calls) == 2
     finally:
         arguments["hue"].shutdown()
 
