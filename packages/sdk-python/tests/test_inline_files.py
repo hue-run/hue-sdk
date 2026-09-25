@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -52,4 +54,24 @@ def test_inline_file_digest_matches_the_shared_fixture(case: dict[str, Any]) -> 
     assert (exported["content"] if file else exported["parts"])[0] == {
         **case["part"],
         **case["expected"],
+    }
+
+
+def test_a_data_url_with_millions_of_parameters_is_still_decoded_by_its_own_encoding() -> None:
+    data = bytes([7]) * 70_000
+    content = (
+        "data:application/octet-stream"
+        + ";" * 3_400_000
+        + ";base64,"
+        + base64.b64encode(data).decode("ascii")
+    )
+    value = json.dumps(
+        [{"role": "user", "parts": [{"type": "blob", "modality": "document", "content": content}]}]
+    )
+    [message] = json.loads(hash_inline_files("gen_ai.input.messages", value))
+    assert message["parts"][0] == {
+        "type": "blob",
+        "modality": "document",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": 70_000,
     }

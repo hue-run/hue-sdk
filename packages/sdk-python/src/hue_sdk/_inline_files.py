@@ -24,8 +24,9 @@ MAX_INLINE_FILE_TEXT = 8 * MAX_REQUEST_BYTES
 _MESSAGE_KEYS = frozenset({"gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"})
 # Strict base64: alphabet characters only, padded to a multiple of four.
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
-# An RFC 2397 data: URL's media type and parameters, up to the comma before its data.
-_DATA_URL = re.compile(r"data:([^;,]*)((?:;[^;,]*)*),")
+# An RFC 2397 data: URL's header, up to the comma before its data. Its ``;`` parameters are read
+# in code, as the TypeScript SDK reads them.
+_DATA_URL = re.compile(r"data:([^,]*),")
 _HEX = frozenset("0123456789abcdefABCDEF")
 _MAX_DEPTH = 256
 
@@ -41,6 +42,20 @@ def _utf8_size(value: str, limit: int) -> int:
     return size
 
 
+def _base64_header(header: str) -> bool:
+    """Whether a data: URL header's parameters, after its media type, include ``base64``."""
+    semicolon = header.find(";")
+    return semicolon != -1 and ";base64;" in f"{header[semicolon:]};"
+
+
+def _utf8(text: str) -> bytes:
+    """UTF-8 as JavaScript writes it: a surrogate pair is its character, a lone surrogate U+FFFD."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace").encode()
+
+
 def _percent_decoded(payload: str) -> bytes | None:
     """RFC 2397 data without ``;base64``: percent-escaped octets, other characters as UTF-8.
 
@@ -52,10 +67,10 @@ def _percent_decoded(payload: str) -> bytes | None:
         pair = payload[index + 1 : index + 3]
         if len(pair) != 2 or not _HEX.issuperset(pair):
             return None
-        decoded += payload[start:index].encode("utf-8")
+        decoded += _utf8(payload[start:index])
         decoded.append(int(pair, 16))
         start = index + 3
-    decoded += payload[start:].encode("utf-8")
+    decoded += _utf8(payload[start:])
     return bytes(decoded)
 
 
@@ -69,14 +84,14 @@ def _file_bytes(content: str) -> bytes:
     match = _DATA_URL.match(content)
     payload = content[match.end() :] if match else content
     decoded: bytes | None = None
-    if match and "base64" not in match.group(2).split(";"):
+    if match and not _base64_header(match.group(1)):
         decoded = _percent_decoded(payload)
     elif len(payload) % 4 == 0 and _BASE64.match(payload):
         try:
             decoded = base64.b64decode(payload, validate=True)
         except binascii.Error:
             decoded = None
-    return content.encode("utf-8") if decoded is None else decoded
+    return _utf8(content) if decoded is None else decoded
 
 
 def _content_key(part: dict[str, Any]) -> str | None:

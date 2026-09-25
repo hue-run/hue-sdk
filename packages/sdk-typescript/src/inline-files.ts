@@ -21,8 +21,17 @@ export function isMessageKey(key: string): boolean {
 
 /** Strict base64: alphabet characters only, padded to a multiple of four. */
 const base64 = /^[A-Za-z0-9+/]*={0,2}$/;
-/** An RFC 2397 `data:` URL's media type and parameters, up to the comma before its data. */
-const dataUrl = /^data:([^;,]*)((?:;[^;,]*)*),/;
+/** An RFC 2397 `data:` URL's header, up to the comma before its data. Its `;` parameters are read
+ * in code: a pattern repeated per parameter fails on a pathological count (Node's stack overflows,
+ * Bun stops matching). */
+const dataUrl = /^data:([^,]*),/;
+
+/** Whether a `data:` URL header's parameters, after its media type, include `base64`. */
+function base64Header(header: string): boolean {
+  const semicolon = header.indexOf(";");
+  // One `;`-separated parameter is exactly `base64`, without splitting them all.
+  return semicolon !== -1 && `${header.slice(semicolon)};`.includes(";base64;");
+}
 const hexPair = /^[0-9A-Fa-f]{2}$/;
 
 /** RFC 2397 data without `;base64`: percent-escaped octets, other characters as UTF-8. Undefined
@@ -53,7 +62,7 @@ function fileBytes(content: string): Buffer {
   const url = dataUrl.exec(content);
   const payload = url ? content.slice(url[0].length) : content;
   const decoded =
-    url && !url[2]!.split(";").includes("base64")
+    url && !base64Header(url[1]!)
       ? percentDecoded(payload)
       : payload.length % 4 === 0 && base64.test(payload)
         ? Buffer.from(payload, "base64")
