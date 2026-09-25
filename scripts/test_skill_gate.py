@@ -43,9 +43,12 @@ def gate_problems(text: str) -> list[str]:
     if not gate:
         problems.append("skill has no Invite-only access section")
     else:
-        for phrase in ("invite-only", GATE_URL, "Tracing only", "then stop"):
+        required = ("invite-only", GATE_URL, "**Read and write**", "`HUE_API_KEY`", "then stop")
+        for phrase in required:
             if phrase not in gate:
                 problems.append(f"invite-only section is missing {phrase!r}")
+        if "Tracing only" in gate:
+            problems.append("invite-only section still asks for a Tracing only key")
         if text.index("## Invite-only access") > text.index("## Install and configure"):
             problems.append("invite-only section must come before install instructions")
     return problems
@@ -67,6 +70,14 @@ class SkillInviteOnlyGateTests(unittest.TestCase):
         )
         self.assertIn("skill tells agents to run 'hue claim'", problems)
         self.assertIn("skill still has an onboarding section", problems)
+
+    def test_gate_check_rejects_a_tracing_only_key(self):
+        text = SKILL.read_text()
+        gate = section(text, "Invite-only access")
+        regressed = text.replace(gate, gate.replace("**Read and write**", "**Tracing only**"))
+        problems = gate_problems(regressed)
+        self.assertIn("invite-only section is missing '**Read and write**'", problems)
+        self.assertIn("invite-only section still asks for a Tracing only key", problems)
 
     def test_gate_check_requires_the_gate_section(self):
         without_gate = re.sub(
