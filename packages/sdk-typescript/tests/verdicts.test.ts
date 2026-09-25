@@ -281,6 +281,7 @@ describe("summarizeVerdicts", () => {
       error: 1,
       skipped: 1,
       pending: 2,
+      notApplicable: 0,
     });
   });
 
@@ -346,6 +347,109 @@ describe("summarizeVerdicts", () => {
         subjects: [{ id: subjectId, caseId: unlinked.id }],
       }).cases[0],
     ).toMatchObject({ state: "passed", subjectId });
+  });
+});
+
+describe("evaluators that do not apply", () => {
+  const notApplicable = {
+    state: "skipped" as const,
+    metrics: [],
+    explanation: "Not applicable: the case has no outcome criteria",
+    evidence: {
+      state: "not_applicable",
+      entry: "hue.outcome_assertions.v3",
+      requires: "outcome_criteria",
+    },
+  };
+
+  test("only Hue's notApplicable flag marks a result not applicable", async () => {
+    const { runId, pins, items, client, record } = run({ itemCount: 2 });
+    record(items[0]!.id, pins[0]!, { ...notApplicable, notApplicable: true });
+    // The same skipped result and evidence without the flag, as a submitted result would read.
+    record(items[1]!.id, pins[0]!, notApplicable);
+    const results = await waitForResults(client, { runId, scorerVersionIds: pins });
+    const byItem = new Map(results.results.map((result) => [result.itemId, result]));
+    expect(byItem.get(items[0]!.id)).toMatchObject({
+      notApplicable: true,
+      requires: "outcome_criteria",
+    });
+    expect(byItem.get(items[1]!.id)!.notApplicable).toBe(false);
+    expect(byItem.get(items[1]!.id)).not.toHaveProperty("requires");
+  });
+
+  test("a mixed set passes each case on its own evaluator; none applying is an error", () => {
+    const [outcome, rubric] = [randomUUID(), randomUUID()];
+    const traced = item("trace-built", randomUUID());
+    const authored = item("hand-authored", randomUUID());
+    const neither = item("neither", randomUUID());
+    const incomplete = item("incomplete-world", randomUUID());
+    const subject = (value: ExperimentItem) => value.execution!.subjectId!;
+    const scored = (value: ExperimentItem, pin: string) => ({
+      id: randomUUID(),
+      itemId: randomUUID(),
+      subjectId: subject(value),
+      scorerVersionId: pin,
+      state: "scored" as const,
+      metrics: [{ name: pin === outcome ? "outcome" : "rubric", value: true }],
+      explanation: null,
+      error: null,
+    });
+    const skipped = (value: ExperimentItem, pin: string, flagged: boolean) => ({
+      id: randomUUID(),
+      itemId: randomUUID(),
+      subjectId: subject(value),
+      scorerVersionId: pin,
+      state: "skipped" as const,
+      metrics: [],
+      explanation: flagged ? "Not applicable" : "Environment incomplete.",
+      error: null,
+      notApplicable: flagged,
+      ...(flagged ? { requires: pin === outcome ? "outcome_criteria" : "conversion_rubric" } : {}),
+    });
+    const summary = summarizeVerdicts(
+      {
+        complete: true,
+        items: [],
+        results: [
+          scored(traced, outcome),
+          skipped(traced, rubric, true),
+          skipped(authored, outcome, true),
+          scored(authored, rubric),
+          skipped(neither, outcome, true),
+          skipped(neither, rubric, true),
+          // A genuine skip for an incomplete environment is still a skip, not n/a.
+          skipped(incomplete, outcome, false),
+          skipped(incomplete, rubric, false),
+        ],
+      },
+      {
+        experimentItems: [traced, authored, neither, incomplete],
+        scorerVersionIds: [outcome, rubric],
+      },
+    );
+    expect(summary.cases.map((row) => [row.externalKey, row.state, row.notApplicable])).toEqual([
+      ["trace-built", "passed", [rubric]],
+      ["hand-authored", "passed", [outcome]],
+      ["neither", "error", [outcome, rubric]],
+      ["incomplete-world", "skipped", []],
+    ]);
+    expect(summary.cases[2]!.explanations).toEqual([
+      "No pinned evaluator applies to this case (they need outcome_criteria or conversion_rubric); pin one that grades it",
+    ]);
+    expect(summary.cases[2]!.errors).toEqual([]);
+    expect(summary.cases[3]!.explanations).toEqual([
+      "Environment incomplete.",
+      "Environment incomplete.",
+    ]);
+    expect(summary.totals).toEqual({
+      cases: 4,
+      passed: 2,
+      failed: 0,
+      error: 1,
+      skipped: 1,
+      pending: 0,
+      notApplicable: 4,
+    });
   });
 });
 

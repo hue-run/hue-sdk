@@ -64,6 +64,18 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   `HUE_CASE_DIR`, `HUE_CASE_INPUTS` and `HUE_CASE_OUTPUT_DIR` with the direct-case layout; every
   file it leaves in `output/` is uploaded. `--worker` registers each repeated
   `--capability <value>`, such as `environment-files:v1` and `input:pdf`, beside `environment:v1`.
+- Evaluators that do not apply to a case. `StoredResult.notApplicable` is true for a skipped result
+  Hue's own outcome scoring records because the case has no outcome criteria or conversion rubric
+  to grade; `waitForResults` carries it, with what the evaluator needs, as
+  `VerdictResult.notApplicable` and `requires`. `summarizeVerdicts` decides a case by the
+  evaluators that apply to it, lists the others in the new `CaseVerdict.notApplicable` and counts
+  them in `totals.notApplicable`, and makes a case no pinned evaluator applies to an error that
+  names what they need. `hue eval` shows `n/a` in such a case's columns, counts the
+  not-applicable results in its pass line and `--json`, and exits 0 when every case passed the
+  evaluators that apply to it. Before, such a result was an ordinary skip: its columns showed `-`,
+  its explanation was printed with a failing case's own, and a case no pinned evaluator applied to
+  was reported as skipped. Only Hue's flag marks a result not applicable; a skip without it, such
+  as one for an incomplete environment, is still a skip.
 
 #### Changed
 
@@ -130,6 +142,21 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   started by a compound command (`a; b`, `a | b`) that ignored SIGTERM kept running, with its world
   credentials, after the case failed. A second Ctrl+C during the grace now kills the agent's group
   at once and exits with 130 instead of ending the CLI and leaving the agent running.
+- `hue eval` replaces an adapter error whose message cannot be reassigned (a frozen error, or one
+  whose `message` is a getter) with a new `Error` carrying the redacted message and name, instead
+  of storing the unredacted message. Values shorter than 16 characters are no longer treated as
+  credentials, so a short environment value no longer redacts ordinary text in the answer.
+- `hue eval` also replaces the credentials it redacts from the answer in the UTF-8 `.txt`, `.csv`
+  and `.json` documents it collects from `output/` before uploading them. PDF, Office and image
+  documents and files an adapter returns by `path` are uploaded as written, so an agent must still
+  never write credentials to `output/`.
+- `hue eval --case` and `resolveScenarioPins` accept the published eval set case's own ID, the one
+  Hue shows on the case page, and URLs naming `/cases/<id>` or `/case-conversions/<id>`. Before,
+  only the case conversion's ID or a `/scenarios/<id>` URL resolved, and the case's own ID failed
+  with HTTP 404.
+- `EvaluationClient.registerLocalAgent` reads the registered key from the response's `agentKey`
+  when it has no `key`, so `RegisteredLocalAgent.key` is set and `hue eval --worker` no longer
+  prints "Registered agent undefined".
 
 ### [0.9.0] - 2026-09-24
 
@@ -873,6 +900,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.4.3 (2026-09-25): the evaluation section says that from `@hue-run/sdk` 0.10.0 one-shot `hue eval` stores case outputs, error messages and explanations by default, the command's stdout being its stored answer with the credentials it was handed redacted, and `--no-output` opts out (earlier versions store them only with `--content`); that files written to `output/` are uploaded and not fully redacted, so they must never hold credentials; and that an evaluator that does not apply to a case shows `n/a` and neither passes nor fails it.
 - 0.4.2 (2026-09-24): recommend full traces. The capture section, now headed "Capture and instrument full traces", tells agents to recommend `captureContent: true` / `capture_content=True` in the plan shown to the user and to state what it sends (prompts/messages, responses and tool inputs/outputs alongside model, usage, timing and errors); the user's approval authorizes it. Metadata-only (`false`) remains the opt-out when the user declines or an existing application policy forbids sending that content. The value is still required, and redaction and credential filtering apply in both modes. Agents instrument every request path that calls a model or tool, not only one, verify at least one real request and report the instrumented paths they did not exercise. Also collects the unreleased metadata changes merged since 0.4.1: find published cases with the Hue MCP tools `list_cases` and `get_case` (the earlier `list_scenarios` and `get_scenario` names remain aliases), and name Hue's consolidated access presets. Evaluation workflows use **Read and write** (formerly **Tracing and evaluations**); tracing still uses **Tracing only**. A **Read** key (formerly **Coding agent (read-only)**) cannot send telemetry.
 - 0.4.1, unchanged metadata (2026-09-22): Hue Cloud is invite-only. The one-command onboarding guidance (`setup --agent`, `resume`, `hue claim`) is replaced by an invite-only section: an agent whose user has no Hue project and **Tracing only** key relays the reply from https://docs.hue.run/guides/agent-setup.md and stops. The published CLI is unchanged.
 - 0.4.1 (2026-09-21): when wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` so the span records `mcp.server.name`.

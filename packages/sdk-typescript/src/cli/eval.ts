@@ -21,6 +21,7 @@ import type {
   LocalAgentClaim,
   LocalAgentRegistration,
   LocalFile,
+  OutputFile,
   RegisteredLocalAgent,
   Scorer,
   ScorerVersion,
@@ -173,7 +174,7 @@ class UsageError extends Error {
   }
 }
 
-interface Output {
+export interface Output {
   /** Human progress lines: stdout normally, stderr with --json. */
   log(line: string): void;
   /** Diagnostics; always stderr. */
@@ -560,10 +561,13 @@ interface CaseCredentials {
   mcp?: { token?: unknown };
   connectionBundle?: unknown;
 }
+const MIN_SECRET_LENGTH = 16;
 function caseSecrets(context: CaseCredentials): string[] {
   const values = new Set<string>();
+  // Hue issues long credentials; a short value would redact ordinary text around it.
   const add = (value: unknown) => {
-    if (typeof value === "string" && value.trim()) values.add(value).add(value.trim());
+    if (typeof value === "string" && value.trim().length >= MIN_SECRET_LENGTH)
+      values.add(value).add(value.trim());
   };
   for (const [name, value] of Object.entries(process.env))
     if (isHueControlPlaneCredential(name, value)) add(value);
@@ -592,6 +596,22 @@ function redactSecrets(text: string, secrets: string[]): string {
   return text;
 }
 
+const TEXT_CONTENT_TYPES = new Set(["text/plain", "text/csv", "application/json"]);
+
+/** A text document held in memory, cleared of the case's credentials. Other documents, a file
+ * declared by path and text that is not UTF-8 are uploaded as written. */
+function redactFile(file: OutputFile, secrets: string[]): OutputFile {
+  if (!file.bytes || !TEXT_CONTENT_TYPES.has(file.contentType)) return file;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(file.bytes);
+  } catch {
+    return file;
+  }
+  const redacted = redactSecrets(text, secrets);
+  return redacted === text ? file : { ...file, bytes: new TextEncoder().encode(redacted) };
+}
+
 /** An answer with its strings redacted, keys included. Deeper than any output the runner
  * accepts, a value is left for the runner to refuse. */
 function redactAnswer(value: unknown, secrets: string[], depth = 0): unknown {
@@ -600,7 +620,7 @@ function redactAnswer(value: unknown, secrets: string[], depth = 0): unknown {
   if (value instanceof TargetResult)
     return new TargetResult(
       redactAnswer(value.output, secrets, depth + 1) as JsonValue | undefined,
-      value.files,
+      value.files.map((file) => redactFile(file, secrets)),
     );
   if (Array.isArray(value)) return value.map((item) => redactAnswer(item, secrets, depth + 1));
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
@@ -624,8 +644,18 @@ function redacting<Context, Answer>(
     try {
       return redactAnswer(await adapter(inputs, context), secrets) as Answer;
     } catch (error) {
-      if (error instanceof Error) error.message = redactSecrets(error.message, secrets);
-      throw error;
+      if (!(error instanceof Error)) throw error;
+      const message = redactSecrets(error.message, secrets);
+      if (message === error.message) throw error;
+      try {
+        error.message = message;
+      } catch {
+        // A frozen error, or one whose message is a getter, keeps its text; replace it below.
+      }
+      if (error.message === message) throw error;
+      const replacement = new Error(message);
+      replacement.name = redactSecrets(String(error.name), secrets);
+      throw replacement;
     }
   };
 }
@@ -762,16 +792,22 @@ const STATE_LABEL: Record<CaseVerdict["state"], string> = {
   pending: "PENDING",
 };
 
-function renderTable(verdicts: ExperimentVerdicts, output: Output): void {
+export function renderTable(verdicts: ExperimentVerdicts, output: Output): void {
   const names: string[] = [];
+  // Which evaluator reports each metric, so a case it does not apply to shows n/a there.
+  const reportedBy = new Map<string, string>();
   for (const item of verdicts.summary.cases)
-    for (const metric of item.metrics) if (!names.includes(metric.name)) names.push(metric.name);
+    for (const metric of item.metrics) {
+      if (!names.includes(metric.name)) names.push(metric.name);
+      reportedBy.set(metric.name, metric.scorerVersionId);
+    }
   const header = ["Case", ...names, "Result"];
   const rows = verdicts.summary.cases.map((item) => [
     item.externalKey,
     ...names.map((name) => {
       const metric = item.metrics.find((candidate) => candidate.name === name);
-      return metric ? metricText(metric) : "-";
+      if (metric) return metricText(metric);
+      return item.notApplicable?.includes(reportedBy.get(name)!) ? "n/a" : "-";
     }),
     STATE_LABEL[item.state],
   ]);
@@ -797,6 +833,9 @@ function renderTable(verdicts: ExperimentVerdicts, output: Output): void {
     totals.error ? `${totals.error} error` : "",
     totals.skipped ? `${totals.skipped} skipped` : "",
     totals.pending ? `${totals.pending} pending` : "",
+    totals.notApplicable
+      ? `${totals.notApplicable} evaluator result${totals.notApplicable === 1 ? "" : "s"} not applicable`
+      : "",
   ].filter(Boolean);
   output.log(
     `${totals.passed} of ${totals.cases} case${totals.cases === 1 ? "" : "s"} passed${extra.length ? ` (${extra.join(", ")})` : ""}`,
@@ -1073,7 +1112,15 @@ function withTelemetryFailures(
   const cases = verdicts.summary.cases.map((item) =>
     failed.has(item.caseId) ? { ...item, state: "error" as const, passed: false } : item,
   );
-  const totals = { cases: cases.length, passed: 0, failed: 0, error: 0, skipped: 0, pending: 0 };
+  const totals = {
+    cases: cases.length,
+    passed: 0,
+    failed: 0,
+    error: 0,
+    skipped: 0,
+    pending: 0,
+    notApplicable: verdicts.summary.totals.notApplicable,
+  };
   for (const item of cases) totals[item.state]++;
   return { ...verdicts, summary: { cases, totals } };
 }

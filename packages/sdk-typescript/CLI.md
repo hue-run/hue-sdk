@@ -380,7 +380,8 @@ hue eval --worker ./hue-agent.ts --agent-key support-agent --content --env-file 
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
 
-The one-shot mode resolves the selection (`--case` by name, ID or URL; `--set` by name, ID or
+The one-shot mode resolves the selection (`--case` by name, or by the ID or URL of the published
+case or of the case conversion that published it; `--set` by name, ID or
 URL with explicit `--scorer-version` pins; or `--dataset-version` with `--scorer-version`),
 creates a fresh run from those immutable pins named `<agent key> @ <revision>` (a commit hash is
 shortened to 7 characters)
@@ -388,10 +389,15 @@ shortened to 7 characters)
 one line per case event (world created, agent started, world sealed), then
 `Waiting for Hue checks...` and a table with one row per case: boolean metrics as `PASS`/`FAIL`,
 numbers as values, text and category metrics as-is, an overall result per case and a pass count.
-Failing cases print the scorer explanation. `--baseline <experiment id|url>` adds improvement,
+Failing cases print the scorer explanation. An evaluator Hue records as not applicable to a case
+(its outcome scoring has no outcome criteria or conversion rubric to grade there) shows `n/a` in
+that case's columns and neither passes nor fails it, so in a mixed eval set a case is decided by
+the evaluators that apply to it; the pass line counts the not-applicable results. A case that no
+pinned evaluator applies to is an error that names what they need. `--baseline <experiment id|url>` adds improvement,
 regression and unchanged counts with per-case deltas. `--json` prints one JSON document
 (`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout
-and sends progress to stderr; a case failed for its telemetry has `state: "error"`,
+and sends progress to stderr; each case lists its not-applicable evaluator versions in
+`notApplicable`, and `totals.notApplicable` counts them; a case failed for its telemetry has `state: "error"`,
 `passed: false` and
 `telemetry: { code: "telemetry_not_accepted", issues: [{ signal, kind, status?, count }] }`. `--wait <seconds>` (default 300) bounds the verdict wait because
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
@@ -432,7 +438,11 @@ when it stops normally. Hue offers a case whose world comes with agent-visible f
 registration that declares `environment-files:v1` and `input:<extension>` for each file type, for
 example `--capability environment-files:v1 --capability input:pdf`; the adapter or command then
 receives the files as described above. Hue keeps each registered revision's capabilities fixed,
-so declare new ones under a new `--revision`.
+so declare new ones under a new `--revision`. A world pinned to provider profiles, a Gmail world
+for example, needs a reviewed `attemptBaselineV2` (see
+[Pinned provider-profile preflight](ENVIRONMENTS.md#pinned-provider-profile-preflight)); `--worker`
+registers none, so put `"attemptBaselineV2"` in the run's configuration JSON when you launch the
+run from Hue.
 
 A Scenario or eval set whose dataset version is not saved cannot back an experiment: the command
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
@@ -454,6 +464,14 @@ one-shot run keeps the choice it started with, so one run never mixes stored and
 rerunning it with other `--no-output` or `--content` flags is refused with the flags it started
 with. Resume a run that an earlier SDK started without `--content` by passing `--no-output`.
 
+Files the agent writes to `output/` are uploaded as generated documents with or without
+`--no-output`, and they are not redacted the way the answer is: `hue eval` replaces the same
+credentials only in the UTF-8 `.txt`, `.csv` and `.json` documents it collects, while PDF, Office
+and image documents, and files an adapter returns by `path`, are uploaded as written. A direct
+case also keeps the agent's raw `output/` files on disk under its checkpoint directory
+(`.hue/eval/<agent-key>/<project>/direct/<experiment>/files/`). Never write credentials to
+`output/`.
+
 Trace evidence is required for every case: when Hue does not accept a case's traces or logs, the
 case is completed as failed (error `TelemetryNotAccepted`, evidence omitted as
 `telemetry_not_accepted`, no output or generated files attached) instead of being left started,
@@ -467,7 +485,8 @@ inside `.hue/eval/`); `--checkpoint-dir` overrides the root. Rerunning the same 
 an interrupted run without invoking the agent again; a different selection is refused until the
 unfinished one is resumed or its directory is removed.
 
-Exit codes: `0` every case passed, `1` a case failed, errored, was skipped or Hue's checks were
+Exit codes: `0` every case passed the evaluators that apply to it, `1` a case failed, errored
+(including one no pinned evaluator applies to), was skipped or Hue's checks were
 still pending at `--wait`, `2` usage or configuration error (including a missing key), `130`
 interrupted. On Node.js 22, load TypeScript adapters with `NODE_OPTIONS=--experimental-strip-types`;
 non-erasable syntax (enums, parameter properties, namespaces) needs a loader such as `--import tsx`

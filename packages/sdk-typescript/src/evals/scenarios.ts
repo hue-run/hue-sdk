@@ -1,4 +1,4 @@
-import type { EvaluationClient } from "./client.js";
+import { HueApiError, type EvaluationClient } from "./client.js";
 import type { CaseConversion, CaseConversionSummary, Dataset, Page, PageOptions } from "./types.js";
 
 /** Immutable pins resolved from a published Scenario or a saved eval set. */
@@ -133,6 +133,18 @@ async function listPublishedScenarios(client: ScenarioClient): Promise<CaseConve
   }
 }
 
+/** The published Scenario whose eval set case has this ID, the one Hue shows on the case page. */
+async function scenarioOfPublishedCase(
+  client: ScenarioClient,
+  caseId: string,
+): Promise<CaseConversion | undefined> {
+  for (const summary of await listPublishedScenarios(client)) {
+    const scenario = await client.getCaseConversion(summary.id);
+    if (scenario.publication?.caseId.toLowerCase() === caseId) return scenario;
+  }
+  return undefined;
+}
+
 const describe = (candidates: { name: string; id: string }[]) =>
   candidates.map((candidate) => `${candidate.name} (${candidate.id})`).join(", ");
 
@@ -162,19 +174,29 @@ async function pinsFromScenario(
 }
 
 /**
- * Resolves a published Scenario's immutable pins from its ID, its Hue URL or its name. A name
- * matches the dataset name of published Scenarios case-insensitively: exact matches first, then
- * a unique prefix or substring.
+ * Resolves a published Scenario's immutable pins from its ID, the ID of the eval set case it
+ * published, a Hue URL naming either (`/scenarios/<id>`, `/case-conversions/<id>` or
+ * `/cases/<id>`) or its name. A name matches the dataset name of published Scenarios
+ * case-insensitively: exact matches first, then a unique prefix or substring.
  *
- * @throws Error when no Scenario matches, several match, or the Scenario is an unpublished draft.
+ * @throws Error when no Scenario matches, several match, or the Scenario is an unpublished draft;
+ * {@link HueApiError} with status 404 when neither a Scenario nor a published case has the ID.
  */
 export async function resolveScenarioPins(
   client: ScenarioClient,
   selector: string,
 ): Promise<ScenarioPins> {
-  const parsed = parseScenarioSelector(selector);
+  const parsed = parseScenarioSelector(selector, ["scenarios", "case-conversions", "cases"]);
   if (parsed.kind === "id") {
-    const scenario = await client.getCaseConversion(parsed.id);
+    let scenario: CaseConversion;
+    try {
+      scenario = await client.getCaseConversion(parsed.id);
+    } catch (error) {
+      if (!(error instanceof HueApiError && error.status === 404)) throw error;
+      const published = await scenarioOfPublishedCase(client, parsed.id);
+      if (!published) throw error;
+      scenario = published;
+    }
     if (!scenario.publication)
       throw new Error(
         `Scenario ${scenario.id} is a draft without published pins; publish it in Hue first`,

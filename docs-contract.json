@@ -502,10 +502,10 @@
     "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.4.2"
+      "version": "0.4.3"
     },
     "name": "hue",
-    "sha256": "sha256:44cfba49a1d75615c366063268f4bd3886206279ebace3054c5ee3ee4ce2f7a9",
+    "sha256": "sha256:f23f2dc5ff8c4328ba10312a7e7d3a2c756f4b760607a2b3305c7b2ea68422ef",
     "source": "skills/hue/SKILL.md"
   }
 }

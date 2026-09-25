@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
-import { explain, spawnAgentCommand } from "../src/cli/eval.js";
+import { explain, renderTable, spawnAgentCommand } from "../src/cli/eval.js";
 import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
 import { TargetCancelledError } from "../src/evals.js";
 import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
@@ -411,9 +411,12 @@ function hueStandIn(
         });
       if (path === "/local-agent-worker/register") {
         calls.register.push(body);
+        // Hue answers with the key as `agentKey`, not the registration's `key`.
+        const { key: agentKey, ...registration } = body;
         return Response.json({
           id: agentId,
-          ...body,
+          agentKey,
+          ...registration,
           enabled: true,
           lastSeenAt: new Date().toISOString(),
           createdAt: new Date().toISOString(),
@@ -732,6 +735,18 @@ const throwingAdapterSource = `export default async function runMyAgent(_inputs,
 }
 `;
 
+/** Throws errors whose message cannot be reassigned, with the world token and the key. */
+const frozenAdapterSource = `export default async function runMyAgent(_inputs, context) {
+  const text = "mirror refused " + context.world.token + " for " + process.env.HUE_API_KEY;
+  if (process.env.HUE_TEST_DOM_EXCEPTION) throw new DOMException(text, "DataCloneError");
+  throw Object.freeze(new Error(text));
+}
+`;
+
+/** Answers a word that contains a too-short credential value many times. */
+const bananaSource = `process.stdout.write(JSON.stringify({ fruit: "banana" }));
+`;
+
 /** Every file under a directory whose text contains one of the values. */
 async function filesContaining(directory: string, values: string[]): Promise<string[]> {
   const found: string[] = [];
@@ -751,6 +766,8 @@ async function workspace() {
   await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
   await writeFile(join(directory, "agent-stubborn.mjs"), stubbornSource);
   await writeFile(join(directory, "agent-leaky.mjs"), leakySource);
+  await writeFile(join(directory, "hue-frozen.mjs"), frozenAdapterSource);
+  await writeFile(join(directory, "agent-banana.mjs"), bananaSource);
   await writeFile(join(directory, "agent-result-file.mjs"), resultFileSource);
   await writeFile(join(directory, "hue-throwing.mjs"), throwingAdapterSource);
   return directory;
@@ -1325,6 +1342,50 @@ describe("hue eval", () => {
     SPAWN_TIMEOUT * 2,
   );
 
+  test("the verdict table shows n/a where an evaluator does not apply to the case", () => {
+    const [outcome, rubric] = [randomUUID(), randomUUID()];
+    const row = (externalKey: string, metric: string, pin: string, skip: string) => ({
+      caseId: randomUUID(),
+      externalKey,
+      subjectId: randomUUID(),
+      state: "passed" as const,
+      passed: true,
+      notApplicable: [skip],
+      metrics: [{ name: metric, value: true, scorerVersionId: pin }],
+      explanations: [],
+      errors: [],
+    });
+    const lines: string[] = [];
+    renderTable(
+      {
+        experimentId: randomUUID(),
+        runId: randomUUID(),
+        scorerVersionIds: [outcome, rubric],
+        results: { complete: true, items: [], results: [] },
+        summary: {
+          cases: [
+            row("trace-built", "outcome", outcome, rubric),
+            row("hand-authored", "rubric", rubric, outcome),
+          ],
+          totals: {
+            cases: 2,
+            passed: 2,
+            failed: 0,
+            error: 0,
+            skipped: 0,
+            pending: 0,
+            notApplicable: 2,
+          },
+        },
+      },
+      { log: (line) => lines.push(line), error: (line) => lines.push(line) },
+    );
+    expect(lines[0]).toBe("Case           outcome  rubric  Result");
+    expect(lines[2]).toBe("trace-built    PASS     n/a     PASSED");
+    expect(lines[3]).toBe("hand-authored  n/a      PASS    PASSED");
+    expect(lines.at(-1)).toBe("2 of 2 cases passed (2 evaluator results not applicable)");
+  });
+
   test("a resume with another --no-output or --content choice names the flags to repeat", () => {
     // An unfinished run keeps its content policy (the checkpoint refuses a change); the message
     // says which flags resume it.
@@ -1419,6 +1480,67 @@ describe("hue eval", () => {
       } finally {
         legacy.stop();
         gateway.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "an error whose message cannot be reassigned is replaced, and short values are left alone",
+    async () => {
+      const cwd = await workspace();
+      try {
+        for (const dom of [false, true]) {
+          const f = hueStandIn({ gateway: true });
+          try {
+            const result = await hue(
+              [
+                "--scenario",
+                "Refund flow",
+                "./hue-frozen.mjs",
+                "--origin",
+                f.baseUrl,
+                "--wait",
+                "0",
+              ],
+              { cwd, env: dom ? { HUE_TEST_DOM_EXCEPTION: "1" } : {} },
+            );
+            expect(result.status).toBe(1);
+            expect(f.calls.completions[0]).toMatchObject({
+              state: "error",
+              error: {
+                type: "TargetError",
+                message: "mirror refused [redacted] for [redacted]",
+              },
+            });
+          } finally {
+            f.stop();
+          }
+        }
+        expect(await filesContaining(join(cwd, ".hue"), [key, worldToken])).toEqual([]);
+        // A credential shorter than any Hue issues is not redacted out of ordinary text.
+        const f = hueStandIn();
+        try {
+          const result = await hue(
+            [
+              "--scenario",
+              "Refund flow",
+              "--command",
+              `${process.execPath} agent-banana.mjs`,
+              "--origin",
+              f.baseUrl,
+              "--wait",
+              "0",
+            ],
+            { cwd, env: { HUE_SERVICE_KEY: "a" } },
+          );
+          expect(result.status).toBe(0);
+          expect(f.calls.completions[0]).toMatchObject({ output: { fruit: "banana" } });
+        } finally {
+          f.stop();
+        }
+      } finally {
         await rm(cwd, { recursive: true, force: true });
       }
     },
