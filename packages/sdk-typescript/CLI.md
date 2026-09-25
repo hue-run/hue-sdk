@@ -534,8 +534,10 @@ directory in either place is the case's error. Symlinks and other special files 
 documents are skipped, as are hidden and lock entries. Every file is opened without following a
 final symlink or blocking, must be the regular file the listing saw and within its limit (4 MiB
 for a helper, 25 MiB for a document, checked before reading), and its upload is staged from the
-bytes read. A file or directory that changed while it was collected, more than 32 documents or
-more than 1024 entries is the case's error too.
+bytes read. A file or directory that vanished or changed while it was collected, more than 32
+documents or more than 1024 entries is the case's error too. A hard link is an ordinary file and
+is collected like one: an agent running as your user could copy the file just as well, so run an
+agent that must not reach your files under another account or in a sandbox.
 
 An adapter file works too: it is called with `(inputs, context)` where `context.mode` is
 `"direct"` and `context` carries `config`, `item`, `executionId`, `files` (agent-visible pinned

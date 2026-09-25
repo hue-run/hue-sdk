@@ -136,18 +136,38 @@ const identityOf = (info: { dev: number; ino: number }): FileIdentity => ({
 });
 const sameIdentity = (a: FileIdentity, b: FileIdentity) => a.dev === b.dev && a.ino === b.ino;
 
-/** A real directory (not a symlink) and its identity, or undefined when `path` is absent. */
+/** A real directory (not a symlink) and its identity, or undefined when `path` is absent. A
+ * parent that is no longer a directory (ENOTDIR) is a change, never an absent directory: a case
+ * directory replaced by a file must not read as "wrote nothing". */
 async function directoryIdentity(path: string, label: string): Promise<FileIdentity | undefined> {
   let info;
   try {
     info = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+    throw unexamined(label, error);
   }
   if (info.isSymbolicLink() || !info.isDirectory())
     throw new Error(`${label} is not a directory; a symbolic link or file is never collected`);
   return identityOf(info);
+}
+
+/** Test seams: `beforeEntry` runs before each listed entry is examined, `afterListing` between
+ * the listing and the reads. */
+export interface CollectionSeams {
+  beforeEntry?: (name: string) => Promise<void>;
+  afterListing?: () => Promise<void>;
+}
+
+/** The error for an entry that vanished or changed kind while it was being collected, or could
+ * not be examined at all. */
+function unexamined(label: string, error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException).code;
+  return new Error(
+    code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP"
+      ? `${label} changed while it was collected`
+      : `${label} could not be read`,
+  );
 }
 
 /**
@@ -155,9 +175,14 @@ async function directoryIdentity(path: string, label: string): Promise<FileIdent
  * with the device and inode each had when listed. Hidden and lock entries (dot names, `~$…`),
  * symlinks and anything that is neither a regular file nor a directory are skipped at every
  * level, except that a top-level helper name must be a regular file when present. The walk stops
- * past 32 documents or 1024 entries, and a directory that changed while it was listed is refused.
+ * past 32 documents or 1024 entries, and an entry that vanished or a directory that changed while
+ * it was listed is refused.
  */
-async function listOutputFiles(root: string, rootIdentity: FileIdentity): Promise<ListedFile[]> {
+async function listOutputFiles(
+  root: string,
+  rootIdentity: FileIdentity,
+  seams: CollectionSeams,
+): Promise<ListedFile[]> {
   const found: ListedFile[] = [];
   const directories: { path: string; label: string; identity: FileIdentity }[] = [
     { path: root, label: "output/", identity: rootIdentity },
@@ -167,7 +192,13 @@ async function listOutputFiles(root: string, rootIdentity: FileIdentity): Promis
   for (let index = 0; index < directories.length; index++) {
     const directory = directories[index]!;
     const prefix = index === 0 ? "" : `${directory.label.slice("output/".length)}`;
-    for await (const entry of await opendir(directory.path)) {
+    let entries;
+    try {
+      entries = await opendir(directory.path);
+    } catch (error) {
+      throw unexamined(directory.label, error);
+    }
+    for await (const entry of entries) {
       if (++visited > MAX_ENTRIES)
         throw new Error(`The output directory holds more than ${MAX_ENTRIES} entries`);
       const name = `${prefix}${entry.name}`;
@@ -176,11 +207,18 @@ async function listOutputFiles(root: string, rootIdentity: FileIdentity): Promis
       const path = join(directory.path, entry.name);
       if (helper && !entry.isFile())
         throw new Error(`output/${name} is not a regular file; the agent must write it itself`);
+      if (entry.isDirectory() || entry.isFile()) await seams.beforeEntry?.(name);
       if (entry.isDirectory()) {
         const identity = await directoryIdentity(path, `output/${name}`);
-        if (identity) directories.push({ path, label: `output/${name}/`, identity });
+        if (!identity) throw new Error(`output/${name} changed while it was collected`);
+        directories.push({ path, label: `output/${name}/`, identity });
       } else if (entry.isFile()) {
-        const info = await lstat(path);
+        let info;
+        try {
+          info = await lstat(path);
+        } catch (error) {
+          throw unexamined(`output/${name}`, error);
+        }
         if (!info.isFile()) throw new Error(`output/${name} changed while it was collected`);
         found.push({ name, path, identity: identityOf(info) });
         if (!helper && ++documents > outputFileLimits.count)
@@ -241,16 +279,16 @@ function artifactFilename(relativePath: string): string {
  * Nothing here trusts a path the agent could have changed: the output directory must be a real
  * directory, every file is opened without following a final symlink or blocking on a FIFO, must
  * be the regular file the listing saw and within its size limit, and the result carries the bytes
- * read from that open file. `afterListing` is a test seam that runs between listing and reading.
+ * read from that open file. `seams` are for tests only.
  */
 export async function collectDirectOutputs(
   outputDirectory: string,
   fallbackOutput?: JsonValue,
-  afterListing?: () => Promise<void>,
+  seams: CollectionSeams = {},
 ): Promise<TargetResult> {
   const rootIdentity = await directoryIdentity(outputDirectory, "The output directory");
-  const listed = rootIdentity ? await listOutputFiles(outputDirectory, rootIdentity) : [];
-  await afterListing?.();
+  const listed = rootIdentity ? await listOutputFiles(outputDirectory, rootIdentity, seams) : [];
+  await seams.afterListing?.();
   const top = (name: string) => listed.find((entry) => entry.name === name);
   const manifest = parseHelper(top("manifest.json"), await readHelper(top("manifest.json")));
   const declaredPrimary =

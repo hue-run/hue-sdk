@@ -107,7 +107,9 @@ This section changes a default of the `hue` binary, so it ships as `0.10.0`.
   uploaded from the bytes read. Before, a helper or an output directory linked to a host path
   sent that host file to Hue, a file swapped for a link after the listing could be uploaded, and
   a FIFO named like a helper hung the CLI. The listing also stops past 32 documents or 1024
-  entries. This applies to direct cases and world cases alike.
+  entries, and an entry that vanishes or changes while it is collected fails the case with a
+  plain "changed while it was collected" error. This applies to direct cases and world cases
+  alike.
 - Input copies in a direct case directory whose names differ only in case or Unicode
   normalization no longer overwrite each other on case-insensitive or normalizing filesystems.
 

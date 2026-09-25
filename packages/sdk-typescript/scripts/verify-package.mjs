@@ -512,6 +512,11 @@ const installedPackageTests = [
   "managed.test.ts",
   "files.test.ts",
   "world.test.ts",
+  // File handoff and output collection: the library through its entry points, the installed
+  // `hue` binary for `hue eval`, and internal modules from the packed dist.
+  "environment-files.test.ts",
+  "cli-output-safety.test.ts",
+  "cli-eval-direct.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -602,7 +607,20 @@ void [transition, event, options, backend];
         .replaceAll(
           '"../src/evals/environment-target.js"',
           '"../node_modules/@hue-run/sdk/dist/evals/environment-target.js"',
-        ),
+        )
+        .replaceAll('"../src/evals/files.js"', '"../node_modules/@hue-run/sdk/dist/evals/files.js"')
+        .replaceAll(
+          '"../src/evals/exit-cleanup.js"',
+          '"../node_modules/@hue-run/sdk/dist/evals/exit-cleanup.js"',
+        )
+        .replaceAll(
+          '"../src/cli/eval-direct.js"',
+          '"../node_modules/@hue-run/sdk/dist/cli/eval-direct.js"',
+        )
+        .replaceAll('"../src/cli/eval.js"', '"../node_modules/@hue-run/sdk/dist/cli/eval.js"')
+        // The CLI is the installed binary, and an adapter imports the installed evals entry.
+        .replaceAll('"../src/setup/cli.ts"', '"../node_modules/@hue-run/sdk/dist/setup/cli.js"')
+        .replaceAll('"../src/evals.ts"', '"../node_modules/@hue-run/sdk/dist/evals.js"'),
     );
   }
   // npm enforces peer compatibility; no --force or legacy peer resolution.
