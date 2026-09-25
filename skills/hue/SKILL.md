@@ -28,14 +28,15 @@ Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed
 ## Invite-only access
 
 Hue Cloud is invite-only and anonymous setup is closed, so there is no trial to start. Before
-installing anything, check whether the user already has a Hue project and a **Read and write**
-project key configured as `HUE_API_KEY` (ask, or look for `HUE_API_KEY` in the application's
-secret workflow without reading its value). If not, do not run `setup --agent`, `resume`,
-`hue claim` or any install, create accounts or change files.
+installing anything, check whether the user already has a Hue project and a project key configured
+as `HUE_API_KEY` (**Read and write** is the recommended preset; ask, or look for `HUE_API_KEY` in
+the application's secret workflow without reading its value). If not, do not run `setup --agent`,
+`resume`, `hue claim` or any install, create accounts or change files.
 Read the [agent setup page](https://docs.hue.run/guides/agent-setup.md), relay its reply to the user
 (it contains the booking link), then stop.
 
-If the user already has a key, they are invited: continue with the SDK guides above and the steps below.
+If the user already has a key of any preset, they are invited: continue with the SDK guides above
+and the steps below, which have them create a **Read and write** key if theirs is another preset.
 
 ## Install and configure
 

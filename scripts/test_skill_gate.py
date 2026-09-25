@@ -43,7 +43,16 @@ def gate_problems(text: str) -> list[str]:
     if not gate:
         problems.append("skill has no Invite-only access section")
     else:
-        required = ("invite-only", GATE_URL, "**Read and write**", "`HUE_API_KEY`", "then stop")
+        # An invited user may hold a key of another preset from earlier guidance; only the
+        # recommendation changed, so the gate must not stop them.
+        required = (
+            "invite-only",
+            GATE_URL,
+            "**Read and write**",
+            "`HUE_API_KEY`",
+            "key of any preset",
+            "then stop",
+        )
         for phrase in required:
             if phrase not in gate:
                 problems.append(f"invite-only section is missing {phrase!r}")
@@ -78,6 +87,14 @@ class SkillInviteOnlyGateTests(unittest.TestCase):
         problems = gate_problems(regressed)
         self.assertIn("invite-only section is missing '**Read and write**'", problems)
         self.assertIn("invite-only section still asks for a Tracing only key", problems)
+
+    def test_gate_check_rejects_a_gate_that_only_admits_read_and_write(self):
+        text = SKILL.read_text()
+        gate = section(text, "Invite-only access")
+        regressed = text.replace(gate, gate.replace("key of any preset", "**Read and write** key"))
+        self.assertIn(
+            "invite-only section is missing 'key of any preset'", gate_problems(regressed)
+        )
 
     def test_gate_check_requires_the_gate_section(self):
         without_gate = re.sub(
