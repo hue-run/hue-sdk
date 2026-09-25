@@ -10,7 +10,7 @@ For frozen datasets, local experiments, custom scorers, durable retries and hist
 
 Python helpers around the official OpenTelemetry trace and log SDKs and OTLP HTTP/protobuf exporters. `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` are accepted as **`>=1.40,<2`**; **1.44.0** is the certified lockfile combination and **1.40.0** is tested as the floor in CI. Provider requests run in your application. This package does not proxy model calls or configure global OTel providers.
 
-The distribution is named `hue-run` (`import hue_sdk`). Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
+The distribution is named `hue-run` on PyPI (`import hue_sdk`); install `hue-run`, not `hue-sdk`, which is not published there. Python 3.10+ is supported by the package contract; recorded validation below identifies the tested runtime.
 
 [Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run)
 
