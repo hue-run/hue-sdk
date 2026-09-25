@@ -49,6 +49,18 @@ function documentStandIn(
     /** Scorer versions (by index) Hue records as not applicable to the case; `forged` answers the
      * same skipped result and evidence without Hue's `notApplicable` flag. */
     notApplicable?: { versions: number[]; forged?: boolean };
+    /** Scorer versions (by index) that answer like a Hue judge: a `verdict` metric and evidence
+     * that says whether the result is advisory. `kind` is the pinned definition's kind, a Hue
+     * judge (`world_judge`, the default) or an evaluator forging the same evidence; `passed` adds
+     * that field to the metric, and `error` answers an error result with the same evidence. */
+    judge?: {
+      versions: number[];
+      verdict: boolean;
+      advisory: boolean;
+      kind?: "world_judge" | "local_code" | "hosted_code";
+      passed?: boolean;
+      error?: boolean;
+    };
   } = {},
 ) {
   const projectId = randomUUID();
@@ -152,6 +164,20 @@ function documentStandIn(
     },
   });
   const scorerVersions = [versionOf(2), versionOf(1)]; // newest first, as the server orders them
+  const judgeKind = options.judge?.kind ?? "world_judge";
+  for (const index of options.judge?.versions ?? [])
+    if (judgeKind !== "local_code")
+      scorerVersions[index]!.definition = (judgeKind === "world_judge"
+        ? {
+            kind: "world_judge",
+            entry: "hue.world_judge.v1",
+            rubric: { items: [{ id: "grounded", question: "Is it grounded?" }] },
+            metrics: [{ name: "verdict", type: "boolean" }],
+          }
+        : {
+            ...scorerVersions[index]!.definition,
+            kind: "hosted_code",
+          }) as unknown as ScorerVersion["definition"];
   const experiments = new Map<string, Experiment & { versionId: string }>();
   const executions = new Map<string, Execution & { experimentId: string; caseId: string }>();
   const subjects = new Map<string, Subject>();
@@ -464,6 +490,36 @@ function documentStandIn(
               error: null,
               sourceDigest: null,
               ...(options.notApplicable.forged ? {} : { notApplicable: true }),
+            });
+            continue;
+          }
+          if (options.judge?.versions.includes(index)) {
+            const { verdict, passed, error } = options.judge;
+            results.get(experiment.evaluation.id)!.push({
+              id: randomUUID(),
+              runId: experiment.evaluation.id,
+              itemId: evaluationItemId,
+              scorerVersionId: version.id,
+              ...(error
+                ? { state: "error" as const, metrics: [], error: { type: "ScorerError" } }
+                : {
+                    state: "scored" as const,
+                    metrics: [
+                      {
+                        name: "verdict",
+                        value: verdict,
+                        ...(passed === undefined ? {} : { passed }),
+                      },
+                    ],
+                    error: null,
+                  }),
+              explanation: `The judge ${verdict ? "passed" : "failed"}.`,
+              evidence: {
+                entry: "hue.world_judge.v1",
+                state: "decided",
+                ...(options.judge.advisory ? { advisory: true } : {}),
+              },
+              sourceDigest: null,
             });
             continue;
           }
@@ -943,6 +999,86 @@ process.stdout.write(key);
       standIn.stop();
     }
   }, 120_000);
+
+  test("an advisory judge's failing verdict is shown but decides nothing; a counting one fails", async () => {
+    type Judge = NonNullable<Parameters<typeof documentStandIn>[0]>["judge"] & {};
+    const run = async (judge: Judge, table = false) => {
+      const standIn = documentStandIn({ judge });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
+      await writeFile(join(cwd, "agent.mjs"), agentSource);
+      try {
+        const [newest, older] = standIn.scorerVersions.map((version) => version.id);
+        const args = [
+          "--set",
+          standIn.dataset.id,
+          "--scorer-version",
+          newest!,
+          "--scorer-version",
+          older!,
+          "--command",
+          `${process.execPath} ${join(cwd, "agent.mjs")}`,
+          "--wait",
+          "5",
+        ];
+        const env = { HUE_BASE_URL: standIn.baseUrl };
+        const json = await hue([...args, "--json"], { cwd, env });
+        const printed = table ? await hue(args, { cwd, env }) : undefined;
+        const report = JSON.parse(json.stdout) as {
+          cases: Record<string, unknown>[];
+          totals: Record<string, number>;
+        };
+        return { status: json.status, printed, report, ids: [newest!, older!] };
+      } finally {
+        standIn.stop();
+      }
+    };
+    // The outcome evaluator passes; Hue's advisory judge answers false and is listed, not counted.
+    const advisory = await run({ versions: [1], verdict: false, advisory: true }, true);
+    expect(advisory.status).toBe(0);
+    expect(advisory.report.cases[0]).toMatchObject({
+      state: "passed",
+      passed: true,
+      advisory: [advisory.ids[1]],
+    });
+    expect(advisory.report.cases[0]!.metrics).toContainEqual({
+      name: "verdict",
+      value: false,
+      scorerVersionId: advisory.ids[1],
+    });
+    expect(advisory.printed!.status).toBe(0);
+    expect(advisory.printed!.stdout).toContain("verdict (advisory)");
+    expect(advisory.printed!.stdout).toContain(
+      "1 of 1 case passed (1 advisory failure not counted)",
+    );
+    // A judge result Hue does not mark advisory counts: its false fails the case.
+    const counting = await run({ versions: [1], verdict: false, advisory: false });
+    expect(counting.status).toBe(1);
+    expect(counting.report.cases[0]).toMatchObject({ state: "failed", advisory: [] });
+    // Only advisory results: nothing decides the case, which is an error.
+    const onlyAdvisory = await run({ versions: [0, 1], verdict: true, advisory: true });
+    expect(onlyAdvisory.status).toBe(1);
+    expect(onlyAdvisory.report.cases[0]).toMatchObject({ state: "error", passed: false });
+    expect(onlyAdvisory.report.cases[0]!.explanations).toContain(
+      "Only advisory evaluators ran for this case, and they never decide it; pin one that grades it",
+    );
+    // Any evaluator can write `advisory: true` in its evidence: from a code evaluator, a failing
+    // or errored result keeps its verdict, and so does a Hue judge's error.
+    for (const forged of [
+      { kind: "local_code" },
+      { kind: "local_code", passed: false },
+      { kind: "hosted_code", passed: false },
+      { kind: "hosted_code", error: true },
+      { kind: "world_judge", error: true },
+    ] as const) {
+      const result = await run({ versions: [1], verdict: false, advisory: true, ...forged });
+      expect(result.status).toBe(1);
+      expect(result.report.cases[0]).toMatchObject({
+        state: "error" in forged ? "error" : "failed",
+        passed: false,
+        advisory: [],
+      });
+    }
+  }, 300_000);
 
   test("evaluators that do not apply to a case neither pass nor fail it", async () => {
     const run = async (notApplicable: { versions: number[]; forged?: boolean }) => {
