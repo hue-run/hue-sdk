@@ -226,6 +226,23 @@ function fixture(options: {
           headers: { "content-type": "application/octet-stream" },
         });
       }
+      const read = /^\/artifacts\/([^/]+)$/.exec(path);
+      if (read && request.method === "GET") {
+        const stored = artifacts.get(read[1]!);
+        if (!stored) return new Response(null, { status: 404 });
+        return Response.json({
+          id: stored.id,
+          filename: stored.filename,
+          declaredContentType: stored.contentType,
+          declaredBytes: stored.byteSize,
+          declaredSha256: stored.sha256,
+          state: stored.state,
+          copyState: stored.copyState,
+          verifiedBytes: stored.state === "ready" ? stored.byteSize : null,
+          verifiedSha256: stored.state === "ready" ? stored.sha256 : null,
+          failureCode: null,
+        });
+      }
       if (path === "/artifacts" && request.method === "POST") {
         if (failReserve) {
           failReserve = false;
@@ -1014,7 +1031,10 @@ describe("file-based cases", () => {
       },
     };
     try {
-      await expect(runExperiment(options)).rejects.toThrow("HTTP 409");
+      // Completion finds no bytes; reading the artifact shows it was never verified.
+      await expect(runExperiment(options)).rejects.toThrow(
+        "Generated file Letter.docx was not verified by Hue (reserved)",
+      );
       expect(invocations).toBe(1);
       expect(f.calls.uploads).toBe(0);
       expect(f.calls.completions).toHaveLength(0);

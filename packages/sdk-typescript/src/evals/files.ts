@@ -4,7 +4,13 @@ import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ArtifactSizeError, HueApiError, type EvaluationClient } from "./client.js";
-import type { CaseFile, LocalFile, OutputFile, SubjectFile } from "./types.js";
+import type {
+  ArtifactReservation,
+  CaseFile,
+  LocalFile,
+  OutputFile,
+  SubjectFile,
+} from "./types.js";
 
 /** Roles the target receives. Organization templates stay with grading, as in the managed protocol. */
 export const targetFileRoles: readonly CaseFile["role"][] = [
@@ -368,15 +374,71 @@ export async function stageOutputFiles(
   return staged;
 }
 
+/** How long an upload waits for Hue to verify one artifact, and how often it looks. Hue verifies
+ * within a two-minute lease, which can outlast one request's timeout. */
+export const artifactSettling = { settleMillis: 180_000, pollMillis: 1000, maxPollMillis: 10_000 };
+
+/** A completion failure that can mean Hue is still verifying: a lost or timed-out response, a
+ * verification already running (409), or a refusal to retry (429, 503). */
+function mayStillVerify(error: unknown): boolean {
+  return (
+    error instanceof HueApiError &&
+    (error.status === undefined ||
+      error.status === 409 ||
+      error.status === 429 ||
+      error.status === 503)
+  );
+}
+
+/**
+ * Completes an artifact's verification and returns the state it settles in. When a completion
+ * times out or finds verification already running, the artifact is read after a pause: ready is
+ * returned, any state but verifying is returned for the caller to refuse (a resume uploads a
+ * rejected artifact again), and a verification still running is completed again, which Hue
+ * refuses while its lease holds and restarts once it lapsed, all within `timing.settleMillis`.
+ */
+async function settleArtifact(
+  client: EvaluationClient,
+  id: string,
+  timing: typeof artifactSettling,
+): Promise<ArtifactReservation["state"]> {
+  const deadline = Date.now() + timing.settleMillis;
+  let pause = timing.pollMillis;
+  for (;;) {
+    try {
+      return (await client.completeArtifact(id)).state;
+    } catch (error) {
+      if (!mayStillVerify(error) || Date.now() >= deadline) throw error;
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, Math.min(pause, deadline - Date.now()))),
+    );
+    pause = Math.min(pause * 2, timing.maxPollMillis);
+    let current: ArtifactReservation | undefined;
+    try {
+      current = await client.getArtifact(id);
+    } catch (error) {
+      if (!mayStillVerify(error)) throw error;
+    }
+    if (current && current.state !== "verifying") return current.state;
+    if (Date.now() >= deadline)
+      throw new Error(
+        `Hue was still verifying generated file ${id} after ${Math.round(timing.settleMillis / 1000)} seconds`,
+      );
+  }
+}
+
 /**
  * Publish staged files as verified artifacts. Reservations use stable keys derived from the
- * execution and the bytes, so a resumed upload settles on the same artifact.
+ * execution and the bytes, so a resumed upload settles on the same artifact, including one Hue
+ * finished verifying after an earlier attempt stopped waiting.
  */
 export async function uploadOutputFiles(
   client: EvaluationClient,
   executionId: string,
   files: StagedOutputFile[],
   save: () => Promise<void>,
+  timing: typeof artifactSettling = artifactSettling,
 ): Promise<void> {
   for (const file of files) {
     if (file.artifactId) continue;
@@ -390,7 +452,8 @@ export async function uploadOutputFiles(
     });
     let state = reserved.state;
     if (state !== "ready") {
-      if (reserved.copyState !== "acknowledged") {
+      // A verification already running holds the uploaded bytes; Hue refuses another upload then.
+      if (reserved.copyState !== "acknowledged" && state !== "verifying") {
         const upload = await client.requestArtifactUpload(reserved.id);
         try {
           await client.uploadArtifactBytes(upload, bytes, file.contentType);
@@ -399,17 +462,7 @@ export async function uploadOutputFiles(
           // settled by verified completion; never rewrite a final object here.
         }
       }
-      let attempt = 0;
-      for (;;) {
-        try {
-          state = (await client.completeArtifact(reserved.id)).state;
-          break;
-        } catch (error) {
-          if (!(error instanceof HueApiError) || error.status !== 503 || attempt++ >= 2)
-            throw error;
-          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
-        }
-      }
+      state = await settleArtifact(client, reserved.id, timing);
     }
     if (state !== "ready")
       throw new Error(`Generated file ${file.filename} was not verified by Hue (${state})`);
