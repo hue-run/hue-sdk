@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
-import { spawnAgentCommand } from "../src/cli/eval.js";
+import { explain, spawnAgentCommand } from "../src/cli/eval.js";
+import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
 import { TargetCancelledError } from "../src/evals.js";
 import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
 
@@ -1280,6 +1281,25 @@ describe("hue eval", () => {
     },
     SPAWN_TIMEOUT * 2,
   );
+
+  test("a resume with another --no-output or --content choice names the flags to repeat", () => {
+    // An unfinished run keeps its content policy (the checkpoint refuses a change); the message
+    // says which flags resume it.
+    const message = (persistResultContent: boolean, captureContent: boolean) =>
+      explain(new CheckpointIdentityError({ persistResultContent, captureContent }));
+    expect(message(false, false)).toBe(
+      "This unfinished run was started with --no-output; rerun with the same flags to resume it, or remove its checkpoint directory to start over",
+    );
+    expect(message(false, true)).toStartWith(
+      "This unfinished run was started with --no-output and --content;",
+    );
+    expect(message(true, false)).toStartWith(
+      "This unfinished run was started without --no-output or --content;",
+    );
+    expect(explain(new CheckpointIdentityError())).toBe(
+      "Checkpoint identity differs from this project, run, pins or content policy",
+    );
+  });
 
   test(
     "a second interrupt during the stop kills the agent's whole group at once",

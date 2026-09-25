@@ -25,7 +25,7 @@ import type {
   ScorerVersion,
 } from "../evals/types.js";
 import { TargetResult } from "../evals/types.js";
-import { CheckpointStore } from "../evals/checkpoint.js";
+import { CheckpointIdentityError, CheckpointStore } from "../evals/checkpoint.js";
 import { digest } from "../evals/json.js";
 import { runLocalAgent } from "../evals/local-worker.js";
 import {
@@ -715,9 +715,17 @@ function redact(message: string, secrets: string[]): string {
   return text;
 }
 
-function explain(error: unknown): string {
+export function explain(error: unknown): string {
   if (error instanceof HueApiError && (error.status === 401 || error.status === 403))
     return `${error.message}. Check that HUE_API_KEY is a "Read and write" project key for this origin.`;
+  // An unfinished run keeps the content policy it started with; name the flags that resume it.
+  if (error instanceof CheckpointIdentityError && error.startedWith) {
+    const flags = [
+      error.startedWith.persistResultContent === false ? "--no-output" : "",
+      error.startedWith.captureContent === true ? "--content" : "",
+    ].filter(Boolean);
+    return `This unfinished run was started ${flags.length ? `with ${flags.join(" and ")}` : "without --no-output or --content"}; rerun with the same flags to resume it, or remove its checkpoint directory to start over`;
+  }
   // The error's own message points at an in-memory report the user cannot reach.
   if (error instanceof HueExportError)
     return `Hue could not accept all telemetry (${describeTelemetryIssues(telemetryIssueCounts(error))})`;

@@ -429,8 +429,10 @@ only from the agent's own instrumentation. Case outputs, error messages and expl
 stored in Hue whether or not `--content` is passed, so a case's answer can be graded and read on
 its run page; `--no-output` keeps them out in one-shot mode. `--worker` always stores them, because
 a run launched from Hue is read on its run page (that is `runLocalAgent()`'s contract), and refuses
-`--no-output`. An interrupted one-shot run keeps the choice it started with: resume one that an
-earlier SDK started without `--content` by passing `--no-output`.
+`--no-output`. An interrupted one-shot run keeps the choice it started with, so one run never
+mixes stored and unstored outputs: rerunning it with other `--no-output` or `--content` flags is
+refused with the flags it started with. Resume a run that an earlier SDK started without
+`--content` by passing `--no-output`.
 
 Trace evidence is required for every case: when Hue does not accept a case's traces or logs, the
 case is completed as failed (error `TelemetryNotAccepted`, evidence omitted as

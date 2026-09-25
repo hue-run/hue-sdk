@@ -17,7 +17,8 @@ refuses to publish a version without a matching entry below.
   shows it. `--content` now governs only telemetry content capture, which stays off by default.
   `--no-output` keeps outputs, error messages and explanations out of a one-shot run; `--worker`
   refuses it. Migration: an interrupted one-shot run keeps the choice it started with, so resume
-  one started without `--content` by an earlier version with `--no-output`.
+  one started without `--content` by an earlier version with `--no-output`; a rerun with other
+  flags is refused with a message naming the flags the run started with.
 
 #### Added
 
