@@ -419,6 +419,47 @@ def test_requests_refused_with_a_short_retry_after_are_sent_again_and_others_are
         thread.join(5)
 
 
+def test_a_write_whose_connection_drops_or_times_out_is_sent_once_and_fails():
+    # Hue may have acted on a request that got no answer, so neither failure may send it again.
+    seen: list[tuple[str, str, bytes]] = []
+    answer = {"mode": "drop"}
+    release = Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            seen.append((self.command, urlsplit(self.path).path, self.rfile.read(length)))
+            if answer["mode"] == "hang":
+                release.wait(5)
+            # Returning without a status line closes the HTTP/1.0 connection unanswered.
+            self.close_connection = True
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = EvaluationClient(
+            f"http://127.0.0.1:{server.server_port}", "synthetic-key", timeout_seconds=0.2
+        )
+        body = {"name": "Greetings", "slug": "greetings", "description": ""}
+        for mode in ("drop", "hang"):
+            answer["mode"] = mode
+            seen.clear()
+            with pytest.raises(HueApiError) as caught:
+                client.create_dataset(name="Greetings", slug="greetings")
+            assert caught.value.status is None
+            assert len(seen) == 1 and seen[0][:2] == ("POST", "/api/v1/datasets")
+            assert json.loads(seen[0][2]) == body
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
 def test_product_registry_methods_use_v1_paths_and_preserve_customer_fields(evaluation_receiver):
     receiver = evaluation_receiver
     client = EvaluationClient(receiver.url, "synthetic-key")

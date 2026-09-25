@@ -1,6 +1,8 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -970,6 +972,7 @@ describe("installed evaluation API and runner contract", () => {
         [503, "60"],
         [503, undefined],
         [503, "1.5"],
+        [503, "\u00b2"],
         [429, "Wed, 21 Oct 2026 07:28:00 GMT"],
         [500, "0"],
         [502, "0"],
@@ -1024,6 +1027,54 @@ describe("installed evaluation API and runner contract", () => {
       expect(sent).toBeLessThan(25 * 1024 * 1024);
     } finally {
       server.stop(true);
+    }
+  });
+  test("a write whose connection drops or times out is sent once and fails with HueApiError", async () => {
+    // Hue may have acted on a request that got no answer, so neither failure may send it again.
+    const seen: string[] = [];
+    let answer: "reply" | "drop" | "hang" = "reply";
+    const server = createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      seen.push(`${request.method} ${request.url} ${body}`);
+      if (answer === "drop") request.socket.destroy();
+      else if (answer === "reply") response.end("{}");
+    });
+    await new Promise<void>((listening) => server.listen(0, "127.0.0.1", listening));
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      timeoutMillis: 200,
+    });
+    const write = 'POST /api/v1/datasets {"name":"Greetings","slug":"greetings"}';
+    const failure = async () => {
+      const error = await client.createDataset({ name: "Greetings", slug: "greetings" }).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(HueApiError);
+      expect((error as HueApiError).status).toBeUndefined();
+    };
+    try {
+      answer = "drop";
+      await failure();
+      expect(seen).toEqual([write]);
+
+      // A connection kept alive from an earlier answer is where HTTP clients tend to resend.
+      seen.length = 0;
+      answer = "reply";
+      await client.checkConnection();
+      answer = "drop";
+      await failure();
+      expect(seen).toEqual(["GET /api/v1/projects/current ", write]);
+
+      seen.length = 0;
+      answer = "hang";
+      await failure();
+      expect(seen).toEqual([write]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((closed) => server.close(closed));
     }
   });
   test("public dataset/scorer registry methods preserve null and revision", async () => {
