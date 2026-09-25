@@ -69,6 +69,8 @@ test("both SDKs refuse an output for the same reason", () => {
     [[big, ...Array(25_000).fill(0)], "structure"],
     [{ "key\u0000": 1 }, "not JSON"],
     [{ "\ud800": 1 }, "not JSON"],
+    // JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
+    [{ "\uffff": Number.NaN, "😀": big }, "bytes"],
   ];
   for (const [value, reason] of cases) {
     let outcome = "accepted";

@@ -114,7 +114,7 @@ _BARE_VALUE = re.compile(
 # An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
 # ``OAuth1 …``), or a lone credential. One already replaced is left alone.
 _AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)[^{_JS_SPACE}\"',;}})\]]+"
+    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)([^{_JS_SPACE}\"',;}})\]]+)"
     rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
 )
 
@@ -154,9 +154,13 @@ def _normalized_key(key: str) -> str:
 
 def _is_text_credential_key(key: str) -> bool:
     """A key naming a credential in free text: a tool definition's credential keys, any header
-    ending in ``Authorization`` and ``Bearer``."""
+    ending in ``Authorization``, and ``Bearer`` and ``Basic``."""
     normalized = _normalized_key(key)
-    return _is_credential_key(key) or normalized.endswith("authorization") or normalized == "bearer"
+    return (
+        _is_credential_key(key)
+        or normalized.endswith("authorization")
+        or normalized in ("bearer", "basic")
+    )
 
 
 # ``API key: …``: a credential named in two words, ``key`` right after ``API``.
@@ -169,26 +173,72 @@ def _is_api_key_phrase(text: str, key_start: int, key: str) -> bool:
     )
 
 
+def _opens_quote(text: str, index: int) -> bool:
+    """Whether a quote, or a backslash-escaped double quote, opens at ``index``."""
+    return text[index : index + 1] in ('"', "'") or text.startswith('\\"', index)
+
+
 def _pair_spans(text: str) -> list[tuple[int, int]]:
-    """The value of each pair whose key names a credential, without its quotes."""
+    """The value of each pair whose key names a credential, without its quotes. A pair inside an
+    earlier pair's value is kept when its value runs past that value."""
     spans: list[tuple[int, int]] = []
     covered = 0
+    # The last ``Authorization`` value read: where it starts, where its first word ends and where
+    # it ends. A value starting inside that first word ends where it does, so each run is read once.
+    authorization: tuple[int, int, int] | None = None
     for match in _PAIR_KEY.finditer(text):
         start = match.end()
         key = match[2]
-        credential = _is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)
-        if start < covered or not credential:
+        if not (_is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)):
+            continue
+        nested = start < covered
+        is_authorization = _normalized_key(key).endswith("authorization")
+        # A value inside an earlier value ends where that value's run or quote ends, so it can run
+        # past it only by opening a quote (which may be the one that closes the earlier value) or,
+        # for ``Authorization``, by the word after its scheme.
+        if nested and not is_authorization and not _opens_quote(text, start):
             continue
         quoted = _QUOTED_VALUE.match(text, start)
-        bare = (
-            _AUTHORIZATION_BARE if _normalized_key(key).endswith("authorization") else _BARE_VALUE
-        )
-        value = quoted or bare.match(text, start)
-        if value is None:
+        if quoted:
+            opening = 2 if quoted[0].startswith("\\") else 1
+            end = quoted.end()
+        elif is_authorization:
+            if (
+                authorization is not None
+                and authorization[0] < start < authorization[1]
+                and not _opens_quote(text, start)
+                and not text.startswith("[redacted]", start)
+                and not text.startswith("%5Bredacted%5D", start)
+            ):
+                opening, end = 0, authorization[2]
+            else:
+                value = _AUTHORIZATION_BARE.match(text, start)
+                if value is None:
+                    continue
+                opening, end = len(value[1]), value.end()
+                authorization = (start, value.end(2), end)
+        else:
+            value = _BARE_VALUE.match(text, start)
+            if value is None:
+                continue
+            opening, end = len(value[1]), value.end()
+        if end <= covered:
             continue
-        opening = (2 if quoted[0].startswith("\\") else 1) if quoted else len(value[1])
-        spans.append((start + opening, value.end() - (opening if quoted else 0)))
-        covered = value.end()
+        spans.append((start + opening, end - (opening if quoted else 0)))
+        covered = end
+    return spans
+
+
+def _authorization_spans(text: str) -> list[tuple[int, int]]:
+    """The credential after each authorization scheme. A scheme word can end an earlier credential
+    (``…~bearer SECRET``), so the search resumes at each credential, which is read at most once
+    more."""
+    spans: list[tuple[int, int]] = []
+    position = 0
+    while (match := _AUTHORIZATION_VALUE.search(text, position)) is not None:
+        credential = match.start() + len(match[1]) + len(match[2])
+        spans.append((credential, match.end()))
+        position = credential
     return spans
 
 
@@ -234,10 +284,7 @@ def scrub_credential_text(text: str) -> str:
         [
             *_pair_spans(text),
             *(match.span() for match in _PREFIXED_TOKEN.finditer(text)),
-            *(
-                (match.start() + len(match[1]) + len(match[2]), match.end())
-                for match in _AUTHORIZATION_VALUE.finditer(text)
-            ),
+            *_authorization_spans(text),
         ],
     )
 

@@ -873,6 +873,8 @@ def test_both_sdks_refuse_an_output_for_the_same_reason():
         ([big, *[0] * 25_000], "structure"),
         ({"key\x00": 1}, "not JSON"),
         ({"\ud800": 1}, "not JSON"),
+        # JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
+        ({"\uffff": float("nan"), "😀": big}, "bytes"),
     ]
     for value, reason in cases:
         try:

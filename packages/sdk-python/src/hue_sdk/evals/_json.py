@@ -99,7 +99,8 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             if any(type(key) is not str for key in item):
                 raise ValueError("JSON object keys must be strings.")
             charge(len(item) + 1 if item else 2)
-            for key in sorted(item):
+            # By UTF-16 code unit, as JavaScript sorts, so both SDKs read members in one order.
+            for key in sorted(item, key=lambda key: key.encode("utf-16-be", "surrogatepass")):
                 _text(key)
                 charge_text(key)
                 charge(1)

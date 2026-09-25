@@ -10,7 +10,7 @@
     },
     {
       "input": "Authorization: Bearer synthetic-bearer-token was rejected",
-      "expected": "Authorization: [redacted] was rejected"
+      "expected": "Authorization: [redacted] [redacted] rejected"
     },
     {
       "input": "{\"error\":\"invalid_grant\",\"access_token\":\"synthetic-access\",\"note\":\"x\"}",
@@ -251,6 +251,18 @@
     {
       "input": "api_key=synthetic-k[Basic c3ludGhldGljOmdsdWVk]",
       "expected": "api_key=[redacted] [redacted]]"
+    },
+    {
+      "input": "token=synthetic-sk-glued!authorization=Bot synthetic-nested-secret",
+      "expected": "token=[redacted]"
+    },
+    {
+      "input": "Invalid token ghp_synthetic01:x~bearer synthetic-trailing-scheme",
+      "expected": "Invalid token [redacted] [redacted]"
+    },
+    {
+      "input": "authorization=Bot x!authorization=Bot synthetic-nested-auth tail",
+      "expected": "authorization=[redacted] tail"
     }
   ]
 }
