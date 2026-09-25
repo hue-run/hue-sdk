@@ -123,11 +123,19 @@ simulated world and grades the sealed outcome. Review and publish cases in the H
    ```
 
 Exit code 0 means every case passed; 1 means a case failed, errored or Hue's checks were still
-pending; 2 is a usage error. With the published `@hue-run/sdk` 0.9.0, telemetry content capture
-stays off unless `--content` is passed, and one-shot mode stores case outputs and explanations
-only with `--content`; `--worker` stores them so a run launched from Hue can be read on its run
-page. Keep credentials out of agent outputs and generated files. Report the run URL and the
-printed verdicts; do not claim a pass without them.
+pending; 2 is a usage error. Check the installed version before describing storage:
+
+- Published `@hue-run/sdk` 0.9.0 stores one-shot case outputs and explanations only with
+  `--content`; `--worker` always stores them so the run can be read in Hue.
+- Current development builds for 0.10.0 store one-shot outputs, error messages and explanations
+  by default. `--content` controls telemetry capture only; `--no-output` opts one-shot runs
+  out of storing their answer text. Verify that the installed CLI lists `--no-output` before
+  using it. Generated files under `output/` are uploaded independently of that flag.
+
+Telemetry content capture stays off unless `--content` is passed in both versions. Do not infer
+that answer storage is disabled from that flag alone. Keep credentials out of stdout, agent
+outputs and generated files. Report the run URL and printed verdicts; do not claim a pass
+without them.
 
 ## Evaluate a document eval set
 
