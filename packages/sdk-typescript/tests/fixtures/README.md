@@ -17,6 +17,24 @@ and their results, including an error. Credentials are placeholders. The Python 
 fixture through its hosted-call recorder; the TypeScript suite keeps it as shared fixture material
 while exercising its parser limits directly.
 
+# Provider error text fixture
+
+`provider-error-text.json` is synthetic: error messages a hosted MCP call can report, each with
+the text both SDKs export as the failed span's status description under content capture once
+credentials are scrubbed (URL userinfo, query values and fragments, quoted query values included;
+a URL with another scheme than `http(s)`, `ws(s)` or `ftp` replaced whole when it has an `@`, `?`
+or `#`; tokens with a known credential prefix; authorization-scheme credentials and an
+`Authorization` header's whole value; credential-named `key=value` and `key: value` pairs, quoted,
+backslash-escaped or bare, and a pair inside another pair's value) and the text bounded, and
+texts that must stay as they are. Credentials are placeholders. The Python suite reads the same
+file.
+
+# Provider tool listing digest fixture
+
+`provider-tool-listing.json` is synthetic: an OpenAI `mcp_list_tools` item whose tools have null
+fields, with the `hue.tool.names` and `hue.tool.definitions.sha256` both SDKs must derive from the
+definitions they record for it. The Python suite reads the same file.
+
 # Tool-definition digest fixture
 
 `tool-definitions.json` is synthetic: a hosted MCP provider tool with placeholder credentials,

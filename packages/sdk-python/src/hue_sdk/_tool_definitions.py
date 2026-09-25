@@ -61,6 +61,160 @@ def _is_credential_key(key: Any) -> bool:
     )
 
 
+# JavaScript's ``\s``, spelled out so both SDKs split free text at the same characters.
+_JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+# A URL's ``://`` and everything after it up to whitespace, a quote or ``<>``. A quoted value right
+# after ``=`` (``?token="…"``) is part of the URL, so all of it is replaced.
+_URL_REST = re.compile(
+    rf"://(?:[^{_JS_SPACE}\"'<>`]|(?<==)\"[^\"<>`\r\n]*\""
+    r"|(?<==)'[^'<>`\r\n]*'|(?<==)[\"'])+",
+)
+_SCHEME_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
+# Schemes WHATWG parses as hierarchical, which both SDKs serialize alike.
+_SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
+_URL_PARTS = re.compile(r"[@?#]")
+# A credential its own prefix identifies wherever it appears, ``%`` escapes included: Hue's API,
+# MCP, world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (``sk-``),
+# Stripe, Slack, Google OAuth, GitHub and GitLab ones.
+_PREFIXED_TOKEN = re.compile(
+    r"\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_"
+    r"|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}",
+    re.IGNORECASE | re.ASCII,
+)
+# An authorization scheme followed by its credential, as in an ``Authorization`` header, up to
+# whitespace, a quote, a delimiter or a backslash. The credential cannot start with ``=`` or ``:``,
+# so ``token = value`` and ``Token : value`` are left to the key-value rule.
+_AUTHORIZATION_VALUE = re.compile(
+    rf"\b(bearer|basic|token)([{_JS_SPACE}]+)[^{_JS_SPACE}\"'`<>=:,;(){{}}\[\]\\]"
+    rf"[^{_JS_SPACE}\"'`<>,;(){{}}\[\]\\]*",
+    re.IGNORECASE | re.ASCII,
+)
+# The key and separator of a ``key=value`` or ``key: value`` pair, the key optionally quoted, with
+# a backslash-escaped quote too (JSON inside a string). A key starts where no key character
+# precedes it, so each word is tried once and a long run stays linear. The value is not consumed,
+# so a pair inside another pair's value (``error: token=…``) is found.
+_PAIR_KEY = re.compile(
+    rf"(\\?[\"']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1([{_JS_SPACE}]*[:=][{_JS_SPACE}]*)",
+    re.IGNORECASE | re.ASCII,
+)
+# A quoted value to its closing quote on the same line, spaces and escaped quotes included, or one
+# between backslash-escaped quotes.
+_QUOTED_VALUE = re.compile(
+    r"\"(?:[^\"\\\r\n]|\\[^\r\n])+\"|'(?:[^'\\\r\n]|\\[^\r\n])+'"
+    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+\\\""
+)
+# An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
+# a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
+_BARE_VALUE = re.compile(
+    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)[{_JS_SPACE}])"
+    rf"[^{_JS_SPACE}\"',;&}})\]]+",
+    re.IGNORECASE | re.ASCII,
+)
+# An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
+# ``ApiKey …``), or a lone credential. One already replaced is left alone.
+_AUTHORIZATION_BARE = re.compile(
+    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)[^{_JS_SPACE}\"',;}})\]]+"
+    rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
+)
+
+
+def _scrub_text_urls(text: str) -> str:
+    """Scrub each URL in free text. Each ``://`` is found by search and its scheme read back from
+    it: up to 64 scheme characters, starting at a letter, so a longer run before ``://`` still
+    leaves a URL to scrub and a long run such as ``a.a.a…`` costs one pass."""
+    scrub = _Scrub()
+    parts: list[str] = []
+    copied = 0
+    index = text.find("://")
+    while index != -1:
+        if index >= copied:
+            start = index
+            while start > copied and index - start < 64 and text[start - 1] in _SCHEME_CHARACTERS:
+                start -= 1
+            while start < index and text[start] not in _SCHEME_LETTERS:
+                start += 1
+            rest = _URL_REST.match(text, index) if start < index else None
+            if rest is not None:
+                url = text[start : rest.end()]
+                if _SPECIAL_TEXT_SCHEME.match(url):
+                    url = scrub.url(url)
+                elif _URL_PARTS.search(url):
+                    url = REDACTED
+                parts.append(text[copied:start] + url)
+                copied = rest.end()
+        index = text.find("://", index + 1)
+    parts.append(text[copied:])
+    return "".join(parts)
+
+
+def _normalized_key(key: str) -> str:
+    return key.lower().replace("-", "").replace("_", "")
+
+
+def _is_text_credential_key(key: str) -> bool:
+    """A key naming a credential in free text: a tool definition's credential keys, any header
+    ending in ``Authorization`` and ``Bearer``."""
+    normalized = _normalized_key(key)
+    return _is_credential_key(key) or normalized.endswith("authorization") or normalized == "bearer"
+
+
+# ``API key: …``: a credential named in two words, ``key`` right after ``API``.
+_API_BEFORE = re.compile(r"(?:^|[^a-z0-9_])api[ \t]+\Z", re.IGNORECASE | re.ASCII)
+
+
+def _is_api_key_phrase(text: str, key_start: int, key: str) -> bool:
+    return key.lower() == "key" and bool(
+        _API_BEFORE.search(text[max(0, key_start - 16) : key_start])
+    )
+
+
+def _scrub_pairs(text: str) -> str:
+    """Replace the value of each pair whose key names a credential."""
+    parts: list[str] = []
+    copied = 0
+    for match in _PAIR_KEY.finditer(text):
+        start = match.end()
+        key = match[2]
+        credential = _is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)
+        if start < copied or not credential:
+            continue
+        quoted = _QUOTED_VALUE.match(text, start)
+        bare = (
+            _AUTHORIZATION_BARE if _normalized_key(key).endswith("authorization") else _BARE_VALUE
+        )
+        value = quoted or bare.match(text, start)
+        if value is None:
+            continue
+        if quoted:
+            quote = '\\"' if quoted[0].startswith("\\") else quoted[0][0]
+            parts.append(f"{text[copied:start]}{quote}{REDACTED}{quote}")
+        else:
+            parts.append(f"{text[copied:start]}{value[1]}{REDACTED}")
+        copied = value.end()
+    parts.append(text[copied:])
+    return "".join(parts)
+
+
+def scrub_credential_text(text: str) -> str:
+    """Remove credentials from free text a provider returned, such as an MCP error message.
+
+    The rules are the tool definitions', extended for text: each ``http``, ``https``, ``ws``,
+    ``wss`` or ``ftp`` URL loses its userinfo and fragment and every query value becomes
+    ``[redacted]``, as a ``url`` field does (an unparseable one becomes ``[redacted]``), and a URL
+    with any other scheme, which runtimes parse differently, becomes ``[redacted]`` when it has an
+    ``@``, ``?`` or ``#``; a token with a known credential prefix (``hue_sk_``, ``sk-``,
+    ``xoxb-``, ``ya29.`` and others), the credential after an authorization scheme (``Bearer``,
+    ``Basic``, ``Token``), the whole value of an ``Authorization`` header, and the value of a
+    ``key=value`` or ``key: value`` pair whose key names a credential (quoted, escaped-quoted or
+    bare) become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
+    """
+    text = _scrub_text_urls(text)
+    text = _PREFIXED_TOKEN.sub(REDACTED, text)
+    text = _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
+    return _scrub_pairs(text)
+
+
 def _is_url_key(key: Any) -> bool:
     if not isinstance(key, str):
         return False
@@ -717,3 +871,17 @@ def with_tool_catalog_summary(source: Mapping[str, Any]) -> Mapping[str, Any]:
         # Metadata-only export removes the definitions whether or not they can be summarized.
         return source
     return {**summary, **source}
+
+
+def tool_catalog_summary(definitions: str) -> dict[str, Any]:
+    """The metadata-only summary of one JSON-encoded definition list.
+
+    ``hue.tool.names`` and ``hue.tool.definitions.sha256``, exactly as export summarizes a
+    record's ``gen_ai.tool.definitions``; empty when the list cannot be summarized.
+    """
+    summarized = with_tool_catalog_summary({"gen_ai.tool.definitions": definitions})
+    return {
+        key: summarized[key]
+        for key in ("hue.tool.names", "hue.tool.definitions.sha256")
+        if key in summarized
+    }

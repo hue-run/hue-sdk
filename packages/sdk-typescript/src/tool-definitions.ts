@@ -78,6 +78,140 @@ function isCredentialKey(key: string): boolean {
   );
 }
 
+/** A URL's `://` and everything after it up to whitespace, a quote or `<>`. A quoted value right
+ * after `=` (`?token="…"`) is part of the URL, so the whole value is replaced. */
+const urlRest = /:\/\/(?:[^\s"'<>`]|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["'])+/y;
+const isSchemeLetter = (code: number) => (code | 0x20) >= 0x61 && (code | 0x20) <= 0x7a;
+/** `a-z`, `0-9`, `+`, `.` and `-`, case-insensitively. */
+const isSchemeCharacter = (code: number) =>
+  isSchemeLetter(code) ||
+  (code >= 0x30 && code <= 0x39) ||
+  code === 0x2b ||
+  code === 0x2e ||
+  code === 0x2d;
+
+/** Scrubs each URL in free text. Each `://` is found by search and its scheme read back from it:
+ * up to 64 scheme characters, starting at a letter, so a longer run before `://` still leaves a
+ * URL to scrub and a long run such as `a.a.a…` costs one pass. */
+function scrubTextUrls(text: string, state: ScrubState): string {
+  let result = "";
+  let copied = 0;
+  for (let index = text.indexOf("://"); index !== -1; index = text.indexOf("://", index + 1)) {
+    if (index < copied) continue;
+    let start = index;
+    while (start > copied && index - start < 64 && isSchemeCharacter(text.charCodeAt(start - 1)))
+      start--;
+    while (start < index && !isSchemeLetter(text.charCodeAt(start))) start++;
+    if (start === index) continue;
+    urlRest.lastIndex = index;
+    const rest = urlRest.exec(text);
+    if (!rest) continue;
+    const end = index + rest[0].length;
+    result += text.slice(copied, start) + scrubTextUrl(text.slice(start, end), state);
+    copied = end;
+  }
+  return result + text.slice(copied);
+}
+/** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
+const specialScheme = /^(?:https?|wss?|ftp):/i;
+/** A URL in free text. One with another scheme, which runtimes parse differently, is replaced
+ * whole when it could carry userinfo, a query or a fragment. */
+function scrubTextUrl(url: string, state: ScrubState): string {
+  if (specialScheme.test(url)) return scrubUrl(url, state);
+  return /[@?#]/.test(url) ? REDACTED : url;
+}
+/** A credential its own prefix identifies wherever it appears, `%` escapes included: Hue's API, MCP,
+ * world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (`sk-`), Stripe,
+ * Slack, Google OAuth, GitHub and GitLab ones. */
+const prefixedToken =
+  /\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}/gi;
+/** An authorization scheme followed by its credential, as in an `Authorization` header, up to
+ * whitespace, a quote, a delimiter or a backslash. The credential cannot start with `=` or `:`, so
+ * `token = value` and `Token : value` are left to the key-value rule. */
+const authorizationValue =
+  /\b(bearer|basic|token)(\s+)[^\s"'`<>=:,;(){}[\]\\][^\s"'`<>,;(){}[\]\\]*/gi;
+/** The key and separator of a `key=value` or `key: value` pair, the key optionally quoted, with a
+ * backslash-escaped quote too (JSON inside a string). A key starts where no key character precedes
+ * it, so each word is tried once and a long run stays linear. The value is not consumed, so a pair
+ * inside another pair's value (`error: token=…`) is found. */
+const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1(\s*[:=]\s*)/gi;
+/** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
+ * one between backslash-escaped quotes. */
+const quotedValue =
+  /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"/y;
+/** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
+ * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
+const bareValue =
+  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
+/** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
+ * `ApiKey …`), or a lone credential. One already replaced is left alone. */
+const authorizationBare =
+  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)[^\s"',;})\]]+(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+
+function normalizedKey(key: string): string {
+  return key.toLowerCase().replace(/[-_]/g, "");
+}
+/** A key naming a credential in free text: a tool definition's credential keys, any header ending
+ * in `Authorization` and `Bearer`. */
+function isTextCredentialKey(key: string): boolean {
+  const normalized = normalizedKey(key);
+  return isCredentialKey(key) || normalized.endsWith("authorization") || normalized === "bearer";
+}
+
+/** `API key: …`: a credential named in two words, `key` right after `API`. */
+const apiBefore = /(?:^|[^a-z0-9_])api[ \t]+$/i;
+function isApiKeyPhrase(text: string, keyStart: number, key: string): boolean {
+  return (
+    key.toLowerCase() === "key" && apiBefore.test(text.slice(Math.max(0, keyStart - 16), keyStart))
+  );
+}
+
+/** Replaces the value of each pair whose key names a credential. */
+function scrubPairs(text: string): string {
+  let result = "";
+  let copied = 0;
+  for (const match of text.matchAll(pairKey)) {
+    const start = match.index + match[0].length;
+    const key = match[2]!;
+    const keyStart = match.index + match[1]!.length;
+    if (start < copied || !(isTextCredentialKey(key) || isApiKeyPhrase(text, keyStart, key)))
+      continue;
+    quotedValue.lastIndex = start;
+    const quoted = quotedValue.exec(text);
+    let value = quoted;
+    if (!quoted) {
+      const bare = normalizedKey(key).endsWith("authorization") ? authorizationBare : bareValue;
+      bare.lastIndex = start;
+      value = bare.exec(text);
+    }
+    if (!value) continue;
+    const quote = quoted ? (quoted[0].startsWith("\\") ? '\\"' : quoted[0][0]!) : value[1]!;
+    result += `${text.slice(copied, start)}${quote}${REDACTED}${quoted ? quote : ""}`;
+    copied = start + value[0].length;
+  }
+  return result + text.slice(copied);
+}
+
+/**
+ * Removes credentials from free text a provider returned, such as an MCP call's error message,
+ * with the rules tool definitions use, extended for text: each `http`, `https`, `ws`, `wss` or
+ * `ftp` URL loses its userinfo and fragment and every query value becomes `[redacted]`, as a
+ * `url` field does (an unparseable one becomes `[redacted]`), and a URL with any other scheme
+ * becomes `[redacted]` when it has an `@`, `?` or `#`; a token with a known credential prefix
+ * (`hue_sk_`, `sk-`, `xoxb-`, `ya29.` and others), the credential after an authorization scheme
+ * (`Bearer`, `Basic`, `Token`), the whole value of an `Authorization` header, and the value of a
+ * `key=value` or `key: value` pair whose key names a credential (quoted, escaped-quoted or bare)
+ * become `[redacted]`.
+ */
+export function scrubCredentialText(text: string): string {
+  const state: ScrubState = { changed: false };
+  return scrubPairs(
+    scrubTextUrls(text, state)
+      .replace(prefixedToken, REDACTED)
+      .replace(authorizationValue, `$1$2${REDACTED}`),
+  );
+}
+
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */
 const openInferenceTool = /^llm\.tools\.(\d+)\.tool\.json_schema$/;
 
@@ -300,4 +434,19 @@ export function withToolCatalogSummary<T extends Record<string, unknown>>(source
     return source;
   }
   return { ...summary, ...source } as T;
+}
+
+/**
+ * The metadata-only summary of one JSON-encoded definition list: `hue.tool.names` and
+ * `hue.tool.definitions.sha256`, exactly as export summarizes a record's
+ * `gen_ai.tool.definitions`. Empty when the list cannot be summarized.
+ */
+export function toolCatalogSummary(definitions: string): Record<string, string | string[]> {
+  const summarized: Record<string, unknown> = withToolCatalogSummary({
+    "gen_ai.tool.definitions": definitions,
+  });
+  const summary: Record<string, string | string[]> = {};
+  for (const key of ["hue.tool.names", "hue.tool.definitions.sha256"])
+    if (key in summarized) summary[key] = summarized[key] as string | string[];
+  return summary;
 }
