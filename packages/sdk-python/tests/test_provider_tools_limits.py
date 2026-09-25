@@ -12,6 +12,7 @@ from hue_sdk._provider_tools import (
     hosted_tool_activity,
     provider_error_description,
 )
+from hue_sdk._tool_definitions import tool_catalog_summary
 
 ERROR_TEXT_FIXTURE = (
     Path(__file__).resolve().parents[3]
@@ -21,6 +22,7 @@ ERROR_TEXT_FIXTURE = (
     / "fixtures"
     / "provider-error-text.json"
 )
+LISTING_DIGEST_FIXTURE = ERROR_TEXT_FIXTURE.with_name("provider-tool-listing.json")
 
 
 def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
@@ -377,3 +379,12 @@ def test_server_address_keeps_an_underscore_in_a_host_name():
             ]
         },
     ) == {"compose": "mcp_server", "internal": "mcp_gateway.internal.example"}
+
+
+def test_a_listing_s_null_fields_are_left_out_so_both_sdks_digest_its_catalog_alike():
+    # The TypeScript suite reads the same fixture and checks the same names and digest.
+    fixture = json.loads(LISTING_DIGEST_FIXTURE.read_text(encoding="utf-8"))
+    [listing] = hosted_tool_activity("openai", fixture["response"]).listings
+    for definition in listing.definitions:
+        assert None not in definition.values()
+    assert tool_catalog_summary(json.dumps(listing.definitions)) == fixture["expected"]

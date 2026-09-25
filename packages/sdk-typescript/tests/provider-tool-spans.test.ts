@@ -168,7 +168,7 @@ describe("provider tool spans", () => {
     expect(failed!.status).toEqual({
       code: 2,
       message:
-        "Upstream rejected Authorization: Bearer [redacted] at https://mcp_server.internal:8443/mcp?key=%5Bredacted%5D",
+        "Upstream rejected Authorization: [redacted] at https://mcp_server.internal:8443/mcp?key=%5Bredacted%5D",
     });
     for (const secret of ["synthetic-bearer-secret", "synthetic-query-secret", "synthetic-pass"])
       expect(content.raw).not.toContain(secret);
@@ -218,6 +218,47 @@ describe("provider tool spans", () => {
     expect(attr(listing!, "hue.tool.definitions.sha256")?.stringValue).toBe(
       expected["hue.tool.definitions.sha256"] as string,
     );
+  });
+
+  test("128 failed MCP calls with adversarial error text are recorded in bounded time", async () => {
+    // A run that made the URL pattern's scheme quadratic, filling the 16,384-character window
+    // error text is scrubbed in, from every call a response can carry.
+    const output = Array.from({ length: 128 }, (_, index) => ({
+      type: "mcp_call",
+      id: `mcp-${index}`,
+      name: "search",
+      server_label: "gmail",
+      arguments: "{}",
+      error: "a.".repeat(8_192),
+    }));
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      baseUrl: endpoint.url,
+      serviceName: "provider-spans",
+      captureContent: true,
+    });
+    let elapsed = 0;
+    try {
+      await hue.model(
+        "synthetic-model",
+        async () => {
+          const started = performance.now();
+          hue.recordProviderToolCalls({ output });
+          elapsed = performance.now() - started;
+        },
+        { provider: "openai" },
+      );
+      expect((await hue.flush()).instrumentationFailures).toBe(0);
+    } finally {
+      await hue.shutdown();
+      endpoint.stop();
+    }
+    // Quadratic, this took about 7 s under Bun; linear, it takes well under one.
+    expect(elapsed).toBeLessThan(2_000);
+    const failed = endpoint.spans.filter((span) => span.name === "execute_tool search");
+    expect(failed).toHaveLength(128);
+    for (const span of failed) expect([...span.status!.message!].length).toBeLessThanOrEqual(1_025);
   });
 
   test("server.address keeps an underscore in the MCP server's host name", async () => {

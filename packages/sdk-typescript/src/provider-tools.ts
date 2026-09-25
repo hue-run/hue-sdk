@@ -129,7 +129,13 @@ export function providerErrorDescription(value: string): string {
 
 /** An OpenAI MCP call's `error`: its text, or an error object's string `message`. */
 function errorText(value: unknown): string | undefined {
-  const message = isItem(value) ? value.message : value;
+  let message: unknown;
+  try {
+    message = isItem(value) ? value.message : value;
+  } catch {
+    // An error whose message cannot be read still fails its call; only the text is lost.
+    return undefined;
+  }
   return typeof message === "string" && message.trim() !== "" ? message : undefined;
 }
 
@@ -195,12 +201,13 @@ function openaiItem(item: unknown, position: number, activity: HostedToolActivit
         try {
           const tool: unknown = item.tools[index];
           if (!isItem(tool)) continue;
+          // A null field is left out, as absent, so both SDKs digest the same definition.
           definitions.push({
             type: "function",
-            ...(tool.name !== undefined ? { name: tool.name } : {}),
-            ...(tool.description !== undefined ? { description: tool.description } : {}),
-            ...(tool.input_schema !== undefined ? { parameters: tool.input_schema } : {}),
-            ...(tool.annotations !== undefined ? { annotations: tool.annotations } : {}),
+            ...(tool.name != null ? { name: tool.name } : {}),
+            ...(tool.description != null ? { description: tool.description } : {}),
+            ...(tool.input_schema != null ? { parameters: tool.input_schema } : {}),
+            ...(tool.annotations != null ? { annotations: tool.annotations } : {}),
           });
         } catch {
           // A definition that cannot be read is skipped; the rest of the listing is kept.

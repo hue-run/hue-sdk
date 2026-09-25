@@ -113,10 +113,13 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
   an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
   ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
-  `?` or `#`, and replaces authorization-scheme credentials and the value of a credential-named
-  `key=value` or `key: value` pair (a quoted value up to its closing quote, and a pair inside
-  another pair's value). The `redact` hook sees the text as `status.message`. Without content
-  capture the span keeps `error.type` only. **Wire**
+  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
+  `hue_world_` and `hue_attempt_`, and `sk-`, Stripe, Slack, Google OAuth, GitHub and GitLab
+  tokens), the credential after `Bearer`, `Basic` or `Token`, an `Authorization` header's whole
+  value and the value of a credential-named `key=value` or `key: value` pair (quoted, with
+  backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside another pair's
+  value). The `redact` hook sees the text as `status.message`. Without content capture the span
+  keeps `error.type` only. **Wire**
 
 #### Changed
 
@@ -165,6 +168,9 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   even under a text media type, as Hue reads it, so such a text (`AAAA…`, for example) is hashed
   as the bytes it decodes to and stays inline while those fit in 64 KiB. A text file's own text
   is still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
+- An OpenAI `mcp_list_tools` tool's null `description`, `input_schema` or `annotations` is left
+  out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record the
+  same definitions and give a catalog the same digest.
 - `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
   throws when read: the item is skipped and counted, and the other calls are recorded, as the
   Python SDK does.

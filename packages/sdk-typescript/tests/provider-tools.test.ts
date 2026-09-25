@@ -4,7 +4,9 @@ import {
   hostedToolActivity,
   providerErrorDescription,
 } from "../src/provider-tools.js";
+import { toolCatalogSummary } from "../src/tool-definitions.js";
 import errorTexts from "./fixtures/provider-error-text.json" with { type: "json" };
+import listingDigest from "./fixtures/provider-tool-listing.json" with { type: "json" };
 
 /** An item whose `type` cannot be read, as a broken provider model can be. */
 const raisingType = () =>
@@ -224,6 +226,31 @@ test("a failed MCP call keeps the provider's error text, from a string or an err
     ["mcp_error", undefined],
     ["mcp_error", undefined],
   ]);
+});
+
+test("an error whose message cannot be read still fails its call, without text", () => {
+  const error = Object.defineProperty({}, "message", {
+    enumerable: true,
+    get() {
+      throw new Error("synthetic message failure");
+    },
+  });
+  const activity = hostedToolActivity("openai", {
+    output: [{ type: "mcp_call", id: "mcp-1", name: "search", server_label: "s", error }],
+  });
+  expect(activity.skipped).toBe(0);
+  expect(activity.calls).toEqual([
+    expect.objectContaining({ name: "search", position: 0, errorType: "mcp_error" }),
+  ]);
+  expect(activity.calls[0]).not.toHaveProperty("errorText");
+});
+
+test("a listing's null fields are left out, so both SDKs digest its catalog alike", () => {
+  // The Python suite reads the same fixture and checks the same names and digest.
+  const [listing] = hostedToolActivity("openai", listingDigest.response).listings;
+  for (const definition of listing!.definitions)
+    expect(Object.values(definition)).not.toContain(null);
+  expect(toolCatalogSummary(JSON.stringify(listing!.definitions))).toEqual(listingDigest.expected);
 });
 
 test("error text is scrubbed of credentials and bounded, identically to the Python SDK", () => {

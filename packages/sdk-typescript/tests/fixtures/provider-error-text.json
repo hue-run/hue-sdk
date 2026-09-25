@@ -10,7 +10,7 @@
     },
     {
       "input": "Authorization: Bearer synthetic-bearer-token was rejected",
-      "expected": "Authorization: Bearer [redacted] was rejected"
+      "expected": "Authorization: [redacted] was rejected"
     },
     {
       "input": "{\"error\":\"invalid_grant\",\"access_token\":\"synthetic-access\",\"note\":\"x\"}",
@@ -123,6 +123,54 @@
     {
       "input": "failed at https://mcp.example.test/sse?token=\"synthetic-unclosed-query next",
       "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "world token hue_world_synthetic0000000000.signature111 and key hue_sk_test_synthetic_key_0123 were refused",
+      "expected": "world token [redacted] and key [redacted] were refused"
+    },
+    {
+      "input": "Slack said xoxb-0000-1111-synthetic; Google said ya29.a0Synthetic_token-123",
+      "expected": "Slack said [redacted]; Google said [redacted]"
+    },
+    {
+      "input": "API key: sk-proj-synthetic0123456789 was rejected",
+      "expected": "API key: [redacted] was rejected"
+    },
+    {
+      "input": "Anthropic said sk-ant-api03-synthetic_key-0123 is invalid; GitHub ghp_synthetic0123456789 expired",
+      "expected": "Anthropic said [redacted] is invalid; GitHub [redacted] expired"
+    },
+    {
+      "input": "Authorization: ApiKey synthetic-apikey-value was rejected",
+      "expected": "Authorization: [redacted] was rejected"
+    },
+    {
+      "input": "Authorization: Bot synthetic-bot-token, retrying",
+      "expected": "Authorization: [redacted], retrying"
+    },
+    {
+      "input": "Proxy-Authorization: Basic c3ludGhldGljOnBhc3M=",
+      "expected": "Proxy-Authorization: [redacted]"
+    },
+    {
+      "input": "upstream body {\\\"api_key\\\":\\\"synthetic escaped key\\\",\\\"user\\\":\\\"bob\\\"}",
+      "expected": "upstream body {\\\"api_key\\\":\\\"[redacted]\\\",\\\"user\\\":\\\"bob\\\"}"
+    },
+    {
+      "input": "Bearer: synthetic-bearer-colon",
+      "expected": "Bearer: [redacted]"
+    },
+    {
+      "input": "Bearer synthetic%2Fbearer%3D%3D rejected",
+      "expected": "Bearer [redacted] rejected"
+    },
+    {
+      "input": "1token=synthetic-digit-led-key",
+      "expected": "1token=[redacted]"
+    },
+    {
+      "input": "risk-assessment and sk-learn ask-me; the Authorization header was missing",
+      "expected": "risk-assessment and sk-learn ask-me; the Authorization header was missing"
     }
   ]
 }

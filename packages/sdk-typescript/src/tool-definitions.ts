@@ -78,10 +78,11 @@ function isCredentialKey(key: string): boolean {
   );
 }
 
-/** A URL in free text: a scheme, `://` and everything up to whitespace, a quote or `<>`. A quoted
- * value right after `=` (`?token="…"`) is part of the URL, so the whole value is replaced. */
+/** A URL in free text: a scheme of at most 64 characters, `://` and everything up to whitespace, a
+ * quote or `<>`. A quoted value right after `=` (`?token="…"`) is part of the URL, so the whole
+ * value is replaced. The bounded scheme keeps a long run such as `a.a.a…` linear. */
 const textUrl =
-  /\b[a-z][a-z0-9+.-]*:\/\/(?:[^\s"'<>`]|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["'])+/gi;
+  /\b[a-z][a-z0-9+.-]{0,63}:\/\/(?:[^\s"'<>`]|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["'])+/gi;
 /** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
 const specialScheme = /^(?:https?|wss?|ftp):/i;
 /** A URL in free text. One with another scheme, which runtimes parse differently, is replaced
@@ -90,18 +91,42 @@ function scrubTextUrl(url: string, state: ScrubState): string {
   if (specialScheme.test(url)) return scrubUrl(url, state);
   return /[@?#]/.test(url) ? REDACTED : url;
 }
-/** An authorization scheme followed by its credential, as in an `Authorization` header. The
- * credential cannot start with `=`, so `token = value` is left to the key-value rule. */
-const authorizationValue = /\b(bearer|basic|token)(\s+)[a-z0-9._~+/-][a-z0-9._~+/=-]*/gi;
-/** The key and separator of a `key=value` or `key: value` pair, the key optionally quoted. The
- * value is not consumed, so a pair inside another pair's value (`error: token=…`) is found. */
-const pairKey = /(["']?)([a-z][a-z0-9_-]{0,63})\1(\s*[:=]\s*)/gi;
-/** A quoted value to its closing quote on the same line, spaces and escaped quotes included. */
-const quotedValue = /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'/y;
+/** A credential its own prefix identifies wherever it appears: Hue's API, MCP, world and attempt
+ * tokens, and OpenAI and Anthropic (`sk-`), Stripe, Slack, Google OAuth, GitHub and GitLab ones. */
+const prefixedToken =
+  /\b(?:hue_(?:sk|mcp|world|attempt)_|sk-|[rs]k_(?:live|test)_|xox[abpors]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=-]{8,}/gi;
+/** An authorization scheme followed by its credential, as in an `Authorization` header, up to
+ * whitespace, a quote, a delimiter or a backslash. The credential cannot start with `=`, so
+ * `token = value` is left to the key-value rule. */
+const authorizationValue =
+  /\b(bearer|basic|token)(\s+)[^\s"'`<>=,;(){}[\]\\][^\s"'`<>,;(){}[\]\\]*/gi;
+/** The key and separator of a `key=value` or `key: value` pair, the key optionally quoted, with a
+ * backslash-escaped quote too (JSON inside a string). A key starts where no key character precedes
+ * it, so each word is tried once and a long run stays linear. The value is not consumed, so a pair
+ * inside another pair's value (`error: token=…`) is found. */
+const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9][a-z0-9_-]*)\1(\s*[:=]\s*)/gi;
+/** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
+ * one between backslash-escaped quotes. */
+const quotedValue =
+  /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"/y;
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
-  /(["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
+  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
+/** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
+ * `ApiKey …`), or a lone credential. One already replaced is left alone. */
+const authorizationBare =
+  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)[^\s"',;})\]]+(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+
+function normalizedKey(key: string): string {
+  return key.toLowerCase().replace(/[-_]/g, "");
+}
+/** A key naming a credential in free text: a tool definition's credential keys, any header ending
+ * in `Authorization` and `Bearer`. */
+function isTextCredentialKey(key: string): boolean {
+  const normalized = normalizedKey(key);
+  return isCredentialKey(key) || normalized.endsWith("authorization") || normalized === "bearer";
+}
 
 /** Replaces the value of each pair whose key names a credential. */
 function scrubPairs(text: string): string {
@@ -109,13 +134,18 @@ function scrubPairs(text: string): string {
   let copied = 0;
   for (const match of text.matchAll(pairKey)) {
     const start = match.index + match[0].length;
-    if (start < copied || !isCredentialKey(match[2]!)) continue;
+    const key = match[2]!;
+    if (start < copied || !isTextCredentialKey(key)) continue;
     quotedValue.lastIndex = start;
-    bareValue.lastIndex = start;
     const quoted = quotedValue.exec(text);
-    const value = quoted ?? bareValue.exec(text);
+    let value = quoted;
+    if (!quoted) {
+      const bare = normalizedKey(key).endsWith("authorization") ? authorizationBare : bareValue;
+      bare.lastIndex = start;
+      value = bare.exec(text);
+    }
     if (!value) continue;
-    const quote = quoted ? quoted[0][0]! : value[1]!;
+    const quote = quoted ? (quoted[0].startsWith("\\") ? '\\"' : quoted[0][0]!) : value[1]!;
     result += `${text.slice(copied, start)}${quote}${REDACTED}${quoted ? quote : ""}`;
     copied = start + value[0].length;
   }
@@ -124,19 +154,21 @@ function scrubPairs(text: string): string {
 
 /**
  * Removes credentials from free text a provider returned, such as an MCP call's error message,
- * with the rules tool definitions use: each `http`, `https`, `ws`, `wss` or `ftp` URL loses its
- * userinfo and fragment and every query value becomes `[redacted]`, as a `url` field does (an
- * unparseable one becomes `[redacted]`), and a URL with any other scheme becomes `[redacted]` when
- * it has an `@`, `?` or `#`;
- * the credential after an authorization scheme (`Bearer`, `Basic`, `Token`) and the value of a
- * `key=value` or `key: value` pair whose key names a credential (a quoted value to its closing
- * quote) become `[redacted]`.
+ * with the rules tool definitions use, extended for text: each `http`, `https`, `ws`, `wss` or
+ * `ftp` URL loses its userinfo and fragment and every query value becomes `[redacted]`, as a
+ * `url` field does (an unparseable one becomes `[redacted]`), and a URL with any other scheme
+ * becomes `[redacted]` when it has an `@`, `?` or `#`; a token with a known credential prefix
+ * (`hue_sk_`, `sk-`, `xoxb-`, `ya29.` and others), the credential after an authorization scheme
+ * (`Bearer`, `Basic`, `Token`), the whole value of an `Authorization` header, and the value of a
+ * `key=value` or `key: value` pair whose key names a credential (quoted, escaped-quoted or bare)
+ * become `[redacted]`.
  */
 export function scrubCredentialText(text: string): string {
   const state: ScrubState = { changed: false };
   return scrubPairs(
     text
       .replace(textUrl, (url) => scrubTextUrl(url, state))
+      .replace(prefixedToken, REDACTED)
       .replace(authorizationValue, `$1$2${REDACTED}`),
   );
 }

@@ -90,7 +90,6 @@ export function safeSpan(source: Span, failed: () => void): Span {
   return new SafeSpan(source, failed);
 }
 
-/** Validate a bounded data tree without invoking toJSON or property getters. */
 /** The bounds `encodeContent` enforces while it copies a value. */
 export interface EncodeLimits {
   bytes: number;
@@ -100,6 +99,7 @@ export interface EncodeLimits {
 /** One content attribute's bounds. */
 const contentLimits: EncodeLimits = { bytes: MAX_CONTENT_BYTES, nodes: 16384, depth: 32 };
 
+/** Validate a bounded data tree without invoking toJSON or property getters. */
 export function encodeContent(value: unknown, limits: EncodeLimits = contentLimits): string {
   let nodes = 0;
   let bytes = 0;

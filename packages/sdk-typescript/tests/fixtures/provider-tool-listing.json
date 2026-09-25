@@ -1,0 +1,54 @@
+{
+  "response": {
+    "output": [
+      {
+        "type": "mcp_list_tools",
+        "server_label": "workspace",
+        "tools": [
+          {
+            "name": "search_threads",
+            "description": null,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              }
+            },
+            "annotations": null
+          },
+          {
+            "name": "create_draft",
+            "description": "Create a draft reply.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "body": {
+                  "type": "string"
+                }
+              }
+            },
+            "annotations": {
+              "readOnlyHint": false
+            }
+          },
+          {
+            "name": "list_labels",
+            "description": "List labels.",
+            "input_schema": null,
+            "annotations": null
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "hue.tool.names": [
+      "search_threads",
+      "create_draft",
+      "list_labels"
+    ],
+    "hue.tool.definitions.sha256": "5b5ed6cea643f8f82f72b4c5739d9e620751c22ebcd0cc184f469f2973dd5b86"
+  }
+}

@@ -8,6 +8,7 @@ on a failed MCP call and ``server.address``, mirroring the TypeScript SDK's
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -144,7 +145,7 @@ def test_failed_mcp_call_exports_scrubbed_error_text_only_under_content_capture(
     assert attrs(failed)["error.type"].string_value == "mcp_error"
     assert failed.status.code == 2
     assert failed.status.message == (
-        "Upstream rejected Authorization: Bearer [redacted] at "
+        "Upstream rejected Authorization: [redacted] at "
         "https://mcp_server.internal:8443/mcp?key=%5Bredacted%5D"
     )
     for secret in (b"synthetic-bearer-secret", b"synthetic-query-secret", b"synthetic-pass"):
@@ -207,6 +208,34 @@ def test_a_large_metadata_only_catalog_keeps_its_summary(receiver):
         listing["hue.tool.definitions.sha256"].string_value
         == expected["hue.tool.definitions.sha256"]
     )
+
+
+def test_128_failed_mcp_calls_with_adversarial_error_text_are_recorded_in_bounded_time(receiver):
+    # A run that made the URL pattern's scheme quadratic, filling the 16,384-character window
+    # error text is scrubbed in, from every call a response can carry.
+    output = [
+        {
+            "type": "mcp_call",
+            "id": f"mcp-{index}",
+            "name": "search",
+            "server_label": "gmail",
+            "arguments": "{}",
+            "error": "a." * 8_192,
+        }
+        for index in range(128)
+    ]
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            started = time.perf_counter()
+            span.record_provider_tool_calls({"output": output})
+            elapsed = time.perf_counter() - started
+        hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    # Quadratic, this took over a minute in CPython; linear, it takes about a second.
+    assert elapsed < 10
+    failed = named(receiver.spans(), "execute_tool search")
+    assert len(failed) == 128
+    assert all(len(span.status.message) <= 1_025 for span in failed)
 
 
 def test_server_address_keeps_an_underscore_in_the_mcp_server_host(receiver):
