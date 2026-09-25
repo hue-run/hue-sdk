@@ -614,7 +614,15 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       const worldDirectory = worldDirectoryOf(item.id);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
         frozen.environmentVersionId ? worldDirectory : join(filesRoot, `case-${uuid(item.id)}`);
-      let checkpoint = await store.read<CaseCheckpoint>(file);
+      let checkpoint: CaseCheckpoint | undefined;
+      try {
+        checkpoint = await store.read<CaseCheckpoint>(file);
+      } catch (error) {
+        // A checkpoint that is unsafe or fails its integrity check is never resumed from, so its
+        // staged outputs are not kept; an I/O failure may pass, so they are.
+        if (!(error as NodeJS.ErrnoException).code) files.keepOutputs = false;
+        throw error;
+      }
       files.keepOutputs = checkpoint?.stage === "uploading";
       if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
         if (checkpoint.stage === "serialization_failed")

@@ -58,9 +58,10 @@ refuses to publish a version without a matching entry below.
 - A generated file declared by `path` is read once as a regular file, its size checked before
   reading, and staged owner-only (0600) from those bytes; a symlink, FIFO or device is the
   target's error. Before, it was read whole, then copied with its own mode.
-- `safeFilename` keeps at most 200 UTF-8 bytes instead of 200 characters, shortening the stem
-  and keeping the extension, so a long multibyte name no longer fails with the operating system's
-  name-length error and `.pdf` stays `.pdf`.
+- `safeFilename` keeps at most 200 UTF-8 bytes instead of 200 characters, so a long multibyte
+  name no longer fails with the operating system's name-length error. A longer name keeps its
+  extension (`.pdf` stays `.pdf`) and its shortened stem ends in `~` and 8 hex digits of the whole
+  name's SHA-256, so two long names stay distinct.
 - A files directory must be owned by the current user and closed to everyone else (mode 0700).
 - `hue eval` stops whatever a command left running in its process group (SIGTERM, then SIGKILL
   after 5 seconds) before reading its answer and files. A forced exit (a second Ctrl+C) also

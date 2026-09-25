@@ -123,20 +123,24 @@ export function assertSafeFileNames(files: readonly Pick<CaseFile, "artifactId" 
         `Pinned file ${quoted(String(file.filename))} is not a safe file name`,
       );
 }
-/** Reduce a declared file name to a single printable path segment, at most 200 UTF-8 bytes. A
- * longer name loses the end of its stem, not its extension, so `.pdf` stays `.pdf`. */
+/**
+ * Reduce a declared file name to a single printable path segment, at most 200 UTF-8 bytes. A
+ * longer name keeps its extension, so `.pdf` stays `.pdf`, and its stem is shortened and marked
+ * with a short hash of the whole name, so two long names never shorten to the same one.
+ */
 export function safeFilename(name: string): string {
   const cleaned = [...name]
     .filter((c) => c.charCodeAt(0) >= 32 && c.charCodeAt(0) !== 127 && c !== "/" && c !== "\\")
     .join("")
     .trim();
-  const extension = extname(cleaned);
-  const kept =
-    Buffer.byteLength(cleaned) <= MAX_NAME_BYTES
-      ? cleaned
-      : extension && Buffer.byteLength(extension) <= 32
-        ? `${truncateBytes(cleaned.slice(0, -extension.length), MAX_NAME_BYTES - Buffer.byteLength(extension))}${extension}`
-        : truncateBytes(cleaned, MAX_NAME_BYTES);
+  let kept = cleaned;
+  if (Buffer.byteLength(cleaned) > MAX_NAME_BYTES) {
+    const found = extname(cleaned);
+    const extension = Buffer.byteLength(found) <= 32 ? found : "";
+    const mark = `~${sha256(Buffer.from(cleaned)).slice(0, 8)}`;
+    const room = MAX_NAME_BYTES - Buffer.byteLength(extension) - mark.length;
+    kept = `${truncateBytes(cleaned.slice(0, cleaned.length - extension.length), room)}${mark}${extension}`;
+  }
   return kept && kept !== "." && kept !== ".." ? kept : "file";
 }
 /** Create `path` if needed and require a directory this user owns that no one else can open. */

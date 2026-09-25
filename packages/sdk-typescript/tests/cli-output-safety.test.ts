@@ -220,7 +220,7 @@ describe("staging files", () => {
     // A name too long for the filesystem is cut to 200 bytes, between characters, and keeps its
     // extension so an agent still recognizes the PDF.
     expect(Buffer.byteLength(names[4]!)).toBeLessThanOrEqual(200);
-    expect(names[4]!.endsWith("é.pdf")).toBe(true);
+    expect(names[4]!).toMatch(/^é+~[0-9a-f]{8}\.pdf$/u);
     expect(await readdir(join(layout.caseDirectory, "files", "source"))).toHaveLength(5);
   });
 
@@ -251,6 +251,20 @@ describe("staging files", () => {
         join(root, "outputs-3"),
       ),
     ).rejects.toThrow("Generated file fifo.txt is not a regular file");
+  });
+
+  test("two long generated names stay two documents", async () => {
+    const { root } = await scene();
+    const staged = await stageOutputFiles(
+      [196, 197, 198].map((length) => ({
+        bytes: Buffer.from(`document ${length}`),
+        filename: `${"x".repeat(length)}.pdf`,
+        contentType: "application/pdf",
+      })),
+      join(root, "outputs"),
+    );
+    expect(new Set(staged.map((file) => file.filename)).size).toBe(3);
+    for (const file of staged) expect(file.filename.endsWith(".pdf")).toBe(true);
   });
 
   test("a files directory another user could open is refused", async () => {

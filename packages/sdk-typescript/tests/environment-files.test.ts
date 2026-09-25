@@ -844,6 +844,38 @@ describe("environment target files (environment-files:v1)", () => {
     expect(kept).toEqual(["Citacion.docx"]);
   }, 30_000);
 
+  test("a checkpoint that fails its integrity check keeps nothing of the case", async () => {
+    const f = platform({ failArtifactCompletions: 1 });
+    const experiment = f.enqueue();
+    const directory = await mkdtemp(join(tmpdir(), "hue-environment-files-corrupt-"));
+    const store = join(directory, `experiment-${experiment.id}`);
+    const caseDirectory = join(store, "files", `world-case-${f.frozenCase.id}`);
+    const target: RunLocalAgentOptions["target"] = async (_inputs, _tools, context) => {
+      const letter = join(context.outputDirectory, "Citacion.docx");
+      await writeFile(letter, "carta de citación");
+      return withFiles({ summary: "letter drafted" }, [
+        { path: letter, filename: "Citacion.docx", contentType: docx, primary: true },
+      ]);
+    };
+    try {
+      await expect(worker(f, directory, { target })).rejects.toMatchObject({ status: 500 });
+      expect(await readdir(caseDirectory)).toEqual(["outputs"]);
+      // The saved `uploading` checkpoint no longer matches its digest: it can never be resumed.
+      const checkpoint = join(store, `case-${f.frozenCase.id}.json`);
+      const saved = JSON.parse(await readFile(checkpoint, "utf8")) as {
+        value: { hasOutput: boolean };
+      };
+      saved.value.hasOutput = !saved.value.hasOutput;
+      await writeFile(checkpoint, JSON.stringify(saved));
+      await expect(worker(f, directory, { target })).rejects.toThrow(
+        "Checkpoint integrity check failed",
+      );
+    } finally {
+      f.stop();
+    }
+    expect(existsSync(caseDirectory)).toBe(false);
+  }, 30_000);
+
   test("a file whose bytes do not match the manifest fails the case before an execution or world exists", async () => {
     const f = platform({ tamper: "source" });
     const experiment = f.enqueue();

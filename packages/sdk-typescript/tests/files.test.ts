@@ -488,15 +488,29 @@ function fixture(options: {
 
 describe("file-based cases", () => {
   test("filename truncation keeps 200 UTF-8 bytes and never splits a code point", () => {
-    const expected = `${"a".repeat(196)}😀`;
-    expect(safeFilename(`${expected}ignored`)).toBe(expected);
-    expect(Buffer.byteLength(expected)).toBe(200);
-    // One more byte and the emoji no longer fits: it is dropped whole, not cut.
-    expect(safeFilename(`${"a".repeat(197)}😀ignored`)).toBe("a".repeat(197));
-    // The stem is shortened, never the extension.
+    // A name that fits, 200 bytes exactly, is unchanged.
+    const fits = `${"a".repeat(196)}😀`;
+    expect(Buffer.byteLength(fits)).toBe(200);
+    expect(safeFilename(fits)).toBe(fits);
+    // A longer one is shortened to leave room for the hash mark; the emoji that no longer fits
+    // is dropped whole, not cut.
+    const shortened = safeFilename(`${"a".repeat(188)}😀😀ignored`);
+    expect(shortened).toMatch(/^a{188}~[0-9a-f]{8}$/u);
+    // A longer name keeps its extension, and its shortened stem is marked by a hash of the
+    // whole name, so two long names stay distinct.
     const long = safeFilename(`${"é".repeat(99)}.pdf`);
-    expect(long).toBe(`${"é".repeat(98)}.pdf`);
-    expect(Buffer.byteLength(long)).toBe(200);
+    expect(long).toMatch(/^é+~[0-9a-f]{8}\.pdf$/u);
+    expect(Buffer.byteLength(long)).toBeLessThanOrEqual(200);
+    expect(safeFilename(`${"é".repeat(99)}.pdf`)).toBe(long);
+    const first = safeFilename(`${"x".repeat(197)}.pdf`);
+    const second = safeFilename(`${"x".repeat(198)}.pdf`);
+    expect(first).not.toBe(second);
+    for (const name of [first, second]) {
+      expect(name.endsWith(".pdf")).toBe(true);
+      expect(Buffer.byteLength(name)).toBeLessThanOrEqual(200);
+    }
+    // A name that fits is unchanged.
+    expect(safeFilename(`${"x".repeat(196)}.pdf`)).toBe(`${"x".repeat(196)}.pdf`);
   });
 
   test("downloads pinned inputs, uploads generated files and grades them locally", async () => {
