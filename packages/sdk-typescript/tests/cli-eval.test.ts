@@ -1343,7 +1343,7 @@ describe("hue eval", () => {
   );
 
   test("the verdict table shows n/a where an evaluator does not apply to the case", () => {
-    const [outcome, rubric] = [randomUUID(), randomUUID()];
+    const [outcome, rubric, judge] = [randomUUID(), randomUUID(), randomUUID()];
     const row = (externalKey: string, metric: string, pin: string, skip: string) => ({
       caseId: randomUUID(),
       externalKey,
@@ -1360,21 +1360,23 @@ describe("hue eval", () => {
       {
         experimentId: randomUUID(),
         runId: randomUUID(),
-        scorerVersionIds: [outcome, rubric],
+        scorerVersionIds: [outcome, rubric, judge],
         results: { complete: true, items: [], results: [] },
         summary: {
           cases: [
             row("trace-built", "outcome", outcome, rubric),
             row("hand-authored", "rubric", rubric, outcome),
+            // A second evaluator reports a metric of the same name.
+            row("judged", "outcome", judge, rubric),
           ],
           totals: {
-            cases: 2,
-            passed: 2,
+            cases: 3,
+            passed: 3,
             failed: 0,
             error: 0,
             skipped: 0,
             pending: 0,
-            notApplicable: 2,
+            notApplicable: 3,
           },
         },
       },
@@ -1383,7 +1385,8 @@ describe("hue eval", () => {
     expect(lines[0]).toBe("Case           outcome  rubric  Result");
     expect(lines[2]).toBe("trace-built    PASS     n/a     PASSED");
     expect(lines[3]).toBe("hand-authored  n/a      PASS    PASSED");
-    expect(lines.at(-1)).toBe("2 of 2 cases passed (2 evaluator results not applicable)");
+    expect(lines[4]).toBe("judged         PASS     n/a     PASSED");
+    expect(lines.at(-1)).toBe("3 of 3 cases passed (3 evaluator results not applicable)");
   });
 
   test("a resume with another --no-output or --content choice names the flags to repeat", () => {

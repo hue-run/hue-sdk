@@ -794,12 +794,15 @@ const STATE_LABEL: Record<CaseVerdict["state"], string> = {
 
 export function renderTable(verdicts: ExperimentVerdicts, output: Output): void {
   const names: string[] = [];
-  // Which evaluator reports each metric, so a case it does not apply to shows n/a there.
-  const reportedBy = new Map<string, string>();
+  // The evaluators that report each metric, so a case one does not apply to shows n/a there.
+  const reportedBy = new Map<string, Set<string>>();
   for (const item of verdicts.summary.cases)
     for (const metric of item.metrics) {
       if (!names.includes(metric.name)) names.push(metric.name);
-      reportedBy.set(metric.name, metric.scorerVersionId);
+      reportedBy.set(
+        metric.name,
+        (reportedBy.get(metric.name) ?? new Set()).add(metric.scorerVersionId),
+      );
     }
   const header = ["Case", ...names, "Result"];
   const rows = verdicts.summary.cases.map((item) => [
@@ -807,7 +810,8 @@ export function renderTable(verdicts: ExperimentVerdicts, output: Output): void 
     ...names.map((name) => {
       const metric = item.metrics.find((candidate) => candidate.name === name);
       if (metric) return metricText(metric);
-      return item.notApplicable?.includes(reportedBy.get(name)!) ? "n/a" : "-";
+      const reporters = reportedBy.get(name)!;
+      return item.notApplicable?.some((version) => reporters.has(version)) ? "n/a" : "-";
     }),
     STATE_LABEL[item.state],
   ]);
