@@ -32,16 +32,16 @@ refuses to publish a version without a matching entry below.
   `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
   any record's tool definitions; before, it carried neither. Descriptions and schemas are still
   exported only with content capture. **Wire**
-- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
-  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
-  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
-  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
-  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`, and
-  `sk-`, Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or `Token`,
-  an `Authorization` header's whole value and the value of a credential-named `key=value` or
-  `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the value
-  quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
+- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as its
+  ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops an
+  `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted ones
+  included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`, `?` or
+  `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
+  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`, and `sk-`,
+  Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or
+  `Token`, an `Authorization` header's whole value and the value of a credential-named `key=value`
+  or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the
+  value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
   another pair's value). The `redact` hook sees the text as `status.message`. Without content
   capture the span keeps `error.type` only. **Wire**
 
