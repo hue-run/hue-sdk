@@ -12,12 +12,22 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- `normalizeScorerDefinitionForPublication` and the `ScorerDefinition` type know every
+  Hue-executed `world_outcome` entry: `hue.conversion_outcome.v2`,
+  `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
+  `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
+  filled in when omitted; the local runner defers all of them to Hue, as it does v1.
 - `VerdictResult.advisory` and `CaseVerdict.advisory`: a result whose evidence says
   `advisory: true`, as Hue records for every judge today, is listed with its metrics but never
   decides its case.
 
 #### Fixed
 
+- A target output over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32
+  levels of nesting) no longer stops the whole run with `OutcomeSerializationError`: that case
+  completes as `error` with the type `OutputTooLarge` and, when result content is persisted, a
+  message naming the bound, and the other cases keep running. Output within the bounds that is not
+  JSON still raises `OutcomeSerializationError`.
 - An advisory judge's `false` verdict no longer fails a case or the run. Hue reports a judge's
   `verdict` without `passed` and marks the result advisory, so a judge never decides a case;
   `summarizeVerdicts`, and so `hue eval`, counted the boolean anyway, so a judge pinned across an
@@ -31,8 +41,8 @@ refuses to publish a version without a matching entry below.
   503 now reads the artifact until it is ready or leaves verification, completing again while it
   verifies, and up to three more times when a 429, 503 or lost response left it unverified, for up
   to three minutes; a mismatched, cancelled or abandoned artifact, or one a 409 left unverified,
-  is still refused. A resumed upload whose artifact is already verifying no longer asks for another upload
-  capability, which Hue refuses then, and settles on the same artifact.
+  is still refused. A resumed upload whose artifact is already verifying no longer asks for
+  another upload capability, which Hue refuses then, and settles on the same artifact.
 - `hue eval` exports its own telemetry, and so each case's required trace, with a 30-second
   deadline instead of 10 seconds, retries included, so a slow acknowledgement or a `Retry-After`
   within it no longer fails the case as `TelemetryNotAccepted`. The retry count is unchanged, and
@@ -736,6 +746,16 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### Unreleased
+
+#### Fixed
+
+- `run_experiment` no longer stops the whole run with `OutcomeSerializationError` when a target's
+  output is over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels
+  of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
+  content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
+  running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
 
 ### [0.6.1] - 2026-09-25
 

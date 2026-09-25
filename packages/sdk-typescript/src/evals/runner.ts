@@ -22,7 +22,7 @@ import {
   uploadOutputFiles,
   type StagedOutputFile,
 } from "./files.js";
-import { json, uuid } from "./json.js";
+import { json, uuid, valueBounds } from "./json.js";
 import { executableHere, persistedScore, scoreLocally, validateScorerBindings } from "./scorers.js";
 import {
   TargetResult,
@@ -67,6 +67,25 @@ export class OutcomeSerializationError extends Error {
       "Target completed, but its output could not be serialized. Resolve completion explicitly; the runner will not invoke the target again.",
     );
     this.name = "OutcomeSerializationError";
+  }
+}
+/** The bound `json` names when a valid output is over what Hue stores for one case. */
+const outputLimits = new Map([
+  ["JSON exceeds byte limit", "bytes"],
+  ["JSON exceeds depth/node limits", "structure"],
+]);
+/** `200000` as `200,000`, without depending on the runtime's locale data. */
+const grouped = (value: number) => String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+/** A target's output beyond what Hue stores for one case. Recorded as that case's error (type
+ * `OutputTooLarge`), never thrown: the other cases keep running. */
+class OutputTooLargeError extends Error {
+  constructor(limit: string) {
+    super(
+      limit === "bytes"
+        ? `The output is larger than ${grouped(valueBounds.bytes)} bytes of JSON, the most Hue stores for one case; return a large result as a generated file`
+        : `The output has more than ${grouped(valueBounds.nodes)} JSON values or nests deeper than ${valueBounds.depth} levels, the most Hue stores for one case`,
+    );
+    this.name = "OutputTooLargeError";
   }
 }
 /** Thrown when cooperative caller cancellation stops target execution. */
@@ -541,7 +560,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     const sanitize = (message: string) =>
       message.slice(0, 4000).toWellFormed().replaceAll("\u0000", "");
     const errorPayload = (error: unknown): TypedError => ({
-      type: "TargetError",
+      type: error instanceof OutputTooLargeError ? "OutputTooLarge" : "TargetError",
       ...(options.persistResultContent && error instanceof Error
         ? { message: sanitize(error.message) }
         : {}),
@@ -722,12 +741,23 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             if (output !== undefined) {
               try {
                 output = json(output);
-              } catch {
-                await store.write(file, {
-                  stage: "serialization_failed",
-                  executionId: execution.id,
-                });
-                throw new OutcomeSerializationError(execution.id);
+              } catch (error) {
+                // An output over the size, count or depth bounds is the target's own failure, as
+                // a file it cannot deliver is: the case completes as an error and the run goes
+                // on. Output that is not JSON at all still stops the run for inspection.
+                const limit =
+                  error instanceof RangeError ? outputLimits.get(error.message) : undefined;
+                if (limit === undefined) {
+                  await store.write(file, {
+                    stage: "serialization_failed",
+                    executionId: execution.id,
+                  });
+                  throw new OutcomeSerializationError(execution.id);
+                }
+                state = "error";
+                output = undefined;
+                targetError = new OutputTooLargeError(limit);
+                options.hue.recordError(span.span, targetError);
               }
             }
             if (output !== undefined) span.setOutput(output);
