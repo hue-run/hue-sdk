@@ -65,8 +65,8 @@ refuses to publish a version without a matching entry below.
 - A files directory must be owned by the current user and closed to everyone else (mode 0700).
 - `hue eval` stops whatever a command left running in its process group (SIGTERM, then SIGKILL
   after 5 seconds) before reading its answer and files. A forced exit (a second Ctrl+C) also
-  removes the world case's files, the MCP configuration holding the world token and the
-  checkpoint locks, so a rerun is not refused on a stale lock.
+  removes the world case's files and the checkpoint locks, so a rerun is not refused on a stale
+  lock.
 
 #### Security
 
