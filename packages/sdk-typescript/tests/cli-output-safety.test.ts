@@ -173,6 +173,15 @@ describe("output collection never follows the agent's links", () => {
     ).rejects.toThrow("output/anexos/sub changed while it was collected");
   });
 
+  test("a case directory replaced by a file fails the case instead of reading as no output", async () => {
+    const { output } = await scene();
+    await rm(join(output, ".."), { recursive: true });
+    await writeFile(join(output, ".."), "now a file");
+    await expect(collectDirectOutputs(output, "stdout answer")).rejects.toThrow(
+      "The output directory changed while it was collected",
+    );
+  });
+
   test("a FIFO named like a helper is refused at once instead of hanging", async () => {
     const { output } = await scene();
     mkfifo(join(output, "summary.txt"));
