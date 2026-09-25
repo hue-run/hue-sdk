@@ -531,9 +531,10 @@ For each case the command is spawned once **inside a private case directory** wi
 <case dir>/output/                write the generated documents here
 ```
 
-Hue verifies each generated document before the case completes. A verification that outlasts a
-request is waited out for up to three minutes, so while Hue is unreachable each upload takes that
-long to fail.
+Hue verifies each generated document before the case completes. Once a document is reserved and
+its bytes are uploaded, a verification that outlasts a request is waited out for up to three
+minutes, so a completion that cannot reach Hue takes that long to fail; a reservation or upload
+that cannot reach Hue still fails at once.
 
 Every regular file the command leaves under `output/` is uploaded as a generated document
 (accepted: `.pdf .docx .pptx .xlsx .json .txt .csv .png .jpg .jpeg .webp`; another extension or an

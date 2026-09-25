@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { FileSetupCheckpointAdapter, setupRunId } from "./checkpoint.js";
 import { SetupBackendAdapter } from "./backend.js";
 import { detectSetupProject } from "./detect.js";
+import { loadCommand, MissingPeerError } from "./peers.js";
 import {
   renderHumanEvent,
   renderJsonlEvent,
@@ -15,12 +16,31 @@ import { runSetup } from "./runner.js";
 import { SETUP_EVENT_CONTRACT_VERSION, type RunFailedEvent, type SetupEvent } from "./types.js";
 
 const commands = new Set(["setup", "resume", "status", "claim"] as const);
+
 // Additional commands live in ../cli and load lazily so the setup parser, its usage text and its
 // JSONL error contract stay untouched for every other input. Add a command with one entry.
 const extensions = new Map<string, () => Promise<number>>([
-  ["eval", async () => (await import("../cli/eval.js")).runEvalCommand(process.argv.slice(3))],
-  ["login", async () => (await import("../cli/login.js")).runLoginCommand(process.argv.slice(3))],
-  ["mcp", async () => (await import("../cli/mcp.js")).runMcpCommand(process.argv.slice(3))],
+  [
+    "eval",
+    async () =>
+      (await loadCommand("eval", () => import("../cli/eval.js"))).runEvalCommand(
+        process.argv.slice(3),
+      ),
+  ],
+  [
+    "login",
+    async () =>
+      (await loadCommand("login", () => import("../cli/login.js"))).runLoginCommand(
+        process.argv.slice(3),
+      ),
+  ],
+  [
+    "mcp",
+    async () =>
+      (await loadCommand("mcp", () => import("../cli/mcp.js"))).runMcpCommand(
+        process.argv.slice(3),
+      ),
+  ],
 ]);
 
 function writeEvent(event: SetupEvent, mode: SetupOutputMode, width: number): void {
@@ -35,7 +55,15 @@ function writeEvent(event: SetupEvent, mode: SetupOutputMode, width: number): vo
 
 async function main(): Promise<number> {
   const extension = extensions.get(process.argv[2] ?? "");
-  if (extension) return extension();
+  if (extension) {
+    try {
+      return await extension();
+    } catch (error) {
+      if (!(error instanceof MissingPeerError)) throw error;
+      process.stderr.write(`${error.message}\n`);
+      return 2;
+    }
+  }
   const agentRequested = process.argv.slice(2).includes("--agent");
   let parsed;
   try {

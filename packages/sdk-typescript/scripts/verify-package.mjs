@@ -227,6 +227,21 @@ run(
   ],
   minimal,
 );
+// Without the optional zod peer, hue eval names it and the install command instead of the
+// runtime's resolution error, and exits with the configuration error code.
+const missingPeer = spawnSync(
+  process.execPath,
+  [join(minimal, "node_modules/@hue-run/sdk/dist/setup/cli.js"), "eval", "--help"],
+  { cwd: minimal, encoding: "utf8" },
+);
+if (
+  missingPeer.status !== 2 ||
+  !missingPeer.stderr.includes("hue eval needs zod, a peer dependency of @hue-run/sdk") ||
+  !missingPeer.stderr.includes(`npm install "zod@${pkg.peerDependencies.zod}"`)
+)
+  throw new Error(
+    `hue eval without zod did not name the missing peer (status ${missingPeer.status}): ${missingPeer.stderr.slice(0, 500)}`,
+  );
 // CommonJS applications on the Node floor (22.12+) load the ESM build through require(esm):
 // every entry point resolves through its "default" condition, and the build must stay free of
 // top-level await, which require() rejects with ERR_REQUIRE_ASYNC_MODULE.
