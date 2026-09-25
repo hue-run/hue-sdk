@@ -133,16 +133,36 @@ async function listPublishedScenarios(client: ScenarioClient): Promise<CaseConve
   }
 }
 
-/** The published Scenario whose eval set case has this ID, the one Hue shows on the case page. */
+/** A listed Scenario, or undefined when it can no longer be read (removed since the listing). */
+async function readListed(client: ScenarioClient, id: string): Promise<CaseConversion | undefined> {
+  try {
+    return await client.getCaseConversion(id);
+  } catch (error) {
+    if (error instanceof HueApiError && error.status === 404) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * The published Scenario whose eval set case has this ID, the one Hue shows on the case page.
+ * Every published Scenario is read, page by page, until one matches: an exact ID is never cut
+ * off by the bound a name search uses.
+ */
 async function scenarioOfPublishedCase(
   client: ScenarioClient,
   caseId: string,
 ): Promise<CaseConversion | undefined> {
-  for (const summary of await listPublishedScenarios(client)) {
-    const scenario = await client.getCaseConversion(summary.id);
-    if (scenario.publication?.caseId.toLowerCase() === caseId) return scenario;
+  let after: string | undefined;
+  for (;;) {
+    const page = await client.listCaseConversions({ after, limit: 100 });
+    for (const summary of page.items) {
+      if (summary.status !== "published") continue;
+      const scenario = await readListed(client, summary.id);
+      if (scenario?.publication?.caseId.toLowerCase() === caseId) return scenario;
+    }
+    if (!page.nextCursor || page.nextCursor === after || !page.items.length) return undefined;
+    after = page.nextCursor;
   }
-  return undefined;
 }
 
 const describe = (candidates: { name: string; id: string }[]) =>
@@ -211,8 +231,8 @@ export async function resolveScenarioPins(
   const datasets = new Map<string, Dataset>();
   const candidates: { name: string; id: string; scenario: CaseConversion; dataset: Dataset }[] = [];
   for (const summary of published) {
-    const scenario = await client.getCaseConversion(summary.id);
-    if (!scenario.publication) continue;
+    const scenario = await readListed(client, summary.id);
+    if (!scenario?.publication) continue;
     let dataset = datasets.get(scenario.publication.datasetId);
     if (!dataset) {
       dataset = await client.getDataset(scenario.publication.datasetId);
