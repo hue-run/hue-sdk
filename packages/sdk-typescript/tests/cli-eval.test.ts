@@ -1384,6 +1384,28 @@ describe("hue eval", () => {
         const stored = JSON.stringify([legacy.calls.completions, gateway.calls.completions]);
         for (const secret of [key, mcpToken, worldToken]) expect(stored).not.toContain(secret);
         expect(await filesContaining(join(cwd, ".hue"), [key, mcpToken, worldToken])).toEqual([]);
+        // A world case's command answering through a result file is redacted the same way.
+        const filed = hueStandIn({ gateway: true });
+        try {
+          const written = await hue(
+            [
+              "--scenario",
+              "Refund flow",
+              "--command",
+              `${process.execPath} -e 'require("fs").writeFileSync(process.env.HUE_CASE_OUTPUT_DIR + "/result.json", JSON.stringify({ token: process.env.HUE_WORLD_TOKEN }))'`,
+              "--origin",
+              filed.baseUrl,
+              "--wait",
+              "0",
+            ],
+            { cwd },
+          );
+          expect(written.status).toBe(0);
+          expect(filed.calls.completions[0]).toMatchObject({ output: { token: "[redacted]" } });
+          expect(JSON.stringify(filed.calls.completions)).not.toContain(worldToken);
+        } finally {
+          filed.stop();
+        }
       } finally {
         legacy.stop();
         gateway.stop();
