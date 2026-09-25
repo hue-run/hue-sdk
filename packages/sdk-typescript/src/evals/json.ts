@@ -13,19 +13,46 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
   const bounds = typeof requested === "number" ? { ...valueBounds, bytes: requested } : requested;
   const ancestors = new Set<object>();
   let nodes = 0;
+  // The UTF-8 length of the JSON text, counted as the value is read, so a value too long to
+  // serialize (past the runtime's longest string) is refused before `JSON.stringify` is asked to.
+  let bytes = 0;
+  const charge = (amount: number) => {
+    bytes += amount;
+    if (bytes > bounds.bytes) throw new RangeError("JSON exceeds byte limit");
+  };
+  // A string's JSON text is at least as long as the string, so one longer than what is left is
+  // refused before it is escaped.
+  const chargeText = (text: string) => {
+    if (text.length + 2 > bounds.bytes - bytes) throw new RangeError("JSON exceeds byte limit");
+    charge(Buffer.byteLength(JSON.stringify(text)));
+  };
   const visit = (item: unknown, depth: number): JsonValue => {
     if (++nodes > bounds.nodes || depth > bounds.depth)
       throw new RangeError("JSON exceeds depth/node limits");
-    if (item === null || typeof item === "boolean") return item;
-    if (typeof item === "number" && Number.isFinite(item)) return item;
-    if (typeof item === "string" && isText(item)) return item;
+    if (item === null || typeof item === "boolean") {
+      charge(item === false ? 5 : 4);
+      return item;
+    }
+    if (typeof item === "number" && Number.isFinite(item)) {
+      charge(JSON.stringify(item).length);
+      return item;
+    }
+    if (typeof item === "string" && isText(item)) {
+      chargeText(item);
+      return item;
+    }
     if (!item || typeof item !== "object" || ancestors.has(item))
       throw new TypeError("Expected finite JSON without cycles or invalid Unicode");
     ancestors.add(item);
     try {
       if (Array.isArray(item)) {
+        // Each element is a value: an array longer than the values left is refused before its
+        // keys are listed.
+        if (item.length > bounds.nodes - nodes)
+          throw new RangeError("JSON exceeds depth/node limits");
         if (Object.keys(item).length !== item.length)
           throw new TypeError("Sparse/extended arrays are not JSON");
+        charge(item.length ? item.length + 1 : 2);
         return item.map((entry) => visit(entry, depth + 1));
       }
       if (Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null)
@@ -33,9 +60,13 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
       if (Object.getOwnPropertySymbols(item).length)
         throw new TypeError("JSON cannot contain symbol properties");
       const result: Record<string, JsonValue> = Object.create(null);
-      for (const key of Object.keys(item).sort()) {
+      const keys = Object.keys(item).sort();
+      charge(keys.length ? keys.length + 1 : 2);
+      for (const key of keys) {
         if (!isText(key))
           throw new TypeError("Expected finite JSON without cycles or invalid Unicode");
+        chargeText(key);
+        charge(1);
         const descriptor = Object.getOwnPropertyDescriptor(item, key)!;
         if (!("value" in descriptor)) throw new TypeError("JSON cannot contain accessors");
         result[key] = visit(descriptor.value, depth + 1);

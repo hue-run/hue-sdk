@@ -35,7 +35,7 @@ from hue_sdk.evals import (
     score_locally,
 )
 from hue_sdk.evals._checkpoint import CheckpointStore
-from hue_sdk.evals._json import json_value
+from hue_sdk.evals._json import JsonLimitError, json_value
 
 
 @pytest.fixture
@@ -840,6 +840,26 @@ def test_json_counts_each_expansion_of_shared_references_and_rejects_real_cycles
     right["next"] = left
     with pytest.raises(ValueError, match="cycles"):
         json_value(left)
+
+
+def test_object_keys_are_not_counted_as_values_as_in_the_typescript_sdk():
+    # Counting keys too refused an object of 10,001 members that TypeScript accepts.
+    json_value({f"k{index}": index for index in range(10_001)})
+    # The object and its members are 20,000 values; one member more is over the limit.
+    json_value({f"k{index}": index for index in range(19_999)}, max_bytes=1_000_000)
+    with pytest.raises(JsonLimitError) as refused:
+        json_value({f"k{index}": index for index in range(20_000)}, max_bytes=1_000_000)
+    assert refused.value.limit == "structure"
+
+
+def test_a_container_with_more_elements_than_values_left_is_refused_before_it_is_read():
+    elements = [0] * 5_000_000
+    started = time.perf_counter()
+    with pytest.raises(JsonLimitError) as refused:
+        json_value(elements)
+    assert refused.value.limit == "structure"
+    # Queueing five million children first took about a second and hundreds of megabytes.
+    assert time.perf_counter() - started < 0.1
 
 
 def test_fresh_exporter_cannot_acknowledge_a_prior_failed_trace(evaluation_receiver, tmp_path):
