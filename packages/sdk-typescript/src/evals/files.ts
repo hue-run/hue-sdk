@@ -402,14 +402,17 @@ async function settleArtifact(
   let retries = 0;
   for (;;) {
     let refusedForNow: boolean;
+    let asked = 0;
     try {
       return (await client.completeArtifact(id)).state;
     } catch (error) {
       if (!mayStillVerify(error) || Date.now() >= deadline) throw error;
       refusedForNow = (error as HueApiError).status !== 409;
+      // A refusal that says how long to wait is waited out, within the settling window.
+      asked = ((error as HueApiError).retryAfterSeconds ?? 0) * 1000;
     }
     await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(0, Math.min(pause, deadline - Date.now()))),
+      setTimeout(resolve, Math.max(0, Math.min(Math.max(pause, asked), deadline - Date.now()))),
     );
     pause = Math.min(pause * 2, timing.maxPollMillis);
     let current: ArtifactReservation | undefined;

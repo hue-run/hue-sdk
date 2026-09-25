@@ -79,9 +79,11 @@ until every item has a terminal result for every pin or the budget elapses (`com
 `summarizeVerdicts` turns results into per-case rows with `passed` and totals; a result Hue marks
 `notApplicable` (the evaluator has no outcome criteria or conversion rubric to grade in that case)
 neither passes nor fails its case and is listed in the row's `notApplicable`, and a case no pinned
-evaluator applies to is an error. A result whose evidence says `advisory: true`, as a Hue judge's
-does, keeps its metrics in the row and is listed in its `advisory`, but never decides the case; a
-case only advisory results scored is an error. `compareVerdicts` diffs two summaries by case key, and
+evaluator applies to is an error. A result of a Hue judge listed in `waitForResults`'
+`judgeScorerVersionIds` (`collectExperimentVerdicts` passes the experiment's `world_judge` pins)
+whose evidence says `advisory: true` keeps its metrics in the row and is listed in its
+`advisory`, but never decides the case; a case only advisory results ran for is an error. Any
+other result, an error, or one with a metric carrying `passed` is never advisory. `compareVerdicts` diffs two summaries by case key, and
 `collectExperimentVerdicts` combines those reads for one experiment. The `hue eval` command uses the same path; see
 [Evaluate an agent against a case](CLI.md#evaluate-an-agent-against-a-case).
 

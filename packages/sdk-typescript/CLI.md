@@ -393,10 +393,12 @@ Failing cases print the scorer explanation. An evaluator Hue records as not appl
 (its outcome scoring has no outcome criteria or conversion rubric to grade there) shows `n/a` in
 that case's columns and neither passes nor fails it, so in a mixed eval set a case is decided by
 the evaluators that apply to it; the pass line counts the not-applicable results. A case that no
-pinned evaluator applies to is an error that names what they need. A result Hue marks advisory
-(its evidence says `advisory: true`, as every judge's does today) is shown in its column, which is
-marked `(advisory)`, but never decides a case or the exit code; the pass line counts advisory
-failures as not counted, and a case only advisory results scored is an error. A metric name that
+pinned evaluator applies to is an error that names what they need. A result of a pinned Hue judge
+(an evaluator of kind `world_judge`) that Hue marks advisory, as it does every judge's today, is
+shown in its column, marked `(advisory)`, but never decides a case or the exit code; the pass line
+counts advisory failures as not counted, and a case only advisory results ran for is an error. Any
+other evaluator's result, an error, or a metric that carries `passed` is never advisory, whatever
+its evidence says. A metric name that
 several evaluators report, such as two judges' `verdict`, gets a column per evaluator, labelled
 with the version's first eight characters. `--baseline <experiment id|url>` adds improvement,
 regression and unchanged counts with per-case deltas. `--json` prints one JSON document
@@ -482,7 +484,8 @@ Trace evidence is required for every case: when Hue does not accept a case's tra
 case is completed as failed (error `TelemetryNotAccepted`, evidence omitted as
 `telemetry_not_accepted`, no output or generated files attached) instead of being left started,
 and the run goes on. Each export of the CLI's own telemetry may take 30 seconds, retries
-included, so a slow acknowledgement or a `Retry-After` within that is waited out; a refusal fails
+included: a slow acknowledgement is waited for, and a 429, 502, 503, 504 or network error is
+retried within that time, honouring `Retry-After`; any other response, or rejected records, fails
 the case at once. Stderr names the case as it completes, with the export
 issue counts, for example
 `[refund] telemetry not accepted, case failed: telemetry_not_accepted: traces failed 1 (HTTP 400)`;
@@ -527,6 +530,10 @@ For each case the command is spawned once **inside a private case directory** wi
 <case dir>/files/<role>/<name>    verified copies of the agent-visible pinned files
 <case dir>/output/                write the generated documents here
 ```
+
+Hue verifies each generated document before the case completes. A verification that outlasts a
+request is waited out for up to three minutes, so while Hue is unreachable each upload takes that
+long to fail.
 
 Every regular file the command leaves under `output/` is uploaded as a generated document
 (accepted: `.pdf .docx .pptx .xlsx .json .txt .csv .png .jpg .jpeg .webp`; another extension or an

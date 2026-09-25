@@ -489,14 +489,36 @@ describe("evaluators that do not apply", () => {
 });
 
 describe("advisory evaluators", () => {
-  test("only Hue's advisory evidence marks a result advisory", async () => {
-    const { runId, pins, items, client, record } = run({ itemCount: 3 });
-    record(items[0]!.id, pins[0]!, { evidence: { entry: "hue.world_judge.v1", advisory: true } });
-    record(items[1]!.id, pins[0]!, { evidence: { advisory: "true" } });
-    record(items[2]!.id, pins[0]!, { evidence: null });
-    const results = await waitForResults(client, { runId, scorerVersionIds: pins });
-    const byItem = new Map(results.results.map((result) => [result.itemId, result.advisory]));
-    expect(items.map((item) => byItem.get(item.id))).toEqual([true, false, false]);
+  test("only a pinned Hue judge's advisory evidence marks a result advisory", async () => {
+    const { runId, pins, items, client, record } = run({ itemCount: 5 });
+    const verdict = { name: "verdict", value: false };
+    const advisory = { entry: "hue.world_judge.v1", advisory: true };
+    record(items[0]!.id, pins[0]!, { metrics: [verdict], evidence: advisory });
+    record(items[1]!.id, pins[0]!, { metrics: [verdict], evidence: { advisory: "true" } });
+    record(items[2]!.id, pins[0]!, { metrics: [verdict], evidence: null });
+    // An error, or a metric that says whether it passed, is never advisory.
+    record(items[3]!.id, pins[0]!, {
+      state: "error",
+      metrics: [],
+      error: { type: "ScorerError" },
+      evidence: advisory,
+    });
+    record(items[4]!.id, pins[0]!, {
+      metrics: [{ ...verdict, passed: false }],
+      evidence: advisory,
+    });
+    const advisoryByItem = async (judgeScorerVersionIds?: string[]) => {
+      const results = await waitForResults(client, {
+        runId,
+        scorerVersionIds: pins,
+        ...(judgeScorerVersionIds ? { judgeScorerVersionIds } : {}),
+      });
+      const byItem = new Map(results.results.map((result) => [result.itemId, result.advisory]));
+      return items.map((item) => byItem.get(item.id));
+    };
+    expect(await advisoryByItem(pins)).toEqual([true, false, false, false, false]);
+    // The same evidence from a pin that is not a Hue judge is just evidence.
+    expect(await advisoryByItem()).toEqual([false, false, false, false, false]);
   });
 
   test("an advisory result is listed but never decides a case", () => {
@@ -544,9 +566,10 @@ describe("advisory evaluators", () => {
         scorerVersionIds: [outcome, judge],
       },
     );
+    // An errored result is never advisory: it keeps its details and the case is an error.
     expect(summary.cases.map((row) => [row.externalKey, row.state, row.advisory])).toEqual([
       ["passing", "passed", [judge]],
-      ["judge-erred", "passed", [judge]],
+      ["judge-erred", "error", []],
       ["failing", "failed", [judge]],
       ["only-judged", "pending", [judge]],
     ]);
@@ -557,17 +580,29 @@ describe("advisory evaluators", () => {
       scorerVersionId: judge,
     });
     expect(summary.cases[0]!.explanations).toEqual([]);
-    expect(summary.cases[1]!.errors).toEqual([]);
+    expect(summary.cases[1]!.errors).toEqual(["JudgeUnavailable"]);
     expect(summary.cases[2]!.explanations).toEqual(["outcome said no"]);
-    // With every pinned result in and only advisory ones among them, nothing decides the case.
+    // With every pinned result in and only advisory ones among them, nothing decides the case;
+    // an advisory evaluator that skipped says why.
+    const skipped = {
+      ...result(onlyJudged, outcome, "scored", true, true),
+      state: "skipped" as const,
+      metrics: [],
+      explanation: "The judge could not run: Gateway unavailable.",
+    };
     const judgedOnly = summarizeVerdicts(
-      { complete: true, items: [], results: [result(onlyJudged, judge, "scored", true, true)] },
-      { experimentItems: [onlyJudged], scorerVersionIds: [judge] },
+      {
+        complete: true,
+        items: [],
+        results: [result(onlyJudged, judge, "scored", true, true), skipped],
+      },
+      { experimentItems: [onlyJudged], scorerVersionIds: [judge, outcome] },
     );
     expect(judgedOnly.cases[0]).toMatchObject({
       state: "error",
       explanations: [
-        "Only advisory evaluators scored this case, and they never decide it; pin one that grades it",
+        "Only advisory evaluators ran for this case, and they never decide it; pin one that grades it",
+        "An advisory evaluator skipped the case: The judge could not run: Gateway unavailable.",
       ],
     });
   });

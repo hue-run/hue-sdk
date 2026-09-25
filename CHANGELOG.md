@@ -17,9 +17,13 @@ refuses to publish a version without a matching entry below.
   `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
   `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
   filled in when omitted; the local runner defers all of them to Hue, as it does v1.
-- `VerdictResult.advisory` and `CaseVerdict.advisory`: a result whose evidence says
-  `advisory: true`, as Hue records for every judge today, is listed with its metrics but never
-  decides its case.
+- `VerdictResult.advisory`, `CaseVerdict.advisory` and
+  `WaitForResultsOptions.judgeScorerVersionIds`: a result of a pinned Hue judge (`world_judge`)
+  whose evidence says `advisory: true`, as Hue records for every judge today, is listed with its
+  metrics but never decides its case.
+  `collectExperimentVerdicts` passes the experiment's judge pins. Any other evaluator can write the
+  same evidence, so no other result, no error and no metric carrying `passed` is advisory.
+- `HueApiError.retryAfterSeconds`: the `Retry-After` of a 429 or 503, when Hue sent one.
 
 #### Fixed
 
@@ -32,7 +36,8 @@ refuses to publish a version without a matching entry below.
   `verdict` without `passed` and marks the result advisory, so a judge never decides a case;
   `summarizeVerdicts`, and so `hue eval`, counted the boolean anyway, so a judge pinned across an
   eval set failed every case it had nothing to grade and `hue eval` exited 1. Advisory results are
-  now shown and never counted; a case only advisory results scored is an error. The `hue eval`
+  now shown and never counted; a case only advisory results ran for is an error, and says why an
+  advisory evaluator skipped it. The `hue eval`
   table gives each evaluator its own column when several report a metric of the same name (two
   judges' `verdict`), marks advisory columns, and counts advisory failures as not counted.
 - An artifact whose verification outlasts a request no longer fails the upload. Hue verifies
@@ -40,13 +45,15 @@ refuses to publish a version without a matching entry below.
   timeout. A completion that times out, finds verification running (409) or is refused with 429 or
   503 now reads the artifact until it is ready or leaves verification, completing again while it
   verifies, and up to three more times when a 429, 503 or lost response left it unverified, for up
-  to three minutes; a mismatched, cancelled or abandoned artifact, or one a 409 left unverified,
-  is still refused. A resumed upload whose artifact is already verifying no longer asks for
-  another upload capability, which Hue refuses then, and settles on the same artifact.
+  to three minutes, honouring a `Retry-After`; a mismatched, cancelled or abandoned artifact, or
+  one a 409 left unverified, is still refused. While Hue is unreachable, each upload now takes
+  those three minutes to fail. A resumed upload whose artifact is already verifying no longer asks
+  for another upload capability, which Hue refuses then, and settles on the same artifact.
 - `hue eval` exports its own telemetry, and so each case's required trace, with a 30-second
   deadline instead of 10 seconds, retries included, so a slow acknowledgement or a `Retry-After`
-  within it no longer fails the case as `TelemetryNotAccepted`. The retry count is unchanged, and
-  a refusal (4xx or rejected records) still fails the case at once.
+  within it no longer fails the case as `TelemetryNotAccepted`. Retries are unchanged (up to five,
+  on 429, 502, 503, 504 and network errors), and any other response, or rejected records, still
+  fails the case at once.
 - A large inline file whose `data:` URL has a pathological number of `;` parameters is hashed as
   the bytes its own encoding gives. The header was read with a pattern repeated per parameter,
   which throws on Node (from about 3.4 million), leaving the message unhashed, or stops matching

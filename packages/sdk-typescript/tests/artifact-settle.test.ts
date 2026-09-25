@@ -13,7 +13,10 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
  * completion marks the artifact verifying at once and ready `verifyMillis` later, whether or not
  * the client is still waiting, and Hue's rules for a verification in progress apply.
  */
-function slowArtifacts(verifyMillis: number, options: { refuseCompletions?: number } = {}) {
+function slowArtifacts(
+  verifyMillis: number,
+  options: { refuseCompletions?: number; retryAfterSeconds?: number } = {},
+) {
   let refusals = options.refuseCompletions ?? 0;
   const calls = { reserves: 0, uploads: 0, completes: 0, reads: 0 };
   const reservations = new Map<string, string>();
@@ -81,7 +84,13 @@ function slowArtifacts(verifyMillis: number, options: { refuseCompletions?: numb
         calls.completes++;
         if (stored.state === "ready") return Response.json(view(stored));
         // Busy before verification starts: the artifact stays reserved.
-        if (refusals > 0 && refusals--) return new Response(null, { status: 503 });
+        if (refusals > 0 && refusals--)
+          return options.retryAfterSeconds === undefined
+            ? new Response(null, { status: 503 })
+            : new Response(null, {
+                status: 429,
+                headers: { "Retry-After": String(options.retryAfterSeconds) },
+              });
         if (stored.state === "verifying") return new Response(null, { status: 409 });
         if (!stored.capability || !stored.bytes) return new Response(null, { status: 409 });
         stored.state = "verifying";
@@ -196,6 +205,28 @@ test("a completion refused for now before verification starts is asked again", a
     hue.stop();
   }
 });
+
+test("a refusal's Retry-After is waited out before completing again", async () => {
+  // Six seconds is longer than the client itself waits, so settling has to honour it.
+  const hue = slowArtifacts(100, { refuseCompletions: 1, retryAfterSeconds: 6 });
+  try {
+    const client = new EvaluationClient({
+      apiKey: "hue_sk_test",
+      baseUrl: hue.baseUrl,
+      timeoutMillis: 2000,
+    });
+    const file = await stagedFile();
+    const started = Date.now();
+    await uploadOutputFiles(client, randomUUID(), [file], async () => {}, {
+      ...fast,
+      settleMillis: 20_000,
+    });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(6000);
+    expect(hue.calls.completes).toBe(2);
+  } finally {
+    hue.stop();
+  }
+}, 20_000);
 
 test("a verification that never ends fails within its bound", async () => {
   const hue = slowArtifacts(60_000);

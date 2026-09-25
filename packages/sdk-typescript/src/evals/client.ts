@@ -78,6 +78,8 @@ export class HueApiError extends Error {
   constructor(
     /** HTTP status when Hue answered; absent for network, timeout and parsing failures. */
     readonly status?: number,
+    /** Seconds Hue asked the caller to wait (`Retry-After` on a 429 or 503), when it said. */
+    readonly retryAfterSeconds?: number,
   ) {
     super(
       status ? `Hue API request failed (HTTP ${status})` : "Hue API connection or response failed",
@@ -184,6 +186,12 @@ const MAX_REFUSAL_RETRY_AFTER_SECONDS = 5;
  * when it refused the request before acting on it, such as a busy key check, so sending any method
  * again is safe. A date, a longer wait or any other failure, a timeout included, is not retried.
  */
+/** The whole seconds a 429 or 503 asks the caller to wait, up to a day, when it says. */
+function askedRetryAfter(response: Response): number | undefined {
+  if (response.status !== 429 && response.status !== 503) return undefined;
+  const header = response.headers.get("retry-after")?.trim() ?? "";
+  return /^\d{1,5}$/.test(header) ? Math.min(Number(header), 86_400) : undefined;
+}
 function refusalRetryAfter(response: Response): number | undefined {
   if (response.status !== 429 && response.status !== 503) return undefined;
   const header = response.headers.get("retry-after")?.trim() ?? "";
@@ -262,7 +270,7 @@ export class EvaluationClient {
     }));
     if (!response.ok) {
       await response.body?.cancel();
-      throw new HueApiError(response.status);
+      throw new HueApiError(response.status, askedRetryAfter(response));
     }
     try {
       const reader = response.body?.getReader();
@@ -302,7 +310,7 @@ export class EvaluationClient {
     );
     if (!response.ok) {
       await response.body?.cancel();
-      throw new HueApiError(response.status);
+      throw new HueApiError(response.status, askedRetryAfter(response));
     }
     try {
       const reader = response.body?.getReader();
@@ -349,7 +357,7 @@ export class EvaluationClient {
       throw new HueApiError();
     }
     await response.body?.cancel().catch(() => undefined);
-    if (!response.ok) throw new HueApiError(response.status);
+    if (!response.ok) throw new HueApiError(response.status, askedRetryAfter(response));
   }
   private page(options: PageOptions = {}): string {
     const query = new URLSearchParams();
