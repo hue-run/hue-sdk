@@ -52,13 +52,18 @@ def _utf16_units(character: str) -> tuple[int, ...]:
 
 
 def _compare_utf16(left: str, right: str) -> int:
-    for a, b in zip(left, right, strict=False):
+    # Skip a shared prefix a chunk at a time at C speed, then compare within the first chunk
+    # that differs, so a long key is walked quickly and never copied whole.
+    index, end = 0, min(len(left), len(right))
+    while index < end and left[index : index + 65536] == right[index : index + 65536]:
+        index += 65536
+    for a, b in zip(left[index : index + 65536], right[index : index + 65536], strict=False):
         if a != b:
             return -1 if _utf16_units(a) < _utf16_units(b) else 1
     return len(left) - len(right)
 
 
-def _utf16_order(keys: list[str], room: int) -> list[str]:
+def _utf16_order(keys: list[str]) -> list[str]:
     """Keys in UTF-16 code unit order, as JavaScript sorts them, without encoding them."""
     # Code point order differs only between a character above U+FFFF and one from U+E000.
     if not (
@@ -66,10 +71,6 @@ def _utf16_order(keys: list[str], room: int) -> list[str]:
         and any(_ABOVE_SURROGATES.search(key) for key in keys)
     ):
         return sorted(keys)
-    # A key whose JSON text alone is longer than the bytes left is refused before any
-    # comparison can walk it.
-    if any(len(key) + 2 > room for key in keys):
-        raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
     return sorted(keys, key=functools.cmp_to_key(_compare_utf16))
 
 
@@ -134,7 +135,7 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             if any(type(key) is not str for key in item):
                 raise ValueError("JSON object keys must be strings.")
             charge(len(item) + 1 if item else 2)
-            for key in _utf16_order(list(item), max_bytes - size):
+            for key in _utf16_order(list(item)):
                 _text(key)
                 charge_text(key)
                 charge(1)

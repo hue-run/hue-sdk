@@ -71,6 +71,8 @@ test("both SDKs refuse an output for the same reason", () => {
     [{ "\ud800": 1 }, "not JSON"],
     // JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
     [{ "\uffff": Number.NaN, "😀": big }, "bytes"],
+    // An invalid member read before an oversized key decides, however the keys are sorted.
+    [{ a: Number.NaN, "😀": 1, ["\uffff" + big]: 1 }, "not JSON"],
   ];
   for (const [value, reason] of cases) {
     let outcome = "accepted";

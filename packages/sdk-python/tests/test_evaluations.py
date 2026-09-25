@@ -876,6 +876,8 @@ def test_both_sdks_refuse_an_output_for_the_same_reason():
         ({"\ud800": 1}, "not JSON"),
         # JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
         ({"\uffff": float("nan"), "😀": big}, "bytes"),
+        # An invalid member read before an oversized key decides, however the keys are sorted.
+        ({"a": float("nan"), "😀": 1, "\uffff" + big: 1}, "not JSON"),
     ]
     for value, reason in cases:
         try:
@@ -925,8 +927,9 @@ def test_a_huge_key_is_refused_without_copying_it_to_sort_the_keys():
 
 
 def test_keys_sort_by_utf16_code_unit_as_javascript_sorts_them():
-    keys = ["\uffff", "😀", "a", "\ue000b", "𝄞", "z", "\ud7ff"]
-    assert _utf16_order(keys, 1_000) == sorted(
+    shared = "p" * 5_000
+    keys = ["\uffff", "😀", "a", "\ue000b", "𝄞", "z", "\ud7ff", shared + "\uffff", shared + "😀"]
+    assert _utf16_order(keys) == sorted(
         keys, key=lambda key: key.encode("utf-16-be", "surrogatepass")
     )
 
