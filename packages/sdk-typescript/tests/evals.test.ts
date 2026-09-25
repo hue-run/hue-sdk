@@ -1820,6 +1820,104 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("an output over the case bounds fails that case only, with a clear error", async () => {
+    for (const persistResultContent of [true, false]) {
+      const f = fixture();
+      const exp = f.create();
+      const hue = createHue({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        serviceName: "oversized-output",
+        captureContent: false,
+      });
+      const calls: string[] = [];
+      try {
+        const report = await runExperiment({
+          client: f.client,
+          hue,
+          experimentId: exp.id,
+          checkpointDirectory: await directory(),
+          persistResultContent,
+          traceEvidence: { mode: "required" },
+          target: (_inputs, context) => {
+            calls.push(context.item.externalKey);
+            // 250 KB of JSON for the first case; the second answers normally.
+            return context.item.externalKey === "text" ? "x".repeat(250_000) : { ok: true };
+          },
+        });
+        // The run finished: both cases were run and completed, the oversized one as an error.
+        expect(calls.sort()).toEqual(["null", "text"]);
+        expect(report.subjectIds).toHaveLength(2);
+        const completions = f.requests.filter((request) => request.path.endsWith("/complete"));
+        const byCase = (externalKey: string) => {
+          const caseId = f.cases.find((item) => item.externalKey === externalKey)!.id;
+          const execution = [...f.executions.values()].find(
+            (item) => item.caseId === caseId && item.experimentId === exp.id,
+          )!;
+          return completions.find((request) => request.path.includes(execution.id))!.body;
+        };
+        const oversized = byCase("text");
+        expect(oversized.state).toBe("error");
+        expect(oversized).not.toHaveProperty("output");
+        expect(oversized.error).toEqual({
+          type: "OutputTooLarge",
+          ...(persistResultContent
+            ? {
+                message:
+                  "The output is larger than 200,000 bytes of JSON, the most Hue stores for one case; return a large result as a generated file",
+              }
+            : {}),
+        });
+        expect(byCase("null").state).toBe("succeeded");
+        expect(
+          f.requests.some((request) => request.path.endsWith(`/experiments/${exp.id}/finish`)),
+        ).toBe(true);
+      } finally {
+        await hue.shutdown();
+        f.server.stop(true);
+      }
+    }
+  });
+
+  test("too many or too deeply nested output values fail that case with the structure limit", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "deep-output",
+      captureContent: false,
+    });
+    try {
+      let deep: JsonValue = "leaf";
+      for (let level = 0; level < 40; level++) deep = [deep];
+      await runExperiment({
+        client: f.client,
+        hue,
+        experimentId: exp.id,
+        checkpointDirectory: await directory(),
+        persistResultContent: true,
+        traceEvidence: { mode: "required" },
+        target: (_inputs, context) =>
+          context.item.externalKey === "text" ? deep : Array.from({ length: 5 }, (_, i) => i),
+      });
+      const errors = f.requests
+        .filter((request) => request.path.endsWith("/complete"))
+        .map((request) => request.body.error)
+        .filter(Boolean);
+      expect(errors).toEqual([
+        {
+          type: "OutputTooLarge",
+          message:
+            "The output has more than 20,000 JSON values or nests deeper than 32 levels, the most Hue stores for one case",
+        },
+      ]);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+
   test("uncertain starts and serialization failures never invoke a target on resume", async () => {
     const f = fixture();
     const exp = f.create();

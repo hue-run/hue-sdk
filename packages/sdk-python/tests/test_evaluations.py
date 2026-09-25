@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
 import os
@@ -681,6 +682,48 @@ def test_start_ambiguity_and_serialization_failure_never_reinvoke(evaluation_rec
         with pytest.raises(UncertainExecutionError) as uncertain:
             run_experiment(**arguments)
         assert uncertain.value.execution_id == receiver.execution["id"] and calls == []
+    finally:
+        arguments["hue"].shutdown()
+
+
+@pytest.mark.parametrize("persist", [True, False])
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        (
+            "x" * 250_000,
+            "The output is larger than 200,000 bytes of JSON, the most Hue stores for one case; "
+            "return a large result as a generated file",
+        ),
+        (
+            functools.reduce(lambda inner, _: [inner], range(40), "leaf"),
+            "The output has more than 20,000 JSON values or nests deeper than 32 levels, the most "
+            "Hue stores for one case",
+        ),
+    ],
+)
+def test_output_over_the_case_bounds_fails_that_case_and_the_run_finishes(
+    evaluation_receiver, tmp_path, persist, output, message
+):
+    calls = []
+
+    def target(*_args):
+        calls.append(1)
+        return output
+
+    arguments = options(evaluation_receiver, tmp_path, target, persist=persist)
+    try:
+        report = run_experiment(**arguments)
+        body = evaluation_receiver.complete_body
+        assert body["state"] == "error" and "output" not in body
+        assert body["error"] == (
+            {"type": "OutputTooLarge", "message": message}
+            if persist
+            else {"type": "OutputTooLarge"}
+        )
+        assert any(path.endswith("/finish") for _, path, *_ in evaluation_receiver.requests)
+        # The saved outcome resumes without invoking the target again.
+        assert run_experiment(**arguments) == report and calls == [1]
     finally:
         arguments["hue"].shutdown()
 

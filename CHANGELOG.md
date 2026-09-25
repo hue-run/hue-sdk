@@ -77,6 +77,11 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   was reported as skipped. Only Hue's flag on a skipped result marks it not applicable: a scored
   or errored result keeps its verdict whatever flag it carries, and a skip without the flag, such
   as one for an incomplete environment, is still a skip.
+- `normalizeScorerDefinitionForPublication` and the `ScorerDefinition` type know every
+  Hue-executed `world_outcome` entry: `hue.conversion_outcome.v2`,
+  `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
+  `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
+  filled in when omitted; the local runner defers all of them to Hue, as it does v1.
 
 #### Changed
 
@@ -125,6 +130,11 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   even under a text media type, as Hue reads it, so such a text (`AAAA…`, for example) is hashed
   as the bytes it decodes to and stays inline while those fit in 64 KiB. A text file's own text
   is still hashed as UTF-8. The Python SDK follows the same rule, checked against a shared fixture.
+- A target output over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32
+  levels of nesting) no longer stops the whole run with `OutcomeSerializationError`: that case
+  completes as `error` with the type `OutputTooLarge` and, when result content is persisted, a
+  message naming the bound, and the other cases keep running. Output that is not JSON at all still
+  raises `OutcomeSerializationError`.
 - `hue eval` completes a case whose telemetry Hue did not accept as failed with
   `telemetry_not_accepted`, prints the export issue counts for it as it completes (and adds them to
   the case's `--json` entry), counts it as an error whatever its scores, exits 1 and goes on with
@@ -720,6 +730,11 @@ No registry release is claimed until publication and registry acceptance complet
   text (`AAAA…`, for example) is hashed as the bytes it decodes to and stays inline while those
   fit in 64 KiB. A text file's own text is still hashed as UTF-8. This matches the TypeScript
   SDK, checked against a shared fixture.
+- `run_experiment` no longer stops the whole run with `OutcomeSerializationError` when a target's
+  output is over what Hue stores for one case (200,000 bytes of JSON, 20,000 values or 32 levels
+  of nesting): that case completes as `error` with the type `OutputTooLarge` and, when result
+  content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
+  running. Output that is not JSON at all still raises `OutcomeSerializationError`.
 - Provider-tool argument size checks stop in bounded UTF-8 chunks, and oversized MCP arguments are
   counted as skipped instrumentation rather than silently omitted.
 - Provider-tool tail classification isolates broken item types, and strict hostname validation

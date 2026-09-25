@@ -29,10 +29,55 @@ const worldMetrics = [
   "process_constraints",
   "task_success",
 ].map((name) => ({ name, type: "boolean" }));
+const conversionV2Metrics = [
+  "completed_run",
+  "saved_draft",
+  "correct_destination",
+  "recipient",
+  "thread",
+  "subject",
+  "content",
+  "unrelated_preserved",
+  "process_constraints",
+  "task_success",
+].map((name) => ({ name, type: "boolean" }));
+const assertionV3Metrics = [
+  { name: "task_success", type: "boolean" },
+  ...[
+    "assertions_passed",
+    "assertions_failed",
+    "advisory_failed",
+    "agent_mistakes",
+    "judges_passed",
+    "judges_failed",
+    "judges_advisory",
+  ].map((name) => ({ name, type: "number", min: 0 })),
+];
+const judge = {
+  model: "anthropic/claude-fable-5.1",
+  provider: "anthropic",
+  template: "a".repeat(64),
+  samples: 3,
+  temperature: 0,
+  maxOutputTokens: 1024,
+  timeoutMs: 60_000,
+};
 const deferred = [
   version({ kind: "manual", metrics: [metric] }),
   version({ kind: "llm_judge", config: {}, metrics: [metric] }),
   version({ kind: "world_outcome", entry: "hue.conversion_outcome.v1", metrics: worldMetrics }),
+  // The newer Hue-executed entries are deferred the same way.
+  version({
+    kind: "world_outcome",
+    entry: "hue.conversion_outcome.v2",
+    metrics: conversionV2Metrics,
+  }),
+  version({
+    kind: "world_outcome",
+    entry: "hue.outcome_assertions.v3",
+    metrics: assertionV3Metrics,
+    config: { judge },
+  }),
   // A newer server's kind must not fall through to the familiar includes entry.
   version({
     kind: "future_hosted_kind",

@@ -13,9 +13,21 @@ class _Missing:
 
 
 MISSING = _Missing()
+VALUE_BYTES = 200_000
+VALUE_NODES = 20_000
+VALUE_DEPTH = 32
 
 
-def json_value(value: Any, max_bytes: int = 200_000) -> Any:
+class JsonLimitError(ValueError):
+    """JSON that is valid but beyond the size (``bytes``) or the count and depth
+    (``structure``) bounds."""
+
+    def __init__(self, limit: str, message: str) -> None:
+        super().__init__(message)
+        self.limit = limit
+
+
+def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
     """Validate before serialization; never coerce keys, NaN, dates or large Python integers."""
     pending = [(value, 0, False)]
     ancestors: set[int] = set()
@@ -26,8 +38,8 @@ def json_value(value: Any, max_bytes: int = 200_000) -> Any:
             ancestors.remove(id(item))
             continue
         nodes += 1
-        if nodes > 20_000 or depth > 32:
-            raise ValueError("JSON exceeds depth or node limits.")
+        if nodes > VALUE_NODES or depth > VALUE_DEPTH:
+            raise JsonLimitError("structure", "JSON exceeds depth or node limits.")
         if item is None or type(item) is bool:
             continue
         if type(item) is int and abs(item) <= 2**53 - 1:
@@ -50,7 +62,7 @@ def json_value(value: Any, max_bytes: int = 200_000) -> Any:
         else:
             pending.extend((child, depth + 1, False) for child in item)
     if len(encode(value)) > max_bytes:
-        raise ValueError("JSON exceeds the byte limit.")
+        raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
     return value
 
 
