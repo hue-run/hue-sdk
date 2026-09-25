@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:e68d07b5e443afb465b9ef79541afa912fd0c8e2ef27f009819f7ed7fda512f6",
+    "sha256": "sha256:ce7d6dcf5344f29bb51e9ae3606df54afa2240edecade71cf5b0d143baa6609d",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -505,7 +505,7 @@
       "version": "0.4.4"
     },
     "name": "hue",
-    "sha256": "sha256:726cad0ef6e1ce15f89ad6ebb074213f64d06bfac6905e4c283c567a17208ad0",
+    "sha256": "sha256:e4004597a53d53d379f13983805dde5f13f3114bb7ed5a063fd9769b55bce4e8",
     "source": "skills/hue/SKILL.md"
   }
 }
