@@ -26,12 +26,13 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
 
 These three entries were added after 0.11.0 was published; 0.11.0 already behaves as they describe.
 
-- An advisory result, which Hue records for every pinned judge (`world_judge`) today, no longer
-  decides a case, so `collectExperimentVerdicts` and `hue eval` (and `summarizeVerdicts`, for
-  results marked advisory) can report a different state and exit code. A case that only advisory
-  judges graded took their verdict (`passed`, exit 0, or `failed`, exit 1) and is now `error`
-  (exit 1), so an eval set graded only by judges fails every case. A case whose other evaluators
-  passed and whose judge said `false` was `failed` (exit 1) and is now `passed` (exit 0).
+- A pinned Hue judge's (`world_judge`) result that Hue marks advisory, as it marks every judge's
+  today, no longer decides a case unless it is an error or one of its metrics carries `passed`, so
+  `collectExperimentVerdicts` and `hue eval` (and `summarizeVerdicts`, for results marked
+  advisory) can report a different state and exit code. A case that only advisory judges graded
+  took their verdict (`passed`, exit 0, or `failed`, exit 1) and is now `error` (exit 1), so an
+  eval set graded only by such judges fails every case. A case whose other evaluators passed and
+  whose advisory judge said `false` was `failed` (exit 1) and is now `passed` (exit 0).
   Migration: pin an evaluator that decides each case, such as a code evaluator, beside the judge,
   or read `CaseVerdict.advisory` (`cases[].advisory` in `hue eval --json`) and the judge's metrics
   to act on its verdict yourself.
