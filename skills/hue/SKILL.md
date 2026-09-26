@@ -219,7 +219,7 @@ See [troubleshooting](https://docs.hue.run/guides/troubleshooting) for delivery 
 
 ## Handoff
 
-End with one of these, filled in with the actual values. If the user has a Hue account and a **Read** or **Read and write** key and the Hue MCP server is not connected, close that message by offering to connect it (step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md)). Do not offer it after a keyless setup, such as tracing against a local OpenTelemetry collector.
+End with one of these, filled in with the actual values. If the user has a Hue account and a **Read** or **Read and write** key and the Hue MCP server is not connected, close that message by offering to connect it with that key: the user also stores it as `HUE_MCP_KEY` themselves if it is not set yet, then you follow step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md), whose client configuration reads `HUE_MCP_KEY`. Do not offer it after a keyless setup, such as tracing against a local OpenTelemetry collector.
 
 - Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`). I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
 - Needs a key or a run: "Code changes are complete and tested against a loopback receiver. Configure `HUE_API_KEY` through `<secret workflow>` and run `<command>`; then I can verify the stored trace."

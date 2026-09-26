@@ -6,9 +6,11 @@ docs.hue.run has the user create and store a key, and the skill names the contac
 without an account. A key configured as `HUE_MCP_KEY` or a Hue MCP connection that answers
 `get_project_context` shows an account too. The key section must keep its rules, not just their
 keywords: check the key for presence only, also when the agent arrives from the setup page, never
-ask for it in chat, and change nothing until a key exists. Every mention of pasting in the key
-section must be a negated instruction, so an added request such as "ask the developer to paste the
-key" fails the gate.
+ask for it in chat, and change nothing until a key exists. A mention of pasting in the key section
+passes only when a negation governs it, directly or through a request verb ("don't paste", "never
+ask them to paste"), so added requests such as "ask the developer to paste the key" or "don't forget
+to paste the key" fail the gate. This is a wording check for common request forms, not a parser that
+catches every phrasing.
 """
 
 import re
@@ -26,10 +28,16 @@ SETUP_COMMAND = re.compile(r"(@hue-run/sdk\S*|\bhue)\s+(setup|resume|claim)\b")
 # the earlier wording that let an agent from the setup page skip the presence check.
 FORBIDDEN = ("invite-only", "heightened demand", "then stop", "Tracing only", "key step is done")
 PASTE = re.compile(r"\bpast(?:e[sd]?|ing)\b", re.I)
-# A negation within the same clause and at most four words before "paste", as in "never ask them
-# to paste" or "don't paste". Punctuation ends the clause, so a negation earlier in the sentence
-# ("never read it, and ask them to paste it") does not count.
-NEGATED_BEFORE_PASTE = re.compile(r"\b(?:never|not|don['’]t)\s+(?:[\w'’]+\s+){0,4}$", re.I)
+# A negation right before "paste" ("don't paste", "cannot paste") or before a request verb whose
+# object is asked to paste ("never ask them to paste", "do not let the user paste"). A negation of
+# another verb ("don't forget to paste", "do not hesitate to paste", "not a problem to paste") does
+# not count, and punctuation ends the clause, so a negation earlier in the sentence ("never read
+# it, and ask them to paste it") does not count either.
+NEGATED_BEFORE_PASTE = re.compile(
+    r"\b(?:never|not|don['’]t|cannot|can['’]t)\s+"
+    r"(?:(?:ask|tell|have|let|want|expect|require)\s+(?:[\w'’]+\s+){0,3}(?:to\s+)?)?$",
+    re.I,
+)
 
 
 def fenced_lines(text: str) -> list[str]:
@@ -169,6 +177,10 @@ class SkillKeyGateTests(unittest.TestCase):
             "If storing fails, the user can paste it here.",
             "Never read its value, and ask the developer to paste the key into chat.",
             "Pasting the key into chat is fine for a first run.",
+            "Don't forget to paste the key into chat.",
+            "Do not hesitate to paste the key into chat.",
+            "If storing fails, it's not a problem to paste it here.",
+            "If they cannot store it, ask them to paste it here.",
         ):
             with self.subTest(request=request):
                 regressed = replace_in_key_section(
@@ -183,6 +195,8 @@ class SkillKeyGateTests(unittest.TestCase):
         for rule in (
             "Don't paste the key into chat.",
             "Do not ask the developer to paste it here.",
+            "Never let the user paste it into chat.",
+            "You cannot paste the key; store it.",
         ):
             with self.subTest(rule=rule):
                 added = replace_in_key_section(text, "Share this line", f"{rule} Share this line")
