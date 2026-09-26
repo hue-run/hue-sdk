@@ -435,6 +435,14 @@
     {
       "input": "{\"error\":\"{\\\"password\\\":\\\"ab\\\\\\/cd synthetic-escaped-slash-value\\\"}\"}",
       "expected": "{\"error\":\"{\\\"password\\\":\\\"[redacted]\\\"}\"}"
+    },
+    {
+      "input": "body {\\\"next\\\":\\\"https://h.example.test/?code=\\\",\\\"password\\\":\\\"synthetic-after-url words\\\"}",
+      "expected": "body {\\\"next\\\":\\\"https://h.example.test/?code=%5Bredacted%5D\",\\\"password\\\":\\\"[redacted]\\\"}"
+    },
+    {
+      "input": "{\"redirect_uri\":\"https://app.example.test/cb?state=\",\"client_secret\":\"synthetic-after-url-plain def\"}",
+      "expected": "{\"redirect_uri\":\"https://app.example.test/cb?state=%5Bredacted%5D\"client_secret\":\"[redacted]\"}"
     }
   ]
 }

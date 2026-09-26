@@ -416,6 +416,20 @@ def test_a_bracketed_value_full_of_escaped_quotes_scrubs_in_linear_time():
     assert time.perf_counter() - started < 10
 
 
+def test_a_run_of_backslashes_in_a_value_that_does_not_close_is_read_once():
+    # Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
+    # would not finish.
+    for count in (80, 200):
+        started = time.perf_counter()
+        provider_error_description('{"error": "token=\\"' + "\\" * count + '"x"}')
+        scrub_credential_text('token: [\\"' + "\\" * count + '"x')
+        assert time.perf_counter() - started < 0.1
+    started = time.perf_counter()
+    for value in ('token=\\"', 'token: [\\"', '?t=\\"'):
+        scrub_credential_text(value + "\\" * 200_000 + "x\n")
+    assert time.perf_counter() - started < 10
+
+
 def test_server_address_keeps_an_underscore_in_a_host_name():
     # WHATWG URL parsing, and so the TypeScript SDK, keeps underscores: they are legal in DNS
     # labels and name real servers, such as Docker Compose services and internal hosts.

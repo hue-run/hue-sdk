@@ -310,6 +310,21 @@ test("a bracketed value full of escaped quotes scrubs in linear time", () => {
   expect(performance.now() - started).toBeLessThan(5_000);
 });
 
+test("a run of backslashes in a value that does not close is read once", () => {
+  // Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
+  // would not finish.
+  for (const count of [80, 200]) {
+    const started = performance.now();
+    providerErrorDescription(`{"error": "token=\\"${"\\".repeat(count)}"x"}`);
+    scrubCredentialText(String.raw`token: [\"${"\\".repeat(count)}"x`);
+    expect(performance.now() - started).toBeLessThan(100);
+  }
+  const started = performance.now();
+  for (const value of [String.raw`token=\"`, String.raw`token: [\"`, String.raw`?t=\"`])
+    scrubCredentialText(`${value}${"\\".repeat(200_000)}x\n`);
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
 test("server.address keeps an underscore in a host name, as WHATWG URL parsing does", () => {
   expect(
     Object.fromEntries(

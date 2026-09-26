@@ -19,9 +19,9 @@ refuses to publish a version without a matching entry below.
   (`\nheaders: …`), and an escaped space separates a scheme from its credential
   (`Authorization%3A%20Bearer%20…`). A key or separator that is itself escaped (`%22token%22%3A`,
   `\u0022token\u0022:`) is still not read. A credential key's whole `[…]` or `{…}` value is
-  replaced, where only its `[` or `{` was, and `key => value` pairs are read. JSON inside a JSON
-  string keeps its escaped quotes (`\\\"`) inside a value. `hue listen` scrubs its messages with the
-  same rules. **Wire**
+  replaced, where only its `[` or `{` was, and one that does not close is replaced to the end of the
+  text, and `key => value` pairs are read. JSON inside a JSON string keeps its escaped quotes
+  (`\\\"`) inside a value. `hue listen` scrubs its messages with the same rules. **Wire**
 - In the same text, a quoted value whose quote does not close on its line, as when the text was cut
   inside it, is replaced to the end of the line, where only its first word was. A URL's quoted query
   value, between backslash-escaped quotes too (`?token=\"…\"`), is replaced whole, so an `&` inside
