@@ -18,8 +18,11 @@ import {
   MCP_USAGE,
   MCP_VERIFY_PROMPT,
   parseMcpUrl,
+  readOnlyMcpUrl,
+  renderMcpSignInSnippets,
   renderMcpSnippets,
   runMcpCommand,
+  shellWord,
 } from "../src/cli/mcp.js";
 
 const roots: string[] = [];
@@ -112,7 +115,7 @@ const VSCODE_JSON = `{
     {
       "type": "promptString",
       "id": "hue-mcp-key",
-      "description": "Hue coding-agent key",
+      "description": "Hue Read or Read and write API key",
       "password": true
     }
   ]
@@ -125,6 +128,15 @@ const WINDSURF_JSON = `{
       "headers": {
         "Authorization": "Bearer \${env:HUE_MCP_KEY}"
       }
+    }
+  }
+}
+`;
+const CLAUDE_CODE_SIGN_IN_JSON = `{
+  "mcpServers": {
+    "hue": {
+      "type": "http",
+      "url": "https://mcp.hue.run/mcp"
     }
   }
 }
@@ -175,8 +187,16 @@ describe("hue mcp install", () => {
       "claude mcp add --transport http --scope user hue https://mcp.hue.run/mcp --header 'Authorization: Bearer ${HUE_MCP_KEY}'",
     );
     expect(snippets.geminiCli.display).toBe(
-      "gemini mcp add --transport http hue https://mcp.hue.run/mcp -H 'Authorization: Bearer $HUE_MCP_KEY'",
+      "gemini mcp add --scope user --transport http hue https://mcp.hue.run/mcp --header 'Authorization: Bearer ${HUE_MCP_KEY}'",
     );
+    const signIn = renderMcpSignInSnippets(DEFAULT_MCP_URL);
+    expect(signIn.claudeCodeProjectJson).toBe(CLAUDE_CODE_SIGN_IN_JSON);
+    expect(signIn.claudeCodeCli.display).toBe(
+      "claude mcp add --transport http --scope user hue https://mcp.hue.run/mcp",
+    );
+    expect(signIn.codexCli.display).toBe("codex mcp add hue --url https://mcp.hue.run/mcp");
+    expect(JSON.stringify(signIn)).not.toContain("HUE_MCP_KEY");
+    expect(readOnlyMcpUrl(DEFAULT_MCP_URL)).toBe("https://mcp.hue.run/mcp?read_only=true");
     expect(parseMcpUrl("https://mcp.staging.hue.run/mcp")).toBe("https://mcp.staging.hue.run/mcp");
     expect(parseMcpUrl("http://127.0.0.1:4000/api/mcp")).toBe("http://127.0.0.1:4000/api/mcp");
     expect(parseMcpUrl("http://mcp.hue.run/mcp")).toBeNull();
@@ -284,7 +304,7 @@ describe("hue mcp install", () => {
         {
           type: "promptString",
           id: "hue-mcp-key",
-          description: "Hue coding-agent key",
+          description: "Hue Read or Read and write API key",
           password: true,
         },
       ],
@@ -338,7 +358,7 @@ describe("hue mcp install", () => {
     const cliDry = await mcp(["install", "--client", "gemini", "--dry-run"], { cwd: root });
     expect(cliDry.code).toBe(0);
     expect(cliDry.stdout).toBe(
-      "Would run: gemini mcp add --transport http hue https://mcp.hue.run/mcp -H 'Authorization: Bearer $HUE_MCP_KEY'\n",
+      "Would run: gemini mcp add --scope user --transport http hue https://mcp.hue.run/mcp --header 'Authorization: Bearer ${HUE_MCP_KEY}'\n",
     );
   });
 
@@ -415,7 +435,7 @@ describe("hue mcp install", () => {
     await expect(lstat(join(root, ".mcp.json"))).rejects.toThrow();
   });
 
-  test("gemini passes the literal $HUE_MCP_KEY reference and reports a failing CLI", async () => {
+  test("gemini passes the literal ${HUE_MCP_KEY} reference and reports a failing CLI", async () => {
     const root = await temporaryRoot();
     const fake = await fakeCli(root, "gemini");
     const present = await mcp(["install", "--client", "gemini"], { cwd: root, env: fake.env });
@@ -423,18 +443,207 @@ describe("hue mcp install", () => {
     expect(await fake.args()).toEqual([
       "mcp",
       "add",
+      "--scope",
+      "user",
       "--transport",
       "http",
       "hue",
       "https://mcp.hue.run/mcp",
-      "-H",
-      "Authorization: Bearer $HUE_MCP_KEY",
+      "--header",
+      "Authorization: Bearer ${HUE_MCP_KEY}",
     ]);
 
     const failing = await fakeCli(root, "gemini", 3);
     const failed = await mcp(["install", "--client", "gemini"], { cwd: root, env: failing.env });
     expect(failed.code).toBe(1);
     expect(failed.stderr).toContain("gemini exited with code 3.");
-    expect(failed.stderr).toContain("-H 'Authorization: Bearer $HUE_MCP_KEY'");
+    expect(failed.stderr).toContain("--header 'Authorization: Bearer ${HUE_MCP_KEY}'");
+    expect(failed.stdout).not.toContain(MCP_VERIFY_PROMPT);
+  });
+
+  test("the verification prompt asks what needs attention and falls back to recent traces", () => {
+    expect(MCP_VERIFY_PROMPT).toContain("get_project_context");
+    expect(MCP_VERIFY_PROMPT).toContain("need attention or have errors");
+    expect(MCP_VERIFY_PROMPT).toContain("5 most recent traces");
+  });
+
+  test("--auth oauth writes and registers the URL only, with sign-in next steps", async () => {
+    const root = await temporaryRoot();
+    const project = await mcp(["install", "--client", "claude-code", "--auth", "oauth"], {
+      cwd: root,
+      env: { PATH: join(root, "empty-bin"), HUE_MCP_KEY: "hue_live_must_not_leak" },
+    });
+    expect(project.stderr).toBe("");
+    expect(project.code).toBe(0);
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(CLAUDE_CODE_SIGN_IN_JSON);
+    expect(project.stdout).toContain("run /mcp, select hue and choose Authenticate");
+    expect(project.stdout).toContain("approve Read");
+    expect(project.stdout).not.toContain("Export HUE_MCP_KEY");
+    expect(project.stdout).toContain(MCP_VERIFY_PROMPT);
+
+    const claude = await fakeCli(root, "claude");
+    const user = await mcp(
+      ["install", "--client", "claude-code", "--auth", "oauth", "--scope", "user"],
+      { cwd: root, env: claude.env },
+    );
+    expect(user.code).toBe(0);
+    expect(await claude.args()).toEqual([
+      "mcp",
+      "add",
+      "--transport",
+      "http",
+      "--scope",
+      "user",
+      "hue",
+      "https://mcp.hue.run/mcp",
+    ]);
+
+    const codex = await fakeCli(root, "codex");
+    const registered = await mcp(["install", "--client", "codex", "--auth", "oauth"], {
+      cwd: root,
+      env: codex.env,
+    });
+    expect(registered.code).toBe(0);
+    expect(await codex.args()).toEqual(["mcp", "add", "hue", "--url", "https://mcp.hue.run/mcp"]);
+    expect(registered.stdout).toContain("codex mcp login hue");
+    expect(registered.stdout).not.toContain("hue_live_must_not_leak");
+
+    const printed = await mcp(["install", "--client", "codex", "--auth", "oauth", "--print"], {
+      cwd: root,
+    });
+    expect(printed.stdout).toBe('[mcp_servers.hue]\nurl = "https://mcp.hue.run/mcp"\n');
+  });
+
+  test("--auth oauth is refused where sign-in does not work, and with read-only", async () => {
+    const root = await temporaryRoot();
+    for (const client of ["cursor", "vscode", "windsurf", "gemini"]) {
+      const result = await mcp(["install", "--client", client, "--auth", "oauth"], { cwd: root });
+      expect(result.code).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("--auth oauth is");
+    }
+    const cursor = await mcp(["install", "--client", "cursor", "--auth", "oauth"], { cwd: root });
+    expect(cursor.stderr).toContain("Cursor's sign-in callback");
+    for (const argv of [
+      ["install", "--client", "claude-code", "--auth", "oauth", "--read-only"],
+      ["install", "--client", "conductor", "--read-only"],
+      [
+        "install",
+        "--client",
+        "codex",
+        "--auth",
+        "oauth",
+        "--url",
+        "https://mcp.hue.run/mcp?read_only=true",
+      ],
+      ["install", "--client", "codex", "--auth", "password"],
+    ]) {
+      const result = await mcp(argv, { cwd: root });
+      expect(result.code).toBe(2);
+      expect(result.stdout).toBe("");
+    }
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  test("--read-only adds read_only=true to a key configuration's URL", async () => {
+    const root = await temporaryRoot();
+    const result = await mcp(["install", "--client", "cursor", "--read-only"], { cwd: root });
+    expect(result.code).toBe(0);
+    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(
+      CURSOR_JSON.replace("https://mcp.hue.run/mcp", "https://mcp.hue.run/mcp?read_only=true"),
+    );
+    expect(result.stdout).toContain("(https://mcp.hue.run/mcp?read_only=true)");
+
+    const fake = await fakeCli(root, "codex");
+    const codex = await mcp(["install", "--client", "codex", "--read-only"], {
+      cwd: root,
+      env: fake.env,
+    });
+    expect(codex.code).toBe(0);
+    expect(await fake.args()).toEqual([
+      "mcp",
+      "add",
+      "hue",
+      "--url",
+      "https://mcp.hue.run/mcp?read_only=true",
+      "--bearer-token-env-var",
+      "HUE_MCP_KEY",
+    ]);
+    // A printed command quotes the URL: `?` is a zsh glob and `&` would end the command.
+    expect(codex.stdout).toContain(
+      "Running: codex mcp add hue --url 'https://mcp.hue.run/mcp?read_only=true' --bearer-token-env-var HUE_MCP_KEY",
+    );
+    const claude = await mcp(
+      ["install", "--client", "claude-code", "--scope", "user", "--read-only", "--print"],
+      { cwd: root },
+    );
+    expect(claude.stdout).toBe(
+      "claude mcp add --transport http --scope user hue 'https://mcp.hue.run/mcp?read_only=true' --header 'Authorization: Bearer ${HUE_MCP_KEY}'\n",
+    );
+    expect(shellWord("https://mcp.hue.run/mcp")).toBe("https://mcp.hue.run/mcp");
+    expect(shellWord("https://h.example/mcp?a=1&b='2'")).toBe(
+      String.raw`'https://h.example/mcp?a=1&b='\''2'\'''`,
+    );
+  });
+
+  test("conductor signs in by default and registers with Claude Code and Codex", async () => {
+    const root = await temporaryRoot();
+    const absent = await mcp(["install", "--client", "conductor"], { cwd: root });
+    expect(absent.code).toBe(0);
+    expect(absent.stdout).toContain("claude is not on PATH");
+    expect(absent.stdout).toContain(
+      "claude mcp add --transport http --scope user hue https://mcp.hue.run/mcp",
+    );
+    expect(absent.stdout).toContain("codex is not on PATH");
+    expect(absent.stdout).toContain("codex mcp add hue --url https://mcp.hue.run/mcp");
+    expect(absent.stdout).toContain("/mcp-status");
+    expect(absent.stdout).toContain(MCP_VERIFY_PROMPT);
+    expect(await readdir(root)).toEqual([]);
+
+    const dry = await mcp(["install", "--client", "conductor", "--dry-run"], { cwd: root });
+    expect(dry.stdout).toBe(
+      "Would run: claude mcp add --transport http --scope user hue https://mcp.hue.run/mcp\n" +
+        "Would run: codex mcp add hue --url https://mcp.hue.run/mcp\n",
+    );
+
+    const claude = await fakeCli(root, "claude");
+    const codex = await fakeCli(root, "codex");
+    const both = await mcp(["install", "--client", "conductor"], { cwd: root, env: codex.env });
+    expect(both.code).toBe(0);
+    expect(await claude.args()).toEqual([
+      "mcp",
+      "add",
+      "--transport",
+      "http",
+      "--scope",
+      "user",
+      "hue",
+      "https://mcp.hue.run/mcp",
+    ]);
+    expect(await codex.args()).toEqual(["mcp", "add", "hue", "--url", "https://mcp.hue.run/mcp"]);
+    expect(both.stdout).toContain("with Claude Code.");
+    expect(both.stdout).toContain("with Codex.");
+
+    const key = await mcp(["install", "--client", "conductor", "--auth", "key"], {
+      cwd: root,
+      env: codex.env,
+    });
+    expect(key.code).toBe(0);
+    expect((await claude.args()).at(-1)).toBe("Authorization: Bearer ${HUE_MCP_KEY}");
+    expect(await codex.args()).toContain("--bearer-token-env-var");
+    expect(key.stdout).toContain("login-shell environment Conductor captures");
+    expect(key.stdout).not.toContain("hue_live_must_not_leak");
+  });
+
+  test("conductor still registers with Codex when Claude Code fails, then exits 1", async () => {
+    const root = await temporaryRoot();
+    await fakeCli(root, "claude", 4);
+    const codex = await fakeCli(root, "codex");
+    const result = await mcp(["install", "--client", "conductor"], { cwd: root, env: codex.env });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("claude exited with code 4.");
+    expect(await codex.args()).toEqual(["mcp", "add", "hue", "--url", "https://mcp.hue.run/mcp"]);
+    expect(result.stdout).toContain("with Codex.");
+    expect(result.stdout).not.toContain(MCP_VERIFY_PROMPT);
   });
 });
