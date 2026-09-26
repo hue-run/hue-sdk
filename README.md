@@ -65,7 +65,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Run an existing local agent callback against a fresh hosted simulated world.
 
 The published TypeScript package is [`0.11.0`](https://www.npmjs.com/package/@hue-run/sdk), with
-`hue mcp install` sign-in with Hue, Conductor, read-only and toolsets options, `hue listen`, live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
+`hue mcp install` sign-in with Hue, Conductor, read-only and toolsets options, live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
 `runLocalAgent()`, V2 environments and the local
 [setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.6.1`](https://pypi.org/project/hue-run/), with live spans, the same
 product-named evaluation client methods and the MCP `mcp=` option. Existing low-level
