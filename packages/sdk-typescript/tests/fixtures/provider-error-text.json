@@ -263,6 +263,26 @@
     {
       "input": "authorization=Bot x!authorization=Bot synthetic-nested-auth tail",
       "expected": "authorization=[redacted] tail"
+    },
+    {
+      "input": "password=sk-synthetic0123:token=\\'synthetic-escaped-single more",
+      "expected": "password=[redacted]'[redacted] more"
+    },
+    {
+      "input": "basic: private_token=\\'synthetic-escaped-basic",
+      "expected": "basic: [redacted]'[redacted]"
+    },
+    {
+      "input": "Proxy-Authorization=sk-synthetic0123|Authorization=\\'Bot synthetic-escaped-auth",
+      "expected": "Proxy-Authorization=[redacted]'[redacted]"
+    },
+    {
+      "input": "body {\\'error\\': \\'denied\\', \\'token\\': \\'synthetic two words\\', \\'n\\': 1}",
+      "expected": "body {\\'error\\': \\'denied\\', \\'token\\': \\'[redacted]\\', \\'n\\': 1}"
+    },
+    {
+      "input": "token=\\'a \\\"b\\\" c\\' d",
+      "expected": "token=\\'[redacted]\\' d"
     }
   ]
 }

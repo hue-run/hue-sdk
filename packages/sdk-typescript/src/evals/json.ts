@@ -8,6 +8,21 @@ export function aggregateBounds(bytes: number): JsonBounds {
 }
 const isText = (item: string) => item.isWellFormed() && !item.includes("\u0000");
 
+/** A string's code points: its UTF-16 length less one for each surrogate pair. */
+function codePoints(text: string): number {
+  let count = text.length;
+  for (let index = 0; index < text.length - 1; index++) {
+    const unit = text.charCodeAt(index);
+    if (unit < 0xd800 || unit > 0xdbff) continue;
+    const next = text.charCodeAt(index + 1);
+    if (next >= 0xdc00 && next <= 0xdfff) {
+      count--;
+      index++;
+    }
+  }
+  return count;
+}
+
 /** Reject lossy JSON serialization before creating requests/checkpoints. */
 export function json(value: unknown, requested: JsonBounds | number = valueBounds): JsonValue {
   const bounds = typeof requested === "number" ? { ...valueBounds, bytes: requested } : requested;
@@ -65,6 +80,17 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
       const keys = Object.keys(item);
       if (keys.length > bounds.nodes - nodes)
         throw new RangeError("JSON exceeds depth/node limits");
+      // Keys whose JSON text alone (at least their code points, two quotes and a colon each)
+      // needs more bytes than are left are refused before they are sorted, as the Python SDK
+      // refuses them, so both refuse such an object for the same reason. A key has at least
+      // half its UTF-16 length in code points, so a long one is refused without counting them.
+      let left = bounds.bytes - bytes;
+      for (const key of keys) {
+        left -= 3;
+        if (key.length / 2 > left) throw new RangeError("JSON exceeds byte limit");
+        left -= codePoints(key);
+        if (left < 0) throw new RangeError("JSON exceeds byte limit");
+      }
       keys.sort();
       charge(keys.length ? keys.length + 1 : 2);
       for (const key of keys) {

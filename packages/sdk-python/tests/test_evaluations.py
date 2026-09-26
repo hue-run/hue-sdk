@@ -5,6 +5,7 @@ import functools
 import inspect
 import json
 import os
+import random
 import subprocess
 import sys
 import time
@@ -876,8 +877,13 @@ def test_both_sdks_refuse_an_output_for_the_same_reason():
         ({"\ud800": 1}, "not JSON"),
         # JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
         ({"\uffff": float("nan"), "😀": big}, "bytes"),
-        # An invalid member read before an oversized key decides, however the keys are sorted.
-        ({"a": float("nan"), "😀": 1, "\uffff" + big: 1}, "not JSON"),
+        # Keys that need more bytes than are left are refused before any member is read, counting
+        # each key's code points, two quotes and a colon.
+        ({"a": float("nan"), "😀": 1, "\uffff" + big: 1}, "bytes"),
+        ({"a": float("nan"), "x" * 199_993: 1}, "not JSON"),
+        ({"a": float("nan"), "x" * 199_994: 1}, "bytes"),
+        ({"a": float("nan"), "😀" * 199_993: 1}, "not JSON"),
+        ({"a": float("nan"), "😀" * 199_994: 1}, "bytes"),
     ]
     for value, reason in cases:
         try:
@@ -926,12 +932,37 @@ def test_a_huge_key_is_refused_without_copying_it_to_sort_the_keys():
         assert peak < 10_000_000
 
 
+def test_keys_that_need_more_bytes_than_are_left_are_refused_before_they_are_sorted():
+    # Long keys that share a prefix and hold both a character above U+FFFF and one from U+E000,
+    # so they sort by comparator: 2,000 of them took 29 seconds.
+    keys = ["a" * 65_000 + f"{index:05d}" + ("😀" if index % 2 else "！") for index in range(300)]
+    random.Random(7).shuffle(keys)
+    members = dict.fromkeys(keys, 0)
+    started = time.perf_counter()
+    with pytest.raises(JsonLimitError) as refused:
+        json_value(members)
+    assert refused.value.limit == "bytes"
+    assert time.perf_counter() - started < 0.1
+
+
 def test_keys_sort_by_utf16_code_unit_as_javascript_sorts_them():
     shared = "p" * 5_000
     keys = ["\uffff", "😀", "a", "\ue000b", "𝄞", "z", "\ud7ff", shared + "\uffff", shared + "😀"]
+    # Keys that differ, or end, on either side of the 64 KiB chunks the comparator skips.
+    keys += ["p" * length + end for length in (65_535, 65_536, 65_537) for end in ("", "😀", "！")]
     assert _utf16_order(keys) == sorted(
         keys, key=lambda key: key.encode("utf-16-be", "surrogatepass")
     )
+
+
+def test_long_keys_sharing_a_prefix_sort_by_utf16_code_unit_quickly():
+    # Comparing the chunk that differs character by character took 4.4 seconds here.
+    keys = ["p" * 60_000 + f"{index:05d}" + ("😀" if index % 2 else "！") for index in range(300)]
+    random.Random(3).shuffle(keys)
+    started = time.perf_counter()
+    ordered = _utf16_order(keys)
+    assert time.perf_counter() - started < 1
+    assert ordered == sorted(keys, key=lambda key: key.encode("utf-16-be"))
 
 
 def test_an_output_the_process_cannot_hold_fails_its_case_as_too_large(

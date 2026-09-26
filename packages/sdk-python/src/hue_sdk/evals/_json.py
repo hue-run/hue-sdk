@@ -52,14 +52,18 @@ def _utf16_units(character: str) -> tuple[int, ...]:
 
 
 def _compare_utf16(left: str, right: str) -> int:
-    # Skip a shared prefix a chunk at a time at C speed, then compare within the first chunk
-    # that differs, so a long key is walked quickly and never copied whole.
+    # Skip a shared prefix a chunk at a time, then find the first difference in the chunk that
+    # differs by halves, all at C speed, so a long key is walked quickly and never copied whole.
     index, end = 0, min(len(left), len(right))
     while index < end and left[index : index + 65536] == right[index : index + 65536]:
         index += 65536
-    for a, b in zip(left[index : index + 65536], right[index : index + 65536], strict=False):
-        if a != b:
-            return -1 if _utf16_units(a) < _utf16_units(b) else 1
+    size = 65536
+    while size > 1:
+        size //= 2
+        if left[index : index + size] == right[index : index + size]:
+            index += size
+    if index < end:
+        return -1 if _utf16_units(left[index]) < _utf16_units(right[index]) else 1
     return len(left) - len(right)
 
 
@@ -134,6 +138,14 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             # Keys are checked but, as in the TypeScript SDK, not counted as values.
             if any(type(key) is not str for key in item):
                 raise ValueError("JSON object keys must be strings.")
+            # Keys whose JSON text alone (at least their code points, two quotes and a colon each)
+            # needs more bytes than are left are refused before they are sorted, as the
+            # TypeScript SDK refuses them, so both refuse such an object for the same reason.
+            key_bytes = 0
+            for key in item:
+                key_bytes += len(key) + 3
+                if key_bytes > max_bytes - size:
+                    raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
             charge(len(item) + 1 if item else 2)
             for key in _utf16_order(list(item)):
                 _text(key)

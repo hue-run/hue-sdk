@@ -131,8 +131,34 @@ def families(rng: random.Random):
         key = rng.choice(["password", "token", "secret"])
         return f'{prefix}{first}X{key}: "{second} and more"', [first, second]
 
+    def nested_quoted_pair():
+        """A pair inside an earlier value whose own value opens a quote, escaped or not, and may
+        close it after a second word."""
+        outer, inner, second = secret(rng), secret(rng), secret(rng)
+        opener = rng.choice(["\\'", '\\"', "'", '"'])
+        key = rng.choice([*KEYS, "basic", "Proxy-Authorization"])
+        separator = rng.choice(SEPARATORS)
+        glue = rng.choice([":", "|", "!", "~", "/", "+"])
+        closed = rng.random() < 0.5
+        value = f"{inner} {second}{opener}" if closed else inner
+        if rng.random() < 0.5:
+            nested = f"{rng.choice(KEYS)}={opener}{value}"
+        else:
+            nested = f"Authorization={opener}{rng.choice(HEADER_SCHEMES)} {value}"
+        return (
+            f"{key}{separator}{rng.choice(PREFIXES)}{outer}{glue}{nested} more",
+            [outer, inner, second] if closed else [outer, inner],
+        )
+
+    def escaped_single_quotes():
+        """A value between backslash-escaped single quotes, as a Python repr inside a string."""
+        first, second = secret(rng), secret(rng)
+        key = rng.choice(KEYS)
+        return f"body {{\\'{key}\\': \\'{first} {second}\\', \\'user\\': \\'bob\\'}}", [first, second]
+
     return [pair, quoted_pair, escaped_json, header, scheme_in_prose, url, prefixed, nested_pair,
-            glued_scheme, trailing_scheme, api_key_phrase, glued_key]
+            glued_scheme, trailing_scheme, api_key_phrase, glued_key, nested_quoted_pair,
+            escaped_single_quotes]
 
 
 def generate(seed: int, per_family: int) -> dict:

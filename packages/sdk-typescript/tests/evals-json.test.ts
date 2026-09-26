@@ -58,6 +58,29 @@ test("an object with more members than values allowed is refused before its keys
   expect(longestSorted).toBe(0);
 });
 
+test("an object whose keys need more bytes than are left is refused before they are sorted", () => {
+  // Long keys that share a prefix, as the Python suite's: sorting them by UTF-16 code unit there
+  // took seconds.
+  const members = Object.fromEntries(
+    Array.from({ length: 300 }, (_, index) => [
+      `${"a".repeat(65_000)}${String(index).padStart(5, "0")}${index % 2 ? "😀" : "！"}`,
+      0,
+    ]).reverse(),
+  );
+  const sort = Array.prototype.sort;
+  let longestSorted = 0;
+  Array.prototype.sort = function (this: unknown[], ...args) {
+    longestSorted = Math.max(longestSorted, this.length);
+    return sort.apply(this, args as [((a: unknown, b: unknown) => number)?]);
+  } as typeof sort;
+  try {
+    expect(() => json(members)).toThrow(new RangeError("JSON exceeds byte limit"));
+  } finally {
+    Array.prototype.sort = sort;
+  }
+  expect(longestSorted).toBe(0);
+});
+
 test("both SDKs refuse an output for the same reason", () => {
   // The Python suite checks the same outputs. Values are read in order, members by key, and each
   // is checked for its type before it is counted.
@@ -71,8 +94,13 @@ test("both SDKs refuse an output for the same reason", () => {
     [{ "\ud800": 1 }, "not JSON"],
     // JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
     [{ "\uffff": Number.NaN, "😀": big }, "bytes"],
-    // An invalid member read before an oversized key decides, however the keys are sorted.
-    [{ a: Number.NaN, "😀": 1, ["\uffff" + big]: 1 }, "not JSON"],
+    // Keys that need more bytes than are left are refused before any member is read, counting
+    // each key's code points, two quotes and a colon.
+    [{ a: Number.NaN, "😀": 1, ["\uffff" + big]: 1 }, "bytes"],
+    [{ a: Number.NaN, ["x".repeat(199_993)]: 1 }, "not JSON"],
+    [{ a: Number.NaN, ["x".repeat(199_994)]: 1 }, "bytes"],
+    [{ a: Number.NaN, ["😀".repeat(199_993)]: 1 }, "not JSON"],
+    [{ a: Number.NaN, ["😀".repeat(199_994)]: 1 }, "bytes"],
   ];
   for (const [value, reason] of cases) {
     let outcome = "accepted";

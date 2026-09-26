@@ -92,7 +92,8 @@ refuses to publish a version without a matching entry below.
   such as 120 MB of control characters) completes its case as `OutputTooLarge`; before, Node's
   `Invalid string length` stopped the run with `OutcomeSerializationError` and a resume kept
   refusing. The JSON byte length is counted as the output is read, and an array or object with
-  more elements than values allowed is refused before its keys are listed or sorted.
+  more elements than values allowed, or keys longer than the bytes left, is refused before its
+  keys are listed or sorted.
 
 ### [0.10.0] - 2026-09-25
 
@@ -825,8 +826,9 @@ No registry release is claimed until publication and registry acceptance complet
   string took tens of seconds and a gigabyte); an output the process cannot hold in memory
   completes its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values,
   so an object of more than 10,000 members is no longer `OutputTooLarge`, and a list or object
-  with more elements than values left is refused before it is read. The output is read in the
-  TypeScript SDK's order, so both SDKs refuse an output for the same reason.
+  with more elements than values left, or keys longer than the bytes left, is refused before it is
+  read. The output is read in the TypeScript SDK's order, so both SDKs refuse an output for the
+  same reason.
 - A large inline file's lone surrogates are replaced once for the whole part rather than in each
   percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
 

@@ -136,9 +136,9 @@ const authorizationValue =
  * inside another pair's value (`error: token=…`) is found. */
 const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1(\s*[:=]\s*)/gi;
 /** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
- * one between backslash-escaped quotes. */
+ * one between backslash-escaped quotes, double or single. */
 const quotedValue =
-  /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"/y;
+  /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'/y;
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
@@ -174,10 +174,15 @@ function isApiKeyPhrase(text: string, keyStart: number, key: string): boolean {
 /** A run of text to replace with `[redacted]`: its start and end offsets. */
 type Span = [start: number, end: number];
 
-/** Whether a quote, or a backslash-escaped double quote, opens at `index`. */
+/** Whether a quote, or a backslash-escaped quote, opens at `index`. */
 function opensQuote(text: string, index: number): boolean {
   const character = text[index];
-  return character === '"' || character === "'" || text.startsWith('\\"', index);
+  return (
+    character === '"' ||
+    character === "'" ||
+    text.startsWith('\\"', index) ||
+    text.startsWith("\\'", index)
+  );
 }
 
 /** The value of each pair whose key names a credential, without its quotes. A pair inside an

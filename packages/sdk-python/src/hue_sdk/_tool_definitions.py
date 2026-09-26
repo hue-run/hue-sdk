@@ -99,10 +99,10 @@ _PAIR_KEY = re.compile(
     re.IGNORECASE | re.ASCII,
 )
 # A quoted value to its closing quote on the same line, spaces and escaped quotes included, or one
-# between backslash-escaped quotes.
+# between backslash-escaped quotes, double or single.
 _QUOTED_VALUE = re.compile(
     r"\"(?:[^\"\\\r\n]|\\[^\r\n])+\"|'(?:[^'\\\r\n]|\\[^\r\n])+'"
-    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+\\\""
+    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+\\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'"
 )
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
@@ -174,8 +174,8 @@ def _is_api_key_phrase(text: str, key_start: int, key: str) -> bool:
 
 
 def _opens_quote(text: str, index: int) -> bool:
-    """Whether a quote, or a backslash-escaped double quote, opens at ``index``."""
-    return text[index : index + 1] in ('"', "'") or text.startswith('\\"', index)
+    """Whether a quote, or a backslash-escaped quote, opens at ``index``."""
+    return text[index : index + 1] in ('"', "'") or text.startswith(('\\"', "\\'"), index)
 
 
 def _pair_spans(text: str) -> list[tuple[int, int]]:
