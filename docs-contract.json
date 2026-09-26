@@ -506,7 +506,7 @@
       "version": "0.5.0"
     },
     "name": "hue",
-    "sha256": "sha256:1af0b9281e9316c1666694c5c51657566220a25c45742af458c48cfce40d2c40",
+    "sha256": "sha256:7aadb4f502cedaf0df2533e77ad9cda9a570dccc0a948b20a2c91f4efc6f7d97",
     "source": "skills/hue/SKILL.md"
   }
 }

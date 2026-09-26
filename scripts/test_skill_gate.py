@@ -50,6 +50,9 @@ def gate_problems(text: str) -> list[str]:
             GATE_URL,
             "**Read and write**",
             "`HUE_API_KEY`",
+            # A user who reached Hue through an MCP key or sign-in is invited too.
+            "`HUE_MCP_KEY`",
+            "`get_project_context` succeeds",
             "key of any preset",
             "then stop",
         )
@@ -95,6 +98,13 @@ class SkillInviteOnlyGateTests(unittest.TestCase):
         self.assertIn(
             "invite-only section is missing 'key of any preset'", gate_problems(regressed)
         )
+
+    def test_gate_check_rejects_a_gate_without_the_mcp_routes(self):
+        text = SKILL.read_text()
+        gate = section(text, "Invite-only access")
+        for route in ("`HUE_MCP_KEY`", "`get_project_context` succeeds"):
+            regressed = text.replace(gate, gate.replace(route, "an unrelated credential"))
+            self.assertIn(f"invite-only section is missing {route!r}", gate_problems(regressed))
 
     def test_gate_check_requires_the_gate_section(self):
         without_gate = re.sub(
