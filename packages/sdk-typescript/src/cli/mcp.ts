@@ -588,7 +588,7 @@ function nextSteps(client: ClientId, auth: AuthMode, toolsets: string | undefine
             ]
           : [
               `In Conductor, open MCP status from the plug icon or /mcp-status, refresh, and use ${SERVER_NAME}'s authentication action. ${approve}`,
-              "Start a new agent session if the Hue tools do not appear.",
+              "Start a new agent session if the Hue tools do not appear. Hue has not yet verified signed-in Conductor end to end; if the tools still do not load, rerun with --auth key.",
             ];
   else if (client === "vscode")
     lines = [

@@ -198,8 +198,8 @@ With `--auth oauth` it is refused: a sign-in connection has **Read and write** a
 **Read** project key for read-only access.
 
 `--toolsets <names>` lists only the named tools, for clients with a tool-count limit or agents that
-only read production: `observe` (the production reads: traces, spans, sessions, trace checks,
-intents and documentation), `all`, or the groups `project`, `traces`, `evals`, `environments`,
+only read production: `observe` (the production reads: projects, traces, spans and their recorded
+content, sessions, trace checks, intents and documentation), `all`, or the groups `project`, `traces`, `evals`, `environments`,
 `intents` and `docs`, comma-separated. A key configuration adds `?toolsets=<names>` to the URL. A
 sign-in configuration keeps the URL bare and sends the `X-Hue-MCP-Toolsets` header instead,
 because toolsets are not part of the connection's identity: Claude Code stores the header, and for
@@ -222,7 +222,9 @@ selection.
 Conductor has no MCP configuration of its own: its Claude Code and Codex agents read their user
 configuration in every workspace, so `conductor` registers the server at user scope with each CLI
 on `PATH` and prints the command for a CLI that is missing. A failing CLI does not stop the other;
-the command then exits `1`.
+the command then exits `1`. Hue has not yet verified the complete signed-in Conductor flow (consent
+through a trace read) end to end; if Hue's tools do not load after signing in, run the command
+again with `--auth key`.
 
 JSON files are parsed and merged: other servers, inputs and top-level fields are kept, only the
 `hue` entry is replaced, and invalid JSON (including comments) is refused together with the snippet

@@ -54,7 +54,9 @@ refuses to publish a version without a matching entry below.
   Sign-in is refused for `cursor`, whose callback Hue does not yet accept, and for `vscode`,
   `windsurf` and `gemini`.
 - `hue mcp install --client conductor` registers the server for Conductor's Claude Code (user
-  scope) and Codex agents with each CLI on `PATH`, and signs in by default.
+  scope) and Codex agents with each CLI on `PATH`, and signs in by default. Hue has not yet
+  verified the complete signed-in Conductor flow end to end, so the next steps name `--auth key`
+  as the fallback.
 - `hue mcp install --toolsets <names>` lists only the named tools: `observe` for production reads,
   `all`, or the catalog groups. A key configuration adds `?toolsets=<names>` to the URL; a sign-in
   configuration sends the `X-Hue-MCP-Toolsets` header, which Claude Code stores and Codex's
