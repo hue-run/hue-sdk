@@ -10,7 +10,7 @@ refuses to publish a version without a matching entry below.
 
 ### [0.11.0] - 2026-09-26
 
-This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
+This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release; three changes to evaluation results and waits were listed as Breaking after it was published. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
 
 #### Breaking
 
@@ -37,14 +37,14 @@ These three entries were added after 0.11.0 was published; 0.11.0 already behave
   or read `CaseVerdict.advisory` (`cases[].advisory` in `hue eval --json`) and the judge's metrics
   to act on its verdict yourself.
 - `hue eval` gives each export of its own telemetry 30 seconds instead of 10 seconds, retries
-  included, so a case whose trace Hue acknowledges slowly waits up to 20 seconds longer before it
-  fails as `TelemetryNotAccepted`, and the longest the SDK waits on one batch of its spans or log
-  records grows from 161 to 481 seconds. Migration: allow for the longer waits in CI and job
-  timeouts.
-- The local runner (`runExperiment`, and so `hue eval`) waits about three minutes for Hue to
-  verify each generated file it uploads, instead of failing at the 10-second request timeout, and a
-  completion that cannot reach Hue takes about those three minutes to fail. Migration: allow about
-  three more minutes per generated file in CI and job timeouts.
+  included, so a case whose trace Hue acknowledges slowly waits up to 20 seconds longer per export
+  before it fails as `TelemetryNotAccepted`, and the longest `hue eval` waits on one batch of its
+  spans or log records grows from 161 to 481 seconds. `createHue`'s default stays 10 seconds.
+  Migration: allow for the longer waits in CI and job timeouts.
+- The local runner (`runExperiment`, and so `hue eval`) waits about three minutes for Hue to verify
+  each generated file it uploads, instead of failing at the 10-second request timeout, and an
+  artifact's completion that cannot reach Hue takes about those three minutes to fail. Migration:
+  allow about three more minutes per generated file in CI and job timeouts.
 
 #### Added
 
