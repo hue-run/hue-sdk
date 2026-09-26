@@ -14,7 +14,7 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 [Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Versioning](./VERSIONING.md) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
-Don't have a Hue account yet? The Hue team sets up accounts: email founders@hue.run or book a time at https://calendar.notion.so/meet/akethini/fd2smi4yej. Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
+Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue.run](mailto:founders@hue.run) or book a time at [https://calendar.notion.so/meet/akethini/hue](https://calendar.notion.so/meet/akethini/hue). Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
 
 </div>
 
@@ -102,7 +102,7 @@ try {
 
 The default destination is `https://app.hue.run`. The trace records the input and output text above; with `captureContent: false` it keeps span names, timing and metadata without that text. The [tracing guide](./packages/sdk-typescript/README.md) covers capture, redaction, borrowed providers, streaming and shutdown.
 
-Don't have a Hue account yet? The Hue team sets up accounts: email founders@hue.run or book a time at https://calendar.notion.so/meet/akethini/fd2smi4yej. Without an account, run the same script against a local OpenTelemetry Collector by setting `baseUrl` as described in [Local development without a Hue account](./packages/sdk-typescript/README.md#local-development-without-a-hue-account); `checkConnection()` is a Hue-only diagnostic, so remove that call when the receiver is a generic collector.
+Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue.run](mailto:founders@hue.run) or book a time at [https://calendar.notion.so/meet/akethini/hue](https://calendar.notion.so/meet/akethini/hue). Without an account, run the same script against a local OpenTelemetry Collector by setting `baseUrl` as described in [Local development without a Hue account](./packages/sdk-typescript/README.md#local-development-without-a-hue-account); `checkConnection()` is a Hue-only diagnostic, so remove that call when the receiver is a generic collector.
 
 For Python, use the installation instructions above and follow the [complete Python example](./packages/sdk-python/README.md).
 

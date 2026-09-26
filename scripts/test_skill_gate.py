@@ -4,7 +4,9 @@
 guidance is live as soon as it merges. The Hue team sets up accounts; the agent setup page on
 docs.hue.run has the user create and store a key, and the skill names the contact for a user
 without an account. The key section must keep its rules, not just their keywords: check the key
-for presence only, never ask for it in chat, and change nothing until a key exists.
+for presence only, also when the agent arrives from the setup page, never ask for it in chat, and
+change nothing until a key exists. Every mention of pasting in the key section must be a negated
+instruction, so an added request such as "ask the developer to paste the key" fails the gate.
 """
 
 import re
@@ -15,13 +17,17 @@ SKILL = Path(__file__).resolve().parents[1] / "skills/hue/SKILL.md"
 KEY_SECTION = "Get a Hue API key"
 SETUP_URL = "https://docs.hue.run/guides/agent-setup.md"
 CONTACT_EMAIL = "founders@hue.run"
-BOOKING_URL = "https://calendar.notion.so/meet/akethini/fd2smi4yej"
+BOOKING_URL = "https://calendar.notion.so/meet/akethini/hue"
 # Commands that start or continue anonymous setup or account linkage.
 SETUP_COMMAND = re.compile(r"(@hue-run/sdk\S*|\bhue)\s+(setup|resume|claim)\b")
-# Copy from the retired invite-only gate, and the production preset the setup key must not be.
-FORBIDDEN = ("invite-only", "heightened demand", "then stop", "Tracing only")
-# An instruction to request the key in chat, unless it is the negated rule itself.
-PASTE_REQUEST = re.compile(r"(?<!never )\b(ask|tell) (them|the user) to paste", re.I)
+# Copy from the retired invite-only gate, the production preset the setup key must not be, and
+# the earlier wording that let an agent from the setup page skip the presence check.
+FORBIDDEN = ("invite-only", "heightened demand", "then stop", "Tracing only", "key step is done")
+PASTE = re.compile(r"\bpast(?:e[sd]?|ing)\b", re.I)
+# A negation within the same clause and at most four words before "paste", as in "never ask them
+# to paste" or "don't paste". Punctuation ends the clause, so a negation earlier in the sentence
+# ("never read it, and ask them to paste it") does not count.
+NEGATED_BEFORE_PASTE = re.compile(r"\b(?:never|not|don['’]t)\s+(?:[\w'’]+\s+){0,4}$", re.I)
 
 
 def fenced_lines(text: str) -> list[str]:
@@ -39,6 +45,10 @@ def fenced_lines(text: str) -> list[str]:
 def section(text: str, heading: str) -> str:
     match = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text, re.M | re.S)
     return match.group(1) if match else ""
+
+
+def unnegated_paste(key: str) -> bool:
+    return any(not NEGATED_BEFORE_PASTE.search(key[: m.start()]) for m in PASTE.finditer(key))
 
 
 def gate_problems(text: str) -> list[str]:
@@ -63,6 +73,7 @@ def gate_problems(text: str) -> list[str]:
             CONTACT_EMAIL,
             BOOKING_URL,
             "never reading its value",
+            "confirm the same way that `HUE_API_KEY` is now present",
             "never ask them to paste it into chat",
             "do not install packages or change files",
         )
@@ -72,7 +83,7 @@ def gate_problems(text: str) -> list[str]:
         for phrase in FORBIDDEN:
             if phrase.casefold() in key.casefold():
                 problems.append(f"key section still says {phrase!r}")
-        if PASTE_REQUEST.search(key):
+        if unnegated_paste(key):
             problems.append("key section asks the user to paste the key")
         if text.index(f"## {KEY_SECTION}") > text.index("## Install and configure"):
             problems.append("key section must come before install instructions")
@@ -138,6 +149,49 @@ class SkillKeyGateTests(unittest.TestCase):
             "If they cannot store it, ask them to paste it here. Share this line",
         )
         self.assertEqual(gate_problems(regressed), ["key section asks the user to paste the key"])
+
+    def test_gate_check_rejects_other_requests_to_paste_the_key(self):
+        text = SKILL.read_text()
+        for request in (
+            "ask the developer to paste the key into chat.",
+            "If storing fails, the user can paste it here.",
+            "Never read its value, and ask the developer to paste the key into chat.",
+            "Pasting the key into chat is fine for a first run.",
+        ):
+            with self.subTest(request=request):
+                regressed = replace_in_key_section(
+                    text, "Share this line", f"{request} Share this line"
+                )
+                self.assertEqual(
+                    gate_problems(regressed), ["key section asks the user to paste the key"]
+                )
+
+    def test_gate_check_accepts_negated_paste_rules(self):
+        text = SKILL.read_text()
+        for rule in (
+            "Don't paste the key into chat.",
+            "Do not ask the developer to paste it here.",
+        ):
+            with self.subTest(rule=rule):
+                added = replace_in_key_section(text, "Share this line", f"{rule} Share this line")
+                self.assertEqual(gate_problems(added), [])
+
+    def test_gate_check_requires_a_key_check_after_the_setup_page(self):
+        text = SKILL.read_text()
+        rule = re.search(r"If you came here from the agent setup page, .*?packages\.", text, re.S)
+        assert rule, "setup page rule not found"
+        regressed = replace_in_key_section(
+            text,
+            rule.group(0),
+            "If you came here from the agent setup page, the key step is done: continue with "
+            "Install and configure.",
+        )
+        problems = gate_problems(regressed)
+        self.assertIn(
+            "key section is missing 'confirm the same way that `HUE_API_KEY` is now present'",
+            problems,
+        )
+        self.assertIn("key section still says 'key step is done'", problems)
 
     def test_gate_check_requires_a_presence_only_key_check(self):
         regressed = replace_in_key_section(

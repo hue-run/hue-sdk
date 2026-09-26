@@ -31,8 +31,9 @@ Before installing anything, check whether the user has a Hue project key configu
 `HUE_API_KEY`: ask, or look for it in the application's secret workflow, checking only that it is
 present and never reading its value. A key of any preset means the user has a Hue account, so
 continue with the SDK guides above and the steps below, which have them create a **Read and write**
-key if theirs is another preset. If you came here from the agent setup page, the key step is done:
-continue with Install and configure.
+key if theirs is another preset. If you came here from the agent setup page, confirm the same way
+that `HUE_API_KEY` is now present before you continue with Install and configure; if it is still
+missing, repeat that page's key message and the contact line below instead of installing packages.
 
 Otherwise, for a first-time setup, read the [agent setup page](https://docs.hue.run/guides/agent-setup.md)
 and follow it; it brings you back here for tracing and ends by connecting the Hue MCP server. The
@@ -40,7 +41,7 @@ user creates a **Read and write** key under **Settings → Integrations & API ke
 `HUE_API_KEY` themselves; never ask them to paste it into chat. Share this line with a user who has
 no Hue account:
 
-> Don't have a Hue account yet? The Hue team sets up accounts: email founders@hue.run or book a time at https://calendar.notion.so/meet/akethini/fd2smi4yej.
+> Don't have a Hue account yet? The Hue team sets up accounts: email founders@hue.run or book a time at https://calendar.notion.so/meet/akethini/hue.
 
 Without a key, do not install packages or change files unless the user asks you to prepare tracing
 against a local OpenTelemetry collector. Anonymous setup (`setup --agent`, `resume`, `hue claim`) is
@@ -182,7 +183,7 @@ See [troubleshooting](https://docs.hue.run/guides/troubleshooting) for delivery 
 
 ## Handoff
 
-End with one of these, filled in with the actual values. If the Hue MCP server is not connected, close that message by offering to connect it (step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md)).
+End with one of these, filled in with the actual values. If the user has a Hue account and a **Read** or **Read and write** key and the Hue MCP server is not connected, close that message by offering to connect it (step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md)). Do not offer it after a keyless setup, such as tracing against a local OpenTelemetry collector.
 
 - Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`). I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
 - Needs a key or a run: "Code changes are complete and tested against a loopback receiver. Configure `HUE_API_KEY` through `<secret workflow>` and run `<command>`; then I can verify the stored trace."
