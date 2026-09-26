@@ -198,11 +198,12 @@ tools whatever the key allows. A project key, with or without it, keeps reaching
 With `--auth oauth` it is refused: a sign-in connection has **Read and write** access, so use a
 **Read** project key for read-only access.
 
-`--toolsets <names>` chooses the tools the connection lists: `all`, `observe` (the production
-reads: projects, traces, spans and their recorded content, sessions, trace checks, intents and
-documentation), or the groups `project`, `traces`, `evals`, `environments`, `intents` and `docs`,
-comma-separated. The selection is added to the URL as `?toolsets=<names>`, for a key or a sign-in
-configuration alike. Without `--toolsets`, `claude-code`, `codex` and `conductor` select `all`,
+`--toolsets <names>` chooses the tools the connection lists: `all`; the profiles `observe`
+(production reads), `author` (author evaluations) and `evaluate` (run an agent against a case);
+or the groups `project`, `traces`, `eval_sets`, `runs`, `judges`, `cases`, `runners`,
+`environments`, `intents` and `docs`, comma-separated. Each group holds at most 20 tools. The
+selection is added to the URL as `?toolsets=<names>`, for a key or a sign-in configuration alike.
+Without `--toolsets`, `claude-code`, `codex` and `conductor` select `all`,
 because those agents defer MCP tools behind their own tool search; `cursor`, which caps the tools
 it loads, selects `observe`; the other clients list Hue's default. The default is the production
 reads plus `search_hue_tools`, which finds every other tool the connection can call, and
