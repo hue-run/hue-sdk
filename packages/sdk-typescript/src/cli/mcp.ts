@@ -689,11 +689,16 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   if (auth === "oauth" && new URL(url).searchParams.has("toolsets"))
     return fail("Leave toolsets off a sign-in URL; --toolsets sends them in a header instead.", 2);
   // --toolsets wins over a selection already in --url, which wins over the client's default.
-  let toolsets: string | undefined =
-    new URL(url).searchParams.get("toolsets") ?? DEFAULT_TOOLSETS[clientId];
-  if (parsed.values.toolsets !== undefined) {
-    const selected = parseToolsets(parsed.values.toolsets);
-    if ("error" in selected) return fail(`${selected.error}\n\n${MCP_USAGE}`, 2);
+  // Both sources are validated: Hue ignores an unknown name and would list every tool.
+  const requested = parsed.values.toolsets ?? new URL(url).searchParams.get("toolsets");
+  let toolsets: string | undefined = DEFAULT_TOOLSETS[clientId];
+  if (requested !== null) {
+    const selected = parseToolsets(requested);
+    if ("error" in selected)
+      return fail(
+        `${parsed.values.toolsets === undefined ? "In --url: " : ""}${selected.error}\n\n${MCP_USAGE}`,
+        2,
+      );
     toolsets = selected.toolsets;
   }
   // `all` is Hue's default, so it needs no selection.

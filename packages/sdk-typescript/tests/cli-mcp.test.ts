@@ -721,6 +721,9 @@ describe("hue mcp install", () => {
         "https://mcp.hue.run/mcp?read_only=true&toolsets=traces",
       ),
     );
+    const typo = await mcp(withUrl("obsrve"), { cwd: root });
+    expect(typo.code).toBe(2);
+    expect(typo.stderr).toContain("In --url: Unknown toolset: obsrve.");
     expect(toolsetsMcpUrl("https://mcp.hue.run/mcp?toolsets=observe", undefined)).toBe(
       "https://mcp.hue.run/mcp",
     );
