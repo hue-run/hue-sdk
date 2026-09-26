@@ -47,20 +47,25 @@ refuses to publish a version without a matching entry below.
 
 - `hue mcp install --auth oauth` configures only the server URL, so the client signs in with Hue
   in the browser instead of sending a key: a URL-only `.mcp.json` or `claude mcp add` for
-  `claude-code`, and `codex mcp add hue --url URL` for `codex`. The default stays `--auth key`.
+  `claude-code`, and `codex mcp add hue --url URL` for `codex`. The connection it signs in is
+  Hue's organization connection: **Read and write** access to the active projects of one
+  organization, selected per call with `project_id` from `list_projects`. The default stays
+  `--auth key`, whose key keeps reaching its one project.
   Sign-in is refused for `cursor`, whose callback Hue does not yet accept, and for `vscode`,
   `windsurf` and `gemini`.
 - `hue mcp install --client conductor` registers the server for Conductor's Claude Code (user
   scope) and Codex agents with each CLI on `PATH`, and signs in by default.
 - `hue mcp install --read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides
   and rejects write tools whatever the key allows. With `--auth oauth` it is refused, since a
-  sign-in connection's access is chosen when it is approved.
+  sign-in connection has **Read and write** access; a **Read** project key is the read-only
+  option.
 
 #### Changed
 
-- The prompt `hue mcp install` prints to verify the connection asks for the traces from the last
-  24 hours that need attention or have errors, and for the 5 most recent traces when there are
-  none, instead of only the 5 most recent error traces.
+- The prompt `hue mcp install` prints to verify the connection starts with `list_projects`, which
+  every credential answers, and passes `project_id` on an organization connection. It then asks
+  for the traces from the last 24 hours that need attention or have errors, and for the 5 most
+  recent traces when there are none, instead of only the 5 most recent error traces.
 - `hue mcp install --client gemini` runs `gemini mcp add --scope user --transport http hue URL
   --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, the form in Hue's connection guide, instead
   of a project-scope entry with `-H '… $HUE_MCP_KEY'`. The VS Code key prompt reads "Hue Read or

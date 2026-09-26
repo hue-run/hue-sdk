@@ -185,14 +185,17 @@ for staging). Hue's Settings page does not show these snippets; this command kee
 
 - `key` (the default, except for `conductor`) references the `HUE_MCP_KEY` environment variable,
   which `hue login` stores in `.env.hue`. A key value is never written.
-- `oauth` configures the URL only. The client opens Hue in a browser, where you sign in, select one
-  project and approve **Read** or **Read and write**; no key or header is involved. It is available
+- `oauth` configures the URL only. The client opens Hue in a browser, where you sign in and
+  approve the connection; no key or header is involved. A new sign-in connection has **Read and
+  write** access to every active project in the organization you choose, within your role, so an
+  agent first calls `list_projects` and passes the chosen project's id as `project_id`. It is available
   for `claude-code`, `codex` and `conductor`. Hue does not yet accept Cursor's sign-in callback, so
   `cursor` and the other clients use a key.
 
 `--read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides and rejects write
-tools whatever the key allows. With `--auth oauth` it is refused: choose **Read** when you approve
-the connection instead.
+tools whatever the key allows. A project key, with or without it, keeps reaching its one project.
+With `--auth oauth` it is refused: a sign-in connection has **Read and write** access, so use a
+**Read** project key for read-only access.
 
 | Client | Key (`--auth key`) | Sign-in (`--auth oauth`) |
 | --- | --- | --- |
@@ -222,8 +225,7 @@ the client (VS Code prompts for the key instead). A desktop app started from the
 does not see that shell's variables, and Conductor's agents read the login-shell environment that
 Conductor captures, so sign-in is the simpler choice there. After a sign-in installation it names
 the client's authentication action. Both end with the prompt that verifies the connection:
-`Use the Hue MCP: call get_project_context, then show the traces from the last 24 hours that need
-attention or have errors, with links. If there are none, show my 5 most recent traces.` Exit codes:
+`Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id as project_id on each call after list_projects.` `list_projects` returns a project key's one project too. Exit codes:
 `0` done or printed, `1` failed, `2` usage error.
 
 ## Local state and conflicts
