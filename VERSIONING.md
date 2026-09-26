@@ -12,6 +12,7 @@ This policy covers `@hue-run/sdk` (npm) and `hue-run` (PyPI). Both packages are 
 
 - TypeScript: the runtime exports and exported types of `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/environment`, `@hue-run/sdk/evals`, `@hue-run/sdk/managed` and `@hue-run/sdk/setup`; the `hue` binary; and `@hue-run/sdk/setup-events.schema.json`.
 - Python: the names listed in `hue_sdk.__all__`, `hue_sdk.evals.__all__` and `hue_sdk.managed.__all__`.
+- `hue mcp install` follows Hue's MCP server and its connection guide: the toolset names it accepts, the configuration it writes and each client's default selection change with the server, in any release.
 
 Everything else is internal even when importable: Python submodules such as `hue_sdk.client`, `hue_sdk.transport`, `hue_sdk.receipts`, `hue_sdk.processors` and `hue_sdk.snapshots`, any `_`-prefixed module or name, and class members prefixed with `_`. Internal names may change in any release.
 

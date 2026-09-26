@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.11.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.11.1`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -187,7 +187,7 @@ for staging). Hue's Settings page does not show these snippets; this command kee
 - `key` (the default, except for `conductor`) references the `HUE_MCP_KEY` environment variable,
   which `hue login` stores in `.env.hue`. A key value is never written.
 - `oauth` configures the URL only. The client opens Hue in a browser, where you sign in and
-  approve the connection; no key or header is involved. A new sign-in connection has **Read and
+  approve the connection; no key is involved. A new sign-in connection has **Read and
   write** access to every active project in the organization you choose, within your role, so an
   agent first calls `list_projects` and passes the chosen project's id as `project_id`. It is available
   for `claude-code`, `codex` and `conductor`. Hue does not yet accept Cursor's sign-in callback, so
@@ -198,27 +198,33 @@ tools whatever the key allows. A project key, with or without it, keeps reaching
 With `--auth oauth` it is refused: a sign-in connection has **Read and write** access, so use a
 **Read** project key for read-only access.
 
-`--toolsets <names>` lists only the named tools, for clients with a tool-count limit or agents that
-only read production: `observe` (the production reads: projects, traces, spans and their recorded
-content, sessions, trace checks, intents and documentation), `all`, or the groups `project`, `traces`, `evals`, `environments`,
-`intents` and `docs`, comma-separated. A key configuration adds `?toolsets=<names>` to the URL. A
-sign-in configuration keeps the URL bare and sends the `X-Hue-MCP-Toolsets` header instead,
-because toolsets are not part of the connection's identity: Claude Code stores the header, and for
-Codex the command prints the `http_headers` line to add to `~/.codex/config.toml`, since
-`codex mcp add` stores none. `--toolsets` replaces a selection already in `--url`, and a selection in `--url` is kept without
-it; otherwise `cursor` selects `observe`. `--toolsets all` lists every tool. Unknown names are refused rather than passed on, because Hue
-ignores them and would list every tool. `get_project_context` is always listed and reports the
-selection.
+`--toolsets <names>` chooses the tools the connection lists: `all`, `observe` (the production
+reads: projects, traces, spans and their recorded content, sessions, trace checks, intents and
+documentation), or the groups `project`, `traces`, `evals`, `environments`, `intents` and `docs`,
+comma-separated. The selection is added to the URL as `?toolsets=<names>`, for a key or a sign-in
+configuration alike. Without `--toolsets`, `claude-code`, `codex` and `conductor` select `all`,
+because those agents defer MCP tools behind their own tool search; `cursor`, which caps the tools
+it loads, selects `observe`; the other clients list Hue's default. The default is the production
+reads plus `search_hue_tools`, which finds every other tool the connection can call, and
+`execute_hue_tool` and `execute_hue_write_tool`, which call one by name (the write executor only
+with write access), so nothing is out of reach. `--toolsets` replaces a selection already in
+`--url`, and a selection in `--url` is kept without it. Unknown names are refused rather than
+passed on, because Hue ignores them and would list its default. `get_project_context` is always
+listed and reports the selection.
 
 | Client | Key (`--auth key`) | Sign-in (`--auth oauth`) |
 | --- | --- | --- |
 | `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. | Merges `mcpServers.hue` with only `type` and `url` into `./.mcp.json`; `--scope user` runs `claude mcp add --transport http --scope user hue URL`. Then run `/mcp` in Claude Code, select `hue` and choose **Authenticate**. |
-| `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. | Runs `codex mcp add hue --url URL`, which can start sign-in right away; `codex mcp login hue` starts or repeats it. |
+| `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. | Runs `codex mcp add hue --url URL`, which can start sign-in right away; `codex mcp login hue` starts or repeats it. The printed TOML block keeps its URL bare and sends the selection as the `X-Hue-MCP-Toolsets` header. |
 | `conductor` | Runs the Claude Code user-scope and Codex key commands above. | The default: runs `claude mcp add --transport http --scope user hue URL` and `codex mcp add hue --url URL`. Then use `hue`'s authentication action in Conductor's MCP status (the plug icon or `/mcp-status`). |
 | `cursor` | Merges `mcpServers.hue` into `./.cursor/mcp.json` with `${env:HUE_MCP_KEY}`. | Refused. |
 | `vscode` | Merges `servers.hue` and the `hue-mcp-key` password input into `./.vscode/mcp.json`. | Refused. |
 | `windsurf` | Prints the `serverUrl` snippet for `~/.codeium/windsurf/mcp_config.json`; nothing is written to the home directory. | Refused. |
 | `gemini` | Runs `gemini mcp add --scope user --transport http hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, or prints it. | Refused. |
+
+Every Codex TOML block sets `supports_parallel_tool_calls = true`, so Codex runs Hue's independent
+calls in parallel rather than one at a time. `codex mcp add` has no option for it, so after
+registering with Codex the command names the line to add under `[mcp_servers.hue]`.
 
 Conductor has no MCP configuration of its own: its Claude Code and Codex agents read their user
 configuration in every workspace, so `conductor` registers the server at user scope with each CLI
@@ -406,7 +412,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.11.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.11.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -417,7 +423,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.11.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.11.1.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
