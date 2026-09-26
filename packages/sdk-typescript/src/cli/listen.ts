@@ -558,7 +558,7 @@ function describeAck(result: AckResult): string {
     case "refused":
       return `Hue refused the acknowledgement (HTTP ${result.status}${result.code ? ` ${result.code}` : ""})`;
     default:
-      return "Hue: unacknowledged, the lease lapses into a timeout";
+      return "Hue did not answer the acknowledgement; unless it was recorded, the lease lapses into a timeout";
   }
 }
 
@@ -625,7 +625,9 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     if (!/^\d{1,2}$/u.test(values.max ?? String(MAX_BATCH)) || max < 1 || max > MAX_BATCH)
       throw new UsageError(`--max must be an integer from 1 to ${MAX_BATCH}`);
   } catch (error) {
-    warn((error as Error).message);
+    // The credential is not known yet here, so a token pasted as an argument or a path is caught
+    // by its shape.
+    warn(foreign((error as Error).message));
     stderr.write(`\n${LISTEN_USAGE}\n`);
     return 2;
   }
@@ -774,7 +776,13 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       const request = new AbortController();
       const abort = () => request.abort();
       forced.signal.addEventListener("abort", abort, { once: true });
-      const timer = setTimeout(abort, Math.min(ACK_REQUEST_TIMEOUT_MS, Math.max(1_000, remaining)));
+      // The first attempt gets the full request time: it is sent whatever the lease has left.
+      const timer = setTimeout(
+        abort,
+        attempt === 0
+          ? ACK_REQUEST_TIMEOUT_MS
+          : Math.min(ACK_REQUEST_TIMEOUT_MS, Math.max(1_000, remaining)),
+      );
       try {
         const response = await fetchImpl(`${base}/${delivery.deliveryId}/ack`, {
           method: "POST",

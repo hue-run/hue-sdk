@@ -510,6 +510,17 @@ describe("hue listen arguments", () => {
         message: "holds the project key in HUE_MCP_KEY",
       },
       { env: { HUE_API_KEY: PROJECT_KEY }, message: "never uses a project key" },
+      {
+        // A token pasted as an argument or a path is not echoed back.
+        env: { HUE_WORLD_TOKEN: WORLD_TOKEN },
+        argv: [...args(hue.origin, bot.url), CONNECTION_KEY],
+        message: "Unexpected argument: [redacted]",
+      },
+      {
+        env: { HUE_WORLD_TOKEN: WORLD_TOKEN },
+        argv: [...args(hue.origin, bot.url), "--env-path", `/tmp/${WORLD_TOKEN}`],
+        message: "Unable to load /tmp/[redacted]",
+      },
       { env: { HUE_WORLD_TOKEN: CONNECTION_KEY }, message: "holds a key, not a world token" },
       { env: { HUE_CONNECTION_KEY: WORLD_TOKEN }, message: "holds a world token" },
       { env: { HUE_WORLD_TOKEN: `hue_at_${"a".repeat(40)}` }, message: "is not a world token" },
@@ -1086,7 +1097,7 @@ describe("hue listen delivery safety", () => {
     const bot = await receiver();
     hue.queue.push(slackDelivery("event_callback"));
     const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
-    await until(() => listen.stdout().includes("unacknowledged"), 4_000);
+    await until(() => listen.stdout().includes("did not answer the acknowledgement"), 4_000);
     listen.stop();
     expect(await listen.exit).toBe(0);
     expect(hue.acks.length).toBeGreaterThanOrEqual(1);
