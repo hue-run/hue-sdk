@@ -45,6 +45,29 @@ refuses to publish a version without a matching entry below.
   another pair's value). The `redact` hook sees the text as `status.message`. Without content
   capture the span keeps `error.type` only. **Wire**
 
+- `hue mcp install --auth oauth` configures only the server URL, so the client signs in with Hue
+  in the browser instead of sending a key: a URL-only `.mcp.json` or `claude mcp add` for
+  `claude-code`, and `codex mcp add hue --url URL` for `codex`. The default stays `--auth key`.
+  Sign-in is refused for `cursor`, whose callback Hue does not yet accept, and for `vscode`,
+  `windsurf` and `gemini`.
+- `hue mcp install --client conductor` registers the server for Conductor's Claude Code (user
+  scope) and Codex agents with each CLI on `PATH`, and signs in by default.
+- `hue mcp install --read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides
+  and rejects write tools whatever the key allows. With `--auth oauth` it is refused, since a
+  sign-in connection's access is chosen when it is approved.
+
+#### Changed
+
+- The prompt `hue mcp install` prints to verify the connection asks for the traces from the last
+  24 hours that need attention or have errors, and for the 5 most recent traces when there are
+  none, instead of only the 5 most recent error traces.
+- `hue mcp install --client gemini` runs `gemini mcp add --scope user --transport http hue URL
+  --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, the form in Hue's connection guide, instead
+  of a project-scope entry with `-H '… $HUE_MCP_KEY'`. The VS Code key prompt reads "Hue Read or
+  Read and write API key".
+- After a key installation, `hue mcp install` says that an app started from the Dock or a launcher
+  does not see the shell's `HUE_MCP_KEY`, and names sign-in as the alternative where it works.
+
 #### Fixed
 
 - `hue eval`, `hue login` and `hue mcp` name a missing peer dependency, such as the optional `zod`

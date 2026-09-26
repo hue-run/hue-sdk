@@ -83,8 +83,9 @@ claim. Setup never enables content capture or creates a simulation, Hue Run, eva
 or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
 For an existing account, `hue login` validates keys created in Hue Settings and stores them in
-`.env.hue` without printing them, and `hue mcp install --client claude-code` (or `cursor`, `codex`,
-`vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration that references `HUE_MCP_KEY`. See
+`.env.hue` without printing them, and `hue mcp install --client claude-code` (or `codex`,
+`conductor`, `cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration that
+references `HUE_MCP_KEY`, or with `--auth oauth` only the URL, for signing in with Hue. See
 [Sign in and store keys](./CLI.md#sign-in-and-store-keys) and
 [Install the MCP for your coding agent](./CLI.md#install-the-mcp-for-your-coding-agent).
 
