@@ -213,5 +213,5 @@ End with one of these, filled in with the actual values:
 
 - Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`). I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
 - Needs a key or a run: "Code changes are complete and tested against a loopback receiver. Configure `HUE_API_KEY` through `<secret workflow>` and run `<command>`; then I can verify the stored trace."
-- Investigated production: "In `<window>`, Hue returned `<total_count>` traces for `<filters>`; I opened `<sample size>` with `get_trace`. Hue recorded `<errors, attention states, trace-check results or timings, with trace links>`. My reading: `<conclusions, marked as mine>`. Not covered: `<filters, features or fields Hue lacks>`."
+- Investigated production: "In `<window>`, Hue counted `<total_count of each query, named by its filters: all traces, status error, needs attention; "at least" when total_count_capped>`; I opened `<sample size>` with `get_trace`. Hue recorded `<errors, attention states, trace-check results or timings, with trace links>`. My reading: `<conclusions, marked as mine>`. Not covered: `<filters, features or fields Hue lacks>`."
 - Blocked: "I stopped before guessing: `<specific ambiguity or failure>`. Next step: `<concrete decision or documentation link>`."
