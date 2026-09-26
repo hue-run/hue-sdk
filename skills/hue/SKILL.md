@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.6"
+  version: "0.5.7"
 ---
 
 # Hue tracing
@@ -131,6 +131,11 @@ only with write access). Call the executor with the tool's `name` and its `argum
 To list a guide's tools directly, select `author` for authoring evaluations or `evaluate` for
 running an agent against a published case. Narrow selections use the groups `project`, `traces`,
 `eval_sets`, `runs`, `judges`, `cases`, `runners`, `environments`, `intents` and `docs`.
+MCP arguments and results name ids after their product objects: `eval_set_id`,
+`eval_set_version_id`, `eval_set_case_id`, `evaluator_id`, `evaluator_version_id`, `run_id`,
+`scoring_run_id`, `scoring_item_id`, `managed_run_id`, `local_run_id`, `case_id`,
+`environment_version_id` and `trace_check_version_id`. List results use `eval_sets`, `evaluators`,
+`runs`, `scoring_runs` and `cases`; a row's own id stays `id`.
 
 1. Select the project. When the Hue tools take a `project_id` argument, the connection covers an
    organization: call `list_projects`, confirm with the user which project to read when more than

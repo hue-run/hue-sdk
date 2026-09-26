@@ -213,6 +213,14 @@ with write access), so nothing is out of reach. `--toolsets` replaces a selectio
 passed on, because Hue ignores them and would list its default. `get_project_context` is always
 listed and reports the selection.
 
+MCP arguments and results name ids after their product objects. Eval tools use `eval_set_id`,
+`eval_set_version_id`, `from_eval_set_version_id` and `eval_set_case_id`; `evaluator_id`,
+`evaluator_version_id` and `evaluator_version_ids`; `run_id` and `baseline_run_id`; and
+`scoring_run_id` and `scoring_item_id`. Dispatches use `managed_run_id` and `local_run_id`,
+reviewed cases `case_id`, environment versions `environment_version_id`, and trace-check versions
+`trace_check_version_id` or `active_trace_check_version_id`. List results are named `eval_sets`,
+`evaluators`, `runs`, `scoring_runs` and `cases`, while a row's own id remains `id`.
+
 | Client | Key (`--auth key`) | Sign-in (`--auth oauth`) |
 | --- | --- | --- |
 | `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. | Merges `mcpServers.hue` with only `type` and `url` into `./.mcp.json`; `--scope user` runs `claude mcp add --transport http --scope user hue URL`. Then run `/mcp` in Claude Code, select `hue` and choose **Authenticate**. |
