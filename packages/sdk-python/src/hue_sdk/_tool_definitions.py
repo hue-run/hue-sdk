@@ -75,10 +75,10 @@ _SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
 # A credential its own prefix identifies wherever it appears, ``%`` escapes included: Hue's API,
-# MCP, world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (``sk-``),
-# Stripe, Slack, Google OAuth, GitHub and GitLab ones.
+# MCP, world, attempt, simulation, setup, install and invocation tokens, and OpenAI and Anthropic
+# (``sk-``), Stripe, Slack, Google OAuth, GitHub and GitLab ones.
 _PREFIXED_TOKEN = re.compile(
-    r"\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_"
+    r"\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv)_|sk-|[rs]k_(?:live|test)_"
     r"|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}",
     re.IGNORECASE | re.ASCII,
 )
@@ -99,10 +99,10 @@ _PAIR_KEY = re.compile(
     re.IGNORECASE | re.ASCII,
 )
 # A quoted value to its closing quote on the same line, spaces and escaped quotes included, or one
-# between backslash-escaped quotes.
+# between backslash-escaped quotes, double or single.
 _QUOTED_VALUE = re.compile(
     r"\"(?:[^\"\\\r\n]|\\[^\r\n])+\"|'(?:[^'\\\r\n]|\\[^\r\n])+'"
-    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+\\\""
+    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+\\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'"
 )
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
@@ -112,9 +112,9 @@ _BARE_VALUE = re.compile(
     re.IGNORECASE | re.ASCII,
 )
 # An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
-# ``ApiKey …``), or a lone credential. One already replaced is left alone.
+# ``OAuth1 …``), or a lone credential. One already replaced is left alone.
 _AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)[^{_JS_SPACE}\"',;}})\]]+"
+    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)([^{_JS_SPACE}\"',;}})\]]+)"
     rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
 )
 
@@ -154,9 +154,13 @@ def _normalized_key(key: str) -> str:
 
 def _is_text_credential_key(key: str) -> bool:
     """A key naming a credential in free text: a tool definition's credential keys, any header
-    ending in ``Authorization`` and ``Bearer``."""
+    ending in ``Authorization``, and ``Bearer`` and ``Basic``."""
     normalized = _normalized_key(key)
-    return _is_credential_key(key) or normalized.endswith("authorization") or normalized == "bearer"
+    return (
+        _is_credential_key(key)
+        or normalized.endswith("authorization")
+        or normalized in ("bearer", "basic")
+    )
 
 
 # ``API key: …``: a credential named in two words, ``key`` right after ``API``.
@@ -169,29 +173,92 @@ def _is_api_key_phrase(text: str, key_start: int, key: str) -> bool:
     )
 
 
-def _scrub_pairs(text: str) -> str:
-    """Replace the value of each pair whose key names a credential."""
-    parts: list[str] = []
-    copied = 0
+def _opens_quote(text: str, index: int) -> bool:
+    """Whether a quote, or a backslash-escaped quote, opens at ``index``."""
+    return text[index : index + 1] in ('"', "'") or text.startswith(('\\"', "\\'"), index)
+
+
+def _pair_spans(text: str) -> list[tuple[int, int]]:
+    """The value of each pair whose key names a credential, without its quotes. A pair inside an
+    earlier pair's value is kept when its value runs past that value."""
+    spans: list[tuple[int, int]] = []
+    covered = 0
+    # The last ``Authorization`` value read: where it starts, where its first word ends and where
+    # it ends. A value starting inside that first word ends where it does, so each run is read once.
+    authorization: tuple[int, int, int] | None = None
     for match in _PAIR_KEY.finditer(text):
         start = match.end()
         key = match[2]
-        credential = _is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)
-        if start < copied or not credential:
+        if not (_is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)):
+            continue
+        nested = start < covered
+        is_authorization = _normalized_key(key).endswith("authorization")
+        # A value inside an earlier value ends where that value's run or quote ends, so it can run
+        # past it only by opening a quote (which may be the one that closes the earlier value) or,
+        # for ``Authorization``, by the word after its scheme.
+        if nested and not is_authorization and not _opens_quote(text, start):
             continue
         quoted = _QUOTED_VALUE.match(text, start)
-        bare = (
-            _AUTHORIZATION_BARE if _normalized_key(key).endswith("authorization") else _BARE_VALUE
-        )
-        value = quoted or bare.match(text, start)
-        if value is None:
-            continue
         if quoted:
-            quote = '\\"' if quoted[0].startswith("\\") else quoted[0][0]
-            parts.append(f"{text[copied:start]}{quote}{REDACTED}{quote}")
+            opening = 2 if quoted[0].startswith("\\") else 1
+            end = quoted.end()
+        elif is_authorization:
+            if (
+                authorization is not None
+                and authorization[0] < start < authorization[1]
+                and not _opens_quote(text, start)
+                and not text.startswith("[redacted]", start)
+                and not text.startswith("%5Bredacted%5D", start)
+            ):
+                opening, end = 0, authorization[2]
+            else:
+                value = _AUTHORIZATION_BARE.match(text, start)
+                if value is None:
+                    continue
+                opening, end = len(value[1]), value.end()
+                authorization = (start, value.end(2), end)
         else:
-            parts.append(f"{text[copied:start]}{value[1]}{REDACTED}")
-        copied = value.end()
+            value = _BARE_VALUE.match(text, start)
+            if value is None:
+                continue
+            opening, end = len(value[1]), value.end()
+        if end <= covered:
+            continue
+        spans.append((start + opening, end - (opening if quoted else 0)))
+        covered = end
+    return spans
+
+
+def _authorization_spans(text: str) -> list[tuple[int, int]]:
+    """The credential after each authorization scheme. A scheme word can end an earlier credential
+    (``…~bearer SECRET``), so the search resumes at each credential, which is read at most once
+    more."""
+    spans: list[tuple[int, int]] = []
+    position = 0
+    while (match := _AUTHORIZATION_VALUE.search(text, position)) is not None:
+        credential = match.start() + len(match[1]) + len(match[2])
+        spans.append((credential, match.end()))
+        position = credential
+    return spans
+
+
+def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """Replace the union of the spans with ``[redacted]``, each run of overlapping or touching
+    spans once."""
+    parts: list[str] = []
+    copied = 0
+    run: list[int] | None = None
+    for start, end in sorted(spans):
+        if run is not None and start <= run[1]:
+            run[1] = max(run[1], end)
+            continue
+        if run is not None:
+            parts.append(text[copied : run[0]] + REDACTED)
+            copied = run[1]
+        run = [start, end]
+    if run is not None:
+        parts.append(text[copied : run[0]] + REDACTED)
+        copied = run[1]
     parts.append(text[copied:])
     return "".join(parts)
 
@@ -210,9 +277,16 @@ def scrub_credential_text(text: str) -> str:
     bare) become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
     text = _scrub_text_urls(text)
-    text = _PREFIXED_TOKEN.sub(REDACTED, text)
-    text = _AUTHORIZATION_VALUE.sub(lambda match: f"{match[1]}{match[2]}{REDACTED}", text)
-    return _scrub_pairs(text)
+    # Every rule reads the same text and their matches are replaced together, so no rule's
+    # replacement can hide text another rule would have matched.
+    return _redact_spans(
+        text,
+        [
+            *_pair_spans(text),
+            *(match.span() for match in _PREFIXED_TOKEN.finditer(text)),
+            *_authorization_spans(text),
+        ],
+    )
 
 
 def _is_url_key(key: Any) -> bool:

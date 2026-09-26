@@ -5,10 +5,13 @@ import functools
 import inspect
 import json
 import os
+import random
 import subprocess
 import sys
 import time
+import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread, current_thread
@@ -18,6 +21,7 @@ from uuid import uuid4
 
 import pytest
 
+import hue_sdk.evals._json as json_module
 import hue_sdk.evals.runner as runner_module
 from hue_sdk import Hue
 from hue_sdk.evals import (
@@ -35,7 +39,7 @@ from hue_sdk.evals import (
     score_locally,
 )
 from hue_sdk.evals._checkpoint import CheckpointStore
-from hue_sdk.evals._json import json_value
+from hue_sdk.evals._json import JsonLimitError, _utf16_order, encode, json_value
 
 
 @pytest.fixture
@@ -840,6 +844,194 @@ def test_json_counts_each_expansion_of_shared_references_and_rejects_real_cycles
     right["next"] = left
     with pytest.raises(ValueError, match="cycles"):
         json_value(left)
+
+
+def test_object_keys_are_not_counted_as_values_as_in_the_typescript_sdk():
+    # Counting keys too refused an object of 10,001 members that TypeScript accepts.
+    json_value({f"k{index}": index for index in range(10_001)})
+    # The object and its members are 20,000 values; one member more is over the limit.
+    json_value({f"k{index}": index for index in range(19_999)}, max_bytes=1_000_000)
+    with pytest.raises(JsonLimitError) as refused:
+        json_value({f"k{index}": index for index in range(20_000)}, max_bytes=1_000_000)
+    assert refused.value.limit == "structure"
+
+
+def test_a_container_with_more_elements_than_values_left_is_refused_before_it_is_read():
+    elements = [0] * 5_000_000
+    started = time.perf_counter()
+    with pytest.raises(JsonLimitError) as refused:
+        json_value(elements)
+    assert refused.value.limit == "structure"
+    # Queueing five million children first took about a second and hundreds of megabytes.
+    assert time.perf_counter() - started < 0.1
+
+
+def test_both_sdks_refuse_an_output_for_the_same_reason():
+    # The TypeScript suite checks the same outputs. Values are read in order, members by key, and
+    # the first that is not JSON or past the value or depth bound decides.
+    big = "x" * 300_000
+    nan = float("nan")
+    deep: object = 0
+    for _ in range(40):
+        deep = [deep]
+    cycle: dict[str, object] = {}
+    cycle["self"] = cycle
+    keyed = {"a": nan, **{f"k{index:07d}": 0 for index in range(19_000)}}
+    cases = [
+        ([nan, big], "not JSON"),
+        ([big, *[0] * 25_000], "structure"),
+        ({"key\x00": 1}, "not JSON"),
+        ({"\ud800": 1}, "not JSON"),
+        # JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
+        ({"\uffff": nan, "😀": deep}, "structure"),
+        # The byte bound is checked last: past it, the output is read again, each object's keys in
+        # JavaScript's order, and a value that is not JSON or past another bound decides.
+        ([big, 0], "bytes"),
+        # The second read counts values afresh.
+        ([*[0] * 15_000, "x" * 200_000], "bytes"),
+        ([big, nan], "not JSON"),
+        ({"b": nan, "a": big}, "not JSON"),
+        ({"b": [0] * 25_000, "a": big}, "structure"),
+        ({"a": nan, "😀": 1, "\uffff" + big: 1}, "not JSON"),
+        ({"a": nan, "x" * 199_994: 1}, "not JSON"),
+        ({"a": deep, "x" * 199_994: 1}, "structure"),
+        ({"a": cycle, "x" * 199_994: 1}, "not JSON"),
+        ({"a": datetime(2026, 9, 26), "x" * 199_994: 1}, "not JSON"),
+        (keyed, "not JSON"),
+        # Keys that need more bytes than are left (each key's code points, two quotes and a colon)
+        # pass the byte bound before the members are read by key.
+        ({"b": nan, "a": deep, "x" * 199_989: 1}, "structure"),
+        ({"b": nan, "a": deep, "x" * 199_990: 1}, "not JSON"),
+        ({"b": nan, "a": deep, "😀" * 199_989: 1}, "structure"),
+        ({"b": nan, "a": deep, "😀" * 199_990: 1}, "not JSON"),
+        # JavaScript lists an object's array indices (up to 2 ** 32 - 2) first, in numeric order.
+        ({"b": nan, "1": deep, "x" * 199_994: 1}, "structure"),
+        ({"10": deep, "9": nan, "x" * 199_994: 1}, "not JSON"),
+        ({"b": nan, "4294967294": deep, "x" * 199_994: 1}, "structure"),
+        ({"b": nan, "4294967295": deep, "x" * 199_994: 1}, "not JSON"),
+        ({"b": nan, "01": deep, "x" * 199_994: 1}, "not JSON"),
+    ]
+    outcomes = []
+    for value, _ in cases:
+        try:
+            json_value(value)
+            outcomes.append("accepted")
+        except JsonLimitError as error:
+            outcomes.append(error.limit)
+        except ValueError:
+            outcomes.append("not JSON")
+    assert outcomes == [reason for _, reason in cases]
+
+
+def test_a_string_referenced_many_times_past_the_byte_bound_is_checked_once():
+    # Checking each reference again took 103 seconds for the first output.
+    long = "é" * 1_000_000
+    for value in ([long] * 19_999, [{long: 0} for _ in range(9_999)]):
+        started = time.perf_counter()
+        with pytest.raises(JsonLimitError) as refused:
+            json_value(value)
+        assert refused.value.limit == "bytes"
+        assert time.perf_counter() - started < 1
+
+
+def test_the_byte_bound_is_the_exact_length_of_the_json_text():
+    # A quote or backslash escapes to two bytes, a control character to six; é, € and 😀 take two,
+    # three and four bytes.
+    sample = {'k"\\': ['"\\\n\u0001é€😀', 1.5, 1e-07, True, False, None, [], {}]}
+    exact = len(encode(sample))
+    json_value(sample, exact)
+    with pytest.raises(JsonLimitError) as refused:
+        json_value(sample, exact - 1)
+    assert refused.value.limit == "bytes"
+
+
+def test_an_output_too_large_to_serialize_is_refused_by_its_count_before_it_is_serialized():
+    # Checking and serializing each of eleven references to a 50 MB string took tens of seconds
+    # and a gigabyte.
+    big = "x" * 50_000_000
+    started = time.perf_counter()
+    with pytest.raises(JsonLimitError) as refused:
+        json_value([big] * 11)
+    assert refused.value.limit == "bytes"
+    assert time.perf_counter() - started < 0.5
+
+
+def test_a_huge_key_is_refused_without_copying_it_to_sort_the_keys():
+    # Encoding each key to sort it by UTF-16 code unit copied a 50 MB key twice over.
+    for members in ({"x" * 50_000_000: 1, "b": 2}, {"\uffff" + "x" * 50_000_000: 1, "😀": 2}):
+        tracemalloc.start()
+        try:
+            with pytest.raises(JsonLimitError) as refused:
+                json_value(members)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert refused.value.limit == "bytes"
+        assert peak < 10_000_000
+
+
+def test_keys_that_need_more_bytes_than_are_left_are_refused_before_they_are_sorted(monkeypatch):
+    # Long keys that share a prefix and hold both a character above U+FFFF and one from U+E000,
+    # so they sort by comparator: 2,000 of them took 29 seconds.
+    keys = ["a" * 65_000 + f"{index:05d}" + ("😀" if index % 2 else "！") for index in range(300)]
+    random.Random(7).shuffle(keys)
+    members = dict.fromkeys(keys, 0)
+    sorted_lengths = []
+
+    def order(keys):
+        sorted_lengths.append(len(keys))
+        return _utf16_order(keys)
+
+    monkeypatch.setattr(json_module, "_utf16_order", order)
+    started = time.perf_counter()
+    with pytest.raises(JsonLimitError) as refused:
+        json_value(members)
+    assert refused.value.limit == "bytes"
+    assert sorted_lengths == []
+    # Checking each key's text, as the byte bound is checked last, is all that is left.
+    assert time.perf_counter() - started < 1
+
+
+def test_keys_sort_by_utf16_code_unit_as_javascript_sorts_them():
+    shared = "p" * 5_000
+    keys = ["\uffff", "😀", "a", "\ue000b", "𝄞", "z", "\ud7ff", shared + "\uffff", shared + "😀"]
+    # Keys that differ, or end, on either side of the 64 KiB chunks the comparator skips.
+    keys += ["p" * length + end for length in (65_535, 65_536, 65_537) for end in ("", "😀", "！")]
+    assert _utf16_order(keys) == sorted(
+        keys, key=lambda key: key.encode("utf-16-be", "surrogatepass")
+    )
+
+
+def test_long_keys_sharing_a_prefix_sort_by_utf16_code_unit_quickly():
+    # Comparing the chunk that differs character by character took 4.4 seconds here.
+    keys = ["p" * 60_000 + f"{index:05d}" + ("😀" if index % 2 else "！") for index in range(300)]
+    random.Random(3).shuffle(keys)
+    started = time.perf_counter()
+    ordered = _utf16_order(keys)
+    assert time.perf_counter() - started < 1
+    assert ordered == sorted(keys, key=lambda key: key.encode("utf-16-be"))
+
+
+def test_an_output_the_process_cannot_hold_fails_its_case_as_too_large(
+    evaluation_receiver, tmp_path, monkeypatch
+):
+    output = "an output the process cannot hold"
+    checked = runner_module.json_value
+
+    def exhausted(value, *args):
+        if value == output:
+            raise MemoryError
+        return checked(value, *args)
+
+    monkeypatch.setattr(runner_module, "json_value", exhausted)
+    arguments = options(evaluation_receiver, tmp_path, lambda *_args: output, persist=False)
+    try:
+        run_experiment(**arguments)
+        body = evaluation_receiver.complete_body
+        assert body["state"] == "error" and body["error"] == {"type": "OutputTooLarge"}
+        assert any(path.endswith("/finish") for _, path, *_ in evaluation_receiver.requests)
+    finally:
+        arguments["hue"].shutdown()
 
 
 def test_fresh_exporter_cannot_acknowledge_a_prior_failed_trace(evaluation_receiver, tmp_path):

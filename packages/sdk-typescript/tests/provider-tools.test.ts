@@ -4,9 +4,10 @@ import {
   hostedToolActivity,
   providerErrorDescription,
 } from "../src/provider-tools.js";
-import { toolCatalogSummary } from "../src/tool-definitions.js";
+import { scrubCredentialText, toolCatalogSummary } from "../src/tool-definitions.js";
 import errorTexts from "./fixtures/provider-error-text.json" with { type: "json" };
 import listingDigest from "./fixtures/provider-tool-listing.json" with { type: "json" };
+import plantedSecrets from "./fixtures/planted-secrets.json" with { type: "json" };
 
 /** An item whose `type` cannot be read, as a broken provider model can be. */
 const raisingType = () =>
@@ -276,4 +277,22 @@ test("server.address keeps an underscore in a host name, as WHATWG URL parsing d
       }),
     ),
   ).toEqual({ compose: "mcp_server", internal: "mcp_gateway.internal.example" });
+});
+
+test("every secret planted in the shared corpus is redacted, one case at a time or all at once", () => {
+  // The Python suite checks the same corpus; `planted-secrets.py` regenerates it from its seed.
+  const started = performance.now();
+  const leaked = plantedSecrets.cases.flatMap(({ input, secrets }) => {
+    const scrubbed = scrubCredentialText(input);
+    return secrets.filter((secret) => scrubbed.includes(secret));
+  });
+  expect(leaked).toEqual([]);
+  // The whole corpus as one text: every secret still redacted, in time linear in its length.
+  const whole = scrubCredentialText(plantedSecrets.cases.map(({ input }) => input).join("\n"));
+  expect(
+    plantedSecrets.cases.flatMap(({ secrets }) =>
+      secrets.filter((secret) => whole.includes(secret)),
+    ),
+  ).toEqual([]);
+  expect(performance.now() - started).toBeLessThan(2_000);
 });

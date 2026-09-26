@@ -121,10 +121,10 @@ function scrubTextUrl(url: string, state: ScrubState): string {
   return /[@?#]/.test(url) ? REDACTED : url;
 }
 /** A credential its own prefix identifies wherever it appears, `%` escapes included: Hue's API, MCP,
- * world, attempt, simulation, setup and install tokens, and OpenAI and Anthropic (`sk-`), Stripe,
- * Slack, Google OAuth, GitHub and GitLab ones. */
+ * world, attempt, simulation, setup, install and invocation tokens, and OpenAI and Anthropic
+ * (`sk-`), Stripe, Slack, Google OAuth, GitHub and GitLab ones. */
 const prefixedToken =
-  /\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install)_|sk-|[rs]k_(?:live|test)_|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}/gi;
+  /\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv)_|sk-|[rs]k_(?:live|test)_|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}/gi;
 /** An authorization scheme followed by its credential, as in an `Authorization` header, up to
  * whitespace, a quote, a delimiter or a backslash. The credential cannot start with `=` or `:`, so
  * `token = value` and `Token : value` are left to the key-value rule. */
@@ -136,26 +136,31 @@ const authorizationValue =
  * inside another pair's value (`error: token=…`) is found. */
 const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1(\s*[:=]\s*)/gi;
 /** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
- * one between backslash-escaped quotes. */
+ * one between backslash-escaped quotes, double or single. */
 const quotedValue =
-  /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"/y;
+  /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'/y;
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
   /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
 /** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
- * `ApiKey …`), or a lone credential. One already replaced is left alone. */
+ * `OAuth1 …`), or a lone credential. One already replaced is left alone. */
 const authorizationBare =
-  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)[^\s"',;})\]]+(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)([^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
 
 function normalizedKey(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, "");
 }
 /** A key naming a credential in free text: a tool definition's credential keys, any header ending
- * in `Authorization` and `Bearer`. */
+ * in `Authorization`, and `Bearer` and `Basic`. */
 function isTextCredentialKey(key: string): boolean {
   const normalized = normalizedKey(key);
-  return isCredentialKey(key) || normalized.endsWith("authorization") || normalized === "bearer";
+  return (
+    isCredentialKey(key) ||
+    normalized.endsWith("authorization") ||
+    normalized === "bearer" ||
+    normalized === "basic"
+  );
 }
 
 /** `API key: …`: a credential named in two words, `key` right after `API`. */
@@ -166,29 +171,117 @@ function isApiKeyPhrase(text: string, keyStart: number, key: string): boolean {
   );
 }
 
-/** Replaces the value of each pair whose key names a credential. */
-function scrubPairs(text: string): string {
-  let result = "";
-  let copied = 0;
+/** A run of text to replace with `[redacted]`: its start and end offsets. */
+type Span = [start: number, end: number];
+
+/** Whether a quote, or a backslash-escaped quote, opens at `index`. */
+function opensQuote(text: string, index: number): boolean {
+  const character = text[index];
+  return (
+    character === '"' ||
+    character === "'" ||
+    text.startsWith('\\"', index) ||
+    text.startsWith("\\'", index)
+  );
+}
+
+/** The value of each pair whose key names a credential, without its quotes. A pair inside an
+ * earlier pair's value is kept when its value runs past that value. */
+function pairSpans(text: string): Span[] {
+  const spans: Span[] = [];
+  let covered = 0;
+  // The last `Authorization` value read: where it starts, where its first word ends and where it
+  // ends. A value starting inside that first word ends where it does, so each run is read once.
+  let authorization: { from: number; firstEnd: number; end: number } | undefined;
   for (const match of text.matchAll(pairKey)) {
     const start = match.index + match[0].length;
     const key = match[2]!;
     const keyStart = match.index + match[1]!.length;
-    if (start < copied || !(isTextCredentialKey(key) || isApiKeyPhrase(text, keyStart, key)))
-      continue;
+    if (!(isTextCredentialKey(key) || isApiKeyPhrase(text, keyStart, key))) continue;
+    const nested = start < covered;
+    const isAuthorization = normalizedKey(key).endsWith("authorization");
+    // A value inside an earlier value ends where that value's run or quote ends, so it can run
+    // past it only by opening a quote (which may be the one that closes the earlier value) or,
+    // for `Authorization`, by the word after its scheme.
+    if (nested && !isAuthorization && !opensQuote(text, start)) continue;
     quotedValue.lastIndex = start;
     const quoted = quotedValue.exec(text);
-    let value = quoted;
-    if (!quoted) {
-      const bare = normalizedKey(key).endsWith("authorization") ? authorizationBare : bareValue;
-      bare.lastIndex = start;
-      value = bare.exec(text);
+    let open: number;
+    let end: number;
+    if (quoted) {
+      open = quoted[0].startsWith("\\") ? 2 : 1;
+      end = start + quoted[0].length;
+    } else if (isAuthorization) {
+      if (
+        authorization &&
+        start > authorization.from &&
+        start < authorization.firstEnd &&
+        !opensQuote(text, start) &&
+        !text.startsWith("[redacted]", start) &&
+        !text.startsWith("%5Bredacted%5D", start)
+      ) {
+        open = 0;
+        end = authorization.end;
+      } else {
+        authorizationBare.lastIndex = start;
+        const value = authorizationBare.exec(text);
+        if (!value) continue;
+        open = value[1]!.length;
+        end = start + value[0].length;
+        authorization = { from: start, firstEnd: start + open + value[2]!.length, end };
+      }
+    } else {
+      bareValue.lastIndex = start;
+      const value = bareValue.exec(text);
+      if (!value) continue;
+      open = value[1]!.length;
+      end = start + value[0].length;
     }
-    if (!value) continue;
-    const quote = quoted ? (quoted[0].startsWith("\\") ? '\\"' : quoted[0][0]!) : value[1]!;
-    result += `${text.slice(copied, start)}${quote}${REDACTED}${quoted ? quote : ""}`;
-    copied = start + value[0].length;
+    if (end <= covered) continue;
+    spans.push([start + open, end - (quoted ? open : 0)]);
+    covered = end;
   }
+  return spans;
+}
+
+/** The credential after each authorization scheme. A scheme word can end an earlier credential
+ * (`…~bearer SECRET`), so the search resumes at each credential, which is read at most once more. */
+function authorizationSpans(text: string): Span[] {
+  const spans: Span[] = [];
+  authorizationValue.lastIndex = 0;
+  for (let match = authorizationValue.exec(text); match; match = authorizationValue.exec(text)) {
+    const credential = match.index + match[1]!.length + match[2]!.length;
+    spans.push([credential, match.index + match[0].length]);
+    authorizationValue.lastIndex = credential;
+  }
+  return spans;
+}
+
+/** Each match of a global pattern. */
+function matchSpans(text: string, pattern: RegExp): Span[] {
+  return [...text.matchAll(pattern)].map((match) => [match.index, match.index + match[0].length]);
+}
+
+/** Replaces the union of the spans with `[redacted]`, each run of overlapping or touching spans
+ * once. */
+function redactSpans(text: string, spans: Span[]): string {
+  spans.sort(([a, b], [c, d]) => a - c || b - d);
+  let result = "";
+  let copied = 0;
+  let run: Span | undefined;
+  const flush = () => {
+    if (!run) return;
+    result += `${text.slice(copied, run[0])}${REDACTED}`;
+    copied = run[1];
+  };
+  for (const [start, end] of spans) {
+    if (run && start <= run[1]) run[1] = Math.max(run[1], end);
+    else {
+      flush();
+      run = [start, end];
+    }
+  }
+  flush();
   return result + text.slice(copied);
 }
 
@@ -204,12 +297,14 @@ function scrubPairs(text: string): string {
  * become `[redacted]`.
  */
 export function scrubCredentialText(text: string): string {
-  const state: ScrubState = { changed: false };
-  return scrubPairs(
-    scrubTextUrls(text, state)
-      .replace(prefixedToken, REDACTED)
-      .replace(authorizationValue, `$1$2${REDACTED}`),
-  );
+  const scrubbed = scrubTextUrls(text, { changed: false });
+  // Every rule reads the same text and their matches are replaced together, so no rule's
+  // replacement can hide text another rule would have matched.
+  return redactSpans(scrubbed, [
+    ...pairSpans(scrubbed),
+    ...matchSpans(scrubbed, prefixedToken),
+    ...authorizationSpans(scrubbed),
+  ]);
 }
 
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */
