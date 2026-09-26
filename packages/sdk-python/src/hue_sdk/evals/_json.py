@@ -118,6 +118,16 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
     size = 0
     # Once the byte bound is passed, the value is read again only to check it (below).
     checking = False
+    # The strings the second read has found valid, by identity: one referenced many times is
+    # scanned once. Every string is held by the value, so no identity is reused meanwhile.
+    checked: set[int] = set()
+
+    def check_text(item: str) -> None:
+        if not checking:
+            _text(item)
+        elif id(item) not in checked:
+            _text(item)
+            checked.add(id(item))
 
     def charge(amount: int) -> None:
         nonlocal size
@@ -151,7 +161,7 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             charge(len(json.dumps(item)))
             return
         if type(item) is str:
-            _text(item)
+            check_text(item)
             charge_text(item)
             return
         if type(item) not in (dict, list) or id(item) in ancestors:
@@ -180,7 +190,7 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
                     raise _PastByteBound
             charge(len(item) + 1 if item else 2)
             for key in _js_order(list(item)) if checking else _utf16_order(list(item)):
-                _text(key)
+                check_text(key)
                 charge_text(key)
                 charge(1)
                 visit(item[key], depth + 1)
@@ -194,7 +204,8 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
     except _PastByteBound:
         pass
     # Read again with each object's keys in the order JavaScript lists them, as the TypeScript SDK
-    # reads it again, and nothing is counted, escaped or sorted, which takes time linear in it.
+    # reads it again, and nothing is counted, escaped or sorted, nor a string checked twice, which
+    # takes time linear in the value's size in memory.
     checking = True
     nodes = 0
     visit(value, 0)

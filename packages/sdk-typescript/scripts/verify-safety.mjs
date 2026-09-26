@@ -72,6 +72,18 @@ console.log(redactionProbe.stdout.trim());
   );
   for (const output of [Array(11).fill("x".repeat(50_000_000)), "\u0001".repeat(120_000_000)])
     assert.throws(() => json(output), { name: "RangeError", message: "JSON exceeds byte limit" });
+  // Past the byte bound, text is checked once however often it is referenced. V8 hashes a string
+  // longer than 16,383 UTF-16 units by its length alone, so such strings are not kept in a set,
+  // where adding 8,000 distinct ones sharing a prefix took minutes.
+  const prefix = "p".repeat(20_000);
+  for (const output of [
+    Array(19_999).fill("€".repeat(1_000_000)),
+    Array.from({ length: 8_000 }, (_, index) => prefix + String(index).padStart(6, "0")),
+  ]) {
+    const started = performance.now();
+    assert.throws(() => json(output), { name: "RangeError", message: "JSON exceeds byte limit" });
+    assert.ok(performance.now() - started < 5_000, "Checking text past the byte bound was slow");
+  }
   console.log(JSON.stringify({ nodeOnlyLimits: "passed" }));
 }
 // Exercise the installed snapshot with a genuinely concurrent growing view.

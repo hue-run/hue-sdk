@@ -33,6 +33,22 @@ test("a value too long to serialize is refused by its count, before it is serial
   }
 });
 
+test("a string referenced many times past the byte bound is checked once", () => {
+  // Checking each reference again took 24 s on Node for the first output.
+  const long = "€".repeat(1_000_000);
+  const longer = "€".repeat(1_000_001);
+  for (const value of [
+    Array(19_999).fill(long),
+    Array.from({ length: 19_999 }, (_, index) => (index % 2 ? long : longer)),
+    Array.from({ length: 9_999 }, () => ({ [long]: 0 })),
+    Array(19_999).fill("€".repeat(16_000)),
+  ]) {
+    const { error, elapsed } = refusal(value);
+    expect(error).toEqual(new RangeError("JSON exceeds byte limit"));
+    expect(elapsed).toBeLessThan(500);
+  }
+});
+
 test("an array with more elements than values allowed is refused before its keys are listed", () => {
   const { error, elapsed } = refusal(Array.from({ length: 5_000_000 }, () => 0));
   expect(error).toEqual(new RangeError("JSON exceeds depth/node limits"));
@@ -104,6 +120,8 @@ test("both SDKs refuse an output for the same reason", () => {
     // The byte bound is checked last: past it, the output is read again, each object's keys in
     // their own order, and a value that is not JSON or past another bound decides.
     [[big, 0], "bytes"],
+    // The second read counts values afresh.
+    [[...Array(15_000).fill(0), long(200_000)], "bytes"],
     [[big, Number.NaN], "not JSON"],
     [{ b: Number.NaN, a: big }, "not JSON"],
     [{ b: Array(25_000).fill(0), a: big }, "structure"],

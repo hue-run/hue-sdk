@@ -887,6 +887,8 @@ def test_both_sdks_refuse_an_output_for_the_same_reason():
         # The byte bound is checked last: past it, the output is read again, each object's keys in
         # JavaScript's order, and a value that is not JSON or past another bound decides.
         ([big, 0], "bytes"),
+        # The second read counts values afresh.
+        ([*[0] * 15_000, "x" * 200_000], "bytes"),
         ([big, nan], "not JSON"),
         ({"b": nan, "a": big}, "not JSON"),
         ({"b": [0] * 25_000, "a": big}, "structure"),
@@ -919,6 +921,17 @@ def test_both_sdks_refuse_an_output_for_the_same_reason():
         except ValueError:
             outcomes.append("not JSON")
     assert outcomes == [reason for _, reason in cases]
+
+
+def test_a_string_referenced_many_times_past_the_byte_bound_is_checked_once():
+    # Checking each reference again took 103 seconds for the first output.
+    long = "é" * 1_000_000
+    for value in ([long] * 19_999, [{long: 0} for _ in range(9_999)]):
+        started = time.perf_counter()
+        with pytest.raises(JsonLimitError) as refused:
+            json_value(value)
+        assert refused.value.limit == "bytes"
+        assert time.perf_counter() - started < 1
 
 
 def test_the_byte_bound_is_the_exact_length_of_the_json_text():

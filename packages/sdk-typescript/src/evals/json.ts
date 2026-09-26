@@ -36,6 +36,21 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
   let bytes = 0;
   // Once the byte bound is passed, the value is read again only to check it (below).
   let checking = false;
+  // Text the second read has found valid is not checked again, so a string referenced many times
+  // is scanned once: by content up to 16,383 UTF-16 units, and a longer string when it is the last
+  // checked of its length. V8 hashes those by length alone, so a set of them would compare each
+  // with every other of that length.
+  const checkedText = new Set<string>();
+  const checkedLong = new Map<number, string>();
+  const text = (item: string) => {
+    if (!checking) return isText(item);
+    if (item.length <= 16_383 ? checkedText.has(item) : checkedLong.get(item.length) === item)
+      return true;
+    if (!isText(item)) return false;
+    if (item.length <= 16_383) checkedText.add(item);
+    else checkedLong.set(item.length, item);
+    return true;
+  };
   const charge = (amount: number) => {
     if (checking) return;
     bytes += amount;
@@ -59,7 +74,7 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
       charge(JSON.stringify(item).length);
       return item;
     }
-    if (typeof item === "string" && isText(item)) {
+    if (typeof item === "string" && text(item)) {
       chargeText(item);
       return item;
     }
@@ -103,7 +118,7 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
       }
       charge(keys.length ? keys.length + 1 : 2);
       for (const key of keys) {
-        if (!isText(key))
+        if (!text(key))
           throw new TypeError("Expected finite JSON without cycles or invalid Unicode");
         chargeText(key);
         charge(1);
@@ -128,7 +143,7 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
   // The byte bound is checked last, as it was before the length was counted as the value is
   // read: a value past it that holds a value that is not JSON, or passes the value or depth bound,
   // is refused for that. So the value is read again with each object's keys in their own order,
-  // and nothing is counted, escaped or sorted, which takes time linear in it.
+  // and nothing is counted, escaped or sorted, nor text checked twice (`text`).
   checking = true;
   nodes = 0;
   visit(value, 0);
