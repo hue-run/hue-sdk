@@ -103,7 +103,7 @@ Options:
   --env-path PATH         Load a dotenv file first (--env-file also works when it exists)
   --credential KIND       world-token or connection-key, when both variables are set
   --max N                 Deliveries leased per pull and forwarded at once, 1 to ${MAX_BATCH} (default ${MAX_BATCH})
-  --allow-remote-forward  Allow a --forward-to host other than this machine
+  --allow-remote-forward  Allow a --forward-to host other than this machine, over https only
   -h, --help              Show this help`;
 
 class UsageError extends Error {}
@@ -164,7 +164,8 @@ export function isLoopbackAddress(address: string): boolean {
 
 /**
  * The receiver URL, or why it is refused: HTTP or HTTPS without credentials or fragment, on this
- * machine (`localhost`, a `.localhost` name or a loopback address) unless `allowRemote`.
+ * machine (`localhost`, a `.localhost` name or a loopback address) unless `allowRemote`, and then
+ * HTTPS only off this machine.
  */
 export function parseForwardTarget(value: string, allowRemote: boolean): URL | string {
   let url: URL;
@@ -177,8 +178,13 @@ export function parseForwardTarget(value: string, allowRemote: boolean): URL | s
     return "--forward-to must be an http or https URL";
   if (url.username || url.password) return "--forward-to must not carry credentials";
   if (url.hash) return "--forward-to must not carry a fragment";
-  if (!allowRemote && !isLocalHostname(url.hostname))
-    return `--forward-to must name this machine (localhost or a loopback address); pass --allow-remote-forward to deliver to ${scrubCredentialText(url.hostname)}`;
+  if (!isLocalHostname(url.hostname)) {
+    if (!allowRemote)
+      return `--forward-to must name this machine (localhost or a loopback address); pass --allow-remote-forward to deliver to ${scrubCredentialText(url.hostname)}`;
+    // Each request carries the subscription's verification token and a valid signature.
+    if (url.protocol !== "https:")
+      return "--forward-to must use https for a host other than this machine, because each request carries the subscription's verification token and signature";
+  }
   return url;
 }
 
@@ -283,7 +289,10 @@ export function forwardDelivery(
         method: "POST",
         headers,
         agent: false,
-        ...(options.allowRemote ? {} : { lookup: loopbackLookup(options.resolver) }),
+        // Plain HTTP only ever reaches a loopback address, whatever --allow-remote-forward says.
+        ...(options.allowRemote && target.protocol === "https:"
+          ? {}
+          : { lookup: loopbackLookup(options.resolver) }),
       });
     } catch {
       // A header Node refuses to send: nothing left this machine.
@@ -691,10 +700,14 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     }
     const receivedAt = performance.now();
     const bodyTimer = setTimeout(abort, PULL_GRACE_MS);
+    // A second stop request abandons an answer still arriving; its leases lapse into timeouts.
+    forced.signal.addEventListener("abort", abort, { once: true });
+    if (forced.signal.aborted) abort();
     try {
       return await readPull(response, receivedAt);
     } finally {
       clearTimeout(bodyTimer);
+      forced.signal.removeEventListener("abort", abort);
     }
   };
 
@@ -705,7 +718,7 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       try {
         parsed = JSON.parse(await readBounded(response, MAX_PULL_RESPONSE_BYTES));
       } catch (error) {
-        return { kind: "retry", reason: (error as Error).message, retryAfterMs: null };
+        return { kind: "retry", reason: foreign((error as Error).message), retryAfterMs: null };
       }
       const list = isObject(parsed) ? parsed.deliveries : undefined;
       if (!Array.isArray(list))

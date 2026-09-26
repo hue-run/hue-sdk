@@ -285,10 +285,11 @@ lease).
 
 `--forward-to` must name this machine: `localhost`, a `.localhost` name or a loopback address, and a
 name is refused unless every address it resolves to is a loopback address. `--allow-remote-forward`
-permits another host. Credentials and fragments in the URL are refused. Output is one line per
-delivery (time, event id, retry number, the bot's status and duration, and the state Hue recorded),
-never a body, a signature or a credential; credentials in error messages are replaced with
-`[redacted]`.
+permits another host over HTTPS only, because every request carries the subscription's verification
+token and a valid signature; plain HTTP still reaches only loopback addresses. Credentials and
+fragments in the URL are refused. Output is one line per delivery (time, event id, retry number, the
+bot's status and duration, and the state Hue recorded), never a body, a signature or a credential;
+credentials in error messages are replaced with `[redacted]`.
 
 Ctrl+C or `SIGTERM` stops pulling (a waiting pull is cancelled), finishes the deliveries in flight
 and acknowledges them, then exits `0`; a second Ctrl+C abandons the forwards and acknowledgements

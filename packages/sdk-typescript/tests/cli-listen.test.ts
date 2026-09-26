@@ -18,7 +18,7 @@ import {
   type ListenCommandIo,
 } from "../src/cli/listen.js";
 
-// A synthetic stand-in for Hue's listen routes, written from the published contract: pull leases
+// A synthetic stand-in for Hue's listen routes, written from the listen protocol: pull leases
 // due deliveries to the credential that scopes the subscription, one open pull at a time, and an
 // acknowledgement is accepted only from that credential, inside the lease, in the strict shape.
 
@@ -137,6 +137,10 @@ interface MockOptions {
   pullFailures?: number;
   /** Lease every queued delivery, ignoring the pull's `max`. */
   overfill?: boolean;
+  /** Send the first pull answer's headers, then its body a byte at a time, never finishing. */
+  trickle?: boolean;
+  /** Answer the first pull with this body as a 200, whether or not it is JSON. */
+  malformed?: string;
 }
 
 interface RecordedAck {
@@ -164,6 +168,7 @@ async function mockHue(options: MockOptions = {}) {
   let ackFailures = options.ackFailures ?? 0;
   let pullFailures = options.pullFailures ?? 0;
   const pullAttempts: number[] = [];
+  let trickling = false;
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
       const raw = (await readBody(request)).toString("utf8");
@@ -225,6 +230,18 @@ async function mockHue(options: MockOptions = {}) {
           (max as number) > 10
         )
           return send(400, {}, "invalid_body");
+        if (options.malformed !== undefined && pullAttempts.length === 1) {
+          response.writeHead(200, { "content-type": "application/json" });
+          return response.end(options.malformed);
+        }
+        if (options.trickle) {
+          trickling = true;
+          response.writeHead(200, { "content-type": "application/json" });
+          response.write('{"deliveries":[');
+          const drip = setInterval(() => response.write(" "), 100);
+          response.on("close", () => clearInterval(drip));
+          return;
+        }
         open = true;
         const entry = {
           at: Date.now(),
@@ -328,6 +345,7 @@ async function mockHue(options: MockOptions = {}) {
     refusals,
     pullAttempts,
     isPullOpen: () => open,
+    isTrickling: () => trickling,
   };
 }
 
@@ -490,7 +508,15 @@ describe("hue listen arguments", () => {
       "http://localhost.example.com/",
     ])
       expect(parseForwardTarget(url, false)).toContain("--allow-remote-forward");
-    expect(parseForwardTarget("http://example.com/events", true)).toBeInstanceOf(URL);
+    expect(parseForwardTarget("https://example.com/events", true)).toBeInstanceOf(URL);
+    // Off this machine only HTTPS: every request carries the verification token and a signature.
+    for (const url of [
+      "http://example.com/events",
+      "http://10.0.0.5:3000/",
+      "http://0.0.0.0:3000/",
+    ])
+      expect(parseForwardTarget(url, true)).toContain("must use https");
+    expect(parseForwardTarget("http://localhost:3000/events", true)).toBeInstanceOf(URL);
     expect(parseForwardTarget("http://user:pass@localhost:3000/", true)).toContain("credentials");
     expect(parseForwardTarget("http://localhost:3000/#x", false)).toContain("fragment");
     expect(parseForwardTarget("ftp://localhost/", false)).toContain("http or https");
@@ -917,6 +943,19 @@ describe("hue listen acknowledgements and refusals", () => {
     expect(bot.requests).toHaveLength(0);
   });
 
+  test("keeps credentials out of the error for an unreadable pull answer", async () => {
+    // Engines quote the start of malformed JSON in their parse error.
+    const hue = await mockHue({ malformed: `${WORLD_TOKEN} is not JSON` });
+    const bot = await receiver();
+    hue.queue.push(slackDelivery("event_callback"));
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.acks.length === 1);
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(listen.stderr()).toContain("Pull failed:");
+    expect(listen.output()).not.toContain(WORLD_TOKEN.slice(0, 24));
+  });
+
   test("waits out another open pull, then delivers", async () => {
     const hue = await mockHue({ busyPulls: 2 });
     const bot = await receiver();
@@ -1011,7 +1050,14 @@ describe("hue listen delivery safety", () => {
     expect(bot.requests[0]!.headers["x-slack-signature"]).toBe(queued.headers["x-slack-signature"]);
     expect(bot.requests[0]!.headers.host).toBe(`bot.localhost:${bot.port}`);
     expect(bot.requests[0]!.headers.connection).not.toBe("upgrade");
-    // With --allow-remote-forward the name is resolved as usual.
+    // With --allow-remote-forward, a plain HTTP name still reaches only loopback addresses.
+    expect(
+      await forwardDelivery(target, delivery, {
+        allowRemote: true,
+        resolver: resolving([{ address: "10.0.0.5", family: 4 }]),
+      }),
+    ).toMatchObject({ outcome: "connection_failed" });
+    expect(bot.requests).toHaveLength(1);
     expect(
       await forwardDelivery(new URL(`http://localhost:${bot.port}/events`), delivery, {
         allowRemote: true,
@@ -1178,6 +1224,21 @@ describe("hue listen shutdown", () => {
     expect(hue.acks).toHaveLength(0);
     expect(listen.stdout()).toContain("-> abandoned; not acknowledged");
     expect(listen.output()).not.toContain("connection failed");
+  });
+
+  test("a second stop abandons a pull answer that is still arriving", async () => {
+    const hue = await mockHue({ trickle: true });
+    const bot = await receiver();
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.isTrickling());
+    await new Promise((tick) => setTimeout(tick, 150));
+    const stoppedAt = Date.now();
+    listen.stop();
+    listen.stop();
+    expect(await listen.exit).toBe(130);
+    expect(Date.now() - stoppedAt).toBeLessThan(1_000);
+    expect(hue.acks).toHaveLength(0);
+    expect(bot.requests).toHaveLength(0);
   });
 
   test("the hue binary stops on SIGINT after acknowledging the delivery in flight", async () => {
