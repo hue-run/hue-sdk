@@ -182,10 +182,8 @@ See [troubleshooting](https://docs.hue.run/guides/troubleshooting) for delivery 
 
 ## Handoff
 
-End with one of these, filled in with the actual values:
+End with one of these, filled in with the actual values. If the Hue MCP server is not connected, close that message by offering to connect it (step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md)).
 
 - Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`). I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
 - Needs a key or a run: "Code changes are complete and tested against a loopback receiver. Configure `HUE_API_KEY` through `<secret workflow>` and run `<command>`; then I can verify the stored trace."
 - Blocked: "I stopped before guessing: `<specific ambiguity or failure>`. Next step: `<concrete decision or documentation link>`."
-
-If the Hue MCP server is not connected, offer to connect it (step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md)).

@@ -3,7 +3,8 @@
 `npx skills add hue-run/hue-sdk --skill hue` installs skills/hue/SKILL.md from main, so its
 guidance is live as soon as it merges. The Hue team sets up accounts; the agent setup page on
 docs.hue.run has the user create and store a key, and the skill names the contact for a user
-without an account.
+without an account. The key section must keep its rules, not just their keywords: check the key
+for presence only, never ask for it in chat, and change nothing until a key exists.
 """
 
 import re
@@ -19,6 +20,8 @@ BOOKING_URL = "https://calendar.notion.so/meet/akethini/fd2smi4yej"
 SETUP_COMMAND = re.compile(r"(@hue-run/sdk\S*|\bhue)\s+(setup|resume|claim)\b")
 # Copy from the retired invite-only gate, and the production preset the setup key must not be.
 FORBIDDEN = ("invite-only", "heightened demand", "then stop", "Tracing only")
+# An instruction to request the key in chat, unless it is the negated rule itself.
+PASTE_REQUEST = re.compile(r"(?<!never )\b(ask|tell) (them|the user) to paste", re.I)
 
 
 def fenced_lines(text: str) -> list[str]:
@@ -46,7 +49,7 @@ def gate_problems(text: str) -> list[str]:
     ]
     if re.search(r"^#+ .*onboarding", text, re.M | re.I):
         problems.append("skill still has an onboarding section")
-    key = section(text, KEY_SECTION)
+    key = " ".join(section(text, KEY_SECTION).split())
     if not key:
         problems.append(f"skill has no {KEY_SECTION} section")
     else:
@@ -59,7 +62,9 @@ def gate_problems(text: str) -> list[str]:
             "key of any preset",
             CONTACT_EMAIL,
             BOOKING_URL,
-            "paste",
+            "never reading its value",
+            "never ask them to paste it into chat",
+            "do not install packages or change files",
         )
         for phrase in required:
             if phrase not in key:
@@ -67,6 +72,8 @@ def gate_problems(text: str) -> list[str]:
         for phrase in FORBIDDEN:
             if phrase.casefold() in key.casefold():
                 problems.append(f"key section still says {phrase!r}")
+        if PASTE_REQUEST.search(key):
+            problems.append("key section asks the user to paste the key")
         if text.index(f"## {KEY_SECTION}") > text.index("## Install and configure"):
             problems.append("key section must come before install instructions")
     return problems
@@ -117,10 +124,36 @@ class SkillKeyGateTests(unittest.TestCase):
                 self.assertIn(f"key section is missing {phrase!r}", gate_problems(regressed))
 
     def test_gate_check_requires_the_no_paste_rule(self):
+        text = SKILL.read_text()
+        rule = "never ask them to paste it into chat"
+        for replacement in ("ask them for it", "ask them to paste it into chat"):
+            with self.subTest(replacement=replacement):
+                problems = gate_problems(replace_in_key_section(text, rule, replacement))
+                self.assertIn(f"key section is missing {rule!r}", problems)
+
+    def test_gate_check_rejects_a_request_to_paste_the_key(self):
         regressed = replace_in_key_section(
-            SKILL.read_text(), "never ask them to paste it into chat", "ask them for it"
+            SKILL.read_text(),
+            "Share this line",
+            "If they cannot store it, ask them to paste it here. Share this line",
         )
-        self.assertIn("key section is missing 'paste'", gate_problems(regressed))
+        self.assertEqual(gate_problems(regressed), ["key section asks the user to paste the key"])
+
+    def test_gate_check_requires_a_presence_only_key_check(self):
+        regressed = replace_in_key_section(
+            SKILL.read_text(), "never reading its value", "printing its value"
+        )
+        self.assertIn("key section is missing 'never reading its value'", gate_problems(regressed))
+
+    def test_gate_check_requires_no_changes_without_a_key(self):
+        text = SKILL.read_text()
+        rule = re.search(r"Without a key, do not install.*?collector\. ", text, re.S)
+        assert rule, "no-change rule not found"
+        regressed = replace_in_key_section(text, rule.group(0), "")
+        self.assertIn(
+            "key section is missing 'do not install packages or change files'",
+            gate_problems(regressed),
+        )
 
     def test_gate_check_rejects_the_retired_invite_only_gate(self):
         regressed = replace_in_key_section(
