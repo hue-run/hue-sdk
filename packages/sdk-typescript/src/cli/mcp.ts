@@ -69,13 +69,19 @@ const CLIENT_LABELS: Record<ClientId, string> = {
 type AuthMode = "key" | "oauth";
 /** Clients whose browser sign-in with Hue works against the deployed server. */
 const OAUTH_CLIENTS: readonly ClientId[] = ["claude-code", "codex", "conductor"];
-/** Toolset names Hue's MCP server accepts: `all`, its catalog groups and the `observe` profile. */
+/** Toolset names Hue's MCP server accepts: `all`, its catalog groups and its curated profiles. */
 export const MCP_TOOLSETS = [
   "all",
   "observe",
+  "author",
+  "evaluate",
   "project",
   "traces",
-  "evals",
+  "eval_sets",
+  "runs",
+  "judges",
+  "cases",
+  "runners",
   "environments",
   "intents",
   "docs",
@@ -118,9 +124,10 @@ Options:
   --read-only     key only: add ?read_only=true to the URL so write tools are hidden. A
                   sign-in connection has Read and write access; use a Read key for read-only
   --toolsets NAMES
-                  Tools to list, comma-separated: all, observe (production reads),
-                  project, traces, evals, environments, intents or docs, added to the
-                  URL as ?toolsets=. Defaults: all for claude-code, codex and conductor,
+                  Tools to list, comma-separated: all; the observe, author or evaluate
+                  profiles; or project, traces, eval_sets, runs, judges, cases, runners,
+                  environments, intents or docs. Added to the URL as ?toolsets=.
+                  Defaults: all for claude-code, codex and conductor,
                   which search their own tools; observe for cursor. Without a selection
                   Hue lists the production reads and search_hue_tools, which reaches
                   every other tool
