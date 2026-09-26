@@ -893,21 +893,21 @@ No registry release is claimed until publication and registry acceptance complet
   content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
   running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
 - A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
-  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
-  `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
+  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. The
+  lone surrogates are replaced once for the whole part. A `data:` URL's parameters are read after
+  matching its header, as in the TypeScript SDK. **Wire**
 - `server.address` keeps a host name with an underscore, such as a Docker Compose service
   (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
-  dropped.
+  dropped. **Wire**
 - An output's JSON byte length is counted as the output is read, as in the TypeScript SDK, so an
   output too large to serialize is refused without serializing it (eleven references to a 50 MB
-  string took tens of seconds and a gigabyte); an output the process cannot hold in memory
-  completes its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values,
-  so an object of more than 10,000 members is no longer `OutputTooLarge`, and a list or object
-  with more elements than values left, or keys longer than the bytes left, is refused before it is
-  read. The output is read in the TypeScript SDK's order, and the byte bound is still checked
-  last, so both SDKs refuse an output for the same reason.
-- A large inline file's lone surrogates are replaced once for the whole part rather than in each
-  percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
+  string took tens of seconds and a gigabyte); an output the process cannot hold in memory completes
+  its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values, so an object
+  of more than 10,000 members, which 0.6.1 refused with `OutcomeSerializationError`, is accepted as
+  in the TypeScript SDK, and a list or object with more elements than values left, or keys longer
+  than the bytes left, is refused before it is read. The output is read in the TypeScript SDK's
+  order, and the byte bound is still checked last, so both SDKs refuse an output for the same
+  reason.
 - A URL's query names are decoded and encoded together in C rather than byte by byte, so
   scrubbing a URL with thousands of parameters, in a tool definition's `url` or in MCP error text,
   takes about half the time it did. The exported text is unchanged.
