@@ -204,8 +204,8 @@ intents and documentation), `all`, or the groups `project`, `traces`, `evals`, `
 sign-in configuration keeps the URL bare and sends the `X-Hue-MCP-Toolsets` header instead,
 because toolsets are not part of the connection's identity: Claude Code stores the header, and for
 Codex the command prints the `http_headers` line to add to `~/.codex/config.toml`, since
-`codex mcp add` stores none. `cursor` selects `observe` unless `--toolsets` names others;
-`--toolsets all` lists every tool. Unknown names are refused rather than passed on, because Hue
+`codex mcp add` stores none. `--toolsets` replaces a selection already in `--url`, and a selection in `--url` is kept without
+it; otherwise `cursor` selects `observe`. `--toolsets all` lists every tool. Unknown names are refused rather than passed on, because Hue
 ignores them and would list every tool. `get_project_context` is always listed and reports the
 selection.
 

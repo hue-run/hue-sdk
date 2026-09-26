@@ -255,10 +255,14 @@ export function parseToolsets(value: string): { toolsets: string } | { error: st
   return { toolsets: names.join(",") };
 }
 
-/** `?toolsets=` lists only the selected tools for a key configuration; commas stay readable. */
-export function toolsetsMcpUrl(url: string, toolsets: string): string {
+/**
+ * `?toolsets=` lists only the selected tools for a key configuration; commas stay readable.
+ * Without a selection the parameter is removed, so the URL lists every tool.
+ */
+export function toolsetsMcpUrl(url: string, toolsets: string | undefined): string {
   const parsed = new URL(url);
   parsed.searchParams.delete("toolsets");
+  if (!toolsets) return parsed.href;
   const query = parsed.search.slice(1);
   parsed.search = `${query ? `${query}&` : ""}toolsets=${toolsets}`;
   return parsed.href;
@@ -684,7 +688,9 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   // Toolsets are not part of the protected resource either: a sign-in URL stays bare.
   if (auth === "oauth" && new URL(url).searchParams.has("toolsets"))
     return fail("Leave toolsets off a sign-in URL; --toolsets sends them in a header instead.", 2);
-  let toolsets: string | undefined = DEFAULT_TOOLSETS[clientId];
+  // --toolsets wins over a selection already in --url, which wins over the client's default.
+  let toolsets: string | undefined =
+    new URL(url).searchParams.get("toolsets") ?? DEFAULT_TOOLSETS[clientId];
   if (parsed.values.toolsets !== undefined) {
     const selected = parseToolsets(parsed.values.toolsets);
     if ("error" in selected) return fail(`${selected.error}\n\n${MCP_USAGE}`, 2);
@@ -692,7 +698,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   }
   // `all` is Hue's default, so it needs no selection.
   if (toolsets === "all") toolsets = undefined;
-  if (toolsets && auth === "key") url = toolsetsMcpUrl(url, toolsets);
+  if (auth === "key") url = toolsetsMcpUrl(url, toolsets);
   const plan = planFor(clientId, auth, scope, url, auth === "oauth" ? toolsets : undefined);
   if (parsed.values.print) {
     stdout.write(plan.snippet);

@@ -703,6 +703,27 @@ describe("hue mcp install", () => {
       },
     );
     expect(everything.stdout).toBe(CURSOR_JSON);
+    // --toolsets replaces a selection in --url; without the flag, the URL's selection is kept.
+    const withUrl = (selection: string) => [
+      "install",
+      "--client",
+      "cursor",
+      "--print",
+      "--url",
+      `https://mcp.hue.run/mcp?read_only=true&toolsets=${selection}`,
+    ];
+    expect((await mcp([...withUrl("observe"), "--toolsets", "all"], { cwd: root })).stdout).toBe(
+      CURSOR_JSON.replace("https://mcp.hue.run/mcp", "https://mcp.hue.run/mcp?read_only=true"),
+    );
+    expect((await mcp(withUrl("traces"), { cwd: root })).stdout).toBe(
+      CURSOR_JSON.replace(
+        "https://mcp.hue.run/mcp",
+        "https://mcp.hue.run/mcp?read_only=true&toolsets=traces",
+      ),
+    );
+    expect(toolsetsMcpUrl("https://mcp.hue.run/mcp?toolsets=observe", undefined)).toBe(
+      "https://mcp.hue.run/mcp",
+    );
     const unknown = await mcp(["install", "--client", "cursor", "--toolsets", "obsrve"], {
       cwd: root,
     });
