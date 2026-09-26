@@ -188,9 +188,9 @@ simulated world and grades the sealed outcome. Review and publish cases in the H
 Exit code 0 means every case passed; 1 means a case failed, errored or Hue's checks were still
 pending; 2 is a usage error. Since `@hue-run/sdk` 0.10.0, an evaluator that does not apply to a
 case shows `n/a` and neither passes nor fails it, and a case no pinned evaluator applies to is an
-error. Telemetry content capture stays off unless `--content` is passed. Since `@hue-run/sdk`
-0.10.0, one-shot mode stores case outputs, error messages and explanations in Hue by default, as
-`--worker` always does: the command's stdout is its stored answer, with the credentials `hue eval`
+error. Telemetry content capture stays off unless `--content` is passed.
+Since `@hue-run/sdk` 0.10.0, one-shot mode stores case outputs, error messages and explanations in
+Hue by default, as `--worker` always does: the command's stdout is its stored answer, with the credentials `hue eval`
 handed it redacted, so the agent must not print credentials or debug logs there, and `--no-output`
 opts a one-shot run out. Earlier versions store one-shot outputs only with `--content`. Files the
 agent writes to `output/` are uploaded either way and are not fully redacted, so never write

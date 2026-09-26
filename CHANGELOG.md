@@ -8,7 +8,9 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.11.0] - 2026-09-26
+
+This release adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs, so it is a `0.MINOR` release. Changed lists the `hue mcp install` output that differs from 0.10.0.
 
 #### Added
 
