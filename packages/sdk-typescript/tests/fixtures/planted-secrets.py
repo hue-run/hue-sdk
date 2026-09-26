@@ -241,10 +241,24 @@ def families(rng: random.Random):
         )
         return text, [first, second]
 
+    def json_in_string_escaped_slash():
+        """JSON inside a JSON string whose inner text escapes ``/`` as PHP does, so a value holds
+        an escaped backslash before another escape (``\\\\\\/``)."""
+        first, second = secret(rng), secret(rng)
+        key = rng.choice(KEYS)
+        text = rng.choice(
+            [
+                f'{{"error":"{{\\"{key}\\":[\\"{{a\\\\\\/b]\\",\\"{first}\\",\\"{second}\\"]}}"}}',
+                f'{{"error":"{{\\"{key}\\":\\"ab\\\\\\/cd {first} {second}\\"}}"}}',
+            ]
+        )
+        return text, [first, second]
+
     return [pair, quoted_pair, escaped_json, header, scheme_in_prose, url, prefixed, nested_pair,
             glued_scheme, trailing_scheme, api_key_phrase, glued_key, nested_quoted_pair,
             escaped_single_quotes, escaped_prefixed, escaped_scheme, escaped_key, bracket_value,
-            arrow_pair, open_quote, quoted_query_value, json_in_string]
+            arrow_pair, open_quote, quoted_query_value, json_in_string,
+            json_in_string_escaped_slash]
 
 
 def generate(seed: int, per_family: int) -> dict:

@@ -427,6 +427,14 @@
     {
       "input": "token: [\\\"a\\\\\\\"b\\\\\\\"c synthetic-bracket-escapes\\\"] next",
       "expected": "token: [redacted] next"
+    },
+    {
+      "input": "{\"error\":\"{\\\"token\\\":[\\\"{a\\\\\\/b]\\\",\\\"synthetic-after-escaped-slash\\\"]}\"}",
+      "expected": "{\"error\":\"{\\\"token\\\":[redacted]}\"}"
+    },
+    {
+      "input": "{\"error\":\"{\\\"password\\\":\\\"ab\\\\\\/cd synthetic-escaped-slash-value\\\"}\"}",
+      "expected": "{\"error\":\"{\\\"password\\\":\\\"[redacted]\\\"}\"}"
     }
   ]
 }

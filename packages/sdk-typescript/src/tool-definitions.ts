@@ -166,10 +166,10 @@ const authorizationValue = new RegExp(
  * value is not consumed, so a pair inside another pair's value (`error: token=…`) is found. */
 const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]*[cdlnrsty][-_]*)\1(\s*(?:=>|[:=])\s*)/gi;
 /** One character of a value between backslash-escaped quotes (JSON inside a JSON string), read an
- * escape at a time, so the escaped backslash or quote of the inner text (`\\\\`, `\\\"`) does
- * not end it. */
+ * escape at a time: the inner text's escaped backslash or quote (`\\\\`, `\\\"`) as one, and any
+ * other escape (`\\`, `\/`, `\n`) as a pair, so none of them ends it. */
 const escapedUnit = (quote: string) =>
-  String.raw`[^${quote}\\\r\n]|\\\\\\\\|\\\\\\${quote}|\\\\[^${quote}\\\r\n]|\\[^${quote}\\\r\n]`;
+  String.raw`[^${quote}\\\r\n]|\\\\\\\\|\\\\\\${quote}|\\[^${quote}\r\n]`;
 /** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
  * one between backslash-escaped quotes, double or single. */
 const quotedValue = new RegExp(
@@ -187,7 +187,7 @@ const openQuotedValue = new RegExp(
  * single quotes), which runs to the end of the text when it does not close, one between
  * backslash-escaped quotes, which ends where its escapes do, or another escaped character. */
 const bracketToken =
-  /[[\]{}]|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\\"(?:[^"\\]|\\\\\\\\|\\\\\\"|\\\\[^"\\]|\\[^"\\])*(?:\\")?|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\\\[^'\\]|\\[^'\\])*(?:\\')?|\\[\s\S]/g;
+  /[[\]{}]|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\\"(?:[^"\\]|\\\\\\\\|\\\\\\"|\\[^"])*(?:\\")?|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\[^'])*(?:\\')?|\\[\s\S]/g;
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
