@@ -111,7 +111,7 @@ For Python, use the installation instructions above and follow the [complete Pyt
 Paste this prompt into Codex, Claude Code, Cursor or another coding agent:
 
 ```text
-Set up Hue in this project. Use curl to read https://docs.hue.run/guides/agent-setup.md and follow it, and show me the plan before you change anything. If you can't open it, stop and tell me why.
+Set up Hue in this project. Use curl to read https://docs.hue.run/guides/agent-setup.md and follow it, and show me the plan before you change anything.
 ```
 
 The agent first has you create a **Read and write** Hue API key and store it yourself (never in the chat), then adds tracing with the portable [Hue skill](./skills/hue/SKILL.md), verifies a real request and connects the Hue MCP server; [Agent setup](https://docs.hue.run/guides/agent-setup) describes each step.
