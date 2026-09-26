@@ -521,12 +521,17 @@ describe("hue listen arguments", () => {
         argv: [...args(hue.origin, bot.url), "--env-path", `/tmp/${WORLD_TOKEN}`],
         message: "Unable to load /tmp/[redacted]",
       },
+      {
+        env: { HUE_WORLD_TOKEN: WORLD_TOKEN },
+        argv: [...args(hue.origin, bot.url), `--${WORLD_TOKEN}`],
+        message: "Unknown option '--[redacted]'",
+      },
       { env: { HUE_WORLD_TOKEN: CONNECTION_KEY }, message: "holds a key, not a world token" },
       { env: { HUE_CONNECTION_KEY: WORLD_TOKEN }, message: "holds a world token" },
       { env: { HUE_WORLD_TOKEN: `hue_at_${"a".repeat(40)}` }, message: "is not a world token" },
       {
         env: { HUE_WORLD_TOKEN: WORLD_TOKEN, HUE_CONNECTION_KEY: CONNECTION_KEY },
-        message: "pass --credential",
+        message: "pass --credential world-token or --credential connection-key",
       },
       {
         env: { HUE_WORLD_TOKEN: WORLD_TOKEN },

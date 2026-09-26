@@ -178,7 +178,7 @@ export function parseForwardTarget(value: string, allowRemote: boolean): URL | s
   if (url.username || url.password) return "--forward-to must not carry credentials";
   if (url.hash) return "--forward-to must not carry a fragment";
   if (!allowRemote && !isLocalHostname(url.hostname))
-    return `--forward-to must name this machine (localhost or a loopback address); pass --allow-remote-forward to deliver to ${url.hostname}`;
+    return `--forward-to must name this machine (localhost or a loopback address); pass --allow-remote-forward to deliver to ${scrubCredentialText(url.hostname)}`;
   return url;
 }
 
@@ -527,7 +527,7 @@ async function loadEnv(
     text = await readFile(resolve(cwd, file), "utf8");
   } catch (error) {
     throw new UsageError(
-      `Unable to load ${file}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
+      `Unable to load ${scrubCredentialText(file)}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
     );
   }
   // As Node's --env-file does, a variable already in the environment keeps its value.
@@ -593,14 +593,21 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
   let max: number;
   let allowRemote: boolean;
   try {
-    const parsed = parseListenArguments(argv);
+    let parsed: ReturnType<typeof parseListenArguments>;
+    try {
+      parsed = parseListenArguments(argv);
+    } catch (error) {
+      // Node's message repeats the option as typed, which may carry a pasted token.
+      throw new UsageError(foreign((error as Error).message));
+    }
     if (parsed.values.help) {
       stdout.write(`${LISTEN_USAGE}\n`);
       return 0;
     }
     const positionals =
       parsed.positionals[0] === "listen" ? parsed.positionals.slice(1) : parsed.positionals;
-    if (positionals.length > 0) throw new UsageError(`Unexpected argument: ${positionals[0]}`);
+    if (positionals.length > 0)
+      throw new UsageError(`Unexpected argument: ${foreign(positionals[0]!)}`);
     const values = parsed.values;
     const env = await loadEnv(io.env ?? process.env, cwd, envFileArgument(values, cwd));
     ({ credential, label } = selectCredential(env, values.credential));
@@ -625,9 +632,9 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     if (!/^\d{1,2}$/u.test(values.max ?? String(MAX_BATCH)) || max < 1 || max > MAX_BATCH)
       throw new UsageError(`--max must be an integer from 1 to ${MAX_BATCH}`);
   } catch (error) {
-    // The credential is not known yet here, so a token pasted as an argument or a path is caught
-    // by its shape.
-    warn(foreign((error as Error).message));
+    // The credential may not be known yet, so each value the user typed was scrubbed by its shape
+    // where the message was built; the guidance around it is left as written.
+    warn((error as Error).message);
     stderr.write(`\n${LISTEN_USAGE}\n`);
     return 2;
   }
@@ -776,13 +783,7 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       const request = new AbortController();
       const abort = () => request.abort();
       forced.signal.addEventListener("abort", abort, { once: true });
-      // The first attempt gets the full request time: it is sent whatever the lease has left.
-      const timer = setTimeout(
-        abort,
-        attempt === 0
-          ? ACK_REQUEST_TIMEOUT_MS
-          : Math.min(ACK_REQUEST_TIMEOUT_MS, Math.max(1_000, remaining)),
-      );
+      const timer = setTimeout(abort, Math.min(ACK_REQUEST_TIMEOUT_MS, Math.max(1_000, remaining)));
       try {
         const response = await fetchImpl(`${base}/${delivery.deliveryId}/ack`, {
           method: "POST",
