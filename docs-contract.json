@@ -500,13 +500,13 @@
   "repository": "https://github.com/hue-run/hue-sdk",
   "schemaVersion": 1,
   "skill": {
-    "description": "Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.",
+    "description": "Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to set up or integrate Hue or verify that requests reach Hue.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.4.5"
+      "version": "0.4.6"
     },
     "name": "hue",
-    "sha256": "sha256:f00996bc5cceb0e00e09bb0ba269953a2984540243f6e3a4e5bad29abfc978d1",
+    "sha256": "sha256:b103cc73ae9dc01805fea25cf2514625fe0065343421a30ab6b00734b9e33f6a",
     "source": "skills/hue/SKILL.md"
   }
 }

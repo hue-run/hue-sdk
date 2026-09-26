@@ -1,9 +1,9 @@
 ---
 name: hue
-description: Add or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to integrate Hue or verify that requests reach Hue.
+description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup. Use when a developer asks to set up or integrate Hue or verify that requests reach Hue.
 metadata:
   author: hue-run
-  version: "0.4.5"
+  version: "0.4.6"
 ---
 
 # Hue tracing
@@ -25,18 +25,26 @@ Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed
 
 **Existing AI SDK 6:** Hue core coexists with AI SDK 6. Pass `hueExperimentalTelemetry(hue)` from `@hue-run/sdk` as `experimental_telemetry` (requires TypeScript 0.2.0); `hueTelemetry` remains AI SDK 7 only. Alternatively keep the existing instrumentation/provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade the app merely to add tracing.
 
-## Invite-only access
+## Get a Hue API key
 
-Hue Cloud is invite-only and anonymous setup is closed, so there is no trial to start. Before
-installing anything, check whether the user already has a Hue project and a project key configured
-as `HUE_API_KEY` (**Read and write** is the recommended preset; ask, or look for `HUE_API_KEY` in
-the application's secret workflow without reading its value). If not, do not run `setup --agent`,
-`resume`, `hue claim` or any install, create accounts or change files.
-Read the [agent setup page](https://docs.hue.run/guides/agent-setup.md), relay its reply to the user
-(it contains the booking link), then stop.
+Before installing anything, check whether the user has a Hue project key configured as
+`HUE_API_KEY`: ask, or look for it in the application's secret workflow, checking only that it is
+present and never reading its value. A key of any preset means the user has a Hue account, so
+continue with the SDK guides above and the steps below, which have them create a **Read and write**
+key if theirs is another preset. If you came here from the agent setup page, the key step is done:
+continue with Install and configure.
 
-If the user already has a key of any preset, they are invited: continue with the SDK guides above
-and the steps below, which have them create a **Read and write** key if theirs is another preset.
+Otherwise, for a first-time setup, read the [agent setup page](https://docs.hue.run/guides/agent-setup.md)
+and follow it; it brings you back here for tracing and ends by connecting the Hue MCP server. The
+user creates a **Read and write** key under **Settings → Integrations & API keys** and stores it as
+`HUE_API_KEY` themselves; never ask them to paste it into chat. Share this line with a user who has
+no Hue account:
+
+> Don't have a Hue account yet? The Hue team sets up accounts: email founders@hue.run or book a time at https://calendar.notion.so/meet/akethini/fd2smi4yej.
+
+Without a key, do not install packages or change files unless the user asks you to prepare tracing
+against a local OpenTelemetry collector. Anonymous setup (`setup --agent`, `resume`, `hue claim`) is
+inactive; do not run it.
 
 ## Install and configure
 
@@ -52,7 +60,7 @@ npm install @hue-run/sdk
 python -m pip install hue-run
 ```
 
-Adapt the install command to the app's package manager, for example `uv add hue-run` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If a package is unavailable or credentials are missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
+Adapt the install command to the app's package manager, for example `uv add hue-run` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If the user has no Hue account or key, proceed as described under Get a Hue API key. If a package is unavailable or another credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
 
 The user creates a **Read and write** project service key in Hue under **Settings → Integrations & API keys** and configures it as `HUE_API_KEY` for development through the application's existing secret workflow. This one key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server. Keep it on development machines: before the application runs on a production server, tell the user to create a separate **Tracing only** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the application; never request it in chat or put it in browser code, fixtures, committed files, or logs.
 
@@ -179,3 +187,5 @@ End with one of these, filled in with the actual values:
 - Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`). I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
 - Needs a key or a run: "Code changes are complete and tested against a loopback receiver. Configure `HUE_API_KEY` through `<secret workflow>` and run `<command>`; then I can verify the stored trace."
 - Blocked: "I stopped before guessing: `<specific ambiguity or failure>`. Next step: `<concrete decision or documentation link>`."
+
+If the Hue MCP server is not connected, offer to connect it (step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md)).
