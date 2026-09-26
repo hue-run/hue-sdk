@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { gunzipSync } from "node:zlib";
 
@@ -48,6 +49,43 @@ const redactionProbe = spawnSync(
 );
 assert.equal(redactionProbe.status, 0, redactionProbe.stderr || redactionProbe.error?.message);
 console.log(redactionProbe.stdout.trim());
+// Node-specific failures of patterns and serialization that Bun does not reproduce.
+{
+  const { hashInlineFiles } = await import(
+    pathToFileURL(join(consumer, "node_modules/@hue-run/sdk/dist/inline-files.js")).href
+  );
+  // A `data:` header with millions of parameters overflowed a pattern repeated per parameter on
+  // Node and left the message unhashed; the header is read in code now.
+  const bytes = Buffer.alloc(70_000, 7);
+  const content = `data:application/octet-stream${";".repeat(3_400_000)};base64,${bytes.toString("base64")}`;
+  const value = JSON.stringify([{ role: "user", parts: [{ type: "blob", content }] }]);
+  const [message] = JSON.parse(hashInlineFiles("gen_ai.input.messages", value));
+  assert.deepEqual(message.parts[0], {
+    type: "blob",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    size: 70_000,
+  });
+  // An output too long for V8 to serialize threw `Invalid string length`, which stopped the run;
+  // its byte count refuses it as over the limit first.
+  const { json } = await import(
+    pathToFileURL(join(consumer, "node_modules/@hue-run/sdk/dist/evals/json.js")).href
+  );
+  for (const output of [Array(11).fill("x".repeat(50_000_000)), "\u0001".repeat(120_000_000)])
+    assert.throws(() => json(output), { name: "RangeError", message: "JSON exceeds byte limit" });
+  // Past the byte bound, text is checked once however often it is referenced. V8 hashes a string
+  // longer than 16,383 UTF-16 units by its length alone, so such strings are not kept in a set,
+  // where adding 8,000 distinct ones sharing a prefix took minutes.
+  const prefix = "p".repeat(20_000);
+  for (const output of [
+    Array(19_999).fill("€".repeat(1_000_000)),
+    Array.from({ length: 8_000 }, (_, index) => prefix + String(index).padStart(6, "0")),
+  ]) {
+    const started = performance.now();
+    assert.throws(() => json(output), { name: "RangeError", message: "JSON exceeds byte limit" });
+    assert.ok(performance.now() - started < 5_000, "Checking text past the byte bound was slow");
+  }
+  console.log(JSON.stringify({ nodeOnlyLimits: "passed" }));
+}
 // Exercise the installed snapshot with a genuinely concurrent growing view.
 // No hooks or mocked constructors create the race; vary the worker's delay to
 // cover growth before, during and after admission while bounding total work.

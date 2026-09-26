@@ -32,16 +32,16 @@ refuses to publish a version without a matching entry below.
   `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
   any record's tool definitions; before, it carried neither. Descriptions and schemas are still
   exported only with content capture. **Wire**
-- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
-  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
-  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
-  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
-  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_` and `hue_install_`, and `sk-`, Stripe,
-  Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or `Token`,
-  an `Authorization` header's whole value and the value of a credential-named `key=value` or
-  `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the value
-  quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
+- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as its
+  ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops an
+  `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted ones
+  included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`, `?` or
+  `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
+  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`, and `sk-`,
+  Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or
+  `Token`, an `Authorization` header's whole value and the value of a credential-named `key=value`
+  or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the
+  value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
   another pair's value). The `redact` hook sees the text as `status.message`. Without content
   capture the span keeps `error.type` only. **Wire**
 
@@ -111,6 +111,13 @@ refuses to publish a version without a matching entry below.
 - `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
   throws when read: the item is skipped and counted, and the other calls are recorded, as the
   Python SDK does.
+- An output too long for the runtime to serialize (on Node, JSON longer than V8's longest string,
+  such as 120 MB of control characters) completes its case as `OutputTooLarge`; before, Node's
+  `Invalid string length` stopped the run with `OutcomeSerializationError` and a resume kept
+  refusing. The JSON byte length is counted as the output is read but still checked last, so an
+  output past the byte bound that is also not JSON raises `OutcomeSerializationError`, and an
+  array or object with more elements than values allowed, or keys longer than the bytes left, is
+  refused before its keys are listed or sorted.
 
 ### [0.10.0] - 2026-09-25
 
@@ -838,6 +845,16 @@ No registry release is claimed until publication and registry acceptance complet
 - `server.address` keeps a host name with an underscore, such as a Docker Compose service
   (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
   dropped.
+- An output's JSON byte length is counted as the output is read, as in the TypeScript SDK, so an
+  output too large to serialize is refused without serializing it (eleven references to a 50 MB
+  string took tens of seconds and a gigabyte); an output the process cannot hold in memory
+  completes its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values,
+  so an object of more than 10,000 members is no longer `OutputTooLarge`, and a list or object
+  with more elements than values left, or keys longer than the bytes left, is refused before it is
+  read. The output is read in the TypeScript SDK's order, and the byte bound is still checked
+  last, so both SDKs refuse an output for the same reason.
+- A large inline file's lone surrogates are replaced once for the whole part rather than in each
+  percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
 
 ### [0.6.1] - 2026-09-25
 

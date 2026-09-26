@@ -532,6 +532,12 @@ const installedPackageTests = [
   "environment-files.test.ts",
   "cli-output-safety.test.ts",
   "cli-eval-direct.test.ts",
+  // Output bounds, provider tool spans and their error-text scrubbing, and inline file digests,
+  // against the packed dist.
+  "evals-json.test.ts",
+  "provider-tools.test.ts",
+  "provider-tool-spans.test.ts",
+  "inline-files.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -624,6 +630,19 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/evals/environment-target.js"',
         )
         .replaceAll('"../src/evals/files.js"', '"../node_modules/@hue-run/sdk/dist/evals/files.js"')
+        .replaceAll('"../src/evals/json.js"', '"../node_modules/@hue-run/sdk/dist/evals/json.js"')
+        .replaceAll(
+          '"../src/provider-tools.js"',
+          '"../node_modules/@hue-run/sdk/dist/provider-tools.js"',
+        )
+        .replaceAll(
+          '"../src/tool-definitions.js"',
+          '"../node_modules/@hue-run/sdk/dist/tool-definitions.js"',
+        )
+        .replaceAll(
+          '"../src/inline-files.js"',
+          '"../node_modules/@hue-run/sdk/dist/inline-files.js"',
+        )
         .replaceAll(
           '"../src/evals/exit-cleanup.js"',
           '"../node_modules/@hue-run/sdk/dist/evals/exit-cleanup.js"',

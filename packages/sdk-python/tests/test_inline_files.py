@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hue_sdk._inline_files import INLINE_FILE_LIMIT, hash_inline_files
+from hue_sdk._inline_files import INLINE_FILE_LIMIT, _file_bytes, hash_inline_files
 
 # The TypeScript suite reads the same file; each digest is of the bytes the case was built from.
 # A checkout without the TypeScript fixtures skips these tests rather than failing to collect;
@@ -75,3 +76,18 @@ def test_a_data_url_with_millions_of_parameters_is_still_decoded_by_its_own_enco
         "sha256": hashlib.sha256(data).hexdigest(),
         "size": 70_000,
     }
+
+
+def test_lone_surrogates_are_replaced_once_for_a_whole_part() -> None:
+    # Replacing them in each percent-escaped segment raised and caught an error per segment,
+    # several times the cost of the same text without them.
+    def seconds(unit: str) -> float:
+        content = "data:text/plain," + unit * (2 * 1024 * 1024 // len(unit))
+        best = float("inf")
+        for _ in range(3):
+            started = time.perf_counter()
+            _file_bytes(content)
+            best = min(best, time.perf_counter() - started)
+        return best
+
+    assert seconds("a%41\ud800") < 3 * seconds("a%41\u00e9")

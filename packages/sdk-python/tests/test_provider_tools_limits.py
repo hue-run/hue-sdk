@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from hue_sdk._provider_tools import (
     hosted_tool_activity,
     provider_error_description,
 )
-from hue_sdk._tool_definitions import tool_catalog_summary
+from hue_sdk._tool_definitions import scrub_credential_text, tool_catalog_summary
 
 ERROR_TEXT_FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -22,6 +23,7 @@ ERROR_TEXT_FIXTURE = (
     / "provider-error-text.json"
 )
 LISTING_DIGEST_FIXTURE = ERROR_TEXT_FIXTURE.with_name("provider-tool-listing.json")
+PLANTED_SECRETS_FIXTURE = ERROR_TEXT_FIXTURE.with_name("planted-secrets.json")
 
 
 def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
@@ -385,3 +387,21 @@ def test_a_listing_s_null_fields_are_left_out_so_both_sdks_digest_its_catalog_al
     for definition in listing.definitions:
         assert None not in definition.values()
     assert tool_catalog_summary(json.dumps(listing.definitions)) == fixture["expected"]
+
+
+def test_every_secret_planted_in_the_shared_corpus_is_redacted_alone_or_all_at_once():
+    # The TypeScript suite checks the same corpus; ``planted-secrets.py`` regenerates it from its
+    # seed.
+    cases = json.loads(PLANTED_SECRETS_FIXTURE.read_text(encoding="utf-8"))["cases"]
+    started = time.perf_counter()
+    leaked = [
+        secret
+        for case in cases
+        for secret in case["secrets"]
+        if secret in scrub_credential_text(case["input"])
+    ]
+    assert leaked == []
+    # The whole corpus as one text: every secret still redacted, in time linear in its length.
+    whole = scrub_credential_text("\n".join(case["input"] for case in cases))
+    assert [secret for case in cases for secret in case["secrets"] if secret in whole] == []
+    assert time.perf_counter() - started < 10

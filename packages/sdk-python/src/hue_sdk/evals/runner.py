@@ -346,12 +346,14 @@ def run_experiment(
                 if output is not MISSING:
                     try:
                         json_value(output)
-                    except JsonLimitError as error:
-                        # An output over the size, count or depth bounds is the target's own
-                        # failure: the case completes as an error and the run goes on. Output that
-                        # is not JSON at all still stops the run for inspection.
+                    except (JsonLimitError, MemoryError) as error:
+                        # An output over the size, count or depth bounds, or too large to read in
+                        # memory, is the target's own failure: the case completes as an error and
+                        # the run goes on. Output that is not JSON at all still stops the run for
+                        # inspection.
                         state, output = "error", MISSING
-                        target_error = OutputTooLargeError(error.limit)
+                        limit = error.limit if isinstance(error, JsonLimitError) else "bytes"
+                        target_error = OutputTooLargeError(limit)
                         span.record_error(target_error)
                     except (ValueError, TypeError, RecursionError):
                         store.write(

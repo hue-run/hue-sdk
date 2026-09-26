@@ -10,7 +10,7 @@
     },
     {
       "input": "Authorization: Bearer synthetic-bearer-token was rejected",
-      "expected": "Authorization: [redacted] was rejected"
+      "expected": "Authorization: [redacted] [redacted] rejected"
     },
     {
       "input": "{\"error\":\"invalid_grant\",\"access_token\":\"synthetic-access\",\"note\":\"x\"}",
@@ -202,7 +202,7 @@
     },
     {
       "input": "Slack said xoxc-synthetic-client-token and xoxd-synthetic%2Fcookie-token",
-      "expected": "Slack said [redacted] and [redacted]"
+      "expected": "Slack said [redacted] [redacted] [redacted]"
     },
     {
       "input": "Hue said hue_sim_synthetic0123, hue_setup_synthetic0123 and hue_install_synthetic0123",
@@ -219,6 +219,70 @@
     {
       "input": "the key: value pairs and a tapi key: stay as they are",
       "expected": "the key: value pairs and a tapi key: stay as they are"
+    },
+    {
+      "input": "sk-synthetic0123Xpassword: \"synthetic two words\" rest",
+      "expected": "[redacted]: \"[redacted]\" rest"
+    },
+    {
+      "input": "Hue said hue_inv_synthetic0123 is invalid",
+      "expected": "Hue said [redacted] is invalid"
+    },
+    {
+      "input": "Authorization: Api-Key synthetic-api-key was rejected",
+      "expected": "Authorization: [redacted] was rejected"
+    },
+    {
+      "input": "Authorization: OAuth1 synthetic-oauth-credential",
+      "expected": "Authorization: [redacted]"
+    },
+    {
+      "input": "Authorization: AWS4-HMAC-SHA256 synthetic-aws-credential",
+      "expected": "Authorization: [redacted]"
+    },
+    {
+      "input": "password=synthetic-pw(Bearer synthetic-bearer-glued)",
+      "expected": "password=[redacted] [redacted])"
+    },
+    {
+      "input": "secret=synthetic-s{Token synthetic-token-glued}",
+      "expected": "secret=[redacted] [redacted]}"
+    },
+    {
+      "input": "api_key=synthetic-k[Basic c3ludGhldGljOmdsdWVk]",
+      "expected": "api_key=[redacted] [redacted]]"
+    },
+    {
+      "input": "token=synthetic-sk-glued!authorization=Bot synthetic-nested-secret",
+      "expected": "token=[redacted]"
+    },
+    {
+      "input": "Invalid token ghp_synthetic01:x~bearer synthetic-trailing-scheme",
+      "expected": "Invalid token [redacted] [redacted]"
+    },
+    {
+      "input": "authorization=Bot x!authorization=Bot synthetic-nested-auth tail",
+      "expected": "authorization=[redacted] tail"
+    },
+    {
+      "input": "password=sk-synthetic0123:token=\\'synthetic-escaped-single more",
+      "expected": "password=[redacted]'[redacted] more"
+    },
+    {
+      "input": "basic: private_token=\\'synthetic-escaped-basic",
+      "expected": "basic: [redacted]'[redacted]"
+    },
+    {
+      "input": "Proxy-Authorization=sk-synthetic0123|Authorization=\\'Bot synthetic-escaped-auth",
+      "expected": "Proxy-Authorization=[redacted]'[redacted]"
+    },
+    {
+      "input": "body {\\'error\\': \\'denied\\', \\'token\\': \\'synthetic two words\\', \\'n\\': 1}",
+      "expected": "body {\\'error\\': \\'denied\\', \\'token\\': \\'[redacted]\\', \\'n\\': 1}"
+    },
+    {
+      "input": "token=\\'a \\\"b\\\" c\\' d",
+      "expected": "token=\\'[redacted]\\' d"
     }
   ]
 }
