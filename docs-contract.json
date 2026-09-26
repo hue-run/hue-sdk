@@ -494,7 +494,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.11.0"
+      "version": "0.11.1"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -503,10 +503,10 @@
     "description": "Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.5.4"
+      "version": "0.5.5"
     },
     "name": "hue",
-    "sha256": "sha256:70b6e6327aab938ec21b4846aaab179e0d41fa3eca8cf1cc87255571a0675ce6",
+    "sha256": "sha256:64b2695a8dde763338b331bfb1d7cb0e105678076b477d78bffcfc1281960697",
     "source": "skills/hue/SKILL.md"
   }
 }
