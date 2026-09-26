@@ -82,38 +82,61 @@ test("an object whose keys need more bytes than are left is refused before they 
 });
 
 test("both SDKs refuse an output for the same reason", () => {
-  // The Python suite checks the same outputs. Values are read in order, members by key, and each
-  // is checked for its type before it is counted.
+  // The Python suite checks the same outputs. Values are read in order, members by key, and the
+  // first that is not JSON or past the value or depth bound decides.
   const big = "x".repeat(300_000);
+  const long = (length: number) => "x".repeat(length);
+  let deep: unknown = 0;
+  for (let level = 0; level < 40; level++) deep = [deep];
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  const keyed = Object.fromEntries([
+    ["a", Number.NaN],
+    ...Array.from({ length: 19_000 }, (_, index) => [`k${String(index).padStart(7, "0")}`, 0]),
+  ]);
   const cases: [unknown, "bytes" | "structure" | "not JSON"][] = [
-    [[big, Number.NaN], "bytes"],
     [[Number.NaN, big], "not JSON"],
-    [{ b: Array(25_000).fill(0), a: big }, "bytes"],
     [[big, ...Array(25_000).fill(0)], "structure"],
     [{ "key\u0000": 1 }, "not JSON"],
     [{ "\ud800": 1 }, "not JSON"],
     // JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
-    [{ "\uffff": Number.NaN, "😀": big }, "bytes"],
-    // Keys that need more bytes than are left are refused before any member is read, counting
-    // each key's code points, two quotes and a colon.
-    [{ a: Number.NaN, "😀": 1, ["\uffff" + big]: 1 }, "bytes"],
-    [{ a: Number.NaN, ["x".repeat(199_993)]: 1 }, "not JSON"],
-    [{ a: Number.NaN, ["x".repeat(199_994)]: 1 }, "bytes"],
-    [{ a: Number.NaN, ["😀".repeat(199_993)]: 1 }, "not JSON"],
-    [{ a: Number.NaN, ["😀".repeat(199_994)]: 1 }, "bytes"],
+    [{ "\uffff": Number.NaN, "😀": deep }, "structure"],
+    // The byte bound is checked last: past it, the output is read again, each object's keys in
+    // their own order, and a value that is not JSON or past another bound decides.
+    [[big, 0], "bytes"],
+    [[big, Number.NaN], "not JSON"],
+    [{ b: Number.NaN, a: big }, "not JSON"],
+    [{ b: Array(25_000).fill(0), a: big }, "structure"],
+    [{ a: Number.NaN, "😀": 1, ["\uffff" + big]: 1 }, "not JSON"],
+    [{ a: Number.NaN, [long(199_994)]: 1 }, "not JSON"],
+    [{ a: deep, [long(199_994)]: 1 }, "structure"],
+    [{ a: cycle, [long(199_994)]: 1 }, "not JSON"],
+    [{ a: new Date(0), [long(199_994)]: 1 }, "not JSON"],
+    [keyed, "not JSON"],
+    // Keys that need more bytes than are left (each key's code points, two quotes and a colon)
+    // pass the byte bound before the members are read by key.
+    [{ b: Number.NaN, a: deep, [long(199_989)]: 1 }, "structure"],
+    [{ b: Number.NaN, a: deep, [long(199_990)]: 1 }, "not JSON"],
+    [{ b: Number.NaN, a: deep, ["😀".repeat(199_989)]: 1 }, "structure"],
+    [{ b: Number.NaN, a: deep, ["😀".repeat(199_990)]: 1 }, "not JSON"],
+    // JavaScript lists an object's array indices (up to 2 ** 32 - 2) first, in numeric order.
+    [{ b: Number.NaN, "1": deep, [long(199_994)]: 1 }, "structure"],
+    [{ "10": deep, "9": Number.NaN, [long(199_994)]: 1 }, "not JSON"],
+    [{ b: Number.NaN, "4294967294": deep, [long(199_994)]: 1 }, "structure"],
+    [{ b: Number.NaN, "4294967295": deep, [long(199_994)]: 1 }, "not JSON"],
+    [{ b: Number.NaN, "01": deep, [long(199_994)]: 1 }, "not JSON"],
   ];
-  for (const [value, reason] of cases) {
-    let outcome = "accepted";
+  const outcomes = cases.map(([value]) => {
     try {
       json(value);
+      return "accepted";
     } catch (error) {
-      outcome =
-        error instanceof RangeError
-          ? error.message === "JSON exceeds byte limit"
-            ? "bytes"
-            : "structure"
-          : "not JSON";
+      return error instanceof RangeError
+        ? error.message === "JSON exceeds byte limit"
+          ? "bytes"
+          : "structure"
+        : "not JSON";
     }
-    expect(outcome).toBe(reason);
-  }
+  });
+  expect(outcomes).toEqual(cases.map(([, reason]) => reason));
 });

@@ -23,6 +23,9 @@ function codePoints(text: string): number {
   return count;
 }
 
+/** Thrown within `json` when the byte bound is passed, which is checked last. */
+class PastByteBound extends Error {}
+
 /** Reject lossy JSON serialization before creating requests/checkpoints. */
 export function json(value: unknown, requested: JsonBounds | number = valueBounds): JsonValue {
   const bounds = typeof requested === "number" ? { ...valueBounds, bytes: requested } : requested;
@@ -31,14 +34,18 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
   // The UTF-8 length of the JSON text, counted as the value is read, so a value too long to
   // serialize (past the runtime's longest string) is refused before `JSON.stringify` is asked to.
   let bytes = 0;
+  // Once the byte bound is passed, the value is read again only to check it (below).
+  let checking = false;
   const charge = (amount: number) => {
+    if (checking) return;
     bytes += amount;
-    if (bytes > bounds.bytes) throw new RangeError("JSON exceeds byte limit");
+    if (bytes > bounds.bytes) throw new PastByteBound();
   };
   // A string's JSON text is at least as long as the string, so one longer than what is left is
   // refused before it is escaped.
   const chargeText = (text: string) => {
-    if (text.length + 2 > bounds.bytes - bytes) throw new RangeError("JSON exceeds byte limit");
+    if (checking) return;
+    if (text.length + 2 > bounds.bytes - bytes) throw new PastByteBound();
     charge(Buffer.byteLength(JSON.stringify(text)));
   };
   const visit = (item: unknown, depth: number): JsonValue => {
@@ -80,18 +87,20 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
       const keys = Object.keys(item);
       if (keys.length > bounds.nodes - nodes)
         throw new RangeError("JSON exceeds depth/node limits");
-      // Keys whose JSON text alone (at least their code points, two quotes and a colon each)
-      // needs more bytes than are left are refused before they are sorted, as the Python SDK
-      // refuses them, so both refuse such an object for the same reason. A key has at least
-      // half its UTF-16 length in code points, so a long one is refused without counting them.
-      let left = bounds.bytes - bytes;
-      for (const key of keys) {
-        left -= 3;
-        if (key.length / 2 > left) throw new RangeError("JSON exceeds byte limit");
-        left -= codePoints(key);
-        if (left < 0) throw new RangeError("JSON exceeds byte limit");
+      if (!checking) {
+        // Keys whose JSON text alone (at least their code points, two quotes and a colon each)
+        // needs more bytes than are left pass the byte bound before they are sorted, as in the
+        // Python SDK, so both read such an object the same way. A key has at least half its
+        // UTF-16 length in code points, so a long one passes it without counting them.
+        let left = bounds.bytes - bytes;
+        for (const key of keys) {
+          left -= 3;
+          if (key.length / 2 > left) throw new PastByteBound();
+          left -= codePoints(key);
+          if (left < 0) throw new PastByteBound();
+        }
+        keys.sort();
       }
-      keys.sort();
       charge(keys.length ? keys.length + 1 : 2);
       for (const key of keys) {
         if (!isText(key))
@@ -108,10 +117,22 @@ export function json(value: unknown, requested: JsonBounds | number = valueBound
       ancestors.delete(item);
     }
   };
-  const result = visit(value, 0);
-  if (Buffer.byteLength(JSON.stringify(result)) > bounds.bytes)
-    throw new RangeError("JSON exceeds byte limit");
-  return result;
+  try {
+    const result = visit(value, 0);
+    if (Buffer.byteLength(JSON.stringify(result)) > bounds.bytes)
+      throw new RangeError("JSON exceeds byte limit");
+    return result;
+  } catch (error) {
+    if (!(error instanceof PastByteBound)) throw error;
+  }
+  // The byte bound is checked last, as it was before the length was counted as the value is
+  // read: a value past it that holds a value that is not JSON, or passes the value or depth bound,
+  // is refused for that. So the value is read again with each object's keys in their own order,
+  // and nothing is counted, escaped or sorted, which takes time linear in it.
+  checking = true;
+  nodes = 0;
+  visit(value, 0);
+  throw new RangeError("JSON exceeds byte limit");
 }
 export function digest(value: unknown): string {
   return createHash("sha256")

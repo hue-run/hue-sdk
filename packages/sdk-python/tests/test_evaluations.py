@@ -11,6 +11,7 @@ import sys
 import time
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread, current_thread
@@ -20,6 +21,7 @@ from uuid import uuid4
 
 import pytest
 
+import hue_sdk.evals._json as json_module
 import hue_sdk.evals.runner as runner_module
 from hue_sdk import Hue
 from hue_sdk.evals import (
@@ -866,34 +868,57 @@ def test_a_container_with_more_elements_than_values_left_is_refused_before_it_is
 
 def test_both_sdks_refuse_an_output_for_the_same_reason():
     # The TypeScript suite checks the same outputs. Values are read in order, members by key, and
-    # each is checked for its type before it is counted.
+    # the first that is not JSON or past the value or depth bound decides.
     big = "x" * 300_000
+    nan = float("nan")
+    deep: object = 0
+    for _ in range(40):
+        deep = [deep]
+    cycle: dict[str, object] = {}
+    cycle["self"] = cycle
+    keyed = {"a": nan, **{f"k{index:07d}": 0 for index in range(19_000)}}
     cases = [
-        ([big, float("nan")], "bytes"),
-        ([float("nan"), big], "not JSON"),
-        ({"b": [0] * 25_000, "a": big}, "bytes"),
+        ([nan, big], "not JSON"),
         ([big, *[0] * 25_000], "structure"),
         ({"key\x00": 1}, "not JSON"),
         ({"\ud800": 1}, "not JSON"),
         # JavaScript sorts 😀 (a surrogate pair) before \uffff; by code point it sorts after.
-        ({"\uffff": float("nan"), "😀": big}, "bytes"),
-        # Keys that need more bytes than are left are refused before any member is read, counting
-        # each key's code points, two quotes and a colon.
-        ({"a": float("nan"), "😀": 1, "\uffff" + big: 1}, "bytes"),
-        ({"a": float("nan"), "x" * 199_993: 1}, "not JSON"),
-        ({"a": float("nan"), "x" * 199_994: 1}, "bytes"),
-        ({"a": float("nan"), "😀" * 199_993: 1}, "not JSON"),
-        ({"a": float("nan"), "😀" * 199_994: 1}, "bytes"),
+        ({"\uffff": nan, "😀": deep}, "structure"),
+        # The byte bound is checked last: past it, the output is read again, each object's keys in
+        # JavaScript's order, and a value that is not JSON or past another bound decides.
+        ([big, 0], "bytes"),
+        ([big, nan], "not JSON"),
+        ({"b": nan, "a": big}, "not JSON"),
+        ({"b": [0] * 25_000, "a": big}, "structure"),
+        ({"a": nan, "😀": 1, "\uffff" + big: 1}, "not JSON"),
+        ({"a": nan, "x" * 199_994: 1}, "not JSON"),
+        ({"a": deep, "x" * 199_994: 1}, "structure"),
+        ({"a": cycle, "x" * 199_994: 1}, "not JSON"),
+        ({"a": datetime(2026, 9, 26), "x" * 199_994: 1}, "not JSON"),
+        (keyed, "not JSON"),
+        # Keys that need more bytes than are left (each key's code points, two quotes and a colon)
+        # pass the byte bound before the members are read by key.
+        ({"b": nan, "a": deep, "x" * 199_989: 1}, "structure"),
+        ({"b": nan, "a": deep, "x" * 199_990: 1}, "not JSON"),
+        ({"b": nan, "a": deep, "😀" * 199_989: 1}, "structure"),
+        ({"b": nan, "a": deep, "😀" * 199_990: 1}, "not JSON"),
+        # JavaScript lists an object's array indices (up to 2 ** 32 - 2) first, in numeric order.
+        ({"b": nan, "1": deep, "x" * 199_994: 1}, "structure"),
+        ({"10": deep, "9": nan, "x" * 199_994: 1}, "not JSON"),
+        ({"b": nan, "4294967294": deep, "x" * 199_994: 1}, "structure"),
+        ({"b": nan, "4294967295": deep, "x" * 199_994: 1}, "not JSON"),
+        ({"b": nan, "01": deep, "x" * 199_994: 1}, "not JSON"),
     ]
-    for value, reason in cases:
+    outcomes = []
+    for value, _ in cases:
         try:
             json_value(value)
-            outcome = "accepted"
+            outcomes.append("accepted")
         except JsonLimitError as error:
-            outcome = error.limit
+            outcomes.append(error.limit)
         except ValueError:
-            outcome = "not JSON"
-        assert outcome == reason
+            outcomes.append("not JSON")
+    assert outcomes == [reason for _, reason in cases]
 
 
 def test_the_byte_bound_is_the_exact_length_of_the_json_text():
@@ -932,17 +957,26 @@ def test_a_huge_key_is_refused_without_copying_it_to_sort_the_keys():
         assert peak < 10_000_000
 
 
-def test_keys_that_need_more_bytes_than_are_left_are_refused_before_they_are_sorted():
+def test_keys_that_need_more_bytes_than_are_left_are_refused_before_they_are_sorted(monkeypatch):
     # Long keys that share a prefix and hold both a character above U+FFFF and one from U+E000,
     # so they sort by comparator: 2,000 of them took 29 seconds.
     keys = ["a" * 65_000 + f"{index:05d}" + ("😀" if index % 2 else "！") for index in range(300)]
     random.Random(7).shuffle(keys)
     members = dict.fromkeys(keys, 0)
+    sorted_lengths = []
+
+    def order(keys):
+        sorted_lengths.append(len(keys))
+        return _utf16_order(keys)
+
+    monkeypatch.setattr(json_module, "_utf16_order", order)
     started = time.perf_counter()
     with pytest.raises(JsonLimitError) as refused:
         json_value(members)
     assert refused.value.limit == "bytes"
-    assert time.perf_counter() - started < 0.1
+    assert sorted_lengths == []
+    # Checking each key's text, as the byte bound is checked last, is all that is left.
+    assert time.perf_counter() - started < 1
 
 
 def test_keys_sort_by_utf16_code_unit_as_javascript_sorts_them():

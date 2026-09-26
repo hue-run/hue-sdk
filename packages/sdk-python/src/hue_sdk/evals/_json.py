@@ -57,7 +57,7 @@ def _compare_utf16(left: str, right: str) -> int:
     index, end = 0, min(len(left), len(right))
     while index < end and left[index : index + 65536] == right[index : index + 65536]:
         index += 65536
-    size = 65536
+    size = 1 << min(16, max(end - index, 0).bit_length())
     while size > 1:
         size //= 2
         if left[index : index + size] == right[index : index + size]:
@@ -78,6 +78,30 @@ def _utf16_order(keys: list[str]) -> list[str]:
     return sorted(keys, key=functools.cmp_to_key(_compare_utf16))
 
 
+def _is_array_index(key: str) -> bool:
+    """Whether JavaScript lists ``key`` among an object's array indices, ahead of its other keys."""
+    return (
+        len(key) <= 10
+        and key.isascii()
+        and key.isdigit()
+        and (key == "0" or key[0] != "0")
+        and int(key) < 2**32 - 1
+    )
+
+
+def _js_order(keys: list[str]) -> list[str]:
+    """Keys in the order JavaScript lists an object's own keys: its array indices in numeric order,
+    then the others as inserted."""
+    indices = [key for key in keys if _is_array_index(key)]
+    if not indices:
+        return keys
+    return sorted(indices, key=int) + [key for key in keys if not _is_array_index(key)]
+
+
+class _PastByteBound(Exception):
+    """Raised within ``json_value`` when the byte bound is passed, which is checked last."""
+
+
 def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
     """Validate before serialization; never coerce keys, NaN, dates or large Python integers.
 
@@ -85,23 +109,31 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
     by key), and each value is checked for its type before it is counted against the value, depth
     and byte bounds, so both SDKs refuse an output for the same reason. The byte count is that of
     the JSON text ``encode`` produces, kept as the value is read, so an output too large to
-    serialize is refused without serializing it.
+    serialize is refused without serializing it. The byte bound is checked last, as it was before
+    it was counted as the value is read: past it, the value is read again, as in TypeScript, and
+    one holding a value that is not JSON, or past the value or depth bound, is refused for that.
     """
     ancestors: set[int] = set()
     nodes = 0
     size = 0
+    # Once the byte bound is passed, the value is read again only to check it (below).
+    checking = False
 
     def charge(amount: int) -> None:
         nonlocal size
+        if checking:
+            return
         size += amount
         if size > max_bytes:
-            raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
+            raise _PastByteBound
 
     def charge_text(text: str) -> None:
+        if checking:
+            return
         # A string's JSON text is at least as long as the string, so one longer than what is left
         # is refused before it is escaped.
         if len(text) + 2 > max_bytes - size:
-            raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
+            raise _PastByteBound
         charge(len(json.dumps(text, ensure_ascii=False).encode("utf-8")))
 
     def visit(item: Any, depth: int) -> None:
@@ -139,15 +171,15 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             if any(type(key) is not str for key in item):
                 raise ValueError("JSON object keys must be strings.")
             # Keys whose JSON text alone (at least their code points, two quotes and a colon each)
-            # needs more bytes than are left are refused before they are sorted, as the
-            # TypeScript SDK refuses them, so both refuse such an object for the same reason.
+            # needs more bytes than are left pass the byte bound before they are sorted, as in the
+            # TypeScript SDK, so both read such an object the same way.
             key_bytes = 0
-            for key in item:
+            for key in item if not checking else ():
                 key_bytes += len(key) + 3
                 if key_bytes > max_bytes - size:
-                    raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
+                    raise _PastByteBound
             charge(len(item) + 1 if item else 2)
-            for key in _utf16_order(list(item)):
+            for key in _js_order(list(item)) if checking else _utf16_order(list(item)):
                 _text(key)
                 charge_text(key)
                 charge(1)
@@ -156,8 +188,17 @@ def json_value(value: Any, max_bytes: int = VALUE_BYTES) -> Any:
             # Repeated siblings serialize independently; only an active ancestor is a cycle.
             ancestors.discard(id(item))
 
+    try:
+        visit(value, 0)
+        return value
+    except _PastByteBound:
+        pass
+    # Read again with each object's keys in the order JavaScript lists them, as the TypeScript SDK
+    # reads it again, and nothing is counted, escaped or sorted, which takes time linear in it.
+    checking = True
+    nodes = 0
     visit(value, 0)
-    return value
+    raise JsonLimitError("bytes", "JSON exceeds the byte limit.")
 
 
 def encode(value: Any) -> bytes:
