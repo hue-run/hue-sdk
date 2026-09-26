@@ -13,7 +13,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_to_bytes, urlencode, urlsplit, urlunsplit
 
 from .transport import MAX_REQUEST_BYTES
 
@@ -64,38 +64,59 @@ def _is_credential_key(key: Any) -> bool:
 # JavaScript's ``\s``, spelled out so both SDKs split free text at the same characters.
 _JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 # A URL's ``://`` and everything after it up to whitespace, a quote or ``<>``. A quoted value right
-# after ``=`` (``?token="…"``) is part of the URL, so all of it is replaced.
+# after ``=`` (``?token="…"``, or ``\"…\"`` in JSON inside a string) is part of the URL, so all of
+# it is replaced, as is one whose quote does not close on its line, to the end of the line whatever
+# it holds.
 _URL_REST = re.compile(
-    rf"://(?:[^{_JS_SPACE}\"'<>`]|(?<==)\"[^\"<>`\r\n]*\""
-    r"|(?<==)'[^'<>`\r\n]*'|(?<==)[\"'])+",
+    r"://(?:(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\\"[^\"<>`\r\n]*\\\"|\\'[^'<>`\r\n]*\\'"
+    r"|(?:\\?\"[^\"\r\n]*|\\?'[^'\r\n]*)(?=[\r\n]|\Z))"
+    rf"|[^{_JS_SPACE}\"'<>`]|(?<==)\\?[\"'])+",
 )
 _SCHEME_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 # Schemes WHATWG parses as hierarchical, which both SDKs serialize alike.
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
-# A credential its own prefix identifies wherever it appears, ``%`` escapes included: Hue's API,
-# MCP, world, attempt, simulation, setup, install and invocation tokens, and OpenAI and Anthropic
-# (``sk-``), Stripe, Slack, Google OAuth, GitHub and GitLab ones.
+# Where a word starts: after a character that is not a word character, or after a JSON escape
+# (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
+_WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
+# Hue's API, MCP, world, attempt, simulation, setup, install, invocation, OAuth and other tokens,
+# and OpenAI and Anthropic (``sk-``), Stripe, Slack, Google OAuth, GitHub and GitLab ones.
+_TOKEN_PREFIX = (
+    r"(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv|at|rt|oauth|ss|vt)_|sk-"
+    r"|[rs]k_(?:live|test)_|xox[abcdeoprs]-|xapp-|ya29\.|gocspx-|gh[opsur]_|github_pat_|glpat-)"
+)
+# A credential its own prefix identifies wherever a word starts, ``%`` escapes included. At the
+# end of a cut text, any length of it is a credential, since the rest may have been cut. The
+# lookahead for a first letter, here and before ``bearer``, lets a search skip other characters
+# before testing a word start.
 _PREFIXED_TOKEN = re.compile(
-    r"\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv)_|sk-|[rs]k_(?:live|test)_"
-    r"|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}",
+    r"(?=[ghrsxy])" + _WORD_START + _TOKEN_PREFIX + r"[a-z0-9_.~+/=%-]{8,}",
+    re.IGNORECASE | re.ASCII,
+)
+_CUT_PREFIXED_TOKEN = re.compile(
+    r"(?=[ghrsxy])" + _WORD_START + _TOKEN_PREFIX + r"(?:[a-z0-9_.~+/=%-]{8,}|[a-z0-9_.~+/=%-]*\Z)",
     re.IGNORECASE | re.ASCII,
 )
 # An authorization scheme followed by its credential, as in an ``Authorization`` header, up to
-# whitespace, a quote, a delimiter or a backslash. The credential cannot start with ``=`` or ``:``,
-# so ``token = value`` and ``Token : value`` are left to the key-value rule.
+# whitespace, a quote, a delimiter or a backslash. The space between them may be escaped (``%20``,
+# ``\t``), and an escaped space ends the credential as a space does. The credential cannot start
+# with ``=`` or ``:``, so ``token = value`` and ``Token : value`` are left to the key-value rule.
 _AUTHORIZATION_VALUE = re.compile(
-    rf"\b(bearer|basic|token)([{_JS_SPACE}]+)[^{_JS_SPACE}\"'`<>=:,;(){{}}\[\]\\]"
-    rf"[^{_JS_SPACE}\"'`<>,;(){{}}\[\]\\]*",
+    rf"(?=[bt]){_WORD_START}(bearer|basic|token)((?:[{_JS_SPACE}]|%20|%09|\\[nrt]|\\u0020)+)"
+    rf"(?!%20|%09)[^{_JS_SPACE}\"'`<>=:,;(){{}}\[\]\\]"
+    rf"(?:(?!%20|%09)[^{_JS_SPACE}\"'`<>,;(){{}}\[\]\\])*",
     re.IGNORECASE | re.ASCII,
 )
-# The key and separator of a ``key=value`` or ``key: value`` pair, the key optionally quoted, with
-# a backslash-escaped quote too (JSON inside a string). A key starts where no key character
-# precedes it, so each word is tried once and a long run stays linear. The value is not consumed,
-# so a pair inside another pair's value (``error: token=…``) is found.
+# The key and separator of a ``key=value``, ``key: value`` or ``key => value`` pair, the key
+# optionally quoted, with a backslash-escaped quote too (JSON inside a string). A key starts where
+# no key character precedes it, so each word is tried once and a long run stays linear. Only a key
+# whose last letter a credential key's can be (``token``, ``apiKey``, ``headers``, ``basic`` …) is
+# read. The value is not consumed, so a pair inside another pair's value (``error: token=…``) is
+# found.
 _PAIR_KEY = re.compile(
-    rf"(\\?[\"']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1([{_JS_SPACE}]*[:=][{_JS_SPACE}]*)",
+    rf"(\\?[\"']|)(?<![a-z0-9_-])([a-z0-9_-]*[cdlnrsty][-_]*)\1"
+    rf"([{_JS_SPACE}]*(?:=>|[:=])[{_JS_SPACE}]*)",
     re.IGNORECASE | re.ASCII,
 )
 # A quoted value to its closing quote on the same line, spaces and escaped quotes included, or one
@@ -103,6 +124,19 @@ _PAIR_KEY = re.compile(
 _QUOTED_VALUE = re.compile(
     r"\"(?:[^\"\\\r\n]|\\[^\r\n])+\"|'(?:[^'\\\r\n]|\\[^\r\n])+'"
     r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+\\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'"
+)
+# A quoted value whose quote does not close on its line, as when the text was cut inside it: the
+# value runs to the end of the line.
+_OPEN_QUOTED_VALUE = re.compile(
+    r"(?:\"(?:[^\"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+"
+    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+|\\'(?:[^'\\\r\n]|\\[^'\r\n])+)\\?(?=[\r\n]|\Z)"
+)
+# What a ``[…]`` or ``{…}`` value's brackets are counted between: a bracket, a string (double,
+# single or backslash-escaped quotes), which runs to the end of the text when it does not close,
+# or another escaped character.
+_BRACKET_TOKEN = re.compile(
+    r"[\[\]{}]|\"(?:[^\"\\]|\\[\s\S])*\"?|'(?:[^'\\]|\\[\s\S])*'?"
+    r"|\\\"(?:[^\"\\]|\\[^\"])*(?:\\\"|\Z)|\\'(?:[^'\\]|\\[^'])*(?:\\'|\Z)|\\[\s\S]"
 )
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
@@ -119,11 +153,14 @@ _AUTHORIZATION_BARE = re.compile(
 )
 
 
-def _scrub_text_urls(text: str) -> str:
+def _scrub_text_urls(text: str, cut: bool = False) -> str:
     """Scrub each URL in free text. Each ``://`` is found by search and its scheme read back from
     it: up to 64 scheme characters, starting at a letter, so a longer run before ``://`` still
-    leaves a URL to scrub and a long run such as ``a.a.a…`` costs one pass."""
+    leaves a URL to scrub and a long run such as ``a.a.a…`` costs one pass. A URL that runs to the
+    end of a ``cut`` text may have lost its ``@`` or ``?`` there, so it is replaced whole."""
     scrub = _Scrub()
+    # Each URL's scrubbed text, as a text can repeat one many times.
+    scrubbed: dict[str, str] = {}
     parts: list[str] = []
     copied = 0
     index = text.find("://")
@@ -137,8 +174,10 @@ def _scrub_text_urls(text: str) -> str:
             rest = _URL_REST.match(text, index) if start < index else None
             if rest is not None:
                 url = text[start : rest.end()]
-                if _SPECIAL_TEXT_SCHEME.match(url):
-                    url = scrub.url(url)
+                if cut and rest.end() == len(text):
+                    url = REDACTED
+                elif _SPECIAL_TEXT_SCHEME.match(url):
+                    url = scrubbed.get(url) or scrubbed.setdefault(url, scrub.url(url))
                 elif _URL_PARTS.search(url):
                     url = REDACTED
                 parts.append(text[copied:start] + url)
@@ -164,13 +203,49 @@ def _is_text_credential_key(key: str) -> bool:
 
 
 # ``API key: …``: a credential named in two words, ``key`` right after ``API``.
-_API_BEFORE = re.compile(r"(?:^|[^a-z0-9_])api[ \t]+\Z", re.IGNORECASE | re.ASCII)
+_API_BEFORE = re.compile(
+    r"(?:^|[^a-z0-9_]|\\[bfnrt]|\\u[0-9a-f]{4}|%[0-9a-f]{2})api[ \t]+\Z", re.IGNORECASE | re.ASCII
+)
 
 
 def _is_api_key_phrase(text: str, key_start: int, key: str) -> bool:
-    return key.lower() == "key" and bool(
-        _API_BEFORE.search(text[max(0, key_start - 16) : key_start])
+    return (
+        len(key) == 3
+        and key.lower() == "key"
+        and bool(_API_BEFORE.search(text[max(0, key_start - 16) : key_start]))
     )
+
+
+_KEY_ESCAPE = re.compile(r"[bfnrt]|u[0-9a-f]{4}", re.IGNORECASE | re.ASCII)
+_KEY_PERCENT_ESCAPE = re.compile(r"[0-9a-f]{2}", re.IGNORECASE | re.ASCII)
+
+
+def _unescaped_key(text: str, key_start: int, key: str) -> str | None:
+    """A key that a JSON or ``%`` escape before it runs into (``\nheaders``, ``%20credentials``),
+    without the escape's characters; ``None`` when no escape precedes it."""
+    before = text[key_start - 1 : key_start]
+    escape = (
+        _KEY_ESCAPE.match(key)
+        if before == "\\"
+        else _KEY_PERCENT_ESCAPE.match(key)
+        if before == "%"
+        else None
+    )
+    return key[escape.end() :] if escape else None
+
+
+def _bracket_end(text: str, start: int) -> int:
+    """Where a ``[…]`` or ``{…}`` value that opens at ``start`` ends: after its matching bracket,
+    brackets inside strings not counted, or at the end of the text when it does not close."""
+    depth = 0
+    for token in _BRACKET_TOKEN.finditer(text, start):
+        if token[0] in ("[", "{"):
+            depth += 1
+        elif token[0] in ("]", "}"):
+            depth -= 1
+            if depth == 0:
+                return token.end()
+    return len(text)
 
 
 def _opens_quote(text: str, index: int) -> bool:
@@ -186,22 +261,50 @@ def _pair_spans(text: str) -> list[tuple[int, int]]:
     # The last ``Authorization`` value read: where it starts, where its first word ends and where
     # it ends. A value starting inside that first word ends where it does, so each run is read once.
     authorization: tuple[int, int, int] | None = None
+    # Where the last ``[…]`` or ``{…}`` value ends. One opening inside it closes inside it.
+    bracketed = 0
+    # Whether each key names a credential; a long text repeats its keys.
+    credential_keys: dict[str, bool] = {}
     for match in _PAIR_KEY.finditer(text):
-        start = match.end()
         key = match[2]
-        if not (_is_text_credential_key(key) or _is_api_key_phrase(text, match.start(2), key)):
-            continue
+        credential = credential_keys.get(key)
+        if credential is None:
+            credential = credential_keys[key] = _is_text_credential_key(key)
+        if not credential:
+            key_start = match.start(2)
+            unescaped = (
+                _unescaped_key(text, key_start, key)
+                if text[key_start - 1 : key_start] in ("\\", "%")
+                else None
+            )
+            if not (
+                (len(key) == 3 and _is_api_key_phrase(text, key_start, key))
+                or (unescaped and _is_text_credential_key(unescaped))
+            ):
+                continue
+        start = match.end()
         nested = start < covered
         is_authorization = _normalized_key(key).endswith("authorization")
+        bracket = text[start : start + 1] in ("[", "{") and not text.startswith("[redacted]", start)
         # A value inside an earlier value ends where that value's run or quote ends, so it can run
-        # past it only by opening a quote (which may be the one that closes the earlier value) or,
-        # for ``Authorization``, by the word after its scheme.
-        if nested and not is_authorization and not _opens_quote(text, start):
+        # past it only by opening a quote (which may be the one that closes the earlier value) or a
+        # bracket outside an earlier bracket or, for ``Authorization``, by the word after its
+        # scheme.
+        if nested and (
+            start < bracketed if bracket else not is_authorization and not _opens_quote(text, start)
+        ):
             continue
         quoted = _QUOTED_VALUE.match(text, start)
+        open_quoted = None if quoted else _OPEN_QUOTED_VALUE.match(text, start)
         if quoted:
             opening = 2 if quoted[0].startswith("\\") else 1
             end = quoted.end()
+        elif open_quoted:
+            opening = 2 if open_quoted[0].startswith("\\") else 1
+            end = open_quoted.end()
+        elif bracket:
+            opening, end = 0, _bracket_end(text, start)
+            bracketed = end
         elif is_authorization:
             if (
                 authorization is not None
@@ -263,7 +366,7 @@ def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
     return "".join(parts)
 
 
-def scrub_credential_text(text: str) -> str:
+def scrub_credential_text(text: str, cut: bool = False) -> str:
     """Remove credentials from free text a provider returned, such as an MCP error message.
 
     The rules are the tool definitions', extended for text: each ``http``, ``https``, ``ws``,
@@ -273,17 +376,22 @@ def scrub_credential_text(text: str) -> str:
     ``@``, ``?`` or ``#``; a token with a known credential prefix (``hue_sk_``, ``sk-``,
     ``xoxb-``, ``ya29.`` and others), the credential after an authorization scheme (``Bearer``,
     ``Basic``, ``Token``), the whole value of an ``Authorization`` header, and the value of a
-    ``key=value`` or ``key: value`` pair whose key names a credential (quoted, escaped-quoted or
-    bare) become ``[redacted]``. Identical to the TypeScript SDK's ``scrubCredentialText``.
+    ``key=value``, ``key: value`` or ``key => value`` pair whose key names a credential (quoted,
+    escaped-quoted, bare, or a whole ``[…]`` or ``{…}``) become ``[redacted]``. A JSON or ``%``
+    escape (``\n``, ``\u0022``, ``%20``) ends a word as a space does. A quote that does not close
+    on its line runs to the end of the line. ``cut`` says the text was cut from a longer one, so a
+    URL or prefixed token that runs to its end is replaced whole. Identical to the TypeScript
+    SDK's ``scrubCredentialText``.
     """
-    text = _scrub_text_urls(text)
+    text = _scrub_text_urls(text, cut)
     # Every rule reads the same text and their matches are replaced together, so no rule's
     # replacement can hide text another rule would have matched.
+    tokens = _CUT_PREFIXED_TOKEN if cut else _PREFIXED_TOKEN
     return _redact_spans(
         text,
         [
             *_pair_spans(text),
-            *(match.span() for match in _PREFIXED_TOKEN.finditer(text)),
+            *(match.span() for match in tokens.finditer(text)),
             *_authorization_spans(text),
         ],
     )
@@ -304,6 +412,9 @@ _TAB_OR_NEWLINE = re.compile("[\t\n\r]")
 _C0_OR_SPACE = "".join(map(chr, range(0x21)))
 _FORBIDDEN_HOST = frozenset("\x00\t\n\r #/:<>?@[\\]^|")
 _FORBIDDEN_DOMAIN = _FORBIDDEN_HOST | frozenset(map(chr, range(0x20))) | {"%", "\x7f"}
+_FORBIDDEN_DOMAIN_CHARACTER = re.compile(
+    "[" + "".join(re.escape(char) for char in sorted(_FORBIDDEN_DOMAIN)) + "]"
+)
 _PATH_ESCAPED = frozenset(' "#<>?^`{}')
 _SINGLE_DOT = frozenset({".", "%2e"})
 _DOUBLE_DOT = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
@@ -326,29 +437,29 @@ def _percent_encode(text: str) -> str:
 
 
 def _percent_decode(data: bytes) -> bytes:
-    decoded = bytearray()
-    index = 0
-    while index < len(data):
-        if (
-            data[index] == 0x25
-            and index + 2 < len(data)
-            and data[index + 1] in _HEX
-            and data[index + 2] in _HEX
-        ):
-            decoded.append(int(data[index + 1 : index + 3], 16))
-            index += 3
-        else:
-            decoded.append(data[index])
-            index += 1
-    return bytes(decoded)
+    """WHATWG percent-decoding: each ``%`` and two hex digits is that byte, any other ``%`` is
+    kept, as ``unquote_to_bytes`` decodes."""
+    return unquote_to_bytes(data) if b"%" in data else data
+
+
+# Each byte's application/x-www-form-urlencoded serialization, for ``str.translate`` over the
+# bytes read as Latin-1, which is linear in C where a loop over the bytes is not.
+_FORM_BYTES = {
+    byte: "+" if byte == 0x20 else chr(byte) if byte in _FORM_SAFE else f"%{byte:02X}"
+    for byte in range(256)
+}
 
 
 def _form_encode(text: str) -> str:
     """The application/x-www-form-urlencoded serialization of one name or value."""
-    return "".join(
-        "+" if byte == 0x20 else chr(byte) if byte in _FORM_SAFE else f"%{byte:02X}"
-        for byte in text.encode("utf-8")
-    )
+    return text.encode("utf-8").decode("latin-1").translate(_FORM_BYTES)
+
+
+_FORM_REDACTED = _form_encode(REDACTED)
+# ``_FORM_BYTES`` for names joined by ``&``, which can then only separate them: each ``&`` ends a
+# name and its redacted value, and in names not yet decoded a ``+`` is a space, written ``+``.
+_JOINED_NAMES = {**_FORM_BYTES, 0x26: f"={_FORM_REDACTED}&"}
+_JOINED_RAW_NAMES = {**_JOINED_NAMES, 0x2B: "+"}
 
 
 def _query_names(query: str) -> list[str]:
@@ -359,6 +470,25 @@ def _query_names(query: str) -> list[str]:
             name = pair.split(b"=", 1)[0].replace(b"+", b" ")
             names.append(_percent_decode(name).decode("utf-8", "replace"))
     return names
+
+
+def _redacted_query(query: str) -> str:
+    """A query as ``URLSearchParams`` serializes it with every value ``[redacted]``. The names are
+    decoded and encoded together, which gives each one's own text unless an escaped ``&``
+    (``%26``) could be taken for a separator, and a long query costs a few passes in C."""
+    names = [pair.partition(b"=")[0] for pair in query.encode("utf-8").split(b"&") if pair]
+    if not names:
+        return ""
+    joined = b"&".join(names)
+    if b"%" not in joined:
+        # UTF-8 from a str, with no escape to decode: each byte is written as it reads.
+        text = joined.decode("latin-1").translate(_JOINED_RAW_NAMES)
+    elif b"%26" not in joined:
+        decoded = unquote_to_bytes(joined.replace(b"+", b" ")).decode("utf-8", "replace")
+        text = decoded.encode("utf-8").decode("latin-1").translate(_JOINED_NAMES)
+    else:
+        return "&".join(f"{_form_encode(name)}={_FORM_REDACTED}" for name in _query_names(query))
+    return f"{text}={_FORM_REDACTED}"
 
 
 # Characters of an IDN host WHATWG parsing is attempted for; the DNS allows 253.
@@ -520,7 +650,7 @@ def _host(text: str) -> str:
             raise _InvalidUrl
         return f"[{_ipv6(text[1:-1])}]"
     domain = _domain_to_ascii(_percent_decode(text.encode("utf-8")).decode("utf-8", "replace"))
-    if not domain or any(char in _FORBIDDEN_DOMAIN for char in domain):
+    if not domain or _FORBIDDEN_DOMAIN_CHARACTER.search(domain):
         raise _InvalidUrl
     return _ipv4(domain) if _ends_in_number(domain) else domain
 
@@ -576,9 +706,7 @@ def _scrub_special_url(scheme: str, rest: str) -> str | None:
         return None
     serialized = f"{scheme}://{host}" + (f":{port}" if port is not None else "") + _path(path)
     if query:
-        pairs = "&".join(
-            f"{_form_encode(name)}={_form_encode(REDACTED)}" for name in _query_names(query)
-        )
+        pairs = _redacted_query(query)
         serialized += f"?{pairs}" if pairs else ""
     elif questioned:
         serialized += "?"

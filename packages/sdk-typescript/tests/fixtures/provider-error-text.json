@@ -86,7 +86,7 @@
     },
     {
       "input": "password=\"synthetic-unclosed and more",
-      "expected": "password=\"[redacted] and more"
+      "expected": "password=\"[redacted]"
     },
     {
       "input": "\"authorization\": \"Bearer synthetic two words\"",
@@ -122,7 +122,7 @@
     },
     {
       "input": "failed at https://mcp.example.test/sse?token=\"synthetic-unclosed-query next",
-      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D"
     },
     {
       "input": "world token hue_world_synthetic0000000000.signature111 and key hue_sk_test_synthetic_key_0123 were refused",
@@ -266,7 +266,7 @@
     },
     {
       "input": "password=sk-synthetic0123:token=\\'synthetic-escaped-single more",
-      "expected": "password=[redacted]'[redacted] more"
+      "expected": "password=[redacted]'[redacted]"
     },
     {
       "input": "basic: private_token=\\'synthetic-escaped-basic",
@@ -283,6 +283,98 @@
     {
       "input": "token=\\'a \\\"b\\\" c\\' d",
       "expected": "token=\\'[redacted]\\' d"
+    },
+    {
+      "input": "{\"detail\":\"invalid key\\nhue_sk_synthetic-escaped-1\"}",
+      "expected": "{\"detail\":\"invalid key\\n[redacted]\"}"
+    },
+    {
+      "input": "Authorization%3A%20Bearer%20synthetic-escaped-2",
+      "expected": "Authorization%3A%20Bearer%20[redacted]"
+    },
+    {
+      "input": "token%3Dghp_synthetic-escaped-3",
+      "expected": "token%3D[redacted]"
+    },
+    {
+      "input": "{\"error\":\"denied \\u0022sk-synthetic-escaped-4\\u0022\"}",
+      "expected": "{\"error\":\"denied \\u0022[redacted]\\u0022\"}"
+    },
+    {
+      "input": "line one\\tBasic synthetic-escaped-5",
+      "expected": "line one\\tBasic [redacted]"
+    },
+    {
+      "input": "detail:\\nheaders: synthetic-escaped-6",
+      "expected": "detail:\\nheaders: [redacted]"
+    },
+    {
+      "input": "%20credentials=synthetic-escaped-7",
+      "expected": "%20credentials=[redacted]"
+    },
+    {
+      "input": "unmasked%zzsk-synthetic-not-after-an-escape",
+      "expected": "unmasked%zzsk-synthetic-not-after-an-escape"
+    },
+    {
+      "input": "{\"token\": [\"synthetic-array-1\", \"synthetic-array-2\"], \"user\": \"bob\"}",
+      "expected": "{\"token\": [redacted], \"user\": \"bob\"}"
+    },
+    {
+      "input": "{'credentials': {'key': 'synthetic-dict-1', 'note': 'x]y'}} after",
+      "expected": "{'credentials': [redacted]} after"
+    },
+    {
+      "input": "body {\\\"secret\\\": [\\\"synthetic-escaped-array\\\"], \\\"user\\\": \\\"bob\\\"}",
+      "expected": "body {\\\"secret\\\": [redacted], \\\"user\\\": \\\"bob\\\"}"
+    },
+    {
+      "input": "headers={Authorization: Bot synthetic-header} next",
+      "expected": "headers=[redacted] next"
+    },
+    {
+      "input": "{\"password\": [\n  \"synthetic-multi-1\",\n  \"synthetic-multi-2\"\n], \"n\": 1}",
+      "expected": "{\"password\": [redacted], \"n\": 1}"
+    },
+    {
+      "input": "token: [synthetic-open-bracket and the rest",
+      "expected": "token: [redacted]"
+    },
+    {
+      "input": "token=[redacted] next",
+      "expected": "token=[redacted] next"
+    },
+    {
+      "input": "{\"token\" => \"synthetic-arrow-1\", \"id\" => 1}",
+      "expected": "{\"token\" => \"[redacted]\", \"id\" => 1}"
+    },
+    {
+      "input": ":api_key => synthetic-arrow-2",
+      "expected": ":api_key => [redacted]"
+    },
+    {
+      "input": "password=\"synthetic-unclosed and more\nnext line",
+      "expected": "password=\"[redacted]\nnext line"
+    },
+    {
+      "input": "https://api.example.test/?token=\"synthetic-open and more",
+      "expected": "https://api.example.test/?token=%5Bredacted%5D"
+    },
+    {
+      "input": "hue_at_synthetic-oauth-access hue_rt_synthetic-oauth-refresh",
+      "expected": "[redacted] [redacted]"
+    },
+    {
+      "input": "hue_oauth_code_synthetic-value hue_ss_synthetic-signing hue_vt_synthetic-verify",
+      "expected": "[redacted] [redacted] [redacted]"
+    },
+    {
+      "input": "xoxe-1-synthetic-slack-refresh GOCSPX-synthetic-google-secret",
+      "expected": "[redacted] [redacted]"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token=\\\"synthetic-escaped-query two\\\" next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
     }
   ]
 }

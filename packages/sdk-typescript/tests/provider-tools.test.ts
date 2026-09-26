@@ -259,11 +259,46 @@ test("error text is scrubbed of credentials and bounded, identically to the Pyth
     expect(providerErrorDescription(input)).toBe(expected);
   expect(providerErrorDescription("x".repeat(1_100))).toBe(`${"x".repeat(1_024)}…`);
   expect(providerErrorDescription("x".repeat(1_024))).toBe("x".repeat(1_024));
-  // Scrubbed before the cut: a credential that straddles the bound never shows a prefix.
-  const straddling = providerErrorDescription(`${"a".repeat(1_015)} token=synthetic-secret-value`);
-  expect(straddling).not.toContain("synthetic");
-  expect(straddling.endsWith("…")).toBe(true);
+  // Scrubbed before the cut: the 1,024th code point falls inside `[redacted]`, never inside a
+  // credential, where cutting first would leave its start to be scrubbed on its own.
+  expect(providerErrorDescription(`${"a".repeat(1_015)} token=synthetic-secret-value`)).toBe(
+    `${"a".repeat(1_015)} token=[r…`,
+  );
+  expect(providerErrorDescription(`${"a".repeat(1_010)} password="synthetic two words"`)).toBe(
+    `${"a".repeat(1_010)} password="[re…`,
+  );
   expect([...providerErrorDescription(`${"😀".repeat(1_030)}`)]).toHaveLength(1_025);
+});
+
+test("what the 16,384-code-point scan cuts through is redacted to the cut, as in the Python SDK", () => {
+  // The long value before it is scrubbed to `[redacted]`, so the text at the cut is exported.
+  const lead = `token=${"x".repeat(16_000)} `;
+  // `kept` ends where the scan cuts, and `rest` is past it; `exported` is what `kept` becomes.
+  const expectCut = (kept: string, rest: string, exported: string) => {
+    const filler = "y".repeat(16_384 - lead.length - kept.length - 1);
+    expect(providerErrorDescription(`${lead}${filler} ${kept}${rest}`)).toBe(
+      `token=[redacted] ${filler} ${exported}…`,
+    );
+  };
+  expectCut('password="synthetic-first synth', 'etic-second"', 'password="[redacted]');
+  expectCut("https://synthetic-us", "er:synthetic-pass@mcp.example.test/", "[redacted]");
+  expectCut("see hue_sk_syn", "thetic0123456789", "see [redacted]");
+  expectCut('headers={"Authorization": "Bot synth', 'etic"}', "headers=[redacted]");
+  // Text the cut does not interrupt keeps its words.
+  expectCut(
+    "see https://mcp.example.test/sse next ",
+    "words",
+    "see https://mcp.example.test/sse next ",
+  );
+});
+
+test("an escaped space ends a credential, so a run of them scrubs in linear time", () => {
+  // Each `Bearer%20` starts a credential; were `%20` part of one, each would run to the end.
+  const started = performance.now();
+  const scrubbed = scrubCredentialText("Bearer%20".repeat(111_112));
+  expect(scrubbed.startsWith("Bearer%20[redacted]%20[redacted]%20")).toBe(true);
+  expect(scrubbed).not.toContain("Bearer%20Bearer");
+  expect(performance.now() - started).toBeLessThan(5_000);
 });
 
 test("server.address keeps an underscore in a host name, as WHATWG URL parsing does", () => {

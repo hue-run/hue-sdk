@@ -8,6 +8,25 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Fixed
+
+- A failed OpenAI MCP call's error text, exported with `captureContent: true`, is scrubbed of
+  credentials it kept before. A JSON escape (`\n`, `\t`, `\u0022`) or `%` escape (`%20`, `%3D`)
+  ends a word as a space does, so a prefixed token, `Bearer`, `Basic` or `Token` or a credential
+  key right after one is found (`…\nhue_sk_…`, `token%3Dghp_…`), and an escaped space separates a
+  scheme from its credential and ends it (`Authorization%3A%20Bearer%20…`). A credential key's
+  whole `[…]` or `{…}` value is replaced, where only its `[` or `{` was, and `key => value` pairs
+  are read. **Wire**
+- In the same text, a quoted value whose quote does not close on its line, as when the text was
+  cut inside it, is replaced to the end of the line, where only its first word was, and so is a
+  URL's query value between backslash-escaped quotes (`?token=\"…\"`). Only the first 16,384 code
+  points are scrubbed; a URL or prefixed token that this cut interrupts is now replaced whole, and
+  the text is still scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`,
+  `hue_rt_`, `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and
+  Google OAuth client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
+
 ### [0.11.0] - 2026-09-26
 
 This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
@@ -56,17 +75,17 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   any record's tool definitions; before, it carried neither. Descriptions and schemas are still
   exported only with content capture. **Wire**
 - With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as its
-  ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops an
-  `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted ones
-  included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`, `?` or
-  `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
-  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`, and `sk-`,
-  Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or
-  `Token`, an `Authorization` header's whole value and the value of a credential-named `key=value`
-  or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the
-  value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
-  another pair's value). The `redact` hook sees the text as `status.message`. Without content
-  capture the span keeps `error.type` only. **Wire**
+  ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…`. Scrubbing
+  drops an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values
+  (quoted ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has
+  an `@`, `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`,
+  `hue_mcp_`, `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`,
+  and `sk-`, Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`,
+  `Basic` or `Token`, an `Authorization` header's whole value and the value of a credential-named
+  `key=value` or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API
+  key:`; the value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a
+  pair inside another pair's value). The `redact` hook sees the text as `status.message`. Without
+  content capture the span keeps `error.type` only. **Wire**
 
 - `hue mcp install --auth oauth` configures only the server URL, so the client signs in with Hue
   in the browser instead of sending a key: a URL-only `.mcp.json` or `claude mcp add` for
@@ -861,9 +880,9 @@ No registry release is claimed until publication and registry acceptance complet
   `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
   any record's tool definitions. **Wire**
 - With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed and cut to 1,024 characters exactly as the
-  TypeScript SDK does, after your `redactor` sees it as `status.message`. Without content capture
-  the span keeps `error.type` only. **Wire**
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…` exactly
+  as the TypeScript SDK 0.11.1 does, before your `redactor` sees it as `status.message`. Without
+  content capture the span keeps `error.type` only. **Wire**
 
 #### Fixed
 
@@ -888,6 +907,9 @@ No registry release is claimed until publication and registry acceptance complet
   last, so both SDKs refuse an output for the same reason.
 - A large inline file's lone surrogates are replaced once for the whole part rather than in each
   percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
+- A URL's query names are decoded and encoded together in C rather than byte by byte, so
+  scrubbing a URL with thousands of parameters, in a tool definition's `url` or in MCP error text,
+  takes about half the time it did. The exported text is unchanged.
 
 ### [0.6.1] - 2026-09-25
 

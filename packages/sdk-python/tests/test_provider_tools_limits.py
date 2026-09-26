@@ -357,10 +357,54 @@ def test_error_text_is_scrubbed_and_bounded_identically_to_the_typescript_sdk():
         assert provider_error_description(case["input"]) == case["expected"]
     assert provider_error_description("x" * 1_100) == "x" * 1_024 + "\u2026"
     assert provider_error_description("x" * 1_024) == "x" * 1_024
-    # Scrubbed before the cut: a credential that straddles the bound never shows a prefix.
-    straddling = provider_error_description("a" * 1_015 + " token=synthetic-secret-value")
-    assert "synthetic" not in straddling and straddling.endswith("\u2026")
+    # Scrubbed before the cut: the 1,024th code point falls inside ``[redacted]``, never inside a
+    # credential, where cutting first would leave its start to be scrubbed on its own.
+    assert (
+        provider_error_description("a" * 1_015 + " token=synthetic-secret-value")
+        == "a" * 1_015 + " token=[r\u2026"
+    )
+    assert (
+        provider_error_description("a" * 1_010 + ' password="synthetic two words"')
+        == "a" * 1_010 + ' password="[re\u2026'
+    )
     assert len(provider_error_description("\U0001f600" * 1_030)) == 1_025
+
+
+@pytest.mark.parametrize(
+    ("kept", "rest", "exported"),
+    [
+        ('password="synthetic-first synth', 'etic-second"', 'password="[redacted]'),
+        ("https://synthetic-us", "er:synthetic-pass@mcp.example.test/", "[redacted]"),
+        ("see hue_sk_syn", "thetic0123456789", "see [redacted]"),
+        ('headers={"Authorization": "Bot synth', 'etic"}', "headers=[redacted]"),
+        # Text the cut does not interrupt keeps its words.
+        (
+            "see https://mcp.example.test/sse next ",
+            "words",
+            "see https://mcp.example.test/sse next ",
+        ),
+    ],
+)
+def test_what_the_scan_cuts_through_is_redacted_to_the_cut_as_in_the_typescript_sdk(
+    kept: str, rest: str, exported: str
+):
+    # The long value before it is scrubbed to ``[redacted]``, so the text at the 16,384-code-point
+    # cut is exported; ``kept`` ends at the cut and ``rest`` is past it.
+    lead = "token=" + "x" * 16_000 + " "
+    filler = "y" * (16_384 - len(lead) - len(kept) - 1)
+    assert (
+        provider_error_description(f"{lead}{filler} {kept}{rest}")
+        == f"token=[redacted] {filler} {exported}\u2026"
+    )
+
+
+def test_an_escaped_space_ends_a_credential_so_a_run_of_them_scrubs_in_linear_time():
+    # Each ``Bearer%20`` starts a credential; were ``%20`` part of one, each would run to the end.
+    started = time.perf_counter()
+    scrubbed = scrub_credential_text("Bearer%20" * 111_112)
+    assert scrubbed.startswith("Bearer%20[redacted]%20[redacted]%20")
+    assert "Bearer%20Bearer" not in scrubbed
+    assert time.perf_counter() - started < 10
 
 
 def test_server_address_keeps_an_underscore_in_a_host_name():

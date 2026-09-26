@@ -79,8 +79,11 @@ function isCredentialKey(key: string): boolean {
 }
 
 /** A URL's `://` and everything after it up to whitespace, a quote or `<>`. A quoted value right
- * after `=` (`?token="…"`) is part of the URL, so the whole value is replaced. */
-const urlRest = /:\/\/(?:[^\s"'<>`]|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["'])+/y;
+ * after `=` (`?token="…"`, or `\"…\"` in JSON inside a string) is part of the URL, so the whole
+ * value is replaced, as is one whose quote does not close on its line, to the end of the line
+ * whatever it holds. */
+const urlRest =
+  /:\/\/(?:(?<==)(?:"[^"<>`\r\n]*"|'[^'<>`\r\n]*'|\\"[^"<>`\r\n]*\\"|\\'[^'<>`\r\n]*\\'|(?:\\?"[^"\r\n]*|\\?'[^'\r\n]*)(?=[\r\n]|$))|[^\s"'<>`]|(?<==)\\?["'])+/y;
 const isSchemeLetter = (code: number) => (code | 0x20) >= 0x61 && (code | 0x20) <= 0x7a;
 /** `a-z`, `0-9`, `+`, `.` and `-`, case-insensitively. */
 const isSchemeCharacter = (code: number) =>
@@ -92,8 +95,9 @@ const isSchemeCharacter = (code: number) =>
 
 /** Scrubs each URL in free text. Each `://` is found by search and its scheme read back from it:
  * up to 64 scheme characters, starting at a letter, so a longer run before `://` still leaves a
- * URL to scrub and a long run such as `a.a.a…` costs one pass. */
-function scrubTextUrls(text: string, state: ScrubState): string {
+ * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
+ * `cut` text may have lost its `@` or `?` there, so it is replaced whole. */
+function scrubTextUrls(text: string, state: ScrubState, cut = false): string {
   let result = "";
   let copied = 0;
   for (let index = text.indexOf("://"); index !== -1; index = text.indexOf("://", index + 1)) {
@@ -107,7 +111,9 @@ function scrubTextUrls(text: string, state: ScrubState): string {
     const rest = urlRest.exec(text);
     if (!rest) continue;
     const end = index + rest[0].length;
-    result += text.slice(copied, start) + scrubTextUrl(text.slice(start, end), state);
+    result +=
+      text.slice(copied, start) +
+      (cut && end === text.length ? REDACTED : scrubTextUrl(text.slice(start, end), state));
     copied = end;
   }
   return result + text.slice(copied);
@@ -120,25 +126,51 @@ function scrubTextUrl(url: string, state: ScrubState): string {
   if (specialScheme.test(url)) return scrubUrl(url, state);
   return /[@?#]/.test(url) ? REDACTED : url;
 }
-/** A credential its own prefix identifies wherever it appears, `%` escapes included: Hue's API, MCP,
- * world, attempt, simulation, setup, install and invocation tokens, and OpenAI and Anthropic
- * (`sk-`), Stripe, Slack, Google OAuth, GitHub and GitLab ones. */
-const prefixedToken =
-  /\b(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv)_|sk-|[rs]k_(?:live|test)_|xox[abcdoprs]-|xapp-|ya29\.|gh[opsur]_|github_pat_|glpat-)[a-z0-9_.~+/=%-]{8,}/gi;
+/** Where a word starts: after a character that is not a word character, or after a JSON escape
+ * (`\n`, `\t`, `\u0022`) or `%` escape, which ends in one. */
+const wordStart = String.raw`(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))`;
+/** Hue's API, MCP, world, attempt, simulation, setup, install, invocation, OAuth and other
+ * tokens, and OpenAI and Anthropic (`sk-`), Stripe, Slack, Google OAuth, GitHub and GitLab ones. */
+const tokenPrefix = String.raw`(?:hue_(?:sk|mcp|world|attempt|sim|setup|install|inv|at|rt|oauth|ss|vt)_|sk-|[rs]k_(?:live|test)_|xox[abcdeoprs]-|xapp-|ya29\.|gocspx-|gh[opsur]_|github_pat_|glpat-)`;
+/** A credential its own prefix identifies wherever a word starts, `%` escapes included. At the end
+ * of a cut text, any length of it is a credential, since the rest may have been cut. The
+ * lookahead for a first letter, here and before `bearer`, lets a search skip other characters
+ * before testing a word start. */
+const prefixedToken = new RegExp(
+  `(?=[ghrsxy])${wordStart}${tokenPrefix}[a-z0-9_.~+/=%-]{8,}`,
+  "gi",
+);
+const cutPrefixedToken = new RegExp(
+  `(?=[ghrsxy])${wordStart}${tokenPrefix}(?:[a-z0-9_.~+/=%-]{8,}|[a-z0-9_.~+/=%-]*$)`,
+  "gi",
+);
 /** An authorization scheme followed by its credential, as in an `Authorization` header, up to
- * whitespace, a quote, a delimiter or a backslash. The credential cannot start with `=` or `:`, so
- * `token = value` and `Token : value` are left to the key-value rule. */
-const authorizationValue =
-  /\b(bearer|basic|token)(\s+)[^\s"'`<>=:,;(){}[\]\\][^\s"'`<>,;(){}[\]\\]*/gi;
-/** The key and separator of a `key=value` or `key: value` pair, the key optionally quoted, with a
- * backslash-escaped quote too (JSON inside a string). A key starts where no key character precedes
- * it, so each word is tried once and a long run stays linear. The value is not consumed, so a pair
- * inside another pair's value (`error: token=…`) is found. */
-const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]+)\1(\s*[:=]\s*)/gi;
+ * whitespace, a quote, a delimiter or a backslash. The space between them may be escaped (`%20`,
+ * `\t`), and an escaped space ends the credential as a space does. The credential cannot start
+ * with `=` or `:`, so `token = value` and `Token : value` are left to the key-value rule. */
+const authorizationValue = new RegExp(
+  String.raw`(?=[bt])${wordStart}(bearer|basic|token)((?:\s|%20|%09|\\[nrt]|\\u0020)+)(?!%20|%09)[^\s"'${"`"}<>=:,;(){}[\]\\](?:(?!%20|%09)[^\s"'${"`"}<>,;(){}[\]\\])*`,
+  "gi",
+);
+/** The key and separator of a `key=value`, `key: value` or `key => value` pair, the key optionally
+ * quoted, with a backslash-escaped quote too (JSON inside a string). A key starts where no key
+ * character precedes it, so each word is tried once and a long run stays linear. Only a key whose
+ * last letter a credential key's can be (`token`, `apiKey`, `headers`, `basic` …) is read. The
+ * value is not consumed, so a pair inside another pair's value (`error: token=…`) is found. */
+const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]*[cdlnrsty][-_]*)\1(\s*(?:=>|[:=])\s*)/gi;
 /** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
  * one between backslash-escaped quotes, double or single. */
 const quotedValue =
   /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'/y;
+/** A quoted value whose quote does not close on its line, as when the text was cut inside it:
+ * the value runs to the end of the line. */
+const openQuotedValue =
+  /(?:"(?:[^"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+|\\"(?:[^"\\\r\n]|\\[^"\r\n])+|\\'(?:[^'\\\r\n]|\\[^'\r\n])+)\\?(?=[\r\n]|$)/y;
+/** What a `[…]` or `{…}` value's brackets are counted between: a bracket, a string (double,
+ * single or backslash-escaped quotes), which runs to the end of the text when it does not close,
+ * or another escaped character. */
+const bracketToken =
+  /[[\]{}]|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\\"(?:[^"\\]|\\[^"])*(?:\\"|$)|\\'(?:[^'\\]|\\[^'])*(?:\\'|$)|\\[\s\S]/g;
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
@@ -164,7 +196,7 @@ function isTextCredentialKey(key: string): boolean {
 }
 
 /** `API key: …`: a credential named in two words, `key` right after `API`. */
-const apiBefore = /(?:^|[^a-z0-9_])api[ \t]+$/i;
+const apiBefore = /(?:^|[^a-z0-9_]|\\[bfnrt]|\\u[0-9a-f]{4}|%[0-9a-f]{2})api[ \t]+$/i;
 function isApiKeyPhrase(text: string, keyStart: number, key: string): boolean {
   return (
     key.toLowerCase() === "key" && apiBefore.test(text.slice(Math.max(0, keyStart - 16), keyStart))
@@ -173,6 +205,30 @@ function isApiKeyPhrase(text: string, keyStart: number, key: string): boolean {
 
 /** A run of text to replace with `[redacted]`: its start and end offsets. */
 type Span = [start: number, end: number];
+
+/** A key that a JSON or `%` escape before it runs into (`\nheaders`, `%20credentials`), without
+ * the escape's characters; `undefined` when no escape precedes it. */
+function unescapedKey(text: string, keyStart: number, key: string): string | undefined {
+  const escape =
+    text[keyStart - 1] === "\\"
+      ? /^(?:[bfnrt]|u[0-9a-f]{4})/i.exec(key)
+      : text[keyStart - 1] === "%"
+        ? /^[0-9a-f]{2}/i.exec(key)
+        : null;
+  return escape ? key.slice(escape[0].length) : undefined;
+}
+
+/** Where a `[…]` or `{…}` value that opens at `start` ends: after its matching bracket, brackets
+ * inside strings not counted, or at the end of the text when it does not close. */
+function bracketEnd(text: string, start: number): number {
+  let depth = 0;
+  bracketToken.lastIndex = start;
+  for (let token = bracketToken.exec(text); token; token = bracketToken.exec(text)) {
+    if (token[0] === "[" || token[0] === "{") depth++;
+    else if ((token[0] === "]" || token[0] === "}") && --depth === 0) return bracketToken.lastIndex;
+  }
+  return text.length;
+}
 
 /** Whether a quote, or a backslash-escaped quote, opens at `index`. */
 function opensQuote(text: string, index: number): boolean {
@@ -193,24 +249,46 @@ function pairSpans(text: string): Span[] {
   // The last `Authorization` value read: where it starts, where its first word ends and where it
   // ends. A value starting inside that first word ends where it does, so each run is read once.
   let authorization: { from: number; firstEnd: number; end: number } | undefined;
+  // Where the last `[…]` or `{…}` value ends. One opening inside it closes inside it.
+  let bracketed = 0;
   for (const match of text.matchAll(pairKey)) {
     const start = match.index + match[0].length;
     const key = match[2]!;
     const keyStart = match.index + match[1]!.length;
-    if (!(isTextCredentialKey(key) || isApiKeyPhrase(text, keyStart, key))) continue;
+    const unescaped = unescapedKey(text, keyStart, key);
+    if (
+      !(
+        isTextCredentialKey(key) ||
+        isApiKeyPhrase(text, keyStart, key) ||
+        (unescaped !== undefined && isTextCredentialKey(unescaped))
+      )
+    )
+      continue;
     const nested = start < covered;
     const isAuthorization = normalizedKey(key).endsWith("authorization");
+    const bracket =
+      (text[start] === "[" || text[start] === "{") && !text.startsWith("[redacted]", start);
     // A value inside an earlier value ends where that value's run or quote ends, so it can run
-    // past it only by opening a quote (which may be the one that closes the earlier value) or,
-    // for `Authorization`, by the word after its scheme.
-    if (nested && !isAuthorization && !opensQuote(text, start)) continue;
+    // past it only by opening a quote (which may be the one that closes the earlier value) or a
+    // bracket outside an earlier bracket or, for `Authorization`, by the word after its scheme.
+    if (nested && (bracket ? start < bracketed : !isAuthorization && !opensQuote(text, start)))
+      continue;
     quotedValue.lastIndex = start;
     const quoted = quotedValue.exec(text);
+    openQuotedValue.lastIndex = start;
+    const openQuoted = quoted ? null : openQuotedValue.exec(text);
     let open: number;
     let end: number;
     if (quoted) {
       open = quoted[0].startsWith("\\") ? 2 : 1;
       end = start + quoted[0].length;
+    } else if (openQuoted) {
+      open = openQuoted[0].startsWith("\\") ? 2 : 1;
+      end = start + openQuoted[0].length;
+    } else if (bracket) {
+      open = 0;
+      end = bracketEnd(text, start);
+      bracketed = end;
     } else if (isAuthorization) {
       if (
         authorization &&
@@ -293,16 +371,19 @@ function redactSpans(text: string, spans: Span[]): string {
  * becomes `[redacted]` when it has an `@`, `?` or `#`; a token with a known credential prefix
  * (`hue_sk_`, `sk-`, `xoxb-`, `ya29.` and others), the credential after an authorization scheme
  * (`Bearer`, `Basic`, `Token`), the whole value of an `Authorization` header, and the value of a
- * `key=value` or `key: value` pair whose key names a credential (quoted, escaped-quoted or bare)
- * become `[redacted]`.
+ * `key=value`, `key: value` or `key => value` pair whose key names a credential (quoted,
+ * escaped-quoted, bare, or a whole `[…]` or `{…}`) become `[redacted]`. A JSON or `%` escape
+ * (`\n`, `\u0022`, `%20`) ends a word as a space does. A quote that does not close on its line
+ * runs to the end of the line. `cut` says the text was cut from a longer one, so a URL or prefixed token that runs to its
+ * end is replaced whole.
  */
-export function scrubCredentialText(text: string): string {
-  const scrubbed = scrubTextUrls(text, { changed: false });
+export function scrubCredentialText(text: string, cut = false): string {
+  const scrubbed = scrubTextUrls(text, { changed: false }, cut);
   // Every rule reads the same text and their matches are replaced together, so no rule's
   // replacement can hide text another rule would have matched.
   return redactSpans(scrubbed, [
     ...pairSpans(scrubbed),
-    ...matchSpans(scrubbed, prefixedToken),
+    ...matchSpans(scrubbed, cut ? cutPrefixedToken : prefixedToken),
     ...authorizationSpans(scrubbed),
   ]);
 }

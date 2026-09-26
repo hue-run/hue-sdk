@@ -165,8 +165,9 @@ call carries `error.type` (`mcp_error`, the provider's status or error code) and
 text, credentials scrubbed (URL userinfo, query values and fragments, or the whole URL for a scheme
 other than `http(s)`, `ws(s)` and `ftp`; tokens with a known credential prefix such as `hue_sk_`,
 `sk-` or `xoxb-`; authorization-scheme credentials and an `Authorization` header's whole value;
-the value of a credential-named `key=value` or `key: value` pair, quoted or not) and cut to 1,024
-characters. An `mcp_list_tools`
+the value of a credential-named `key=value`, `key: value` or `key => value` pair, quoted, bare or
+a whole `[…]` or `{…}`, a quote that does not close on its line running to its end; a JSON or `%`
+escape such as `\n` or `%20` ends a word) and cut to 1,024 characters and a `…`. An `mcp_list_tools`
 item becomes a `tools/list` child span with that server's `gen_ai.tool.definitions`; with
 `captureContent: false` it carries only `hue.tool.names` and `hue.tool.definitions.sha256`, the
 summary described below. Pass the request so each server's host is recorded as `server.address`
