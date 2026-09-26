@@ -176,30 +176,55 @@ warns; `--gitignore` appends the file name to the `.gitignore` next to it. Exit 
 
 ## Install the MCP for your coding agent
 
-`hue mcp install --client <name>` writes, runs or prints the configuration for Hue's MCP server.
-Every shape matches the snippet Hue shows in Settings: server name `hue`, the endpoint (default
-`https://mcp.hue.run/mcp`; `--url https://mcp.staging.hue.run/mcp` for staging) and a reference to
-the `HUE_MCP_KEY` environment variable. A key value is never written.
+`hue mcp install --client <name>` writes, runs or prints the configuration for Hue's MCP server,
+in the shapes of the [connection guide](https://docs.hue.run/agents/mcp-server): server name
+`hue` and the endpoint (default `https://mcp.hue.run/mcp`; `--url https://mcp.staging.hue.run/mcp`
+for staging). Hue's Settings page does not show these snippets; this command keeps its own copy.
 
-| Client | Result |
-| --- | --- |
-| `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. |
-| `cursor` | Merges `mcpServers.hue` into `./.cursor/mcp.json` with `${env:HUE_MCP_KEY}`. |
-| `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. |
-| `vscode` | Merges `servers.hue` and the `hue-mcp-key` password input into `./.vscode/mcp.json`. |
-| `windsurf` | Prints the `serverUrl` snippet for `~/.codeium/windsurf/mcp_config.json`; nothing is written to the home directory. |
-| `gemini` | Runs `gemini mcp add --transport http hue URL -H 'Authorization: Bearer $HUE_MCP_KEY'`, or prints it. |
+`--auth` chooses how the client authenticates:
+
+- `key` (the default, except for `conductor`) references the `HUE_MCP_KEY` environment variable,
+  which `hue login` stores in `.env.hue`. A key value is never written.
+- `oauth` configures the URL only. The client opens Hue in a browser, where you sign in, select one
+  project and approve **Read** or **Read and write**; no key or header is involved. It is available
+  for `claude-code`, `codex` and `conductor`. Hue does not yet accept Cursor's sign-in callback, so
+  `cursor` and the other clients use a key.
+
+`--read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides and rejects write
+tools whatever the key allows. With `--auth oauth` it is refused: choose **Read** when you approve
+the connection instead.
+
+| Client | Key (`--auth key`) | Sign-in (`--auth oauth`) |
+| --- | --- | --- |
+| `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. | Merges `mcpServers.hue` with only `type` and `url` into `./.mcp.json`; `--scope user` runs `claude mcp add --transport http --scope user hue URL`. Then run `/mcp` in Claude Code, select `hue` and choose **Authenticate**. |
+| `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. | Runs `codex mcp add hue --url URL`, which can start sign-in right away; `codex mcp login hue` starts or repeats it. |
+| `conductor` | Runs the Claude Code user-scope and Codex key commands above. | The default: runs `claude mcp add --transport http --scope user hue URL` and `codex mcp add hue --url URL`. Then use `hue`'s authentication action in Conductor's MCP status (the plug icon or `/mcp-status`). |
+| `cursor` | Merges `mcpServers.hue` into `./.cursor/mcp.json` with `${env:HUE_MCP_KEY}`. | Refused. |
+| `vscode` | Merges `servers.hue` and the `hue-mcp-key` password input into `./.vscode/mcp.json`. | Refused. |
+| `windsurf` | Prints the `serverUrl` snippet for `~/.codeium/windsurf/mcp_config.json`; nothing is written to the home directory. | Refused. |
+| `gemini` | Runs `gemini mcp add --scope user --transport http hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, or prints it. | Refused. |
+
+Conductor has no MCP configuration of its own: its Claude Code and Codex agents read their user
+configuration in every workspace, so `conductor` registers the server at user scope with each CLI
+on `PATH` and prints the command for a CLI that is missing. A failing CLI does not stop the other;
+the command then exits `1`.
 
 JSON files are parsed and merged: other servers, inputs and top-level fields are kept, only the
 `hue` entry is replaced, and invalid JSON (including comments) is refused together with the snippet
 to add by hand. Files are written with mode `0644` through a temporary file and an atomic rename;
-symlinks are refused. `--dry-run` prints the resulting file content or command without writing or
+symlinks are refused. `--dry-run` prints the resulting file content or commands without writing or
 running; `--print` prints only the snippet. Client CLIs run without a shell, so the
-`${HUE_MCP_KEY}` and `$HUE_MCP_KEY` references reach them literally; the printed commands use
-single quotes for the same reason. After installation the command reminds you to export
-`HUE_MCP_KEY` in the shell that starts the client (VS Code prompts for the key instead) and prints
-the verification prompt: `Use the Hue MCP: call get_project_context, then show my 5 most recent
-error traces with links.` Exit codes: `0` done or printed, `1` failed, `2` usage error.
+`${HUE_MCP_KEY}` reference reaches them literally; the printed commands use single quotes for the
+same reason, and quote a URL with a query such as `?read_only=true`, whose `?` is a zsh glob.
+
+After a key installation the command reminds you to export `HUE_MCP_KEY` in the shell that starts
+the client (VS Code prompts for the key instead). A desktop app started from the Dock or a launcher
+does not see that shell's variables, and Conductor's agents read the login-shell environment that
+Conductor captures, so sign-in is the simpler choice there. After a sign-in installation it names
+the client's authentication action. Both end with the prompt that verifies the connection:
+`Use the Hue MCP: call get_project_context, then show the traces from the last 24 hours that need
+attention or have errors, with links. If there are none, show my 5 most recent traces.` Exit codes:
+`0` done or printed, `1` failed, `2` usage error.
 
 ## Local state and conflicts
 
@@ -414,7 +439,9 @@ every case of the saved version; there is no case subset.
 `--command "<shell command>"` spawns the command once per case with the world's environment
 (`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, one `HUE_SIM_<SURFACE ID>_URL` per provider mirror,
 `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the case, and
-`HUE_MCP_URL`, `HUE_MCP_TOKEN`, `HUE_MCP_EXPIRES_AT` for the first MCP mirror), plus
+`HUE_MCP_URL`, `HUE_MCP_TOKEN`, `HUE_MCP_EXPIRES_AT` for the first MCP mirror; these name the
+world's simulated MCP server and replace a `HUE_MCP_URL` that `hue login` stored for Hue's project
+MCP server), plus
 `HUE_EXECUTION_ID`, `HUE_ENVIRONMENT_RUN_ID`, `HUE_CASE_ID` and `HUE_CASE_KEY`, and
 `{"inputs": ..., "config": ...}` on stdin. The child does not receive `HUE_API_KEY`, `HUE_MCP_KEY`
 or any other Hue control-plane credential unless `--allow-hue-credentials` is passed; the rest of
