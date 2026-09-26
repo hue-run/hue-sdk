@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.5"
+  version: "0.5.6"
 ---
 
 # Hue tracing
@@ -128,6 +128,9 @@ list has it, otherwise `execute_hue_tool` (reads) or `execute_hue_write_tool` (w
 only with write access). Call the executor with the tool's `name` and its `arguments`, including
 `project_id` for an organization connection. So a tool missing from your list is one search away:
 `list_projects`, then `search_hue_tools`, then `execute_hue_tool`. Ask the user before any write.
+To list a guide's tools directly, select `author` for authoring evaluations or `evaluate` for
+running an agent against a published case. Narrow selections use the groups `project`, `traces`,
+`eval_sets`, `runs`, `judges`, `cases`, `runners`, `environments`, `intents` and `docs`.
 
 1. Select the project. When the Hue tools take a `project_id` argument, the connection covers an
    organization: call `list_projects`, confirm with the user which project to read when more than
