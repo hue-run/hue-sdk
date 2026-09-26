@@ -24,6 +24,25 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   `-H '… $HUE_MCP_KEY'`. Migration: an earlier project entry keeps working and takes precedence in
   that project; remove it with `gemini mcp remove hue` there to use the user entry.
 
+These three entries were added after 0.11.0 was published; 0.11.0 already behaves as they describe.
+
+- An advisory result, which Hue records for every pinned judge (`world_judge`) today, no longer
+  decides a case, so `collectExperimentVerdicts`, `summarizeVerdicts` and `hue eval` can report a
+  different state and exit code. A case that only advisory judges graded took their verdict
+  (`passed`, exit 0, or `failed`, exit 1) and is now `error` (exit 1), so an eval set graded only
+  by judges fails every case. A case whose other evaluators passed and whose judge said `false` was
+  `failed` (exit 1) and is now `passed` (exit 0). Migration: pin an evaluator that decides each
+  case, such as a code evaluator, beside the judge, or read `CaseVerdict.advisory`
+  (`cases[].advisory` in `hue eval --json`) and the judge's metrics to act on its verdict yourself.
+- `hue eval` gives each export of its own telemetry 30 seconds instead of 10 seconds, retries
+  included, so a case whose trace Hue acknowledges slowly waits up to 20 seconds longer before it
+  fails as `TelemetryNotAccepted`, and the most one batch of its spans may take to export grows
+  from 161 to 481 seconds. Migration: allow for the longer waits in CI and job timeouts.
+- The local runner (`runExperiment`, and so `hue eval`) waits up to three minutes for Hue to verify
+  each generated file it uploads, instead of failing at the 10-second request timeout, and a
+  completion that cannot reach Hue takes those three minutes to fail. Migration: allow up to three
+  more minutes per generated file in CI and job timeouts.
+
 #### Added
 
 - `hue listen --subscription <id> --forward-to <url>` delivers a simulated world's events (Slack
