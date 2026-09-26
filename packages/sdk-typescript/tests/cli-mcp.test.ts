@@ -685,10 +685,18 @@ describe("hue mcp install", () => {
 
   test("--toolsets adds ?toolsets= to the URL and refuses unknown names", async () => {
     expect(parseToolsets("observe")).toEqual({ toolsets: "observe" });
+    expect(parseToolsets("author,evaluate")).toEqual({ toolsets: "author,evaluate" });
+    expect(parseToolsets("eval_sets,runs,judges,cases,runners")).toEqual({
+      toolsets: "eval_sets,runs,judges,cases,runners",
+    });
     expect(parseToolsets("traces, docs,traces")).toEqual({ toolsets: "traces,docs" });
     expect(parseToolsets("obsrve")).toEqual({
       error:
-        "Unknown toolset: obsrve. Choose from all, observe, project, traces, evals, environments, intents, docs.",
+        "Unknown toolset: obsrve. Choose from all, observe, author, evaluate, project, traces, eval_sets, runs, judges, cases, runners, environments, intents, docs.",
+    });
+    expect(parseToolsets("evals")).toEqual({
+      error:
+        "Unknown toolset: evals. Choose from all, observe, author, evaluate, project, traces, eval_sets, runs, judges, cases, runners, environments, intents, docs.",
     });
     expect("error" in parseToolsets("observe,")).toBe(true);
     expect(toolsetsMcpUrl("https://mcp.hue.run/mcp?read_only=true", "traces,docs")).toBe(
