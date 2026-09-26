@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import unittest
+from http.client import IncompleteRead, RemoteDisconnected
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -131,6 +132,34 @@ class WaitTests(unittest.TestCase):
         with patch.object(registry, "urlopen", refusing(403)):
             with self.assertRaises(HTTPError):
                 registry.fetch_json(SIMPLE, {})
+
+    def test_a_connection_closed_before_or_during_the_answer_is_polled_again(self):
+        class Truncated:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                raise IncompleteRead(b'{"versions"', 100)
+
+        def closed(request, timeout):
+            raise RemoteDisconnected("Remote end closed connection without response")
+
+        def reset(request, timeout):
+            raise ConnectionResetError(104, "Connection reset by peer")
+
+        for urlopen in (closed, reset, lambda request, timeout: Truncated()):
+            with patch.object(registry, "urlopen", urlopen):
+                self.assertIsNone(registry.fetch_json(SIMPLE, {}))
+        # Within the wait, such a poll counts as missing and the next one can succeed.
+        answers = iter([None, None, PUBLISHED[FULL]])
+        clock = Clock()
+        polls = registry.wait(
+            lambda: [] if next(answers) else ["x"], 600, 15, clock.sleep, lambda: clock.now
+        )
+        self.assertEqual(polls, 3)
 
 
 if __name__ == "__main__":

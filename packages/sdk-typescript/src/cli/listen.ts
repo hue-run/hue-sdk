@@ -5,6 +5,7 @@ import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { resolve } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
+import { HUE_CONTROL_PLANE_VARIABLES } from "../environment/world.js";
 import { scrubCredentialText } from "../tool-definitions.js";
 import { sdkVersion } from "../version.js";
 import { envFileArgument, envFileOptions } from "./env-file.js";
@@ -59,6 +60,11 @@ const ACK_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000];
 const MAX_RETRY_AFTER_MS = 60_000;
 /** Deliveries whose answer is remembered, so a delivery Hue hands out again is not re-sent. */
 const REMEMBERED_DELIVERIES = 1_024;
+/** The least time between pulls that forwarded nothing new, so repeats cannot spin. */
+const IDLE_PULL_FLOOR_MS = 1_000;
+/** A stop request this soon after the first is the same one: under `npx`, npm forwards the
+ * terminal's SIGINT to a process group that already received it. */
+const REPEATED_STOP_MS = 1_000;
 
 /** Connection-level headers the local request sets for itself. */
 const HOP_BY_HOP = new Set([
@@ -94,7 +100,7 @@ deliveries in flight are finished and acknowledged, and nothing unanswered is ac
 The credential is read from the environment, never from the command line:
   HUE_WORLD_TOKEN     the world token, for a subscription on one world
   HUE_CONNECTION_KEY  the connection key, for a subscription on a connection key
-A project key (HUE_API_KEY, HUE_MCP_KEY) is refused.
+A project key (HUE_API_KEY, HUE_MCP_KEY, HUE_PROJECT_KEY or HUE_SERVICE_KEY) is refused.
 
 Options:
   --subscription ID       The listen subscription to deliver (its id from Hue)
@@ -505,7 +511,7 @@ function selectCredential(
   const variable = kind === "world-token" ? "HUE_WORLD_TOKEN" : "HUE_CONNECTION_KEY";
   const credential = kind === "world-token" ? worldToken : connectionKey;
   if (!credential) throw new UsageError(`${variable} is not set`);
-  for (const projectVariable of ["HUE_API_KEY", "HUE_MCP_KEY"])
+  for (const projectVariable of HUE_CONTROL_PLANE_VARIABLES)
     if (env[projectVariable]?.trim() === credential)
       throw new UsageError(
         `${variable} holds the project key in ${projectVariable}; hue listen pulls only with the subscription's world token or connection key`,
@@ -655,15 +661,17 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     accept: "application/json",
     "user-agent": `hue-sdk-typescript/${sdkVersion} hue-listen`,
   };
-  // The first stop request stops pulling and lets deliveries in flight finish; a second one
-  // abandons their acknowledgements, whose leases then lapse into timeouts.
+  // The first stop request stops pulling and lets deliveries in flight finish; a second one, a
+  // second or more later, abandons their acknowledgements, whose leases then lapse into timeouts.
   const stopping = new AbortController();
   const forced = new AbortController();
+  let stoppedAt = 0;
   const removeInterrupt = (io.onInterrupt ?? defaultOnInterrupt)(() => {
     if (!stopping.signal.aborted) {
+      stoppedAt = performance.now();
       stopping.abort();
       warn("Stopping: finishing deliveries in flight (press Ctrl+C again to abandon them).");
-    } else forced.abort();
+    } else if (performance.now() - stoppedAt >= REPEATED_STOP_MS) forced.abort();
   });
   const remembered = new Map<string, LocalAnswer>();
   let fatal: string | null = null;
@@ -838,7 +846,8 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     }
   };
 
-  const deliver = async (delivery: Delivery, deadline: number): Promise<void> => {
+  /** Forwards and acknowledges one delivery; true when its request reached the receiver now. */
+  const deliver = async (delivery: Delivery, deadline: number): Promise<boolean> => {
     // Hue may hand out a delivery again (a pull whose answer was retried); its request already
     // reached the receiver, so the recorded answer is repeated and nothing is sent twice.
     const previous = remembered.get(delivery.deliveryId);
@@ -857,7 +866,7 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       out(
         `${new Date().toISOString()}  ${name} -> abandoned; not acknowledged, the lease lapses into a timeout`,
       );
-      return;
+      return false;
     }
     if (!previous) {
       remembered.set(delivery.deliveryId, answer);
@@ -869,6 +878,7 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     out(
       `${new Date().toISOString()}  ${name}${previous ? " (repeated)" : ""} -> ${describeAnswer(answer)}; ${describeAck(result)}`,
     );
+    return !previous;
   };
 
   out(
@@ -898,9 +908,7 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         continue;
       }
       failures = 0;
-      // A pull that answers empty at once, though it could wait, is not repeated at once.
-      if (ready && result.deliveries.length === 0 && performance.now() - pulledAt < 1_000)
-        await sleep(1_000, stopping.signal);
+      const waited = ready;
       if (!ready) {
         ready = true;
         out("Ready: waiting for events.");
@@ -913,11 +921,16 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         warn(
           `Hue leased ${result.excess} more delivery(ies) than --max ${max}; they are not forwarded, their leases lapse and Hue retries them.`,
         );
-      await Promise.all(
+      const forwarded = await Promise.all(
         result.deliveries.map((delivery) =>
           deliver(delivery, result.receivedAt + result.leaseLeftMs(delivery)),
         ),
       );
+      // A pull that could wait but answered at once with nothing new to forward (none due, only
+      // deliveries already answered, or ones this client skips) is not repeated at once, so a
+      // Hue that hands them out again or refuses their acknowledgements is not pulled in a loop.
+      if (waited && !forwarded.includes(true) && performance.now() - pulledAt < IDLE_PULL_FLOOR_MS)
+        await sleep(IDLE_PULL_FLOOR_MS, stopping.signal);
     }
   } finally {
     removeInterrupt();

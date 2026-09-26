@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import time
+from http.client import IncompleteRead, RemoteDisconnected
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -42,7 +43,9 @@ def fetch_json(url: str, headers: dict[str, str]) -> dict | None:
         if error.code == 404 or error.code == 429 or error.code >= 500:
             return None
         raise
-    except (URLError, TimeoutError):
+    # A connection the CDN closed before or while answering (urllib raises these unwrapped) is as
+    # transient as a refused connection: poll again.
+    except (URLError, TimeoutError, RemoteDisconnected, IncompleteRead, ConnectionError):
         return None
     try:
         return json.loads(body)

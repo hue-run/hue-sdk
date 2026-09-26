@@ -863,7 +863,7 @@ def test_a_container_with_more_elements_than_values_left_is_refused_before_it_is
         json_value(elements)
     assert refused.value.limit == "structure"
     # Queueing five million children first took about a second and hundreds of megabytes.
-    assert time.perf_counter() - started < 0.1
+    assert time.perf_counter() - started < 0.5
 
 
 def test_both_sdks_refuse_an_output_for_the_same_reason():

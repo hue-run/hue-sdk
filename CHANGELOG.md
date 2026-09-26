@@ -8,6 +8,33 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Added
+
+- `EvaluationClient.getArtifact` and `completeArtifact` take an optional `{ signal }`, which ends
+  the request and the client's own wait to send it again.
+
+#### Fixed
+
+- The local runner's wait for Hue to verify a generated file ends at its three minutes: each
+  completion and read it makes, and the client's wait to repeat one Hue refused with a short
+  `Retry-After`, stops there. Before, a completion refused that way or answered slowly near the end
+  could run about a minute past.
+- `hue listen` no longer pulls in a loop when a pull brings nothing new to forward, such as a
+  delivery it already answered that Hue hands out again, or one whose acknowledgements Hue refuses:
+  it waits a second before the next pull, as it did after an empty pull, where it sent about 1,600
+  pulls and acknowledgements a second.
+- `hue listen` refuses a credential equal to the value of any Hue control-plane variable,
+  `HUE_PROJECT_KEY` and `HUE_SERVICE_KEY` included, not only `HUE_API_KEY` and `HUE_MCP_KEY`.
+- One Ctrl+C no longer abandons `hue listen`'s deliveries in flight under `npx`. npm forwards the
+  terminal's SIGINT to the command, which counted it as a second Ctrl+C, exited 130 and left the
+  deliveries unacknowledged. A stop request within a second of the first is now the same stop; a
+  second Ctrl+C after that still abandons them.
+- `hue eval` names the agent after the script that follows an interpreter written with a Windows
+  executable suffix (`node.exe`, or `bun.exe`, as npm installs Bun on every platform), where it
+  took the interpreter's name.
+
 ### [0.11.0] - 2026-09-26
 
 This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
@@ -35,7 +62,7 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   finishes and acknowledges the deliveries in flight before it exits. It needs event subscriptions
   on the Hue origin, which `https://app.hue.run` does not offer yet. See
   [CLI.md](./packages/sdk-typescript/CLI.md#deliver-simulated-events-to-a-local-bot).
-- `normalizeScorerDefinitionForPublication` and the `ScorerDefinition` type know every
+- The `ScorerDefinition` type, and the scorer definitions `runSimulation` publishes, know every
   Hue-executed `world_outcome` entry: `hue.conversion_outcome.v2`,
   `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
   `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
@@ -137,10 +164,10 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   the bytes its own encoding gives. The header was read with a pattern repeated per parameter,
   which throws on Node (from about 3.4 million), leaving the message unhashed, or stops matching
   on Bun (from about 1.1 million), hashing the URL's text. The Python SDK reads the header the
-  same way.
-- An OpenAI `mcp_list_tools` tool's null `description`, `input_schema` or `annotations` is left
-  out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record the
-  same definitions and give a catalog the same digest.
+  same way. **Wire**
+- An OpenAI `mcp_list_tools` tool's null `name`, `description`, `input_schema` or `annotations` is
+  left out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record
+  the same definitions and give a catalog the same digest. **Wire**
 - `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
   throws when read: the item is skipped and counted, and the other calls are recorded, as the
   Python SDK does.
@@ -150,7 +177,8 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   refusing. The JSON byte length is counted as the output is read but still checked last, so an
   output past the byte bound that is also not JSON raises `OutcomeSerializationError`, and an
   array or object with more elements than values allowed, or keys longer than the bytes left, is
-  refused before its keys are listed or sorted.
+  refused before its keys are listed or sorted. A run that already stopped this way still refuses
+  to resume from its checkpoint; run it again with a new checkpoint directory.
 
 ### [0.10.0] - 2026-09-25
 
