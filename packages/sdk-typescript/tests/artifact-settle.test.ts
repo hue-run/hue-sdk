@@ -272,7 +272,7 @@ test("a completion Hue keeps refusing with a short Retry-After ends at the settl
         ...fast,
         settleMillis: 1_000,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Hue had not verified generated file");
     expect(Date.now() - started).toBeLessThan(4_000);
     expect(hue.calls.completes).toBe(1);
   } finally {
@@ -295,7 +295,7 @@ test("a completion Hue answers after the settle bound is not waited for", async 
         ...fast,
         settleMillis: 1_000,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Hue had not verified generated file");
     expect(Date.now() - started).toBeLessThan(4_000);
   } finally {
     hue.stop();

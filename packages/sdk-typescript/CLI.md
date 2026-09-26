@@ -291,16 +291,16 @@ bot's status and duration, and the state Hue recorded), never a body, a signatur
 credentials in error messages are replaced with `[redacted]`.
 
 Ctrl+C or `SIGTERM` stops pulling (a waiting pull is cancelled), finishes the deliveries in flight
-and acknowledges them, then exits `0`. A second Ctrl+C a second or more after the first abandons the
-forwards and acknowledgements still in flight and exits `130`; one within a second of the first,
-such as the copy `npx` forwards to the command, is the same stop. Nothing is acknowledged before the
-bot answered or its window closed; a delivery left unacknowledged is left to its lease. Network
-errors, `429`, `5xx`, an unreadable pull answer and another open pull for the same subscription (a
-second `hue listen`) are retried with backoff up to 30 seconds; a `Retry-After` can lengthen a wait
-to at most 60 seconds, never shorten it. Exit codes: `0` stopped, `1` Hue refused the credential,
-the subscription (unknown, revoked, or one that delivers to a request URL) or the pull itself (a
-redirect, another refusal or an answer without deliveries), `2` usage error, `130` interrupted
-twice.
+and acknowledges them, then exits `0`, no sooner than a second after the first Ctrl+C. A second
+Ctrl+C a second or more after the first abandons the forwards and acknowledgements still in flight
+and exits `130`; one within a second of the first, such as the copy `npx` forwards to the command,
+is the same stop. Nothing is acknowledged before the bot answered or its window closed; a delivery
+left unacknowledged is left to its lease. Network errors, `429`, `5xx`, an unreadable pull answer
+and another open pull for the same subscription (a second `hue listen`) are retried with backoff up
+to 30 seconds; a `Retry-After` can lengthen a wait to at most 60 seconds, never shorten it. Exit
+codes: `0` stopped, `1` Hue refused the credential, the subscription (unknown, revoked, or one that
+delivers to a request URL) or the pull itself (a redirect, another refusal or an answer without
+deliveries), `2` usage error, `130` interrupted twice.
 
 ## Local state and conflicts
 

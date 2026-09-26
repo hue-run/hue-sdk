@@ -468,6 +468,8 @@ function run(argv: string[], env: Record<string, string>, io: Partial<ListenComm
   return {
     exit,
     stop: () => interrupt?.(),
+    /** Whether the stop request listener is still registered. */
+    listening: () => interrupt !== undefined,
     stdout: stdout.text,
     stderr: stderr.text,
     requests,
@@ -1427,6 +1429,10 @@ describe("hue listen shutdown", () => {
     await new Promise((tick) => setTimeout(tick, 50));
     listen.stop();
     expect(await listen.exit).toBe(0);
+    // A repeat can still come after the command returned; the listener outlives the loop for the
+    // rest of the second, so the runtime's default handler never ends the process by SIGINT.
+    expect(listen.listening()).toBe(true);
+    await until(() => !listen.listening(), 3_000);
     expect(hue.acks).toHaveLength(1);
     expect(hue.acks[0]!.body).toMatchObject({ outcome: "response", status: 200 });
     expect(listen.output()).not.toContain("abandoned");

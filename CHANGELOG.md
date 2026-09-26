@@ -22,15 +22,16 @@ refuses to publish a version without a matching entry below.
   `Retry-After`, stops there. Before, a completion refused that way or answered slowly near the end
   could run about a minute past.
 - `hue listen` no longer pulls in a loop when a pull brings nothing new to forward, such as a
-  delivery it already answered that Hue hands out again, or one whose acknowledgements Hue refuses:
-  it waits a second before the next pull, as it did after an empty pull, where it sent about 1,600
-  pulls and acknowledgements a second.
+  delivery it already answered that Hue hands out again, or one whose acknowledgements Hue refuses.
+  Before, it sent about 1,600 pulls and acknowledgements a second; it now waits a second before the
+  next pull, as it already did after an empty pull.
 - `hue listen` refuses a credential equal to the value of any Hue control-plane variable,
   `HUE_PROJECT_KEY` and `HUE_SERVICE_KEY` included, not only `HUE_API_KEY` and `HUE_MCP_KEY`.
 - One Ctrl+C no longer abandons `hue listen`'s deliveries in flight under `npx`. npm forwards the
   terminal's SIGINT to the command, which counted it as a second Ctrl+C, exited 130 and left the
-  deliveries unacknowledged. A stop request within a second of the first is now the same stop; a
-  second Ctrl+C after that still abandons them.
+  deliveries unacknowledged. A stop request within a second of the first is now the same stop, and
+  the command exits no sooner than that second, so a copy arriving as it exits cannot end it by
+  SIGINT; a second Ctrl+C after that still abandons them.
 - `hue eval` names the agent after the script that follows an interpreter written with a Windows
   executable suffix (`node.exe`, or `bun.exe`, as npm installs Bun on every platform), where it
   took the interpreter's name.

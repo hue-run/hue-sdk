@@ -933,7 +933,15 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         await sleep(IDLE_PULL_FLOOR_MS, stopping.signal);
     }
   } finally {
-    removeInterrupt();
+    // A repeated stop request can still arrive once the loop has ended (npm forwards Ctrl+C a few
+    // milliseconds late), and without a listener, or once the process has begun to exit, the
+    // runtime's default handler would end it by SIGINT. So the listener, and the process, stay
+    // until such a request would count as a new one: at most a second after the first.
+    const repeatable = stopping.signal.aborted
+      ? REPEATED_STOP_MS - (performance.now() - stoppedAt)
+      : 0;
+    if (repeatable > 0) setTimeout(removeInterrupt, repeatable);
+    else removeInterrupt();
   }
   if (fatal !== null) {
     warn(`Error: ${fatal}`);

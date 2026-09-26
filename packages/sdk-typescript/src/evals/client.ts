@@ -247,6 +247,8 @@ export class EvaluationClient {
         };
         const timer = setTimeout(done, seconds * 1000 * (1 + Math.random() * 0.5));
         signal?.addEventListener("abort", done, { once: true });
+        // The signal may have ended while the refusal's body was cancelled.
+        if (signal?.aborted) done();
       });
       if (signal?.aborted) throw new HueApiError(response.status, askedRetryAfter(response));
     }
