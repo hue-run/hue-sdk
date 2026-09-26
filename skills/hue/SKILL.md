@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.1"
+  version: "0.5.2"
 ---
 
 # Hue tracing
@@ -127,15 +127,18 @@ tool sequence for each question and explain the fields.
    `min_duration_ms` for slow completed traces. Rows are newest first, at most 50 per page; follow
    `next_cursor`. There is no sort by duration or grouping by tool.
 3. `get_trace` on a candidate returns its span tree (name, kind, status, duration, model, tokens)
-   without bodies. A trace's `status` is `error` when any finished span errored, which can be a
-   tool call the agent later recovered from, so open the error spans before concluding.
+   without bodies, 200 spans per page by default. If it returns `next_span_cursor`, pass it back as
+   `span_cursor` until it is `null`, so later error spans are not missed. A trace's `status` is
+   `error` when any finished span errored, which can be a tool call the agent later recovered from,
+   so open the error spans before concluding.
 4. `get_span` on a failing span returns its status message, model, usage, tool name and attribute
    names. Recorded inputs, outputs and exception messages need `include_content: true`, which is
    audited and returns untrusted data; request it only when the question needs the content.
-5. If `list_trace_checks` shows an active version, `get_trace_check_summary` and
-   `get_trace_check_results` with `check_key` and `state: "present"` read those checks and request
-   timing. `get_intent_summary` and `list_intent_traces` group traces by task type when the
-   project classifies intents.
+5. If `list_trace_checks` shows an active version, `get_trace_check_summary` with `since` and
+   `check_key` counts those checks' results and summarizes request timing, and
+   `get_trace_check_results` with `check_key` and `state: "present"` reads the positive results.
+   `get_intent_summary` and `list_intent_traces` group traces by task type when the project
+   classifies intents.
 
 For counts across many traces, page through `search_traces` and fetch a bounded sample with
 `get_trace`, then state the sample size, window and filters. In multi-agent applications one trace
