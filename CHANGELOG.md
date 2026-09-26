@@ -12,6 +12,15 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- `hue listen --subscription <id> --forward-to <url>` delivers a simulated world's events (Slack
+  Events API requests) to a bot on this machine without a public URL. It pulls with the
+  subscription's own world token or connection key (`HUE_WORLD_TOKEN` or `HUE_CONNECTION_KEY`, never
+  a project key and never from the command line), forwards each signed request unchanged to a
+  loopback receiver (`--allow-remote-forward` for another host, over HTTPS only) without following
+  redirects, acknowledges it with the local answer within Slack's three-second window, and on Ctrl+C
+  finishes and acknowledges the deliveries in flight before it exits. It needs event subscriptions
+  on the Hue origin, which `https://app.hue.run` does not offer yet. See
+  [CLI.md](./packages/sdk-typescript/CLI.md#deliver-simulated-events-to-a-local-bot).
 - `normalizeScorerDefinitionForPublication` and the `ScorerDefinition` type know every
   Hue-executed `world_outcome` entry: `hue.conversion_outcome.v2`,
   `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
