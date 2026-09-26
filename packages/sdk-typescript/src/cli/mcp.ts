@@ -20,8 +20,8 @@ import { isLoopbackHost } from "../config.js";
  * `hue mcp install`: writes or prints the coding-agent configuration for Hue's MCP server. The
  * shapes are those of Hue's published connection guide (https://docs.hue.run/agents/mcp-server),
  * kept as a separate copy here. Key configurations reference the `HUE_MCP_KEY` environment
- * variable (or a VS Code password input); sign-in configurations hold only the URL. A key value is
- * never written.
+ * variable (or a VS Code password input); sign-in configurations hold no credential. A key value
+ * is never written.
  */
 
 /** Streams, environment and working directory for {@link runMcpCommand}; tests inject these. */
@@ -80,10 +80,26 @@ export const MCP_TOOLSETS = [
   "intents",
   "docs",
 ] as const;
-/** The header that selects toolsets for a sign-in connection, whose URL must stay bare. */
+/**
+ * The header form of `?toolsets=`. Only the sign-in Codex TOML uses it, as Hue's guide does, to
+ * keep that URL bare; every other configuration carries the selection in its URL.
+ */
 export const TOOLSETS_HEADER = "X-Hue-MCP-Toolsets";
-/** Clients whose configuration selects a toolset unless `--toolsets` says otherwise. */
-const DEFAULT_TOOLSETS: Partial<Record<ClientId, string>> = { cursor: "observe" };
+/**
+ * Toolsets a client's configuration selects unless `--toolsets` says otherwise. Claude Code,
+ * Codex and Conductor's agents defer MCP tools behind their own tool search, so listing every tool
+ * costs them little. Cursor caps the tools it loads, so it names the production reads. The other
+ * clients list Hue's default: the production reads, and `search_hue_tools` with its executors,
+ * which reach every other tool.
+ */
+const DEFAULT_TOOLSETS: Partial<Record<ClientId, string>> = {
+  "claude-code": "all",
+  codex: "all",
+  conductor: "all",
+  cursor: "observe",
+};
+/** Codex runs a server's tool calls one at a time without it; each Hue call is independent. */
+const CODEX_PARALLEL = "supports_parallel_tool_calls = true";
 
 export const MCP_USAGE = `Usage: hue mcp install --client <claude-code|codex|conductor|cursor|vscode|windsurf|gemini>
                        [--auth key|oauth] [--read-only] [--toolsets NAMES] [--url URL]
@@ -102,10 +118,12 @@ Options:
   --read-only     key only: add ?read_only=true to the URL so write tools are hidden. A
                   sign-in connection has Read and write access; use a Read key for read-only
   --toolsets NAMES
-                  List only these tools, comma-separated: observe (production reads),
-                  all, project, traces, evals, environments, intents or docs. A key
-                  configuration adds ?toolsets= to the URL; a sign-in one sends the
-                  ${TOOLSETS_HEADER} header. cursor defaults to observe; others to all
+                  Tools to list, comma-separated: all, observe (production reads),
+                  project, traces, evals, environments, intents or docs, added to the
+                  URL as ?toolsets=. Defaults: all for claude-code, codex and conductor,
+                  which search their own tools; observe for cursor. Without a selection
+                  Hue lists the production reads and search_hue_tools, which reaches
+                  every other tool
   --url URL       Hue MCP endpoint (default ${DEFAULT_MCP_URL})
   --scope SCOPE   claude-code only: project writes .mcp.json (default); user runs
                   \`claude mcp add --scope user\`
@@ -179,7 +197,7 @@ export function renderMcpSnippets(url: string) {
       args: ["mcp", "add", SERVER_NAME, "--url", url, "--bearer-token-env-var", ENV_VAR],
       display: `codex mcp add ${SERVER_NAME} --url ${shellWord(url)} --bearer-token-env-var ${ENV_VAR}`,
     },
-    codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${url}"\nbearer_token_env_var = "${ENV_VAR}"\n`,
+    codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${url}"\nbearer_token_env_var = "${ENV_VAR}"\n${CODEX_PARALLEL}\n`,
     vscodeServer,
     vscodeInput,
     vscodeJson: json({ servers: { [SERVER_NAME]: vscodeServer }, inputs: [vscodeInput] }),
@@ -206,42 +224,32 @@ export function renderMcpSnippets(url: string) {
 }
 
 /**
- * Sign-in snippets: the bare server URL, which the client uses to discover Hue's OAuth metadata,
- * and, when toolsets are selected, the header that carries them.
+ * Sign-in snippets: the server URL and nothing secret. The client discovers Hue's OAuth metadata
+ * from it and sends it, query included, on every request; the token's resource ignores the query,
+ * so `?toolsets=` selects tools here as it does for a key.
  */
-export function renderMcpSignInSnippets(url: string, toolsets?: string) {
-  const headers = toolsets ? { [TOOLSETS_HEADER]: toolsets } : undefined;
-  const claudeCodeServer = { type: "http", url, ...(headers ? { headers } : {}) };
-  const headerArgs = toolsets ? ["--header", `${TOOLSETS_HEADER}: ${toolsets}`] : [];
+export function renderMcpSignInSnippets(url: string) {
+  const toolsets = new URL(url).searchParams.get("toolsets");
+  const claudeCodeServer = { type: "http", url };
   return {
     claudeCodeServer,
     claudeCodeProjectJson: json({ mcpServers: { [SERVER_NAME]: claudeCodeServer } }),
     claudeCodeCli: {
-      args: [
-        "mcp",
-        "add",
-        "--transport",
-        "http",
-        "--scope",
-        "user",
-        SERVER_NAME,
-        url,
-        ...headerArgs,
-      ],
-      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${shellWord(url)}${toolsets ? ` --header '${TOOLSETS_HEADER}: ${toolsets}'` : ""}`,
+      args: ["mcp", "add", "--transport", "http", "--scope", "user", SERVER_NAME, url],
+      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${shellWord(url)}`,
     },
-    // `codex mcp add` cannot store a header; the TOML carries it and the next steps say so.
     codexCli: {
       args: ["mcp", "add", SERVER_NAME, "--url", url],
       display: `codex mcp add ${SERVER_NAME} --url ${shellWord(url)}`,
     },
-    codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${url}"\n${toolsets ? `http_headers = { "${TOOLSETS_HEADER}" = "${toolsets}" }\n` : ""}`,
+    // The header form of the same selection, for a TOML entry that keeps its URL bare.
+    codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${toolsetsMcpUrl(url, undefined)}"\n${toolsets ? `http_headers = { "${TOOLSETS_HEADER}" = "${toolsets}" }\n` : ""}${CODEX_PARALLEL}\n`,
   };
 }
 
 /**
  * Parses a comma-separated `--toolsets` value into Hue's canonical form, or returns an error.
- * Unknown names are refused: Hue ignores them and would list the whole catalog, hiding a typo.
+ * Unknown names are refused: Hue ignores them and would list its default, hiding a typo.
  */
 export function parseToolsets(value: string): { toolsets: string } | { error: string } {
   const names = [...new Set(value.split(",").map((name) => name.trim()))];
@@ -256,8 +264,8 @@ export function parseToolsets(value: string): { toolsets: string } | { error: st
 }
 
 /**
- * `?toolsets=` lists only the selected tools for a key configuration; commas stay readable.
- * Without a selection the parameter is removed, so the URL lists every tool.
+ * `?toolsets=` lists only the selected tools; commas stay readable. Without a selection the
+ * parameter is removed, so the connection lists Hue's default.
  */
 export function toolsetsMcpUrl(url: string, toolsets: string | undefined): string {
   const parsed = new URL(url);
@@ -491,16 +499,10 @@ const notOnPath = (executable: string, label: string) =>
   `${executable} is not on PATH. Run this where ${label} is installed:`;
 
 /** `auth: "oauth"` is only planned for {@link OAUTH_CLIENTS}; the caller refuses the others. */
-function planFor(
-  client: ClientId,
-  auth: AuthMode,
-  scope: "project" | "user",
-  url: string,
-  toolsets: string | undefined,
-): Plan {
+function planFor(client: ClientId, auth: AuthMode, scope: "project" | "user", url: string): Plan {
   const snippets = renderMcpSnippets(url);
   // Claude Code and Codex take the same plan shape with or without a key.
-  const shared = auth === "oauth" ? renderMcpSignInSnippets(url, toolsets) : snippets;
+  const shared = auth === "oauth" ? renderMcpSignInSnippets(url) : snippets;
   const claudeUser: CliCommand = {
     executable: "claude",
     label: "Claude Code",
@@ -572,7 +574,7 @@ function planFor(
   }
 }
 
-function nextSteps(client: ClientId, auth: AuthMode, toolsets: string | undefined): string[] {
+function nextSteps(client: ClientId, auth: AuthMode): string[] {
   const label = CLIENT_LABELS[client];
   const approve =
     "Sign in to Hue and approve the connection. It can read and write every active project in the organization you choose, within your role; for read-only access, use a Read project key with --auth key.";
@@ -604,11 +606,11 @@ function nextSteps(client: ClientId, auth: AuthMode, toolsets: string | undefine
       "  set -a; . ./.env.hue; set +a",
       `An app started from the Dock or a launcher does not see that shell's variables; start ${label} from the shell${OAUTH_CLIENTS.includes(client) ? ", or sign in instead with --auth oauth" : ""}.`,
     ];
-  // `codex mcp add` stores no headers, so a sign-in toolset selection is added by hand.
-  if (auth === "oauth" && toolsets && (client === "codex" || client === "conductor"))
+  // `codex mcp add` has no option for it, so a registered server gets the line by hand.
+  if (client === "codex" || client === "conductor")
     lines.push(
-      `To list only the ${toolsets} tools in Codex, add this line under [mcp_servers.${SERVER_NAME}] in ~/.codex/config.toml:`,
-      `  http_headers = { "${TOOLSETS_HEADER}" = "${toolsets}" }`,
+      `If codex mcp add registered ${SERVER_NAME}, add this line under [mcp_servers.${SERVER_NAME}] in ~/.codex/config.toml so Codex runs Hue's tool calls in parallel:`,
+      `  ${CODEX_PARALLEL}`,
     );
   return [...lines, "Then ask your agent:", `  ${MCP_VERIFY_PROMPT}`];
 }
@@ -685,11 +687,8 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       2,
     );
   if (parsed.values["read-only"]) url = readOnlyMcpUrl(url);
-  // Toolsets are not part of the protected resource either: a sign-in URL stays bare.
-  if (auth === "oauth" && new URL(url).searchParams.has("toolsets"))
-    return fail("Leave toolsets off a sign-in URL; --toolsets sends them in a header instead.", 2);
   // --toolsets wins over a selection already in --url, which wins over the client's default.
-  // Both sources are validated: Hue ignores an unknown name and would list every tool.
+  // Both sources are validated: Hue ignores an unknown name and would list its default.
   const requested = parsed.values.toolsets ?? new URL(url).searchParams.get("toolsets");
   let toolsets: string | undefined = DEFAULT_TOOLSETS[clientId];
   if (requested !== null) {
@@ -701,15 +700,13 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       );
     toolsets = selected.toolsets;
   }
-  // `all` is Hue's default, so it needs no selection.
-  if (toolsets === "all") toolsets = undefined;
-  if (auth === "key") url = toolsetsMcpUrl(url, toolsets);
-  const plan = planFor(clientId, auth, scope, url, auth === "oauth" ? toolsets : undefined);
+  url = toolsetsMcpUrl(url, toolsets);
+  const plan = planFor(clientId, auth, scope, url);
   if (parsed.values.print) {
     stdout.write(plan.snippet);
     return 0;
   }
-  const steps = nextSteps(clientId, auth, toolsets);
+  const steps = nextSteps(clientId, auth);
 
   if (plan.kind === "manual") {
     out(plan.hint);

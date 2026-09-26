@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.4"
+  version: "0.5.5"
 ---
 
 # Hue tracing
@@ -121,6 +121,14 @@ it does not diagnose or summarize. The
 [production recipes](https://docs.hue.run/agents/investigate-production) give the tool sequence
 for each question and explain the fields.
 
+Hue's default connection lists the production reads used below. It also lists `search_hue_tools`,
+which finds every other tool the connection can call, such as eval sets, runs, cases and writes.
+Each result carries the tool's `input_schema` and a `call` field: the tool's own name when your
+list has it, otherwise `execute_hue_tool` (reads) or `execute_hue_write_tool` (writes, present
+only with write access). Call the executor with the tool's `name` and its `arguments`, including
+`project_id` for an organization connection. So a tool missing from your list is one search away:
+`list_projects`, then `search_hue_tools`, then `execute_hue_tool`. Ask the user before any write.
+
 1. Select the project. When the Hue tools take a `project_id` argument, the connection covers an
    organization: call `list_projects`, confirm with the user which project to read when more than
    one could apply, and pass its id as `project_id` on every call below. Without that argument the
@@ -165,7 +173,9 @@ simulated world and grades the sealed outcome. Review and publish cases in the H
    the case URL the user pastes. With an organization connection, pass the case's project as
    `project_id` on every Hue tool call in this loop, as under Verify delivery: `list_cases`,
    `get_case`, `list_local_agents`, `launch_local_run`, `get_local_run`, `get_run`, `get_run_item`,
-   `get_run_execution` and `get_trace`.
+   `get_run_execution` and `get_trace`. When one is not in your tool list, find it with
+   `search_hue_tools` and call it through the executor its `call` field names, as under
+   [Investigate production](#investigate-production-with-the-hue-mcp).
 2. Check `list_local_agents`. If no agent is online, run the evaluation from the shell:
 
    ```sh
