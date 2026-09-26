@@ -22,6 +22,7 @@ import {
   renderMcpSignInSnippets,
   renderMcpSnippets,
   runMcpCommand,
+  shellWord,
 } from "../src/cli/mcp.js";
 
 const roots: string[] = [];
@@ -568,6 +569,21 @@ describe("hue mcp install", () => {
       "--bearer-token-env-var",
       "HUE_MCP_KEY",
     ]);
+    // A printed command quotes the URL: `?` is a zsh glob and `&` would end the command.
+    expect(codex.stdout).toContain(
+      "Running: codex mcp add hue --url 'https://mcp.hue.run/mcp?read_only=true' --bearer-token-env-var HUE_MCP_KEY",
+    );
+    const claude = await mcp(
+      ["install", "--client", "claude-code", "--scope", "user", "--read-only", "--print"],
+      { cwd: root },
+    );
+    expect(claude.stdout).toBe(
+      "claude mcp add --transport http --scope user hue 'https://mcp.hue.run/mcp?read_only=true' --header 'Authorization: Bearer ${HUE_MCP_KEY}'\n",
+    );
+    expect(shellWord("https://mcp.hue.run/mcp")).toBe("https://mcp.hue.run/mcp");
+    expect(shellWord("https://h.example/mcp?a=1&b='2'")).toBe(
+      String.raw`'https://h.example/mcp?a=1&b='\''2'\'''`,
+    );
   });
 
   test("conductor signs in by default and registers with Claude Code and Codex", async () => {

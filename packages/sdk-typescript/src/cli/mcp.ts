@@ -98,6 +98,14 @@ snippet for its user configuration file. conductor registers the server for its 
 const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 
 /**
+ * A URL as a POSIX shell word for printed commands: `?` is a zsh glob and `&` ends a command, so a
+ * URL with a query (such as `?read_only=true`) is single-quoted. Executed commands pass argv.
+ */
+export function shellWord(value: string): string {
+  return /^[\w@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
  * Canonical Hue client snippets for a key configuration; the JSON values are also the merge
  * entries for config files.
  */
@@ -140,13 +148,13 @@ export function renderMcpSnippets(url: string) {
         "--header",
         `Authorization: Bearer \${${ENV_VAR}}`,
       ],
-      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${url} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
+      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${shellWord(url)} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
     },
     cursorServer,
     cursorJson: json({ mcpServers: { [SERVER_NAME]: cursorServer } }),
     codexCli: {
       args: ["mcp", "add", SERVER_NAME, "--url", url, "--bearer-token-env-var", ENV_VAR],
-      display: `codex mcp add ${SERVER_NAME} --url ${url} --bearer-token-env-var ${ENV_VAR}`,
+      display: `codex mcp add ${SERVER_NAME} --url ${shellWord(url)} --bearer-token-env-var ${ENV_VAR}`,
     },
     codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${url}"\nbearer_token_env_var = "${ENV_VAR}"\n`,
     vscodeServer,
@@ -169,7 +177,7 @@ export function renderMcpSnippets(url: string) {
       ],
       // Single quotes keep the reference literal when a person runs this in a shell where the
       // key is exported; Gemini CLI expands ${HUE_MCP_KEY} from its settings at connection time.
-      display: `gemini mcp add --scope user --transport http ${SERVER_NAME} ${url} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
+      display: `gemini mcp add --scope user --transport http ${SERVER_NAME} ${shellWord(url)} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
     },
   };
 }
@@ -182,11 +190,11 @@ export function renderMcpSignInSnippets(url: string) {
     claudeCodeProjectJson: json({ mcpServers: { [SERVER_NAME]: claudeCodeServer } }),
     claudeCodeCli: {
       args: ["mcp", "add", "--transport", "http", "--scope", "user", SERVER_NAME, url],
-      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${url}`,
+      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${shellWord(url)}`,
     },
     codexCli: {
       args: ["mcp", "add", SERVER_NAME, "--url", url],
-      display: `codex mcp add ${SERVER_NAME} --url ${url}`,
+      display: `codex mcp add ${SERVER_NAME} --url ${shellWord(url)}`,
     },
     codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${url}"\n`,
   };

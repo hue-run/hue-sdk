@@ -215,7 +215,7 @@ to add by hand. Files are written with mode `0644` through a temporary file and 
 symlinks are refused. `--dry-run` prints the resulting file content or commands without writing or
 running; `--print` prints only the snippet. Client CLIs run without a shell, so the
 `${HUE_MCP_KEY}` reference reaches them literally; the printed commands use single quotes for the
-same reason.
+same reason, and quote a URL with a query such as `?read_only=true`, whose `?` is a zsh glob.
 
 After a key installation the command reminds you to export `HUE_MCP_KEY` in the shell that starts
 the client (VS Code prompts for the key instead). A desktop app started from the Dock or a launcher
