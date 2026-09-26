@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import type { lookup } from "node:dns";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import {
+  forwardDelivery,
   isLoopbackAddress,
   LISTEN_USAGE,
+  parseDelivery,
   parseForwardTarget,
   runListenCommand,
   type ListenCommandIo,
@@ -103,6 +108,20 @@ function slackDelivery(kind: Queued["kind"], options: { retryNum?: number; text?
   return { deliveryId: randomUUID(), kind, eventId, retryNum, headers, body } satisfies Queued;
 }
 
+/** A queued delivery as a pull answer carries it. */
+function wire(delivery: Queued, expiresAt = Date.now() + LEASE_MS) {
+  return {
+    deliveryId: delivery.deliveryId,
+    subscriptionId: SUBSCRIPTION,
+    worldId: "7d7c3f0e-2b4e-4a51-8a4c-3a1f5e2d6b70",
+    eventId: delivery.eventId,
+    kind: delivery.kind,
+    retryNum: delivery.retryNum,
+    leaseExpiresAt: new Date(expiresAt).toISOString(),
+    request: { method: "POST", headers: delivery.headers, body: delivery.body },
+  };
+}
+
 interface MockOptions {
   credential?: string;
   mode?: "listen" | "http";
@@ -114,6 +133,10 @@ interface MockOptions {
   leaseMs?: number;
   /** Hand the same leased delivery out again in the next pull answer. */
   repeatDeliveries?: boolean;
+  /** Answer the first pulls with 503 and `Retry-After: 0`. */
+  pullFailures?: number;
+  /** Lease every queued delivery, ignoring the pull's `max`. */
+  overfill?: boolean;
 }
 
 interface RecordedAck {
@@ -139,15 +162,25 @@ async function mockHue(options: MockOptions = {}) {
   let open = false;
   let busy = options.busyPulls ?? 0;
   let ackFailures = options.ackFailures ?? 0;
+  let pullFailures = options.pullFailures ?? 0;
+  const pullAttempts: number[] = [];
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
       const raw = (await readBody(request)).toString("utf8");
-      const send = (status: number, body: unknown, diagnostic?: string) => {
+      const send = (
+        status: number,
+        body: unknown,
+        diagnostic?: string,
+        headers: Record<string, string> = {},
+      ) => {
         if (diagnostic) refusals.push({ route: request.url ?? "", status });
         response.writeHead(status, {
           "content-type": "application/json",
           "cache-control": "no-store",
           ...(diagnostic ? { "x-hue-diagnostic": diagnostic } : {}),
+          // A transient refusal asks for an immediate retry, which the client must not take.
+          ...(status === 503 ? { "retry-after": "0" } : {}),
+          ...headers,
         });
         response.end(JSON.stringify(diagnostic ? { error: "refused", diagnostic } : body));
       };
@@ -160,6 +193,11 @@ async function mockHue(options: MockOptions = {}) {
       const bearer = request.headers.authorization;
       if (request.method !== "POST" || (!pull && !ack)) return send(404, {}, "not_found");
       if (pull) {
+        pullAttempts.push(Date.now());
+        if (pullFailures > 0) {
+          pullFailures--;
+          return send(503, {}, "unavailable");
+        }
         if (bearer !== `Bearer ${credential}`) return send(401, {}, "credential_not_subscription");
         if (pull[1] !== SUBSCRIPTION) return send(404, {}, "subscription_not_found");
         if (options.mode === "http") return send(409, {}, "not_listen");
@@ -207,26 +245,25 @@ async function mockHue(options: MockOptions = {}) {
           await new Promise((tick) => setTimeout(tick, 10));
         open = false;
         if (closed) return;
-        const leased = [...repeat.splice(0), ...queue.splice(0, max as number)];
-        const expiresAt = Date.now() + leaseMs;
+        const leased = [
+          ...repeat.splice(0),
+          ...queue.splice(0, options.overfill ? queue.length : (max as number)),
+        ];
+        // The answer's Date is whole seconds, as HTTP writes it; the lease is measured from it.
+        const second = Math.floor(Date.now() / 1000) * 1000;
+        const expiresAt = second + leaseMs;
         for (const delivery of leased) {
           if (!leases.has(delivery.deliveryId))
             leases.set(delivery.deliveryId, { delivery, credential, expiresAt });
           if (options.repeatDeliveries && !leases.get(delivery.deliveryId)!.ack)
             repeat.push(delivery);
         }
-        return send(200, {
-          deliveries: leased.map((delivery) => ({
-            deliveryId: delivery.deliveryId,
-            subscriptionId: SUBSCRIPTION,
-            worldId: "7d7c3f0e-2b4e-4a51-8a4c-3a1f5e2d6b70",
-            eventId: delivery.eventId,
-            kind: delivery.kind,
-            retryNum: delivery.retryNum,
-            leaseExpiresAt: new Date(expiresAt).toISOString(),
-            request: { method: "POST", headers: delivery.headers, body: delivery.body },
-          })),
-        });
+        return send(
+          200,
+          { deliveries: leased.map((delivery) => wire(delivery, expiresAt)) },
+          undefined,
+          { date: new Date(second).toUTCString() },
+        );
       }
       const lease = leases.get(ack![2]!);
       if (ack![1] !== SUBSCRIPTION || !lease) return send(404, {}, "delivery_not_found");
@@ -289,6 +326,7 @@ async function mockHue(options: MockOptions = {}) {
     pulls,
     acks,
     refusals,
+    pullAttempts,
     isPullOpen: () => open,
   };
 }
@@ -591,6 +629,7 @@ describe("hue listen forwarding", () => {
     expect(hue.pulls.slice(1).every((pull) => pull.waitMs === 20_000)).toBe(true);
 
     const output = listen.output();
+    expect(output).toContain(`from ${hue.origin} to ${bot.url} using the world token.`);
     expect(output).toContain("Ready: waiting for events.");
     expect(output).toContain("url_verification -> 200");
     expect(output).toContain(`${event.eventId} retry 1 -> 200`);
@@ -788,6 +827,9 @@ describe("hue listen acknowledgements and refusals", () => {
     listen.stop();
     expect(await listen.exit).toBe(0);
     expect(hue.acks.map((ack) => ack.status)).toEqual([503, 503, 200]);
+    // Retry-After: 0 is not taken literally: the backoff (250 ms, then 500 ms) still applies.
+    expect(hue.acks[1]!.at - hue.acks[0]!.at).toBeGreaterThanOrEqual(200);
+    expect(hue.acks[2]!.at - hue.acks[1]!.at).toBeGreaterThanOrEqual(450);
     expect(new Set(hue.acks.map((ack) => JSON.stringify(ack.body))).size).toBe(1);
     expect(bot.requests).toHaveLength(1);
 
@@ -808,7 +850,7 @@ describe("hue listen acknowledgements and refusals", () => {
       {
         options: { credential: WORLD_TOKEN },
         env: { HUE_CONNECTION_KEY: PROJECT_KEY },
-        message: "Hue refused the connection key (HTTP 401 credential_not_subscription)",
+        message: `Hue refused the connection key (HTTP 401 credential_not_subscription): it is not subscription ${SUBSCRIPTION}'s credential, or it ended (a world token ends when its world seals). A project key never pulls.`,
       },
       {
         options: { credential: CONNECTION_KEY },
@@ -855,6 +897,201 @@ describe("hue listen acknowledgements and refusals", () => {
     expect(await listen.exit).toBe(0);
     expect(hue.refusals.filter((refusal) => refusal.status === 409)).toHaveLength(2);
     expect(listen.stderr()).toContain("another pull is open for this subscription");
+  });
+});
+
+describe("hue listen delivery safety", () => {
+  test("parses only deliveries it can forward unchanged", () => {
+    const queued = slackDelivery("event_callback");
+    const base = wire(queued);
+    expect(parseDelivery(base, SUBSCRIPTION)).toMatchObject({
+      deliveryId: queued.deliveryId,
+      kind: "event_callback",
+      request: { headers: queued.headers, body: queued.body },
+    });
+    const headers = (value: Record<string, string>) => ({
+      ...base,
+      request: { ...base.request, headers: value },
+    });
+    const refused: unknown[] = [
+      { ...base, subscriptionId: randomUUID() },
+      { ...base, deliveryId: "../../5b0f6a52-3c1e-4d7a-9e55-0c2b8f1d9a11" },
+      { ...base, kind: "block_actions" },
+      { ...base, retryNum: -1 },
+      { ...base, eventId: "Ev\u001b[31m" },
+      { ...base, request: { ...base.request, method: "GET" } },
+      { ...base, request: { ...base.request, body: 42 } },
+      headers({ ...queued.headers, "x-injected": "a\r\nset-cookie: b" }),
+      headers({ ...queued.headers, "bad name": "x" }),
+      headers({ "Content-Type": "application/json", "content-type": "text/plain" }),
+    ];
+    for (const value of refused) expect(parseDelivery(value, SUBSCRIPTION)).toBeNull();
+    // Header names keep the spelling Hue sent; HTTP compares them case-insensitively.
+    const mixed = parseDelivery(
+      headers({ "Content-Type": "application/json", "X-Slack-Signature": "v0=1" }),
+      SUBSCRIPTION,
+    )!;
+    expect(mixed.request.headers).toEqual({
+      "Content-Type": "application/json",
+      "X-Slack-Signature": "v0=1",
+    });
+  });
+
+  test("admits a --forward-to name only when every address it resolves to is loopback", async () => {
+    const bot = await receiver();
+    const queued = slackDelivery("event_callback");
+    // Any header spelling is forwarded, and a stale Content-Length never reaches the bot.
+    const delivery = parseDelivery(
+      wire({
+        ...queued,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Slack-Signature": queued.headers["x-slack-signature"]!,
+          "Content-Length": "1",
+          Host: "attacker.example",
+          Connection: "upgrade",
+        },
+      }),
+      SUBSCRIPTION,
+    )!;
+    const target = new URL(`http://bot.localhost:${bot.port}/events`);
+    const resolving = (addresses: Array<{ address: string; family: number }>) =>
+      ((_host: string, _options: unknown, callback: (error: null, found: unknown) => void) =>
+        callback(null, addresses)) as unknown as typeof lookup;
+    for (const addresses of [
+      [{ address: "10.0.0.5", family: 4 }],
+      [
+        { address: "127.0.0.1", family: 4 },
+        { address: "10.0.0.5", family: 4 },
+      ],
+      [],
+    ])
+      expect(
+        await forwardDelivery(target, delivery, { resolver: resolving(addresses) }),
+      ).toMatchObject({ outcome: "connection_failed" });
+    expect(bot.requests).toHaveLength(0);
+    expect(
+      await forwardDelivery(target, delivery, {
+        resolver: resolving([{ address: "127.0.0.1", family: 4 }]),
+      }),
+    ).toMatchObject({ outcome: "response", status: 200 });
+    expect(bot.requests).toHaveLength(1);
+    expect(bot.requests[0]!.body.toString("utf8")).toBe(queued.body);
+    expect(bot.requests[0]!.headers["content-length"]).toBe(String(Buffer.byteLength(queued.body)));
+    expect(bot.requests[0]!.headers["x-slack-signature"]).toBe(queued.headers["x-slack-signature"]);
+    expect(bot.requests[0]!.headers.host).toBe(`bot.localhost:${bot.port}`);
+    expect(bot.requests[0]!.headers.connection).not.toBe("upgrade");
+    // With --allow-remote-forward the name is resolved as usual.
+    expect(
+      await forwardDelivery(new URL(`http://localhost:${bot.port}/events`), delivery, {
+        allowRemote: true,
+      }),
+    ).toMatchObject({ outcome: "response", status: 200 });
+  });
+
+  test("reports a failed TLS handshake as a TLS error", async () => {
+    const plain = await receiver();
+    const delivery = parseDelivery(wire(slackDelivery("event_callback")), SUBSCRIPTION)!;
+    expect(
+      await forwardDelivery(new URL(`https://127.0.0.1:${plain.port}/events`), delivery),
+    ).toMatchObject({ outcome: "tls_error" });
+  });
+
+  test("sends a URL verification's answer body only when it succeeds, cut to 4 KiB", async () => {
+    let reply: (response: ServerResponse) => void = () => undefined;
+    const bot = await receiver((_request, response) => reply(response));
+    const target = new URL(`http://127.0.0.1:${bot.port}/slack/events`);
+    const handshake = parseDelivery(wire(slackDelivery("url_verification")), SUBSCRIPTION)!;
+    reply = (response) => {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("✓".repeat(3000));
+    };
+    const long = await forwardDelivery(target, handshake);
+    expect(long).toMatchObject({ outcome: "response", status: 200 });
+    expect(Buffer.byteLength(long!.body!)).toBeLessThanOrEqual(4096);
+    expect(Buffer.byteLength(long!.body!)).toBeGreaterThan(4090);
+    expect(long!.body!.replaceAll("✓", "")).toBe("");
+    reply = (response) => {
+      response.writeHead(500);
+      response.end("stack trace with a secret");
+    };
+    const failed = await forwardDelivery(target, handshake);
+    expect(failed).toMatchObject({ outcome: "response", status: 500 });
+    expect(failed!.body).toBeUndefined();
+  });
+
+  test("loads the credential from --env-path", async () => {
+    const hue = await mockHue();
+    const bot = await receiver();
+    const directory = await mkdtemp(join(tmpdir(), "hue-listen-env-"));
+    try {
+      await writeFile(join(directory, ".env.world"), `HUE_WORLD_TOKEN=${WORLD_TOKEN}\n`);
+      hue.queue.push(slackDelivery("event_callback"));
+      const listen = run(
+        [...args(hue.origin, bot.url), "--env-path", ".env.world"],
+        {},
+        {
+          cwd: directory,
+        },
+      );
+      await until(() => hue.acks.length === 1);
+      listen.stop();
+      expect(await listen.exit).toBe(0);
+      expect(listen.output()).not.toContain(WORLD_TOKEN);
+      const missing = run(
+        [...args(hue.origin, bot.url), "--env-path", "missing.env"],
+        {},
+        {
+          cwd: directory,
+        },
+      );
+      expect(await missing.exit).toBe(2);
+      expect(missing.stderr()).toContain("Unable to load missing.env");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("never retries a pull faster than its backoff, whatever Retry-After says", async () => {
+    const hue = await mockHue({ pullFailures: 3 });
+    const bot = await receiver();
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.pulls.length >= 1);
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    const [first, second, third, fourth] = hue.pullAttempts;
+    expect(second! - first!).toBeGreaterThanOrEqual(15);
+    expect(third! - second!).toBeGreaterThanOrEqual(35);
+    expect(fourth! - third!).toBeGreaterThanOrEqual(70);
+    expect(listen.stderr()).toContain("Pull failed: HTTP 503 unavailable");
+  });
+
+  test("forwards no more than --max even when Hue leases more", async () => {
+    const hue = await mockHue({ overfill: true });
+    const bot = await receiver();
+    hue.queue.push(...[1, 2, 3, 4, 5].map(() => slackDelivery("event_callback")));
+    const listen = run(args(hue.origin, bot.url, "--max", "2"), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.acks.length === 2);
+    await new Promise((tick) => setTimeout(tick, 100));
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(bot.requests).toHaveLength(2);
+    expect(bot.peak()).toBeLessThanOrEqual(2);
+    expect(listen.stderr()).toContain("Hue leased 3 more delivery(ies) than --max 2");
+  });
+
+  test("stops repeating an acknowledgement when the lease Hue stated has ended", async () => {
+    // The lease ends 2.5 s after the answer's Date, so repeats stop well inside 30 s.
+    const hue = await mockHue({ leaseMs: 2_500, ackFailures: 1_000 });
+    const bot = await receiver();
+    hue.queue.push(slackDelivery("event_callback"));
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => listen.stdout().includes("unacknowledged"), 4_000);
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(hue.acks.length).toBeGreaterThanOrEqual(1);
+    expect(hue.acks.length).toBeLessThanOrEqual(5);
+    expect(hue.acks.every((ack) => ack.status === 503)).toBe(true);
   });
 });
 
@@ -909,6 +1146,8 @@ describe("hue listen shutdown", () => {
     expect(await listen.exit).toBe(130);
     await new Promise((tick) => setTimeout(tick, 100));
     expect(hue.acks).toHaveLength(0);
+    expect(listen.stdout()).toContain("-> abandoned; not acknowledged");
+    expect(listen.output()).not.toContain("connection failed");
   });
 
   test("the hue binary stops on SIGINT after acknowledging the delivery in flight", async () => {

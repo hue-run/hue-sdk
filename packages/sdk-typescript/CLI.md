@@ -237,7 +237,9 @@ Events API requests today); the command pulls them, forwards each one unchanged 
 provider's schedule. It needs a **listen** event subscription on the world or on a connection key;
 the subscription's id and signing secret are shown once when it is created. Configure the bot with
 that signing secret where `SLACK_SIGNING_SECRET` went, then start the command: Hue offers the URL
-verification first, and events follow once the bot has answered it.
+verification first, and events follow once the bot has answered it. Event subscriptions are not
+yet available on `https://app.hue.run`; until the origin offers them, the command stops with
+Hue's refusal.
 
 ```sh
 hue listen --subscription <id> --forward-to http://localhost:3000/slack/events --env-path .env.world
@@ -257,29 +259,32 @@ signature verifies as it would in production; only `Host`, `Content-Length` and 
 headers are the local request's own, and Hue's credential is never forwarded. No redirect is
 followed: a `3xx` is reported as the answer. An answer counts only within three seconds, Slack's
 acknowledgement window; a later one is a timeout. A failing answer with `x-slack-no-retry: 1` is
-reported so Hue stops retrying it. Only the URL verification's answer body (at most 4 KiB, for its
-challenge) is sent to Hue; an event's answer body stays on this machine. Each pull waits for at
-most 20 seconds, leases up to `--max` deliveries (1 to 10, default 10) and forwards them
-concurrently; the next pull starts once they are acknowledged. A provider retry of an event is a
+reported so Hue stops retrying it. Only a successful URL verification answer's body (at most
+4 KiB, for its challenge) is sent to Hue; any other answer body stays on this machine. Each pull
+waits for at most 20 seconds and leases up to `--max` deliveries (1 to 10, default 10), which are
+forwarded concurrently; the next pull starts once they are acknowledged, and a delivery beyond
+`--max` is never forwarded. A provider retry of an event is a
 new delivery and is forwarded again with its `X-Slack-Retry-Num` and `X-Slack-Retry-Reason`, so the
 bot deduplicates by `event_id` as it does with Slack. A delivery Hue hands out a second time is
 not sent again; its recorded answer is repeated. An acknowledgement Hue did not answer is repeated
-until the delivery's 30-second lease ends.
+until the delivery's lease ends, as Hue stated it (30 seconds from the lease).
 
 `--forward-to` must name this machine: `localhost`, a `.localhost` name or a loopback address, and
-a name must resolve to loopback addresses only. `--allow-remote-forward` permits another host.
+a name is refused unless every address it resolves to is a loopback address. `--allow-remote-forward` permits another host.
 Credentials and fragments in the URL are refused. Output is one line per delivery (time, event id,
 retry number, the bot's status and duration, and the state Hue recorded), never a body, a
 signature or a credential; credentials in error messages are replaced with `[redacted]`.
 
 Ctrl+C or `SIGTERM` stops pulling (a waiting pull is cancelled), finishes the deliveries in flight
-and acknowledges them, then exits `0`; a second Ctrl+C abandons unfinished acknowledgements and
-exits `130`. Nothing is acknowledged before the bot answered or its window closed, and a lease
+and acknowledges them, then exits `0`; a second Ctrl+C abandons the forwards and acknowledgements
+still in flight and exits `130`. Nothing is acknowledged before the bot answered or its window closed, and a lease
 left unacknowledged lapses into a timeout that Hue retries on the provider's schedule, so no event
 is lost and none is marked delivered unanswered. Network errors, `429`, `5xx` and another open pull
-for the same subscription (a second `hue listen`) are retried with backoff up to 30 seconds. Exit
-codes: `0` stopped, `1` Hue refused the credential or the subscription (unknown, revoked, or one
-that delivers to a request URL), `2` usage error, `130` interrupted twice.
+for the same subscription (a second `hue listen`) are retried with backoff up to 30 seconds; a
+`Retry-After` can lengthen a wait to at most 60 seconds, never shorten it. Exit codes: `0` stopped,
+`1` Hue refused the credential, the subscription (unknown, revoked, or one that delivers to a
+request URL) or the pull itself (a redirect, another refusal or an unreadable answer), `2` usage
+error, `130` interrupted twice.
 
 ## Local state and conflicts
 

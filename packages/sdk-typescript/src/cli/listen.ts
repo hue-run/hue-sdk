@@ -77,7 +77,7 @@ const HOP_BY_HOP = new Set([
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const EVENT_ID = /^[A-Za-z0-9_-]{1,64}$/u;
-const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9a-z-]{1,128}$/u;
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/u;
 const HEADER_VALUE = /^[\t\x20-\x7e]{0,8192}$/u;
 const WORLD_TOKEN = /^hue_world_[A-Za-z0-9_-]{1,1024}\.[A-Za-z0-9_-]{43}$/u;
 const CONNECTION_KEY = /^hue_sk_[A-Za-z0-9_-]{1,512}$/u;
@@ -114,6 +114,8 @@ interface Delivery {
   eventId: string | null;
   kind: "url_verification" | "event_callback";
   retryNum: number;
+  /** The lease's end as the server stated it, or null when absent. */
+  leaseExpiresAt: number | null;
   request: { headers: Record<string, string>; body: string };
 }
 
@@ -134,7 +136,15 @@ type AckResult =
   | { kind: "unanswered" };
 
 type PullResult =
-  | { kind: "deliveries"; deliveries: Delivery[]; skipped: number }
+  | {
+      kind: "deliveries";
+      deliveries: Delivery[];
+      skipped: number;
+      excess: number;
+      /** When the answer arrived, and how long its leases have left by the server's clock. */
+      receivedAt: number;
+      leaseLeftMs: (delivery: Delivery) => number;
+    }
   | { kind: "retry"; reason: string; retryAfterMs: number | null }
   | { kind: "fatal"; message: string }
   | { kind: "stopped" };
@@ -178,30 +188,32 @@ function isLocalHostname(hostname: string): boolean {
 }
 
 /**
- * A resolver that admits only loopback addresses, so a `localhost` name that resolves elsewhere
- * reaches nothing. Address literals do not resolve; `parseForwardTarget` checked them.
+ * A resolver that admits a name only when every address it resolves to is a loopback address, so
+ * a `localhost` name that resolves elsewhere reaches nothing. Address literals do not resolve;
+ * `parseForwardTarget` checked them.
  */
-const loopbackLookup = ((
-  hostname: string,
-  options: { all?: boolean; family?: number },
-  callback: (
-    error: NodeJS.ErrnoException | null,
-    address: string | LookupAddress[],
-    family?: number,
-  ) => void,
-) => {
-  dnsLookup(hostname, { ...options, all: true }, (error, addresses) => {
-    if (error) return callback(error, options.all ? [] : "", 0);
-    const local = addresses.filter((entry) => isLoopbackAddress(entry.address));
-    if (local.length === 0) {
-      const refused: NodeJS.ErrnoException = new Error(`${hostname} is not a loopback address`);
-      refused.code = "ENOTLOOPBACK";
-      return callback(refused, options.all ? [] : "", 0);
-    }
-    if (options.all) callback(null, local);
-    else callback(null, local[0]!.address, local[0]!.family);
-  });
-}) as unknown as LookupFunction;
+function loopbackLookup(resolver: typeof dnsLookup = dnsLookup): LookupFunction {
+  return ((
+    hostname: string,
+    options: { all?: boolean; family?: number },
+    callback: (
+      error: NodeJS.ErrnoException | null,
+      address: string | LookupAddress[],
+      family?: number,
+    ) => void,
+  ) => {
+    resolver(hostname, { ...options, all: true }, (error, addresses) => {
+      if (error) return callback(error, options.all ? [] : "", 0);
+      if (addresses.length === 0 || !addresses.every((entry) => isLoopbackAddress(entry.address))) {
+        const refused: NodeJS.ErrnoException = new Error(`${hostname} is not a loopback address`);
+        refused.code = "ENOTLOOPBACK";
+        return callback(refused, options.all ? [] : "", 0);
+      }
+      if (options.all) callback(null, addresses);
+      else callback(null, addresses[0]!.address, addresses[0]!.family);
+    });
+  }) as unknown as LookupFunction;
+}
 
 function isTlsError(error: NodeJS.ErrnoException): boolean {
   const code = error.code ?? "";
@@ -224,20 +236,27 @@ function clampUtf8(text: string, limit: number): string {
 }
 
 /**
- * Sends one delivery to the receiver and reports its answer. The body bytes and every header go
- * out unchanged (the provider's signature covers them), no redirect is followed, and the answer
- * counts only inside `timeoutMs`. Only a URL verification's answer body is read.
+ * Sends one delivery to the receiver and reports its answer, or null when `signal` abandoned it.
+ * The body bytes and every header go out unchanged (the provider's signature covers them), no
+ * redirect is followed, and the answer counts only inside `timeoutMs`. Only a URL verification's
+ * successful answer body is read.
  */
 export function forwardDelivery(
   target: URL,
   delivery: Delivery,
-  options: { timeoutMs?: number; allowRemote?: boolean; signal?: AbortSignal } = {},
-): Promise<LocalAnswer> {
+  options: {
+    timeoutMs?: number;
+    allowRemote?: boolean;
+    signal?: AbortSignal;
+    /** Resolves `--forward-to` names; tests stand in for DNS. */
+    resolver?: typeof dnsLookup;
+  } = {},
+): Promise<LocalAnswer | null> {
   const timeoutMs = options.timeoutMs ?? FORWARD_TIMEOUT_MS;
   const body = Buffer.from(delivery.request.body, "utf8");
-  const headers: OutgoingHttpHeaders = {};
+  const headers: OutgoingHttpHeaders = Object.create(null) as OutgoingHttpHeaders;
   for (const [name, value] of Object.entries(delivery.request.headers))
-    if (!HOP_BY_HOP.has(name)) headers[name] = value;
+    if (!HOP_BY_HOP.has(name.toLowerCase())) headers[name] = value;
   headers["content-length"] = String(body.byteLength);
   const started = performance.now();
   const elapsed = () => Math.min(LEASE_MS, Math.max(0, Math.round(performance.now() - started)));
@@ -248,8 +267,8 @@ export function forwardDelivery(
       () => finish({ outcome: "timeout", durationMs: elapsed() }),
       timeoutMs,
     );
-    const abandon = () => finish({ outcome: "connection_failed", durationMs: elapsed() });
-    const finish = (answer: LocalAnswer) => {
+    const abandon = () => finish(null);
+    const finish = (answer: LocalAnswer | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -264,7 +283,7 @@ export function forwardDelivery(
         method: "POST",
         headers,
         agent: false,
-        ...(options.allowRemote ? {} : { lookup: loopbackLookup }),
+        ...(options.allowRemote ? {} : { lookup: loopbackLookup(options.resolver) }),
       });
     } catch {
       // A header Node refuses to send: nothing left this machine.
@@ -292,7 +311,9 @@ export function forwardDelivery(
           ...(noRetry ? { noRetry } : {}),
           ...(text !== undefined ? { body: text } : {}),
         });
-      if (delivery.kind !== "url_verification") {
+      // Only a successful handshake answer can verify, so only its body is read; a failing
+      // answer's page stays on this machine.
+      if (delivery.kind !== "url_verification" || status < 200 || status > 299) {
         response.on("error", () => undefined);
         answered();
         return;
@@ -318,7 +339,15 @@ export function forwardDelivery(
 /** One delivery from a pull answer, or null when it is not one this client can forward safely. */
 export function parseDelivery(value: unknown, subscriptionId: string): Delivery | null {
   if (!isObject(value)) return null;
-  const { deliveryId, subscriptionId: owner, eventId, kind, retryNum, request } = value;
+  const {
+    deliveryId,
+    subscriptionId: owner,
+    eventId,
+    kind,
+    retryNum,
+    leaseExpiresAt,
+    request,
+  } = value;
   if (typeof deliveryId !== "string" || !UUID.test(deliveryId)) return null;
   if (typeof owner !== "string" || owner.toLowerCase() !== subscriptionId.toLowerCase())
     return null;
@@ -333,17 +362,23 @@ export function parseDelivery(value: unknown, subscriptionId: string): Delivery 
   if (!isObject(headers)) return null;
   const entries = Object.entries(headers);
   if (entries.length > MAX_DELIVERY_HEADERS) return null;
-  const copied: Record<string, string> = {};
+  const copied = Object.create(null) as Record<string, string>;
+  const names = new Set<string>();
   for (const [name, header] of entries) {
     if (!HEADER_NAME.test(name) || typeof header !== "string" || !HEADER_VALUE.test(header))
       return null;
+    // Two spellings of one header would leave the receiver to guess which is meant.
+    if (names.has(name.toLowerCase())) return null;
+    names.add(name.toLowerCase());
     copied[name] = header;
   }
+  const leaseEnd = typeof leaseExpiresAt === "string" ? Date.parse(leaseExpiresAt) : Number.NaN;
   return {
     deliveryId: deliveryId.toLowerCase(),
     eventId: eventId as string | null,
     kind,
     retryNum: retryNum as number,
+    leaseExpiresAt: Number.isFinite(leaseEnd) ? leaseEnd : null,
     request: { headers: copied, body },
   };
 }
@@ -539,12 +574,14 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
   const forwardTimeoutMs = io.forwardTimeoutMs ?? FORWARD_TIMEOUT_MS;
   const pullRetryDelays = io.retryDelaysMs ?? PULL_RETRY_DELAYS_MS;
   const secrets: string[] = [];
+  // Every line loses the credential and control characters; text from elsewhere (error messages,
+  // the receiver URL) also loses anything shaped like a credential.
   const clean = (text: string) => {
     let out = text;
     for (const secret of secrets) out = out.replaceAll(secret, "[redacted]");
-    // Server text and error messages never reach the terminal with control characters.
-    return scrubCredentialText(out).replace(/[^\P{Cc}\n\t]|\p{Cf}/gu, " ");
+    return out.replace(/[^\P{Cc}\n\t]|\p{Cf}/gu, " ");
   };
+  const foreign = (text: string) => scrubCredentialText(text);
   const out = (line: string) => void stdout.write(`${clean(line)}\n`);
   const warn = (line: string) => void stderr.write(`${clean(line)}\n`);
 
@@ -629,9 +666,12 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       });
     } catch (error) {
       if (stopping.signal.aborted) return { kind: "stopped" };
+      const cause = (error as { cause?: { code?: unknown } }).cause?.code;
       return {
         kind: "retry",
-        reason: request.signal.aborted ? "no answer in time" : (error as Error).message,
+        reason: request.signal.aborted
+          ? "no answer in time"
+          : `${foreign((error as Error).message)}${typeof cause === "string" && /^[A-Z_]{1,32}$/u.test(cause) ? ` (${cause})` : ""}`,
         retryAfterMs: null,
       };
     } finally {
@@ -640,15 +680,16 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       // cancels reading them, so they are forwarded and acknowledged rather than left to lapse.
       stopping.signal.removeEventListener("abort", abort);
     }
+    const receivedAt = performance.now();
     const bodyTimer = setTimeout(abort, PULL_GRACE_MS);
     try {
-      return await readPull(response);
+      return await readPull(response, receivedAt);
     } finally {
       clearTimeout(bodyTimer);
     }
   };
 
-  const readPull = async (response: Response): Promise<PullResult> => {
+  const readPull = async (response: Response, receivedAt: number): Promise<PullResult> => {
     const status = response.status;
     if (status === 200) {
       let parsed: unknown;
@@ -663,15 +704,26 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       const deliveries: Delivery[] = [];
       const seen = new Set<string>();
       let skipped = 0;
+      let excess = 0;
       for (const item of list) {
         const delivery = parseDelivery(item, subscription);
         if (!delivery) skipped++;
-        else if (!seen.has(delivery.deliveryId)) {
+        else if (seen.has(delivery.deliveryId)) continue;
+        // Concurrency stays bounded by --max whatever the answer holds.
+        else if (deliveries.length >= max) excess++;
+        else {
           seen.add(delivery.deliveryId);
           deliveries.push(delivery);
         }
       }
-      return { kind: "deliveries", deliveries, skipped };
+      // A lease is measured on the server's clock: its stated end less the answer's `Date`, which
+      // is truncated to the second and so may be up to a second early.
+      const serverNow = Date.parse(response.headers.get("date") ?? "");
+      const leaseLeftMs = (delivery: Delivery) =>
+        delivery.leaseExpiresAt === null || !Number.isFinite(serverNow)
+          ? LEASE_MS
+          : Math.min(LEASE_MS, Math.max(0, delivery.leaseExpiresAt - serverNow - 1_000));
+      return { kind: "deliveries", deliveries, skipped, excess, receivedAt, leaseLeftMs };
     }
     const code = await refusalCode(response);
     const named = `HTTP ${status}${code ? ` ${code}` : ""}`;
@@ -714,12 +766,15 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     deadline: number,
   ): Promise<AckResult> => {
     for (let attempt = 0; ; attempt++) {
+      // The first acknowledgement is always sent (Hue decides whether the lease still holds);
+      // repeats stop when the lease has ended.
       const remaining = deadline - performance.now();
-      if (forced.signal.aborted || remaining <= 0) return { kind: "unanswered" };
+      if (forced.signal.aborted || (attempt > 0 && remaining <= 0)) return { kind: "unanswered" };
+      const step = ACK_RETRY_DELAYS_MS[Math.min(attempt, ACK_RETRY_DELAYS_MS.length - 1)]!;
       const request = new AbortController();
       const abort = () => request.abort();
       forced.signal.addEventListener("abort", abort, { once: true });
-      const timer = setTimeout(abort, Math.min(ACK_REQUEST_TIMEOUT_MS, remaining));
+      const timer = setTimeout(abort, Math.min(ACK_REQUEST_TIMEOUT_MS, Math.max(1_000, remaining)));
       try {
         const response = await fetchImpl(`${base}/${delivery.deliveryId}/ack`, {
           method: "POST",
@@ -746,14 +801,14 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         if (response.status === 409 && code === "subscription_revoked") return { kind: "revoked" };
         if (response.status !== 429 && response.status < 500)
           return { kind: "refused", status: response.status, code };
-        const delay = retryAfterMs(response);
+        // A `Retry-After` of 0 never turns the backoff into a busy loop.
         await sleep(
-          Math.min(delay ?? ACK_RETRY_DELAYS_MS[Math.min(attempt, 4)]!, remaining),
+          Math.min(Math.max(step, retryAfterMs(response) ?? 0), Math.max(0, remaining)),
           forced.signal,
         );
       } catch {
         // No answer: the same acknowledgement is safe to repeat until the lease ends.
-        await sleep(ACK_RETRY_DELAYS_MS[Math.min(attempt, 4)]!, forced.signal);
+        await sleep(Math.min(step, Math.max(0, remaining)), forced.signal);
       } finally {
         clearTimeout(timer);
         forced.signal.removeEventListener("abort", abort);
@@ -772,6 +827,16 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         allowRemote,
         signal: forced.signal,
       }));
+    const name =
+      delivery.kind === "url_verification"
+        ? "url_verification"
+        : `${delivery.eventId ?? "event"}${delivery.retryNum ? ` retry ${delivery.retryNum}` : ""}`;
+    if (answer === null) {
+      out(
+        `${new Date().toISOString()}  ${name} -> abandoned; not acknowledged, the lease lapses into a timeout`,
+      );
+      return;
+    }
     if (!previous) {
       remembered.set(delivery.deliveryId, answer);
       if (remembered.size > REMEMBERED_DELIVERIES)
@@ -779,17 +844,13 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     }
     const result = await acknowledge(delivery, answer, deadline);
     if (result.kind === "revoked") fatal ??= `Subscription ${subscription} is revoked.`;
-    const name =
-      delivery.kind === "url_verification"
-        ? "url_verification"
-        : `${delivery.eventId ?? "event"}${delivery.retryNum ? ` retry ${delivery.retryNum}` : ""}`;
     out(
       `${new Date().toISOString()}  ${name}${previous ? " (repeated)" : ""} -> ${describeAnswer(answer)}; ${describeAck(result)}`,
     );
   };
 
   out(
-    `Forwarding subscription ${subscription} to ${target.href} with its ${label} from ${origin}. Press Ctrl+C to stop.`,
+    `Forwarding subscription ${subscription} from ${origin} to ${foreign(target.href)} using the ${label}. Press Ctrl+C to stop.`,
   );
   let failures = 0;
   let ready = false;
@@ -804,8 +865,11 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         break;
       }
       if (result.kind === "retry") {
-        const delay =
-          result.retryAfterMs ?? pullRetryDelays[Math.min(failures, pullRetryDelays.length - 1)]!;
+        // `Retry-After` can lengthen the backoff, never shorten it.
+        const delay = Math.max(
+          pullRetryDelays[Math.min(failures, pullRetryDelays.length - 1)]!,
+          result.retryAfterMs ?? 0,
+        );
         failures++;
         warn(`Pull failed: ${result.reason}; retrying in ${Math.ceil(delay / 1000)} s.`);
         await sleep(delay, stopping.signal);
@@ -823,9 +887,14 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
         warn(
           `Skipped ${result.skipped} delivery(ies) this version of @hue-run/sdk cannot forward; their leases lapse and Hue retries them.`,
         );
-      const leasedAt = performance.now();
+      if (result.excess)
+        warn(
+          `Hue leased ${result.excess} more delivery(ies) than --max ${max}; they are not forwarded, their leases lapse and Hue retries them.`,
+        );
       await Promise.all(
-        result.deliveries.map((delivery) => deliver(delivery, leasedAt + LEASE_MS)),
+        result.deliveries.map((delivery) =>
+          deliver(delivery, result.receivedAt + result.leaseLeftMs(delivery)),
+        ),
       );
     }
   } finally {

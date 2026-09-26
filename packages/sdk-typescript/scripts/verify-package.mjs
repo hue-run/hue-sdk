@@ -458,8 +458,13 @@ if (
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
+    // A client that ignored SIGINT would otherwise hang this check until the CI job's timeout.
+    const killer = setTimeout(() => child.kill("SIGKILL"), 40_000);
     child.on("error", failed);
-    child.on("close", (status) => finished({ status, output }));
+    child.on("close", (status) => {
+      clearTimeout(killer);
+      finished({ status, output });
+    });
     const deadline = Date.now() + 20_000;
     const poll = setInterval(() => {
       if (acks.length > 0 || Date.now() > deadline) {
