@@ -81,7 +81,7 @@ def gate_problems(text: str) -> list[str]:
             "`HUE_API_KEY`",
             # A user who reached Hue through an MCP key or sign-in has an account too.
             "`HUE_MCP_KEY`",
-            "`get_project_context` succeeds",
+            "`list_projects` or `get_project_context` succeeds",
             "key of any preset",
             CONTACT_EMAIL,
             BOOKING_URL,
@@ -142,7 +142,7 @@ class SkillKeyGateTests(unittest.TestCase):
 
     def test_gate_check_requires_the_mcp_routes(self):
         text = SKILL.read_text()
-        for route in ("`HUE_MCP_KEY`", "`get_project_context` succeeds"):
+        for route in ("`HUE_MCP_KEY`", "`list_projects` or `get_project_context` succeeds"):
             with self.subTest(route=route):
                 regressed = replace_in_key_section(text, route, "an unrelated credential")
                 self.assertIn(f"key section is missing {route!r}", gate_problems(regressed))

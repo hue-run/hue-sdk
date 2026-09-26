@@ -157,7 +157,9 @@ simulated world and grades the sealed outcome. Review and publish cases in the H
 
 1. Find the published case with the Hue MCP tools `list_cases` and `get_case`, or use
    the case URL the user pastes. With an organization connection, pass the case's project as
-   `project_id` on these calls, as under Verify delivery.
+   `project_id` on every Hue tool call in this loop, as under Verify delivery: `list_cases`,
+   `get_case`, `list_local_agents`, `launch_local_run`, `get_local_run`, `get_run`, `get_run_item`,
+   `get_run_execution` and `get_trace`.
 2. Check `list_local_agents`. If no agent is online, run the evaluation from the shell:
 
    ```sh
