@@ -198,6 +198,18 @@ tools whatever the key allows. A project key, with or without it, keeps reaching
 With `--auth oauth` it is refused: a sign-in connection has **Read and write** access, so use a
 **Read** project key for read-only access.
 
+`--toolsets <names>` lists only the named tools, for clients with a tool-count limit or agents that
+only read production: `observe` (the production reads: projects, traces, spans and their recorded
+content, sessions, trace checks, intents and documentation), `all`, or the groups `project`, `traces`, `evals`, `environments`,
+`intents` and `docs`, comma-separated. A key configuration adds `?toolsets=<names>` to the URL. A
+sign-in configuration keeps the URL bare and sends the `X-Hue-MCP-Toolsets` header instead,
+because toolsets are not part of the connection's identity: Claude Code stores the header, and for
+Codex the command prints the `http_headers` line to add to `~/.codex/config.toml`, since
+`codex mcp add` stores none. `--toolsets` replaces a selection already in `--url`, and a selection in `--url` is kept without
+it; otherwise `cursor` selects `observe`. `--toolsets all` lists every tool. Unknown names are refused rather than passed on, because Hue
+ignores them and would list every tool. `get_project_context` is always listed and reports the
+selection.
+
 | Client | Key (`--auth key`) | Sign-in (`--auth oauth`) |
 | --- | --- | --- |
 | `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. | Merges `mcpServers.hue` with only `type` and `url` into `./.mcp.json`; `--scope user` runs `claude mcp add --transport http --scope user hue URL`. Then run `/mcp` in Claude Code, select `hue` and choose **Authenticate**. |
@@ -211,7 +223,9 @@ With `--auth oauth` it is refused: a sign-in connection has **Read and write** a
 Conductor has no MCP configuration of its own: its Claude Code and Codex agents read their user
 configuration in every workspace, so `conductor` registers the server at user scope with each CLI
 on `PATH` and prints the command for a CLI that is missing. A failing CLI does not stop the other;
-the command then exits `1`.
+the command then exits `1`. Hue has not yet verified the complete signed-in Conductor flow (consent
+through a trace read) end to end; if Hue's tools do not load after signing in, run the command
+again with `--auth key`.
 
 JSON files are parsed and merged: other servers, inputs and top-level fields are kept, only the
 `hue` entry is replaced, and invalid JSON (including comments) is refused together with the snippet

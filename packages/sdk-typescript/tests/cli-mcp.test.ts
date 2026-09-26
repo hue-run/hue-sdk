@@ -18,11 +18,13 @@ import {
   MCP_USAGE,
   MCP_VERIFY_PROMPT,
   parseMcpUrl,
+  parseToolsets,
   readOnlyMcpUrl,
   renderMcpSignInSnippets,
   renderMcpSnippets,
   runMcpCommand,
   shellWord,
+  toolsetsMcpUrl,
 } from "../src/cli/mcp.js";
 
 const roots: string[] = [];
@@ -141,6 +143,10 @@ const CLAUDE_CODE_SIGN_IN_JSON = `{
   }
 }
 `;
+const CURSOR_OBSERVE_JSON = CURSOR_JSON.replace(
+  "https://mcp.hue.run/mcp",
+  "https://mcp.hue.run/mcp?toolsets=observe",
+);
 const CODEX_TOML = `[mcp_servers.hue]\nurl = "https://mcp.hue.run/mcp"\nbearer_token_env_var = "HUE_MCP_KEY"\n`;
 
 describe("hue mcp install", () => {
@@ -222,7 +228,8 @@ describe("hue mcp install", () => {
     const root = await temporaryRoot();
     const cursor = await mcp(["install", "--client", "cursor"], { cwd: root });
     expect(cursor.code).toBe(0);
-    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(CURSOR_JSON);
+    // Cursor lists the observe profile unless --toolsets says otherwise.
+    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(CURSOR_OBSERVE_JSON);
     expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o644);
     expect(cursor.stdout).toContain("Wrote .cursor/mcp.json");
 
@@ -350,7 +357,7 @@ describe("hue mcp install", () => {
 
     const printed = await mcp(["install", "--client", "cursor", "--print"], { cwd: root });
     expect(printed.code).toBe(0);
-    expect(printed.stdout).toBe(CURSOR_JSON);
+    expect(printed.stdout).toBe(CURSOR_OBSERVE_JSON);
     await expect(lstat(join(root, ".cursor"))).rejects.toThrow();
 
     const toml = await mcp(["install", "--client", "codex", "--print"], { cwd: root });
@@ -554,9 +561,12 @@ describe("hue mcp install", () => {
     const result = await mcp(["install", "--client", "cursor", "--read-only"], { cwd: root });
     expect(result.code).toBe(0);
     expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(
-      CURSOR_JSON.replace("https://mcp.hue.run/mcp", "https://mcp.hue.run/mcp?read_only=true"),
+      CURSOR_JSON.replace(
+        "https://mcp.hue.run/mcp",
+        "https://mcp.hue.run/mcp?read_only=true&toolsets=observe",
+      ),
     );
-    expect(result.stdout).toContain("(https://mcp.hue.run/mcp?read_only=true)");
+    expect(result.stdout).toContain("(https://mcp.hue.run/mcp?read_only=true&toolsets=observe)");
 
     const fake = await fakeCli(root, "codex");
     const codex = await mcp(["install", "--client", "codex", "--read-only"], {
@@ -649,5 +659,140 @@ describe("hue mcp install", () => {
     expect(await codex.args()).toEqual(["mcp", "add", "hue", "--url", "https://mcp.hue.run/mcp"]);
     expect(result.stdout).toContain("with Codex.");
     expect(result.stdout).not.toContain(MCP_VERIFY_PROMPT);
+  });
+
+  test("--toolsets adds ?toolsets= to a key URL and refuses unknown names", async () => {
+    expect(parseToolsets("observe")).toEqual({ toolsets: "observe" });
+    expect(parseToolsets("traces, docs,traces")).toEqual({ toolsets: "traces,docs" });
+    expect(parseToolsets("obsrve")).toEqual({
+      error:
+        "Unknown toolset: obsrve. Choose from all, observe, project, traces, evals, environments, intents, docs.",
+    });
+    expect("error" in parseToolsets("observe,")).toBe(true);
+    expect(toolsetsMcpUrl("https://mcp.hue.run/mcp?read_only=true", "traces,docs")).toBe(
+      "https://mcp.hue.run/mcp?read_only=true&toolsets=traces,docs",
+    );
+    expect(toolsetsMcpUrl("https://mcp.hue.run/mcp?toolsets=all", "observe")).toBe(
+      "https://mcp.hue.run/mcp?toolsets=observe",
+    );
+
+    const root = await temporaryRoot();
+    const claude = await mcp(["install", "--client", "claude-code", "--toolsets", "observe"], {
+      cwd: root,
+    });
+    expect(claude.code).toBe(0);
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(
+      CLAUDE_CODE_JSON.replace(
+        "https://mcp.hue.run/mcp",
+        "https://mcp.hue.run/mcp?toolsets=observe",
+      ),
+    );
+    const fake = await fakeCli(root, "codex");
+    const codex = await mcp(["install", "--client", "codex", "--toolsets", "traces,docs"], {
+      cwd: root,
+      env: fake.env,
+    });
+    expect(codex.code).toBe(0);
+    expect((await fake.args())[4]).toBe("https://mcp.hue.run/mcp?toolsets=traces,docs");
+    expect(codex.stdout).toContain("--url 'https://mcp.hue.run/mcp?toolsets=traces,docs'");
+
+    const everything = await mcp(
+      ["install", "--client", "cursor", "--toolsets", "all", "--print"],
+      {
+        cwd: root,
+      },
+    );
+    expect(everything.stdout).toBe(CURSOR_JSON);
+    // --toolsets replaces a selection in --url; without the flag, the URL's selection is kept.
+    const withUrl = (selection: string) => [
+      "install",
+      "--client",
+      "cursor",
+      "--print",
+      "--url",
+      `https://mcp.hue.run/mcp?read_only=true&toolsets=${selection}`,
+    ];
+    expect((await mcp([...withUrl("observe"), "--toolsets", "all"], { cwd: root })).stdout).toBe(
+      CURSOR_JSON.replace("https://mcp.hue.run/mcp", "https://mcp.hue.run/mcp?read_only=true"),
+    );
+    expect((await mcp(withUrl("traces"), { cwd: root })).stdout).toBe(
+      CURSOR_JSON.replace(
+        "https://mcp.hue.run/mcp",
+        "https://mcp.hue.run/mcp?read_only=true&toolsets=traces",
+      ),
+    );
+    const typo = await mcp(withUrl("obsrve"), { cwd: root });
+    expect(typo.code).toBe(2);
+    expect(typo.stderr).toContain("In --url: Unknown toolset: obsrve.");
+    expect(toolsetsMcpUrl("https://mcp.hue.run/mcp?toolsets=observe", undefined)).toBe(
+      "https://mcp.hue.run/mcp",
+    );
+    const unknown = await mcp(["install", "--client", "cursor", "--toolsets", "obsrve"], {
+      cwd: root,
+    });
+    expect(unknown.code).toBe(2);
+    expect(unknown.stderr).toContain("Unknown toolset: obsrve.");
+  });
+
+  test("a sign-in toolset selection travels in a header, never in the URL", async () => {
+    const root = await temporaryRoot();
+    const project = await mcp(
+      ["install", "--client", "claude-code", "--auth", "oauth", "--toolsets", "observe"],
+      { cwd: root },
+    );
+    expect(project.code).toBe(0);
+    expect(JSON.parse(await readFile(join(root, ".mcp.json"), "utf8"))).toEqual({
+      mcpServers: {
+        hue: {
+          type: "http",
+          url: "https://mcp.hue.run/mcp",
+          headers: { "X-Hue-MCP-Toolsets": "observe" },
+        },
+      },
+    });
+
+    const claude = await fakeCli(root, "claude");
+    const codex = await fakeCli(root, "codex");
+    const conductor = await mcp(["install", "--client", "conductor", "--toolsets", "observe"], {
+      cwd: root,
+      env: codex.env,
+    });
+    expect(conductor.code).toBe(0);
+    expect(await claude.args()).toEqual([
+      "mcp",
+      "add",
+      "--transport",
+      "http",
+      "--scope",
+      "user",
+      "hue",
+      "https://mcp.hue.run/mcp",
+      "--header",
+      "X-Hue-MCP-Toolsets: observe",
+    ]);
+    expect(await codex.args()).toEqual(["mcp", "add", "hue", "--url", "https://mcp.hue.run/mcp"]);
+    expect(conductor.stdout).toContain('http_headers = { "X-Hue-MCP-Toolsets" = "observe" }');
+
+    const toml = await mcp(
+      ["install", "--client", "codex", "--auth", "oauth", "--toolsets", "observe", "--print"],
+      { cwd: root },
+    );
+    expect(toml.stdout).toBe(
+      '[mcp_servers.hue]\nurl = "https://mcp.hue.run/mcp"\nhttp_headers = { "X-Hue-MCP-Toolsets" = "observe" }\n',
+    );
+    const inUrl = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--auth",
+        "oauth",
+        "--url",
+        "https://mcp.hue.run/mcp?toolsets=observe",
+      ],
+      { cwd: root },
+    );
+    expect(inUrl.code).toBe(2);
+    expect(inUrl.stderr).toContain("Leave toolsets off a sign-in URL");
   });
 });
