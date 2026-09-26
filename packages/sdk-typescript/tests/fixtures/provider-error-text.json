@@ -415,6 +415,18 @@
     {
       "input": "{\"secret\": {\"a\": [1}, \"b\": \"synthetic-after-stray\"]}, \"n\": 1}",
       "expected": "{\"secret\": [redacted], \"n\": 1}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.test/?token=\\\"synthetic-url-escaped-open def\"} more",
+      "expected": "{\"error\":\"GET https://h.test/?token=%5Bredacted%5D\"} more"
+    },
+    {
+      "input": "token: \\\"synthetic-before-escaped-backslash more\\\\\" words",
+      "expected": "token: \\\"[redacted]\" words"
+    },
+    {
+      "input": "token: [\\\"a\\\\\\\"b\\\\\\\"c synthetic-bracket-escapes\\\"] next",
+      "expected": "token: [redacted] next"
     }
   ]
 }

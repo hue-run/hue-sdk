@@ -301,6 +301,15 @@ test("an escaped space ends a credential, so a run of them scrubs in linear time
   expect(performance.now() - started).toBeLessThan(5_000);
 });
 
+test("a bracketed value full of escaped quotes scrubs in linear time", () => {
+  // A string between backslash-escaped quotes that a bare quote ends is read once, not again
+  // from each escaped quote inside it.
+  const started = performance.now();
+  const text = String.raw`token: [\"${String.raw`\\\"`.repeat(50_000)}"`;
+  expect(scrubCredentialText(text)).toBe("token: [redacted]");
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
 test("server.address keeps an underscore in a host name, as WHATWG URL parsing does", () => {
   expect(
     Object.fromEntries(

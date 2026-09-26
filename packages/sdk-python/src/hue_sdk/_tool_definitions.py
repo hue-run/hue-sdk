@@ -69,7 +69,8 @@ _JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\
 # it holds.
 _URL_REST = re.compile(
     r"://(?:(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\\"[^\"<>`\r\n]*\\\"|\\'[^'<>`\r\n]*\\'"
-    r"|(?:\\?\"[^\"\r\n]*|\\?'[^'\r\n]*)(?=[\r\n]|\Z))"
+    r"|(?:\"[^\"\r\n]*|'[^'\r\n]*)(?=[\r\n]|\Z)|\\\"[^\"\r\n]*(?=[\"\r\n]|\Z)"
+    r"|\\'[^'\r\n]*(?=['\r\n]|\Z))"
     rf"|[^{_JS_SPACE}\"'<>`]|(?<==)\\?[\"'])+",
 )
 _SCHEME_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -153,16 +154,16 @@ _QUOTED_VALUE = re.compile(
 # the string holding it.
 _OPEN_QUOTED_VALUE = re.compile(
     r"(?:\"(?:[^\"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+)\\?(?=[\r\n]|\Z)"
-    rf"|\\\"(?:{_ESCAPED_DOUBLE})+\\?(?=[\"\r\n]|\Z)"
-    rf"|\\'(?:{_ESCAPED_SINGLE})+\\?(?=['\r\n]|\Z)"
+    rf"|\\\"(?:{_ESCAPED_DOUBLE})+(?:\\\\|\\)?(?=[\"\r\n]|\Z)"
+    rf"|\\'(?:{_ESCAPED_SINGLE})+(?:\\\\|\\)?(?=['\r\n]|\Z)"
 )
-# What a ``[…]`` or ``{…}`` value's brackets are counted between: a bracket, a string (double,
-# single or backslash-escaped quotes), which runs to the end of the text when it does not close,
-# or another escaped character.
+# What a ``[…]`` or ``{…}`` value's brackets are counted between: a bracket, a string (double or
+# single quotes), which runs to the end of the text when it does not close, one between
+# backslash-escaped quotes, which ends where its escapes do, or another escaped character.
 _BRACKET_TOKEN = re.compile(
     r"[\[\]{}]|\"(?:[^\"\\]|\\[\s\S])*\"?|'(?:[^'\\]|\\[\s\S])*'?"
-    r"|\\\"(?:[^\"\\]|\\\\\\\\|\\\\\\\"|\\\\[^\"\\]|\\[^\"\\])*(?:\\\"|\Z)"
-    r"|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\\\[^'\\]|\\[^'\\])*(?:\\'|\Z)|\\[\s\S]"
+    r"|\\\"(?:[^\"\\]|\\\\\\\\|\\\\\\\"|\\\\[^\"\\]|\\[^\"\\])*(?:\\\")?"
+    r"|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\\\[^'\\]|\\[^'\\])*(?:\\')?|\\[\s\S]"
 )
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.

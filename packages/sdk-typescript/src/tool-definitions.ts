@@ -83,7 +83,7 @@ function isCredentialKey(key: string): boolean {
  * value is replaced, as is one whose quote does not close on its line, to the end of the line
  * whatever it holds. */
 const urlRest =
-  /:\/\/(?:(?<==)(?:"[^"<>`\r\n]*"|'[^'<>`\r\n]*'|\\"[^"<>`\r\n]*\\"|\\'[^'<>`\r\n]*\\'|(?:\\?"[^"\r\n]*|\\?'[^'\r\n]*)(?=[\r\n]|$))|[^\s"'<>`]|(?<==)\\?["'])+/y;
+  /:\/\/(?:(?<==)(?:"[^"<>`\r\n]*"|'[^'<>`\r\n]*'|\\"[^"<>`\r\n]*\\"|\\'[^'<>`\r\n]*\\'|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|\\"[^"\r\n]*(?=["\r\n]|$)|\\'[^'\r\n]*(?=['\r\n]|$))|[^\s"'<>`]|(?<==)\\?["'])+/y;
 const isSchemeLetter = (code: number) => (code | 0x20) >= 0x61 && (code | 0x20) <= 0x7a;
 /** `a-z`, `0-9`, `+`, `.` and `-`, case-insensitively. */
 const isSchemeCharacter = (code: number) =>
@@ -180,14 +180,14 @@ const quotedValue = new RegExp(
  * the value runs to the end of the line, or one between backslash-escaped quotes to the quote that
  * ends the string holding it. */
 const openQuotedValue = new RegExp(
-  String.raw`(?:"(?:[^"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+)\\?(?=[\r\n]|$)|\\"(?:${escapedUnit('"')})+\\?(?=["\r\n]|$)|\\'(?:${escapedUnit("'")})+\\?(?=['\r\n]|$)`,
+  String.raw`(?:"(?:[^"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+)\\?(?=[\r\n]|$)|\\"(?:${escapedUnit('"')})+(?:\\\\|\\)?(?=["\r\n]|$)|\\'(?:${escapedUnit("'")})+(?:\\\\|\\)?(?=['\r\n]|$)`,
   "y",
 );
-/** What a `[…]` or `{…}` value's brackets are counted between: a bracket, a string (double,
- * single or backslash-escaped quotes), which runs to the end of the text when it does not close,
- * or another escaped character. */
+/** What a `[…]` or `{…}` value's brackets are counted between: a bracket, a string (double or
+ * single quotes), which runs to the end of the text when it does not close, one between
+ * backslash-escaped quotes, which ends where its escapes do, or another escaped character. */
 const bracketToken =
-  /[[\]{}]|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\\"(?:[^"\\]|\\\\\\\\|\\\\\\"|\\\\[^"\\]|\\[^"\\])*(?:\\"|$)|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\\\[^'\\]|\\[^'\\])*(?:\\'|$)|\\[\s\S]/g;
+  /[[\]{}]|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\\"(?:[^"\\]|\\\\\\\\|\\\\\\"|\\\\[^"\\]|\\[^"\\])*(?:\\")?|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\\\[^'\\]|\\[^'\\])*(?:\\')?|\\[\s\S]/g;
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =

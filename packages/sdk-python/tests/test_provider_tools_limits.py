@@ -407,6 +407,15 @@ def test_an_escaped_space_ends_a_credential_so_a_run_of_them_scrubs_in_linear_ti
     assert time.perf_counter() - started < 10
 
 
+def test_a_bracketed_value_full_of_escaped_quotes_scrubs_in_linear_time():
+    # A string between backslash-escaped quotes that a bare quote ends is read once, not again
+    # from each escaped quote inside it.
+    started = time.perf_counter()
+    text = 'token: [\\"' + '\\\\\\"' * 50_000 + '"'
+    assert scrub_credential_text(text) == "token: [redacted]"
+    assert time.perf_counter() - started < 10
+
+
 def test_server_address_keeps_an_underscore_in_a_host_name():
     # WHATWG URL parsing, and so the TypeScript SDK, keeps underscores: they are legal in DNS
     # labels and name real servers, such as Docker Compose services and internal hosts.
