@@ -113,6 +113,7 @@ hue setup --format human  # explicit append-only terminal rendering
 hue setup --origin http://127.0.0.1:PORT # isolated loopback tests only
 hue login                 # validate keys created in Hue and store them in ./.env.hue
 hue mcp install --client claude-code # write the Hue MCP configuration for a coding agent
+hue listen --subscription <id> --forward-to http://localhost:3000/slack/events # deliver events to a local bot
 ```
 
 Hosted setup accepts HTTPS origins only. HTTP is accepted solely for `localhost`, `127.0.0.1` and
@@ -225,6 +226,60 @@ the client's authentication action. Both end with the prompt that verifies the c
 `Use the Hue MCP: call get_project_context, then show the traces from the last 24 hours that need
 attention or have errors, with links. If there are none, show my 5 most recent traces.` Exit codes:
 `0` done or printed, `1` failed, `2` usage error.
+
+## Deliver simulated events to a local bot
+
+`hue listen` delivers a simulated world's events to a receiver on your machine, so an
+event-driven agent such as a Slack bot can be tested without a public URL, the way
+`stripe listen --forward-to` delivers webhooks. Hue signs each request as the provider does (Slack
+Events API requests today); the command pulls them, forwards each one unchanged to
+`--forward-to` and reports the bot's answer to Hue, which settles or retries the event on the
+provider's schedule. It needs a **listen** event subscription on the world or on a connection key;
+the subscription's id and signing secret are shown once when it is created. Configure the bot with
+that signing secret where `SLACK_SIGNING_SECRET` went, then start the command: Hue offers the URL
+verification first, and events follow once the bot has answered it.
+
+```sh
+hue listen --subscription <id> --forward-to http://localhost:3000/slack/events --env-path .env.world
+```
+
+The credential is the subscription's own, read from the environment (or `--env-path`, loaded
+first; a variable already set keeps its value): `HUE_WORLD_TOKEN` for a world's subscription or
+`HUE_CONNECTION_KEY` for a connection key's, chosen with `--credential world-token|connection-key`
+when both are set. It is never taken from the command line, where other local processes and shell
+history can read it. A project key is refused: a value equal to `HUE_API_KEY` or `HUE_MCP_KEY`
+exits 2 before any request, and Hue answers any credential that is not the subscription's with
+`401`. `--origin` (default `HUE_BASE_URL`, then `https://app.hue.run`) must be HTTPS, or plain HTTP
+on a loopback test server.
+
+Each request reaches the bot with its body bytes and headers unchanged, so the provider's
+signature verifies as it would in production; only `Host`, `Content-Length` and connection
+headers are the local request's own, and Hue's credential is never forwarded. No redirect is
+followed: a `3xx` is reported as the answer. An answer counts only within three seconds, Slack's
+acknowledgement window; a later one is a timeout. A failing answer with `x-slack-no-retry: 1` is
+reported so Hue stops retrying it. Only the URL verification's answer body (at most 4 KiB, for its
+challenge) is sent to Hue; an event's answer body stays on this machine. Each pull waits for at
+most 20 seconds, leases up to `--max` deliveries (1 to 10, default 10) and forwards them
+concurrently; the next pull starts once they are acknowledged. A provider retry of an event is a
+new delivery and is forwarded again with its `X-Slack-Retry-Num` and `X-Slack-Retry-Reason`, so the
+bot deduplicates by `event_id` as it does with Slack. A delivery Hue hands out a second time is
+not sent again; its recorded answer is repeated. An acknowledgement Hue did not answer is repeated
+until the delivery's 30-second lease ends.
+
+`--forward-to` must name this machine: `localhost`, a `.localhost` name or a loopback address, and
+a name must resolve to loopback addresses only. `--allow-remote-forward` permits another host.
+Credentials and fragments in the URL are refused. Output is one line per delivery (time, event id,
+retry number, the bot's status and duration, and the state Hue recorded), never a body, a
+signature or a credential; credentials in error messages are replaced with `[redacted]`.
+
+Ctrl+C or `SIGTERM` stops pulling (a waiting pull is cancelled), finishes the deliveries in flight
+and acknowledges them, then exits `0`; a second Ctrl+C abandons unfinished acknowledgements and
+exits `130`. Nothing is acknowledged before the bot answered or its window closed, and a lease
+left unacknowledged lapses into a timeout that Hue retries on the provider's schedule, so no event
+is lost and none is marked delivered unanswered. Network errors, `429`, `5xx` and another open pull
+for the same subscription (a second `hue listen`) are retried with backoff up to 30 seconds. Exit
+codes: `0` stopped, `1` Hue refused the credential or the subscription (unknown, revoked, or one
+that delivers to a request URL), `2` usage error, `130` interrupted twice.
 
 ## Local state and conflicts
 

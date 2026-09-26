@@ -373,6 +373,117 @@ if (
       `Installed hue login --env-path did not create a new env file: ${login.stderr}`,
     );
 }
+// The installed `hue listen` under Node: one leased delivery reaches a loopback receiver unchanged,
+// is acknowledged with the receiver's answer, and SIGINT then stops the client cleanly.
+{
+  const token = `hue_world_eyJwYWNrYWdlIjoiY2hlY2sifQ.${"t".repeat(43)}`;
+  const subscription = "0f8e3c2a-5b7d-4e1f-9a6c-2d4b8e0f1a3c";
+  const deliveryId = "6a1c9e4f-2b3d-4c5e-8f7a-9b0c1d2e3f4a";
+  const body = JSON.stringify({ type: "event_callback", event_id: "Ev0PACKAGE01", event: {} });
+  const received = [];
+  const receiver = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => (raw += chunk));
+    request.on("end", () => {
+      received.push({ signature: request.headers["x-slack-signature"], raw });
+      response.end("");
+    });
+  });
+  await new Promise((listening) => receiver.listen(0, "127.0.0.1", listening));
+  const acks = [];
+  let pulled = false;
+  const standIn = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => (raw += chunk));
+    request.on("end", () => {
+      response.setHeader("content-type", "application/json");
+      if (request.headers.authorization !== `Bearer ${token}`) {
+        response.statusCode = 401;
+        return response.end("{}");
+      }
+      const base = `/api/v1/event-subscriptions/${subscription}/deliveries`;
+      if (request.url === `${base}/pull`) {
+        const deliveries = pulled
+          ? []
+          : [
+              {
+                deliveryId,
+                subscriptionId: subscription,
+                worldId: null,
+                eventId: "Ev0PACKAGE01",
+                kind: "event_callback",
+                retryNum: 0,
+                leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+                request: {
+                  method: "POST",
+                  headers: { "content-type": "application/json", "x-slack-signature": "v0=abc" },
+                  body,
+                },
+              },
+            ];
+        pulled = true;
+        // An empty pull waits briefly, as a long poll would, rather than spinning.
+        return setTimeout(
+          () => response.end(JSON.stringify({ deliveries })),
+          deliveries.length ? 0 : 200,
+        );
+      }
+      if (request.url === `${base}/${deliveryId}/ack`) {
+        acks.push(JSON.parse(raw));
+        return response.end(JSON.stringify({ state: "acknowledged" }));
+      }
+      response.statusCode = 404;
+      response.end("{}");
+    });
+  });
+  await new Promise((listening) => standIn.listen(0, "127.0.0.1", listening));
+  const listen = await new Promise((finished, failed) => {
+    const child = spawn(
+      process.execPath,
+      [
+        join(minimal, "node_modules/@hue-run/sdk/dist/setup/cli.js"),
+        "listen",
+        "--subscription",
+        subscription,
+        "--forward-to",
+        `http://localhost:${receiver.address().port}/slack/events`,
+        "--origin",
+        `http://127.0.0.1:${standIn.address().port}`,
+      ],
+      {
+        env: { PATH: process.env.PATH, HUE_WORLD_TOKEN: token },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    child.on("error", failed);
+    child.on("close", (status) => finished({ status, output }));
+    const deadline = Date.now() + 20_000;
+    const poll = setInterval(() => {
+      if (acks.length > 0 || Date.now() > deadline) {
+        clearInterval(poll);
+        child.kill("SIGINT");
+      }
+    }, 50);
+  });
+  receiver.close();
+  standIn.close();
+  if (
+    listen.status !== 0 ||
+    acks.length !== 1 ||
+    acks[0].outcome !== "response" ||
+    acks[0].status !== 200 ||
+    received.length !== 1 ||
+    received[0].raw !== body ||
+    received[0].signature !== "v0=abc" ||
+    listen.output.includes(token)
+  )
+    throw new Error(
+      `Installed hue listen did not forward and acknowledge under Node: ${listen.output}`,
+    );
+}
 // Evaluation/simulation users install the optional validation peer. Ajv remains separately
 // optional: without it the JSON Schema scorer reports a typed error instead of crashing.
 const evaluation = join(destination, "evaluation-consumer");
@@ -532,6 +643,8 @@ const installedPackageTests = [
   "environment-files.test.ts",
   "cli-output-safety.test.ts",
   "cli-eval-direct.test.ts",
+  // `hue listen` against a stand-in for the listen routes, through the installed binary and dist.
+  "cli-listen.test.ts",
   // Output bounds, provider tool spans and their error-text scrubbing, and inline file digests,
   // against the packed dist.
   "evals-json.test.ts",
@@ -652,6 +765,7 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/cli/eval-direct.js"',
         )
         .replaceAll('"../src/cli/eval.js"', '"../node_modules/@hue-run/sdk/dist/cli/eval.js"')
+        .replaceAll('"../src/cli/listen.js"', '"../node_modules/@hue-run/sdk/dist/cli/listen.js"')
         // The CLI is the installed binary, and an adapter imports the installed evals entry.
         .replaceAll('"../src/setup/cli.ts"', '"../node_modules/@hue-run/sdk/dist/setup/cli.js"')
         .replaceAll('"../src/evals.ts"', '"../node_modules/@hue-run/sdk/dist/evals.js"'),
