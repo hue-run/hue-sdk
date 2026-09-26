@@ -14,7 +14,7 @@ OpenTelemetry tracing and local evaluation workflows for AI applications.
 
 [Documentation](https://docs.hue.run) · [Sign in](https://app.hue.run) · [Examples](./examples) · [Compatibility](./COMPATIBILITY.md) · [Changelog](./CHANGELOG.md) · [Versioning](./VERSIONING.md) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 
-Hue Cloud is currently invite-only; to request access, email [team@hue.run](mailto:team@hue.run). Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
+Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue.run](mailto:founders@hue.run) or book a time at [https://calendar.notion.so/meet/akethini/hue](https://calendar.notion.so/meet/akethini/hue). Tracing works without an account against any OTLP receiver; only the Hue-specific connection check, trace receipts and hosted evaluations need a project. See "Local development without a Hue account" in the [TypeScript](./packages/sdk-typescript/README.md#local-development-without-a-hue-account) and [Python](./packages/sdk-python/README.md#local-development-without-a-hue-account) guides.
 
 </div>
 
@@ -51,25 +51,6 @@ npm install @hue-run/sdk
 # Or, with Bun:
 bun add @hue-run/sdk
 ```
-
-The one-command onboarding path shipped in TypeScript `0.4.0`:
-
-```sh
-npx --yes @hue-run/sdk@latest setup --agent
-```
-
-It is not public yet. Automatic setup supports Express with npm, Express with Bun, and Flask with uv
-in one unambiguous application package with a recognizable entrypoint, existing GET route and
-environment-selected port. It installs the exact runtime through that project's manager, wires the
-application, makes one request to that route and verifies its exact trace/span receipt. Monorepos,
-mixed managers and unfamiliar entrypoints stop with a structured action. Technical preflight checks
-availability and presents the published [privacy notice](https://hue.run/privacy) and
-[security information](https://trust.hue.run/) before telemetry. An anonymous trial lasts 24 hours
-with limits of 100 traces, 1,000 spans and 2 MiB. A private local browser handoff lets the owner link
-an account while preserving the project and original request evidence; reconciliation refuses the
-old anonymous key and does not replay business work. Setup never enables content capture or creates
-a simulation, Hue Run, evaluation, source capture or remote execution. See the
-[CLI contract](./packages/sdk-typescript/CLI.md).
 
 See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue to an application with existing OpenTelemetry or AI SDK dependencies. Contributors can also [build and verify from a checkout](#build-and-verify-from-a-standalone-clone).
 
@@ -121,39 +102,23 @@ try {
 
 The default destination is `https://app.hue.run`. The trace records the input and output text above; with `captureContent: false` it keeps span names, timing and metadata without that text. The [tracing guide](./packages/sdk-typescript/README.md) covers capture, redaction, borrowed providers, streaming and shutdown.
 
-No Hue project yet? Request access at [team@hue.run](mailto:team@hue.run), or run the same script against a local OpenTelemetry Collector by setting `baseUrl` as described in [Local development without a Hue account](./packages/sdk-typescript/README.md#local-development-without-a-hue-account); `checkConnection()` is a Hue-only diagnostic, so remove that call when the receiver is a generic collector.
+Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue.run](mailto:founders@hue.run) or book a time at [https://calendar.notion.so/meet/akethini/hue](https://calendar.notion.so/meet/akethini/hue). Without an account, run the same script against a local OpenTelemetry Collector by setting `baseUrl` as described in [Local development without a Hue account](./packages/sdk-typescript/README.md#local-development-without-a-hue-account); `checkConnection()` is a Hue-only diagnostic, so remove that call when the receiver is a generic collector.
 
 For Python, use the installation instructions above and follow the [complete Python example](./packages/sdk-python/README.md).
 
 ## For coding agents
 
-The portable [Hue skill](./skills/hue/SKILL.md) helps Codex, Claude Code, Cursor, and other compatible agents inspect your app, integrate tracing, and verify delivery. It preserves your existing model provider and OpenTelemetry setup. It uses the [Agent Skills format](https://agentskills.io/specification), with its version recorded in the skill metadata.
-
-Install it in your application directory with the [skills CLI](https://github.com/vercel-labs/skills):
-
-```sh
-npx skills add hue-run/hue-sdk --skill hue
-```
-
-The CLI lets you choose your agent and installs into the current project; no Hue API key is needed to install the skill. The repository command uses the default branch. To try an unmerged skill change, install from that branch's local checkout instead:
-
-```sh
-npx skills add /path/to/hue-sdk --skill hue
-```
-
-Then ask your coding agent:
+Paste this prompt into Codex, Claude Code, Cursor or another coding agent:
 
 ```text
-Use the Hue skill to add tracing to this application. Preserve its behavior and
-existing telemetry. Capture full traces (prompts, responses and tool inputs and
-outputs) on every request path that calls a model or tool, unless our data policy
-forbids sending that content. Preserve redaction and use safe initialization, bounded lifecycle
-methods and a kill switch. Test collector outages and verify a real trace in Hue. Tell me what you changed and still need me to configure.
+Set up Hue in this project. Use curl to read https://docs.hue.run/guides/agent-setup.md and follow it, and show me the plan before you change anything. If you can't open it, stop and tell me why.
 ```
 
-You configure your project service key through your application's secret workflow; do not paste it into the agent chat. The skill can prepare and locally test the integration before the key is available. See [For agents](https://docs.hue.run/guides/agent-setup) for the documentation handoff.
+The agent first has you create a **Read and write** Hue API key and store it yourself (never in the chat), then adds tracing with the portable [Hue skill](./skills/hue/SKILL.md), verifies a real request and connects the Hue MCP server; [Agent setup](https://docs.hue.run/guides/agent-setup) describes each step.
 
-To let the agent inspect traces and evaluations in Hue, connect the [Hue MCP server](https://docs.hue.run/agents/mcp-server) with the `hue` executable: `hue login` validates a **Read and write** key created in Settings and stores it in `.env.hue`, and `hue mcp install --client claude-code` (also `codex`, `conductor`, `cursor`, `vscode`, `windsurf` and `gemini`) writes the client configuration, which references the `HUE_MCP_KEY` environment variable rather than a key value. With `--auth oauth` (Claude Code, Codex and Conductor), the configuration holds only the URL and you sign in with Hue in the client instead of using a key. See [Install the MCP for your coding agent](./packages/sdk-typescript/CLI.md#install-the-mcp-for-your-coding-agent).
+To keep the skill in your project for later sessions, install it with the [skills CLI](https://github.com/vercel-labs/skills): `npx skills add hue-run/hue-sdk --skill hue`. It installs from the default branch; to try an unmerged skill change, pass the path of a local checkout instead of `hue-run/hue-sdk`.
+
+To connect the [Hue MCP server](https://docs.hue.run/agents/mcp-server) by hand, use the `hue` executable: `hue login` validates a **Read and write** key created in Settings and stores it in `.env.hue`, and `hue mcp install --client claude-code` (also `codex`, `conductor`, `cursor`, `vscode`, `windsurf` and `gemini`) writes the client configuration, which references the `HUE_MCP_KEY` environment variable rather than a key value. With `--auth oauth` (Claude Code, Codex and Conductor), the configuration holds only the URL and you sign in with Hue in the client instead of using a key. See [Install the MCP for your coding agent](./packages/sdk-typescript/CLI.md#install-the-mcp-for-your-coding-agent).
 
 For production request handlers, follow [production safety](https://docs.hue.run/guides/production-safety). The strict setup example above intentionally exposes delivery failures.
 
