@@ -8,6 +8,30 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.11.1] - 2026-09-26
+
+`hue mcp install` gives agents that search their own tools every Hue tool, and every selection travels in the server URL.
+
+#### Changed
+
+- `hue mcp install --client claude-code`, `codex` and `conductor` write `?toolsets=all` into the
+  server URL, with a key or with sign-in: these agents defer MCP tools behind their own tool
+  search, so listing every tool costs them little. `cursor` keeps `?toolsets=observe`. `vscode`,
+  `windsurf` and `gemini` list Hue's default: the production reads, plus `search_hue_tools`,
+  `execute_hue_tool` and `execute_hue_write_tool`, which find and call every other tool the
+  connection allows.
+- A sign-in configuration carries `--toolsets` in its URL, as a key configuration does, and a
+  selection already in a sign-in `--url` is kept. The printed sign-in Codex TOML keeps its URL bare
+  and sends the selection as the `X-Hue-MCP-Toolsets` header, as Hue's connection guide does.
+- Every printed Codex TOML block sets `supports_parallel_tool_calls = true`, so Codex runs Hue's
+  independent calls in parallel. After `codex mcp add`, which has no option for it, the command
+  names the line to add.
+
+#### Fixed
+
+- `--toolsets all` writes `?toolsets=all` instead of leaving the URL bare, since a bare URL lists
+  Hue's default.
+
 ### [0.11.0] - 2026-09-26
 
 This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
@@ -1129,6 +1153,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.5.5 (2026-09-26): a tool missing from the agent's list is one search away. Hue's default connection lists the production reads and `search_hue_tools`, whose results give each tool's input schema and the name to call: the tool itself when listed, otherwise `execute_hue_tool` for a read or `execute_hue_write_tool` for a write. The production investigation describes that `list_projects`, `search_hue_tools`, `execute_hue_tool` flow, and the published-case loop reaches its eval tools through it when they are not listed.
 - 0.5.4 (2026-09-26): the production investigation counts before it samples. `aggregate` counts traces, errors and duration percentiles over a whole window, grouped by task type, attention state, finding, release, user, intent or time, and groups steps by tool, name or model. `search_traces` gains filters for findings, user, release, trace name and model and sorts by duration, `search_spans` lists individual steps such as failing tool calls, `get_trace` returns stored findings and span sizes, and `get_span_content` reads exact recorded values. Answers name the window, filters and any sampling or scan cap behind each number.
 - 0.5.3 (2026-09-26): a Hue MCP connection can cover every project in an organization. When the Hue tools take a `project_id` argument, the skill has agents call `list_projects`, confirm the project with the user when more than one could apply, and pass its id as `project_id` on every call, including `verify_trace`, `get_trace`, the production investigation and every call of the published-case loop; without that argument the connection reaches one project. The account check also accepts a connection that answers `list_projects`. A **Read** key still suffices for inspection, and the skill no longer says a browser sign-in can be approved for **Read**: a sign-in connection can have **Read and write** access, so agents ask before any write.
 - 0.5.2 (2026-09-26): one setup path for everyone. The invite-only section, which relayed the reply from https://docs.hue.run/guides/agent-setup.md and stopped, becomes **Get a Hue API key**. The agent checks only that `HUE_API_KEY` is present, never its value; a key of any preset, a key configured as `HUE_MCP_KEY` or a Hue MCP connection on which `get_project_context` succeeds means the user has a Hue account. An agent that came from the agent setup page confirms the same way that `HUE_API_KEY` is now present before it continues with Install and configure, and repeats that page's key message and the contact line instead of installing packages if the key is still missing; otherwise a first-time setup follows that page, which brings the agent back to the skill for tracing and ends by connecting the Hue MCP server. The user creates a **Read and write** key under **Settings → Integrations & API keys** and stores it as `HUE_API_KEY` themselves, never pasting it into chat. A user without an account gets one contact line: email founders@hue.run or book a time with the Hue team. Without a key, the agent installs no packages and changes no files unless the user asks it to prepare tracing against a local OpenTelemetry collector; anonymous setup (`setup --agent`, `resume`, `hue claim`) stays inactive. A missing Hue account or key defers to that section. The handoff offers a user with a Hue account and a **Read** or **Read and write** key to connect the Hue MCP server when it is not connected, with the user also storing that key as `HUE_MCP_KEY` if it is not set yet (not after a keyless setup against a local OpenTelemetry collector), and the description says "set up or integrate Hue".
