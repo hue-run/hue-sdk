@@ -375,6 +375,38 @@
     {
       "input": "failed at https://mcp.example.test/sse?token=\\\"synthetic-escaped-query two\\\" next",
       "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "GET https://api.example.test/v1?q=\"abc & Authorization: Bearer synthetic-after-amp",
+      "expected": "GET https://api.example.test/v1?q=%5Bredacted%5D"
+    },
+    {
+      "input": "GET https://api.example.test/v1?q=\\\"abc & password: synthetic-escaped-amp\\\" end",
+      "expected": "GET https://api.example.test/v1?q=%5Bredacted%5D end"
+    },
+    {
+      "input": "GET https://api.example.test/v1?q=\"a & password: synthetic-closed-amp\" end",
+      "expected": "GET https://api.example.test/v1?q=%5Bredacted%5D end"
+    },
+    {
+      "input": "{\\\"password\\\": [\\\"x\\\\\\\"y\\\", \\\"a]b\\\", \\\"synthetic-inner-escape\\\"]}",
+      "expected": "{\\\"password\\\": [redacted]}"
+    },
+    {
+      "input": "{\\\"token\\\": \\\"a\\\\\\\"b synthetic-inner-quote\\\"}",
+      "expected": "{\\\"token\\\": \\\"[redacted]\\\"}"
+    },
+    {
+      "input": "{\"error\": \"failed: token=\\\"synthetic-open-a synthetic-open-b\"}",
+      "expected": "{\"error\": \"failed: token=\\\"[redacted]\"}"
+    },
+    {
+      "input": "Bearer abc%20synthetic-after-escaped-space",
+      "expected": "Bearer [redacted]"
+    },
+    {
+      "input": "Authorization%3A%20Bearer%20synthetic-escaped-separator%20next",
+      "expected": "Authorization%3A%20Bearer%20[redacted]%20next"
     }
   ]
 }

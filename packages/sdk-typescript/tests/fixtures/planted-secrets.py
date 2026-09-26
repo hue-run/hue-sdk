@@ -219,10 +219,32 @@ def families(rng: random.Random):
         )
         return text, [first, second]
 
+    def quoted_query_value():
+        """A URL query value in quotes, closed or not, holding an ``&`` and a credential pair."""
+        value = secret(rng)
+        quote = rng.choice(['"', "'", '\\"'])
+        closing = rng.choice([quote + " next", ""])
+        pair = f"{rng.choice(KEYS)}{rng.choice(SEPARATORS)}{value}"
+        host = rng.choice(["mcp.example.test", "api.example.test:8443"])
+        return f"https://{host}/v1?q={quote}{rng.choice(PROSE)} & {pair}{closing}", [value]
+
+    def json_in_string():
+        """JSON inside a JSON string whose inner strings escape a quote (``\\\\\\"``)."""
+        first, second = secret(rng), secret(rng)
+        key = rng.choice(KEYS)
+        text = rng.choice(
+            [
+                f'{{\\"{key}\\": [\\"x\\\\\\"y\\", \\"a]b\\", \\"{first}\\", \\"{second}\\"]}}',
+                f'{{\\"{key}\\": \\"a\\\\\\"b {first} {second}\\"}}',
+                f'{{"error": "failed: {key}=\\"{first} {second}"}}',
+            ]
+        )
+        return text, [first, second]
+
     return [pair, quoted_pair, escaped_json, header, scheme_in_prose, url, prefixed, nested_pair,
             glued_scheme, trailing_scheme, api_key_phrase, glued_key, nested_quoted_pair,
             escaped_single_quotes, escaped_prefixed, escaped_scheme, escaped_key, bracket_value,
-            arrow_pair, open_quote]
+            arrow_pair, open_quote, quoted_query_value, json_in_string]
 
 
 def generate(seed: int, per_family: int) -> dict:

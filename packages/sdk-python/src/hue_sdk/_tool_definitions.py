@@ -77,6 +77,12 @@ _SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 # Schemes WHATWG parses as hierarchical, which both SDKs serialize alike.
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
+# A quoted value after ``=`` in a URL's text, whole, as ``_URL_REST`` reads one. It is replaced
+# before the URL is parsed, so an ``&`` or ``=`` inside it cannot make the rest of it a query name.
+_URL_QUOTED_VALUE = re.compile(
+    r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\\"[^\"<>`\r\n]*\\\"|\\'[^'<>`\r\n]*\\'"
+    r"|(?:\\?\"[^\"\r\n]*|\\?'[^'\r\n]*)\Z)"
+)
 # Where a word starts: after a character that is not a word character, or after a JSON escape
 # (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
 _WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
@@ -100,12 +106,16 @@ _CUT_PREFIXED_TOKEN = re.compile(
 )
 # An authorization scheme followed by its credential, as in an ``Authorization`` header, up to
 # whitespace, a quote, a delimiter or a backslash. The space between them may be escaped (``%20``,
-# ``\t``), and an escaped space ends the credential as a space does. The credential cannot start
-# with ``=`` or ``:``, so ``token = value`` and ``Token : value`` are left to the key-value rule.
+# ``\t``), and then an escaped space also ends the credential, which keeps a run of them linear.
+# The credential cannot start with ``=`` or ``:``, so ``token = value`` and ``Token : value`` are
+# left to the key-value rule.
+_CREDENTIAL_START = rf"[^{_JS_SPACE}\"'`<>=:,;(){{}}\[\]\\]"
+_CREDENTIAL_REST = rf"[^{_JS_SPACE}\"'`<>,;(){{}}\[\]\\]"
 _AUTHORIZATION_VALUE = re.compile(
-    rf"(?=[bt]){_WORD_START}(bearer|basic|token)((?:[{_JS_SPACE}]|%20|%09|\\[nrt]|\\u0020)+)"
-    rf"(?!%20|%09)[^{_JS_SPACE}\"'`<>=:,;(){{}}\[\]\\]"
-    rf"(?:(?!%20|%09)[^{_JS_SPACE}\"'`<>,;(){{}}\[\]\\])*",
+    rf"(?=[bt]){_WORD_START}(bearer|basic|token)"
+    rf"(?:([{_JS_SPACE}]+){_CREDENTIAL_START}{_CREDENTIAL_REST}*"
+    rf"|((?:[{_JS_SPACE}]|%20|%09|\\[nrt]|\\u0020)+)(?!%20|%09){_CREDENTIAL_START}"
+    rf"(?:(?!%20|%09){_CREDENTIAL_REST})*)",
     re.IGNORECASE | re.ASCII,
 )
 # The key and separator of a ``key=value``, ``key: value`` or ``key => value`` pair, the key
@@ -119,24 +129,40 @@ _PAIR_KEY = re.compile(
     rf"([{_JS_SPACE}]*(?:=>|[:=])[{_JS_SPACE}]*)",
     re.IGNORECASE | re.ASCII,
 )
+
+
+# One character of a value between backslash-escaped quotes (JSON inside a JSON string), read an
+# escape at a time, so the escaped backslash or quote of the inner text (``\\\\``, ``\\\"``) does
+# not end it.
+def _escaped_unit(quote: str) -> str:
+    return rf"[^{quote}\\\r\n]|\\\\\\\\|\\\\\\{quote}|\\\\[^{quote}\\\r\n]|\\[^{quote}\\\r\n]"
+
+
+_ESCAPED_DOUBLE = _escaped_unit('"')
+_ESCAPED_SINGLE = _escaped_unit("'")
+
+
 # A quoted value to its closing quote on the same line, spaces and escaped quotes included, or one
 # between backslash-escaped quotes, double or single.
 _QUOTED_VALUE = re.compile(
     r"\"(?:[^\"\\\r\n]|\\[^\r\n])+\"|'(?:[^'\\\r\n]|\\[^\r\n])+'"
-    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+\\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'"
+    rf"|\\\"(?:{_ESCAPED_DOUBLE})+\\\"|\\'(?:{_ESCAPED_SINGLE})+\\'"
 )
 # A quoted value whose quote does not close on its line, as when the text was cut inside it: the
-# value runs to the end of the line.
+# value runs to the end of the line, or one between backslash-escaped quotes to the quote that ends
+# the string holding it.
 _OPEN_QUOTED_VALUE = re.compile(
-    r"(?:\"(?:[^\"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+"
-    r"|\\\"(?:[^\"\\\r\n]|\\[^\"\r\n])+|\\'(?:[^'\\\r\n]|\\[^'\r\n])+)\\?(?=[\r\n]|\Z)"
+    r"(?:\"(?:[^\"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+)\\?(?=[\r\n]|\Z)"
+    rf"|\\\"(?:{_ESCAPED_DOUBLE})+\\?(?=[\"\r\n]|\Z)"
+    rf"|\\'(?:{_ESCAPED_SINGLE})+\\?(?=['\r\n]|\Z)"
 )
 # What a ``[…]`` or ``{…}`` value's brackets are counted between: a bracket, a string (double,
 # single or backslash-escaped quotes), which runs to the end of the text when it does not close,
 # or another escaped character.
 _BRACKET_TOKEN = re.compile(
     r"[\[\]{}]|\"(?:[^\"\\]|\\[\s\S])*\"?|'(?:[^'\\]|\\[\s\S])*'?"
-    r"|\\\"(?:[^\"\\]|\\[^\"])*(?:\\\"|\Z)|\\'(?:[^'\\]|\\[^'])*(?:\\'|\Z)|\\[\s\S]"
+    r"|\\\"(?:[^\"\\]|\\\\\\\\|\\\\\\\"|\\\\[^\"\\]|\\[^\"\\])*(?:\\\"|\Z)"
+    r"|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\\\[^'\\]|\\[^'\\])*(?:\\'|\Z)|\\[\s\S]"
 )
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
@@ -177,7 +203,9 @@ def _scrub_text_urls(text: str, cut: bool = False) -> str:
                 if cut and rest.end() == len(text):
                     url = REDACTED
                 elif _SPECIAL_TEXT_SCHEME.match(url):
-                    url = scrubbed.get(url) or scrubbed.setdefault(url, scrub.url(url))
+                    url = scrubbed.get(url) or scrubbed.setdefault(
+                        url, scrub.url(_URL_QUOTED_VALUE.sub(REDACTED, url))
+                    )
                 elif _URL_PARTS.search(url):
                     url = REDACTED
                 parts.append(text[copied:start] + url)
@@ -339,7 +367,7 @@ def _authorization_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     position = 0
     while (match := _AUTHORIZATION_VALUE.search(text, position)) is not None:
-        credential = match.start() + len(match[1]) + len(match[2])
+        credential = match.start() + len(match[1]) + len(match[2] or match[3])
         spans.append((credential, match.end()))
         position = credential
     return spans
@@ -379,9 +407,9 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
     ``key=value``, ``key: value`` or ``key => value`` pair whose key names a credential (quoted,
     escaped-quoted, bare, or a whole ``[…]`` or ``{…}``) become ``[redacted]``. A JSON or ``%``
     escape (``\n``, ``\u0022``, ``%20``) ends a word as a space does. A quote that does not close
-    on its line runs to the end of the line. ``cut`` says the text was cut from a longer one, so a
-    URL or prefixed token that runs to its end is replaced whole. Identical to the TypeScript
-    SDK's ``scrubCredentialText``.
+    on its line runs to the end of the line, and a URL's quoted query value is replaced whole.
+    ``cut`` says the text was cut from a longer one, so a URL or prefixed token that runs to its
+    end is replaced whole. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
     text = _scrub_text_urls(text, cut)
     # Every rule reads the same text and their matches are replaced together, so no rule's

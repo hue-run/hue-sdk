@@ -120,10 +120,14 @@ function scrubTextUrls(text: string, state: ScrubState, cut = false): string {
 }
 /** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
 const specialScheme = /^(?:https?|wss?|ftp):/i;
-/** A URL in free text. One with another scheme, which runtimes parse differently, is replaced
- * whole when it could carry userinfo, a query or a fragment. */
+/** A quoted value after `=` in a URL's text, whole, as `urlRest` reads one. It is replaced before
+ * the URL is parsed, so an `&` or `=` inside it cannot make the rest of it a query name. */
+const urlQuotedValue =
+  /(?<==)(?:"[^"<>`\r\n]*"|'[^'<>`\r\n]*'|\\"[^"<>`\r\n]*\\"|\\'[^'<>`\r\n]*\\'|(?:\\?"[^"\r\n]*|\\?'[^'\r\n]*)$)/g;
+/** A URL in free text, its quoted query values replaced. One with another scheme, which runtimes
+ * parse differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
-  if (specialScheme.test(url)) return scrubUrl(url, state);
+  if (specialScheme.test(url)) return scrubUrl(url.replace(urlQuotedValue, REDACTED), state);
   return /[@?#]/.test(url) ? REDACTED : url;
 }
 /** Where a word starts: after a character that is not a word character, or after a JSON escape
@@ -146,10 +150,13 @@ const cutPrefixedToken = new RegExp(
 );
 /** An authorization scheme followed by its credential, as in an `Authorization` header, up to
  * whitespace, a quote, a delimiter or a backslash. The space between them may be escaped (`%20`,
- * `\t`), and an escaped space ends the credential as a space does. The credential cannot start
- * with `=` or `:`, so `token = value` and `Token : value` are left to the key-value rule. */
+ * `\t`), and then an escaped space also ends the credential, which keeps a run of them linear.
+ * The credential cannot start with `=` or `:`, so `token = value` and `Token : value` are left to
+ * the key-value rule. */
+const credentialStart = String.raw`[^\s"'${"`"}<>=:,;(){}[\]\\]`;
+const credentialRest = String.raw`[^\s"'${"`"}<>,;(){}[\]\\]`;
 const authorizationValue = new RegExp(
-  String.raw`(?=[bt])${wordStart}(bearer|basic|token)((?:\s|%20|%09|\\[nrt]|\\u0020)+)(?!%20|%09)[^\s"'${"`"}<>=:,;(){}[\]\\](?:(?!%20|%09)[^\s"'${"`"}<>,;(){}[\]\\])*`,
+  String.raw`(?=[bt])${wordStart}(bearer|basic|token)(?:(\s+)${credentialStart}${credentialRest}*|((?:\s|%20|%09|\\[nrt]|\\u0020)+)(?!%20|%09)${credentialStart}(?:(?!%20|%09)${credentialRest})*)`,
   "gi",
 );
 /** The key and separator of a `key=value`, `key: value` or `key => value` pair, the key optionally
@@ -158,19 +165,29 @@ const authorizationValue = new RegExp(
  * last letter a credential key's can be (`token`, `apiKey`, `headers`, `basic` …) is read. The
  * value is not consumed, so a pair inside another pair's value (`error: token=…`) is found. */
 const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]*[cdlnrsty][-_]*)\1(\s*(?:=>|[:=])\s*)/gi;
+/** One character of a value between backslash-escaped quotes (JSON inside a JSON string), read an
+ * escape at a time, so the escaped backslash or quote of the inner text (`\\\\`, `\\\"`) does
+ * not end it. */
+const escapedUnit = (quote: string) =>
+  String.raw`[^${quote}\\\r\n]|\\\\\\\\|\\\\\\${quote}|\\\\[^${quote}\\\r\n]|\\[^${quote}\\\r\n]`;
 /** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
  * one between backslash-escaped quotes, double or single. */
-const quotedValue =
-  /"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:[^"\\\r\n]|\\[^"\r\n])+\\"|\\'(?:[^'\\\r\n]|\\[^'\r\n])+\\'/y;
+const quotedValue = new RegExp(
+  String.raw`"(?:[^"\\\r\n]|\\[^\r\n])+"|'(?:[^'\\\r\n]|\\[^\r\n])+'|\\"(?:${escapedUnit('"')})+\\"|\\'(?:${escapedUnit("'")})+\\'`,
+  "y",
+);
 /** A quoted value whose quote does not close on its line, as when the text was cut inside it:
- * the value runs to the end of the line. */
-const openQuotedValue =
-  /(?:"(?:[^"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+|\\"(?:[^"\\\r\n]|\\[^"\r\n])+|\\'(?:[^'\\\r\n]|\\[^'\r\n])+)\\?(?=[\r\n]|$)/y;
+ * the value runs to the end of the line, or one between backslash-escaped quotes to the quote that
+ * ends the string holding it. */
+const openQuotedValue = new RegExp(
+  String.raw`(?:"(?:[^"\\\r\n]|\\[^\r\n])+|'(?:[^'\\\r\n]|\\[^\r\n])+)\\?(?=[\r\n]|$)|\\"(?:${escapedUnit('"')})+\\?(?=["\r\n]|$)|\\'(?:${escapedUnit("'")})+\\?(?=['\r\n]|$)`,
+  "y",
+);
 /** What a `[…]` or `{…}` value's brackets are counted between: a bracket, a string (double,
  * single or backslash-escaped quotes), which runs to the end of the text when it does not close,
  * or another escaped character. */
 const bracketToken =
-  /[[\]{}]|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\\"(?:[^"\\]|\\[^"])*(?:\\"|$)|\\'(?:[^'\\]|\\[^'])*(?:\\'|$)|\\[\s\S]/g;
+  /[[\]{}]|"(?:[^"\\]|\\[\s\S])*"?|'(?:[^'\\]|\\[\s\S])*'?|\\"(?:[^"\\]|\\\\\\\\|\\\\\\"|\\\\[^"\\]|\\[^"\\])*(?:\\"|$)|\\'(?:[^'\\]|\\\\\\\\|\\\\\\'|\\\\[^'\\]|\\[^'\\])*(?:\\'|$)|\\[\s\S]/g;
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
@@ -328,7 +345,7 @@ function authorizationSpans(text: string): Span[] {
   const spans: Span[] = [];
   authorizationValue.lastIndex = 0;
   for (let match = authorizationValue.exec(text); match; match = authorizationValue.exec(text)) {
-    const credential = match.index + match[1]!.length + match[2]!.length;
+    const credential = match.index + match[1]!.length + (match[2] ?? match[3])!.length;
     spans.push([credential, match.index + match[0].length]);
     authorizationValue.lastIndex = credential;
   }
@@ -374,8 +391,9 @@ function redactSpans(text: string, spans: Span[]): string {
  * `key=value`, `key: value` or `key => value` pair whose key names a credential (quoted,
  * escaped-quoted, bare, or a whole `[…]` or `{…}`) become `[redacted]`. A JSON or `%` escape
  * (`\n`, `\u0022`, `%20`) ends a word as a space does. A quote that does not close on its line
- * runs to the end of the line. `cut` says the text was cut from a longer one, so a URL or prefixed token that runs to its
- * end is replaced whole.
+ * runs to the end of the line, and a URL's quoted query value is replaced whole. `cut` says the
+ * text was cut from a longer one, so a URL or prefixed token that runs to its end is replaced
+ * whole.
  */
 export function scrubCredentialText(text: string, cut = false): string {
   const scrubbed = scrubTextUrls(text, { changed: false }, cut);

@@ -16,16 +16,17 @@ refuses to publish a version without a matching entry below.
   credentials it kept before. A JSON escape (`\n`, `\t`, `\u0022`) or `%` escape (`%20`, `%3D`)
   ends a word as a space does, so a prefixed token, `Bearer`, `Basic` or `Token` or a credential
   key right after one is found (`…\nhue_sk_…`, `token%3Dghp_…`), and an escaped space separates a
-  scheme from its credential and ends it (`Authorization%3A%20Bearer%20…`). A credential key's
-  whole `[…]` or `{…}` value is replaced, where only its `[` or `{` was, and `key => value` pairs
-  are read. **Wire**
-- In the same text, a quoted value whose quote does not close on its line, as when the text was
-  cut inside it, is replaced to the end of the line, where only its first word was, and so is a
-  URL's query value between backslash-escaped quotes (`?token=\"…\"`). Only the first 16,384 code
-  points are scrubbed; a URL or prefixed token that this cut interrupts is now replaced whole, and
-  the text is still scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`,
-  `hue_rt_`, `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and
-  Google OAuth client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
+  scheme from its credential (`Authorization%3A%20Bearer%20…`). A credential key's whole `[…]` or
+  `{…}` value is replaced, where only its `[` or `{` was, and `key => value` pairs are read. JSON
+  inside a JSON string keeps its escaped quotes (`\\\"`) inside a value. **Wire**
+- In the same text, a quoted value whose quote does not close on its line, as when the text was cut
+  inside it, is replaced to the end of the line, where only its first word was. A URL's quoted query
+  value, between backslash-escaped quotes too (`?token=\"…\"`), is replaced whole, so an `&` inside
+  it no longer leaves the rest as a query name. Only the first 16,384 code points are scrubbed; a
+  URL or prefixed token that this cut interrupts is now replaced whole, and the text is still
+  scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`, `hue_rt_`,
+  `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and Google OAuth
+  client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
 
 ### [0.11.0] - 2026-09-26
 
@@ -881,8 +882,8 @@ No registry release is claimed until publication and registry acceptance complet
   any record's tool definitions. **Wire**
 - With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
   its ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…` exactly
-  as the TypeScript SDK 0.11.1 does, before your `redactor` sees it as `status.message`. Without
-  content capture the span keeps `error.type` only. **Wire**
+  as the TypeScript SDK's next release does, before your `redactor` sees it as `status.message`.
+  Without content capture the span keeps `error.type` only. **Wire**
 
 #### Fixed
 
