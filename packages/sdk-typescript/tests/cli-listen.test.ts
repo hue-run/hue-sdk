@@ -572,6 +572,20 @@ describe("hue listen arguments", () => {
     expect(bot.requests).toHaveLength(0);
   });
 
+  test("keeps a token pasted as --origin out of its output", async () => {
+    const bot = await receiver();
+    const listen = run(
+      args(`https://${WORLD_TOKEN}`, bot.url),
+      { HUE_WORLD_TOKEN: WORLD_TOKEN },
+      { fetch: (() => Promise.reject(new Error("offline"))) as unknown as typeof fetch },
+    );
+    await until(() => listen.stderr().includes("Pull failed"));
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(listen.stdout()).toContain("from https://[redacted] to");
+    expect(listen.output().toLowerCase()).not.toContain(WORLD_TOKEN.toLowerCase().slice(0, 24));
+  });
+
   test("prints its usage", async () => {
     const listen = run(["listen", "--help"], {});
     expect(await listen.exit).toBe(0);

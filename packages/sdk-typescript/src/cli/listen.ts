@@ -859,7 +859,7 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
   };
 
   out(
-    `Forwarding subscription ${subscription} from ${origin} to ${foreign(target.href)} using the ${label}. Press Ctrl+C to stop.`,
+    `Forwarding subscription ${subscription} from ${foreign(origin)} to ${foreign(target.href)} using the ${label}. Press Ctrl+C to stop.`,
   );
   let failures = 0;
   let ready = false;
