@@ -407,6 +407,14 @@
     {
       "input": "Authorization%3A%20Bearer%20synthetic-escaped-separator%20next",
       "expected": "Authorization%3A%20Bearer%20[redacted]%20next"
+    },
+    {
+      "input": "token=[synthetic-part1} synthetic-part2] next",
+      "expected": "token=[redacted] next"
+    },
+    {
+      "input": "{\"secret\": {\"a\": [1}, \"b\": \"synthetic-after-stray\"]}, \"n\": 1}",
+      "expected": "{\"secret\": [redacted], \"n\": 1}"
     }
   ]
 }

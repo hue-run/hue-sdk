@@ -235,14 +235,19 @@ function unescapedKey(text: string, keyStart: number, key: string): string | und
   return escape ? key.slice(escape[0].length) : undefined;
 }
 
-/** Where a `[…]` or `{…}` value that opens at `start` ends: after its matching bracket, brackets
- * inside strings not counted, or at the end of the text when it does not close. */
+/** Where a `[…]` or `{…}` value that opens at `start` ends: after the bracket that closes it,
+ * a closing bracket of another kind and brackets inside strings being part of the value, or at the
+ * end of the text when it does not close. */
 function bracketEnd(text: string, start: number): number {
-  let depth = 0;
+  const closers: string[] = [];
   bracketToken.lastIndex = start;
   for (let token = bracketToken.exec(text); token; token = bracketToken.exec(text)) {
-    if (token[0] === "[" || token[0] === "{") depth++;
-    else if ((token[0] === "]" || token[0] === "}") && --depth === 0) return bracketToken.lastIndex;
+    if (token[0] === "[") closers.push("]");
+    else if (token[0] === "{") closers.push("}");
+    else if (token[0] === closers.at(-1)) {
+      closers.pop();
+      if (!closers.length) return bracketToken.lastIndex;
+    }
   }
   return text.length;
 }
