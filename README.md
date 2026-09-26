@@ -118,6 +118,8 @@ The agent first has you create a **Read and write** Hue API key and store it you
 
 To keep the skill in your project for later sessions, install it with the [skills CLI](https://github.com/vercel-labs/skills): `npx skills add hue-run/hue-sdk --skill hue`. It installs from the default branch; to try an unmerged skill change, pass the path of a local checkout instead of `hue-run/hue-sdk`.
 
+To connect the [Hue MCP server](https://docs.hue.run/agents/mcp-server) by hand, use the `hue` executable: `hue login` validates a **Read and write** key created in Settings and stores it in `.env.hue`, and `hue mcp install --client claude-code` (also `codex`, `conductor`, `cursor`, `vscode`, `windsurf` and `gemini`) writes the client configuration, which references the `HUE_MCP_KEY` environment variable rather than a key value. With `--auth oauth` (Claude Code, Codex and Conductor), the configuration holds only the URL and you sign in with Hue in the client instead of using a key. See [Install the MCP for your coding agent](./packages/sdk-typescript/CLI.md#install-the-mcp-for-your-coding-agent).
+
 For production request handlers, follow [production safety](https://docs.hue.run/guides/production-safety). The strict setup example above intentionally exposes delivery failures.
 
 The [tracing reliability contract](./RELIABILITY.md) maps failure isolation and resource limits to regression tests and application acceptance checks.

@@ -48,12 +48,15 @@ def _base64_header(header: str) -> bool:
     return semicolon != -1 and ";base64;" in f"{header[semicolon:]};"
 
 
-def _utf8(text: str) -> bytes:
-    """UTF-8 as JavaScript writes it: a surrogate pair is its character, a lone surrogate U+FFFD."""
-    try:
-        return text.encode("utf-8")
-    except UnicodeEncodeError:
-        return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace").encode()
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _well_formed(text: str) -> str:
+    """Text as JavaScript encodes it to UTF-8: a surrogate pair is its character, a lone surrogate
+    U+FFFD. Done once for a whole part, so its UTF-8 encodes without error."""
+    if not _SURROGATE.search(text):
+        return text
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
 
 
 def _percent_decoded(payload: str) -> bytes | None:
@@ -67,10 +70,10 @@ def _percent_decoded(payload: str) -> bytes | None:
         pair = payload[index + 1 : index + 3]
         if len(pair) != 2 or not _HEX.issuperset(pair):
             return None
-        decoded += _utf8(payload[start:index])
+        decoded += payload[start:index].encode("utf-8")
         decoded.append(int(pair, 16))
         start = index + 3
-    decoded += _utf8(payload[start:])
+    decoded += payload[start:].encode("utf-8")
     return bytes(decoded)
 
 
@@ -81,6 +84,7 @@ def _file_bytes(content: str) -> bytes:
     otherwise), content in the base64 alphabet is decoded, and anything else, such as a text
     file's own text, is UTF-8. A data: URL whose data does not decode is taken as UTF-8 too.
     """
+    content = _well_formed(content)
     match = _DATA_URL.match(content)
     payload = content[match.end() :] if match else content
     decoded: bytes | None = None
@@ -91,7 +95,7 @@ def _file_bytes(content: str) -> bytes:
             decoded = base64.b64decode(payload, validate=True)
         except binascii.Error:
             decoded = None
-    return _utf8(content) if decoded is None else decoded
+    return content.encode("utf-8") if decoded is None else decoded
 
 
 def _content_key(part: dict[str, Any]) -> str | None:

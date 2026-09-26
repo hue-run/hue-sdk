@@ -3,10 +3,12 @@
 `npx skills add hue-run/hue-sdk --skill hue` installs skills/hue/SKILL.md from main, so its
 guidance is live as soon as it merges. The Hue team sets up accounts; the agent setup page on
 docs.hue.run has the user create and store a key, and the skill names the contact for a user
-without an account. The key section must keep its rules, not just their keywords: check the key
-for presence only, also when the agent arrives from the setup page, never ask for it in chat, and
-change nothing until a key exists. Every mention of pasting in the key section must be a negated
-instruction, so an added request such as "ask the developer to paste the key" fails the gate.
+without an account. A key configured as `HUE_MCP_KEY` or a Hue MCP connection that answers
+`get_project_context` shows an account too. The key section must keep its rules, not just their
+keywords: check the key for presence only, also when the agent arrives from the setup page, never
+ask for it in chat, and change nothing until a key exists. Every mention of pasting in the key
+section must be a negated instruction, so an added request such as "ask the developer to paste the
+key" fails the gate.
 """
 
 import re
@@ -69,6 +71,9 @@ def gate_problems(text: str) -> list[str]:
             SETUP_URL,
             "**Read and write**",
             "`HUE_API_KEY`",
+            # A user who reached Hue through an MCP key or sign-in has an account too.
+            "`HUE_MCP_KEY`",
+            "`get_project_context` succeeds",
             "key of any preset",
             CONTACT_EMAIL,
             BOOKING_URL,
@@ -127,6 +132,13 @@ class SkillKeyGateTests(unittest.TestCase):
         )
         self.assertIn("key section is missing 'key of any preset'", gate_problems(regressed))
 
+    def test_gate_check_requires_the_mcp_routes(self):
+        text = SKILL.read_text()
+        for route in ("`HUE_MCP_KEY`", "`get_project_context` succeeds"):
+            with self.subTest(route=route):
+                regressed = replace_in_key_section(text, route, "an unrelated credential")
+                self.assertIn(f"key section is missing {route!r}", gate_problems(regressed))
+
     def test_gate_check_requires_the_setup_page_and_contact_line(self):
         text = SKILL.read_text()
         for phrase in (SETUP_URL, CONTACT_EMAIL, BOOKING_URL):
@@ -178,7 +190,9 @@ class SkillKeyGateTests(unittest.TestCase):
 
     def test_gate_check_requires_a_key_check_after_the_setup_page(self):
         text = SKILL.read_text()
-        rule = re.search(r"If you came here from the agent setup page, .*?packages\.", text, re.S)
+        rule = re.search(
+            r"If you came\s+here\s+from\s+the\s+agent\s+setup\s+page,.*?packages\.", text, re.S
+        )
         assert rule, "setup page rule not found"
         regressed = replace_in_key_section(
             text,

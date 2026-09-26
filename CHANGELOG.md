@@ -32,18 +32,41 @@ refuses to publish a version without a matching entry below.
   `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
   any record's tool definitions; before, it carried neither. Descriptions and schemas are still
   exported only with content capture. **Wire**
-- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops
-  an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted
-  ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`,
-  `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
-  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_` and `hue_install_`, and `sk-`, Stripe,
-  Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or `Token`,
-  an `Authorization` header's whole value and the value of a credential-named `key=value` or
-  `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the value
-  quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
+- With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as its
+  ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops an
+  `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted ones
+  included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`, `?` or
+  `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
+  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`, and `sk-`,
+  Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or
+  `Token`, an `Authorization` header's whole value and the value of a credential-named `key=value`
+  or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the
+  value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
   another pair's value). The `redact` hook sees the text as `status.message`. Without content
   capture the span keeps `error.type` only. **Wire**
+
+- `hue mcp install --auth oauth` configures only the server URL, so the client signs in with Hue
+  in the browser instead of sending a key: a URL-only `.mcp.json` or `claude mcp add` for
+  `claude-code`, and `codex mcp add hue --url URL` for `codex`. The default stays `--auth key`.
+  Sign-in is refused for `cursor`, whose callback Hue does not yet accept, and for `vscode`,
+  `windsurf` and `gemini`.
+- `hue mcp install --client conductor` registers the server for Conductor's Claude Code (user
+  scope) and Codex agents with each CLI on `PATH`, and signs in by default.
+- `hue mcp install --read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides
+  and rejects write tools whatever the key allows. With `--auth oauth` it is refused, since a
+  sign-in connection's access is chosen when it is approved.
+
+#### Changed
+
+- The prompt `hue mcp install` prints to verify the connection asks for the traces from the last
+  24 hours that need attention or have errors, and for the 5 most recent traces when there are
+  none, instead of only the 5 most recent error traces.
+- `hue mcp install --client gemini` runs `gemini mcp add --scope user --transport http hue URL
+  --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, the form in Hue's connection guide, instead
+  of a project-scope entry with `-H '… $HUE_MCP_KEY'`. The VS Code key prompt reads "Hue Read or
+  Read and write API key".
+- After a key installation, `hue mcp install` says that an app started from the Dock or a launcher
+  does not see the shell's `HUE_MCP_KEY`, and names sign-in as the alternative where it works.
 
 #### Fixed
 
@@ -88,6 +111,13 @@ refuses to publish a version without a matching entry below.
 - `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
   throws when read: the item is skipped and counted, and the other calls are recorded, as the
   Python SDK does.
+- An output too long for the runtime to serialize (on Node, JSON longer than V8's longest string,
+  such as 120 MB of control characters) completes its case as `OutputTooLarge`; before, Node's
+  `Invalid string length` stopped the run with `OutcomeSerializationError` and a resume kept
+  refusing. The JSON byte length is counted as the output is read but still checked last, so an
+  output past the byte bound that is also not JSON raises `OutcomeSerializationError`, and an
+  array or object with more elements than values allowed, or keys longer than the bytes left, is
+  refused before its keys are listed or sorted.
 
 ### [0.10.0] - 2026-09-25
 
@@ -815,6 +845,16 @@ No registry release is claimed until publication and registry acceptance complet
 - `server.address` keeps a host name with an underscore, such as a Docker Compose service
   (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
   dropped.
+- An output's JSON byte length is counted as the output is read, as in the TypeScript SDK, so an
+  output too large to serialize is refused without serializing it (eleven references to a 50 MB
+  string took tens of seconds and a gigabyte); an output the process cannot hold in memory
+  completes its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values,
+  so an object of more than 10,000 members is no longer `OutputTooLarge`, and a list or object
+  with more elements than values left, or keys longer than the bytes left, is refused before it is
+  read. The output is read in the TypeScript SDK's order, and the byte bound is still checked
+  last, so both SDKs refuse an output for the same reason.
+- A large inline file's lone surrogates are replaced once for the whole part rather than in each
+  percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
 
 ### [0.6.1] - 2026-09-25
 
@@ -1056,7 +1096,9 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
-- 0.4.6 (2026-09-26): one setup path for everyone. The invite-only section, which relayed the reply from https://docs.hue.run/guides/agent-setup.md and stopped, becomes **Get a Hue API key**. The agent checks only that `HUE_API_KEY` is present, never its value, and a key of any preset means the user has a Hue account. An agent that came from the agent setup page confirms the same way that `HUE_API_KEY` is now present before it continues with Install and configure, and repeats that page's key message and the contact line instead of installing packages if the key is still missing; otherwise a first-time setup follows that page, which brings the agent back to the skill for tracing and ends by connecting the Hue MCP server. The user creates a **Read and write** key under **Settings → Integrations & API keys** and stores it as `HUE_API_KEY` themselves, never pasting it into chat. A user without an account gets one contact line: email founders@hue.run or book a time with the Hue team. Without a key, the agent installs no packages and changes no files unless the user asks it to prepare tracing against a local OpenTelemetry collector; anonymous setup (`setup --agent`, `resume`, `hue claim`) stays inactive. A missing Hue account or key defers to that section, the handoff offers to connect the Hue MCP server when it is not connected to a user with a Hue account and a **Read** or **Read and write** key (not after a keyless setup against a local OpenTelemetry collector), and the description says "set up or integrate Hue". Also records 0.4.5 (2026-09-25), which had no entry: the published case loop uses `hue eval --case` with `@hue-run/sdk` 0.9.0 or later; the MCP tool names are the current `get_run`, `get_run_item`, `list_eval_sets` and `list_evaluators` instead of the retired `get_experiment`, `get_experiment_item`, `list_datasets` and `list_scorers`; `--baseline` takes the previous run's `experimentId`, not its `runId`; content inspection uses the Hue UI or an authorized MCP connection; and cases can be reviewed and published through the project-write case-conversion MCP tools when authorized.
+- 0.5.1 (2026-09-26): one setup path for everyone. The invite-only section, which relayed the reply from https://docs.hue.run/guides/agent-setup.md and stopped, becomes **Get a Hue API key**. The agent checks only that `HUE_API_KEY` is present, never its value; a key of any preset, a key configured as `HUE_MCP_KEY` or a Hue MCP connection on which `get_project_context` succeeds means the user has a Hue account. An agent that came from the agent setup page confirms the same way that `HUE_API_KEY` is now present before it continues with Install and configure, and repeats that page's key message and the contact line instead of installing packages if the key is still missing; otherwise a first-time setup follows that page, which brings the agent back to the skill for tracing and ends by connecting the Hue MCP server. The user creates a **Read and write** key under **Settings → Integrations & API keys** and stores it as `HUE_API_KEY` themselves, never pasting it into chat. A user without an account gets one contact line: email founders@hue.run or book a time with the Hue team. Without a key, the agent installs no packages and changes no files unless the user asks it to prepare tracing against a local OpenTelemetry collector; anonymous setup (`setup --agent`, `resume`, `hue claim`) stays inactive. A missing Hue account or key defers to that section. The handoff offers to connect the Hue MCP server when it is not connected to a user with a Hue account and a **Read** or **Read and write** key (not after a keyless setup against a local OpenTelemetry collector), and the description says "set up or integrate Hue".
+- 0.5.0 (2026-09-26): a new section, "Investigate production with the Hue MCP", has agents fetch production data with the MCP read tools and do the analysis themselves: `get_project_context`, then `search_traces` over one window for volume, errors, `attention` and `min_duration_ms`, `get_trace` for the span tree, `get_span` with `include_content` only when the content is needed, trace-check and intent reads where the project set them up, bounded samples with their size stated, and links to the [production recipes](https://docs.hue.run/agents/investigate-production). The description now covers reading production traces. The invite-only check also admits a user whose key is configured as `HUE_MCP_KEY` or whose Hue MCP connection answers `get_project_context`. The MCP key guidance names both variables: the application and `hue eval` read `HUE_API_KEY`, an MCP client reads `HUE_MCP_KEY`, `hue login` stores one **Read and write** key under both, and a **Read** key or a sign-in approved for **Read** suffices for inspection. The handoff gains an ending for a completed investigation that separates what Hue recorded from the agent's reading.
+- 0.4.5 (2026-09-25), recorded with 0.5.1: the published case loop uses `hue eval --case` with `@hue-run/sdk` 0.9.0 or later; the MCP tool names are the current `get_run`, `get_run_item`, `list_eval_sets` and `list_evaluators` instead of the retired `get_experiment`, `get_experiment_item`, `list_datasets` and `list_scorers`; `--baseline` takes the previous run's `experimentId`, not its `runId`; content inspection uses the Hue UI or an authorized MCP connection; and cases can be reviewed and published through the project-write case-conversion MCP tools when authorized.
 - 0.4.4 (2026-09-25): `@hue-run/sdk` 0.10.0 is published, so the evaluation section says what changed "since" it rather than "from" it: an evaluator that does not apply to a case shows `n/a`, and one-shot `hue eval` stores outputs by default. Also collects the unreleased metadata change merged since 0.4.3: recommend one **Read and write** project key for development instead of **Tracing only**. The invite-only check looks for a Hue project and a project key configured as `HUE_API_KEY`, names **Read and write** as the recommended preset and still admits a key of any preset. The one **Read and write** key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server, where it is configured as `HUE_MCP_KEY` (a **Read** key suffices for inspect-only access). Before the application runs on a production server, the user creates a separate **Tracing only** key for that server's `HUE_API_KEY`. The fix for a rejected export is a **Read and write** key for development and evaluation, or **Tracing only** on a production server.
 - 0.4.3 (2026-09-25): the evaluation section says that from `@hue-run/sdk` 0.10.0 one-shot `hue eval` stores case outputs, error messages and explanations by default, the command's stdout being its stored answer with the credentials it was handed redacted, and `--no-output` opts out (earlier versions store them only with `--content`); that files written to `output/` are uploaded and not fully redacted, so they must never hold credentials; and that an evaluator that does not apply to a case shows `n/a` and neither passes nor fails it.
 - 0.4.2 (2026-09-24): recommend full traces. The capture section, now headed "Capture and instrument full traces", tells agents to recommend `captureContent: true` / `capture_content=True` in the plan shown to the user and to state what it sends (prompts/messages, responses and tool inputs/outputs alongside model, usage, timing and errors); the user's approval authorizes it. Metadata-only (`false`) remains the opt-out when the user declines or an existing application policy forbids sending that content. The value is still required, and redaction and credential filtering apply in both modes. Agents instrument every request path that calls a model or tool, not only one, verify at least one real request and report the instrumented paths they did not exercise. Also collects the unreleased metadata changes merged since 0.4.1: find published cases with the Hue MCP tools `list_cases` and `get_case` (the earlier `list_scenarios` and `get_scenario` names remain aliases), and name Hue's consolidated access presets. Evaluation workflows use **Read and write** (formerly **Tracing and evaluations**); tracing still uses **Tracing only**. A **Read** key (formerly **Coding agent (read-only)**) cannot send telemetry.
