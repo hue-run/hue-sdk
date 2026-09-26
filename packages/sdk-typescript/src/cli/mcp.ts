@@ -39,11 +39,13 @@ const ENV_VAR = "HUE_MCP_KEY";
 const INPUT_ID = `${SERVER_NAME}-mcp-key`;
 const MAX_CONFIG_BYTES = 1024 * 1024;
 /**
- * Prompt to paste into the agent after installation. It reads what needs attention and falls back
- * to recent traces, so a project without errors still proves the read path.
+ * Prompt to paste into the agent after installation. `list_projects` answers for every credential:
+ * a project key or earlier connection returns its one project, and an organization connection
+ * lists them, after which each call takes `project_id`. It reads what needs attention and falls
+ * back to recent traces, so a project without errors still proves the read path.
  */
 export const MCP_VERIFY_PROMPT =
-  "Use the Hue MCP: call get_project_context, then show the traces from the last 24 hours that need attention or have errors, with links. If there are none, show my 5 most recent traces.";
+  "Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id as project_id on each call after list_projects.";
 
 const CLIENT_IDS = [
   "claude-code",
@@ -74,15 +76,16 @@ export const MCP_USAGE = `Usage: hue mcp install --client <claude-code|codex|con
 
 Configure a coding agent to use the Hue MCP server. A key configuration references the
 ${ENV_VAR} environment variable; a key value is never written. A sign-in configuration holds
-only the URL: the client opens Hue in a browser, where you approve one project.
+only the URL: the client opens Hue in a browser, where you approve access to the projects of
+one organization.
 
 Options:
   --client NAME   Coding agent to configure (required)
   --auth MODE     key: reference ${ENV_VAR} (the default, except for conductor)
                   oauth: URL only, sign in with Hue in the client (claude-code, codex and
                   conductor; the default for conductor)
-  --read-only     key only: add ?read_only=true to the URL so write tools are hidden; with
-                  oauth, approve Read when you sign in instead
+  --read-only     key only: add ?read_only=true to the URL so write tools are hidden. A
+                  sign-in connection has Read and write access; use a Read key for read-only
   --url URL       Hue MCP endpoint (default ${DEFAULT_MCP_URL})
   --scope SCOPE   claude-code only: project writes .mcp.json (default); user runs
                   \`claude mcp add --scope user\`
@@ -500,7 +503,7 @@ function planFor(client: ClientId, auth: AuthMode, scope: "project" | "user", ur
 function nextSteps(client: ClientId, auth: AuthMode): string[] {
   const label = CLIENT_LABELS[client];
   const approve =
-    "Sign in to Hue, select the project and approve Read (Read and write only if the agent should change project data).";
+    "Sign in to Hue and approve the connection. It can read and write every active project in the organization you choose, within your role; for read-only access, use a Read project key with --auth key.";
   let lines: string[];
   if (auth === "oauth")
     lines =
@@ -600,7 +603,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     (parsed.values["read-only"] || new URL(url).searchParams.has("read_only"))
   )
     return fail(
-      "Read-only sign-in is chosen in Hue: approve Read when you sign in, and leave --read-only and read_only off the URL.",
+      "A sign-in connection has Read and write access and cannot be made read-only by its URL. For read-only access, use a Read project key (--auth key), or add --read-only to a key configuration.",
       2,
     );
   if (parsed.values["read-only"]) url = readOnlyMcpUrl(url);

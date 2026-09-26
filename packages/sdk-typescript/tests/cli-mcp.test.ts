@@ -462,6 +462,9 @@ describe("hue mcp install", () => {
   });
 
   test("the verification prompt asks what needs attention and falls back to recent traces", () => {
+    // list_projects answers for every credential, so the prompt starts there.
+    expect(MCP_VERIFY_PROMPT.startsWith("Use the Hue MCP: call list_projects")).toBe(true);
+    expect(MCP_VERIFY_PROMPT).toContain("pass the project's id as project_id");
     expect(MCP_VERIFY_PROMPT).toContain("get_project_context");
     expect(MCP_VERIFY_PROMPT).toContain("need attention or have errors");
     expect(MCP_VERIFY_PROMPT).toContain("5 most recent traces");
@@ -477,7 +480,8 @@ describe("hue mcp install", () => {
     expect(project.code).toBe(0);
     expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(CLAUDE_CODE_SIGN_IN_JSON);
     expect(project.stdout).toContain("run /mcp, select hue and choose Authenticate");
-    expect(project.stdout).toContain("approve Read");
+    expect(project.stdout).toContain("approve the connection");
+    expect(project.stdout).toContain("use a Read project key with --auth key");
     expect(project.stdout).not.toContain("Export HUE_MCP_KEY");
     expect(project.stdout).toContain(MCP_VERIFY_PROMPT);
 
