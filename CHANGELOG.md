@@ -8,7 +8,21 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.11.0] - 2026-09-26
+
+This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
+
+#### Breaking
+
+- `hue mcp install --client cursor` writes the URL with `?toolsets=observe`, so Cursor lists only
+  Hue's production reads, as Hue's own Cursor snippet does; before, it listed every tool the key
+  allows. Migration: pass `--toolsets all` to keep the whole catalog, or remove `?toolsets=observe`
+  from `.cursor/mcp.json`.
+- `hue mcp install --client gemini` runs `gemini mcp add --scope user --transport http hue URL
+  --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, the form in Hue's connection guide, so the
+  server is registered for the user in every project; before, it wrote a project-scope entry with
+  `-H '… $HUE_MCP_KEY'`. Migration: an earlier project entry keeps working and takes precedence in
+  that project; remove it with `gemini mcp remove hue` there to use the user entry.
 
 #### Added
 
@@ -69,8 +83,8 @@ refuses to publish a version without a matching entry below.
 - `hue mcp install --toolsets <names>` lists only the named tools: `observe` for production reads,
   `all`, or the catalog groups. A key configuration adds `?toolsets=<names>` to the URL; a sign-in
   configuration sends the `X-Hue-MCP-Toolsets` header, which Claude Code stores and Codex's
-  configuration needs added by hand. `--client cursor` selects `observe` by default. Unknown names
-  are refused.
+  configuration needs added by hand. `--client cursor` selects `observe` by default (see
+  Breaking). Unknown names are refused.
 - `hue mcp install --read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides
   and rejects write tools whatever the key allows. With `--auth oauth` it is refused, since a
   sign-in connection has **Read and write** access; a **Read** project key is the read-only
@@ -82,10 +96,8 @@ refuses to publish a version without a matching entry below.
   every credential answers, and passes `project_id` on an organization connection. It then asks
   for the traces from the last 24 hours that need attention or have errors, and for the 5 most
   recent traces when there are none, instead of only the 5 most recent error traces.
-- `hue mcp install --client gemini` runs `gemini mcp add --scope user --transport http hue URL
-  --header 'Authorization: Bearer ${HUE_MCP_KEY}'`, the form in Hue's connection guide, instead
-  of a project-scope entry with `-H '… $HUE_MCP_KEY'`. The VS Code key prompt reads "Hue Read or
-  Read and write API key".
+- The VS Code key prompt that `hue mcp install --client vscode` writes reads "Hue Read or Read and
+  write API key".
 - After a key installation, `hue mcp install` says that an app started from the Dock or a launcher
   does not see the shell's `HUE_MCP_KEY`, and names sign-in as the alternative where it works.
 
