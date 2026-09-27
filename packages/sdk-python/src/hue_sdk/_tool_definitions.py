@@ -241,16 +241,16 @@ _BRACKET_TOKEN = re.compile(
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
 _BARE_VALUE = re.compile(
-    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;&}})\]\\<>`])"
+    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;&}})\]\\])"
     rf"|(?:bearer|basic|token)[{_JS_SPACE}])"
-    rf"(?:\[redacted\](?=[^{_JS_SPACE}\"',;&}})\]\\<>`]))?[^{_JS_SPACE}\"',;&}})\]]+",
+    rf"(?:\[redacted\](?=[^{_JS_SPACE}\"',;&}})\]\\]))?[^{_JS_SPACE}\"',;&}})\]]+",
     re.IGNORECASE | re.ASCII,
 )
 # An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
 # ``OAuth1 …``), or a lone credential. One already replaced is left alone.
 _AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;&}})\]\\<>`]))"
-    rf"((?:\[redacted\](?=[^{_JS_SPACE}\"',;&}})\]\\<>`]))?[^{_JS_SPACE}\"',;}})\]]+)"
+    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;}})\]\\]))"
+    rf"((?:\[redacted\](?=[^{_JS_SPACE}\"',;}})\]\\]))?[^{_JS_SPACE}\"',;}})\]]+)"
     rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
 )
 

@@ -411,11 +411,11 @@ const bracketToken = new RegExp(
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
-  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;&})\]\\<>`])|(?:bearer|basic|token)\s)(?:\[redacted\](?=[^\s"',;&})\]\\<>`]))?[^\s"',;&})\]]+/iy;
+  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;&})\]\\])|(?:bearer|basic|token)\s)(?:\[redacted\](?=[^\s"',;&})\]\\]))?[^\s"',;&})\]]+/iy;
 /** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
  * `OAuth1 …`), or a lone credential. One already replaced is left alone. */
 const authorizationBare =
-  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;&})\]\\<>`]))((?:\[redacted\](?=[^\s"',;&})\]\\<>`]))?[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;})\]\\]))((?:\[redacted\](?=[^\s"',;})\]\\]))?[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
 
 function normalizedKey(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, "");

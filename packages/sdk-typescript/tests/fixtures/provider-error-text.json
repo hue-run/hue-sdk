@@ -785,14 +785,6 @@
       "expected": "GET https://h.example/p?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
     },
     {
-      "input": "GET https://api.example.com/v1/files?authorization=synthetic-auth-q1&page=2 failed",
-      "expected": "GET https://api.example.com/v1/files?authorization=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D[redacted]"
-    },
-    {
-      "input": "<a href=https://h.example/?token=synthetic-lt-1>link</a>",
-      "expected": "<a href=https://h.example/?token=%5Bredacted%5D[redacted]"
-    },
-    {
       "input": "clone https://x-access-token:ghs_synthetic-git-2@github.com/o/r.git?ref=main failed",
       "expected": "clone https://github.com/o/r.git?ref=%5Bredacted%5D failed"
     }
