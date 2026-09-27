@@ -390,7 +390,8 @@ function mayStillVerify(error: unknown): boolean {
  * a pause: ready is returned; verifying is completed again, which Hue refuses while its lease
  * holds and restarts once it lapsed; an artifact a retryable refusal (a lost response, 429 or 503)
  * left unverified is completed again up to three times; any other state is returned for the
- * caller to refuse (a resume uploads a rejected artifact again). All within `timing.settleMillis`.
+ * caller to refuse (a resume uploads a rejected artifact again). All within `timing.settleMillis`,
+ * which also ends a request in flight and the client's own wait to send one again.
  */
 async function settleArtifact(
   client: EvaluationClient,
@@ -398,15 +399,27 @@ async function settleArtifact(
   timing: typeof artifactSettling,
 ): Promise<ArtifactReservation["state"]> {
   const deadline = Date.now() + timing.settleMillis;
+  const signal = AbortSignal.timeout(timing.settleMillis);
+  // The last state read, which names the state when the deadline cuts off a request at it.
+  let known: ArtifactReservation | undefined;
+  const timedOut = (last: ArtifactReservation | undefined) => {
+    const seconds = Math.round(timing.settleMillis / 1000);
+    return new Error(
+      last?.state === "verifying"
+        ? `Hue was still verifying generated file ${id} after ${seconds} seconds`
+        : `Hue had not verified generated file ${id} after ${seconds} seconds (${last ? `it was ${last.state}` : "its state could not be read"})`,
+    );
+  };
   let pause = timing.pollMillis;
   let retries = 0;
   for (;;) {
     let refusedForNow: boolean;
     let asked = 0;
     try {
-      return (await client.completeArtifact(id)).state;
+      return (await client.completeArtifact(id, { signal })).state;
     } catch (error) {
-      if (!mayStillVerify(error) || Date.now() >= deadline) throw error;
+      if (!mayStillVerify(error)) throw error;
+      if (Date.now() >= deadline) throw timedOut(known);
       refusedForNow = (error as HueApiError).status !== 409;
       // A refusal that says how long to wait is waited out, within the settling window.
       asked = ((error as HueApiError).retryAfterSeconds ?? 0) * 1000;
@@ -417,7 +430,7 @@ async function settleArtifact(
     pause = Math.min(pause * 2, timing.maxPollMillis);
     let current: ArtifactReservation | undefined;
     try {
-      current = await client.getArtifact(id);
+      current = known = await client.getArtifact(id, { signal });
     } catch (error) {
       if (!mayStillVerify(error)) throw error;
     }
@@ -428,14 +441,7 @@ async function settleArtifact(
       current.failureCode !== "mismatch";
     if (current && current.state !== "verifying" && !(unverified && refusedForNow && retries++ < 3))
       return current.state;
-    if (Date.now() >= deadline) {
-      const seconds = Math.round(timing.settleMillis / 1000);
-      throw new Error(
-        current?.state === "verifying"
-          ? `Hue was still verifying generated file ${id} after ${seconds} seconds`
-          : `Hue had not verified generated file ${id} after ${seconds} seconds (${current ? `it was ${current.state}` : "its state could not be read"})`,
-      );
-    }
+    if (Date.now() >= deadline) throw timedOut(current ?? known);
   }
 }
 

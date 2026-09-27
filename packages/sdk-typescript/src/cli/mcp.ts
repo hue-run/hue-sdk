@@ -45,7 +45,7 @@ const MAX_CONFIG_BYTES = 1024 * 1024;
  * back to recent traces, so a project without errors still proves the read path.
  */
 export const MCP_VERIFY_PROMPT =
-  "Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id as project_id on each call after list_projects.";
+  "Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id or slug as project_id on each call after list_projects.";
 
 const CLIENT_IDS = [
   "claude-code",
@@ -91,6 +91,8 @@ export const MCP_TOOLSETS = [
  * keep that URL bare; every other configuration carries the selection in its URL.
  */
 export const TOOLSETS_HEADER = "X-Hue-MCP-Toolsets";
+/** The header form of `?project=`, used by the sign-in Codex TOML to keep its URL bare. */
+export const PROJECT_HEADER = "X-Hue-MCP-Project";
 /**
  * Toolsets a client's configuration selects unless `--toolsets` says otherwise. Claude Code,
  * Codex and Conductor's agents defer MCP tools behind their own tool search, so listing every tool
@@ -108,7 +110,8 @@ const DEFAULT_TOOLSETS: Partial<Record<ClientId, string>> = {
 const CODEX_PARALLEL = "supports_parallel_tool_calls = true";
 
 export const MCP_USAGE = `Usage: hue mcp install --client <claude-code|codex|conductor|cursor|vscode|windsurf|gemini>
-                       [--auth key|oauth] [--read-only] [--toolsets NAMES] [--url URL]
+                       [--auth key|oauth] [--read-only] [--project ID-OR-SLUG]
+                       [--toolsets NAMES] [--url URL]
                        [--scope project|user] [--dry-run] [--print]
 
 Configure a coding agent to use the Hue MCP server. A key configuration references the
@@ -123,6 +126,8 @@ Options:
                   conductor; the default for conductor)
   --read-only     key only: add ?read_only=true to the URL so write tools are hidden. A
                   sign-in connection has Read and write access; use a Read key for read-only
+  --project VALUE Pin the connection to one project by id or slug. Its tools omit project_id,
+                  and the server is named hue-<value> so it can coexist with an unpinned hue
   --toolsets NAMES
                   Tools to list, comma-separated: all; the observe, author or evaluate
                   profiles; or project, traces, eval_sets, runs, judges, cases, runners,
@@ -157,7 +162,7 @@ export function shellWord(value: string): string {
  * Canonical Hue client snippets for a key configuration; the JSON values are also the merge
  * entries for config files.
  */
-export function renderMcpSnippets(url: string) {
+export function renderMcpSnippets(url: string, serverName = SERVER_NAME) {
   const bearer = (reference: string) => `Bearer ${reference}`;
   const claudeCodeServer = {
     type: "http",
@@ -182,7 +187,7 @@ export function renderMcpSnippets(url: string) {
   };
   return {
     claudeCodeServer,
-    claudeCodeProjectJson: json({ mcpServers: { [SERVER_NAME]: claudeCodeServer } }),
+    claudeCodeProjectJson: json({ mcpServers: { [serverName]: claudeCodeServer } }),
     claudeCodeCli: {
       args: [
         "mcp",
@@ -191,25 +196,25 @@ export function renderMcpSnippets(url: string) {
         "http",
         "--scope",
         "user",
-        SERVER_NAME,
+        serverName,
         url,
         "--header",
         `Authorization: Bearer \${${ENV_VAR}}`,
       ],
-      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${shellWord(url)} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
+      display: `claude mcp add --transport http --scope user ${serverName} ${shellWord(url)} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
     },
     cursorServer,
-    cursorJson: json({ mcpServers: { [SERVER_NAME]: cursorServer } }),
+    cursorJson: json({ mcpServers: { [serverName]: cursorServer } }),
     codexCli: {
-      args: ["mcp", "add", SERVER_NAME, "--url", url, "--bearer-token-env-var", ENV_VAR],
-      display: `codex mcp add ${SERVER_NAME} --url ${shellWord(url)} --bearer-token-env-var ${ENV_VAR}`,
+      args: ["mcp", "add", serverName, "--url", url, "--bearer-token-env-var", ENV_VAR],
+      display: `codex mcp add ${serverName} --url ${shellWord(url)} --bearer-token-env-var ${ENV_VAR}`,
     },
-    codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${url}"\nbearer_token_env_var = "${ENV_VAR}"\n${CODEX_PARALLEL}\n`,
+    codexToml: `[mcp_servers.${serverName}]\nurl = "${url}"\nbearer_token_env_var = "${ENV_VAR}"\n${CODEX_PARALLEL}\n`,
     vscodeServer,
     vscodeInput,
-    vscodeJson: json({ servers: { [SERVER_NAME]: vscodeServer }, inputs: [vscodeInput] }),
+    vscodeJson: json({ servers: { [serverName]: vscodeServer }, inputs: [vscodeInput] }),
     windsurfServer,
-    windsurfJson: json({ mcpServers: { [SERVER_NAME]: windsurfServer } }),
+    windsurfJson: json({ mcpServers: { [serverName]: windsurfServer } }),
     geminiCli: {
       args: [
         "mcp",
@@ -218,14 +223,14 @@ export function renderMcpSnippets(url: string) {
         "user",
         "--transport",
         "http",
-        SERVER_NAME,
+        serverName,
         url,
         "--header",
         `Authorization: Bearer \${${ENV_VAR}}`,
       ],
       // Single quotes keep the reference literal when a person runs this in a shell where the
       // key is exported; Gemini CLI expands ${HUE_MCP_KEY} from its settings at connection time.
-      display: `gemini mcp add --scope user --transport http ${SERVER_NAME} ${shellWord(url)} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
+      display: `gemini mcp add --scope user --transport http ${serverName} ${shellWord(url)} --header 'Authorization: Bearer \${${ENV_VAR}}'`,
     },
   };
 }
@@ -233,24 +238,30 @@ export function renderMcpSnippets(url: string) {
 /**
  * Sign-in snippets: the server URL and nothing secret. The client discovers Hue's OAuth metadata
  * from it and sends it, query included, on every request; the token's resource ignores the query,
- * so `?toolsets=` selects tools here as it does for a key.
+ * so `?toolsets=` and `?project=` select tools and a project here as they do for a key.
  */
-export function renderMcpSignInSnippets(url: string) {
-  const toolsets = new URL(url).searchParams.get("toolsets");
+export function renderMcpSignInSnippets(url: string, serverName = SERVER_NAME) {
+  const parsed = new URL(url);
+  const toolsets = parsed.searchParams.get("toolsets");
+  const project = parsed.searchParams.get("project");
+  const headers = [
+    toolsets ? `"${TOOLSETS_HEADER}" = "${toolsets}"` : null,
+    project ? `"${PROJECT_HEADER}" = "${project}"` : null,
+  ].filter((value): value is string => value !== null);
   const claudeCodeServer = { type: "http", url };
   return {
     claudeCodeServer,
-    claudeCodeProjectJson: json({ mcpServers: { [SERVER_NAME]: claudeCodeServer } }),
+    claudeCodeProjectJson: json({ mcpServers: { [serverName]: claudeCodeServer } }),
     claudeCodeCli: {
-      args: ["mcp", "add", "--transport", "http", "--scope", "user", SERVER_NAME, url],
-      display: `claude mcp add --transport http --scope user ${SERVER_NAME} ${shellWord(url)}`,
+      args: ["mcp", "add", "--transport", "http", "--scope", "user", serverName, url],
+      display: `claude mcp add --transport http --scope user ${serverName} ${shellWord(url)}`,
     },
     codexCli: {
-      args: ["mcp", "add", SERVER_NAME, "--url", url],
-      display: `codex mcp add ${SERVER_NAME} --url ${shellWord(url)}`,
+      args: ["mcp", "add", serverName, "--url", url],
+      display: `codex mcp add ${serverName} --url ${shellWord(url)}`,
     },
-    // The header form of the same selection, for a TOML entry that keeps its URL bare.
-    codexToml: `[mcp_servers.${SERVER_NAME}]\nurl = "${toolsetsMcpUrl(url, undefined)}"\n${toolsets ? `http_headers = { "${TOOLSETS_HEADER}" = "${toolsets}" }\n` : ""}${CODEX_PARALLEL}\n`,
+    // Header forms of the selections, for a TOML entry that keeps its URL bare.
+    codexToml: `[mcp_servers.${serverName}]\nurl = "${projectMcpUrl(toolsetsMcpUrl(url, undefined), undefined)}"\n${headers.length ? `http_headers = { ${headers.join(", ")} }\n` : ""}${CODEX_PARALLEL}\n`,
   };
 }
 
@@ -283,6 +294,28 @@ export function toolsetsMcpUrl(url: string, toolsets: string | undefined): strin
   return parsed.href;
 }
 
+/** Parses the id or slug used to pin a connection and derives its coexisting server name. */
+export function parseProject(
+  value: string,
+): { project: string; serverName: string } | { error: string } {
+  const project = value.trim();
+  if (!project)
+    return { error: "--project is empty. Name a project id or slug, or remove the option." };
+  if (project.length > 256 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/iu.test(project))
+    return {
+      error: "--project takes a project id or slug, using letters, numbers and hyphens.",
+    };
+  return { project, serverName: `${SERVER_NAME}-${project.toLowerCase()}` };
+}
+
+/** Replaces `?project=` while preserving the URL's other selections. */
+export function projectMcpUrl(url: string, project: string | undefined): string {
+  const parsed = new URL(url);
+  parsed.searchParams.delete("project");
+  if (project) parsed.searchParams.append("project", project);
+  return parsed.href;
+}
+
 /** `?read_only=true` hides and rejects Hue's write tools for any key. */
 export function readOnlyMcpUrl(url: string): string {
   const parsed = new URL(url);
@@ -301,12 +334,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Replaces only the `hue` entry under `key`, keeping every other server and top-level field. */
+/** Replaces only the selected server entry under `key`, keeping every other server and field. */
 function mergeServerEntry(
   existing: unknown,
   key: "mcpServers" | "servers",
   entry: Record<string, unknown>,
   display: string,
+  serverName = SERVER_NAME,
 ): Record<string, unknown> {
   if (existing !== undefined && !isRecord(existing))
     throw new ConfigError(`${display} must contain a JSON object.`);
@@ -314,7 +348,7 @@ function mergeServerEntry(
   const servers = root[key];
   if (servers !== undefined && !isRecord(servers))
     throw new ConfigError(`${display}: "${key}" must be a JSON object.`);
-  return { ...root, [key]: { ...(servers ?? {}), [SERVER_NAME]: entry } };
+  return { ...root, [key]: { ...(servers ?? {}), [serverName]: entry } };
 }
 
 function mergeVscodeInput(
@@ -465,6 +499,7 @@ function parseMcpArguments(argv: string[]) {
       client: { type: "string" },
       auth: { type: "string" },
       "read-only": { type: "boolean", default: false },
+      project: { type: "string" },
       toolsets: { type: "string" },
       url: { type: "string" },
       scope: { type: "string" },
@@ -506,10 +541,16 @@ const notOnPath = (executable: string, label: string) =>
   `${executable} is not on PATH. Run this where ${label} is installed:`;
 
 /** `auth: "oauth"` is only planned for {@link OAUTH_CLIENTS}; the caller refuses the others. */
-function planFor(client: ClientId, auth: AuthMode, scope: "project" | "user", url: string): Plan {
-  const snippets = renderMcpSnippets(url);
+function planFor(
+  client: ClientId,
+  auth: AuthMode,
+  scope: "project" | "user",
+  url: string,
+  serverName: string,
+): Plan {
+  const snippets = renderMcpSnippets(url, serverName);
   // Claude Code and Codex take the same plan shape with or without a key.
-  const shared = auth === "oauth" ? renderMcpSignInSnippets(url) : snippets;
+  const shared = auth === "oauth" ? renderMcpSignInSnippets(url, serverName) : snippets;
   const claudeUser: CliCommand = {
     executable: "claude",
     label: "Claude Code",
@@ -581,22 +622,28 @@ function planFor(client: ClientId, auth: AuthMode, scope: "project" | "user", ur
   }
 }
 
-function nextSteps(client: ClientId, auth: AuthMode): string[] {
+function nextSteps(
+  client: ClientId,
+  auth: AuthMode,
+  serverName: string,
+  project: string | undefined,
+): string[] {
   const label = CLIENT_LABELS[client];
-  const approve =
-    "Sign in to Hue and approve the connection. It can read and write every active project in the organization you choose, within your role; for read-only access, use a Read project key with --auth key.";
+  const approve = project
+    ? `Sign in to Hue and approve the connection. It acts only on the pinned project ${project}, within your role; for read-only access, use a Read project key with --auth key.`
+    : "Sign in to Hue and approve the connection. It can read and write every active project in the organization you choose, within your role; for read-only access, use a Read project key with --auth key.";
   let lines: string[];
   if (auth === "oauth")
     lines =
       client === "claude-code"
-        ? [`In Claude Code, run /mcp, select ${SERVER_NAME} and choose Authenticate. ${approve}`]
+        ? [`In Claude Code, run /mcp, select ${serverName} and choose Authenticate. ${approve}`]
         : client === "codex"
           ? [
-              `If Codex did not open Hue in your browser, run: codex mcp login ${SERVER_NAME}`,
+              `If Codex did not open Hue in your browser, run: codex mcp login ${serverName}`,
               approve,
             ]
           : [
-              `In Conductor, open MCP status from the plug icon or /mcp-status, refresh, and use ${SERVER_NAME}'s authentication action. ${approve}`,
+              `In Conductor, open MCP status from the plug icon or /mcp-status, refresh, and use ${serverName}'s authentication action. ${approve}`,
               "Start a new agent session if the Hue tools do not appear. Hue has not yet verified signed-in Conductor end to end; if the tools still do not load, rerun with --auth key.",
             ];
   else if (client === "vscode")
@@ -616,10 +663,17 @@ function nextSteps(client: ClientId, auth: AuthMode): string[] {
   // `codex mcp add` has no option for it, so a registered server gets the line by hand.
   if (client === "codex" || client === "conductor")
     lines.push(
-      `If codex mcp add registered ${SERVER_NAME}, add this line under [mcp_servers.${SERVER_NAME}] in ~/.codex/config.toml so Codex runs Hue's tool calls in parallel:`,
+      `If codex mcp add registered ${serverName}, add this line under [mcp_servers.${serverName}] in ~/.codex/config.toml so Codex runs Hue's tool calls in parallel:`,
       `  ${CODEX_PARALLEL}`,
     );
-  return [...lines, "Then ask your agent:", `  ${MCP_VERIFY_PROMPT}`];
+  if (project)
+    lines.push(
+      `If this connection returns HTTP 404, ${project} is not an active project this credential can reach. Change or remove --project; signing in again will not fix it.`,
+    );
+  const verify = project
+    ? `Use the Hue MCP: call list_projects and confirm it returns only the pinned project ${project} with connection.pinned true. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. Do not pass project_id: this connection is pinned.`
+    : MCP_VERIFY_PROMPT;
+  return [...lines, "Then ask your agent:", `  ${verify}`];
 }
 
 /**
@@ -694,6 +748,31 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       2,
     );
   if (parsed.values["read-only"]) url = readOnlyMcpUrl(url);
+  // --project replaces a pin already in --url. Without it, validate and keep the URL's pin.
+  const urlProjects = new URL(url).searchParams.getAll("project");
+  let projectValue = parsed.values.project;
+  if (projectValue === undefined && urlProjects.length) {
+    const trimmed = urlProjects.map((value) => value.trim());
+    if (trimmed.some((value) => !value) || new Set(trimmed).size !== 1)
+      return fail(
+        "In --url: ?project= must name one project id or slug. Remove empty or conflicting values.",
+        2,
+      );
+    projectValue = trimmed[0];
+  }
+  let project: string | undefined;
+  let serverName = SERVER_NAME;
+  if (projectValue !== undefined) {
+    const selected = parseProject(projectValue);
+    if ("error" in selected)
+      return fail(
+        `${parsed.values.project === undefined ? "In --url: " : ""}${selected.error}\n\n${MCP_USAGE}`,
+        2,
+      );
+    project = selected.project;
+    serverName = selected.serverName;
+  }
+  url = projectMcpUrl(url, project);
   // --toolsets wins over a selection already in --url, which wins over the client's default.
   // Both sources are validated: Hue ignores an unknown name and would list its default.
   const requested = parsed.values.toolsets ?? new URL(url).searchParams.get("toolsets");
@@ -708,12 +787,12 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     toolsets = selected.toolsets;
   }
   url = toolsetsMcpUrl(url, toolsets);
-  const plan = planFor(clientId, auth, scope, url);
+  const plan = planFor(clientId, auth, scope, url, serverName);
   if (parsed.values.print) {
     stdout.write(plan.snippet);
     return 0;
   }
-  const steps = nextSteps(clientId, auth);
+  const steps = nextSteps(clientId, auth, serverName, project);
 
   if (plan.kind === "manual") {
     out(plan.hint);
@@ -738,7 +817,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       out(`Running: ${command.display}`);
       const code = await runClientCli(executable, command.args, { cwd, env, stdout, stderr });
       if (code === 0) {
-        out(`Registered the "${SERVER_NAME}" MCP server (${url}) with ${command.label}.`);
+        out(`Registered the "${serverName}" MCP server (${url}) with ${command.label}.`);
         continue;
       }
       failed = true;
@@ -756,7 +835,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   let content: string;
   try {
     const existing = await readJsonConfig(path, display);
-    let merged = mergeServerEntry(existing, plan.key, plan.entry, display);
+    let merged = mergeServerEntry(existing, plan.key, plan.entry, display, serverName);
     if (plan.input) merged = mergeVscodeInput(merged, plan.input, display);
     content = json(merged);
   } catch (error) {
@@ -774,7 +853,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }
-  out(`Wrote ${display} with the "${SERVER_NAME}" MCP server (${url}).`);
+  out(`Wrote ${display} with the "${serverName}" MCP server (${url}).`);
   for (const line of steps) out(line);
   return 0;
 }

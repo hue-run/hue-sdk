@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.11.1`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.11.2`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -168,12 +168,13 @@ accepted too, but Node 22 and 24 read that flag from the whole command line and 
 The env file is written with mode `0600` through a temporary file and an atomic rename. Other
 lines are preserved; a symlink or a non-regular file is refused; an existing different value is
 replaced only with `--force`. Empty values, whitespace and URLs are refused before any request.
-The MCP endpoint is `https://mcp.hue.run/mcp` for `https://app.hue.run`,
-`https://mcp.staging.hue.run/mcp` for `https://staging.hue.run` and `<origin>/api/mcp` otherwise;
-plain HTTP origins are accepted for loopback test servers only. Output names variables and lengths
-(`Stored the key (NN chars) as HUE_API_KEY and HUE_MCP_KEY`), never values. When git does not ignore the env file, the command
-warns; `--gitignore` appends the file name to the `.gitignore` next to it. Exit codes: `0` stored,
-`1` failed, `2` usage error, `130` interrupted.
+The production MCP server is available only at `https://mcp.hue.run/mcp`. `hue login` uses
+`https://mcp.staging.hue.run/mcp` with `https://staging.hue.run` and `<origin>/api/mcp` for other
+development or preview origins; plain HTTP origins are accepted for loopback test servers only.
+Output names variables and lengths (`Stored the key (NN chars) as HUE_API_KEY and HUE_MCP_KEY`),
+never values. When git does not ignore the env file, the command warns; `--gitignore` appends the
+file name to the `.gitignore` next to it. Exit codes: `0` stored, `1` failed, `2` usage error, `130`
+interrupted.
 
 ## Install the MCP for your coding agent
 
@@ -192,6 +193,15 @@ for staging). Hue's Settings page does not show these snippets; this command kee
   agent first calls `list_projects` and passes the chosen project's id as `project_id`. It is available
   for `claude-code`, `codex` and `conductor`. Hue does not yet accept Cursor's sign-in callback, so
   `cursor` and the other clients use a key.
+
+`--project <id-or-slug>` pins either kind of connection to one project. The command adds or
+replaces `?project=<value>` while keeping `toolsets`, and names the server `hue-<value>` so it can
+sit beside the organization-wide `hue` connection. A pinned connection's tools do not publish or
+accept `project_id`; `list_projects` returns only that project with `connection.pinned: true`.
+The printed sign-in Codex TOML keeps its URL bare and sends `X-Hue-MCP-Project` together with any
+`X-Hue-MCP-Toolsets` header. An empty pin is refused. If the selected project is inactive or the
+credential cannot reach it, Hue returns HTTP `404`; change or remove `--project`, because signing
+in again does not change the credential's reach.
 
 `--read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides and rejects write
 tools whatever the key allows. A project key, with or without it, keeps reaching its one project.
@@ -212,6 +222,14 @@ with write access), so nothing is out of reach. `--toolsets` replaces a selectio
 `--url`, and a selection in `--url` is kept without it. Unknown names are refused rather than
 passed on, because Hue ignores them and would list its default. `get_project_context` is always
 listed and reports the selection.
+
+MCP arguments and results name ids after their product objects. Eval tools use `eval_set_id`,
+`eval_set_version_id`, `from_eval_set_version_id` and `eval_set_case_id`; `evaluator_id`,
+`evaluator_version_id` and `evaluator_version_ids`; `run_id` and `baseline_run_id`; and
+`scoring_run_id` and `scoring_item_id`. Dispatches use `managed_run_id` and `local_run_id`,
+reviewed cases `case_id`, environment versions `environment_version_id`, and trace-check versions
+`trace_check_version_id` or `active_trace_check_version_id`. List results are named `eval_sets`,
+`evaluators`, `runs`, `scoring_runs` and `cases`, while a row's own id remains `id`.
 
 | Client | Key (`--auth key`) | Sign-in (`--auth oauth`) |
 | --- | --- | --- |
@@ -235,7 +253,8 @@ through a trace read) end to end; if Hue's tools do not load after signing in, r
 again with `--auth key`.
 
 JSON files are parsed and merged: other servers, inputs and top-level fields are kept, only the
-`hue` entry is replaced, and invalid JSON (including comments) is refused together with the snippet
+selected server entry is replaced (`hue`, or `hue-<value>` with `--project`), and invalid JSON
+(including comments) is refused together with the snippet
 to add by hand. Files are written with mode `0644` through a temporary file and an atomic rename;
 symlinks are refused. `--dry-run` prints the resulting file content or commands without writing or
 running; `--print` prints only the snippet. Client CLIs run without a shell, so the
@@ -247,7 +266,7 @@ the client (VS Code prompts for the key instead). A desktop app started from the
 does not see that shell's variables, and Conductor's agents read the login-shell environment that
 Conductor captures, so sign-in is the simpler choice there. After a sign-in installation it names
 the client's authentication action. Both end with the prompt that verifies the connection:
-`Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id as project_id on each call after list_projects.` `list_projects` returns a project key's one project too. Exit codes:
+`Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id or slug as project_id on each call after list_projects.` A pinned installation instead verifies `connection.pinned: true` and omits `project_id`. `list_projects` returns a project key's one project too. Exit codes:
 `0` done or printed, `1` failed, `2` usage error.
 
 ## Deliver simulated events to a local bot
@@ -256,12 +275,10 @@ the client's authentication action. Both end with the prompt that verifies the c
 agent such as a Slack bot can be tested without a public URL, the way `stripe listen --forward-to`
 delivers webhooks. Hue signs each request as the provider does (Slack Events API requests today);
 the command pulls them, forwards each one unchanged to `--forward-to` and reports the bot's answer
-to Hue, which settles or retries the event on the provider's schedule. It needs a **listen** event
-subscription on the world or on a connection key; the subscription's id and signing secret are shown
-once when it is created. Configure the bot with that signing secret where `SLACK_SIGNING_SECRET`
-went, then start the command: Hue offers the URL verification first, and events follow once the bot
-has answered it. Event subscriptions are not yet available on `https://app.hue.run`; until the
-origin offers them, the command stops with Hue's refusal.
+to Hue. It needs a **listen** event subscription on the world or on a connection key, and the bot
+configured with that subscription's signing secret where `SLACK_SIGNING_SECRET` went. Event
+subscriptions are not yet available on `https://app.hue.run`; until the origin offers them, the
+command exits `1` with the refusal it receives.
 
 ```sh
 hue listen --subscription <id> --forward-to http://localhost:3000/slack/events --env-path .env.world
@@ -270,8 +287,8 @@ The credential is the subscription's own, read from the environment (or `--env-p
 a variable already set keeps its value): `HUE_WORLD_TOKEN` for a world's subscription or
 `HUE_CONNECTION_KEY` for a connection key's, chosen with `--credential world-token|connection-key`
 when both are set. It is never taken from the command line, where other local processes and shell
-history can read it. A project key is refused: a value equal to `HUE_API_KEY` or `HUE_MCP_KEY` exits
-2 before any request, and Hue answers any credential that is not the subscription's with `401`.
+history can read it. A project key is refused: a value equal to `HUE_API_KEY`, `HUE_MCP_KEY`,
+`HUE_PROJECT_KEY` or `HUE_SERVICE_KEY` exits 2 before any request.
 `--origin` (default `HUE_BASE_URL`, then `https://app.hue.run`) must be HTTPS, or plain HTTP on a
 loopback test server.
 
@@ -283,12 +300,13 @@ a later one is a timeout. A failing answer with `x-slack-no-retry: 1` is reporte
 retrying it. Only a successful URL verification answer's body (at most 4 KiB, for its challenge) is
 sent to Hue; any other answer body stays on this machine. Each pull waits for at most 20 seconds and
 leases up to `--max` deliveries (1 to 10, default 10), which are forwarded concurrently; the next
-pull starts once they are acknowledged, and a delivery beyond `--max` is never forwarded. A provider
-retry of an event is a new delivery and is forwarded again with its `X-Slack-Retry-Num` and
+pull starts once they are acknowledged, and a delivery beyond `--max` is never forwarded. A pull
+that answers at once with nothing new to forward is not repeated for a second. A provider retry of
+an event is a new delivery and is forwarded again with its `X-Slack-Retry-Num` and
 `X-Slack-Retry-Reason`, so the bot deduplicates by `event_id` as it does with Slack. A delivery Hue
 hands out a second time is not sent again; its recorded answer is repeated. An acknowledgement Hue
-did not answer is repeated until the delivery's lease ends, as Hue stated it (30 seconds from the
-lease).
+did not answer is repeated until the delivery's lease ends, as the pull's answer stated it, and for
+at most 30 seconds.
 
 `--forward-to` must name this machine: `localhost`, a `.localhost` name or a loopback address, and a
 name is refused unless every address it resolves to is a loopback address. `--allow-remote-forward`
@@ -299,15 +317,16 @@ bot's status and duration, and the state Hue recorded), never a body, a signatur
 credentials in error messages are replaced with `[redacted]`.
 
 Ctrl+C or `SIGTERM` stops pulling (a waiting pull is cancelled), finishes the deliveries in flight
-and acknowledges them, then exits `0`; a second Ctrl+C abandons the forwards and acknowledgements
-still in flight and exits `130`. Nothing is acknowledged before the bot answered or its window
-closed, and a lease left unacknowledged lapses into a timeout that Hue retries on the provider's
-schedule, so no event is lost and none is marked delivered unanswered. Network errors, `429`, `5xx`
+and acknowledges them, then exits `0`, no sooner than a second after the first Ctrl+C. A second
+Ctrl+C a second or more after the first abandons the forwards and acknowledgements still in flight
+and exits `130`; one within a second of the first, such as the copy `npx` forwards to the command,
+is the same stop. Nothing is acknowledged before the bot answered or its window closed; a delivery
+left unacknowledged is left to its lease. Network errors, `429`, `5xx`, an unreadable pull answer
 and another open pull for the same subscription (a second `hue listen`) are retried with backoff up
 to 30 seconds; a `Retry-After` can lengthen a wait to at most 60 seconds, never shorten it. Exit
 codes: `0` stopped, `1` Hue refused the credential, the subscription (unknown, revoked, or one that
-delivers to a request URL) or the pull itself (a redirect, another refusal or an unreadable answer),
-`2` usage error, `130` interrupted twice.
+delivers to a request URL) or the pull itself (a redirect, another refusal or an answer without
+deliveries), `2` usage error, `130` interrupted twice.
 
 ## Local state and conflicts
 
@@ -413,7 +432,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.11.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.11.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -424,7 +443,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.11.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.11.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json

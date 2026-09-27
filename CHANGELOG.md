@@ -34,6 +34,49 @@ refuses to publish a version without a matching entry below.
   `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and Google OAuth
   client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
 
+### [0.11.2] - 2026-09-27
+
+This release pins MCP connections to one project, matches the current Hue MCP toolsets and object
+vocabulary, and fixes bounded waits and shutdown behavior in the evaluation and listen CLIs.
+
+#### Added
+
+- `hue mcp install --project <id-or-slug>` pins a key or sign-in connection to one project and
+  names it `hue-<value>` so it can coexist with an organization-wide `hue` connection. Its tools
+  omit `project_id`; the printed sign-in Codex TOML sends the pin as `X-Hue-MCP-Project`.
+- `hue mcp install --toolsets` accepts the `author` and `evaluate` profiles and the current
+  `eval_sets`, `runs`, `judges`, `cases` and `runners` groups alongside the existing selections.
+- `EvaluationClient.getArtifact` and `completeArtifact` take an optional `{ signal }`, which ends
+  the request and the client's own wait to send it again.
+
+#### Changed
+
+- `hue mcp install` validates the current MCP toolset names, uses product object names in its guide
+  and skill, and documents `https://mcp.hue.run/mcp` as the only production MCP URL.
+- Hue skill 0.5.9 describes pinned connections, current MCP parameter and result names, the catalog
+  executors and the current evaluation profiles and groups.
+
+#### Fixed
+
+- The local runner's wait for Hue to verify a generated file ends at its three minutes: each
+  completion and read it makes, and the client's wait to repeat one Hue refused with a short
+  `Retry-After`, stops there. Before, a completion refused that way or answered slowly near the end
+  could run about a minute past.
+- `hue listen` no longer pulls in a loop when a pull brings nothing new to forward, such as a
+  delivery it already answered that Hue hands out again, or one whose acknowledgements Hue refuses.
+  Before, it sent about 1,600 pulls and acknowledgements a second; it now waits a second before the
+  next pull, as it already did after an empty pull.
+- `hue listen` refuses a credential equal to the value of any Hue control-plane variable,
+  `HUE_PROJECT_KEY` and `HUE_SERVICE_KEY` included, not only `HUE_API_KEY` and `HUE_MCP_KEY`.
+- One Ctrl+C no longer abandons `hue listen`'s deliveries in flight under `npx`. npm forwards the
+  terminal's SIGINT to the command, which counted it as a second Ctrl+C, exited 130 and left the
+  deliveries unacknowledged. A stop request within a second of the first is now the same stop, and
+  the command exits no sooner than that second, so a copy arriving as it exits cannot end it by
+  SIGINT; a second Ctrl+C after that still abandons them.
+- `hue eval` names the agent after the script that follows an interpreter written with a Windows
+  executable suffix (`node.exe`, or `bun.exe`, as npm installs Bun on every platform), where it
+  took the interpreter's name.
+
 ### [0.11.1] - 2026-09-26
 
 `hue mcp install` gives agents that search their own tools every Hue tool, and every selection travels in the server URL.
@@ -60,7 +103,7 @@ refuses to publish a version without a matching entry below.
 
 ### [0.11.0] - 2026-09-26
 
-This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
+This release changes two defaults of `hue mcp install` (see Breaking), so it is a `0.MINOR` release; three changes to evaluation results and waits were listed as Breaking after it was published. It also adds `hue mcp install` options (sign-in with Hue, Conductor, read-only and toolsets), `hue listen` and new tracing and evaluation APIs.
 
 #### Breaking
 
@@ -74,6 +117,28 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   `-H '… $HUE_MCP_KEY'`. Migration: an earlier project entry keeps working and takes precedence in
   that project; remove it with `gemini mcp remove hue` there to use the user entry.
 
+These three entries were added after 0.11.0 was published; 0.11.0 already behaves as they describe.
+
+- A pinned Hue judge's (`world_judge`) result that Hue marks advisory, as it marks every judge's
+  today, no longer decides a case unless it is an error or one of its metrics carries `passed`, so
+  `collectExperimentVerdicts` and `hue eval` (and `summarizeVerdicts`, for results marked
+  advisory) can report a different state and exit code. A case that only advisory judges graded
+  took their verdict (`passed`, exit 0, or `failed`, exit 1) and is now `error` (exit 1), so an
+  eval set graded only by such judges fails every case. A case whose other evaluators passed and
+  whose advisory judge said `false` was `failed` (exit 1) and is now `passed` (exit 0).
+  Migration: pin an evaluator that decides each case, such as a code evaluator, beside the judge,
+  or read `CaseVerdict.advisory` (`cases[].advisory` in `hue eval --json`) and the judge's metrics
+  to act on its verdict yourself.
+- `hue eval` gives each export of its own telemetry 30 seconds instead of 10 seconds, retries
+  included, so a case whose trace Hue acknowledges slowly waits up to 20 seconds longer per export
+  before it fails as `TelemetryNotAccepted`, and the longest `hue eval` waits on one batch of its
+  spans or log records grows from 161 to 481 seconds. `createHue`'s default stays 10 seconds.
+  Migration: allow for the longer waits in CI and job timeouts.
+- The local runner (`runExperiment`, and so `hue eval`) waits about three minutes for Hue to verify
+  each generated file it uploads, instead of failing at the 10-second request timeout, and an
+  artifact's completion that cannot reach Hue takes about those three minutes to fail. Migration:
+  allow about three more minutes per generated file in CI and job timeouts.
+
 #### Added
 
 - `hue listen --subscription <id> --forward-to <url>` delivers a simulated world's events (Slack
@@ -85,7 +150,7 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   finishes and acknowledges the deliveries in flight before it exits. It needs event subscriptions
   on the Hue origin, which `https://app.hue.run` does not offer yet. See
   [CLI.md](./packages/sdk-typescript/CLI.md#deliver-simulated-events-to-a-local-bot).
-- `normalizeScorerDefinitionForPublication` and the `ScorerDefinition` type know every
+- The `ScorerDefinition` type, and the scorer definitions `runSimulation` publishes, know every
   Hue-executed `world_outcome` entry: `hue.conversion_outcome.v2`,
   `hue.outcome_assertions.v2` and `hue.outcome_assertions.v3`, whose version pins its judge in
   `config.judge` (new `OutcomeJudgeConfig` type). Each entry's metrics are fixed by the entry and
@@ -187,10 +252,10 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   the bytes its own encoding gives. The header was read with a pattern repeated per parameter,
   which throws on Node (from about 3.4 million), leaving the message unhashed, or stops matching
   on Bun (from about 1.1 million), hashing the URL's text. The Python SDK reads the header the
-  same way.
-- An OpenAI `mcp_list_tools` tool's null `description`, `input_schema` or `annotations` is left
-  out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record the
-  same definitions and give a catalog the same digest.
+  same way. **Wire**
+- An OpenAI `mcp_list_tools` tool's null `name`, `description`, `input_schema` or `annotations` is
+  left out of its `tools/list` definition, as the Python SDK leaves it out, so both SDKs record
+  the same definitions and give a catalog the same digest. **Wire**
 - `recordProviderToolCalls` no longer drops a whole response when one item's `type` (or any field)
   throws when read: the item is skipped and counted, and the other calls are recorded, as the
   Python SDK does.
@@ -200,7 +265,8 @@ This release changes two defaults of `hue mcp install` (see Breaking), so it is 
   refusing. The JSON byte length is counted as the output is read but still checked last, so an
   output past the byte bound that is also not JSON raises `OutcomeSerializationError`, and an
   array or object with more elements than values allowed, or keys longer than the bytes left, is
-  refused before its keys are listed or sorted.
+  refused before its keys are listed or sorted. A run that already stopped this way still refuses
+  to resume from its checkpoint; run it again with a new checkpoint directory.
 
 ### [0.10.0] - 2026-09-25
 

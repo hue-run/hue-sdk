@@ -15,7 +15,11 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
  */
 function slowArtifacts(
   verifyMillis: number,
-  options: { refuseCompletions?: number; retryAfterSeconds?: number } = {},
+  options: {
+    refuseCompletions?: number;
+    retryAfterSeconds?: number;
+    answerAfterMillis?: number;
+  } = {},
 ) {
   let refusals = options.refuseCompletions ?? 0;
   const calls = { reserves: 0, uploads: 0, completes: 0, reads: 0 };
@@ -82,6 +86,8 @@ function slowArtifacts(
       }
       if (match[2] === "complete") {
         calls.completes++;
+        if (options.answerAfterMillis)
+          await new Promise((resolve) => setTimeout(resolve, options.answerAfterMillis));
         if (stored.state === "ready") return Response.json(view(stored));
         // Busy before verification starts: the artifact stays reserved.
         if (refusals > 0 && refusals--)
@@ -249,3 +255,49 @@ test("a verification that never ends fails within its bound", async () => {
     hue.stop();
   }
 });
+
+test("a completion Hue keeps refusing with a short Retry-After ends at the settle bound", async () => {
+  // The client itself waits out a Retry-After of up to 5 s, four times; settling stops it.
+  const hue = slowArtifacts(100, { refuseCompletions: 100, retryAfterSeconds: 5 });
+  try {
+    const client = new EvaluationClient({
+      apiKey: "hue_sk_test",
+      baseUrl: hue.baseUrl,
+      timeoutMillis: 10_000,
+    });
+    const file = await stagedFile();
+    const started = Date.now();
+    await expect(
+      uploadOutputFiles(client, randomUUID(), [file], async () => {}, {
+        ...fast,
+        settleMillis: 1_000,
+      }),
+    ).rejects.toThrow("Hue had not verified generated file");
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(hue.calls.completes).toBe(1);
+  } finally {
+    hue.stop();
+  }
+}, 40_000);
+
+test("a completion Hue answers after the settle bound is not waited for", async () => {
+  const hue = slowArtifacts(100, { answerAfterMillis: 6_000 });
+  try {
+    const client = new EvaluationClient({
+      apiKey: "hue_sk_test",
+      baseUrl: hue.baseUrl,
+      timeoutMillis: 10_000,
+    });
+    const file = await stagedFile();
+    const started = Date.now();
+    await expect(
+      uploadOutputFiles(client, randomUUID(), [file], async () => {}, {
+        ...fast,
+        settleMillis: 1_000,
+      }),
+    ).rejects.toThrow("Hue had not verified generated file");
+    expect(Date.now() - started).toBeLessThan(4_000);
+  } finally {
+    hue.stop();
+  }
+}, 40_000);

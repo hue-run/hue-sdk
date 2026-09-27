@@ -270,15 +270,20 @@ const INTERPRETERS = new Set([
   "env",
 ]);
 
-/** Agent key from the adapter filename, or the first script-like token of a command. */
-function derivedAgentKey(adapterFile: string | undefined, command: string | undefined): string {
+/** Agent key from the adapter filename, or the first script-like token of a command. An
+ * interpreter is skipped with a Windows executable suffix too (`node.exe`, and `bun.exe`, as npm
+ * installs Bun on every platform). */
+export function derivedAgentKey(
+  adapterFile: string | undefined,
+  command: string | undefined,
+): string {
   if (adapterFile) return slug(basename(adapterFile, extname(adapterFile)));
   const tokens = (command ?? "").trim().split(/\s+/);
   const names = tokens.map((token) => token.split(/[\\/]/).pop() ?? "");
+  const interpreter = (name: string) =>
+    INTERPRETERS.has(name.toLowerCase().replace(/\.(?:exe|cmd|bat)$/, ""));
   const script =
-    names.find((name) => name && !name.startsWith("-") && !INTERPRETERS.has(name.toLowerCase())) ??
-    names[0] ??
-    "";
+    names.find((name) => name && !name.startsWith("-") && !interpreter(name)) ?? names[0] ?? "";
   return slug(basename(script, extname(script)));
 }
 

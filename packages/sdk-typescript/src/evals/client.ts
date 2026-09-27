@@ -219,12 +219,19 @@ export class EvaluationClient {
     this.timeoutMillis = validated.timeoutMillis;
   }
   /** Sends one request to Hue, again after the wait while Hue refuses it with a short
-   * `Retry-After`. `init` runs for every attempt, so each has its own timeout. */
-  private async send(url: string, init: () => RequestInit): Promise<Response> {
+   * `Retry-After`. `init` runs for every attempt, so each has its own timeout; `signal` also ends
+   * each attempt, and a wait to send one again, whose refusal is then the caller's error. */
+  private async send(
+    url: string,
+    init: () => RequestInit,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     for (let attempt = 0; ; attempt++) {
       let response: Response;
       try {
-        response = await fetch(url, init());
+        const attemptInit = init();
+        const signals = [attemptInit.signal, signal].filter((item): item is AbortSignal => !!item);
+        response = await fetch(url, { ...attemptInit, signal: AbortSignal.any(signals) });
       } catch {
         throw new HueApiError();
       }
@@ -232,9 +239,18 @@ export class EvaluationClient {
       if (seconds === undefined) return response;
       await response.body?.cancel().catch(() => undefined);
       // Never sooner than asked; the jitter spreads out parallel requests refused together.
-      await new Promise((resolve) =>
-        setTimeout(resolve, seconds * 1000 * (1 + Math.random() * 0.5)),
-      );
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, seconds * 1000 * (1 + Math.random() * 0.5));
+        signal?.addEventListener("abort", done, { once: true });
+        // The signal may have ended while the refusal's body was cancelled.
+        if (signal?.aborted) done();
+      });
+      if (signal?.aborted) throw new HueApiError(response.status, askedRetryAfter(response));
     }
   }
   private async request<T>(
@@ -242,6 +258,7 @@ export class EvaluationClient {
     path: string,
     body?: unknown,
     bounds = { ...valueBounds, bytes: 1024 * 1024 },
+    signal?: AbortSignal,
   ): Promise<T> {
     // Optional top-level fields are omitted intentionally; nested undefined remains invalid.
     const payload =
@@ -255,16 +272,20 @@ export class EvaluationClient {
               bounds,
             ),
           );
-    const response = await this.send(`${this.baseUrl}/api/v1${path}`, () => ({
-      method,
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        ...(payload ? { "Content-Type": "application/json" } : {}),
-      },
-      body: payload,
-      redirect: "error",
-      signal: AbortSignal.timeout(this.timeoutMillis),
-    }));
+    const response = await this.send(
+      `${this.baseUrl}/api/v1${path}`,
+      () => ({
+        method,
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          ...(payload ? { "Content-Type": "application/json" } : {}),
+        },
+        body: payload,
+        redirect: "error",
+        signal: AbortSignal.timeout(this.timeoutMillis),
+      }),
+      signal,
+    );
     if (!response.ok) {
       await response.body?.cancel();
       throw new HueApiError(response.status, askedRetryAfter(response));
@@ -640,9 +661,15 @@ export class EvaluationClient {
       throw new HueApiError();
     }
   }
-  /** Reads one artifact reservation and its verification state. */
-  getArtifact(id: string) {
-    return this.request<ArtifactReservation>("GET", `/artifacts/${uuid(id)}`);
+  /** Reads one artifact reservation and its verification state. `signal` ends the request. */
+  getArtifact(id: string, options: { signal?: AbortSignal } = {}) {
+    return this.request<ArtifactReservation>(
+      "GET",
+      `/artifacts/${uuid(id)}`,
+      undefined,
+      undefined,
+      options.signal,
+    );
   }
   /** Reserves an artifact by declared identity; replaying the key returns the same reservation. */
   reserveArtifact(input: {
@@ -663,9 +690,16 @@ export class EvaluationClient {
   requestArtifactUpload(id: string) {
     return this.request<ArtifactUpload>("POST", `/artifacts/${uuid(id)}/upload`, {});
   }
-  /** Asks Hue to verify the staged bytes against the declared identity. */
-  completeArtifact(id: string) {
-    return this.request<ArtifactReservation>("POST", `/artifacts/${uuid(id)}/complete`, {});
+  /** Asks Hue to verify the staged bytes against the declared identity. `signal` ends the
+   * request, and a wait to send it again. */
+  completeArtifact(id: string, options: { signal?: AbortSignal } = {}) {
+    return this.request<ArtifactReservation>(
+      "POST",
+      `/artifacts/${uuid(id)}/complete`,
+      {},
+      undefined,
+      options.signal,
+    );
   }
   /** Saves an execution's outcome and creates its immutable subject. */
   completeExecution(id: string, input: CompleteExecution) {

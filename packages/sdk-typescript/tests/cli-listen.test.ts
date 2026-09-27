@@ -141,6 +141,17 @@ interface MockOptions {
   trickle?: boolean;
   /** Answer the first pull with this body as a 200, whether or not it is JSON. */
   malformed?: string;
+  /** Hand every delivery it leased out again in each pull answer, answered or not. */
+  rehandAnswered?: boolean;
+  /** Refuse every acknowledgement with 422 `ack_refused`. */
+  refuseAcks?: boolean;
+  /** Answer every pull at once, without waiting for a delivery. */
+  emptyAtOnce?: boolean;
+  /** Answer each pull, or each acknowledgement, with a 307 to this URL. */
+  pullRedirect?: string;
+  ackRedirect?: string;
+  /** The `Retry-After` of a 503 (`0` by default). */
+  retryAfter?: string;
 }
 
 interface RecordedAck {
@@ -184,7 +195,7 @@ async function mockHue(options: MockOptions = {}) {
           "cache-control": "no-store",
           ...(diagnostic ? { "x-hue-diagnostic": diagnostic } : {}),
           // A transient refusal asks for an immediate retry, which the client must not take.
-          ...(status === 503 ? { "retry-after": "0" } : {}),
+          ...(status === 503 ? { "retry-after": options.retryAfter ?? "0" } : {}),
           ...headers,
         });
         response.end(JSON.stringify(diagnostic ? { error: "refused", diagnostic } : body));
@@ -197,6 +208,12 @@ async function mockHue(options: MockOptions = {}) {
       );
       const bearer = request.headers.authorization;
       if (request.method !== "POST" || (!pull && !ack)) return send(404, {}, "not_found");
+      const redirect = pull ? options.pullRedirect : options.ackRedirect;
+      if (redirect) {
+        if (pull) pullAttempts.push(Date.now());
+        response.writeHead(307, { location: redirect });
+        return response.end();
+      }
       if (pull) {
         pullAttempts.push(Date.now());
         if (pullFailures > 0) {
@@ -257,7 +274,7 @@ async function mockHue(options: MockOptions = {}) {
             entry.closedEarly = true;
           }
         });
-        const deadline = Date.now() + (waitMs as number);
+        const deadline = Date.now() + (options.emptyAtOnce ? 0 : (waitMs as number));
         while (!closed && queue.length === 0 && repeat.length === 0 && Date.now() < deadline)
           await new Promise((tick) => setTimeout(tick, 10));
         open = false;
@@ -272,7 +289,10 @@ async function mockHue(options: MockOptions = {}) {
         for (const delivery of leased) {
           if (!leases.has(delivery.deliveryId))
             leases.set(delivery.deliveryId, { delivery, credential, expiresAt });
-          if (options.repeatDeliveries && !leases.get(delivery.deliveryId)!.ack)
+          if (
+            options.rehandAnswered ||
+            (options.repeatDeliveries && !leases.get(delivery.deliveryId)!.ack)
+          )
             repeat.push(delivery);
         }
         return send(
@@ -309,6 +329,10 @@ async function mockHue(options: MockOptions = {}) {
       )
         return send(400, {}, "invalid_body");
       acks.push({ at: Date.now(), deliveryId: ack![2]!, status: 0, body });
+      if (options.refuseAcks) {
+        acks.at(-1)!.status = 422;
+        return send(422, {}, "ack_refused");
+      }
       if (ackFailures > 0) {
         ackFailures--;
         acks.at(-1)!.status = 503;
@@ -444,6 +468,8 @@ function run(argv: string[], env: Record<string, string>, io: Partial<ListenComm
   return {
     exit,
     stop: () => interrupt?.(),
+    /** Whether the stop request listener is still registered. */
+    listening: () => interrupt !== undefined,
     stdout: stdout.text,
     stderr: stderr.text,
     requests,
@@ -479,6 +505,7 @@ describe("hue listen arguments", () => {
       "[::1]",
       "::ffff:127.0.0.1",
       "::ffff:7f00:1",
+      "[::ffff:7fff:ffff]",
     ])
       expect(isLoopbackAddress(address)).toBe(true);
     for (const address of [
@@ -487,6 +514,9 @@ describe("hue listen arguments", () => {
       "0.0.0.0",
       "::",
       "::ffff:10.0.0.1",
+      "::ffff:a00:1",
+      "[::ffff:a00:1]",
+      "::ffff:8000:1",
       "fe80::1",
       "localhost",
       "128.0.0.1",
@@ -534,6 +564,14 @@ describe("hue listen arguments", () => {
       {
         env: { HUE_CONNECTION_KEY: PROJECT_KEY, HUE_MCP_KEY: PROJECT_KEY },
         message: "holds the project key in HUE_MCP_KEY",
+      },
+      {
+        env: { HUE_CONNECTION_KEY: PROJECT_KEY, HUE_PROJECT_KEY: ` ${PROJECT_KEY}\n` },
+        message: "holds the project key in HUE_PROJECT_KEY",
+      },
+      {
+        env: { HUE_CONNECTION_KEY: PROJECT_KEY, HUE_SERVICE_KEY: PROJECT_KEY },
+        message: "holds the project key in HUE_SERVICE_KEY",
       },
       { env: { HUE_API_KEY: PROJECT_KEY }, message: "never uses a project key" },
       {
@@ -970,6 +1008,59 @@ describe("hue listen acknowledgements and refusals", () => {
 });
 
 describe("hue listen delivery safety", () => {
+  test("forwards every header Hue stored but connection-level ones, and sets its own length", async () => {
+    const bot = await receiver();
+    const queued = slackDelivery("event_callback");
+    const stored = {
+      ...queued.headers,
+      "X-Custom-Trace": "t-1",
+      Host: "evil.example",
+      "Content-Length": "1",
+      Connection: "keep-alive",
+      "Keep-Alive": "timeout=5",
+      "Proxy-Authorization": "Basic cHJveHk6c2VjcmV0",
+      "Proxy-Connection": "keep-alive",
+      TE: "trailers",
+      Trailer: "x-late",
+      "Transfer-Encoding": "chunked",
+      Upgrade: "h2c",
+    };
+    const delivery = parseDelivery(
+      { ...wire(queued), request: { method: "POST", headers: stored, body: queued.body } },
+      SUBSCRIPTION,
+    )!;
+    const answer = await forwardDelivery(new URL(bot.url), delivery);
+    expect(answer).toMatchObject({ outcome: "response", status: 200 });
+    const [received] = bot.requests;
+    // Node's client adds its own Host and Connection, and the length of the body it sent.
+    expect(Object.keys(received!.headers).sort()).toEqual(
+      [
+        ...Object.keys(queued.headers),
+        "x-custom-trace",
+        "host",
+        "connection",
+        "content-length",
+      ].sort(),
+    );
+    expect(received!.headers.host).toBe(`localhost:${bot.port}`);
+    expect(received!.headers["content-length"]).toBe(String(Buffer.byteLength(queued.body)));
+    expect(received!.headers["x-custom-trace"]).toBe("t-1");
+  });
+
+  test("keeps the credential out of every line, even where no credential rule finds it", async () => {
+    const hue = await mockHue();
+    const bot = await receiver();
+    // Glued to a word, the token has no word boundary for the credential rules to find.
+    const listen = run(args(hue.origin, `${bot.url}/x${WORLD_TOKEN}`), {
+      HUE_WORLD_TOKEN: WORLD_TOKEN,
+    });
+    await until(() => listen.stdout().includes("Ready"));
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(listen.stdout()).toContain(`${bot.url}/x[redacted]`);
+    expect(listen.output()).not.toContain(WORLD_TOKEN);
+  });
+
   test("parses only deliveries it can forward unchanged", () => {
     const queued = slackDelivery("event_callback");
     const base = wire(queued);
@@ -1171,6 +1262,86 @@ describe("hue listen delivery safety", () => {
   });
 });
 
+describe("hue listen pacing and redirects", () => {
+  // Without a floor, a Hue that answers at once with nothing new was pulled about 1,600 times a
+  // second; each case below runs for 1.5 s.
+  const settle = () => new Promise((tick) => setTimeout(tick, 1_500));
+
+  test("a delivery Hue hands out again after it was answered is not pulled for in a loop", async () => {
+    const hue = await mockHue({ rehandAnswered: true });
+    const bot = await receiver();
+    hue.queue.push(slackDelivery("event_callback"));
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.acks.length >= 1);
+    await settle();
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(bot.requests).toHaveLength(1);
+    expect(hue.pulls.length).toBeLessThanOrEqual(5);
+    expect(hue.acks.length).toBeLessThanOrEqual(5);
+    expect(listen.stdout()).toContain("(repeated)");
+  });
+
+  test("a delivery whose acknowledgements Hue refuses is not pulled for in a loop", async () => {
+    const hue = await mockHue({ refuseAcks: true, repeatDeliveries: true });
+    const bot = await receiver();
+    hue.queue.push(slackDelivery("event_callback"));
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.acks.length >= 1);
+    await settle();
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(bot.requests).toHaveLength(1);
+    expect(hue.pulls.length).toBeLessThanOrEqual(5);
+    expect(listen.stdout()).toContain("Hue refused the acknowledgement (HTTP 422 ack_refused)");
+  });
+
+  test("an empty pull answered at once is not repeated at once", async () => {
+    const hue = await mockHue({ emptyAtOnce: true });
+    const bot = await receiver();
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.pulls.length >= 2);
+    await settle();
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(hue.pulls.length).toBeLessThanOrEqual(4);
+  });
+
+  test("a redirect answering a pull or an acknowledgement is reported, never followed", async () => {
+    const elsewhere: string[] = [];
+    const thief = createServer((request, response) => {
+      elsewhere.push(`${request.method} ${request.url} ${request.headers.authorization ?? ""}`);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"deliveries":[]}');
+    });
+    const thiefUrl = `http://127.0.0.1:${await listenOn(thief)}`;
+    const bot = await receiver();
+
+    const pulled = await mockHue({ pullRedirect: `${thiefUrl}/pull` });
+    const pull = run(args(pulled.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    expect(await pull.exit).toBe(1);
+    expect(pull.stderr()).toContain("Hue answered the pull with a redirect (HTTP 307)");
+
+    const acked = await mockHue({ ackRedirect: `${thiefUrl}/ack` });
+    acked.queue.push(slackDelivery("event_callback"));
+    const ack = run(args(acked.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => ack.stdout().includes("Hue refused the acknowledgement (HTTP 307)"));
+    ack.stop();
+    expect(await ack.exit).toBe(0);
+    expect(elsewhere).toEqual([]);
+  });
+
+  test("a Retry-After longer than a minute waits a minute", async () => {
+    const hue = await mockHue({ pullFailures: 1, retryAfter: "3600" });
+    const bot = await receiver();
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => listen.stderr().includes("Pull failed"));
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    expect(listen.stderr()).toContain("Pull failed: HTTP 503 unavailable; retrying in 60 s.");
+  });
+});
+
 describe("hue listen shutdown", () => {
   test("a stop during a forward finishes it and its acknowledgement, then pulls no more", async () => {
     const hue = await mockHue();
@@ -1218,6 +1389,8 @@ describe("hue listen shutdown", () => {
     const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
     await until(() => bot.requests.length === 1);
     listen.stop();
+    // A second stop request counts only a second after the first.
+    await new Promise((tick) => setTimeout(tick, 1_100));
     listen.stop();
     expect(await listen.exit).toBe(130);
     await new Promise((tick) => setTimeout(tick, 100));
@@ -1232,13 +1405,38 @@ describe("hue listen shutdown", () => {
     const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
     await until(() => hue.isTrickling());
     await new Promise((tick) => setTimeout(tick, 150));
-    const stoppedAt = Date.now();
     listen.stop();
+    await new Promise((tick) => setTimeout(tick, 1_100));
+    const stoppedAt = Date.now();
     listen.stop();
     expect(await listen.exit).toBe(130);
     expect(Date.now() - stoppedAt).toBeLessThan(1_000);
     expect(hue.acks).toHaveLength(0);
     expect(bot.requests).toHaveLength(0);
+  });
+
+  test("a second stop within a second is the same one, as npm forwards Ctrl+C under npx", async () => {
+    const hue = await mockHue();
+    const bot = await receiver(async (_request, response) => {
+      await new Promise((tick) => setTimeout(tick, 500));
+      response.writeHead(200);
+      response.end();
+    });
+    hue.queue.push(slackDelivery("event_callback"));
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => bot.requests.length === 1);
+    listen.stop();
+    await new Promise((tick) => setTimeout(tick, 50));
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    // A repeat can still come after the command returned; the listener outlives the loop for the
+    // rest of the second, so the runtime's default handler never ends the process by SIGINT.
+    expect(listen.listening()).toBe(true);
+    await until(() => !listen.listening(), 3_000);
+    expect(hue.acks).toHaveLength(1);
+    expect(hue.acks[0]!.body).toMatchObject({ outcome: "response", status: 200 });
+    expect(listen.output()).not.toContain("abandoned");
+    expect(listen.output()).not.toContain("Interrupted.");
   });
 
   test("the hue binary stops on SIGINT after acknowledging the delivery in flight", async () => {
@@ -1265,5 +1463,33 @@ describe("hue listen shutdown", () => {
     expect(output).toContain("Stopped.");
     expect(output).not.toContain(WORLD_TOKEN);
     expect(output).not.toContain(BODY_CANARY);
+  }, 40_000);
+
+  test("the hue binary treats a SIGINT npm forwards right after the terminal's as one", async () => {
+    const hue = await mockHue();
+    const bot = await receiver(async (_request, response) => {
+      await new Promise((tick) => setTimeout(tick, 1_000));
+      response.writeHead(200);
+      response.end();
+    });
+    hue.queue.push(slackDelivery("event_callback"));
+    const child = spawn(process.execPath, [cli, ...args(hue.origin, bot.url)], {
+      env: { PATH: process.env.PATH ?? "", HUE_WORLD_TOKEN: WORLD_TOKEN },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += String(chunk)));
+    child.stderr.on("data", (chunk) => (output += String(chunk)));
+    const closed = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+    await until(() => bot.requests.length === 1, 30_000);
+    // The terminal signals the process group, and npm's run-script forwards the same signal.
+    child.kill("SIGINT");
+    await new Promise((tick) => setTimeout(tick, 20));
+    child.kill("SIGINT");
+    expect(await closed).toBe(0);
+    expect(hue.acks).toHaveLength(1);
+    expect(hue.acks[0]!.body).toMatchObject({ outcome: "response", status: 200 });
+    expect(output).toContain("Stopped.");
+    expect(output).not.toContain("abandoned");
   }, 40_000);
 });
