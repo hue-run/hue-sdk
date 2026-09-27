@@ -635,6 +635,10 @@
     {
       "input": "GET https://h.example.test/p/p&mongodb:\\\\user:synthetic-nested-backslash@db.example.test/x?q=1 failed",
       "expected": "GET https://h.example.test/p/p&mongodb://[redacted]@db.example.test/x?q=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p/p&mongodb:\\\\user:synthetic-nested-backslash-bare@db.example.test/x failed",
+      "expected": "GET https://h.example.test/p/p&mongodb:\\\\[redacted]@db.example.test/x failed"
     }
   ]
 }

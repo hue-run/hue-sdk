@@ -134,7 +134,8 @@ type UrlChange = [start: number, end: number, growth: number];
  * up to 64 scheme characters, starting at a letter, so a longer run before `://` still leaves a
  * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
  * `cut` text may have lost its `@` or `?` there, so it is replaced whole. Each URL it replaces is
- * added to `changes`, and where each URL it keeps lies in the scrubbed text to `kept`. */
+ * added to `changes`, and where each URL it does not replace whole lies in the scrubbed text to
+ * `kept`. */
 function scrubTextUrls(
   text: string,
   state: ScrubState,
@@ -499,12 +500,13 @@ export function scrubCredentialText(text: string, cut = false): string {
   ]);
 }
 
-/** A URL nested in another's path (`…/p&mongodb://u:…@…`): its `://`, then its userinfo to the
- * last `@` before a `/`, `\`, `?`, `#` or whitespace, as a URL's own userinfo is read. */
-const nestedUserinfo = /:\/\/[^\s/\\?#]*@/g;
+/** A URL nested in another's path (`…/p&mongodb://u:…@…`): its `://` (or `:\\`), then its
+ * userinfo to the last `@` before a `/`, `\`, `?`, `#` or whitespace, as a URL's own userinfo is
+ * read. */
+const nestedUserinfo = /:[/\\]{2}[^\s/\\?#]*@/g;
 
-/** The userinfo of each URL nested in the path of a URL the text keeps: the path is kept and the
- * nested URL is not read on its own. */
+/** The userinfo of each URL nested in the path of a URL not replaced whole: the path is kept and
+ * the nested URL is not read on its own. */
 function nestedUserinfoSpans(text: string, urls: Span[]): Span[] {
   const spans: Span[] = [];
   for (const [start, end] of urls) {

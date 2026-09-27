@@ -253,7 +253,8 @@ def _scrub_text_urls(
     leaves a URL to scrub and a long run such as ``a.a.a…`` costs one pass. A URL that runs to the
     end of a ``cut`` text may have lost its ``@`` or ``?`` there, so it is replaced whole. Each URL
     it replaces is added to ``changes``: where it starts and ends, and how much longer its
-    replacement is; where each URL it keeps lies in the scrubbed text is added to ``kept``."""
+    replacement is; where each URL it does not replace whole lies in the scrubbed text is added to
+    ``kept``."""
     scrub = _Scrub()
     # Each URL's scrubbed text, as a text can repeat one many times.
     scrubbed: dict[str, str] = {}
@@ -540,16 +541,17 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
     return _redact_spans(scrubbed, spans)
 
 
-# A URL nested in another's path (``…/p&mongodb://u:…@…``): its ``://``, then its userinfo to the
-# last ``@`` before a ``/``, ``\``, ``?``, ``#`` or whitespace, as a URL's own userinfo is read.
-_NESTED_USERINFO = re.compile(rf"://[^{_JS_SPACE}/\\?#]*@")
+# A URL nested in another's path (``…/p&mongodb://u:…@…``): its ``://`` (or ``:\\``), then its
+# userinfo to the last ``@`` before a ``/``, ``\``, ``?``, ``#`` or whitespace, as a URL's own
+# userinfo is read.
+_NESTED_USERINFO = re.compile(rf":[/\\]{{2}}[^{_JS_SPACE}/\\?#]*@")
 _QUERY_OR_FRAGMENT = re.compile(r"[?#]")
 _PATH_START = re.compile(r"[/\\]")
 
 
 def _nested_userinfo_spans(text: str, urls: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """The userinfo of each URL nested in the path of a URL the text keeps: the path is kept and
-    the nested URL is not read on its own."""
+    """The userinfo of each URL nested in the path of a URL not replaced whole: the path is kept
+    and the nested URL is not read on its own."""
     spans: list[tuple[int, int]] = []
     for start, end in urls:
         authority = text.find("://", start, end) + 3
