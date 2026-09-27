@@ -420,8 +420,8 @@ async function rejectSymlink(path: string, display: string): Promise<Stats | und
 /**
  * Atomic write: temporary file, fsync, rename. A file it replaces keeps its permission bits, so one
  * kept at 0600 because it holds other servers' tokens is never widened, except that other accounts
- * lose write access; it keeps its group when those bits grant the group access (or loses the group
- * bits when the group cannot be kept). A new file is created owner-only, 0600 narrowed by the
+ * lose write access; it keeps its group (or, when the group cannot be kept, its group and other
+ * accounts get only the access both had). A new file is created owner-only, 0600 narrowed by the
  * umask: people and clients add literal tokens to these files.
  */
 async function writeConfigFile(
@@ -445,12 +445,14 @@ async function writeConfigFile(
       if (existing) {
         // Other accounts never keep write access: they could add a server command to run.
         let mode = existing.mode & 0o775;
-        // The new file has the process's group (the directory's on macOS), which may differ.
-        if (mode & 0o070 && (await handle.stat()).gid !== existing.gid) {
+        // The new file has the process's group (the directory's on macOS), which may differ. When
+        // the group cannot be kept, its members and everyone else get only what both had.
+        if ((await handle.stat()).gid !== existing.gid) {
           try {
             await handle.chown(-1, existing.gid);
           } catch {
-            mode &= ~0o070;
+            const shared = (mode >> 3) & mode & 0o007;
+            mode = (mode & 0o700) | (shared << 3) | shared;
           }
         }
         await handle.chmod(mode);

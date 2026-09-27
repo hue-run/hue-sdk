@@ -421,7 +421,7 @@ describe("hue mcp install", () => {
     }
   })();
   test.skipIf(otherGroup === undefined)(
-    "a replaced group-readable file keeps its group, so no other group can read it",
+    "a replaced file keeps its group, so no other group can read it",
     async () => {
       const root = await temporaryRoot();
       const file = join(root, ".mcp.json");
@@ -433,6 +433,11 @@ describe("hue mcp install", () => {
       expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
       expect((await lstat(file)).gid).toBe(otherGroup!);
       expect(await mode(file)).toBe(0o640);
+      // A mode that denies the group only protects the file while it keeps that group.
+      await chmod(file, 0o604);
+      expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
+      expect((await lstat(file)).gid).toBe(otherGroup!);
+      expect(await mode(file)).toBe(0o604);
     },
   );
 
