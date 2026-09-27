@@ -66,7 +66,9 @@ function scrubUrl(value: string, state: ScrubState): string {
   return changed ? url.toString() : value;
 }
 
-function isCredentialKey(key: string): boolean {
+/** Whether a field name names a credential: one of `credentialKeys`, or a name ending in `token`,
+ * `secret`, `password`, `apikey` or `credential`, ignoring case, `-` and `_`. */
+export function isCredentialKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[-_]/g, "");
   return (
     credentialKeys.has(normalized) ||

@@ -1,20 +1,11 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import {
-  access,
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  stat,
-  unlink,
-} from "node:fs/promises";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { constants, type Stats } from "node:fs";
+import { access, lstat, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { isLoopbackHost } from "../config.js";
+import { isCredentialKey, scrubCredentialText } from "../tool-definitions.js";
 
 /**
  * `hue mcp install`: writes or prints the coding-agent configuration for Hue's MCP server. The
@@ -388,40 +379,137 @@ async function readJsonConfig(path: string, display: string): Promise<unknown> {
   }
 }
 
-async function rejectSymlink(path: string, display: string): Promise<void> {
-  try {
-    if ((await lstat(path)).isSymbolicLink())
-      throw new ConfigError(`Refusing to write ${display}: it is a symbolic link.`);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
+/**
+ * Refuses a symbolic link, or anything but a directory, between the working directory and the file
+ * (`.cursor` or `.vscode`), as the file itself is refused. The working directory and its ancestors
+ * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one.
+ */
+async function rejectLinkedParents(cwd: string, path: string, display: string): Promise<void> {
+  let current = cwd;
+  for (const part of relative(cwd, dirname(path)).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const shown = displayPath(cwd, current);
+    if (info.isSymbolicLink())
+      throw new ConfigError(`Refusing to use ${display}: ${shown} is a symbolic link.`);
+    if (!info.isDirectory())
+      throw new ConfigError(`Refusing to use ${display}: ${shown} is not a directory.`);
   }
 }
 
-/** Atomic write for a secret-free config file: temporary file, fsync, rename; mode 0644. */
-async function writeConfigFile(path: string, text: string, display: string): Promise<void> {
+/** The file's status, or undefined when there is none; a symbolic link is refused. */
+async function rejectSymlink(path: string, display: string): Promise<Stats | undefined> {
+  let info;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (info.isSymbolicLink())
+    throw new ConfigError(`Refusing to write ${display}: it is a symbolic link.`);
+  return info;
+}
+
+/**
+ * Atomic write: temporary file, fsync, rename. A file it replaces keeps its permission bits, so one
+ * kept at 0600 because it holds other servers' tokens is never widened, and keeps its group when
+ * those bits grant the group access (or loses the group bits when the group cannot be kept). A new
+ * file is created owner-only, 0600 narrowed by the umask: people and clients add literal tokens to
+ * these files.
+ */
+async function writeConfigFile(
+  cwd: string,
+  path: string,
+  text: string,
+  display: string,
+): Promise<void> {
+  await rejectLinkedParents(cwd, path, display);
   await mkdir(dirname(path), { recursive: true });
-  await rejectSymlink(path, display);
+  await rejectLinkedParents(cwd, path, display);
+  const existing = await rejectSymlink(path, display);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   try {
     const handle = await open(
       temporary,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o644,
+      0o600,
     );
     try {
       await handle.writeFile(text, "utf8");
+      if (existing) {
+        let mode = existing.mode & 0o777;
+        // The new file has the process's group (the directory's on macOS), which may differ.
+        if (mode & 0o070 && (await handle.stat()).gid !== existing.gid) {
+          try {
+            await handle.chown(-1, existing.gid);
+          } catch {
+            mode &= ~0o070;
+          }
+        }
+        await handle.chmod(mode);
+      }
       await handle.sync();
     } finally {
       await handle.close();
     }
-    await chmod(temporary, 0o644);
+    await rejectLinkedParents(cwd, path, display);
     await rejectSymlink(path, display);
     await rename(temporary, path);
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
+}
+
+const REDACTED = "[redacted]";
+/**
+ * Only references a client resolves (`${NAME}`, `${env:NAME}`, `${input:id}`), after an optional
+ * `Bearer`, `Basic` or `Token` scheme: no credential. A reference with a default does not match.
+ */
+const REFERENCE_ONLY = /^(?:(?:bearer|basic|token)[ \t]+)?(?:\$\{(?:(?:env|input):)?[\w.-]+\})+$/iu;
+
+/** An `args` option whose next item is its value and names a credential: `--api-key`, `--header`. */
+function isCredentialOption(item: unknown): boolean {
+  const name = typeof item === "string" ? /^--?([A-Za-z][\w-]*)$/u.exec(item)?.[1] : undefined;
+  return name !== undefined && (isCredentialKey(name) || name.toLowerCase() === "header");
+}
+
+/**
+ * A merged configuration as `--dry-run` prints it. Header and `env` values, strings under a key
+ * naming a credential and the value after a credential option in `args` become `[redacted]` unless
+ * they only reference a variable or input; other strings lose what `scrubCredentialText` finds (a
+ * known token prefix, a `token=` pair, a URL's userinfo and query values). `url`, the address this
+ * command writes, is shown as is: its query holds only this command's selections.
+ */
+function redactConfigValue(value: unknown, url: string, secret = false, depth = 0): unknown {
+  if (depth > 256) return REDACTED;
+  if (typeof value === "string") {
+    if (value === url || REFERENCE_ONLY.test(value)) return value;
+    return secret ? REDACTED : scrubCredentialText(value);
+  }
+  if (Array.isArray(value))
+    return value.map((item: unknown, index) =>
+      redactConfigValue(item, url, secret || isCredentialOption(value[index - 1]), depth + 1),
+    );
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      redactConfigValue(
+        item,
+        url,
+        secret || isCredentialKey(key) || key.toLowerCase() === "env",
+        depth + 1,
+      ),
+    ]),
+  );
 }
 
 async function findExecutable(name: string, env: NodeJS.ProcessEnv): Promise<string | null> {
@@ -832,10 +920,12 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
 
   const path = resolve(cwd, plan.file);
   const display = displayPath(cwd, path);
+  let merged: Record<string, unknown>;
   let content: string;
   try {
+    await rejectLinkedParents(cwd, path, display);
     const existing = await readJsonConfig(path, display);
-    let merged = mergeServerEntry(existing, plan.key, plan.entry, display, serverName);
+    merged = mergeServerEntry(existing, plan.key, plan.entry, display, serverName);
     if (plan.input) merged = mergeVscodeInput(merged, plan.input, display);
     content = json(merged);
   } catch (error) {
@@ -844,12 +934,18 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return fail(`Could not read ${display}: ${(error as Error).message}`);
   }
   if (parsed.values["dry-run"]) {
-    out(`Would write ${display}:`);
-    stdout.write(content);
+    // Other servers' entries can hold literal tokens; the file keeps them, the output does not.
+    const shown = json(redactConfigValue(merged, url));
+    out(
+      shown === content
+        ? `Would write ${display}:`
+        : `Would write ${display} (credential values shown as ${REDACTED}):`,
+    );
+    stdout.write(shown);
     return 0;
   }
   try {
-    await writeConfigFile(path, content, display);
+    await writeConfigFile(cwd, path, content, display);
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }
