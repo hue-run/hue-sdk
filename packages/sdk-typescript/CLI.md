@@ -168,12 +168,13 @@ accepted too, but Node 22 and 24 read that flag from the whole command line and 
 The env file is written with mode `0600` through a temporary file and an atomic rename. Other
 lines are preserved; a symlink or a non-regular file is refused; an existing different value is
 replaced only with `--force`. Empty values, whitespace and URLs are refused before any request.
-The MCP endpoint is `https://mcp.hue.run/mcp` for `https://app.hue.run`,
-`https://mcp.staging.hue.run/mcp` for `https://staging.hue.run` and `<origin>/api/mcp` otherwise;
-plain HTTP origins are accepted for loopback test servers only. Output names variables and lengths
-(`Stored the key (NN chars) as HUE_API_KEY and HUE_MCP_KEY`), never values. When git does not ignore the env file, the command
-warns; `--gitignore` appends the file name to the `.gitignore` next to it. Exit codes: `0` stored,
-`1` failed, `2` usage error, `130` interrupted.
+The production MCP server is available only at `https://mcp.hue.run/mcp`. `hue login` uses
+`https://mcp.staging.hue.run/mcp` with `https://staging.hue.run` and `<origin>/api/mcp` for other
+development or preview origins; plain HTTP origins are accepted for loopback test servers only.
+Output names variables and lengths (`Stored the key (NN chars) as HUE_API_KEY and HUE_MCP_KEY`),
+never values. When git does not ignore the env file, the command warns; `--gitignore` appends the
+file name to the `.gitignore` next to it. Exit codes: `0` stored, `1` failed, `2` usage error, `130`
+interrupted.
 
 ## Install the MCP for your coding agent
 
