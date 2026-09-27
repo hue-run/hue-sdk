@@ -1019,8 +1019,10 @@ describe("hue listen delivery safety", () => {
       "X-Custom-Trace": "t-1",
       Host: "evil.example",
       "Content-Length": "1",
-      Connection: "keep-alive",
+      // A value no client sends, so a forwarded Connection shows even though the client sets its own.
+      Connection: "x-hue-stored",
       "Keep-Alive": "timeout=5",
+      "Proxy-Authenticate": "Basic realm=stored",
       "Proxy-Authorization": "Basic cHJveHk6c2VjcmV0",
       "Proxy-Connection": "keep-alive",
       TE: "trailers",
@@ -1044,6 +1046,7 @@ describe("hue listen delivery safety", () => {
     expect(
       own.filter((name) => !["host", "content-length", "connection", "accept"].includes(name)),
     ).toEqual([]);
+    expect(received!.headers.connection).not.toBe("x-hue-stored");
     expect(received!.headers.host).toBe(`localhost:${bot.port}`);
     expect(received!.headers["content-length"]).toBe(String(Buffer.byteLength(queued.body)));
     expect(received!.headers["x-custom-trace"]).toBe("t-1");

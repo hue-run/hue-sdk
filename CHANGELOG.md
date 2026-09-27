@@ -12,9 +12,9 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
-- `hue listen` starts a pull no sooner than 50 ms after the last one began, so a Hue that answers
-  every pull at once with new deliveries is pulled at most 20 times a second; before, with a local
-  receiver, it pulled about a thousand times a second.
+- `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
+  so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
+  before, with a local receiver, it pulled about a thousand times a second.
 
 ### [0.11.2] - 2026-09-27
 
