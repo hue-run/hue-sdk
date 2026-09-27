@@ -262,14 +262,15 @@ those grant the group access, so a file kept at `0600` is never widened. A symli
 symlinked `.cursor` or `.vscode` directory, is refused; the current directory itself may be reached
 through a symlink. `--dry-run` prints the resulting file content or commands without writing or
 running. In printed file content, every header and `env` value, and each other credential it
-recognizes (a known token prefix, the value of an option such as `--api-key VALUE` or
-`--token=VALUE`, a field such as `clientSecret` or `key`, a token-like URL path segment, a URL's
-query values other than the `toolsets`, `project` and `read_only` selections of Hue's own URL), is
-shown as `[redacted]` unless it only references a variable or input such as `${HUE_MCP_KEY}`; the
-file keeps the values. `--print` prints only the snippet. Client CLIs run
-without a shell, so the `${HUE_MCP_KEY}` reference reaches them literally; the printed commands use
-single quotes for the same reason, and quote a URL with a query such as `?read_only=true`, whose `?`
-is a zsh glob.
+recognizes (a known token prefix, the value of an option such as `--api-key VALUE`, `-H VALUE` or
+`--token=VALUE`, a field such as `clientSecret`, `key` or `secretKey`, a token-like URL path segment,
+a URL's query values), is shown as `[redacted]` unless the whole value is a variable or input
+reference such as `Bearer ${HUE_MCP_KEY}`; the file keeps the values. Hue's own URL keeps only its
+`toolsets`, `project` and `read_only` selections there and in the lines that report what the
+command did; a command printed for you to run keeps `--url` as given. `--print` prints only the
+snippet. Client CLIs run without a shell, so the `${HUE_MCP_KEY}` reference reaches them literally;
+the printed commands use single quotes for the same reason, and quote a URL with a query such as
+`?read_only=true`, whose `?` is a zsh glob.
 
 After a key installation the command reminds you to export `HUE_MCP_KEY` in the shell that starts
 the client (VS Code prompts for the key instead). A desktop app started from the Dock or a launcher

@@ -430,7 +430,6 @@ async function writeConfigFile(
   text: string,
   display: string,
 ): Promise<void> {
-  await rejectLinkedParents(cwd, path, display);
   await mkdir(dirname(path), { recursive: true });
   await rejectLinkedParents(cwd, path, display);
   const existing = await rejectSymlink(path, display);
@@ -473,13 +472,20 @@ const REDACTED = "[redacted]";
  * Only references a client resolves (`${NAME}`, `${env:NAME}`, `${input:id}`), after an optional
  * `Bearer`, `Basic` or `Token` scheme: no credential. A reference with a default does not match.
  */
-const REFERENCE_ONLY = /^(?:(?:bearer|basic|token)[ \t]+)?(?:\$\{(?:(?:env|input):)?[\w.-]+\})+$/iu;
+const REFERENCE_ONLY =
+  /^(?:(?:bearer|basic|token)[ \t]+)?(?:\$\{(?:input:[\w.-]+|(?:env:)?[A-Za-z_]\w*)\})+$/iu;
 
 /** Names `isCredentialKey` leaves out that configurations use for a credential field or option. */
-const CREDENTIAL_NAMES = new Set(["key", "auth", "pat", "bearer", "header", "env"]);
+const CREDENTIAL_NAMES = new Set(["auth", "pat", "bearer", "env"]);
 
+/** `isCredentialKey`, `CREDENTIAL_NAMES`, or a name ending in `key`, `keys` or `header`. */
 function isCredentialName(name: string): boolean {
-  return isCredentialKey(name) || CREDENTIAL_NAMES.has(name.toLowerCase().replace(/[-_]/g, ""));
+  const normalized = name.toLowerCase().replace(/[-_]/g, "");
+  return (
+    isCredentialKey(name) ||
+    CREDENTIAL_NAMES.has(normalized) ||
+    /(?:keys?|header)$/u.test(normalized)
+  );
 }
 
 /**
@@ -514,10 +520,14 @@ function redactUrlPath(value: string): string {
   return parsed.href;
 }
 
+/** A query parameter name shown before its redacted value; any other becomes `[redacted]` whole. */
+const PARAMETER_NAME = /^[A-Za-z_][\w.-]{0,31}$/u;
+
 /**
- * The URL this command writes, as `--dry-run` prints it: the selections it validated (`toolsets`,
- * `project`, and `read_only` when true or false) are shown; any other query value, and a token-like
+ * The URL this command writes, as its output shows it: the selections it validated (`toolsets`,
+ * `project`, and `read_only` when true or false) are kept; any other query value, and a token-like
  * path segment, becomes `[redacted]`. `parseMcpUrl` has already refused userinfo and a fragment.
+ * Commands printed for a person to run keep the URL as given.
  */
 function displayMcpUrl(url: string): string {
   const parsed = new URL(url);
@@ -531,7 +541,10 @@ function displayMcpUrl(url: string): string {
         name === "toolsets" ||
         name === "project" ||
         (name === "read_only" && /^(?:true|false)$/u.test(value));
-      return selection ? pair : `${name}=${REDACTED}`;
+      if (selection) return pair;
+      return PARAMETER_NAME.test(name) && scrubCredentialText(name) === name
+        ? `${name}=${REDACTED}`
+        : REDACTED;
     });
   return redactUrlPath(
     `${parsed.origin}${parsed.pathname}${query.length ? `?${query.join("&")}` : ""}`,
@@ -543,10 +556,14 @@ function displayMcpUrl(url: string): string {
  * under a key naming a credential, the value of a credential option in `args` (`--api-key VALUE`,
  * `--key=VALUE`) and token-like URL path segments become `[redacted]` unless they only reference a
  * variable or input; other strings lose what `scrubCredentialText` finds (a known token prefix, a
- * `token=` pair, a URL's userinfo and query values). Server names are not read as field names.
- * `url`, the address this command writes, is shown by {@link displayMcpUrl}, keeping its selections.
+ * `token=` pair, a URL's userinfo and query values). The server names under `serversKey` are not
+ * read as field names. `url`, the address this command writes, is shown by {@link displayMcpUrl}.
  */
-function redactConfig(root: Record<string, unknown>, url: string): unknown {
+function redactConfig(
+  root: Record<string, unknown>,
+  serversKey: "mcpServers" | "servers",
+  url: string,
+): unknown {
   const shownUrl = displayMcpUrl(url);
   const redact = (value: unknown, secret: boolean, depth: number, names: boolean): unknown => {
     if (depth > 256) return REDACTED;
@@ -570,9 +587,9 @@ function redactConfig(root: Record<string, unknown>, url: string): unknown {
         key,
         redact(
           item,
-          secret || (!names && isCredentialName(key)),
+          secret || (!(names && isRecord(item)) && isCredentialName(key)),
           depth + 1,
-          depth === 0 && (key === "mcpServers" || key === "servers"),
+          depth === 0 && key === serversKey,
         ),
       ]),
     );
@@ -943,6 +960,10 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     toolsets = selected.toolsets;
   }
   url = toolsetsMcpUrl(url, toolsets);
+  const shownUrl = displayMcpUrl(url);
+  // What the command reports doing; a command a person is to run is printed as given.
+  const shownCommand = (command: CliCommand) =>
+    command.display.replaceAll(shellWord(url), shellWord(shownUrl));
   const plan = planFor(clientId, auth, scope, url, serverName);
   if (parsed.values.print) {
     stdout.write(plan.snippet);
@@ -959,7 +980,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
 
   if (plan.kind === "cli") {
     if (parsed.values["dry-run"]) {
-      for (const command of plan.commands) out(`Would run: ${command.display}`);
+      for (const command of plan.commands) out(`Would run: ${shownCommand(command)}`);
       return 0;
     }
     let failed = false;
@@ -970,10 +991,10 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
         out(command.display);
         continue;
       }
-      out(`Running: ${command.display}`);
+      out(`Running: ${shownCommand(command)}`);
       const code = await runClientCli(executable, command.args, { cwd, env, stdout, stderr });
       if (code === 0) {
-        out(`Registered the "${serverName}" MCP server (${url}) with ${command.label}.`);
+        out(`Registered the "${serverName}" MCP server (${shownUrl}) with ${command.label}.`);
         continue;
       }
       failed = true;
@@ -1003,7 +1024,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   }
   if (parsed.values["dry-run"]) {
     // Other servers' entries can hold literal tokens; the file keeps them, the output does not.
-    const shown = json(redactConfig(merged, url));
+    const shown = json(redactConfig(merged, plan.key, url));
     out(
       shown === content
         ? `Would write ${display}:`
@@ -1017,7 +1038,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }
-  out(`Wrote ${display} with the "${serverName}" MCP server (${url}).`);
+  out(`Wrote ${display} with the "${serverName}" MCP server (${shownUrl}).`);
   for (const line of steps) out(line);
   return 0;
 }

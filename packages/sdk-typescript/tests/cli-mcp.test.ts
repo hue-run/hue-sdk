@@ -12,6 +12,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -393,7 +394,10 @@ describe("hue mcp install", () => {
   });
 
   // A group other than the one a new file gets: the process's (Linux) or the directory's (macOS).
-  const otherGroup = process.getgroups?.().find((gid) => gid !== process.getegid?.());
+  const temporaryGroup = statSync(realpathSync(tmpdir())).gid;
+  const otherGroup = process
+    .getgroups?.()
+    .find((gid) => gid !== process.getegid?.() && gid !== temporaryGroup);
   test.skipIf(otherGroup === undefined)(
     "a replaced group-readable file keeps its group, so no other group can read it",
     async () => {
@@ -460,13 +464,23 @@ describe("hue mcp install", () => {
       "987654321",
       "short-header-option-value",
       "inline-header-option-value",
+      "ghp_defaultliteral123456789",
+      "access-key-option-value",
+      "secret-key-field-value",
+      "auth-header-field-value",
+      "root-servers-token-value",
+      "stray-server-token-value",
     ];
     const existing = JSON.stringify({
       mcpServers: {
         github: {
           type: "http",
           url: "https://api.example.com/mcp/",
-          headers: { Authorization: `Bearer ${secrets[0]}`, "X-Custom": secrets[1] },
+          headers: {
+            Authorization: `Bearer ${secrets[0]}`,
+            "X-Custom": secrets[1],
+            "X-Default": `\${env:-${secrets[15]}}`,
+          },
         },
         local: {
           command: "npx",
@@ -482,12 +496,21 @@ describe("hue mcp install", () => {
             "-H",
             `X-Custom: ${secrets[13]}`,
             `--header=X-Other: ${secrets[14]}`,
+            "--access-key",
+            secrets[16],
             "/work",
           ],
           env: { SERVICE_TOKEN: secrets[4], OTHER: "${OTHER_KEY}", PIN: Number(secrets[12]) },
         },
         // Server names are not field names: this one's entry is shown like any other.
-        "release-token": { key: secrets[10], url: `https://mcp.example.com/s/${secrets[11]}/mcp` },
+        "release-token": {
+          key: secrets[10],
+          secretKey: secrets[17],
+          authHeader: secrets[18],
+          url: `https://mcp.example.com/s/${secrets[11]}/mcp`,
+        },
+        // Only an entry is exempt as a server name, not a stray value named like a credential.
+        "stray-token": secrets[20],
         linked: {
           url: `https://example.com/mcp?api_key=${secrets[5]}`,
           headers: { Authorization: "Bearer ${env:LINKED_KEY}" },
@@ -499,6 +522,7 @@ describe("hue mcp install", () => {
         },
       },
       custom: { clientSecret: secrets[7], enabled: true },
+      servers: { token: secrets[19] },
     });
     await writeFile(join(root, ".mcp.json"), existing);
     const dry = await mcp(["install", "--client", "claude-code", "--dry-run"], {
@@ -515,10 +539,12 @@ describe("hue mcp install", () => {
     const shown = JSON.parse(dry.stdout.slice(dry.stdout.indexOf("\n") + 1)) as {
       mcpServers: Record<string, Record<string, unknown>>;
       custom: Record<string, unknown>;
+      servers: unknown;
     };
     expect(shown.mcpServers.github!.headers).toEqual({
       Authorization: "[redacted]",
       "X-Custom": "[redacted]",
+      "X-Default": "[redacted]",
     });
     expect(shown.mcpServers.local).toEqual({
       command: "npx",
@@ -534,14 +560,20 @@ describe("hue mcp install", () => {
         "-H",
         "[redacted]",
         "--header=[redacted]",
+        "--access-key",
+        "[redacted]",
         "/work",
       ],
       env: { SERVICE_TOKEN: "[redacted]", OTHER: "${OTHER_KEY}", PIN: "[redacted]" },
     });
     expect(shown.mcpServers["release-token"]).toEqual({
       key: "[redacted]",
+      secretKey: "[redacted]",
+      authHeader: "[redacted]",
       url: "https://mcp.example.com/s/[redacted]/mcp",
     });
+    expect(shown.mcpServers["stray-token"] as unknown).toBe("[redacted]");
+    expect(shown.servers).toEqual({ token: "[redacted]" });
     expect(shown.mcpServers.linked).toEqual({
       url: "https://example.com/mcp?api_key=%5Bredacted%5D",
       headers: { Authorization: "Bearer ${env:LINKED_KEY}" },
@@ -561,23 +593,30 @@ describe("hue mcp install", () => {
     for (const secret of secrets) expect(written).toContain(secret);
 
     // A credential in --url is left out; the selections this command validated are shown.
+    const keyUrl = `https://mcp.hue.run/mcp?api_key=${secrets[6]}&sk-proj-${secrets[6]}&toolsets=traces,docs`;
     const keyInUrl = await mcp(
-      [
-        "install",
-        "--client",
-        "claude-code",
-        "--dry-run",
-        "--read-only",
-        "--url",
-        `https://mcp.hue.run/mcp?api_key=${secrets[6]}&toolsets=traces,docs`,
-      ],
+      ["install", "--client", "claude-code", "--dry-run", "--read-only", "--url", keyUrl],
       { cwd: root },
     );
     expect(keyInUrl.code).toBe(0);
     expect(keyInUrl.stdout).not.toContain(secrets[6]);
     expect(keyInUrl.stdout).toContain(
-      '"url": "https://mcp.hue.run/mcp?api_key=[redacted]&read_only=true&toolsets=traces,docs"',
+      '"url": "https://mcp.hue.run/mcp?api_key=[redacted]&[redacted]&read_only=true&toolsets=traces,docs"',
     );
+    // So is every line that reports what the command does; the file keeps the URL as given.
+    const codexDry = await mcp(["install", "--client", "codex", "--dry-run", "--url", keyUrl], {
+      cwd: root,
+    });
+    expect(codexDry.stdout).toBe(
+      "Would run: codex mcp add hue --url 'https://mcp.hue.run/mcp?api_key=[redacted]&[redacted]&toolsets=traces,docs' --bearer-token-env-var HUE_MCP_KEY\n",
+    );
+    const keyWrite = await mcp(["install", "--client", "claude-code", "--url", keyUrl], {
+      cwd: root,
+    });
+    expect(keyWrite.code).toBe(0);
+    expect(keyWrite.stdout).not.toContain(secrets[6]);
+    expect(keyWrite.stdout).toContain("(https://mcp.hue.run/mcp?api_key=[redacted]&");
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toContain(`api_key=${secrets[6]}`);
 
     // A pinned server named like a credential still shows Hue's entry whole.
     const pinned = await mcp(
