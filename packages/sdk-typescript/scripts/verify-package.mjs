@@ -520,6 +520,123 @@ if (
       `Installed hue listen did not forward and acknowledge under Node: ${listen.output}`,
     );
 }
+// The installed `hue listen` under Node, stopped as `npx` stops it: the terminal's SIGINT while a
+// delivery is in flight, and npm's copy of it a few milliseconds later, which may come as the
+// client exits. The copy's delay varies, so one is sent every 2 ms for 600 ms. Each is the first
+// stop request again: the delivery is acknowledged and the client exits 0, not ended by SIGINT.
+{
+  const token = `hue_world_eyJwYWNrYWdlIjoiY2hlY2sifQ.${"t".repeat(43)}`;
+  const subscription = "0f8e3c2a-5b7d-4e1f-9a6c-2d4b8e0f1a3c";
+  const deliveryId = "7b2d0f5a-3c4e-4d6f-9a8b-0c1d2e3f4a5b";
+  const body = JSON.stringify({ type: "event_callback", event_id: "Ev0PACKAGE02", event: {} });
+  let received = 0;
+  const receiver = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      received++;
+      setTimeout(() => response.end(""), 300);
+    });
+  });
+  await new Promise((listening) => receiver.listen(0, "127.0.0.1", listening));
+  const acks = [];
+  let pulled = false;
+  const standIn = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => (raw += chunk));
+    request.on("end", () => {
+      response.setHeader("content-type", "application/json");
+      if (request.headers.authorization !== `Bearer ${token}`) {
+        response.statusCode = 401;
+        return response.end("{}");
+      }
+      const base = `/api/v1/event-subscriptions/${subscription}/deliveries`;
+      if (request.url === `${base}/pull`) {
+        const deliveries = pulled
+          ? []
+          : [
+              {
+                deliveryId,
+                subscriptionId: subscription,
+                worldId: null,
+                eventId: "Ev0PACKAGE02",
+                kind: "event_callback",
+                retryNum: 0,
+                leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+                request: { method: "POST", headers: { "content-type": "application/json" }, body },
+              },
+            ];
+        pulled = true;
+        // A later pull waits, as a long poll does, until the client ends it.
+        const timer = setTimeout(
+          () => response.end(JSON.stringify({ deliveries })),
+          deliveries.length ? 0 : 20_000,
+        );
+        return response.on("close", () => clearTimeout(timer));
+      }
+      if (request.url === `${base}/${deliveryId}/ack`) {
+        acks.push(JSON.parse(raw));
+        return response.end(JSON.stringify({ state: "acknowledged" }));
+      }
+      response.statusCode = 404;
+      response.end("{}");
+    });
+  });
+  await new Promise((listening) => standIn.listen(0, "127.0.0.1", listening));
+  const listen = await new Promise((finished, failed) => {
+    const child = spawn(
+      process.execPath,
+      [
+        join(minimal, "node_modules/@hue-run/sdk/dist/setup/cli.js"),
+        "listen",
+        "--subscription",
+        subscription,
+        "--forward-to",
+        `http://localhost:${receiver.address().port}/slack/events`,
+        "--origin",
+        `http://127.0.0.1:${standIn.address().port}`,
+      ],
+      {
+        env: { PATH: process.env.PATH, HUE_WORLD_TOKEN: token },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    const killer = setTimeout(() => child.kill("SIGKILL"), 40_000);
+    child.on("error", failed);
+    child.on("close", (status, signal) => {
+      clearTimeout(killer);
+      finished({ status, signal, output });
+    });
+    const deadline = Date.now() + 20_000;
+    const poll = setInterval(() => {
+      if (received === 0 && Date.now() <= deadline) return;
+      clearInterval(poll);
+      const stoppedAt = Date.now();
+      child.kill("SIGINT");
+      const copies = setInterval(() => {
+        if (Date.now() - stoppedAt > 600 || child.exitCode !== null || child.signalCode !== null)
+          return clearInterval(copies);
+        child.kill("SIGINT");
+      }, 2);
+    }, 5);
+  });
+  receiver.close();
+  standIn.close();
+  if (
+    listen.status !== 0 ||
+    listen.signal !== null ||
+    acks.length !== 1 ||
+    acks[0].outcome !== "response" ||
+    acks[0].status !== 200 ||
+    !listen.output.includes("Stopped.") ||
+    listen.output.includes(token)
+  )
+    throw new Error(
+      `Installed hue listen did not treat npm's copy of SIGINT as the same stop under Node (status ${listen.status}, signal ${listen.signal}): ${listen.output}`,
+    );
+}
 // Evaluation/simulation users install the optional validation peer. Ajv remains separately
 // optional: without it the JSON Schema scorer reports a typed error instead of crashing.
 const evaluation = join(destination, "evaluation-consumer");

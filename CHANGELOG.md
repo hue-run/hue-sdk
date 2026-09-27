@@ -36,6 +36,9 @@ refuses to publish a version without a matching entry below.
   scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`, `hue_rt_`,
   `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and Google OAuth
   client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
+- `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
+  so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
+  before, with a local receiver, it pulled about a thousand times a second.
 
 ### [0.11.2] - 2026-09-27
 

@@ -62,6 +62,9 @@ const MAX_RETRY_AFTER_MS = 60_000;
 const REMEMBERED_DELIVERIES = 1_024;
 /** The least time between pulls that forwarded nothing new, so repeats cannot spin. */
 const IDLE_PULL_FLOOR_MS = 1_000;
+/** The least time between the starts of pulls that forwarded something, so a Hue that answers
+ * every pull at once with new deliveries is pulled at most 20 times a second. */
+const BUSY_PULL_FLOOR_MS = 50;
 /** The most of a text from elsewhere (an error message, a URL) that is scrubbed and printed, in
  * code points, as of a provider's error text; a longer one is cut there and `…` marks the cut. */
 const MAX_FOREIGN_TEXT = 16_384;
@@ -940,8 +943,12 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
       // A pull that could wait but answered at once with nothing new to forward (none due, only
       // deliveries already answered, or ones this client skips) is not repeated at once, so a
       // Hue that hands them out again or refuses their acknowledgements is not pulled in a loop.
-      if (waited && !forwarded.includes(true) && performance.now() - pulledAt < IDLE_PULL_FLOOR_MS)
+      // One that forwarded something is repeated no sooner than BUSY_PULL_FLOOR_MS after it began.
+      const elapsed = performance.now() - pulledAt;
+      if (waited && !forwarded.includes(true) && elapsed < IDLE_PULL_FLOOR_MS)
         await sleep(IDLE_PULL_FLOOR_MS, stopping.signal);
+      else if (waited && elapsed < BUSY_PULL_FLOOR_MS)
+        await sleep(BUSY_PULL_FLOOR_MS - elapsed, stopping.signal);
     }
   } finally {
     // A repeated stop request can still arrive once the loop has ended (npm forwards Ctrl+C a few
