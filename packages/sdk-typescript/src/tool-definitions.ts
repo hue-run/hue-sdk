@@ -98,15 +98,32 @@ const notJsonBoundary = (quote: string) =>
 const urlEscapedValue = (quote: string) =>
   String.raw`\\${quote}(?:${escapedUnit(quote, String.raw`<>${"`"}\r\n`)})*(?:\\\\\\\\)*\\${quote}(?=[\s"&#]|$)`;
 const openEscapedValue = (quote: string) => String.raw`\\${quote}(?:${escapedUnit(quote)})*`;
-/** A URL's `://` and everything after it up to whitespace, a quote, `<>` or a backslash-escaped
- * quote. A quoted value right after `=` (`?token="…"`) is part of the URL to its closing quote,
- * unless that quote opens the next key of the JSON around it, and the whole value is replaced; so
- * is one between backslash-escaped quotes (`?token=\"…\"`) that ends the URL or its query value,
- * and one whose quote does not close on its line, to the end of the line whatever it holds. */
-const urlRest = new RegExp(
-  String.raw`:\/\/(?:(?<==)(?:"${notJsonBoundary('"')}[^"<>${"`"}\r\n]*"|'${notJsonBoundary("'")}[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|${openEscapedValue('"')}\\*(?=[\r\n]|$)|${openEscapedValue("'")}\\*(?=[\r\n]|$))|(?!\\["'])[^\s"'<>${"`"}]|(?<==)["'])+`,
+/** One piece of a URL after its `://`, which runs to whitespace, a quote, `<>` or a
+ * backslash-escaped quote: a run of other characters; a quoted value right after `=`
+ * (`?token="…"`), to its closing quote unless that quote opens the next key of the JSON around it;
+ * one between backslash-escaped quotes (`?token=\"…\"`) that ends the URL or its query value; one
+ * whose quote does not close on its line, to the end of the line whatever it holds; a backslash
+ * that opens no escaped quote; or a quote after `=` that opens no value. `scrubTextUrl` replaces
+ * the quoted values. Pieces are read one at a time, not by one repeated pattern, so no length of
+ * URL can exhaust a regular expression engine's backtracking stack. */
+const urlPiece = new RegExp(
+  String.raw`([^\s"'<>${"`"}\\]+)|(?<==)(?:"${notJsonBoundary('"')}[^"<>${"`"}\r\n]*"|'${notJsonBoundary("'")}[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|${openEscapedValue('"')}\\*(?=[\r\n]|$)|${openEscapedValue("'")}\\*(?=[\r\n]|$))|\\(?!["'])|(?<==)["']`,
   "y",
 );
+/** An `&` that starts another URL (`&mongodb://…`), which is not a query name of the one before. */
+const ampersandUrl = /&[a-z][a-z0-9+.-]*:\/\//i;
+/** Where the URL whose `://` is at `index` ends: `index + 3` when nothing after it is one, and
+ * before an `&` in a run of its characters that starts another URL. */
+function urlEnd(text: string, index: number): number {
+  let end = index + 3;
+  urlPiece.lastIndex = end;
+  for (let piece = urlPiece.exec(text); piece; piece = urlPiece.exec(text)) {
+    const next = piece[1] === undefined ? null : ampersandUrl.exec(piece[1]);
+    if (next) return end + next.index;
+    end = urlPiece.lastIndex;
+  }
+  return end;
+}
 const isSchemeLetter = (code: number) => (code | 0x20) >= 0x61 && (code | 0x20) <= 0x7a;
 /** `a-z`, `0-9`, `+`, `.` and `-`, case-insensitively. */
 const isSchemeCharacter = (code: number) =>
@@ -140,10 +157,8 @@ function scrubTextUrls(
       start--;
     while (start < index && !isSchemeLetter(text.charCodeAt(start))) start++;
     if (start === index) continue;
-    urlRest.lastIndex = index;
-    const rest = urlRest.exec(text);
-    if (!rest) continue;
-    const end = index + rest[0].length;
+    const end = urlEnd(text, index);
+    if (end === index + 3) continue;
     const url = text.slice(start, end);
     const scrubbed = cut && end === text.length ? REDACTED : scrubTextUrl(url, state);
     if (scrubbed !== url) changes.push([start, end, scrubbed.length - url.length]);
@@ -154,22 +169,25 @@ function scrubTextUrls(
 }
 /** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
 const specialScheme = /^(?:https?|wss?|ftp):/i;
-/** A quoted value after `=` in a URL's query, whole, as `urlRest` reads one, or to the query's
- * end at a `#`, and one whose quote does not close before the URL's end, wherever it is. Each is
- * replaced before the URL is parsed, so an `&` or `=` inside it cannot make the rest of it a query
- * name. */
-const urlQueryValue = new RegExp(
-  String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|\\?["'][^\r\n]*$)`,
+/** The quoted values of a URL's text, as `urlPiece` reads them, replaced before the URL is parsed,
+ * so an `&` or `=` inside one cannot make the rest of it a query name. One between
+ * backslash-escaped quotes, which is never part of a URL in the text around it, and one whose
+ * quote does not close before the URL's end are replaced wherever they are; any other only in the
+ * query, to its end at a `#`, since one in the host or path can hold the `?` that starts the query
+ * or make the URL unparseable. */
+const urlAnyValue = new RegExp(
+  String.raw`(?<==)(?:${urlEscapedValue('"')}|${urlEscapedValue("'")}|"[^"\r\n]*$|'[^'\r\n]*$|${openEscapedValue('"')}\\*$|${openEscapedValue("'")}\\*$)`,
   "g",
 );
-const urlOpenValue = new RegExp(
-  String.raw`(?<==)(?:"[^"\r\n]*|'[^'\r\n]*|${openEscapedValue('"')}\\*|${openEscapedValue("'")}\\*)$`,
+const urlQueryValue = new RegExp(
+  String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|\\?["'][^\r\n]*$)`,
+  "g",
 );
 /** A URL in free text, its quoted values replaced. One with another scheme, which runtimes parse
  * differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
   if (!specialScheme.test(url)) return /[@?#]/.test(url) ? REDACTED : url;
-  const opened = url.replace(urlOpenValue, REDACTED);
+  const opened = url.replace(urlAnyValue, REDACTED);
   const query = opened.indexOf("?");
   const hash = opened.indexOf("#");
   if (query === -1 || (hash !== -1 && hash < query)) return scrubUrl(opened, state);
@@ -239,11 +257,11 @@ const bracketToken = new RegExp(
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
-  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)\s)[^\s"',;&})\]]+/iy;
+  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;&})\]\\])|(?:bearer|basic|token)\s)(?:\[redacted\](?=[^\s"',;&})\]\\]))?[^\s"',;&})\]]+/iy;
 /** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
  * `OAuth1 …`), or a lone credential. One already replaced is left alone. */
 const authorizationBare =
-  /(\\?["']?)(?!\[redacted\]|%5Bredacted%5D)([^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;})\]\\]))((?:\[redacted\](?=[^\s"',;})\]\\]))?[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
 
 function normalizedKey(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, "");
@@ -465,8 +483,8 @@ export function scrubCredentialText(text: string, cut = false): string {
   ]);
 }
 
-/** The spans cut to the text outside the replaced URLs, moved to where that text is once the URLs
- * are: a span starting inside a URL starts after it, and one ending inside a URL ends before it. */
+/** The spans moved to where their text is once the URLs are replaced: one starting inside a
+ * replaced URL starts after it, and one ending inside one ends before it. */
 function spansBesideUrls(spans: Span[], changes: UrlChange[]): Span[] {
   // How much longer the text is after each replacement.
   const growth: number[] = [];

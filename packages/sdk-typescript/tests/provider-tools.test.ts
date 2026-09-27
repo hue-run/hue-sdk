@@ -310,6 +310,20 @@ test("a bracketed value full of escaped quotes scrubs in linear time", () => {
   expect(performance.now() - started).toBeLessThan(5_000);
 });
 
+test("a URL of any length is read to its end", () => {
+  // A URL is read a piece at a time; as one repeated pattern, a long one exhausted Bun's regular
+  // expression engine, which then matched nothing and left the URL as it was.
+  const started = performance.now();
+  const scrubbed = scrubCredentialText(
+    `see https://h.example.test/?sig=synthetic-sig&p=${"a".repeat(600_000)}`,
+  );
+  expect(
+    scrubbed.startsWith("see https://h.example.test/?sig=%5Bredacted%5D&p=%5Bredacted%5D"),
+  ).toBe(true);
+  expect(scrubbed).not.toContain("synthetic-sig");
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
 test("a run of backslashes in a value that does not close is read once", () => {
   // Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
   // would not finish.

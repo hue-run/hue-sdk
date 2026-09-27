@@ -108,33 +108,56 @@ _URL_ESCAPED_VALUE = (
 )
 _OPEN_ESCAPED_DOUBLE = rf"\\\"(?:{_ESCAPED_DOUBLE})*"
 _OPEN_ESCAPED_SINGLE = rf"\\'(?:{_ESCAPED_SINGLE})*"
-# A URL's ``://`` and everything after it up to whitespace, a quote, ``<>`` or a backslash-escaped
-# quote. A quoted value right after ``=`` (``?token="…"``) is part of the URL to its closing quote,
-# unless that quote opens the next key of the JSON around it, and the whole value is replaced; so
-# is one between backslash-escaped quotes (``?token=\"…\"``) that ends the URL or its query value,
-# and one whose quote does not close on its line, to the end of the line whatever it holds.
-_URL_REST = re.compile(
-    rf"://(?:(?<==)(?:\"{_NOT_JSON_BOUNDARY_DOUBLE}[^\"<>`\r\n]*\""
+# One piece of a URL after its ``://``, which runs to whitespace, a quote, ``<>`` or a
+# backslash-escaped quote: a run of other characters; a quoted value right after ``=``
+# (``?token="…"``), to its closing quote unless that quote opens the next key of the JSON around
+# it; one between backslash-escaped quotes (``?token=\"…\"``) that ends the URL or its query value;
+# one whose quote does not close on its line, to the end of the line whatever it holds; a backslash
+# that opens no escaped quote; or a quote after ``=`` that opens no value. ``_url_values_replaced``
+# replaces the quoted values. Pieces are read one at a time, as in the TypeScript SDK, where one
+# repeated pattern could exhaust the regular expression engine's backtracking stack.
+_URL_PIECE = re.compile(
+    rf"([^{_JS_SPACE}\"'<>`\\]+)|(?<==)(?:\"{_NOT_JSON_BOUNDARY_DOUBLE}[^\"<>`\r\n]*\""
     rf"|'{_NOT_JSON_BOUNDARY_SINGLE}[^'<>`\r\n]*'|{_URL_ESCAPED_VALUE}"
     r"|(?:\"[^\"\r\n]*|'[^'\r\n]*)(?=[\r\n]|\Z)"
     rf"|{_OPEN_ESCAPED_DOUBLE}\\*(?=[\r\n]|\Z)|{_OPEN_ESCAPED_SINGLE}\\*(?=[\r\n]|\Z))"
-    rf"|(?!\\[\"'])[^{_JS_SPACE}\"'<>`]|(?<==)[\"'])+",
+    r"|\\(?![\"'])|(?<==)[\"']",
 )
+
+
+# An ``&`` that starts another URL (``&mongodb://…``), which is not a query name of the one before.
+_AMPERSAND_URL = re.compile(r"&[a-z][a-z0-9+.-]*://", re.IGNORECASE | re.ASCII)
+
+
+def _url_end(text: str, index: int) -> int:
+    """Where the URL whose ``://`` is at ``index`` ends: ``index + 3`` when nothing after it is
+    one, and before an ``&`` in a run of its characters that starts another URL."""
+    end = index + 3
+    while (piece := _URL_PIECE.match(text, end)) is not None:
+        if piece.start(1) != -1 and (
+            following := _AMPERSAND_URL.search(text, piece.start(1), piece.end(1))
+        ):
+            return following.start()
+        end = piece.end()
+    return end
+
+
 _SCHEME_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 # Schemes WHATWG parses as hierarchical, which both SDKs serialize alike.
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
-# A quoted value after ``=`` in a URL's query, whole, as ``_URL_REST`` reads one, or to the query's
-# end at a ``#``, and one whose quote does not close before the URL's end, wherever it is. Each is
-# replaced before the URL is parsed, so an ``&`` or ``=`` inside it cannot make the rest of it a
-# query name.
-_URL_QUERY_VALUE = re.compile(
-    rf"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|{_URL_ESCAPED_VALUE}|\\?[\"'][^\r\n]*\Z)"
+# The quoted values of a URL's text, as ``_URL_PIECE`` reads them, replaced before the URL is
+# parsed, so an ``&`` or ``=`` inside one cannot make the rest of it a query name. One between
+# backslash-escaped quotes, which is never part of a URL in the text around it, and one whose quote
+# does not close before the URL's end are replaced wherever they are; any other only in the query,
+# to its end at a ``#``, since one in the host or path can hold the ``?`` that starts the query or
+# make the URL unparseable.
+_URL_ANY_VALUE = re.compile(
+    rf"(?<==)(?:{_URL_ESCAPED_VALUE}|\"[^\"\r\n]*\Z|'[^'\r\n]*\Z"
+    rf"|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
 )
-_URL_OPEN_VALUE = re.compile(
-    rf"(?<==)(?:\"[^\"\r\n]*|'[^'\r\n]*|{_OPEN_ESCAPED_DOUBLE}\\*|{_OPEN_ESCAPED_SINGLE}\\*)\Z"
-)
+_URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
 # Where a word starts: after a character that is not a word character, or after a JSON escape
 # (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
 _WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
@@ -208,14 +231,16 @@ _BRACKET_TOKEN = re.compile(
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
 _BARE_VALUE = re.compile(
-    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D|(?:bearer|basic|token)[{_JS_SPACE}])"
-    rf"[^{_JS_SPACE}\"',;&}})\]]+",
+    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;&}})\]\\])"
+    rf"|(?:bearer|basic|token)[{_JS_SPACE}])"
+    rf"(?:\[redacted\](?=[^{_JS_SPACE}\"',;&}})\]\\]))?[^{_JS_SPACE}\"',;&}})\]]+",
     re.IGNORECASE | re.ASCII,
 )
 # An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
 # ``OAuth1 …``), or a lone credential. One already replaced is left alone.
 _AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)(?!\[redacted\]|%5Bredacted%5D)([^{_JS_SPACE}\"',;}})\]]+)"
+    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;}})\]\\]))"
+    rf"((?:\[redacted\](?=[^{_JS_SPACE}\"',;}})\]\\]))?[^{_JS_SPACE}\"',;}})\]]+)"
     rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
 )
 
@@ -242,9 +267,8 @@ def _scrub_text_urls(
                 start -= 1
             while start < index and text[start] not in _SCHEME_LETTERS:
                 start += 1
-            rest = _URL_REST.match(text, index) if start < index else None
-            if rest is not None:
-                end = rest.end()
+            end = _url_end(text, index) if start < index else index + 3
+            if end > index + 3:
                 url = text[start:end]
                 if cut and end == len(text):
                     replaced = REDACTED
@@ -266,9 +290,9 @@ def _scrub_text_urls(
 
 
 def _url_values_replaced(url: str) -> str:
-    """A URL's quoted values replaced: one it ends in, wherever it is, and each in its query up to
-    a ``#``."""
-    url = _URL_OPEN_VALUE.sub(REDACTED, url, count=1)
+    """A URL's quoted values replaced: one between backslash-escaped quotes or one it ends in,
+    wherever it is, and each other in its query up to a ``#``."""
+    url = _URL_ANY_VALUE.sub(REDACTED, url)
     query = url.find("?")
     fragment = url.find("#")
     if query == -1 or (fragment != -1 and fragment < query):
@@ -496,9 +520,8 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
 def _spans_beside_urls(
     spans: list[tuple[int, int]], changes: list[tuple[int, int, int]]
 ) -> list[tuple[int, int]]:
-    """The spans cut to the text outside the replaced URLs, moved to where that text is once the
-    URLs are: a span starting inside a URL starts after it, and one ending inside a URL ends before
-    it."""
+    """The spans moved to where their text is once the URLs are replaced: one starting inside a
+    replaced URL starts after it, and one ending inside one ends before it."""
     starts = [change[0] for change in changes]
     # How much longer the text is after each replacement.
     growth = list(accumulate(change[2] for change in changes))

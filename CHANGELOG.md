@@ -21,14 +21,17 @@ refuses to publish a version without a matching entry below.
   `\u0022token\u0022:`) is still not read. A credential key's whole `[…]` or `{…}` value is
   replaced, where only its `[` or `{` was, and one that does not close is replaced to the end of the
   text, and `key => value` pairs are read. JSON inside a JSON string keeps its escaped quotes
-  (`\\\"`) inside a value. `hue listen` scrubs its messages with the same rules. **Wire**
+  (`\\\"`) inside a value, and a value that only starts with `[redacted]` (`token=[redacted]…`) is
+  no longer taken for one already replaced. `hue listen` scrubs its messages with the same rules,
+  reading at most 16,384 code points of each and marking a cut with `…`. **Wire**
 - In the same text, a quoted value whose quote does not close on its line, as when the text was cut
   inside it, is replaced to the end of the line, where only its first word was. A URL's quoted query
-  value (`?token="…"`), or one between backslash-escaped quotes that ends the URL or the query value
-  (`?token=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as a query
-  name. Such a value no longer takes in the next key of the JSON around the URL
-  (`?state=","client_secret":"…"`), and the value of a key or scheme word that a URL takes in
-  (`?t="a"&Bearer …`) is still replaced after it. Only the first 16,384 code points are scrubbed; a
+  value (`?token="…"`), or a value between backslash-escaped quotes anywhere in it that ends the URL
+  or a query value (`=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as
+  a query name. Such a value no longer takes in the next key of the JSON around the URL
+  (`?state=","client_secret":"…"`), the value of a key or scheme word that a URL takes in
+  (`?t="a"&Bearer …`) is still replaced after it, and a URL after an `&` (`&mongodb://u:…@…`) is
+  read as its own URL, not a query name. Only the first 16,384 code points are scrubbed; a
   URL or prefixed token that this cut interrupts is now replaced whole, and the text is still
   scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`, `hue_rt_`,
   `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and Google OAuth

@@ -491,6 +491,82 @@
     {
       "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"a\\\"&password=\\\"synthetic-before-url https://h.example.test/?q=1\\\"}\"}",
       "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D&password=%5Bredacted%5D\\\"[redacted]\\\"}\"}"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=\\\"abc\\\"&mongodb://u:synthetic-amp-escaped@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&[redacted] failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=\"abc\"&mongodb://u:synthetic-amp-plain@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&[redacted] failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=abc&mongodb://u:synthetic-amp-bare@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&[redacted] failed"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d1 synthetic-second-1\\",
+      "expected": "{\"error\":\"password=\\\"[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d1 synthetic-second-1\\\nnext line",
+      "expected": "{\"error\":\"password=\\\"[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d3 synthetic-second-3\\\\\\",
+      "expected": "{\"error\":\"password=\\\"[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d3 synthetic-second-3\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\\"[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d5 synthetic-second-5\\\\\\\\\\",
+      "expected": "{\"error\":\"password=\\\"[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d5 synthetic-second-5\\\\\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\\"[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s1 synthetic-second-1\\",
+      "expected": "{\"error\":\"password=\\'[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s1 synthetic-second-1\\\nnext line",
+      "expected": "{\"error\":\"password=\\'[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s3 synthetic-second-3\\\\\\",
+      "expected": "{\"error\":\"password=\\'[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s3 synthetic-second-3\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\'[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s5 synthetic-second-5\\\\\\\\\\",
+      "expected": "{\"error\":\"password=\\'[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s5 synthetic-second-5\\\\\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\'[redacted]\nnext line"
+    },
+    {
+      "input": "access_token=>%5Bredacted%5Dsynthetic-after-marker failed",
+      "expected": "access_token=>[redacted] failed"
+    },
+    {
+      "input": "token=[redacted]synthetic-after-marker-bracket failed",
+      "expected": "token=[redacted] failed"
+    },
+    {
+      "input": "{'error': 'GET https://h.example.test/v1/token=\\'synthetic-path-escaped\\'#top failed'}",
+      "expected": "{'error': 'GET https://h.example.test/v1/token=[redacted] failed'}"
+    },
+    {
+      "input": "GET https://h.example.test/p;password=\\'synthetic-path?escaped\\'#x failed",
+      "expected": "GET https://h.example.test/p;password=[redacted] failed"
     }
   ]
 }

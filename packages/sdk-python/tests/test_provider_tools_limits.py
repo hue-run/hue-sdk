@@ -416,6 +416,18 @@ def test_a_bracketed_value_full_of_escaped_quotes_scrubs_in_linear_time():
     assert time.perf_counter() - started < 10
 
 
+def test_a_url_of_any_length_is_read_to_its_end():
+    # A URL is read a piece at a time, as in the TypeScript SDK, where one repeated pattern
+    # exhausted Bun's regular expression engine on a long URL.
+    started = time.perf_counter()
+    scrubbed = scrub_credential_text(
+        "see https://h.example.test/?sig=synthetic-sig&p=" + "a" * 600_000
+    )
+    assert scrubbed.startswith("see https://h.example.test/?sig=%5Bredacted%5D&p=%5Bredacted%5D")
+    assert "synthetic-sig" not in scrubbed
+    assert time.perf_counter() - started < 10
+
+
 def test_a_run_of_backslashes_in_a_value_that_does_not_close_is_read_once():
     # Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
     # would not finish.

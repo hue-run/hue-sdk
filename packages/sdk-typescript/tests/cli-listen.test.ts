@@ -846,6 +846,17 @@ describe("hue listen forwarding", () => {
     }
   });
 
+  test("text from elsewhere is scrubbed and printed only to its first 16,384 code points", async () => {
+    const hue = await mockHue();
+    const bot = await receiver();
+    const long = `token=\\"${"b ".repeat(500_000)}synthetic-long-tail`;
+    const listen = run([...args(hue.origin, bot.url), long], { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    expect(await listen.exit).toBe(2);
+    expect(listen.output()).toContain('Unexpected argument: token=\\"[redacted]…');
+    expect(listen.output()).not.toContain("synthetic-long-tail");
+    expect(listen.output().length).toBeLessThan(5_000);
+  });
+
   test("repeats the recorded answer for a delivery handed out again instead of sending it twice", async () => {
     const hue = await mockHue({ repeatDeliveries: true });
     const bot = await receiver();
