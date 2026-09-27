@@ -31,6 +31,11 @@ refuses to publish a version without a matching entry below.
   and wrote `mcp.json` wherever that link pointed. The checks run before the file is read and again
   before the rename, but are not atomic against an account that can write the project directory and
   races the command.
+- Security: `hue eval` and the SDK's `runSimulation` and `runLocalAgent` accept a project or
+  experiment id from Hue as a checkpoint path component only when it is a single name of letters,
+  digits, `.`, `_` and `-` that starts with a letter or digit, and refuse a resolved checkpoint path
+  outside its directory. Before, an id containing `../` from a hostile or compromised origin made
+  them create directories and write checkpoint files outside `.hue/eval` or `--checkpoint-dir`.
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.

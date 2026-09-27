@@ -40,10 +40,12 @@ function hueStandIn(
     traces?: "refuse" | "drop" | "retry-after";
     /** Grade as a scorer that never reads the execution state. */
     ignoreExecutionState?: boolean;
+    /** Project id the stand-in reports; a hostile origin may return anything. */
+    projectId?: string;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
-  const projectId = randomUUID();
+  const projectId = options.projectId ?? randomUUID();
   const environmentId = randomUUID();
   const environmentVersionId = randomUUID();
   const dataset = {
@@ -881,6 +883,39 @@ describe("hue eval", () => {
         expect(caseSpan.attributes).not.toContain("output.value");
         expect(await readFile(join(cwd, ".hue", "eval", ".gitignore"), "utf8")).toBe("*\n");
         expect(f.calls.requests.filter((line) => line === "GET /case-conversions")).toHaveLength(1);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "refuses a project id from the origin that would leave the checkpoint directory",
+    async () => {
+      const f = hueStandIn({ projectId: "../../escaped" });
+      const cwd = await workspace();
+      const checkpoints = join(cwd, "state", "checkpoints");
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            f.scenario.id,
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--checkpoint-dir",
+            checkpoints,
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("Refusing to use project id");
+        expect(existsSync(join(cwd, "escaped"))).toBe(false);
+        expect(existsSync(checkpoints)).toBe(false);
+        expect(f.experiments.size).toBe(0);
       } finally {
         f.stop();
         await rm(cwd, { recursive: true, force: true });

@@ -635,6 +635,38 @@ function harness(
 }
 
 describe("one-shot simulation workflow", () => {
+  test("rejects malformed server experiment ids before creating a run checkpoint", async () => {
+    for (const id of ["", ".", "..", "../escape", null, 42]) {
+      const fixture = harness({
+        evidenceFailures: 0,
+        loseCompletionAcknowledgement: false,
+        loseSealAcknowledgement: false,
+      });
+      fixture.client.createExperiment = async () => ({
+        id: id as string,
+        evaluationRunId: randomUUID(),
+      });
+      const directory = await mkdtemp(join(tmpdir(), "hue-simulation-invalid-id-"));
+      try {
+        await expect(
+          runSimulation({
+            ...fixture,
+            checkpointDirectory: directory,
+            definition: scenario,
+            persistResultContent: false,
+            traceEvidence: { mode: "required" },
+          }),
+        ).rejects.toThrow(/Refusing to use experiment id/);
+        expect(fixture.targetCalls()).toBe(0);
+        expect((await readdir(directory)).sort()).toEqual(["active-attempt.json", "manifest.json"]);
+        const attempt = JSON.parse(await readFile(join(directory, "active-attempt.json"), "utf8"));
+        expect(attempt.value.experimentId).toBeUndefined();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("publishes a server-valid aggregate world and preserves definition identity", async () => {
     const fixture = harness({
       evidenceFailures: 0,

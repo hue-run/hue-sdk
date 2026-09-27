@@ -27,7 +27,7 @@ import type {
   ScorerVersion,
 } from "../evals/types.js";
 import { TargetResult } from "../evals/types.js";
-import { CheckpointIdentityError, CheckpointStore } from "../evals/checkpoint.js";
+import { CheckpointIdentityError, CheckpointStore, checkpointPath } from "../evals/checkpoint.js";
 import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
 import { safeFilename } from "../evals/files.js";
 import { digest } from "../evals/json.js";
@@ -966,9 +966,13 @@ async function prepareCheckpointDirectory(
   explicit: string | undefined,
   agentKey: string,
   projectId: string,
-  leaf: string,
+  ...leaf: string[]
 ): Promise<string> {
-  if (explicit) return join(resolve(explicit), projectId, leaf);
+  const segments: [string, string][] = [
+    [projectId, "project id"],
+    ...leaf.map((part): [string, string] => [part, "checkpoint kind"]),
+  ];
+  if (explicit) return checkpointPath(explicit, ...segments);
   const root = resolve(".hue", "eval");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const ignore = join(root, ".gitignore");
@@ -977,7 +981,7 @@ async function prepareCheckpointDirectory(
   } catch {
     await writeFile(ignore, "*\n", { flag: "wx", mode: 0o600 }).catch(() => undefined);
   }
-  return join(root, agentKey, projectId, leaf);
+  return checkpointPath(join(root, agentKey), ...segments);
 }
 
 /** Worker-side client that reports registration and claims without changing the worker. */
@@ -1474,7 +1478,7 @@ async function runDirect(
       client,
       hue: run.hue,
       experimentId,
-      checkpointDirectory: join(store.directory, experimentId),
+      checkpointDirectory: checkpointPath(store.directory, [experimentId, "experiment id"]),
       // Outputs, error messages and explanations are stored unless opted out; --content governs
       // only the telemetry.
       persistResultContent: !values["no-output"],
@@ -1556,7 +1560,8 @@ async function runWorker(
     values["checkpoint-dir"],
     agent.key,
     project.id,
-    join("worker", slug(agent.revision) || "dev"),
+    "worker",
+    slug(agent.revision) || "dev",
   );
   let current: LocalAgentClaim | undefined;
   client.onRegistered = (registered) => {
