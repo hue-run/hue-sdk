@@ -383,8 +383,8 @@ async function readJsonConfig(path: string, display: string): Promise<unknown> {
  * Refuses a symbolic link, or anything but a directory, between the working directory and the file
  * (`.cursor` or `.vscode`), as the file itself is refused. The working directory and its ancestors
  * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one. This runs
- * once, before the file is read; Node has no `openat`, so it cannot pin the directory against an
- * account that can write the project and swaps it for a link before the write.
+ * before the file is read and again before the rename. Node has no `openat`, so it cannot pin the
+ * directory against an account that can write the project and swaps a link in after the last check.
  */
 async function rejectLinkedParents(cwd: string, path: string, display: string): Promise<void> {
   let current = cwd;
@@ -427,7 +427,12 @@ async function rejectSymlink(path: string, display: string): Promise<Stats | und
  * created owner-only, 0600 narrowed by the umask: people and clients add literal tokens to these
  * files.
  */
-async function writeConfigFile(path: string, text: string, display: string): Promise<void> {
+async function writeConfigFile(
+  cwd: string,
+  path: string,
+  text: string,
+  display: string,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const existing = await rejectSymlink(path, display);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
@@ -455,14 +460,16 @@ async function writeConfigFile(path: string, text: string, display: string): Pro
         }
         await handle.chmod(mode);
         // Root also gives the file back to its owner, last: changing the mode of another account's
-        // file would need CAP_FOWNER. If it cannot, the file stays root's, as before.
+        // file would need CAP_FOWNER. If it cannot, the write fails and the old file stays in place,
+        // rather than leaving one its owner cannot read.
         if (process.geteuid?.() === 0 && created.uid !== existing.uid)
-          await handle.chown(existing.uid, -1).catch(() => undefined);
+          await handle.chown(existing.uid, -1);
       }
       await handle.sync();
     } finally {
       await handle.close();
     }
+    await rejectLinkedParents(cwd, path, display);
     await rejectSymlink(path, display);
     await rename(temporary, path);
   } catch (error) {
@@ -1063,7 +1070,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return 0;
   }
   try {
-    await writeConfigFile(path, content, display);
+    await writeConfigFile(cwd, path, content, display);
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }

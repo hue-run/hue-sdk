@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   chmod,
   chown,
@@ -13,6 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { chownSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -31,6 +32,18 @@ import {
   shellWord,
   toolsetsMcpUrl,
 } from "../src/cli/mcp.js";
+
+// `open` passes through, after `beforeOpen` when a test sets it, so a test can change the tree at the
+// moment the command creates its temporary file.
+const realFilesystem = { ...filesystem };
+let beforeOpen: ((path: string) => Promise<void>) | undefined;
+void mock.module("node:fs/promises", () => ({
+  ...realFilesystem,
+  open: async (...args: Parameters<typeof filesystem.open>) => {
+    await beforeOpen?.(String(args[0]));
+    return realFilesystem.open(...args);
+  },
+}));
 
 const roots: string[] = [];
 async function temporaryRoot(): Promise<string> {
@@ -479,6 +492,27 @@ describe("hue mcp install", () => {
     }
     expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
     expect(await readdir(outside)).toEqual(["mcp.json"]);
+
+    // A link swapped in after the read, before the temporary file is created, is refused before the
+    // rename, so the file outside is not replaced.
+    await rm(join(root, ".cursor"));
+    await mkdir(join(root, ".cursor"));
+    beforeOpen = async (path) => {
+      if (!path.startsWith(join(root, ".cursor", "."))) return;
+      beforeOpen = undefined;
+      await rm(join(root, ".cursor"), { recursive: true });
+      await symlink(outside, join(root, ".cursor"));
+    };
+    try {
+      const swapped = await mcp(["install", "--client", "cursor"], { cwd: root });
+      expect(swapped.code).toBe(1);
+      expect(swapped.stderr).toContain(".cursor is a symbolic link");
+    } finally {
+      beforeOpen = undefined;
+    }
+    expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
+    expect(await readdir(outside)).toEqual(["mcp.json"]);
+    await rm(join(root, ".cursor"));
 
     // The working directory itself may be reached through a link, as /tmp, /var and some home
     // directories are on macOS; only the directories the command names below it are checked.
