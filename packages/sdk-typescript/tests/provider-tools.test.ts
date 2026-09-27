@@ -4,7 +4,11 @@ import {
   hostedToolActivity,
   providerErrorDescription,
 } from "../src/provider-tools.js";
-import { scrubCredentialText, toolCatalogSummary } from "../src/tool-definitions.js";
+import {
+  scrubCredentialText,
+  scrubCredentialTextUnbounded,
+  toolCatalogSummary,
+} from "../src/tool-definitions.js";
 import errorTexts from "./fixtures/provider-error-text.json" with { type: "json" };
 import listingDigest from "./fixtures/provider-tool-listing.json" with { type: "json" };
 import plantedSecrets from "./fixtures/planted-secrets.json" with { type: "json" };
@@ -259,11 +263,122 @@ test("error text is scrubbed of credentials and bounded, identically to the Pyth
     expect(providerErrorDescription(input)).toBe(expected);
   expect(providerErrorDescription("x".repeat(1_100))).toBe(`${"x".repeat(1_024)}…`);
   expect(providerErrorDescription("x".repeat(1_024))).toBe("x".repeat(1_024));
-  // Scrubbed before the cut: a credential that straddles the bound never shows a prefix.
-  const straddling = providerErrorDescription(`${"a".repeat(1_015)} token=synthetic-secret-value`);
-  expect(straddling).not.toContain("synthetic");
-  expect(straddling.endsWith("…")).toBe(true);
+  // Scrubbed before the cut: the 1,024th code point falls inside `[redacted]`, never inside a
+  // credential, where cutting first would leave its start to be scrubbed on its own.
+  expect(providerErrorDescription(`${"a".repeat(1_015)} token=synthetic-secret-value`)).toBe(
+    `${"a".repeat(1_015)} token=[r…`,
+  );
+  expect(providerErrorDescription(`${"a".repeat(1_010)} password="synthetic two words"`)).toBe(
+    `${"a".repeat(1_010)} password="[re…`,
+  );
   expect([...providerErrorDescription(`${"😀".repeat(1_030)}`)]).toHaveLength(1_025);
+});
+
+test("what the 16,384-code-point scan cuts through is redacted to the cut, as in the Python SDK", () => {
+  // The long value before it is scrubbed to `[redacted]`, so the text at the cut is exported.
+  const lead = `token=${"x".repeat(16_000)} `;
+  // `kept` ends where the scan cuts, and `rest` is past it; `exported` is what `kept` becomes.
+  const expectCut = (kept: string, rest: string, exported: string) => {
+    const filler = "y".repeat(16_384 - lead.length - kept.length - 1);
+    expect(providerErrorDescription(`${lead}${filler} ${kept}${rest}`)).toBe(
+      `token=[redacted] ${filler} ${exported}…`,
+    );
+  };
+  expectCut('password="synthetic-first synth', 'etic-second"', 'password="[redacted]');
+  expectCut("https://synthetic-us", "er:synthetic-pass@mcp.example.test/", "[redacted]");
+  expectCut("see hue_sk_syn", "thetic0123456789", "see [redacted]");
+  expectCut('headers={"Authorization": "Bot synth', 'etic"}', "headers=[redacted]");
+  // Text the cut does not interrupt keeps its words.
+  expectCut(
+    "see https://mcp.example.test/sse next ",
+    "words",
+    "see https://mcp.example.test/sse next ",
+  );
+});
+
+test("an escaped space ends a credential, so a run of them scrubs in linear time", () => {
+  // Each `Bearer%20` starts a credential; were `%20` part of one, each would run to the end.
+  const started = performance.now();
+  const scrubbed = scrubCredentialTextUnbounded("Bearer%20".repeat(111_112));
+  expect(scrubbed.startsWith("Bearer%20[redacted]%20[redacted]%20")).toBe(true);
+  expect(scrubbed).not.toContain("Bearer%20Bearer");
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
+test("a bracketed value full of escaped quotes scrubs in linear time", () => {
+  // A string between backslash-escaped quotes that a bare quote ends is read once, not again
+  // from each escaped quote inside it.
+  const started = performance.now();
+  const text = String.raw`token: [\"${String.raw`\\\"`.repeat(50_000)}"`;
+  expect(scrubCredentialTextUnbounded(text)).toBe("token: [redacted]");
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
+test("a URL of 500,000 escaped values is read to its end", () => {
+  // A URL is read a piece at a time; as one repeated pattern, a URL this long made Bun's regular
+  // expression engine (1.4) match nothing and leave it as it was, and a shorter one Bun 1.3's.
+  const started = performance.now();
+  const scrubbed = scrubCredentialTextUnbounded(
+    `see https://h.example.test/?sig=synthetic-sig${'&a=\\"x\\"'.repeat(500_000)}`,
+  );
+  expect(
+    scrubbed.startsWith("see https://h.example.test/?sig=%5Bredacted%5D&a=%5Bredacted%5D"),
+  ).toBe(true);
+  expect(scrubbed).not.toContain("synthetic-sig");
+  expect(performance.now() - started).toBeLessThan(20_000);
+});
+
+test("a query full of `?` is read once for names holding a URL", () => {
+  // A name starts at the query's `?` or an `&`; were every `?` a start, each would be read to the
+  // end of the query.
+  const started = performance.now();
+  expect(scrubCredentialTextUnbounded(`https://h.example.test/?${"?".repeat(100_000)}`)).toContain(
+    "https://h.example.test/?",
+  );
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
+test("a text longer than 16,384 code points is scrubbed to there and cut", () => {
+  // An escaped value this long in a URL is past what Bun's regular expression engine reads, which
+  // then matched nothing and left the value as it was.
+  const scrubbed = scrubCredentialText(
+    `see https://h.example.test/?t=\\"synthetic-long-value${"b".repeat(200_000)}`,
+  );
+  expect(scrubbed).not.toContain("synthetic-long-value");
+  expect(scrubbed.endsWith("…")).toBe(true);
+  expect(scrubbed.length).toBeLessThan(16_384);
+});
+
+test("a scheme that a cut text ends in or right after is replaced whole", () => {
+  for (const end of ["wss://", "wss:/", "wss:", "ws"])
+    expect(scrubCredentialText(`see x>synthetic-cut-glue-${end}`, true)).toBe("see x>[redacted]");
+  // The 16,384-code-point cut falls inside the `://`.
+  const text = `${"a ".repeat(8_179)}synthetic-cap-glue-redis://h?x=1`;
+  expect(scrubCredentialText(text)).toBe(`${"a ".repeat(8_179)}[redacted]…`);
+});
+
+test("a run of Authorization values inside each other's first word is read once", () => {
+  // Each value starting inside the one before's first word ends where that one does; were each
+  // read again to the end, 20,000 of them would take seconds.
+  const started = performance.now();
+  for (const value of ["Authorization=>%5Bredacted%5D\\", "Authorization=%5Bredacted%5D&"])
+    expect(scrubCredentialTextUnbounded(value.repeat(20_000))).not.toContain("%5Bredacted%5D");
+  expect(performance.now() - started).toBeLessThan(1_000);
+});
+
+test("a run of backslashes in a value that does not close is read once", () => {
+  // Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
+  // would not finish.
+  for (const count of [80, 200]) {
+    const started = performance.now();
+    providerErrorDescription(`{"error": "token=\\"${"\\".repeat(count)}"x"}`);
+    scrubCredentialTextUnbounded(String.raw`token: [\"${"\\".repeat(count)}"x`);
+    expect(performance.now() - started).toBeLessThan(100);
+  }
+  const started = performance.now();
+  for (const value of [String.raw`token=\"`, String.raw`token: [\"`, String.raw`?t=\"`])
+    scrubCredentialTextUnbounded(`${value}${"\\".repeat(200_000)}x\n`);
+  expect(performance.now() - started).toBeLessThan(5_000);
 });
 
 test("server.address keeps an underscore in a host name, as WHATWG URL parsing does", () => {
@@ -288,7 +403,9 @@ test("every secret planted in the shared corpus is redacted, one case at a time 
   });
   expect(leaked).toEqual([]);
   // The whole corpus as one text: every secret still redacted, in time linear in its length.
-  const whole = scrubCredentialText(plantedSecrets.cases.map(({ input }) => input).join("\n"));
+  const whole = scrubCredentialTextUnbounded(
+    plantedSecrets.cases.map(({ input }) => input).join("\n"),
+  );
   expect(
     plantedSecrets.cases.flatMap(({ secrets }) =>
       secrets.filter((secret) => whole.includes(secret)),

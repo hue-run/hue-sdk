@@ -149,12 +149,13 @@ def provider_error_description(value: str) -> str:
     """A provider's error text as a failed call exports it under content capture.
 
     Credentials are scrubbed first, then the text keeps at most 1,024 code points with ``…``
-    marking a cut; lone surrogates are replaced and NUL removed. Identical to the TypeScript
-    SDK's ``providerErrorDescription``.
+    marking a cut; lone surrogates are replaced and NUL removed. Only the first 16,384 code points
+    are scrubbed, and what that cut interrupts (a quoted value, a URL, a prefixed token) is
+    redacted to it. Identical to the TypeScript SDK's ``providerErrorDescription``.
     """
     text = _LONE_SURROGATE.sub("\ufffd", value).replace("\x00", "")
     scanned = text[:MAX_ERROR_SCAN]
-    scrubbed = scrub_credential_text(scanned)
+    scrubbed = scrub_credential_text(scanned, len(text) > MAX_ERROR_SCAN)
     bounded = scrubbed[:MAX_ERROR_TEXT]
     cut = len(text) > MAX_ERROR_SCAN or len(scrubbed) > MAX_ERROR_TEXT
     return f"{bounded}…" if cut else bounded

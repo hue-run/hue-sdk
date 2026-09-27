@@ -86,7 +86,7 @@
     },
     {
       "input": "password=\"synthetic-unclosed and more",
-      "expected": "password=\"[redacted] and more"
+      "expected": "password=\"[redacted]"
     },
     {
       "input": "\"authorization\": \"Bearer synthetic two words\"",
@@ -122,7 +122,7 @@
     },
     {
       "input": "failed at https://mcp.example.test/sse?token=\"synthetic-unclosed-query next",
-      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D"
     },
     {
       "input": "world token hue_world_synthetic0000000000.signature111 and key hue_sk_test_synthetic_key_0123 were refused",
@@ -266,7 +266,7 @@
     },
     {
       "input": "password=sk-synthetic0123:token=\\'synthetic-escaped-single more",
-      "expected": "password=[redacted]'[redacted] more"
+      "expected": "password=[redacted]'[redacted]"
     },
     {
       "input": "basic: private_token=\\'synthetic-escaped-basic",
@@ -283,6 +283,526 @@
     {
       "input": "token=\\'a \\\"b\\\" c\\' d",
       "expected": "token=\\'[redacted]\\' d"
+    },
+    {
+      "input": "{\"detail\":\"invalid key\\nhue_sk_synthetic-escaped-1\"}",
+      "expected": "{\"detail\":\"invalid key\\n[redacted]\"}"
+    },
+    {
+      "input": "Authorization%3A%20Bearer%20synthetic-escaped-2",
+      "expected": "Authorization%3A%20Bearer%20[redacted]"
+    },
+    {
+      "input": "token%3Dghp_synthetic-escaped-3",
+      "expected": "token%3D[redacted]"
+    },
+    {
+      "input": "{\"error\":\"denied \\u0022sk-synthetic-escaped-4\\u0022\"}",
+      "expected": "{\"error\":\"denied \\u0022[redacted]\\u0022\"}"
+    },
+    {
+      "input": "line one\\tBasic synthetic-escaped-5",
+      "expected": "line one\\tBasic [redacted]"
+    },
+    {
+      "input": "detail:\\nheaders: synthetic-escaped-6",
+      "expected": "detail:\\nheaders: [redacted]"
+    },
+    {
+      "input": "%20credentials=synthetic-escaped-7",
+      "expected": "%20credentials=[redacted]"
+    },
+    {
+      "input": "unmasked%zzsk-synthetic-not-after-an-escape",
+      "expected": "unmasked%zzsk-synthetic-not-after-an-escape"
+    },
+    {
+      "input": "{\"token\": [\"synthetic-array-1\", \"synthetic-array-2\"], \"user\": \"bob\"}",
+      "expected": "{\"token\": [redacted], \"user\": \"bob\"}"
+    },
+    {
+      "input": "{'credentials': {'key': 'synthetic-dict-1', 'note': 'x]y'}} after",
+      "expected": "{'credentials': [redacted]} after"
+    },
+    {
+      "input": "body {\\\"secret\\\": [\\\"synthetic-escaped-array\\\"], \\\"user\\\": \\\"bob\\\"}",
+      "expected": "body {\\\"secret\\\": [redacted], \\\"user\\\": \\\"bob\\\"}"
+    },
+    {
+      "input": "headers={Authorization: Bot synthetic-header} next",
+      "expected": "headers=[redacted] next"
+    },
+    {
+      "input": "{\"password\": [\n  \"synthetic-multi-1\",\n  \"synthetic-multi-2\"\n], \"n\": 1}",
+      "expected": "{\"password\": [redacted], \"n\": 1}"
+    },
+    {
+      "input": "token: [synthetic-open-bracket and the rest",
+      "expected": "token: [redacted]"
+    },
+    {
+      "input": "token=[redacted] next",
+      "expected": "token=[redacted] next"
+    },
+    {
+      "input": "{\"token\" => \"synthetic-arrow-1\", \"id\" => 1}",
+      "expected": "{\"token\" => \"[redacted]\", \"id\" => 1}"
+    },
+    {
+      "input": ":api_key => synthetic-arrow-2",
+      "expected": ":api_key => [redacted]"
+    },
+    {
+      "input": "password=\"synthetic-unclosed and more\nnext line",
+      "expected": "password=\"[redacted]\nnext line"
+    },
+    {
+      "input": "https://api.example.test/?token=\"synthetic-open and more",
+      "expected": "https://api.example.test/?token=%5Bredacted%5D"
+    },
+    {
+      "input": "hue_at_synthetic-oauth-access hue_rt_synthetic-oauth-refresh",
+      "expected": "[redacted] [redacted]"
+    },
+    {
+      "input": "hue_oauth_code_synthetic-value hue_ss_synthetic-signing hue_vt_synthetic-verify",
+      "expected": "[redacted] [redacted] [redacted]"
+    },
+    {
+      "input": "xoxe-1-synthetic-slack-refresh GOCSPX-synthetic-google-secret",
+      "expected": "[redacted] [redacted]"
+    },
+    {
+      "input": "failed at https://mcp.example.test/sse?token=\\\"synthetic-escaped-query two\\\" next",
+      "expected": "failed at https://mcp.example.test/sse?token=%5Bredacted%5D next"
+    },
+    {
+      "input": "GET https://api.example.test/v1?q=\"abc & Authorization: Bearer synthetic-after-amp",
+      "expected": "GET https://api.example.test/v1?q=%5Bredacted%5D"
+    },
+    {
+      "input": "GET https://api.example.test/v1?q=\\\"abc & password: synthetic-escaped-amp\\\" end",
+      "expected": "GET https://api.example.test/v1?q=%5Bredacted%5D end"
+    },
+    {
+      "input": "GET https://api.example.test/v1?q=\"a & password: synthetic-closed-amp\" end",
+      "expected": "GET https://api.example.test/v1?q=%5Bredacted%5D end"
+    },
+    {
+      "input": "{\\\"password\\\": [\\\"x\\\\\\\"y\\\", \\\"a]b\\\", \\\"synthetic-inner-escape\\\"]}",
+      "expected": "{\\\"password\\\": [redacted]}"
+    },
+    {
+      "input": "{\\\"token\\\": \\\"a\\\\\\\"b synthetic-inner-quote\\\"}",
+      "expected": "{\\\"token\\\": \\\"[redacted]\\\"}"
+    },
+    {
+      "input": "{\"error\": \"failed: token=\\\"synthetic-open-a synthetic-open-b\"}",
+      "expected": "{\"error\": \"failed: token=\\\"[redacted]\"}"
+    },
+    {
+      "input": "Bearer abc%20synthetic-after-escaped-space",
+      "expected": "Bearer [redacted]"
+    },
+    {
+      "input": "Authorization%3A%20Bearer%20synthetic-escaped-separator%20next",
+      "expected": "Authorization%3A%20Bearer%20[redacted]%20next"
+    },
+    {
+      "input": "token=[synthetic-part1} synthetic-part2] next",
+      "expected": "token=[redacted] next"
+    },
+    {
+      "input": "{\"secret\": {\"a\": [1}, \"b\": \"synthetic-after-stray\"]}, \"n\": 1}",
+      "expected": "{\"secret\": [redacted], \"n\": 1}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.test/?token=\\\"synthetic-url-escaped-open def\"} more",
+      "expected": "{\"error\":\"GET https://h.test/?token=%5Bredacted%5D\\\"[redacted]\"} more"
+    },
+    {
+      "input": "token: \\\"synthetic-before-escaped-backslash more\\\\\" words",
+      "expected": "token: \\\"[redacted]\" words"
+    },
+    {
+      "input": "token: [\\\"a\\\\\\\"b\\\\\\\"c synthetic-bracket-escapes\\\"] next",
+      "expected": "token: [redacted] next"
+    },
+    {
+      "input": "{\"error\":\"{\\\"token\\\":[\\\"{a\\\\\\/b]\\\",\\\"synthetic-after-escaped-slash\\\"]}\"}",
+      "expected": "{\"error\":\"{\\\"token\\\":[redacted]}\"}"
+    },
+    {
+      "input": "{\"error\":\"{\\\"password\\\":\\\"ab\\\\\\/cd synthetic-escaped-slash-value\\\"}\"}",
+      "expected": "{\"error\":\"{\\\"password\\\":\\\"[redacted]\\\"}\"}"
+    },
+    {
+      "input": "body {\\\"next\\\":\\\"https://h.example.test/?code=\\\",\\\"password\\\":\\\"synthetic-after-url words\\\"}",
+      "expected": "body {\\\"next\\\":\\\"https://h.example.test/?code=%5Bredacted%5D\\\",\\\"password\\\":\\\"[redacted]\\\"}"
+    },
+    {
+      "input": "{\"redirect_uri\":\"https://app.example.test/cb?state=\",\"client_secret\":\"synthetic-after-url-plain def\"}",
+      "expected": "{\"redirect_uri\":\"https://app.example.test/cb?state=%5Bredacted%5D[redacted]\":\"[redacted]\"}"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?filter=\"name\";sig=synthetic-after-quote failed",
+      "expected": "GET https://api.example.test/v1/items?filter=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?q=\"a\"synthetic-glued-value failed",
+      "expected": "GET https://api.example.test/v1/items?q=%5Bredacted%5D failed"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"a\\\"&\\\"token\\\":\\\"synthetic-escaped-key\\\"\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D\\\"token\\\":\\\"[redacted]\\\"\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"x\\\"#\\\"password\\\":\\\"synthetic-after-hash\\\"\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D#\\\"password\\\":\\\"[redacted]\\\"\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"synthetic-open-value\\\\\\\\\\",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"synthetic-inner\\\\\\\"quote\\\" failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"a\\\"&password=\\\"synthetic-after-url x\\\"}\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D&password=%5Bredacted%5D\\\"[redacted]\\\"}\"}"
+    },
+    {
+      "input": "GET https://h.example.test/p?t=\\\"a\\\"&Bearer synthetic-after-url-scheme failed",
+      "expected": "GET https://h.example.test/p?t=%5Bredacted%5D&Bearer=%5Bredacted%5D [redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\"?\"&code=synthetic-path-quote failed",
+      "expected": "GET https://h.example.test/p=%22?%22=%5Bredacted%5D&code=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\"synthetic-open-path?synthetic-path-name",
+      "expected": "GET https://h.example.test/p=[redacted]"
+    },
+    {
+      "input": "GET https://h.example.test/p?t=\"a#b\"&synthetic-hash-name=1 failed",
+      "expected": "GET https://h.example.test/p?t=%5Bredacted%5D failed"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"a\\\"&password=\\\"synthetic-before-url https://h.example.test/?q=1\\\"}\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D&password=%5Bredacted%5D\\\"[redacted]\\\"}\"}"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=\\\"abc\\\"&mongodb://u:synthetic-amp-escaped@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=\"abc\"&mongodb://u:synthetic-amp-plain@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=abc&mongodb://u:synthetic-amp-bare@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d1 synthetic-second-1\\",
+      "expected": "{\"error\":\"password=\\\"[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d1 synthetic-second-1\\\nnext line",
+      "expected": "{\"error\":\"password=\\\"[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d3 synthetic-second-3\\\\\\",
+      "expected": "{\"error\":\"password=\\\"[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d3 synthetic-second-3\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\\"[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d5 synthetic-second-5\\\\\\\\\\",
+      "expected": "{\"error\":\"password=\\\"[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\\"synthetic-tail-d5 synthetic-second-5\\\\\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\\"[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s1 synthetic-second-1\\",
+      "expected": "{\"error\":\"password=\\'[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s1 synthetic-second-1\\\nnext line",
+      "expected": "{\"error\":\"password=\\'[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s3 synthetic-second-3\\\\\\",
+      "expected": "{\"error\":\"password=\\'[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s3 synthetic-second-3\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\'[redacted]\nnext line"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s5 synthetic-second-5\\\\\\\\\\",
+      "expected": "{\"error\":\"password=\\'[redacted]"
+    },
+    {
+      "input": "{\"error\":\"password=\\'synthetic-tail-s5 synthetic-second-5\\\\\\\\\\\nnext line",
+      "expected": "{\"error\":\"password=\\'[redacted]\nnext line"
+    },
+    {
+      "input": "access_token=>%5Bredacted%5Dsynthetic-after-marker failed",
+      "expected": "access_token=>[redacted] failed"
+    },
+    {
+      "input": "token=[redacted]synthetic-after-marker-bracket failed",
+      "expected": "token=[redacted] failed"
+    },
+    {
+      "input": "{'error': 'GET https://h.example.test/v1/token=\\'synthetic-path-escaped\\'#top failed'}",
+      "expected": "{'error': 'GET [redacted] failed'}"
+    },
+    {
+      "input": "GET https://h.example.test/p;password=\\'synthetic-path?escaped\\'#x failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=\\\"abc\\\"&2mongodb://u:synthetic-amp-digit@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?mongodb://u:synthetic-first-name@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=abc&%mongodb://u:synthetic-amp-percent@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET mongodb://h.example.test/?a=1&x://synthetic-nested-opaque failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/#access_token=t&https://h2.example.test/synthetic-nested-fragment failed",
+      "expected": "GET https://h.example.test/ failed"
+    },
+    {
+      "input": "GET https://h.example.test/?a=1&https://h2.example.test/p&sig=synthetic-nested-sig failed",
+      "expected": "GET https://h.example.test/?a=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&sig=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/?a=1&x://h2.example.test/p=synthetic-nested-value failed",
+      "expected": "GET https://h.example.test/?a=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p;x=\\\"a#b\\\"&mongodb://u:synthetic-after-escaped-hash@db.example.test/x failed",
+      "expected": "GET https://h.example.test/p;x=[redacted] failed"
+    },
+    {
+      "input": "GET ftp://h.example.test/?x=\\'a#b\\'&HTTPS:/synthetic-name-after-escaped-hash failed",
+      "expected": "GET ftp://h.example.test/?x=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\\\"a?b\\\"&code=synthetic-escaped-question failed",
+      "expected": "GET https://h.example.test/p=[redacted]?%5Bredacted%5D=%5Bredacted%5D&code=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\\'a?b\\'&code=synthetic-escaped-question-single failed",
+      "expected": "GET https://h.example.test/p=[redacted]?%5Bredacted%5D=%5Bredacted%5D&code=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p;password=\\\"a?synthetic-open-question#x failed",
+      "expected": "GET [redacted]"
+    },
+    {
+      "input": "GET https://h.example.test/path&mongodb://user:synthetic-nested-path-a@db.example.test/x failed",
+      "expected": "GET https://h.example.test/path&[redacted] failed"
+    },
+    {
+      "input": "see https://h.example.test/path/mongodb://user:synthetic-nested-path-b@db.example.test/x ok",
+      "expected": "see https://h.example.test/path/[redacted] ok"
+    },
+    {
+      "input": "GET https://h.example.test/p/x://password=p@synthetic-nested-key failed",
+      "expected": "GET https://h.example.test/p/[redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/p/mongodb://user:p@synthetic-nested-last-at@db.example.test/x failed",
+      "expected": "GET https://h.example.test/p/[redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/p/p&mongodb:\\\\user:synthetic-nested-backslash@db.example.test/x?q=1 failed",
+      "expected": "GET https://h.example.test/p/p&[redacted]?q=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p/p&mongodb:\\\\user:synthetic-nested-backslash-bare@db.example.test/x failed",
+      "expected": "GET https://h.example.test/p/p&[redacted] failed"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&token:synthetic-reg-1 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&password:synthetic-reg-2 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&x-api-key:synthetic-reg-3 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&client_secret:synthetic-reg-4 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&headers:{synthetic-reg-5} failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&Authorization:Bearer%20synthetic-reg-6 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D[redacted]\"}"
+    },
+    {
+      "input": "GET https://h.example.test/p?code=\\\"abc\\\"&Bearer%20synthetic-reg-7 failed",
+      "expected": "GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "next=http://api.example.test/Authorization:Bearer%20synthetic-path-auth/x=y?headers=\"a&x=\"b synthetic-after-header-word\"&c=1",
+      "expected": "next=[redacted][redacted]\"&c=1"
+    },
+    {
+      "input": "ftp://u:p@api.example.test/x&q=\\'abc\\'&mongodb://u:p@db.example.test/x&q=synthetic-nested-opaque-query",
+      "expected": "[redacted]"
+    },
+    {
+      "input": "password=\"synthetic-plain-open-a synthetic-plain-open-b\\",
+      "expected": "password=\"[redacted]"
+    },
+    {
+      "input": "password='synthetic-plain-open-c synthetic-plain-open-d\\\nnext",
+      "expected": "password='[redacted]\nnext"
+    },
+    {
+      "input": "password=\"synthetic-plain-open-e synthetic-plain-open-f\\\\\\",
+      "expected": "password=\"[redacted]"
+    },
+    {
+      "input": "GET wss://h.example.comaccess_token='synthetic-h1#synthetic-h2'/x=\\\\\\\"synthetic-h3\\\\\\\"/;sig='x'?access_token='y failed",
+      "expected": "GET [redacted][redacted]'x'?access_token='[redacted]"
+    },
+    {
+      "input": "GET wss://h.example.comaccess_token='a#b'/x=\\\\\\\"synthetic-h6\\\\\\\" failed",
+      "expected": "GET [redacted][redacted]"
+    },
+    {
+      "input": "Bearer\\token synthetic-tab-token-a failed",
+      "expected": "Bearer\\t[redacted] [redacted] failed"
+    },
+    {
+      "input": "{\"error\": \"Bearer \\token synthetic-tab-token-b\"}",
+      "expected": "{\"error\": \"Bearer \\t[redacted] [redacted]\"}"
+    },
+    {
+      "input": "GET wss://h.example.test/?t=\\\"a b\\\"&Authorization:synthetic-hid-1&synthetic-hid-2=\\\"c\\\" failed",
+      "expected": "GET wss://h.example.test/?t=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET http://h.example.test/?q=\\\"a b\\\"&amp;mongodb://u:synthetic-hid-3@h&amp;synthetic-hid-4 failed",
+      "expected": "GET http://h.example.test/?q=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p?a=\\\"b\\\"&next=\"redis://h?k=\"\"synthetic-net-1 failed",
+      "expected": "GET https://h.example.test/p?a=%5Bredacted%5D&next=%5Bredacted%5D[redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/p?x=1&Basic%2Bsynthetic-esc-1&amp;Bearer\\\\tsynthetic-esc-2=1 failed",
+      "expected": "GET https://h.example.test/p?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p?x=1&client_secret%3Asynthetic-dec-1&amp;password%3Dsynthetic-dec-2=1 failed",
+      "expected": "GET https://h.example.test/p?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "error: mongodb://h/?q=\\\"a\\\"&Authorization: http://u;x@h.example.test synthetic-b2",
+      "expected": "error: [redacted] [redacted][redacted]"
+    },
+    {
+      "input": "GET mongodb://h/?q=\\\"a\\\"&Authorization:http://;@h\tsynthetic-b1 failed",
+      "expected": "GET [redacted][redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;https:///u:synthetic-pw-1@h.example/ failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;https://user:synthetic-pw-2/ failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;https://u:synthetic-pw-3\\@h.example/ failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/?q=\\\"x\\\"&amp;https:///&amp;synthetic-pw-4@h.example/ failed",
+      "expected": "GET https://a.example/?q=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "see https://h.example/p/https:///u:synthetic-pw-5@h2.example/x failed",
+      "expected": "see https://h.example/p/https://[redacted]@h2.example/x failed"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?q=hello+world&basic%5B0%5D=1&token%5B%5D=2 failed",
+      "expected": "GET https://api.example.test/v1/items?q=%5Bredacted%5D&basic%5B0%5D=%5Bredacted%5D&token%5B%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?x=1&Bearer%0Bsynthetic-esc-3=1&amp;Token%C2%A0synthetic-esc-4 failed",
+      "expected": "GET https://api.example.test/v1/items?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;?t=\"https://b.example/?k=\"v\"&amp;x=https://u@h.example/synthetic-desync-1 failed",
+      "expected": "GET https://a.example/p=[redacted]&amp;?t=%5Bredacted%5D\"&amp;x=[redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;y?t=\"&amp;https://b.example/#f?=\"a\"&amp;https://u@h.example/synthetic-desync-2 failed",
+      "expected": "GET https://a.example/p=[redacted]&amp;y?t=%5Bredacted%5D[redacted][redacted] failed"
+    },
+    {
+      "input": "GET https://aésk-synthetic-idn-1.example/p=\\\"v\\\"#f failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://%73k-synthetic-idn-2.example/p=\"a?b c",
+      "expected": "GET [redacted]"
+    },
+    {
+      "input": "fatal: unable to access 'https://x-access-token:ghs_synthetic-git-1@github.com/org/repo.git/': 403",
+      "expected": "fatal: unable to access 'https://github.com/org/repo.git/': 403"
+    },
+    {
+      "input": "GET https://h.example/p?x=1&amp;%20Bearer%0Bsynthetic-esc-5=1 failed",
+      "expected": "GET https://h.example/p?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "clone https://x-access-token:ghs_synthetic-git-2@github.com/o/r.git?ref=main failed",
+      "expected": "clone https://github.com/o/r.git?ref=%5Bredacted%5D failed"
+    },
+    {
+      "input": "{\"e\":\"token=>%5Bredacted%5D\\nsynthetic-arrow-1\"}",
+      "expected": "{\"e\":\"token=>[redacted]\"}"
+    },
+    {
+      "input": "Authorization => %5Bredacted%5D\\synthetic-arrow-2 failed",
+      "expected": "Authorization => [redacted]"
+    },
+    {
+      "input": "clone https://Authorization:synthetic-git-3@github.com/o/r.git?ref=main failed: exit 128",
+      "expected": "clone https://github.com/o/r.git?ref=%5Bredacted%5D failed: exit 128"
+    },
+    {
+      "input": "token=>[redacted]synthetic-arrow-3 failed",
+      "expected": "token=>[redacted] failed"
     }
   ]
 }

@@ -119,11 +119,13 @@ function codePoints(text: string, count: number): { text: string; cut: boolean }
 /**
  * A provider's error text as a failed call exports it under content capture: credentials
  * scrubbed first, then at most 1,024 code points with `…` marking a cut, lone surrogates
- * replaced and NUL removed. The Python SDK produces the same text.
+ * replaced and NUL removed. Only the first 16,384 code points are scrubbed, and what that cut
+ * interrupts (a quoted value, a URL, a prefixed token) is redacted to it. The Python SDK
+ * produces the same text.
  */
 export function providerErrorDescription(value: string): string {
   const scanned = codePoints(value.toWellFormed().replaceAll("\u0000", ""), MAX_ERROR_SCAN);
-  const bounded = codePoints(scrubCredentialText(scanned.text), MAX_ERROR_TEXT);
+  const bounded = codePoints(scrubCredentialText(scanned.text, scanned.cut), MAX_ERROR_TEXT);
   return bounded.cut || scanned.cut ? `${bounded.text}…` : bounded.text;
 }
 

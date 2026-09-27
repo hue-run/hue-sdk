@@ -36,6 +36,38 @@ refuses to publish a version without a matching entry below.
   digits, `.`, `_` and `-` that starts with a letter or digit, and refuse a resolved checkpoint path
   outside its directory. Before, an id containing `../` from a hostile or compromised origin made
   them create directories and write checkpoint files outside `.hue/eval` or `--checkpoint-dir`.
+- A failed OpenAI MCP call's error text, exported with `captureContent: true`, is scrubbed of
+  credentials it kept before. A JSON escape (`\n`, `\t`, `\u0022`) or `%` escape (`%20`, `%3D`) ends
+  a word as a space does, so a prefixed token, or `Bearer`, `Basic` or `Token`, right after one is
+  found (`…\nhue_sk_…`, `token%3Dghp_…`), as is a credential key that `:`, `=` or `=>` follows
+  (`\nheaders: …`), and an escaped space separates a scheme from its credential
+  (`Authorization%3A%20Bearer%20…`). A key or separator that is itself escaped (`%22token%22%3A`,
+  `\u0022token\u0022:`) is still not read. A credential key's whole `[…]` or `{…}` value is
+  replaced, where only its `[` or `{` was, and one that does not close is replaced to the end of the
+  text, and `key => value` pairs are read. JSON inside a JSON string keeps its escaped quotes
+  (`\\\"`) inside a value, and a value that only starts with `[redacted]` (`token=[redacted]…`) is
+  no longer taken for one already replaced. `hue listen` scrubs its messages with the same rules,
+  reading at most 16,384 code points of each and marking a cut with `…`. **Wire**
+- In the same text, a quoted value whose quote does not close on its line, as when the text was cut
+  inside it, is replaced to the end of the line, where only its first word was. A URL's quoted query
+  value (`?token="…"`), or a value between backslash-escaped quotes anywhere in it that ends the URL
+  or a query value (`=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as
+  a query name. The value of the next key of the JSON around such a value is no longer exported
+  (`?state=","client_secret":"…"`), the value of a key or scheme word that a URL takes in
+  (`?t="a"&Bearer …`) is still replaced after it, and a query name holding a `:`, a scheme word
+  before an escape other than of a bracket, or a credential pair once `%3A` and `%3D` are read
+  (`?mongodb://u:…@…`, `&token:…`, `&Bearer%20…`, `&client_secret%3A…`) is replaced. A URL that
+  would be rewritten with a credential (a prefixed token included) in its host or path is replaced
+  whole; one in its own userinfo, which is dropped, does not count. Where a URL now ends sooner or
+  later than 0.11.0 read it, what 0.11.0 hid there stays hidden: around the URL, by replacing a
+  rewritten URL whole that holds some of it in its host or path, and in a query name. A URL nested
+  in another's path (`…/p&mongodb://u:…@…`) loses its userinfo, after any extra `/`, or, when its
+  scheme is not `http(s)`, `ws(s)` or `ftp` and it holds an `@`, everything to the end of that
+  path. Only the first 16,384 code points are scrubbed; a URL or prefixed token that this cut
+  interrupts is now replaced whole, as is the word of scheme characters the cut ends in, and the
+  text is still scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`,
+  `hue_rt_`, `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and
+  Google OAuth client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.
@@ -177,17 +209,17 @@ These three entries were added after 0.11.0 was published; 0.11.0 already behave
   any record's tool definitions; before, it carried neither. Descriptions and schemas are still
   exported only with content capture. **Wire**
 - With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as its
-  ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops an
-  `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted ones
-  included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`, `?` or
-  `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
-  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`, and `sk-`,
-  Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or
-  `Token`, an `Authorization` header's whole value and the value of a credential-named `key=value`
-  or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the
-  value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
-  another pair's value). The `redact` hook sees the text as `status.message`. Without content
-  capture the span keeps `error.type` only. **Wire**
+  ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…`. Scrubbing
+  drops an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values
+  (quoted ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has
+  an `@`, `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`,
+  `hue_mcp_`, `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`,
+  and `sk-`, Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`,
+  `Basic` or `Token`, an `Authorization` header's whole value and the value of a credential-named
+  `key=value` or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API
+  key:`; the value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a
+  pair inside another pair's value). The `redact` hook sees the text as `status.message`. Without
+  content capture the span keeps `error.type` only. **Wire**
 
 - `hue mcp install --auth oauth` configures only the server URL, so the client signs in with Hue
   in the browser instead of sending a key: a URL-only `.mcp.json` or `claude mcp add` for
@@ -983,9 +1015,9 @@ No registry release is claimed until publication and registry acceptance complet
   `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
   any record's tool definitions. **Wire**
 - With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed and cut to 1,024 characters exactly as the
-  TypeScript SDK does, after your `redactor` sees it as `status.message`. Without content capture
-  the span keeps `error.type` only. **Wire**
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…` exactly
+  as the TypeScript SDK's next release does, before your `redactor` sees it as `status.message`.
+  Without content capture the span keeps `error.type` only. **Wire**
 
 #### Fixed
 
@@ -995,21 +1027,24 @@ No registry release is claimed until publication and registry acceptance complet
   content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
   running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
 - A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
-  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
-  `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
+  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. The
+  lone surrogates are replaced once for the whole part. A `data:` URL's parameters are read after
+  matching its header, as in the TypeScript SDK. **Wire**
 - `server.address` keeps a host name with an underscore, such as a Docker Compose service
   (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
-  dropped.
+  dropped. **Wire**
 - An output's JSON byte length is counted as the output is read, as in the TypeScript SDK, so an
   output too large to serialize is refused without serializing it (eleven references to a 50 MB
-  string took tens of seconds and a gigabyte); an output the process cannot hold in memory
-  completes its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values,
-  so an object of more than 10,000 members is no longer `OutputTooLarge`, and a list or object
-  with more elements than values left, or keys longer than the bytes left, is refused before it is
-  read. The output is read in the TypeScript SDK's order, and the byte bound is still checked
-  last, so both SDKs refuse an output for the same reason.
-- A large inline file's lone surrogates are replaced once for the whole part rather than in each
-  percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
+  string took tens of seconds and a gigabyte); an output the process cannot hold in memory completes
+  its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values, so an object
+  of more than 10,000 members, which 0.6.1 refused with `OutcomeSerializationError`, is accepted as
+  in the TypeScript SDK, and a list or object with more elements than values left, or keys longer
+  than the bytes left, is refused before it is read. The output is read in the TypeScript SDK's
+  order, and the byte bound is still checked last, so both SDKs refuse an output for the same
+  reason.
+- A URL's query names are decoded and encoded together in C rather than byte by byte, so
+  scrubbing a URL with thousands of parameters, in a tool definition's `url` or in MCP error text,
+  takes about half the time it did. The exported text is unchanged.
 
 ### [0.6.1] - 2026-09-25
 
