@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  chmod,
+  chown,
   lstat,
   mkdir,
   mkdtemp,
@@ -10,6 +12,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { chownSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -227,13 +230,15 @@ describe("hue mcp install", () => {
     expect(parseMcpUrl("https://u:p@mcp.hue.run/mcp")).toBeNull();
   });
 
-  test("claude-code writes .mcp.json with the canonical content and mode 0644", async () => {
+  test("claude-code writes a new .mcp.json with the canonical content, owner-only", async () => {
     const root = await temporaryRoot();
     const result = await mcp(["mcp", "install", "--client", "claude-code"], { cwd: root });
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(CLAUDE_CODE_ALL_JSON);
-    expect(await mode(join(root, ".mcp.json"))).toBe(0o644);
+    // People and clients add other servers' literal tokens to this file later.
+    expect(await mode(join(root, ".mcp.json"))).toBe(0o600);
+    expect(await readdir(root)).toEqual([".mcp.json"]);
     expect(result.stdout).toContain(`Wrote .mcp.json with the "hue" MCP server (${ALL_URL}).`);
     expect(result.stdout).toContain("Export HUE_MCP_KEY in the shell that starts Claude Code");
     expect(result.stdout).toContain(".env.hue");
@@ -246,7 +251,7 @@ describe("hue mcp install", () => {
     expect(cursor.code).toBe(0);
     // Cursor lists the observe profile unless --toolsets says otherwise.
     expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe(CURSOR_OBSERVE_JSON);
-    expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o644);
+    expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o600);
     expect(cursor.stdout).toContain("Wrote .cursor/mcp.json");
 
     // VS Code keeps Hue's default list: the production reads and the catalog tools.
@@ -361,6 +366,360 @@ describe("hue mcp install", () => {
     expect(linked.code).toBe(1);
     expect(linked.stderr).toContain("symbolic link");
     expect(await readFile(join(root, "elsewhere.json"), "utf8")).toBe("{}\n");
+  });
+
+  test("a replaced file keeps its mode, so one kept at 0600 for its tokens is not widened", async () => {
+    const root = await temporaryRoot();
+    const token = "ghp_kept_owner_only_0000000000";
+    const existing = {
+      mcpServers: { github: { type: "http", headers: { Authorization: `Bearer ${token}` } } },
+    };
+    await writeFile(join(root, ".mcp.json"), JSON.stringify(existing), { mode: 0o600 });
+    await chmod(join(root, ".mcp.json"), 0o600);
+    const result = await mcp(["install", "--client", "claude-code"], { cwd: root });
+    expect(result.code).toBe(0);
+    expect(await mode(join(root, ".mcp.json"))).toBe(0o600);
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toContain(token);
+
+    // Other modes are kept as they are, neither widened nor narrowed.
+    await mkdir(join(root, ".cursor"));
+    await writeFile(join(root, ".cursor", "mcp.json"), "{}\n");
+    await chmod(join(root, ".cursor", "mcp.json"), 0o640);
+    expect((await mcp(["install", "--client", "cursor"], { cwd: root })).code).toBe(0);
+    expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o640);
+    await chmod(join(root, ".cursor", "mcp.json"), 0o644);
+    expect((await mcp(["install", "--client", "cursor"], { cwd: root })).code).toBe(0);
+    expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o644);
+    // Except that other accounts lose write access, which would let them add a command to run.
+    await chmod(join(root, ".cursor", "mcp.json"), 0o666);
+    expect((await mcp(["install", "--client", "cursor"], { cwd: root })).code).toBe(0);
+    expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o664);
+    expect((await readdir(join(root, ".cursor"))).sort()).toEqual(["mcp.json"]);
+  });
+
+  // A group this account can give a file, other than the one a new file gets: the process's
+  // (Linux) or the directory's (macOS). A container may list a group it cannot map.
+  const otherGroup = (() => {
+    const directory = mkdtempSync(join(tmpdir(), "hue-cli-mcp-group-"));
+    const probe = join(directory, "probe");
+    writeFileSync(probe, "");
+    const temporaryGroup = statSync(realpathSync(directory)).gid;
+    try {
+      return process
+        .getgroups?.()
+        .filter((gid) => gid !== process.getegid?.() && gid !== temporaryGroup)
+        .find((gid) => {
+          try {
+            chownSync(probe, process.getuid!(), gid);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  })();
+  test.skipIf(otherGroup === undefined)(
+    "a replaced file keeps its group, so no other group can read it",
+    async () => {
+      const root = await temporaryRoot();
+      const file = join(root, ".mcp.json");
+      await writeFile(file, "{}\n");
+      await chown(file, process.getuid!(), otherGroup!);
+      await chmod(file, 0o640);
+      const defaultGroup = (await lstat(root)).gid;
+      expect(defaultGroup).not.toBe(otherGroup);
+      expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
+      expect((await lstat(file)).gid).toBe(otherGroup!);
+      expect(await mode(file)).toBe(0o640);
+      // A mode that denies the group only protects the file while it keeps that group.
+      await chmod(file, 0o604);
+      expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
+      expect((await lstat(file)).gid).toBe(otherGroup!);
+      expect(await mode(file)).toBe(0o604);
+    },
+  );
+
+  test("refuses a symbolic link to the config's directory, but not to the working directory", async () => {
+    const root = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const token = "ghp_outside_the_project_000000";
+    const elsewhere = JSON.stringify({
+      mcpServers: { other: { headers: { Authorization: `Bearer ${token}` } } },
+    });
+    await writeFile(join(outside, "mcp.json"), elsewhere);
+    await symlink(outside, join(root, ".cursor"));
+    for (const argv of [
+      ["install", "--client", "cursor"],
+      ["install", "--client", "cursor", "--dry-run"],
+    ]) {
+      const linked = await mcp(argv, { cwd: root });
+      expect(linked.code).toBe(1);
+      expect(linked.stdout).toBe("");
+      expect(linked.stderr).toContain(
+        "Refusing to use .cursor/mcp.json: .cursor is a symbolic link.",
+      );
+      expect(linked.stderr).not.toContain(token);
+    }
+    expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
+    expect(await readdir(outside)).toEqual(["mcp.json"]);
+
+    // The working directory itself may be reached through a link, as /tmp, /var and some home
+    // directories are on macOS; only the directories the command names below it are checked.
+    await symlink(root, join(outside, "project"));
+    const viaLink = await mcp(["install", "--client", "vscode"], { cwd: join(outside, "project") });
+    expect(viaLink.code).toBe(0);
+    expect(await readFile(join(root, ".vscode", "mcp.json"), "utf8")).toBe(VSCODE_JSON);
+  });
+
+  test("--dry-run redacts literal credentials and keeps references and Hue's entry", async () => {
+    const root = await temporaryRoot();
+    const secrets = [
+      "ghp_header0000000000000000000",
+      "plain-custom-header-value",
+      "sk-literal-argument-0000000",
+      "tok_inline_option_123456",
+      "literal-env-value",
+      "query-credential-value",
+      "hue_sk_literal0000000000000",
+      "top-level-client-secret",
+      "short-key-option-value",
+      "auth-inline-value",
+      "plain-key-field-value",
+      "NjM4ZTk5path0token7",
+      "987654321",
+      "short-header-option-value",
+      "inline-header-option-value",
+      "ghp_defaultliteral123456789",
+      "access-key-option-value",
+      "secret-key-field-value",
+      "auth-header-field-value",
+      "root-servers-token-value",
+      "stray-server-token-value",
+      "Abc123Def456Ghi789Jkl",
+      "docker-env-option-value",
+      "bare-assignment-value",
+    ];
+    const existing = JSON.stringify({
+      mcpServers: {
+        github: {
+          type: "http",
+          url: "https://api.example.com/mcp/",
+          headers: {
+            Authorization: `Bearer ${secrets[0]}`,
+            "X-Custom": secrets[1],
+            "X-Default": `\${env:-${secrets[15]}}`,
+          },
+        },
+        local: {
+          command: "npx",
+          args: [
+            "-y",
+            "some-server",
+            "--api-key",
+            secrets[2],
+            `--token=${secrets[3]}`,
+            "--key",
+            secrets[8],
+            `--auth=${secrets[9]}`,
+            "-H",
+            `X-Custom: ${secrets[13]}`,
+            `--header=X-Other: ${secrets[14]}`,
+            "--access-key",
+            secrets[16],
+            `--url=https://mcp.example.com/s/${secrets[21]}/sse`,
+            "-e",
+            `DEBUG=${secrets[22]}`,
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "-e",
+            `fetch(endpoint, { headers: { "X-Custom": "${secrets[1]}" } })`,
+            `STRIPE_KEY=${secrets[23]}`,
+            "LOG_LEVEL=debug",
+            "/work",
+          ],
+          env: { SERVICE_TOKEN: secrets[4], OTHER: "${OTHER_KEY}", PIN: Number(secrets[12]) },
+        },
+        // Server names are not field names: this one's entry is shown like any other.
+        "release-token": {
+          key: secrets[10],
+          secretKey: secrets[17],
+          authHeader: secrets[18],
+          url: `https://mcp.example.com/s/${secrets[11]}/mcp`,
+        },
+        // Only an entry is exempt as a server name, not a stray value named like a credential.
+        "stray-token": secrets[20],
+        linked: {
+          url: `https://example.com/mcp?api_key=${secrets[5]}`,
+          headers: { Authorization: "Bearer ${env:LINKED_KEY}" },
+        },
+        "hue-other": {
+          type: "http",
+          url: "https://mcp.hue.run/mcp",
+          headers: { Authorization: `Bearer ${secrets[6]}` },
+        },
+      },
+      custom: { clientSecret: secrets[7], enabled: true },
+      servers: { token: secrets[19] },
+    });
+    await writeFile(join(root, ".mcp.json"), existing);
+    const dry = await mcp(["install", "--client", "claude-code", "--dry-run"], {
+      cwd: root,
+      env: { PATH: join(root, "empty-bin"), HUE_MCP_KEY: "hue_live_must_not_leak" },
+    });
+    expect(dry.code).toBe(0);
+    expect(dry.stderr).toBe("");
+    for (const secret of [...secrets, "hue_live_must_not_leak"])
+      expect(dry.stdout).not.toContain(secret);
+    expect(
+      dry.stdout.startsWith("Would write .mcp.json (credential values shown as [redacted]):\n{\n"),
+    ).toBe(true);
+    const shown = JSON.parse(dry.stdout.slice(dry.stdout.indexOf("\n") + 1)) as {
+      mcpServers: Record<string, Record<string, unknown>>;
+      custom: Record<string, unknown>;
+      servers: unknown;
+    };
+    expect(shown.mcpServers.github!.headers).toEqual({
+      Authorization: "[redacted]",
+      "X-Custom": "[redacted]",
+      "X-Default": "[redacted]",
+    });
+    expect(shown.mcpServers.local).toEqual({
+      command: "npx",
+      args: [
+        "-y",
+        "some-server",
+        "--api-key",
+        "[redacted]",
+        "--token=[redacted]",
+        "--key",
+        "[redacted]",
+        "--auth=[redacted]",
+        "-H",
+        "[redacted]",
+        "--header=[redacted]",
+        "--access-key",
+        "[redacted]",
+        "--url=https://mcp.example.com/s/[redacted]/sse",
+        "-e",
+        "DEBUG=[redacted]",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "-e",
+        "[redacted]",
+        "STRIPE_KEY=[redacted]",
+        "LOG_LEVEL=debug",
+        "/work",
+      ],
+      env: { SERVICE_TOKEN: "[redacted]", OTHER: "${OTHER_KEY}", PIN: "[redacted]" },
+    });
+    expect(shown.mcpServers["release-token"]).toEqual({
+      key: "[redacted]",
+      secretKey: "[redacted]",
+      authHeader: "[redacted]",
+      url: "https://mcp.example.com/s/[redacted]/mcp",
+    });
+    expect(shown.mcpServers["stray-token"] as unknown).toBe("[redacted]");
+    expect(shown.servers).toEqual({ token: "[redacted]" });
+    expect(shown.mcpServers.linked).toEqual({
+      url: "https://example.com/mcp?api_key=%5Bredacted%5D",
+      headers: { Authorization: "Bearer ${env:LINKED_KEY}" },
+    });
+    expect(shown.mcpServers["hue-other"]!.headers).toEqual({ Authorization: "[redacted]" });
+    expect(shown.mcpServers.hue).toEqual({
+      type: "http",
+      url: ALL_URL,
+      headers: { Authorization: "Bearer ${HUE_MCP_KEY}" },
+    });
+    expect(shown.custom).toEqual({ clientSecret: "[redacted]", enabled: true });
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(existing);
+
+    // The file itself keeps every value; only the printed view is redacted.
+    expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
+    const written = await readFile(join(root, ".mcp.json"), "utf8");
+    for (const secret of secrets) expect(written).toContain(secret);
+
+    // A credential in --url is left out; the selections this command validated are shown.
+    const keyName = "a1b2c3d4e5f6a7b8c9d0e1f2";
+    const keyUrl = `https://mcp.hue.run/mcp?api_key=${secrets[6]}&sk-proj-${secrets[6]}&${keyName}&toolsets=traces,docs`;
+    const keyInUrl = await mcp(
+      ["install", "--client", "claude-code", "--dry-run", "--read-only", "--url", keyUrl],
+      { cwd: root },
+    );
+    expect(keyInUrl.code).toBe(0);
+    for (const secret of [secrets[6]!, keyName]) expect(keyInUrl.stdout).not.toContain(secret);
+    expect(keyInUrl.stdout).toContain(
+      '"url": "https://mcp.hue.run/mcp?api_key=[redacted]&[redacted]&[redacted]&read_only=true&toolsets=traces,docs"',
+    );
+    // So is every line that reports what the command does; the file keeps the URL as given.
+    const codexDry = await mcp(["install", "--client", "codex", "--dry-run", "--url", keyUrl], {
+      cwd: root,
+    });
+    expect(codexDry.stdout).toBe(
+      "Would run: codex mcp add hue --url 'https://mcp.hue.run/mcp?api_key=[redacted]&[redacted]&[redacted]&toolsets=traces,docs' --bearer-token-env-var HUE_MCP_KEY\n",
+    );
+    // A replacement pattern in the URL stays literal.
+    const patternDry = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--dry-run",
+        "--url",
+        `https://mcp.hue.run/$&/mcp?api_key=${secrets[6]}`,
+      ],
+      { cwd: root },
+    );
+    expect(patternDry.stdout).not.toContain(secrets[6]);
+    expect(patternDry.stdout).toContain("/$&/mcp?api_key=[redacted]");
+    // A known token in the path, or a read_only value other than true or false, is left out too.
+    const pathDry = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--dry-run",
+        "--url",
+        `https://mcp.hue.run/mcp/hue_sk_abcdefghijklmnop?read_only=${secrets[7]}`,
+      ],
+      { cwd: root },
+    );
+    expect(pathDry.stdout).toContain("https://mcp.hue.run/mcp/[redacted]?read_only=[redacted]&");
+    expect(pathDry.stdout).not.toContain("hue_sk_");
+    expect(pathDry.stdout).not.toContain(secrets[7]);
+    const keyWrite = await mcp(["install", "--client", "claude-code", "--url", keyUrl], {
+      cwd: root,
+    });
+    expect(keyWrite.code).toBe(0);
+    expect(keyWrite.stdout).not.toContain(secrets[6]);
+    expect(keyWrite.stdout).toContain("(https://mcp.hue.run/mcp?api_key=[redacted]&");
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toContain(`api_key=${secrets[6]}`);
+    const codex = await fakeCli(root, "codex");
+    const ran = await mcp(["install", "--client", "codex", "--url", keyUrl], {
+      cwd: root,
+      env: codex.env,
+    });
+    expect(ran.code).toBe(0);
+    for (const secret of [secrets[6]!, keyName]) expect(ran.stdout).not.toContain(secret);
+    expect(ran.stdout).toContain(
+      "Running: codex mcp add hue --url 'https://mcp.hue.run/mcp?api_key=[redacted]&",
+    );
+    expect(ran.stdout).toContain(
+      'Registered the "hue" MCP server (https://mcp.hue.run/mcp?api_key=[redacted]&',
+    );
+    // The client itself receives the URL as given, key included.
+    expect((await codex.args())[4]).toStartWith(`https://mcp.hue.run/mcp?api_key=${secrets[6]}&`);
+
+    // A pinned server named like a credential still shows Hue's entry whole.
+    const pinned = await mcp(
+      ["install", "--client", "cursor", "--project", "release-token", "--dry-run"],
+      { cwd: root },
+    );
+    expect(pinned.code).toBe(0);
+    expect(pinned.stdout).toBe(
+      `Would write .cursor/mcp.json:\n${CURSOR_OBSERVE_JSON.replace('"hue"', '"hue-release-token"').replace("?toolsets=observe", "?project=release-token&toolsets=observe")}`,
+    );
   });
 
   test("--dry-run prints the resulting content and --print prints only the snippet", async () => {
