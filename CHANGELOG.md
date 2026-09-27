@@ -1054,13 +1054,14 @@ No registry release is claimed until publication and registry acceptance complet
   scrubbing a URL with thousands of parameters, in a tool definition's `url` or in MCP error text,
   takes about half the time it did. The exported text is unchanged.
 - On Python 3.13 and later, a URL with an `xn--` host label whose Punycode overflows
-  (`http://xn--11111111111111111w`) stopped the credential scrubber with `OverflowError`. In a
-  failed MCP call's error text, that call's span was exported with `error.type`
-  `builtins.OverflowError`, and the calls and listings after it in the same
-  `record_provider_tool_calls` were not recorded; a record whose tool definitions held such a URL
-  was dropped. Such a URL, and one whose parse fails in any other way, is now replaced whole with
-  `[redacted]`, as in the TypeScript SDK. Error text that still cannot be scrubbed leaves only its
-  own span without a description, counted as an instrumentation failure. **Wire**
+  (`http://xn--11111111111111111w`) stopped the credential scrubber with `OverflowError`: with
+  content capture, a record whose tool definitions held one was dropped, and without it the record
+  lost `hue.tool.names` and `hue.tool.definitions.sha256`. Such a URL, and an `http`, `https`, `ws`,
+  `wss` or `ftp` URL whose parse fails in any other way, is now replaced whole with `[redacted]`, as
+  in the TypeScript SDK, including in the MCP error text this release exports. Each failed call's
+  error text is scrubbed on its own: text that cannot be scrubbed leaves only its span without a
+  description, counted as an instrumentation failure, and the later calls are still recorded.
+  **Wire**
 
 ### [0.6.1] - 2026-09-25
 
