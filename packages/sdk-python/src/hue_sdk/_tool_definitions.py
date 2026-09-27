@@ -271,10 +271,10 @@ def _scrub_text_urls(
     end of a ``cut`` text may have lost its ``@`` or ``?`` there, so it is replaced whole. Each URL
     it replaces is added to ``changes``: where it starts and ends, and how much longer its
     replacement is; where each URL it does not replace whole lies in the scrubbed text is added to
-    ``kept``. One replaced whole because a span of ``closing`` reaches its host or path from before
-    its ``://`` or starts there (not in its own userinfo), or the userinfo in ``nested`` of a URL
-    nested in it starts there, is added to ``whole``: where its ``[redacted]`` lies
-    in the scrubbed text, and the URL as it would have been rewritten. A query name overlapping a
+    ``kept``. One replaced whole because a span of ``closing`` runs past its ``://`` from before it
+    or starts in its host or path (not in its own userinfo), or the userinfo in ``nested`` of a URL
+    nested in it starts there, is added to ``whole``: where its ``[redacted]`` lies in the scrubbed
+    text, and the URL as it would have been rewritten. A query name overlapping a
     span of ``hidden`` is replaced. Each list of spans is sorted by start."""
     scrub = _Scrub()
     spans = closing or []
@@ -466,6 +466,16 @@ def _url_values_replaced(url: str, hides: Callable[[int, int], bool] | None = No
     return opened[:query] + _QUERY_NAME.sub(name, valued) + fragment
 
 
+# ``_BARE_VALUE`` and ``_AUTHORIZATION_BARE`` for a value that starts with a placeholder after
+# ``=>``, which is read to its end as any other value is.
+_ARROWED_BARE_VALUE = re.compile(rf"(\\?[\"']?)[^{_JS_SPACE}\"',;&}})\]]+")
+_ARROWED_AUTHORIZATION_BARE = re.compile(
+    rf"(\\?[\"']?)([^{_JS_SPACE}\"',;}})\]]+)"
+    rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
+)
+_PLACEHOLDER_START = re.compile(r"\[redacted\]|%5Bredacted%5D", re.IGNORECASE | re.ASCII)
+
+
 def _normalized_key(key: str) -> str:
     return key.lower().replace("-", "").replace("_", "")
 
@@ -576,6 +586,9 @@ def _pair_spans(text: str) -> list[tuple[int, int]]:
             start < bracketed if bracket else not is_authorization and not _opens_quote(text, start)
         ):
             continue
+        # 0.11.0 read ``=>`` as ``=`` and the value from the ``>``, whatever followed it, so a
+        # placeholder right after ``=>`` is not taken for a value already replaced.
+        arrowed = "=>" in match[3] and _PLACEHOLDER_START.match(text, start) is not None
         quoted = _QUOTED_VALUE.match(text, start)
         open_quoted = None if quoted else _OPEN_QUOTED_VALUE.match(text, start)
         if quoted:
@@ -597,13 +610,14 @@ def _pair_spans(text: str) -> list[tuple[int, int]]:
             ):
                 opening, end = 0, authorization[2]
             else:
-                value = _AUTHORIZATION_BARE.match(text, start)
+                pattern = _ARROWED_AUTHORIZATION_BARE if arrowed else _AUTHORIZATION_BARE
+                value = pattern.match(text, start)
                 if value is None:
                     continue
                 opening, end = len(value[1]), value.end()
                 authorization = (start, value.end(2), end)
         else:
-            value = _BARE_VALUE.match(text, start)
+            value = (_ARROWED_BARE_VALUE if arrowed else _BARE_VALUE).match(text, start)
             if value is None:
                 continue
             opening, end = len(value[1]), value.end()
@@ -706,8 +720,8 @@ def _scrub_credential_text_unbounded(text: str, cut: bool = False) -> str:
     plain, userinfo, values = _plain_url_spans(text) if "://" in text else ([], [], [])
     closing = sorted([*credentials, *plain, *values])
     whole: list[tuple[int, str]] = []
-    # A credential starting in a URL's own userinfo, which the rewrite drops with its key, does not
-    # hide the names after it.
+    # A credential starting in a URL's own userinfo, which the rewrite drops with its key, hides
+    # neither the names after it nor, below, the text after the URL.
     hidden = sorted([*_outside_userinfo(credentials, userinfo), *plain, *userinfo])
     scrubbed = _scrub_text_urls(text, cut, changes, kept, closing, whole, userinfo, hidden)
     net = sorted([*plain, *userinfo, *values])
@@ -723,7 +737,9 @@ def _scrub_credential_text_unbounded(text: str, cut: bool = False) -> str:
         *_nested_userinfo_spans(scrubbed, kept),
     ]
     if changes or net:
-        spans += _spans_beside_urls([*credentials, *_outside_urls(text, net, changes)], changes)
+        spans += _spans_beside_urls(
+            [*_outside_userinfo(credentials, userinfo), *_outside_urls(text, net, changes)], changes
+        )
     if whole:
         spans += _rewritten_spans(scrubbed, whole)
     if cut:

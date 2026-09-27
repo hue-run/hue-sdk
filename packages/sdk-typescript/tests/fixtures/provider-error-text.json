@@ -787,6 +787,18 @@
     {
       "input": "clone https://x-access-token:ghs_synthetic-git-2@github.com/o/r.git?ref=main failed",
       "expected": "clone https://github.com/o/r.git?ref=%5Bredacted%5D failed"
+    },
+    {
+      "input": "{\"e\":\"token=>%5Bredacted%5D\\nsynthetic-arrow-1\"}",
+      "expected": "{\"e\":\"token=>[redacted]\"}"
+    },
+    {
+      "input": "Authorization => %5Bredacted%5D\\synthetic-arrow-2 failed",
+      "expected": "Authorization => [redacted]"
+    },
+    {
+      "input": "clone https://Authorization:synthetic-git-3@github.com/o/r.git?ref=main failed: exit 128",
+      "expected": "clone https://github.com/o/r.git?ref=%5Bredacted%5D failed: exit 128"
     }
   ]
 }

@@ -137,9 +137,9 @@ type UrlChange = [start: number, end: number, growth: number];
  * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
  * `cut` text may have lost its `@` or `?` there, so it is replaced whole. Each URL it replaces is
  * added to `changes`, and where each URL it does not replace whole lies in the scrubbed text to
- * `kept`. One replaced whole because a span of `closing` reaches its host or path from before its
- * `://` or starts there (not in its own userinfo), or the userinfo in `nested` of a URL nested in
- * it starts there, is added to `whole`: where its `[redacted]` lies in the
+ * `kept`. One replaced whole because a span of `closing` runs past its `://` from before it or
+ * starts in its host or path (not in its own userinfo), or the userinfo in `nested` of a URL nested
+ * in it starts there, is added to `whole`: where its `[redacted]` lies in the
  * scrubbed text, and the URL as it would have been rewritten. A query name overlapping a span of
  * `hidden` is replaced. Each list of spans is sorted by start. */
 function scrubTextUrls(
@@ -417,6 +417,13 @@ const bareValue =
 const authorizationBare =
   /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;})\]\\]))((?:\[redacted\](?=[^\s"',;})\]\\]))?[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
 
+/** `bareValue` and `authorizationBare` for a value that starts with a placeholder after `=>`,
+ * which is read to its end as any other value is. */
+const arrowedBareValue = /(\\?["']?)[^\s"',;&})\]]+/y;
+const arrowedAuthorizationBare =
+  /(\\?["']?)([^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+const placeholderStart = /^(?:\[redacted\]|%5Bredacted%5D)/i;
+
 function normalizedKey(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, "");
 }
@@ -515,6 +522,10 @@ function pairSpans(text: string): Span[] {
     // bracket outside an earlier bracket or, for `Authorization`, by the word after its scheme.
     if (nested && (bracket ? start < bracketed : !isAuthorization && !opensQuote(text, start)))
       continue;
+    // 0.11.0 read `=>` as `=` and the value from the `>`, whatever followed it, so a placeholder
+    // right after `=>` is not taken for a value already replaced.
+    const arrowed =
+      match[3]!.includes("=>") && placeholderStart.test(text.slice(start, start + 14));
     quotedValue.lastIndex = start;
     const quoted = quotedValue.exec(text);
     openQuotedValue.lastIndex = start;
@@ -543,16 +554,18 @@ function pairSpans(text: string): Span[] {
         open = 0;
         end = authorization.end;
       } else {
-        authorizationBare.lastIndex = start;
-        const value = authorizationBare.exec(text);
+        const pattern = arrowed ? arrowedAuthorizationBare : authorizationBare;
+        pattern.lastIndex = start;
+        const value = pattern.exec(text);
         if (!value) continue;
         open = value[1]!.length;
         end = start + value[0].length;
         authorization = { from: start, firstEnd: start + open + value[2]!.length, end };
       }
     } else {
-      bareValue.lastIndex = start;
-      const value = bareValue.exec(text);
+      const pattern = arrowed ? arrowedBareValue : bareValue;
+      pattern.lastIndex = start;
+      const value = pattern.exec(text);
       if (!value) continue;
       open = value[1]!.length;
       end = start + value[0].length;
@@ -672,8 +685,8 @@ export function scrubCredentialTextUnbounded(text: string, cut = false): string 
     closing,
     whole,
     plain.userinfo,
-    // A credential starting in a URL's own userinfo, which the rewrite drops with its key, does
-    // not hide the names after it.
+    // A credential starting in a URL's own userinfo, which the rewrite drops with its key, hides
+    // neither the names after it nor, below, the text after the URL.
     [...outsideUserinfo(credentials, plain.userinfo), ...plain.hidden, ...plain.userinfo].sort(
       ([a], [b]) => a - b,
     ),
@@ -689,7 +702,10 @@ export function scrubCredentialTextUnbounded(text: string, cut = false): string 
     ...authorizationSpans(scrubbed),
     ...nestedUserinfoSpans(scrubbed, kept),
     ...(changes.length || net.length
-      ? spansBesideUrls([...credentials, ...outsideUrls(text, net, changes)], changes)
+      ? spansBesideUrls(
+          [...outsideUserinfo(credentials, plain.userinfo), ...outsideUrls(text, net, changes)],
+          changes,
+        )
       : []),
     ...(whole.length ? rewrittenSpans(scrubbed, whole) : []),
     ...(cut ? cutSchemeSpans(scrubbed) : []),
