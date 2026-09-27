@@ -166,8 +166,8 @@ const specialScheme = /^(?:https?|wss?|ftp):/i;
  * so an `&` or `=` inside one cannot make the rest of it a query name. One between
  * backslash-escaped quotes, which is never part of a URL in the text around it, and one whose
  * quote does not close before the URL's end are replaced wherever they are; any other only in the
- * query, to its end at a `#`, since one in the host or path can hold the `?` that starts the query
- * or make the URL unparseable. */
+ * query, since one in the host or path can hold the `?` that starts the query or make the URL
+ * unparseable. `scrubTextUrl` replaces them before the first `#`. */
 const urlAnyValue = new RegExp(
   String.raw`(?<==)(?:${urlEscapedValue('"')}|${urlEscapedValue("'")}|"[^"\r\n]*$|'[^'\r\n]*$|${openEscapedValue('"')}\\*$|${openEscapedValue("'")}\\*$)`,
   "g",
@@ -183,15 +183,17 @@ const urlQueryName = /(?<=[?&])[^=&#]*:\/\/[^=&#]*/g;
  * differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
   if (!specialScheme.test(url)) return /[@?#]/.test(url) ? REDACTED : url;
-  const opened = url.replace(urlAnyValue, REDACTED);
+  // The first `#` starts the fragment, which is dropped, even inside a quoted value, as the URL
+  // parser reads the text; values are replaced only before it.
+  const hash = url.indexOf("#");
+  const fragment = hash === -1 ? "" : url.slice(hash);
+  const opened = (hash === -1 ? url : url.slice(0, hash)).replace(urlAnyValue, REDACTED);
   const query = opened.indexOf("?");
-  const hash = opened.indexOf("#");
-  if (query === -1 || (hash !== -1 && hash < query)) return scrubUrl(opened, state);
-  const end = hash === -1 ? opened.length : hash;
+  if (query === -1) return scrubUrl(opened + fragment, state);
   return scrubUrl(
     opened.slice(0, query) +
-      opened.slice(query, end).replace(urlQueryValue, REDACTED).replace(urlQueryName, REDACTED) +
-      opened.slice(end),
+      opened.slice(query).replace(urlQueryValue, REDACTED).replace(urlQueryName, REDACTED) +
+      fragment,
     state,
   );
 }

@@ -416,7 +416,7 @@ def test_a_bracketed_value_full_of_escaped_quotes_scrubs_in_linear_time():
     assert time.perf_counter() - started < 10
 
 
-def test_a_url_of_any_length_is_read_to_its_end():
+def test_a_url_of_600_000_pieces_is_read_to_its_end():
     # A URL is read a piece at a time, as in the TypeScript SDK, where one repeated pattern
     # exhausted Bun's regular expression engine on a URL of 600,000 pieces.
     started = time.perf_counter()

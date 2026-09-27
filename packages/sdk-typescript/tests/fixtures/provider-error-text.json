@@ -595,6 +595,14 @@
     {
       "input": "GET https://h.example.test/?a=1&x://h2.example.test/p=synthetic-nested-value failed",
       "expected": "GET https://h.example.test/?a=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p;x=\\\"a#b\\\"&mongodb://u:synthetic-after-escaped-hash@db.example.test/x failed",
+      "expected": "GET https://h.example.test/p;x=[redacted] failed"
+    },
+    {
+      "input": "GET ftp://h.example.test/?x=\\'a#b\\'&HTTPS:/synthetic-name-after-escaped-hash failed",
+      "expected": "GET ftp://h.example.test/?x=%5Bredacted%5D failed"
     }
   ]
 }

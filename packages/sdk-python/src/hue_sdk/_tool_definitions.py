@@ -144,8 +144,8 @@ _URL_PARTS = re.compile(r"[@?#]")
 # parsed, so an ``&`` or ``=`` inside one cannot make the rest of it a query name. One between
 # backslash-escaped quotes, which is never part of a URL in the text around it, and one whose quote
 # does not close before the URL's end are replaced wherever they are; any other only in the query,
-# to its end at a ``#``, since one in the host or path can hold the ``?`` that starts the query or
-# make the URL unparseable.
+# since one in the host or path can hold the ``?`` that starts the query or make the URL
+# unparseable. ``_url_values_replaced`` replaces them before the first ``#``.
 _URL_ANY_VALUE = re.compile(
     rf"(?<==)(?:{_URL_ESCAPED_VALUE}|\"[^\"\r\n]*\Z|'[^'\r\n]*\Z"
     rf"|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
@@ -287,15 +287,17 @@ def _scrub_text_urls(
 
 def _url_values_replaced(url: str) -> str:
     """A URL's quoted values replaced: one between backslash-escaped quotes or one it ends in,
-    wherever it is, and each other in its query up to a ``#``."""
-    url = _URL_ANY_VALUE.sub(REDACTED, url)
-    query = url.find("?")
-    fragment = url.find("#")
-    if query == -1 or (fragment != -1 and fragment < query):
-        return url
-    end = len(url) if fragment == -1 else fragment
-    queried = _URL_QUERY_NAME.sub(REDACTED, _URL_QUERY_VALUE.sub(REDACTED, url[query:end]))
-    return url[:query] + queried + url[end:]
+    wherever it is, and each other in its query. The first ``#`` starts the fragment, which is
+    dropped, even inside a quoted value, as the URL parser reads the text; values are replaced
+    only before it."""
+    hash_at = url.find("#")
+    fragment = "" if hash_at == -1 else url[hash_at:]
+    opened = _URL_ANY_VALUE.sub(REDACTED, url if hash_at == -1 else url[:hash_at])
+    query = opened.find("?")
+    if query == -1:
+        return opened + fragment
+    queried = _URL_QUERY_NAME.sub(REDACTED, _URL_QUERY_VALUE.sub(REDACTED, opened[query:]))
+    return opened[:query] + queried + fragment
 
 
 def _normalized_key(key: str) -> str:
