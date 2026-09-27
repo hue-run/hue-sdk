@@ -506,12 +506,12 @@ const OPTION_VALUE = /^(-{0,2}([A-Za-z][\w-]*)=)(.*)$/su;
 /**
  * The item after Docker's `-e` or `--env`, as an environment value is shown: a variable name alone
  * (passed through from the environment) as is, `NAME=VALUE` with its value redacted. Anything else,
- * such as the script after `node -e`, is undefined and redacted like any other string.
+ * such as the script after `node -e`, can hold a literal credential in any shape and is redacted.
  */
-function redactEnvironmentItem(item: string): string | undefined {
+function redactEnvironmentItem(item: string): string {
   if (/^[A-Za-z_]\w*$/u.test(item)) return item;
   const assignment = /^([A-Za-z_]\w*)=(.*)$/su.exec(item);
-  if (!assignment) return undefined;
+  if (!assignment) return REDACTED;
   return REFERENCE_ONLY.test(assignment[2]!) ? item : `${assignment[1]}=${REDACTED}`;
 }
 
@@ -605,13 +605,9 @@ function redactConfig(
     if (Array.isArray(value))
       return value.map((item: unknown, index) => {
         const previous = value[index - 1];
-        const environment =
-          !secret && typeof item === "string" && (previous === "-e" || previous === "--env")
-            ? redactEnvironmentItem(item)
-            : undefined;
-        return (
-          environment ?? redact(item, secret || isCredentialOption(previous), depth + 1, false)
-        );
+        if (!secret && typeof item === "string" && (previous === "-e" || previous === "--env"))
+          return redactEnvironmentItem(item);
+        return redact(item, secret || isCredentialOption(previous), depth + 1, false);
       });
     if (!isRecord(value)) return value;
     return Object.fromEntries(
