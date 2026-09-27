@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
-import { explain, renderTable, spawnAgentCommand } from "../src/cli/eval.js";
+import { derivedAgentKey, explain, renderTable, spawnAgentCommand } from "../src/cli/eval.js";
 import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
@@ -811,6 +811,21 @@ function expectNoSecrets(result: { stdout: string; stderr: string }) {
   expect(result.stdout).not.toContain(mcpToken);
   expect(result.stderr).not.toContain(mcpToken);
 }
+
+test("an agent command's key skips its interpreter, a Windows executable name included", () => {
+  // npm installs Bun as bun.exe on every platform, so its path names the test runner too.
+  for (const command of [
+    "node agent.mjs",
+    "/opt/app/node_modules/bun/bin/bun.exe agent.mjs --flag",
+    "C:\\nodejs\\node.exe .\\agent.mjs",
+    "NPX.CMD tsx agent.ts",
+    "python3 -u agent.py",
+  ])
+    expect(derivedAgentKey(undefined, command)).toBe("agent");
+  // A script whose own name ends in .exe is still the agent.
+  expect(derivedAgentKey(undefined, "./my-agent.exe --once")).toBe("my-agent");
+  expect(derivedAgentKey("adapters/support-bot.ts", "node other.mjs")).toBe("support-bot");
+});
 
 describe("hue eval", () => {
   test(

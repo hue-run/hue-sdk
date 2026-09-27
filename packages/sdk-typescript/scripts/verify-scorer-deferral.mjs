@@ -15,8 +15,11 @@ const {
   createEvaluationClient,
   defineLocalScorer,
   rescore,
+  runSimulation,
   scoreLocally,
 } = require("@hue-run/sdk/evals");
+const { createHue } = require("@hue-run/sdk");
+const { createEnvironmentClient } = require("@hue-run/sdk/environment");
 const directory = await mkdtemp(join(tmpdir(), "hue-deferred-installed-"));
 const version = (definition) => ({ id: randomUUID(), contentDigest: "d".repeat(64), definition });
 const metric = { name: "quality", type: "boolean" };
@@ -125,6 +128,7 @@ const evidence = {
 };
 const uploads = [];
 const publications = [];
+const environmentRequests = [];
 const server = createServer(async (request, response) => {
   try {
     assert.equal(request.headers.authorization, "Bearer synthetic-deferral-key");
@@ -144,6 +148,12 @@ const server = createServer(async (request, response) => {
       return send({ items: [{ id: itemId, subjectId, hasOutput: true }], nextCursor: null });
     if (path === `/api/v1/evaluation-subjects/${subjectId}`)
       return send({ id: subjectId, executionId: randomUUID(), ...evidence });
+    // A repository simulation reaches its environment only after its definition was accepted.
+    if (path.startsWith("/api/v1/environments")) {
+      environmentRequests.push(`${request.method} ${path}`);
+      response.statusCode = 404;
+      return send({ error: "Synthetic environment refused" });
+    }
     // rescore lists the run's recorded results before scoring so terminal scores are preserved;
     // this synthetic run has none, so resume still relies on the checkpoint.
     if (request.method === "GET" && path === `/api/v1/evaluation-runs/${runId}/results`)
@@ -209,6 +219,66 @@ try {
   assert.deepEqual(resumed, report);
   assert.equal(localCalls, 1);
   assert.equal(uploads.length, 2);
+  // A repository simulation may name the newer Hue-executed entries without their metrics, which
+  // each entry fixes: the definition is accepted and the run goes on to its environment, which
+  // this server refuses. A release that does not know the entries refuses the definition first.
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const hue = createHue({
+    apiKey: "synthetic-deferral-key",
+    baseUrl,
+    serviceName: "deferral",
+    captureContent: false,
+  });
+  const simulationDirectory = await mkdtemp(join(tmpdir(), "hue-deferred-simulation-"));
+  try {
+    await assert.rejects(
+      runSimulation({
+        client: options.client,
+        environmentClient: createEnvironmentClient({ apiKey: "synthetic-deferral-key", baseUrl }),
+        hue,
+        checkpointDirectory: simulationDirectory,
+        persistResultContent: false,
+        traceEvidence: { mode: "omit", reason: "Synthetic deferral check" },
+        definition: {
+          kind: "repository",
+          name: "Deferred entries",
+          slug: "deferred-entries",
+          environment: {
+            name: "Synthetic world",
+            slug: "synthetic-world",
+            definition: { schemaVersion: 1, state: { collections: { records: {} } }, actions: [] },
+          },
+          cases: [{ externalKey: "one", inputs: { task: "draft" }, expected: "drafted" }],
+          scorers: [
+            {
+              name: "Conversion",
+              slug: "conversion",
+              scorer: { kind: "world_outcome", entry: "hue.conversion_outcome.v2" },
+            },
+            {
+              name: "Assertions",
+              slug: "assertions",
+              scorer: { kind: "world_outcome", entry: "hue.outcome_assertions.v2" },
+            },
+            {
+              name: "Judged",
+              slug: "judged",
+              scorer: {
+                kind: "world_outcome",
+                entry: "hue.outcome_assertions.v3",
+                config: { judge },
+              },
+            },
+          ],
+        },
+      }),
+      (error) => !/Unsupported or invalid SDK scorer definition/.test(String(error?.message)),
+    );
+    assert.ok(environmentRequests.length > 0);
+  } finally {
+    await hue.shutdown();
+    await rm(simulationDirectory, { recursive: true, force: true });
+  }
   console.log("Installed scorer deferral, local bindings and checkpoint resume passed");
 } finally {
   server.closeAllConnections();
