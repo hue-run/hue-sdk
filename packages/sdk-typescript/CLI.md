@@ -261,15 +261,16 @@ end up in it; a replaced file keeps its read, write and execute permissions, so 
 `0600` is never widened, except that other accounts lose write access (they could add a command for
 the client to run). It keeps its group; when the group cannot be kept, the group and other accounts
 get only the access both had. Setuid, setgid and sticky bits are dropped, and an access control list
-is not kept: the replacement has only the mode bits, whose group bits are the list's mask, so
-restore the list afterwards if you use one. A symlinked file, or a symlinked `.cursor` or `.vscode`
-directory, is refused; the current directory itself may be reached through a symlink. `--dry-run`
-prints the resulting file content or commands without writing or running. In printed file content,
-every header and `env` value, and each other credential it recognizes (a known token prefix, the
-value of an option such as `--api-key VALUE`, `-H VALUE`, `-e NAME=VALUE` or `--token=VALUE`, a
-field or assignment such as `clientSecret`, `key` or `STRIPE_KEY=`, a token-like URL path segment, a
-URL's query values, which read `%5Bredacted%5D`), is shown as `[redacted]` unless the whole value is
-a variable or input reference such as `Bearer ${HUE_MCP_KEY}`; the file keeps the values. Hue's own
+is not kept: the replacement has only the mode bits, whose group bits are the list's mask, plus any
+default list the directory gives new files, whose entries then get up to the group's access. Restore
+a list afterwards if you use one. A symlinked file, or a symlinked `.cursor` or `.vscode` directory,
+is refused; the current directory itself may be reached through a symlink. `--dry-run` prints the
+resulting file content or commands without writing or running. In printed file content, every header
+and `env` value, and each other credential it recognizes (a known token prefix, the value of an
+option such as `--api-key VALUE`, `-H VALUE`, `-e NAME=VALUE` or `--token=VALUE`, a field or
+assignment such as `clientSecret`, `key` or `STRIPE_KEY=`, a token-like URL path segment, a URL's
+query values, which read `%5Bredacted%5D`), is shown as `[redacted]` unless the whole value is a
+variable or input reference such as `Bearer ${HUE_MCP_KEY}`; the file keeps the values. Hue's own
 URL shows its `toolsets`, `project` and `read_only` selections, with every other query value and any
 token-like path segment as `[redacted]`, there and in the lines that report what the command did; a
 command printed for you to run keeps `--url` as given. `--print` prints only the snippet. Client
