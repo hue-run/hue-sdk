@@ -31,6 +31,11 @@ refuses to publish a version without a matching entry below.
   and wrote `mcp.json` wherever that link pointed. The checks run before the file is read and again
   before the rename, but are not atomic against an account that can write the project directory and
   races the command.
+- Security: `hue eval` and the SDK's `runSimulation` and `runLocalAgent` accept a project or
+  experiment id from Hue as a checkpoint path component only when it is a single name of letters,
+  digits, `.`, `_` and `-` that starts with a letter or digit, and refuse a resolved checkpoint path
+  outside its directory. Before, an id containing `../` from a hostile or compromised origin made
+  them create directories and write checkpoint files outside `.hue/eval` or `--checkpoint-dir`.
 - A failed OpenAI MCP call's error text, exported with `captureContent: true`, is scrubbed of
   credentials it kept before. A JSON escape (`\n`, `\t`, `\u0022`) or `%` escape (`%20`, `%3D`) ends
   a word as a space does, so a prefixed token, or `Bearer`, `Basic` or `Token`, right after one is

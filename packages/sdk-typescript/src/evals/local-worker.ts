@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
 import type { EnvironmentClient } from "../environment/client.js";
@@ -10,7 +10,7 @@ import type {
   RequestedAttemptProviderV2,
 } from "./attempt.js";
 import type { EvaluationClient } from "./client.js";
-import { CheckpointStore } from "./checkpoint.js";
+import { CheckpointStore, checkpointPath, checkpointSegment } from "./checkpoint.js";
 import {
   pinRequestedAttemptV2,
   requestedAttemptV2,
@@ -351,17 +351,21 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
       );
       let experimentFinished = false;
       try {
+        const experimentId = checkpointSegment(claim.experimentId, "experiment id");
         const requested = requestedConfiguration
           ? pinRequestedAttemptV2(
               requestedConfiguration,
-              (await options.client.getExperiment(claim.experimentId)).config,
+              (await options.client.getExperiment(experimentId)).config,
             )
           : undefined;
         const report = await runExperiment({
           client: options.client,
           hue: options.hue,
-          experimentId: claim.experimentId,
-          checkpointDirectory: join(directory, `experiment-${claim.experimentId}`),
+          experimentId,
+          checkpointDirectory: checkpointPath(directory, [
+            `experiment-${experimentId}`,
+            "experiment id",
+          ]),
           persistResultContent: true,
           // Worker dispatch uses the case pin: directTarget never receives a world.
           environmentEvidence: options.directTarget ? "when_pinned" : "required",

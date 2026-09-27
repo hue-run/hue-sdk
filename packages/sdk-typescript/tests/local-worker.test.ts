@@ -569,6 +569,48 @@ function fixture(options: {
 }
 
 describe("local agent worker", () => {
+  test("rejects malformed claimed experiment ids before creating a run checkpoint", async () => {
+    for (const id of ["", ".", "..", "../escape", null, 42]) {
+      const f = fixture({ capabilityStatus: 500 });
+      const directory = await mkdtemp(join(tmpdir(), "hue-worker-invalid-id-"));
+      const hue = createHue({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        serviceName: "invalid-claim",
+        captureContent: false,
+      });
+      const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl });
+      const claim = client.claimLocalAgentRun.bind(client);
+      client.claimLocalAgentRun = async (input) => ({
+        ...(await claim(input))!,
+        experimentId: id as string,
+      });
+      let targetCalls = 0;
+      try {
+        await expect(
+          runLocalAgent({
+            client,
+            environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+            hue,
+            checkpointDirectory: directory,
+            agent: { key: "invalid-claim", name: "Invalid claim", revision: "v1" },
+            maxRuns: 1,
+            target() {
+              targetCalls++;
+              return {};
+            },
+          }),
+        ).rejects.toThrow(/Refusing to use experiment id/);
+        expect(targetCalls).toBe(0);
+        expect((await readdir(directory)).sort()).toEqual(["manifest.json", "worker-id.json"]);
+      } finally {
+        await hue.shutdown();
+        f.server.stop(true);
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   for (const providerOutcome of ["ready", "environment_incomplete"] as const) {
     test(`generic worker defers nonlocal scorer pins for ${providerOutcome} V2 work`, async () => {
       const f = fixture({ capabilityStatus: 500, providerOutcome });
