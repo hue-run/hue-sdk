@@ -193,6 +193,15 @@ for staging). Hue's Settings page does not show these snippets; this command kee
   for `claude-code`, `codex` and `conductor`. Hue does not yet accept Cursor's sign-in callback, so
   `cursor` and the other clients use a key.
 
+`--project <id-or-slug>` pins either kind of connection to one project. The command adds or
+replaces `?project=<value>` while keeping `toolsets`, and names the server `hue-<value>` so it can
+sit beside the organization-wide `hue` connection. A pinned connection's tools do not publish or
+accept `project_id`; `list_projects` returns only that project with `connection.pinned: true`.
+The printed sign-in Codex TOML keeps its URL bare and sends `X-Hue-MCP-Project` together with any
+`X-Hue-MCP-Toolsets` header. An empty pin is refused. If the selected project is inactive or the
+credential cannot reach it, Hue returns HTTP `404`; change or remove `--project`, because signing
+in again does not change the credential's reach.
+
 `--read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides and rejects write
 tools whatever the key allows. A project key, with or without it, keeps reaching its one project.
 With `--auth oauth` it is refused: a sign-in connection has **Read and write** access, so use a
@@ -243,7 +252,8 @@ through a trace read) end to end; if Hue's tools do not load after signing in, r
 again with `--auth key`.
 
 JSON files are parsed and merged: other servers, inputs and top-level fields are kept, only the
-`hue` entry is replaced, and invalid JSON (including comments) is refused together with the snippet
+selected server entry is replaced (`hue`, or `hue-<value>` with `--project`), and invalid JSON
+(including comments) is refused together with the snippet
 to add by hand. Files are written with mode `0644` through a temporary file and an atomic rename;
 symlinks are refused. `--dry-run` prints the resulting file content or commands without writing or
 running; `--print` prints only the snippet. Client CLIs run without a shell, so the
@@ -255,7 +265,7 @@ the client (VS Code prompts for the key instead). A desktop app started from the
 does not see that shell's variables, and Conductor's agents read the login-shell environment that
 Conductor captures, so sign-in is the simpler choice there. After a sign-in installation it names
 the client's authentication action. Both end with the prompt that verifies the connection:
-`Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id as project_id on each call after list_projects.` `list_projects` returns a project key's one project too. Exit codes:
+`Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id or slug as project_id on each call after list_projects.` A pinned installation instead verifies `connection.pinned: true` and omits `project_id`. `list_projects` returns a project key's one project too. Exit codes:
 `0` done or printed, `1` failed, `2` usage error.
 
 ## Deliver simulated events to a local bot
