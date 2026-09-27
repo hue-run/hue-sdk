@@ -442,20 +442,22 @@ async function writeConfigFile(path: string, text: string, display: string): Pro
       if (existing) {
         // Other accounts never keep write access: they could add a server command to run.
         let mode = existing.mode & 0o775;
-        // The new file has the process's group (the directory's on macOS), which may differ, and
-        // root's owner. When the group cannot be kept, its members and everyone else get only what
-        // both had.
-        const root = process.geteuid?.() === 0;
+        // The new file has the process's group (the directory's on macOS), which may differ. When
+        // the group cannot be kept, its members and everyone else get only what both had.
         const created = await handle.stat();
-        if (created.gid !== existing.gid || (root && created.uid !== existing.uid)) {
+        if (created.gid !== existing.gid) {
           try {
-            await handle.chown(root ? existing.uid : -1, existing.gid);
+            await handle.chown(-1, existing.gid);
           } catch {
             const shared = (mode >> 3) & mode & 0o007;
             mode = (mode & 0o700) | (shared << 3) | shared;
           }
         }
         await handle.chmod(mode);
+        // Root also gives the file back to its owner, last: changing the mode of another account's
+        // file would need CAP_FOWNER. If it cannot, the file stays root's, as before.
+        if (process.geteuid?.() === 0 && created.uid !== existing.uid)
+          await handle.chown(existing.uid, -1).catch(() => undefined);
       }
       await handle.sync();
     } finally {

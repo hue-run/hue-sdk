@@ -447,8 +447,8 @@ describe("hue mcp install", () => {
       const root = await temporaryRoot();
       const file = join(root, ".mcp.json");
       await writeFile(file, "{}\n");
-      await chown(file, 12345, 12346);
       await chmod(file, 0o600);
+      await chown(file, 12345, 12346);
       expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
       const info = await lstat(file);
       expect([info.uid, info.gid]).toEqual([12345, 12346]);
