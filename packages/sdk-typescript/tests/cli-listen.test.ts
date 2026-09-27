@@ -147,6 +147,8 @@ interface MockOptions {
   refuseAcks?: boolean;
   /** Answer every pull at once, without waiting for a delivery. */
   emptyAtOnce?: boolean;
+  /** Answer every pull at once with a new delivery. */
+  freshAtOnce?: boolean;
   /** Answer each pull, or each acknowledgement, with a 307 to this URL. */
   pullRedirect?: string;
   ackRedirect?: string;
@@ -274,6 +276,7 @@ async function mockHue(options: MockOptions = {}) {
             entry.closedEarly = true;
           }
         });
+        if (options.freshAtOnce) queue.push(slackDelivery("event_callback"));
         const deadline = Date.now() + (options.emptyAtOnce ? 0 : (waitMs as number));
         while (!closed && queue.length === 0 && repeat.length === 0 && Date.now() < deadline)
           await new Promise((tick) => setTimeout(tick, 10));
@@ -1032,16 +1035,15 @@ describe("hue listen delivery safety", () => {
     const answer = await forwardDelivery(new URL(bot.url), delivery);
     expect(answer).toMatchObject({ outcome: "response", status: 200 });
     const [received] = bot.requests;
-    // Node's client adds its own Host and Connection, and the length of the body it sent.
-    expect(Object.keys(received!.headers).sort()).toEqual(
-      [
-        ...Object.keys(queued.headers),
-        "x-custom-trace",
-        "host",
-        "connection",
-        "content-length",
-      ].sort(),
-    );
+    const forwarded = [...Object.keys(queued.headers), "x-custom-trace"];
+    expect(Object.keys(received!.headers)).toEqual(expect.arrayContaining(forwarded));
+    // The rest are the client's own: its Host and the length of the body it sent, and Connection
+    // (Node) or Accept (Bun 1.3). None of the connection-level headers Hue stored arrives.
+    const own = Object.keys(received!.headers).filter((name) => !forwarded.includes(name));
+    expect(own).toEqual(expect.arrayContaining(["host", "content-length"]));
+    expect(
+      own.filter((name) => !["host", "content-length", "connection", "accept"].includes(name)),
+    ).toEqual([]);
     expect(received!.headers.host).toBe(`localhost:${bot.port}`);
     expect(received!.headers["content-length"]).toBe(String(Buffer.byteLength(queued.body)));
     expect(received!.headers["x-custom-trace"]).toBe("t-1");
@@ -1305,6 +1307,22 @@ describe("hue listen pacing and redirects", () => {
     listen.stop();
     expect(await listen.exit).toBe(0);
     expect(hue.pulls.length).toBeLessThanOrEqual(4);
+  });
+
+  test("pulls answered at once with new deliveries are paced", async () => {
+    const hue = await mockHue({ freshAtOnce: true });
+    const bot = await receiver();
+    const listen = run(args(hue.origin, bot.url), { HUE_WORLD_TOKEN: WORLD_TOKEN });
+    await until(() => hue.acks.length >= 1);
+    const from = hue.pulls.length;
+    await settle();
+    const pulled = hue.pulls.length - from;
+    listen.stop();
+    expect(await listen.exit).toBe(0);
+    // At most one pull every 50 ms: about 30 in 1.5 s, where a local receiver allowed hundreds.
+    expect(pulled).toBeGreaterThanOrEqual(5);
+    expect(pulled).toBeLessThanOrEqual(40);
+    expect(bot.requests.length).toBeGreaterThanOrEqual(pulled);
   });
 
   test("a redirect answering a pull or an acknowledgement is reported, never followed", async () => {

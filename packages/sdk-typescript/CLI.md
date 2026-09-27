@@ -300,8 +300,9 @@ a later one is a timeout. A failing answer with `x-slack-no-retry: 1` is reporte
 retrying it. Only a successful URL verification answer's body (at most 4 KiB, for its challenge) is
 sent to Hue; any other answer body stays on this machine. Each pull waits for at most 20 seconds and
 leases up to `--max` deliveries (1 to 10, default 10), which are forwarded concurrently; the next
-pull starts once they are acknowledged, and a delivery beyond `--max` is never forwarded. A pull
-that answers at once with nothing new to forward is not repeated for a second. A provider retry of
+pull starts once they are acknowledged, and no sooner than 50 ms after the last one began, and a
+delivery beyond `--max` is never forwarded. A pull that answers at once with nothing new to forward
+is not repeated for a second. A provider retry of
 an event is a new delivery and is forwarded again with its `X-Slack-Retry-Num` and
 `X-Slack-Retry-Reason`, so the bot deduplicates by `event_id` as it does with Slack. A delivery Hue
 hands out a second time is not sent again; its recorded answer is repeated. An acknowledgement Hue
