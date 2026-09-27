@@ -418,10 +418,10 @@ const authorizationBare =
   /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;})\]\\]))((?:\[redacted\](?=[^\s"',;})\]\\]))?[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
 
 /** `bareValue` and `authorizationBare` for a value that starts with a placeholder after `=>`,
- * which is read to its end as any other value is. */
-const arrowedBareValue = /(\\?["']?)[^\s"',;&})\]]+/y;
+ * which is read to its end as any other value is, a `[redacted]` it starts with included. */
+const arrowedBareValue = /(\\?["']?)(?:\[redacted\][^\s"',;&})\]]*|[^\s"',;&})\]]+)/iy;
 const arrowedAuthorizationBare =
-  /(\\?["']?)([^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+  /(\\?["']?)(\[redacted\][^\s"',;})\]]*|[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\][^\s"',;})\]]*|[^\s"',;})\]]+))?/iy;
 const placeholderStart = /^(?:\[redacted\]|%5Bredacted%5D)/i;
 
 function normalizedKey(key: string): string {

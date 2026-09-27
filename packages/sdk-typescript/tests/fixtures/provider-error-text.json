@@ -799,6 +799,10 @@
     {
       "input": "clone https://Authorization:synthetic-git-3@github.com/o/r.git?ref=main failed: exit 128",
       "expected": "clone https://github.com/o/r.git?ref=%5Bredacted%5D failed: exit 128"
+    },
+    {
+      "input": "token=>[redacted]synthetic-arrow-3 failed",
+      "expected": "token=>[redacted] failed"
     }
   ]
 }

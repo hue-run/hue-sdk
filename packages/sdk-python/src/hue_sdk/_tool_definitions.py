@@ -467,11 +467,15 @@ def _url_values_replaced(url: str, hides: Callable[[int, int], bool] | None = No
 
 
 # ``_BARE_VALUE`` and ``_AUTHORIZATION_BARE`` for a value that starts with a placeholder after
-# ``=>``, which is read to its end as any other value is.
-_ARROWED_BARE_VALUE = re.compile(rf"(\\?[\"']?)[^{_JS_SPACE}\"',;&}})\]]+")
+# ``=>``, which is read to its end as any other value is, a ``[redacted]`` it starts with included.
+_ARROWED_BARE_VALUE = re.compile(
+    rf"(\\?[\"']?)(?:\[redacted\][^{_JS_SPACE}\"',;&}})\]]*|[^{_JS_SPACE}\"',;&}})\]]+)",
+    re.IGNORECASE | re.ASCII,
+)
 _ARROWED_AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)([^{_JS_SPACE}\"',;}})\]]+)"
-    rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
+    rf"(\\?[\"']?)(\[redacted\][^{_JS_SPACE}\"',;}})\]]*|[^{_JS_SPACE}\"',;}})\]]+)"
+    rf"(?:[ \t]+(?:\[redacted\][^{_JS_SPACE}\"',;}})\]]*|[^{_JS_SPACE}\"',;}})\]]+))?",
+    re.IGNORECASE | re.ASCII,
 )
 _PLACEHOLDER_START = re.compile(r"\[redacted\]|%5Bredacted%5D", re.IGNORECASE | re.ASCII)
 
