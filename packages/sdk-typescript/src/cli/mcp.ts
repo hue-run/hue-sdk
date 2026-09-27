@@ -1,20 +1,11 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import {
-  access,
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  stat,
-  unlink,
-} from "node:fs/promises";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { constants, type Stats } from "node:fs";
+import { access, lstat, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { isLoopbackHost } from "../config.js";
+import { isCredentialKey, scrubCredentialText } from "../tool-definitions.js";
 
 /**
  * `hue mcp install`: writes or prints the coding-agent configuration for Hue's MCP server. The
@@ -388,40 +379,250 @@ async function readJsonConfig(path: string, display: string): Promise<unknown> {
   }
 }
 
-async function rejectSymlink(path: string, display: string): Promise<void> {
-  try {
-    if ((await lstat(path)).isSymbolicLink())
-      throw new ConfigError(`Refusing to write ${display}: it is a symbolic link.`);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
+/**
+ * Refuses a symbolic link, or anything but a directory, between the working directory and the file
+ * (`.cursor` or `.vscode`), as the file itself is refused. The working directory and its ancestors
+ * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one.
+ */
+async function rejectLinkedParents(cwd: string, path: string, display: string): Promise<void> {
+  let current = cwd;
+  for (const part of relative(cwd, dirname(path)).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const shown = displayPath(cwd, current);
+    if (info.isSymbolicLink())
+      throw new ConfigError(`Refusing to use ${display}: ${shown} is a symbolic link.`);
+    if (!info.isDirectory())
+      throw new ConfigError(`Refusing to use ${display}: ${shown} is not a directory.`);
   }
 }
 
-/** Atomic write for a secret-free config file: temporary file, fsync, rename; mode 0644. */
-async function writeConfigFile(path: string, text: string, display: string): Promise<void> {
+/** The file's status, or undefined when there is none; a symbolic link is refused. */
+async function rejectSymlink(path: string, display: string): Promise<Stats | undefined> {
+  let info;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (info.isSymbolicLink())
+    throw new ConfigError(`Refusing to write ${display}: it is a symbolic link.`);
+  return info;
+}
+
+/**
+ * Atomic write: temporary file, fsync, rename. A file it replaces keeps its permission bits, so one
+ * kept at 0600 because it holds other servers' tokens is never widened, except that other accounts
+ * lose write access; it keeps its group (or, when the group cannot be kept, its group and other
+ * accounts get only the access both had). A new file is created owner-only, 0600 narrowed by the
+ * umask: people and clients add literal tokens to these files.
+ */
+async function writeConfigFile(
+  cwd: string,
+  path: string,
+  text: string,
+  display: string,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await rejectSymlink(path, display);
+  await rejectLinkedParents(cwd, path, display);
+  const existing = await rejectSymlink(path, display);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   try {
     const handle = await open(
       temporary,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o644,
+      0o600,
     );
     try {
       await handle.writeFile(text, "utf8");
+      if (existing) {
+        // Other accounts never keep write access: they could add a server command to run.
+        let mode = existing.mode & 0o775;
+        // The new file has the process's group (the directory's on macOS), which may differ. When
+        // the group cannot be kept, its members and everyone else get only what both had.
+        if ((await handle.stat()).gid !== existing.gid) {
+          try {
+            await handle.chown(-1, existing.gid);
+          } catch {
+            const shared = (mode >> 3) & mode & 0o007;
+            mode = (mode & 0o700) | (shared << 3) | shared;
+          }
+        }
+        await handle.chmod(mode);
+      }
       await handle.sync();
     } finally {
       await handle.close();
     }
-    await chmod(temporary, 0o644);
+    await rejectLinkedParents(cwd, path, display);
     await rejectSymlink(path, display);
     await rename(temporary, path);
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
+}
+
+const REDACTED = "[redacted]";
+/**
+ * Only references a client resolves (`${NAME}`, `${env:NAME}`, `${input:id}`), after an optional
+ * `Bearer`, `Basic` or `Token` scheme: no credential. A reference with a default does not match.
+ */
+const REFERENCE_ONLY =
+  /^(?:(?:bearer|basic|token)[ \t]+)?(?:\$\{(?:input:[\w.-]+|(?:env:)?[A-Za-z_]\w*)\})+$/iu;
+
+/** Names `isCredentialKey` leaves out that configurations use for a credential field or option. */
+const CREDENTIAL_NAMES = new Set(["auth", "pat", "bearer", "env"]);
+
+/** `isCredentialKey`, `CREDENTIAL_NAMES`, or a name ending in `key`, `keys` or `header`. */
+function isCredentialName(name: string): boolean {
+  const normalized = name.toLowerCase().replace(/[-_]/g, "");
+  return (
+    isCredentialKey(name) ||
+    CREDENTIAL_NAMES.has(normalized) ||
+    /(?:keys?|header)$/u.test(normalized)
+  );
+}
+
+/**
+ * An `args` option whose next item is its value and names a credential: `--api-key`, `--header`,
+ * or `-H`, the header option of curl and `mcp-remote`.
+ */
+function isCredentialOption(item: unknown): boolean {
+  if (item === "-H") return true;
+  const name = typeof item === "string" ? /^--?([A-Za-z][\w-]*)$/u.exec(item)?.[1] : undefined;
+  return name !== undefined && isCredentialName(name);
+}
+
+/** `--name=value`, or `NAME=value` as `env` takes it, as an `args` item. */
+const OPTION_VALUE = /^(-{0,2}([A-Za-z][\w-]*)=)(.*)$/su;
+/**
+ * The item after Docker's `-e` or `--env`, as an environment value is shown: a variable name alone
+ * (passed through from the environment) as is, `NAME=VALUE` with its value redacted. Anything else,
+ * such as the script after `node -e`, can hold a literal credential in any shape and is redacted.
+ */
+function redactEnvironmentItem(item: string): string {
+  if (/^[A-Za-z_]\w*$/u.test(item)) return item;
+  const assignment = /^([A-Za-z_]\w*)=(.*)$/su.exec(item);
+  if (!assignment) return REDACTED;
+  return REFERENCE_ONLY.test(assignment[2]!) ? item : `${assignment[1]}=${REDACTED}`;
+}
+
+/** A URL path segment long and mixed enough to be a token, as some servers put their key there. */
+const TOKEN_SEGMENT = /^(?=[^/]*[A-Za-z])(?=[^/]*\d)[^/]{16,}$/u;
+
+/** Whether a URL path segment is token-like, or a credential `scrubCredentialText` knows. */
+function isTokenSegment(segment: string): boolean {
+  return TOKEN_SEGMENT.test(segment) || scrubCredentialText(segment) !== segment;
+}
+
+/** A URL with each token-like path segment replaced; any other string is returned as is. */
+function redactUrlPath(value: string): string {
+  if (!/^(?:https?|wss?):\/\//iu.test(value)) return value;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return value;
+  }
+  const segments = parsed.pathname.split("/");
+  if (!segments.some(isTokenSegment)) return value;
+  parsed.pathname = segments
+    .map((segment) => (isTokenSegment(segment) ? REDACTED : segment))
+    .join("/");
+  return parsed.href;
+}
+
+/** A query parameter name shown before its redacted value; any other becomes `[redacted]` whole. */
+const PARAMETER_NAME = /^[A-Za-z_][\w.-]{0,31}$/u;
+
+/**
+ * The URL this command writes, as its output shows it: the selections it validated (`toolsets`,
+ * `project`, and `read_only` when true or false) are kept; any other query value, and a token-like
+ * path segment, becomes `[redacted]`. `parseMcpUrl` has already refused userinfo and a fragment.
+ * Commands printed for a person to run keep the URL as given.
+ */
+function displayMcpUrl(url: string): string {
+  const parsed = new URL(url);
+  const query = parsed.search
+    .slice(1)
+    .split("&")
+    .filter(Boolean)
+    .map((pair) => {
+      const [name = "", value = ""] = pair.split("=", 2);
+      const selection =
+        name === "toolsets" ||
+        name === "project" ||
+        (name === "read_only" && /^(?:true|false)$/u.test(value));
+      if (selection) return pair;
+      return PARAMETER_NAME.test(name) &&
+        !TOKEN_SEGMENT.test(name) &&
+        scrubCredentialText(name) === name
+        ? `${name}=${REDACTED}`
+        : REDACTED;
+    });
+  return redactUrlPath(
+    `${parsed.origin}${parsed.pathname}${query.length ? `?${query.join("&")}` : ""}`,
+  );
+}
+
+/**
+ * A merged configuration as `--dry-run` prints it. Header and `env` values, strings and numbers
+ * under a key naming a credential, the value of a credential option in `args` (`--api-key VALUE`,
+ * `--key=VALUE`) and token-like URL path segments become `[redacted]` unless they only reference a
+ * variable or input; other strings lose what `scrubCredentialText` finds (a known token prefix, a
+ * `token=` pair, a URL's userinfo and query values). The server names under `serversKey` are not
+ * read as field names. `url`, the address this command writes, is shown as `shownUrl`.
+ */
+function redactConfig(
+  root: Record<string, unknown>,
+  serversKey: "mcpServers" | "servers",
+  url: string,
+  shownUrl: string,
+): unknown {
+  const redact = (value: unknown, secret: boolean, depth: number, names: boolean): unknown => {
+    if (depth > 256) return REDACTED;
+    if (typeof value === "number") return secret ? REDACTED : value;
+    if (typeof value === "string") {
+      if (value === url) return shownUrl;
+      if (REFERENCE_ONLY.test(value)) return value;
+      if (secret) return REDACTED;
+      const option = OPTION_VALUE.exec(value);
+      if (!option) return scrubCredentialText(redactUrlPath(value));
+      if (REFERENCE_ONLY.test(option[3]!)) return value;
+      const shown = isCredentialName(option[2]!)
+        ? REDACTED
+        : scrubCredentialText(redactUrlPath(option[3]!));
+      return `${option[1]}${shown}`;
+    }
+    if (Array.isArray(value))
+      return value.map((item: unknown, index) => {
+        const previous = value[index - 1];
+        if (!secret && typeof item === "string" && (previous === "-e" || previous === "--env"))
+          return redactEnvironmentItem(item);
+        return redact(item, secret || isCredentialOption(previous), depth + 1, false);
+      });
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redact(
+          item,
+          secret || (!(names && isRecord(item)) && isCredentialName(key)),
+          depth + 1,
+          depth === 0 && key === serversKey,
+        ),
+      ]),
+    );
+  };
+  return redact(root, false, 0, false);
 }
 
 async function findExecutable(name: string, env: NodeJS.ProcessEnv): Promise<string | null> {
@@ -787,6 +988,10 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     toolsets = selected.toolsets;
   }
   url = toolsetsMcpUrl(url, toolsets);
+  const shownUrl = displayMcpUrl(url);
+  // What the command reports doing; a command a person is to run is printed as given.
+  const shownCommand = (command: CliCommand) =>
+    command.display.replaceAll(shellWord(url), () => shellWord(shownUrl));
   const plan = planFor(clientId, auth, scope, url, serverName);
   if (parsed.values.print) {
     stdout.write(plan.snippet);
@@ -803,7 +1008,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
 
   if (plan.kind === "cli") {
     if (parsed.values["dry-run"]) {
-      for (const command of plan.commands) out(`Would run: ${command.display}`);
+      for (const command of plan.commands) out(`Would run: ${shownCommand(command)}`);
       return 0;
     }
     let failed = false;
@@ -814,10 +1019,10 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
         out(command.display);
         continue;
       }
-      out(`Running: ${command.display}`);
+      out(`Running: ${shownCommand(command)}`);
       const code = await runClientCli(executable, command.args, { cwd, env, stdout, stderr });
       if (code === 0) {
-        out(`Registered the "${serverName}" MCP server (${url}) with ${command.label}.`);
+        out(`Registered the "${serverName}" MCP server (${shownUrl}) with ${command.label}.`);
         continue;
       }
       failed = true;
@@ -832,10 +1037,12 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
 
   const path = resolve(cwd, plan.file);
   const display = displayPath(cwd, path);
+  let merged: Record<string, unknown>;
   let content: string;
   try {
+    await rejectLinkedParents(cwd, path, display);
     const existing = await readJsonConfig(path, display);
-    let merged = mergeServerEntry(existing, plan.key, plan.entry, display, serverName);
+    merged = mergeServerEntry(existing, plan.key, plan.entry, display, serverName);
     if (plan.input) merged = mergeVscodeInput(merged, plan.input, display);
     content = json(merged);
   } catch (error) {
@@ -844,16 +1051,22 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return fail(`Could not read ${display}: ${(error as Error).message}`);
   }
   if (parsed.values["dry-run"]) {
-    out(`Would write ${display}:`);
-    stdout.write(content);
+    // Other servers' entries can hold literal tokens; the file keeps them, the output does not.
+    const shown = json(redactConfig(merged, plan.key, url, shownUrl));
+    out(
+      shown === content
+        ? `Would write ${display}:`
+        : `Would write ${display} (credential values shown as ${REDACTED}):`,
+    );
+    stdout.write(shown);
     return 0;
   }
   try {
-    await writeConfigFile(path, content, display);
+    await writeConfigFile(cwd, path, content, display);
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }
-  out(`Wrote ${display} with the "${serverName}" MCP server (${url}).`);
+  out(`Wrote ${display} with the "${serverName}" MCP server (${shownUrl}).`);
   for (const line of steps) out(line);
   return 0;
 }
