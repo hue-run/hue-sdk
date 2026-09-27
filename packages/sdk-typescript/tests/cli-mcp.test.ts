@@ -18,7 +18,9 @@ import {
   MCP_USAGE,
   MCP_VERIFY_PROMPT,
   parseMcpUrl,
+  parseProject,
   parseToolsets,
+  projectMcpUrl,
   readOnlyMcpUrl,
   renderMcpSignInSnippets,
   renderMcpSnippets,
@@ -489,7 +491,7 @@ describe("hue mcp install", () => {
   test("the verification prompt asks what needs attention and falls back to recent traces", () => {
     // list_projects answers for every credential, so the prompt starts there.
     expect(MCP_VERIFY_PROMPT.startsWith("Use the Hue MCP: call list_projects")).toBe(true);
-    expect(MCP_VERIFY_PROMPT).toContain("pass the project's id as project_id");
+    expect(MCP_VERIFY_PROMPT).toContain("pass the project's id or slug as project_id");
     expect(MCP_VERIFY_PROMPT).toContain("get_project_context");
     expect(MCP_VERIFY_PROMPT).toContain("need attention or have errors");
     expect(MCP_VERIFY_PROMPT).toContain("5 most recent traces");
@@ -814,5 +816,98 @@ describe("hue mcp install", () => {
     );
     expect(inUrl.code).toBe(0);
     expect(inUrl.stdout).toBe(`Would run: codex mcp add hue --url '${observeUrl}'\n`);
+  });
+
+  test("--project pins one project under a coexisting server name", async () => {
+    expect(parseProject(" support-agent ")).toEqual({
+      project: "support-agent",
+      serverName: "hue-support-agent",
+    });
+    expect("error" in parseProject(" ")).toBe(true);
+    expect("error" in parseProject("support agent")).toBe(true);
+    expect(projectMcpUrl("https://mcp.hue.run/mcp?toolsets=all", "support-agent")).toBe(
+      "https://mcp.hue.run/mcp?toolsets=all&project=support-agent",
+    );
+    expect(
+      projectMcpUrl("https://mcp.hue.run/mcp?project=old&toolsets=observe", "support-agent"),
+    ).toBe("https://mcp.hue.run/mcp?toolsets=observe&project=support-agent");
+
+    const root = await temporaryRoot();
+    await writeFile(
+      join(root, ".mcp.json"),
+      JSON.stringify({ mcpServers: { hue: { type: "http", url: DEFAULT_MCP_URL } } }),
+    );
+    const pinned = await mcp(["install", "--client", "claude-code", "--project", "support-agent"], {
+      cwd: root,
+    });
+    expect(pinned.code).toBe(0);
+    expect(pinned.stderr).toBe("");
+    expect(JSON.parse(await readFile(join(root, ".mcp.json"), "utf8"))).toEqual({
+      mcpServers: {
+        hue: { type: "http", url: DEFAULT_MCP_URL },
+        "hue-support-agent": {
+          type: "http",
+          url: "https://mcp.hue.run/mcp?project=support-agent&toolsets=all",
+          headers: { Authorization: "Bearer ${HUE_MCP_KEY}" },
+        },
+      },
+    });
+    expect(pinned.stdout).toContain('Wrote .mcp.json with the "hue-support-agent" MCP server');
+    expect(pinned.stdout).toContain("connection.pinned true");
+    expect(pinned.stdout).toContain("Do not pass project_id");
+    expect(pinned.stdout).toContain("signing in again will not fix it");
+  });
+
+  test("a pinned Codex sign-in TOML sends project and toolsets as headers", async () => {
+    const root = await temporaryRoot();
+    const result = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--auth",
+        "oauth",
+        "--project",
+        "support-agent",
+        "--toolsets",
+        "observe",
+        "--print",
+      ],
+      { cwd: root },
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(
+      '[mcp_servers.hue-support-agent]\nurl = "https://mcp.hue.run/mcp"\nhttp_headers = { "X-Hue-MCP-Toolsets" = "observe", "X-Hue-MCP-Project" = "support-agent" }\nsupports_parallel_tool_calls = true\n',
+    );
+
+    // --project replaces a URL pin and keeps the URL's toolset selection.
+    const replaced = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--auth",
+        "oauth",
+        "--project",
+        "support-agent",
+        "--dry-run",
+        "--url",
+        "https://mcp.hue.run/mcp?project=old&toolsets=traces",
+      ],
+      { cwd: root },
+    );
+    expect(replaced.stdout).toBe(
+      "Would run: codex mcp add hue-support-agent --url 'https://mcp.hue.run/mcp?project=support-agent&toolsets=traces'\n",
+    );
+
+    for (const argv of [
+      ["install", "--client", "codex", "--project", ""],
+      ["install", "--client", "codex", "--url", "https://mcp.hue.run/mcp?project="],
+      ["install", "--client", "codex", "--url", "https://mcp.hue.run/mcp?project=one&project=two"],
+    ]) {
+      const refused = await mcp(argv, { cwd: root });
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain("project");
+    }
   });
 });

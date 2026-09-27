@@ -313,6 +313,37 @@ if (
   removedConnectEvents[0]?.event !== "run.failed"
 )
   throw new Error("Installed hue CLI still accepts the removed connect command");
+// The installed CLI, not the source import, must preserve a project pin while rendering the
+// Codex sign-in form that carries transport selections as headers on a bare URL.
+const installedPinnedMcp = spawnSync(
+  join(minimal, "node_modules", ".bin", "hue"),
+  [
+    "mcp",
+    "install",
+    "--client",
+    "codex",
+    "--auth",
+    "oauth",
+    "--project",
+    "support-agent",
+    "--toolsets",
+    "observe",
+    "--print",
+  ],
+  {
+    cwd: minimal,
+    encoding: "utf8",
+    timeout: 5000,
+    env: process.env,
+  },
+);
+const expectedPinnedMcp = `[mcp_servers.hue-support-agent]\nurl = "https://mcp.hue.run/mcp"\nhttp_headers = { "X-Hue-MCP-Toolsets" = "observe", "X-Hue-MCP-Project" = "support-agent" }\nsupports_parallel_tool_calls = true\n`;
+if (
+  installedPinnedMcp.status !== 0 ||
+  installedPinnedMcp.stderr ||
+  installedPinnedMcp.stdout !== expectedPinnedMcp
+)
+  throw new Error("Installed hue mcp install did not preserve the project pin");
 // Node 22 and 24 read --env-file from the whole command line and exit before the CLI runs when that
 // file is missing, so the installed `hue login` must create a new env file through --env-path.
 {
