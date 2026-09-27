@@ -15,11 +15,12 @@ refuses to publish a version without a matching entry below.
 - Security: `hue mcp install` no longer makes a client configuration it replaces world-readable.
   Since 0.10.0 it wrote every file with mode `0644`, so a `.mcp.json`, `.cursor/mcp.json` or
   `.vscode/mcp.json` kept at `0600` because it holds other servers' literal tokens became readable
-  by every local account. A replaced file now keeps its mode (and its group, when the group can
-  read it); a new file is created `0600`.
+  by every local account. A replaced file now keeps its permissions (and its group, when they grant
+  the group access); a new file is created `0600`.
 - Security: `hue mcp install --dry-run` shows header and `env` values, and other credentials it
-  recognizes in the resulting file, as `[redacted]` unless they only reference a variable or input
-  such as `${HUE_MCP_KEY}`. Before, it printed other servers' literal tokens.
+  recognizes in the resulting file (credential options and fields, known token prefixes, token-like
+  URL path segments and query values), as `[redacted]` unless they only reference a variable or
+  input such as `${HUE_MCP_KEY}`. Before, it printed other servers' literal tokens.
 - `hue mcp install` refuses a symlinked `.cursor` or `.vscode` directory, as it already refused a
   symlinked file. Before, it read and wrote `mcp.json` wherever that link pointed.
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,

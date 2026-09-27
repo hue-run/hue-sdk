@@ -475,41 +475,109 @@ const REDACTED = "[redacted]";
  */
 const REFERENCE_ONLY = /^(?:(?:bearer|basic|token)[ \t]+)?(?:\$\{(?:(?:env|input):)?[\w.-]+\})+$/iu;
 
-/** An `args` option whose next item is its value and names a credential: `--api-key`, `--header`. */
-function isCredentialOption(item: unknown): boolean {
-  const name = typeof item === "string" ? /^--?([A-Za-z][\w-]*)$/u.exec(item)?.[1] : undefined;
-  return name !== undefined && (isCredentialKey(name) || name.toLowerCase() === "header");
+/** Names `isCredentialKey` leaves out that configurations use for a credential field or option. */
+const CREDENTIAL_NAMES = new Set(["key", "auth", "pat", "bearer", "header", "env"]);
+
+function isCredentialName(name: string): boolean {
+  return isCredentialKey(name) || CREDENTIAL_NAMES.has(name.toLowerCase().replace(/[-_]/g, ""));
 }
 
 /**
- * A merged configuration as `--dry-run` prints it. Header and `env` values, strings under a key
- * naming a credential and the value after a credential option in `args` become `[redacted]` unless
- * they only reference a variable or input; other strings lose what `scrubCredentialText` finds (a
- * known token prefix, a `token=` pair, a URL's userinfo and query values). `url`, the address this
- * command writes, is shown as is: its query holds only this command's selections.
+ * An `args` option whose next item is its value and names a credential: `--api-key`, `--header`,
+ * or `-H`, the header option of curl and `mcp-remote`.
  */
-function redactConfigValue(value: unknown, url: string, secret = false, depth = 0): unknown {
-  if (depth > 256) return REDACTED;
-  if (typeof value === "string") {
-    if (value === url || REFERENCE_ONLY.test(value)) return value;
-    return secret ? REDACTED : scrubCredentialText(value);
+function isCredentialOption(item: unknown): boolean {
+  if (item === "-H") return true;
+  const name = typeof item === "string" ? /^--?([A-Za-z][\w-]*)$/u.exec(item)?.[1] : undefined;
+  return name !== undefined && isCredentialName(name);
+}
+
+/** `--name=value`, as an `args` item. */
+const OPTION_VALUE = /^(--?([A-Za-z][\w-]*)=)(.*)$/su;
+/** A URL path segment long and mixed enough to be a token, as some servers put their key there. */
+const TOKEN_SEGMENT = /^(?=[^/]*[A-Za-z])(?=[^/]*\d)[^/]{16,}$/u;
+
+/** A URL with each token-like path segment replaced; any other string is returned as is. */
+function redactUrlPath(value: string): string {
+  if (!/^(?:https?|wss?):\/\//iu.test(value)) return value;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return value;
   }
-  if (Array.isArray(value))
-    return value.map((item: unknown, index) =>
-      redactConfigValue(item, url, secret || isCredentialOption(value[index - 1]), depth + 1),
-    );
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      key,
-      redactConfigValue(
-        item,
-        url,
-        secret || isCredentialKey(key) || key.toLowerCase() === "env",
-        depth + 1,
-      ),
-    ]),
+  const segments = parsed.pathname.split("/");
+  if (!segments.some((segment) => TOKEN_SEGMENT.test(segment))) return value;
+  parsed.pathname = segments
+    .map((segment) => (TOKEN_SEGMENT.test(segment) ? REDACTED : segment))
+    .join("/");
+  return parsed.href;
+}
+
+/**
+ * The URL this command writes, as `--dry-run` prints it: the selections it validated (`toolsets`,
+ * `project`, and `read_only` when true or false) are shown; any other query value, and a token-like
+ * path segment, becomes `[redacted]`. `parseMcpUrl` has already refused userinfo and a fragment.
+ */
+function displayMcpUrl(url: string): string {
+  const parsed = new URL(url);
+  const query = parsed.search
+    .slice(1)
+    .split("&")
+    .filter(Boolean)
+    .map((pair) => {
+      const [name = "", value = ""] = pair.split("=", 2);
+      const selection =
+        name === "toolsets" ||
+        name === "project" ||
+        (name === "read_only" && /^(?:true|false)$/u.test(value));
+      return selection ? pair : `${name}=${REDACTED}`;
+    });
+  return redactUrlPath(
+    `${parsed.origin}${parsed.pathname}${query.length ? `?${query.join("&")}` : ""}`,
   );
+}
+
+/**
+ * A merged configuration as `--dry-run` prints it. Header and `env` values, strings and numbers
+ * under a key naming a credential, the value of a credential option in `args` (`--api-key VALUE`,
+ * `--key=VALUE`) and token-like URL path segments become `[redacted]` unless they only reference a
+ * variable or input; other strings lose what `scrubCredentialText` finds (a known token prefix, a
+ * `token=` pair, a URL's userinfo and query values). Server names are not read as field names.
+ * `url`, the address this command writes, is shown by {@link displayMcpUrl}, keeping its selections.
+ */
+function redactConfig(root: Record<string, unknown>, url: string): unknown {
+  const shownUrl = displayMcpUrl(url);
+  const redact = (value: unknown, secret: boolean, depth: number, names: boolean): unknown => {
+    if (depth > 256) return REDACTED;
+    if (typeof value === "number") return secret ? REDACTED : value;
+    if (typeof value === "string") {
+      if (value === url) return shownUrl;
+      if (REFERENCE_ONLY.test(value)) return value;
+      if (secret) return REDACTED;
+      const option = OPTION_VALUE.exec(value);
+      if (option && isCredentialName(option[2]!))
+        return REFERENCE_ONLY.test(option[3]!) ? value : `${option[1]}${REDACTED}`;
+      return scrubCredentialText(redactUrlPath(value));
+    }
+    if (Array.isArray(value))
+      return value.map((item: unknown, index) =>
+        redact(item, secret || isCredentialOption(value[index - 1]), depth + 1, false),
+      );
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redact(
+          item,
+          secret || (!names && isCredentialName(key)),
+          depth + 1,
+          depth === 0 && (key === "mcpServers" || key === "servers"),
+        ),
+      ]),
+    );
+  };
+  return redact(root, false, 0, false);
 }
 
 async function findExecutable(name: string, env: NodeJS.ProcessEnv): Promise<string | null> {
@@ -935,7 +1003,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   }
   if (parsed.values["dry-run"]) {
     // Other servers' entries can hold literal tokens; the file keeps them, the output does not.
-    const shown = json(redactConfigValue(merged, url));
+    const shown = json(redactConfig(merged, url));
     out(
       shown === content
         ? `Would write ${display}:`

@@ -453,6 +453,13 @@ describe("hue mcp install", () => {
       "query-credential-value",
       "hue_sk_literal0000000000000",
       "top-level-client-secret",
+      "short-key-option-value",
+      "auth-inline-value",
+      "plain-key-field-value",
+      "NjM4ZTk5path0token7",
+      "987654321",
+      "short-header-option-value",
+      "inline-header-option-value",
     ];
     const existing = JSON.stringify({
       mcpServers: {
@@ -463,9 +470,24 @@ describe("hue mcp install", () => {
         },
         local: {
           command: "npx",
-          args: ["-y", "some-server", "--api-key", secrets[2], `--token=${secrets[3]}`, "/work"],
-          env: { SERVICE_TOKEN: secrets[4], OTHER: "${OTHER_KEY}" },
+          args: [
+            "-y",
+            "some-server",
+            "--api-key",
+            secrets[2],
+            `--token=${secrets[3]}`,
+            "--key",
+            secrets[8],
+            `--auth=${secrets[9]}`,
+            "-H",
+            `X-Custom: ${secrets[13]}`,
+            `--header=X-Other: ${secrets[14]}`,
+            "/work",
+          ],
+          env: { SERVICE_TOKEN: secrets[4], OTHER: "${OTHER_KEY}", PIN: Number(secrets[12]) },
         },
+        // Server names are not field names: this one's entry is shown like any other.
+        "release-token": { key: secrets[10], url: `https://mcp.example.com/s/${secrets[11]}/mcp` },
         linked: {
           url: `https://example.com/mcp?api_key=${secrets[5]}`,
           headers: { Authorization: "Bearer ${env:LINKED_KEY}" },
@@ -500,8 +522,25 @@ describe("hue mcp install", () => {
     });
     expect(shown.mcpServers.local).toEqual({
       command: "npx",
-      args: ["-y", "some-server", "--api-key", "[redacted]", "--token=[redacted]", "/work"],
-      env: { SERVICE_TOKEN: "[redacted]", OTHER: "${OTHER_KEY}" },
+      args: [
+        "-y",
+        "some-server",
+        "--api-key",
+        "[redacted]",
+        "--token=[redacted]",
+        "--key",
+        "[redacted]",
+        "--auth=[redacted]",
+        "-H",
+        "[redacted]",
+        "--header=[redacted]",
+        "/work",
+      ],
+      env: { SERVICE_TOKEN: "[redacted]", OTHER: "${OTHER_KEY}", PIN: "[redacted]" },
+    });
+    expect(shown.mcpServers["release-token"]).toEqual({
+      key: "[redacted]",
+      url: "https://mcp.example.com/s/[redacted]/mcp",
     });
     expect(shown.mcpServers.linked).toEqual({
       url: "https://example.com/mcp?api_key=%5Bredacted%5D",
@@ -520,6 +559,35 @@ describe("hue mcp install", () => {
     expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
     const written = await readFile(join(root, ".mcp.json"), "utf8");
     for (const secret of secrets) expect(written).toContain(secret);
+
+    // A credential in --url is left out; the selections this command validated are shown.
+    const keyInUrl = await mcp(
+      [
+        "install",
+        "--client",
+        "claude-code",
+        "--dry-run",
+        "--read-only",
+        "--url",
+        `https://mcp.hue.run/mcp?api_key=${secrets[6]}&toolsets=traces,docs`,
+      ],
+      { cwd: root },
+    );
+    expect(keyInUrl.code).toBe(0);
+    expect(keyInUrl.stdout).not.toContain(secrets[6]);
+    expect(keyInUrl.stdout).toContain(
+      '"url": "https://mcp.hue.run/mcp?api_key=[redacted]&read_only=true&toolsets=traces,docs"',
+    );
+
+    // A pinned server named like a credential still shows Hue's entry whole.
+    const pinned = await mcp(
+      ["install", "--client", "cursor", "--project", "release-token", "--dry-run"],
+      { cwd: root },
+    );
+    expect(pinned.code).toBe(0);
+    expect(pinned.stdout).toBe(
+      `Would write .cursor/mcp.json:\n${CURSOR_OBSERVE_JSON.replace('"hue"', '"hue-release-token"').replace("?toolsets=observe", "?project=release-token&toolsets=observe")}`,
+    );
   });
 
   test("--dry-run prints the resulting content and --print prints only the snippet", async () => {
