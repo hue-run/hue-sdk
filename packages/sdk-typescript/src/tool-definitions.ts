@@ -137,22 +137,24 @@ type UrlChange = [start: number, end: number, growth: number];
  * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
  * `cut` text may have lost its `@` or `?` there, so it is replaced whole. Each URL it replaces is
  * added to `changes`, and where each URL it does not replace whole lies in the scrubbed text to
- * `kept`. One replaced whole because of a credential in `credentials` is added to `whole`: where
- * its `[redacted]` lies in the scrubbed text, and the URL as it would have been rewritten. A query
- * name overlapping a span of `hidden` (sorted by start) is replaced. */
+ * `kept`. One replaced whole because a span of `closing`, or the userinfo in `nested` of a URL
+ * nested in it, lies in its host or path is added to `whole`: where its `[redacted]` lies in the
+ * scrubbed text, and the URL as it would have been rewritten. A query name overlapping a span of
+ * `hidden` is replaced. Each list of spans is sorted by start. */
 function scrubTextUrls(
   text: string,
   state: ScrubState,
   cut = false,
   changes: UrlChange[] = [],
   kept: Span[] = [],
-  credentials: Span[] = [],
+  closing: Span[] = [],
   whole: Array<[at: number, rewritten: string]> = [],
+  nested: Span[] = [],
   hidden: Span[] = [],
 ): string {
-  // The furthest any credential span starting at or before each one reaches.
+  // The furthest any closing span starting at or before each one reaches.
   const reach: number[] = [];
-  for (const [, end] of credentials) reach.push(Math.max(end, reach.at(-1) ?? 0));
+  for (const [, end] of closing) reach.push(Math.max(end, reach.at(-1) ?? 0));
   const hiddenReach: number[] = [];
   for (const [, end] of hidden) hiddenReach.push(Math.max(end, hiddenReach.at(-1) ?? 0));
   let result = "";
@@ -175,10 +177,15 @@ function scrubTextUrls(
             reaches(hidden, hiddenReach, start + from, start + to),
           );
     // A URL rewritten around a pair or scheme credential before its query, where the rewrite can
-    // take the key or scheme word apart from the value, is replaced whole instead.
+    // take the key or scheme word apart from the value, is replaced whole instead, as is one
+    // around what the text read on its own hid there, which the rewrite keeps: its host and path
+    // are kept. The URL's own userinfo, after its `://` and any `/` or `\`, is not such a span.
     if (scrubbed !== url && scrubbed !== REDACTED) {
       const before = /[?#]/.exec(url);
-      if (reaches(credentials, reach, index + 3, before ? start + before.index : end)) {
+      const to = before ? start + before.index : end;
+      let authority = index + 3;
+      while (authority < end && (text[authority] === "/" || text[authority] === "\\")) authority++;
+      if (reaches(closing, reach, index + 3, to) || startsBetween(nested, authority + 1, to)) {
         whole.push([result.length + start - copied, scrubbed]);
         scrubbed = REDACTED;
       }
@@ -190,6 +197,17 @@ function scrubTextUrls(
     copied = end;
   }
   return result + text.slice(copied);
+}
+/** Whether a span of `spans` (sorted by start) starts at `from` or after it and before `to`. */
+function startsBetween(spans: Span[], from: number, to: number): boolean {
+  let low = 0;
+  let high = spans.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (spans[middle]![0] < from) low = middle + 1;
+    else high = middle;
+  }
+  return low < spans.length && spans[low]![0] < to;
 }
 /** Whether a span of `spans` (sorted by start, `reach` their running furthest end) overlaps
  * `from` to `to`. */
@@ -222,11 +240,13 @@ const urlQueryValue = new RegExp(
 );
 /** Each query name: from the query's `?` or an `&` to its `=`, not from a `?` inside a value. */
 const queryName = /(?<=^\?|&)[^=&#]+/g;
-/** A scheme word before an escaped character or `+` (`&Bearer%20…`, `&amp;Basic\\t…`). */
-const escapedScheme = /(?<![a-z0-9])(?:bearer|basic|token)(?:%|\\|\+)/i;
+/** A scheme word before an escaped space: `%20`, `%09`, `%0A`, `%0D`, `+` or `%2B` (a form's
+ * space), or a JSON escape (`\t`, `\\t`, `\u0020`), as in `&Bearer%20…` or `&amp;Basic%2B…`. */
+const escapedScheme =
+  /(?<![a-z0-9])(?:bearer|basic|token)(?:%(?:20|09|0a|0d|2b)|\+|\\+(?:[tnr]|u0020))/i;
 /** Whether a query name, which would be exported as a name, the text rules never reading it, holds
  * a credential: a `:` (another URL, `?mongodb://u:…@…`, or a pair, `&token:…`), a scheme word
- * before an escaped character, or a pair or scheme credential the text rules find once `%3A` and
+ * before an escaped space, or a pair or scheme credential the text rules find once `%3A` and
  * `%3D` are read as `:` and `=` (`&auth.token%20…`, `&Authorization%3ABearer%20…`). The URL keeps
  * its extent, so its later values are replaced as ever. */
 function isCredentialName(name: string): boolean {
@@ -613,8 +633,12 @@ export function scrubCredentialTextUnbounded(text: string, cut = false): string 
     ? [...pairSpans(text), ...authorizationSpans(text)].sort(([a], [b]) => a - b)
     : [];
   // What the text hides with its URLs read as they were before escaped quotes were: a URL read
-  // now can end sooner or later, and neither may export what that reading hid.
-  const plain = text.includes("://") ? plainUrlSpans(text) : [];
+  // now can end sooner or later, and neither may export what that reading hid. A query name never
+  // overlaps a query value or fragment that reading hid.
+  const plain = text.includes("://")
+    ? plainUrlSpans(text)
+    : { hidden: [], userinfo: [], values: [] };
+  const closing = [...credentials, ...plain.hidden].sort(([a], [b]) => a - b);
   const whole: Array<[number, string]> = [];
   const scrubbed = scrubTextUrls(
     text,
@@ -622,10 +646,12 @@ export function scrubCredentialTextUnbounded(text: string, cut = false): string 
     cut,
     changes,
     kept,
-    credentials,
+    closing,
     whole,
-    [...credentials, ...plain].sort(([a], [b]) => a - b),
+    plain.userinfo,
+    [...closing, ...plain.userinfo].sort(([a], [b]) => a - b),
   );
+  const net = [...plain.hidden, ...plain.userinfo, ...plain.values].sort(([a], [b]) => a - b);
   // Every rule reads the same text and their matches are replaced together, so no rule's
   // replacement can hide text another rule would have matched. The pairs and schemes of the text
   // with each URL replaced whole rewritten instead are read too, so what a value that runs out of
@@ -635,8 +661,8 @@ export function scrubCredentialTextUnbounded(text: string, cut = false): string 
     ...matchSpans(scrubbed, cut ? cutPrefixedToken : prefixedToken),
     ...authorizationSpans(scrubbed),
     ...nestedUserinfoSpans(scrubbed, kept),
-    ...(changes.length || plain.length
-      ? spansBesideUrls([...credentials, ...outsideUrls(text, plain, changes)], changes)
+    ...(changes.length || net.length
+      ? spansBesideUrls([...credentials, ...outsideUrls(text, net, changes)], changes)
       : []),
     ...(whole.length ? rewrittenSpans(scrubbed, whole) : []),
     ...(cut ? cutSchemeSpans(scrubbed) : []),
@@ -658,12 +684,15 @@ function cutSchemeSpans(text: string): Span[] {
 const plainUrlPiece = /[^\s"'<>`]+|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<==)["']/y;
 
 /** What the text hides with each URL read as before escaped quotes were, where it lies in the
- * text, sorted by start: all of a URL with another scheme holding `@`, `?` or `#`, or of one the
- * parser refuses, else its userinfo, each query value and its fragment; and each pair or scheme
- * credential of the text with those URLs replaced, one starting or ending in a URL starting or
- * ending with it. */
-function plainUrlSpans(text: string): Span[] {
+ * text, each list sorted by start. `hidden` is all of a URL with another scheme holding `@`, `?`
+ * or `#`, or of one the parser refuses, and each pair or scheme credential of the text with those
+ * URLs replaced, one starting or ending in a URL starting or ending with it. `userinfo` is each
+ * other URL's userinfo, after any `/` or `\` that follow its `://`, as the parser skips them, and
+ * `values` its query values and fragment. */
+function plainUrlSpans(text: string): { hidden: Span[]; userinfo: Span[]; values: Span[] } {
   const spans: Span[] = [];
+  const userinfo: Span[] = [];
+  const values: Span[] = [];
   const changes: UrlChange[] = [];
   let scrubbed = "";
   let copied = 0;
@@ -691,10 +720,11 @@ function plainUrlSpans(text: string): Span[] {
       spans.push([start, end]);
       continue;
     }
-    const authority = index + 3 - start;
-    const boundary = url.slice(authority).search(/[/\\?#]/);
-    const at = url.lastIndexOf("@", boundary === -1 ? url.length : authority + boundary - 1);
-    if (at > authority) spans.push([index + 3, start + at]);
+    let authority = index + 3;
+    while (authority < end && (text[authority] === "/" || text[authority] === "\\")) authority++;
+    const boundary = text.slice(authority, end).search(/[/\\?#]/);
+    const at = text.lastIndexOf("@", (boundary === -1 ? end : authority + boundary) - 1);
+    if (at > authority) userinfo.push([authority, at]);
     const hash = url.indexOf("#");
     const tail = hash === -1 ? url.length : hash;
     const question = url.indexOf("?");
@@ -703,18 +733,19 @@ function plainUrlSpans(text: string): Span[] {
       for (const piece of url.slice(question + 1, tail).split("&")) {
         const equals = piece.indexOf("=");
         if (equals !== -1 && equals + 1 < piece.length)
-          spans.push([part + equals + 1, part + piece.length]);
+          values.push([part + equals + 1, part + piece.length]);
         part += piece.length + 1;
       }
     }
-    if (hash !== -1) spans.push([start + hash, end]);
+    if (hash !== -1) values.push([start + hash, end]);
   }
-  if (!changes.length) return spans;
+  if (!changes.length) return { hidden: spans, userinfo, values };
   scrubbed += text.slice(copied);
-  return [
+  const hidden = [
     ...spans,
     ...spansBeforeUrls([...pairSpans(scrubbed), ...authorizationSpans(scrubbed)], changes),
   ].sort(([a], [b]) => a - b);
+  return { hidden, userinfo, values };
 }
 
 /** The spans of a text whose URLs `changes` replaced, moved back to where their text lies before:
@@ -784,10 +815,10 @@ function rewrittenSpans(text: string, whole: Array<[number, string]>): Span[] {
   return spansBesideUrls([...pairSpans(rewritten), ...authorizationSpans(rewritten)], changes);
 }
 
-/** A URL nested in another's path (`…/p&mongodb://u:…@…`): its `://` (or `:\\`), then its
- * userinfo to the last `@` before a `/`, `\`, `?`, `#` or whitespace, as a URL's own userinfo is
- * read. */
-const nestedUserinfo = /:[/\\]{2}[^\s/\\?#]*@/g;
+/** A URL nested in another's path (`…/p&mongodb://u:…@…`): its `://` (or `:\\`) and any more `/`
+ * or `\`, then its userinfo to the last `@` before a `/`, `\`, `?`, `#` or whitespace, as a URL's
+ * own userinfo is read. */
+const nestedUserinfo = /:[/\\]{2}[/\\]*[^\s/\\?#]*@/g;
 
 /** The userinfo of each URL nested in the path of a URL not replaced whole, and the whole of one
  * with another scheme that holds an `@`: the path is kept and the nested URL is not read on its

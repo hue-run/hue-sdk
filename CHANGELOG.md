@@ -44,19 +44,20 @@ refuses to publish a version without a matching entry below.
   inside it, is replaced to the end of the line, where only its first word was. A URL's quoted query
   value (`?token="…"`), or a value between backslash-escaped quotes anywhere in it that ends the URL
   or a query value (`=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as
-  a query name. Such a value no longer takes in the next key of the JSON around the URL
+  a query name. The value of the next key of the JSON around such a value is no longer exported
   (`?state=","client_secret":"…"`), the value of a key or scheme word that a URL takes in
   (`?t="a"&Bearer …`) is still replaced after it, and a query name holding a `:`, a scheme word
-  before an escaped character, or a credential pair once `%3A` and `%3D` are read
-  (`?mongodb://u:…@…`, `&token:…`, `&Bearer%20…`, `&client_secret%3A…`) is replaced. Where a URL
-  now ends sooner or later than 0.11.0 read it, what 0.11.0 hid there stays hidden, a query name
-  included. A URL that would be rewritten with a credential in its host or path is replaced whole,
-  and a URL nested in another's path (`…/p&mongodb://u:…@…`) loses its userinfo, or all of it when
-  its scheme is not `http(s)`, `ws(s)` or `ftp`. Only the first 16,384 code points are scrubbed; a
-  URL, scheme or prefixed token that this cut interrupts is now replaced whole, and the text is
-  still scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`, `hue_rt_`,
-  `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and Google OAuth
-  client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
+  before an escaped space, or a credential pair once `%3A` and `%3D` are read (`?mongodb://u:…@…`,
+  `&token:…`, `&Bearer%20…`, `&client_secret%3A…`) is replaced. Where a URL now ends sooner or
+  later than 0.11.0 read it, what 0.11.0 hid there stays hidden: a URL that would be rewritten
+  with a credential, or with what 0.11.0 hid, in its host or path is replaced whole, and so is a
+  query name that holds some of it. A URL nested in another's path (`…/p&mongodb://u:…@…`) loses
+  its userinfo, after any extra `/`, or all of it when its scheme is not `http(s)`, `ws(s)` or
+  `ftp`. Only the first 16,384 code points are scrubbed; a URL, scheme or prefixed token that this
+  cut interrupts is now replaced whole, and the text is still scrubbed before it is cut to 1,024
+  characters. Hue's OAuth tokens (`hue_at_`, `hue_rt_`, `hue_oauth_`), its `hue_ss_` and `hue_vt_`
+  tokens, Slack refresh tokens (`xoxe-`) and Google OAuth client secrets (`GOCSPX-`) are replaced
+  by their prefix. **Wire**
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.

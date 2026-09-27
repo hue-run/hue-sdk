@@ -674,7 +674,7 @@
     },
     {
       "input": "ftp://u:p@api.example.test/x&q=\\'abc\\'&mongodb://u:p@db.example.test/x&q=synthetic-nested-opaque-query",
-      "expected": "ftp://api.example.test/x&q=[redacted]&[redacted]"
+      "expected": "[redacted]"
     },
     {
       "input": "password=\"synthetic-plain-open-a synthetic-plain-open-b\\",
@@ -731,6 +731,30 @@
     {
       "input": "GET mongodb://h/?q=\\\"a\\\"&Authorization:http://;@h\tsynthetic-b1 failed",
       "expected": "GET [redacted][redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;https:///u:synthetic-pw-1@h.example/ failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;https://user:synthetic-pw-2/ failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;https://u:synthetic-pw-3\\@h.example/ failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/?q=\\\"x\\\"&amp;https:///&amp;synthetic-pw-4@h.example/ failed",
+      "expected": "GET https://a.example/?q=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "see https://h.example/p/https:///u:synthetic-pw-5@h2.example/x failed",
+      "expected": "see https://h.example/p/https://[redacted]@h2.example/x failed"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?q=hello+world&basic%5B0%5D=1&token%5B%5D=2 failed",
+      "expected": "GET https://api.example.test/v1/items?q=%5Bredacted%5D&basic%5B0%5D=%5Bredacted%5D&token%5B%5D=%5Bredacted%5D failed"
     }
   ]
 }
