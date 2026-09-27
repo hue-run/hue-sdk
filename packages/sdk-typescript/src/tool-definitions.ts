@@ -163,13 +163,14 @@ function scrubTextUrls(
 /** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
 const specialScheme = /^(?:https?|wss?|ftp):/i;
 /** The quoted values of a URL's text, as `urlPiece` reads them, replaced before the URL is parsed,
- * so an `&` or `=` inside one cannot make the rest of it a query name. One between
- * backslash-escaped quotes, which is never part of a URL in the text around it, and one whose
- * quote does not close before the URL's end are replaced wherever they are; any other only in the
- * query, since one in the host or path can hold the `?` that starts the query or make the URL
- * unparseable. `scrubTextUrl` replaces them before the first `#`. */
-const urlAnyValue = new RegExp(
-  String.raw`(?<==)(?:${urlEscapedValue('"')}|${urlEscapedValue("'")}|"[^"\r\n]*$|'[^'\r\n]*$|${openEscapedValue('"')}\\*$|${openEscapedValue("'")}\\*$)`,
+ * so an `&` or `=` inside one cannot make the rest of it a query name. One whose quote does not
+ * close before the URL's end, and, before its first `#`, one between backslash-escaped quotes,
+ * which is never part of a URL in the text around it, are replaced wherever they are; any other
+ * only in the query, since one in the host or path can hold the `?` that starts the query or make
+ * the URL unparseable. */
+const urlOpenValue = /(?<==)(?:"[^"\r\n]*|'[^'\r\n]*)$/;
+const urlEscapedValues = new RegExp(
+  String.raw`(?<==)(?:${urlEscapedValue('"')}|${urlEscapedValue("'")}|${openEscapedValue('"')}\\*$|${openEscapedValue("'")}\\*$)`,
   "g",
 );
 const urlQueryValue = new RegExp(
@@ -184,10 +185,11 @@ const urlQueryName = /(?<=[?&])[^=&#]*:\/\/[^=&#]*/g;
 function scrubTextUrl(url: string, state: ScrubState): string {
   if (!specialScheme.test(url)) return /[@?#]/.test(url) ? REDACTED : url;
   // The first `#` starts the fragment, which is dropped, even inside a quoted value, as the URL
-  // parser reads the text; values are replaced only before it.
-  const hash = url.indexOf("#");
-  const fragment = hash === -1 ? "" : url.slice(hash);
-  const opened = (hash === -1 ? url : url.slice(0, hash)).replace(urlAnyValue, REDACTED);
+  // parser reads the text; other values are replaced only before it.
+  const whole = url.replace(urlOpenValue, REDACTED);
+  const hash = whole.indexOf("#");
+  const fragment = hash === -1 ? "" : whole.slice(hash);
+  const opened = (hash === -1 ? whole : whole.slice(0, hash)).replace(urlEscapedValues, REDACTED);
   const query = opened.indexOf("?");
   if (query === -1) return scrubUrl(opened + fragment, state);
   return scrubUrl(

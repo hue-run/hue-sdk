@@ -141,14 +141,14 @@ _SCHEME_CHARACTERS = _SCHEME_LETTERS | frozenset("0123456789+.-")
 _SPECIAL_TEXT_SCHEME = re.compile(r"(?:https?|wss?|ftp):", re.IGNORECASE | re.ASCII)
 _URL_PARTS = re.compile(r"[@?#]")
 # The quoted values of a URL's text, as ``_URL_PIECE`` reads them, replaced before the URL is
-# parsed, so an ``&`` or ``=`` inside one cannot make the rest of it a query name. One between
-# backslash-escaped quotes, which is never part of a URL in the text around it, and one whose quote
-# does not close before the URL's end are replaced wherever they are; any other only in the query,
-# since one in the host or path can hold the ``?`` that starts the query or make the URL
-# unparseable. ``_url_values_replaced`` replaces them before the first ``#``.
-_URL_ANY_VALUE = re.compile(
-    rf"(?<==)(?:{_URL_ESCAPED_VALUE}|\"[^\"\r\n]*\Z|'[^'\r\n]*\Z"
-    rf"|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
+# parsed, so an ``&`` or ``=`` inside one cannot make the rest of it a query name. One whose quote
+# does not close before the URL's end, and, before its first ``#``, one between backslash-escaped
+# quotes, which is never part of a URL in the text around it, are replaced wherever they are; any
+# other only in the query, since one in the host or path can hold the ``?`` that starts the query
+# or make the URL unparseable.
+_URL_OPEN_VALUE = re.compile(r"(?<==)(?:\"[^\"\r\n]*|'[^'\r\n]*)\Z")
+_URL_ESCAPED_VALUES = re.compile(
+    rf"(?<==)(?:{_URL_ESCAPED_VALUE}|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
 )
 _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
 # A query name holding another URL (``?mongodb://u:…@…``, ``&x://…``), which would be exported as
@@ -286,13 +286,14 @@ def _scrub_text_urls(
 
 
 def _url_values_replaced(url: str) -> str:
-    """A URL's quoted values replaced: one between backslash-escaped quotes or one it ends in,
+    """A URL's quoted values replaced: one it ends in or one between backslash-escaped quotes,
     wherever it is, and each other in its query. The first ``#`` starts the fragment, which is
-    dropped, even inside a quoted value, as the URL parser reads the text; values are replaced
-    only before it."""
-    hash_at = url.find("#")
-    fragment = "" if hash_at == -1 else url[hash_at:]
-    opened = _URL_ANY_VALUE.sub(REDACTED, url if hash_at == -1 else url[:hash_at])
+    dropped, even inside a quoted value, as the URL parser reads the text; values other than one
+    it ends in are replaced only before it."""
+    whole = _URL_OPEN_VALUE.sub(REDACTED, url, count=1)
+    hash_at = whole.find("#")
+    fragment = "" if hash_at == -1 else whole[hash_at:]
+    opened = _URL_ESCAPED_VALUES.sub(REDACTED, whole if hash_at == -1 else whole[:hash_at])
     query = opened.find("?")
     if query == -1:
         return opened + fragment
