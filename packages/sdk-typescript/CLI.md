@@ -266,21 +266,21 @@ and an access control list is not kept: the replacement has only the mode bits, 
 the list's mask, plus any default list the directory gives new files, whose entries then get up to
 the group's access. Restore a list afterwards if you use one. A symlinked file, or a symlinked
 `.cursor` or `.vscode` directory, is refused; the current directory itself may be reached through a
-symlink. The directory is checked before the file is read and again before the rename, but not
-atomically: an account that can write the project directory and races the command can still swap in
-a link between the last check and the rename. `--dry-run` prints the resulting file content or
-commands without writing or running. In printed file content, every header and `env` value, and each
-other credential it recognizes (a known token prefix, the value of an option such as
-`--api-key VALUE`, `-H VALUE`, `-e NAME=VALUE` or `--token=VALUE`, a field or assignment such as
-`clientSecret`, `key` or `STRIPE_KEY=`, a token-like URL path segment, a URL's query values, which
-read `%5Bredacted%5D`), is shown as `[redacted]` unless the whole value is a variable or input
-reference such as `Bearer ${HUE_MCP_KEY}`; the file keeps the values. Hue's own URL shows its
-`toolsets`, `project` and `read_only` selections, with every other query value and any token-like
-path segment as `[redacted]`, there and in the lines that report what the command did; a command
-printed for you to run keeps `--url` as given. `--print` prints only the snippet. Client CLIs run
-without a shell, so the `${HUE_MCP_KEY}` reference reaches them literally; the printed commands use
-single quotes for the same reason, and quote a URL with a query such as `?read_only=true`, whose `?`
-is a zsh glob.
+symlink. The directory is checked before the file is read and again before the rename, and a
+different file found in place of the one read is refused, but not atomically: an account that can
+write the project directory and races the command can still swap in a link between the last check
+and the rename. `--dry-run` prints the resulting file content or commands without writing or
+running. In printed file content, every header and `env` value, and each other credential it
+recognizes (a known token prefix, the value of an option such as `--api-key VALUE`, `-H VALUE`,
+`-e NAME=VALUE` or `--token=VALUE`, a field or assignment such as `clientSecret`, `key` or
+`STRIPE_KEY=`, a token-like URL path segment, a URL's query values, which read `%5Bredacted%5D`), is
+shown as `[redacted]` unless the whole value is a variable or input reference such as
+`Bearer ${HUE_MCP_KEY}`; the file keeps the values. Hue's own URL shows its `toolsets`, `project`
+and `read_only` selections, with every other query value and any token-like path segment as
+`[redacted]`, there and in the lines that report what the command did; a command printed for you to
+run keeps `--url` as given. `--print` prints only the snippet. Client CLIs run without a shell, so
+the `${HUE_MCP_KEY}` reference reaches them literally; the printed commands use single quotes for
+the same reason, and quote a URL with a query such as `?read_only=true`, whose `?` is a zsh glob.
 
 After a key installation the command reminds you to export `HUE_MCP_KEY` in the shell that starts
 the client (VS Code prompts for the key instead). A desktop app started from the Dock or a launcher

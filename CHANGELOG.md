@@ -27,9 +27,10 @@ refuses to publish a version without a matching entry below.
   token-like path segment and every query value other than its `toolsets`, `project` and `read_only`
   selections as `[redacted]`.
 - Security: `hue mcp install` refuses a symlinked `.cursor` or `.vscode` directory, as it already
-  refused a symlinked file. Before, it read and wrote `mcp.json` wherever that link pointed. The
-  check runs before the file is read and again before the rename, but is not atomic against an
-  account that can write the project directory and races the command.
+  refused a symlinked file, and a different file found in place of the one it read. Before, it read
+  and wrote `mcp.json` wherever that link pointed. The checks run before the file is read and again
+  before the rename, but are not atomic against an account that can write the project directory and
+  races the command.
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.
