@@ -254,11 +254,28 @@ def families(rng: random.Random):
         )
         return text, [first, second]
 
+    def url_then_key():
+        """A URL whose query value ends where the next key of the JSON around it starts, is
+        followed by other text, or is followed by a key and scheme word the URL takes in."""
+        value = secret(rng)
+        key = rng.choice(KEYS)
+        host = rng.choice(["mcp.example.test", "api.example.test:8443"])
+        text = rng.choice(
+            [
+                f'{{"redirect_uri":"https://{host}/cb?state=","{key}":"{value} x"}}',
+                f'{{\\"next\\":\\"https://{host}/cb?code=\\",\\"{key}\\":\\"{value} x\\"}}',
+                f"GET https://{host}/v1/items?filter=\"name\";sig={value} failed",
+                f'GET https://{host}/p?t=\\"a\\"&{key}=\\"{value} x\\"}}',
+                f'GET https://{host}/p?t=\\"a\\"&{rng.choice(SCHEMES)} {value} failed',
+            ]
+        )
+        return text, [value]
+
     return [pair, quoted_pair, escaped_json, header, scheme_in_prose, url, prefixed, nested_pair,
             glued_scheme, trailing_scheme, api_key_phrase, glued_key, nested_quoted_pair,
             escaped_single_quotes, escaped_prefixed, escaped_scheme, escaped_key, bracket_value,
             arrow_pair, open_quote, quoted_query_value, json_in_string,
-            json_in_string_escaped_slash]
+            json_in_string_escaped_slash, url_then_key]
 
 
 def generate(seed: int, per_family: int) -> dict:

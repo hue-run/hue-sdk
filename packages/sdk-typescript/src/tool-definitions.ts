@@ -78,13 +78,35 @@ function isCredentialKey(key: string): boolean {
   );
 }
 
-/** A URL's `://` and everything after it up to whitespace, a quote or `<>`. A quoted value right
- * after `=` (`?token="…"`, or `\"…\"` in JSON inside a string) is part of the URL when its quote
- * closes before whitespace, `&`, `#` or the end, so it cannot take in the next key of the text
- * around it, and the whole value is replaced; so is one whose quote does not close on its line, to
- * the end of the line whatever it holds, or an escaped one to the quote that ends its string. */
-const urlRest =
-  /:\/\/(?:(?<==)(?:(?:"[^"<>`\r\n]*"|'[^'<>`\r\n]*'|\\"[^"<>`\r\n]*\\"|\\'[^'<>`\r\n]*\\')(?=[\s&#]|$)|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|\\"(?:[^"\\\r\n]|\\[^"\r\n])*(?=["\r\n]|$)|\\'(?:[^'\\\r\n]|\\[^'\r\n])*(?=['\r\n]|$))|[^\s"'<>`]|(?<==)["'])+/y;
+/** One piece of a value between backslash-escaped quotes (JSON inside a JSON string): a character,
+ * or a whole run of backslashes with what it escapes. The run's length decides what it is: after
+ * 4m backslashes, three more and the quote are the inner text's escaped quote, one or three more
+ * escape another character, two more (or none, after at least four) are escaped backslashes. Each
+ * run can be read only one way, so a value that does not close is given up in linear time; 4m + 1
+ * backslashes and the quote close it. `line` holds the characters that end a value's line. */
+const escapedUnit = (quote: string, line = String.raw`\r\n`) =>
+  String.raw`[^${quote}\\${line}]|(?:\\\\\\\\)*(?:\\\\\\${quote}|\\\\\\[^${quote}\\${line}]|\\[^${quote}\\${line}]|\\\\(?!\\))|(?:\\\\\\\\)+(?!\\)`;
+/** Not a quoted value whose closing quote opens the next key of the JSON around the URL
+ * (`?code=","password":…`): only JSON punctuation lies between its quotes, and a key and `:` or
+ * `=` follow. */
+const notJsonBoundary = (quote: string) =>
+  String.raw`(?![\s,:{}[\]]*${quote}[a-zA-Z0-9_.$-]*\\?["']\s*[:=])`;
+/** A value between backslash-escaped quotes (JSON inside a string) in a URL, whole, when its
+ * closing quote ends the URL or its query value: whitespace, the string's own quote, `&`, `#` or
+ * the end follows. `openEscapedValue` is one whose closing quote is missing, to where its escapes
+ * end. */
+const urlEscapedValue = (quote: string) =>
+  String.raw`\\${quote}(?:${escapedUnit(quote, String.raw`<>${"`"}\r\n`)})*(?:\\\\\\\\)*\\${quote}(?=[\s"&#]|$)`;
+const openEscapedValue = (quote: string) => String.raw`\\${quote}(?:${escapedUnit(quote)})*`;
+/** A URL's `://` and everything after it up to whitespace, a quote, `<>` or a backslash-escaped
+ * quote. A quoted value right after `=` (`?token="…"`) is part of the URL to its closing quote,
+ * unless that quote opens the next key of the JSON around it, and the whole value is replaced; so
+ * is one between backslash-escaped quotes (`?token=\"…\"`) that ends the URL or its query value,
+ * and one whose quote does not close on its line, to the end of the line whatever it holds. */
+const urlRest = new RegExp(
+  String.raw`:\/\/(?:(?<==)(?:"${notJsonBoundary('"')}[^"<>${"`"}\r\n]*"|'${notJsonBoundary("'")}[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|${openEscapedValue('"')}\\*(?=[\r\n]|$)|${openEscapedValue("'")}\\*(?=[\r\n]|$))|(?!\\["'])[^\s"'<>${"`"}]|(?<==)["'])+`,
+  "y",
+);
 const isSchemeLetter = (code: number) => (code | 0x20) >= 0x61 && (code | 0x20) <= 0x7a;
 /** `a-z`, `0-9`, `+`, `.` and `-`, case-insensitively. */
 const isSchemeCharacter = (code: number) =>
@@ -94,11 +116,21 @@ const isSchemeCharacter = (code: number) =>
   code === 0x2e ||
   code === 0x2d;
 
+/** A URL `scrubTextUrls` replaced: where it starts and ends in the text, and how much longer its
+ * replacement is. */
+type UrlChange = [start: number, end: number, growth: number];
+
 /** Scrubs each URL in free text. Each `://` is found by search and its scheme read back from it:
  * up to 64 scheme characters, starting at a letter, so a longer run before `://` still leaves a
  * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
- * `cut` text may have lost its `@` or `?` there, so it is replaced whole. */
-function scrubTextUrls(text: string, state: ScrubState, cut = false): string {
+ * `cut` text may have lost its `@` or `?` there, so it is replaced whole. Each URL it replaces is
+ * added to `changes`. */
+function scrubTextUrls(
+  text: string,
+  state: ScrubState,
+  cut = false,
+  changes: UrlChange[] = [],
+): string {
   let result = "";
   let copied = 0;
   for (let index = text.indexOf("://"); index !== -1; index = text.indexOf("://", index + 1)) {
@@ -112,24 +144,42 @@ function scrubTextUrls(text: string, state: ScrubState, cut = false): string {
     const rest = urlRest.exec(text);
     if (!rest) continue;
     const end = index + rest[0].length;
-    result +=
-      text.slice(copied, start) +
-      (cut && end === text.length ? REDACTED : scrubTextUrl(text.slice(start, end), state));
+    const url = text.slice(start, end);
+    const scrubbed = cut && end === text.length ? REDACTED : scrubTextUrl(url, state);
+    if (scrubbed !== url) changes.push([start, end, scrubbed.length - url.length]);
+    result += text.slice(copied, start) + scrubbed;
     copied = end;
   }
   return result + text.slice(copied);
 }
 /** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
 const specialScheme = /^(?:https?|wss?|ftp):/i;
-/** A quoted value after `=` in a URL's text, whole, as `urlRest` reads one. It is replaced before
- * the URL is parsed, so an `&` or `=` inside it cannot make the rest of it a query name. */
-const urlQuotedValue =
-  /(?<==)(?:(?:"[^"<>`\r\n]*"|'[^'<>`\r\n]*'|\\"[^"<>`\r\n]*\\"|\\'[^'<>`\r\n]*\\')(?=[\s&#]|$)|(?:\\?"[^"\r\n]*|\\?'[^'\r\n]*)$)/g;
-/** A URL in free text, its quoted query values replaced. One with another scheme, which runtimes
- * parse differently, is replaced whole when it could carry userinfo, a query or a fragment. */
+/** A quoted value after `=` in a URL's query, whole, as `urlRest` reads one, or to the query's
+ * end at a `#`, and one whose quote does not close before the URL's end, wherever it is. Each is
+ * replaced before the URL is parsed, so an `&` or `=` inside it cannot make the rest of it a query
+ * name. */
+const urlQueryValue = new RegExp(
+  String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|\\?["'][^\r\n]*$)`,
+  "g",
+);
+const urlOpenValue = new RegExp(
+  String.raw`(?<==)(?:"[^"\r\n]*|'[^'\r\n]*|${openEscapedValue('"')}\\*|${openEscapedValue("'")}\\*)$`,
+);
+/** A URL in free text, its quoted values replaced. One with another scheme, which runtimes parse
+ * differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
-  if (specialScheme.test(url)) return scrubUrl(url.replace(urlQuotedValue, REDACTED), state);
-  return /[@?#]/.test(url) ? REDACTED : url;
+  if (!specialScheme.test(url)) return /[@?#]/.test(url) ? REDACTED : url;
+  const opened = url.replace(urlOpenValue, REDACTED);
+  const query = opened.indexOf("?");
+  const hash = opened.indexOf("#");
+  if (query === -1 || (hash !== -1 && hash < query)) return scrubUrl(opened, state);
+  const end = hash === -1 ? opened.length : hash;
+  return scrubUrl(
+    opened.slice(0, query) +
+      opened.slice(query, end).replace(urlQueryValue, REDACTED) +
+      opened.slice(end),
+    state,
+  );
 }
 /** Where a word starts: after a character that is not a word character, or after a JSON escape
  * (`\n`, `\t`, `\u0022`) or `%` escape, which ends in one. */
@@ -166,14 +216,6 @@ const authorizationValue = new RegExp(
  * last letter a credential key's can be (`token`, `apiKey`, `headers`, `basic` …) is read. The
  * value is not consumed, so a pair inside another pair's value (`error: token=…`) is found. */
 const pairKey = /(\\?["']|)(?<![a-z0-9_-])([a-z0-9_-]*[cdlnrsty][-_]*)\1(\s*(?:=>|[:=])\s*)/gi;
-/** One piece of a value between backslash-escaped quotes (JSON inside a JSON string): a character,
- * or a whole run of backslashes with what it escapes. The run's length decides what it is: after
- * 4m backslashes, three more and the quote are the inner text's escaped quote, one or three more
- * escape another character, two more (or none, after at least four) are escaped backslashes. Each
- * run can be read only one way, so a value that does not close is given up in linear time; 4m + 1
- * backslashes and the quote close it. `line` holds the characters that end a value's line. */
-const escapedUnit = (quote: string, line = String.raw`\r\n`) =>
-  String.raw`[^${quote}\\${line}]|(?:\\\\\\\\)*(?:\\\\\\${quote}|\\\\\\[^${quote}\\${line}]|\\[^${quote}\\${line}]|\\\\(?!\\))|(?:\\\\\\\\)+(?!\\)`;
 /** A quoted value to its closing quote on the same line, spaces and escaped quotes included, or
  * one between backslash-escaped quotes, double or single. */
 const quotedValue = new RegExp(
@@ -407,14 +449,54 @@ function redactSpans(text: string, spans: Span[]): string {
  * whole.
  */
 export function scrubCredentialText(text: string, cut = false): string {
-  const scrubbed = scrubTextUrls(text, { changed: false }, cut);
+  const changes: UrlChange[] = [];
+  const scrubbed = scrubTextUrls(text, { changed: false }, cut, changes);
   // Every rule reads the same text and their matches are replaced together, so no rule's
-  // replacement can hide text another rule would have matched.
+  // replacement can hide text another rule would have matched. A URL can take in a key or scheme
+  // whose value follows it (`…&password=\"…`), so the text's pairs and schemes before its URLs
+  // were replaced are read too.
   return redactSpans(scrubbed, [
     ...pairSpans(scrubbed),
     ...matchSpans(scrubbed, cut ? cutPrefixedToken : prefixedToken),
     ...authorizationSpans(scrubbed),
+    ...(changes.length
+      ? spansBesideUrls([...pairSpans(text), ...authorizationSpans(text)], changes)
+      : []),
   ]);
+}
+
+/** The spans cut to the text outside the replaced URLs, moved to where that text is once the URLs
+ * are: a span starting inside a URL starts after it, and one ending inside a URL ends before it. */
+function spansBesideUrls(spans: Span[], changes: UrlChange[]): Span[] {
+  // How much longer the text is after each replacement.
+  const growth: number[] = [];
+  let total = 0;
+  for (const change of changes) growth.push((total += change[2]));
+  // The last replaced URL starting before `position`, or -1.
+  const last = (position: number) => {
+    let low = 0;
+    let high = changes.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (changes[middle]![0] < position) low = middle + 1;
+      else high = middle;
+    }
+    return low - 1;
+  };
+  const moved: Span[] = [];
+  for (const [start, end] of spans) {
+    const first = last(start + 1);
+    const from = first === -1 ? start : Math.max(start, changes[first]![1]) + growth[first]!;
+    const final = last(end);
+    const to =
+      final === -1
+        ? end
+        : end < changes[final]![1]
+          ? changes[final]![0] + (growth[final - 1] ?? 0)
+          : end + growth[final]!;
+    if (from < to) moved.push([from, to]);
+  }
+  return moved;
 }
 
 /** OpenInference records each tool as `llm.tools.{index}.tool.json_schema`. */

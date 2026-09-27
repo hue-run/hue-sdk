@@ -24,8 +24,11 @@ refuses to publish a version without a matching entry below.
   (`\\\"`) inside a value. `hue listen` scrubs its messages with the same rules. **Wire**
 - In the same text, a quoted value whose quote does not close on its line, as when the text was cut
   inside it, is replaced to the end of the line, where only its first word was. A URL's quoted query
-  value, between backslash-escaped quotes too (`?token=\"…\"`), is replaced whole, so an `&` inside
-  it no longer leaves the rest as a query name. Only the first 16,384 code points are scrubbed; a
+  value (`?token="…"`), or one between backslash-escaped quotes that ends the URL or the query value
+  (`?token=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as a query
+  name. Such a value no longer takes in the next key of the JSON around the URL
+  (`?state=","client_secret":"…"`), and the value of a key or scheme word that a URL takes in
+  (`?t="a"&Bearer …`) is still replaced after it. Only the first 16,384 code points are scrubbed; a
   URL or prefixed token that this cut interrupts is now replaced whole, and the text is still
   scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`, `hue_rt_`,
   `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and Google OAuth

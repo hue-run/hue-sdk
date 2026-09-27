@@ -418,7 +418,7 @@
     },
     {
       "input": "{\"error\":\"GET https://h.test/?token=\\\"synthetic-url-escaped-open def\"} more",
-      "expected": "{\"error\":\"GET https://h.test/?token=%5Bredacted%5D\"} more"
+      "expected": "{\"error\":\"GET https://h.test/?token=%5Bredacted%5D\\\"[redacted]\"} more"
     },
     {
       "input": "token: \\\"synthetic-before-escaped-backslash more\\\\\" words",
@@ -438,11 +438,59 @@
     },
     {
       "input": "body {\\\"next\\\":\\\"https://h.example.test/?code=\\\",\\\"password\\\":\\\"synthetic-after-url words\\\"}",
-      "expected": "body {\\\"next\\\":\\\"https://h.example.test/?code=%5Bredacted%5D\",\\\"password\\\":\\\"[redacted]\\\"}"
+      "expected": "body {\\\"next\\\":\\\"https://h.example.test/?code=%5Bredacted%5D\\\",\\\"password\\\":\\\"[redacted]\\\"}"
     },
     {
       "input": "{\"redirect_uri\":\"https://app.example.test/cb?state=\",\"client_secret\":\"synthetic-after-url-plain def\"}",
       "expected": "{\"redirect_uri\":\"https://app.example.test/cb?state=%5Bredacted%5D\"client_secret\":\"[redacted]\"}"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?filter=\"name\";sig=synthetic-after-quote failed",
+      "expected": "GET https://api.example.test/v1/items?filter=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?q=\"a\"synthetic-glued-value failed",
+      "expected": "GET https://api.example.test/v1/items?q=%5Bredacted%5D failed"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"a\\\"&\\\"token\\\":\\\"synthetic-escaped-key\\\"\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D\\\"token\\\":\\\"[redacted]\\\"\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"x\\\"#\\\"password\\\":\\\"synthetic-after-hash\\\"\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D#\\\"password\\\":\\\"[redacted]\\\"\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"synthetic-open-value\\\\\\\\\\",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"synthetic-inner\\\\\\\"quote\\\" failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"a\\\"&password=\\\"synthetic-after-url x\\\"}\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D&password=%5Bredacted%5D\\\"[redacted]\\\"}\"}"
+    },
+    {
+      "input": "GET https://h.example.test/p?t=\\\"a\\\"&Bearer synthetic-after-url-scheme failed",
+      "expected": "GET https://h.example.test/p?t=%5Bredacted%5D&Bearer=%5Bredacted%5D [redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\"?\"&code=synthetic-path-quote failed",
+      "expected": "GET https://h.example.test/p=%22?%22=%5Bredacted%5D&code=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\"synthetic-open-path?synthetic-path-name",
+      "expected": "GET https://h.example.test/p=[redacted]"
+    },
+    {
+      "input": "GET https://h.example.test/p?t=\"a#b\"&synthetic-hash-name=1 failed",
+      "expected": "GET https://h.example.test/p?t=%5Bredacted%5D failed"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?t=\\\"a\\\"&password=\\\"synthetic-before-url https://h.example.test/?q=1\\\"}\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?t=%5Bredacted%5D&password=%5Bredacted%5D\\\"[redacted]\\\"}\"}"
     }
   ]
 }
