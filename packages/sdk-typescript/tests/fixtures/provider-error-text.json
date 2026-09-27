@@ -755,6 +755,10 @@
     {
       "input": "GET https://api.example.test/v1/items?q=hello+world&basic%5B0%5D=1&token%5B%5D=2 failed",
       "expected": "GET https://api.example.test/v1/items?q=%5Bredacted%5D&basic%5B0%5D=%5Bredacted%5D&token%5B%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/v1/items?x=1&Bearer%0Bsynthetic-esc-3=1&amp;Token%C2%A0synthetic-esc-4 failed",
+      "expected": "GET https://api.example.test/v1/items?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
     }
   ]
 }

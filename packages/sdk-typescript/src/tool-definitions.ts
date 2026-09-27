@@ -240,13 +240,13 @@ const urlQueryValue = new RegExp(
 );
 /** Each query name: from the query's `?` or an `&` to its `=`, not from a `?` inside a value. */
 const queryName = /(?<=^\?|&)[^=&#]+/g;
-/** A scheme word before an escaped space: `%20`, `%09`, `%0A`, `%0D`, `+` or `%2B` (a form's
- * space), or a JSON escape (`\t`, `\\t`, `\u0020`), as in `&Bearer%20…` or `&amp;Basic%2B…`. */
-const escapedScheme =
-  /(?<![a-z0-9])(?:bearer|basic|token)(?:%(?:20|09|0a|0d|2b)|\+|\\+(?:[tnr]|u0020))/i;
+/** A scheme word before an escape, which may be of any space (`%20`, `%0B`, `%C2%A0`, `\t`,
+ * `\\t`, `\u0020`), or `+`, a form's space, as in `&Bearer%20…` or `&amp;Basic%2B…`; not before
+ * an escaped bracket, as in an array's name (`token%5B%5D`). */
+const escapedScheme = /(?<![a-z0-9])(?:bearer|basic|token)(?:%(?!5b|5d)|\\|\+)/i;
 /** Whether a query name, which would be exported as a name, the text rules never reading it, holds
  * a credential: a `:` (another URL, `?mongodb://u:…@…`, or a pair, `&token:…`), a scheme word
- * before an escaped space, or a pair or scheme credential the text rules find once `%3A` and
+ * before an escape, or a pair or scheme credential the text rules find once `%3A` and
  * `%3D` are read as `:` and `=` (`&auth.token%20…`, `&Authorization%3ABearer%20…`). The URL keeps
  * its extent, so its later values are replaced as ever. */
 function isCredentialName(name: string): boolean {
