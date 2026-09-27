@@ -606,11 +606,15 @@
     },
     {
       "input": "GET https://h.example.test/p=\\\"a?b\\\"&code=synthetic-escaped-question failed",
-      "expected": "GET https://h.example.test/p=[redacted]?b%5C%22=%5Bredacted%5D&code=%5Bredacted%5D failed"
+      "expected": "GET https://h.example.test/p=[redacted]?%5Bredacted%5D=%5Bredacted%5D&code=%5Bredacted%5D failed"
     },
     {
       "input": "GET https://h.example.test/p=\\'a?b\\'&code=synthetic-escaped-question-single failed",
-      "expected": "GET https://h.example.test/p=[redacted]?b%5C%27=%5Bredacted%5D&code=%5Bredacted%5D failed"
+      "expected": "GET https://h.example.test/p=[redacted]?%5Bredacted%5D=%5Bredacted%5D&code=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p;password=\\\"a?synthetic-open-question#x failed",
+      "expected": "GET https://h.example.test/p;password=[redacted]"
     }
   ]
 }

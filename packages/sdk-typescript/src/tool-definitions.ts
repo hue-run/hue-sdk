@@ -170,7 +170,7 @@ const specialScheme = /^(?:https?|wss?|ftp):/i;
  * the URL unparseable. */
 const urlOpenValue = /(?<==)(?:"[^"\r\n]*|'[^'\r\n]*)$/;
 const urlEscapedValues = new RegExp(
-  String.raw`(?<==)(?:${urlEscapedValue('"')}|${urlEscapedValue("'")}|${openEscapedValue('"')}\\*$|${openEscapedValue("'")}\\*$)`,
+  String.raw`(?<==)(?:(${urlEscapedValue('"')}|${urlEscapedValue("'")})|${openEscapedValue('"')}\\*$|${openEscapedValue("'")}\\*$)`,
   "g",
 );
 const urlQueryValue = new RegExp(
@@ -185,23 +185,27 @@ const urlQueryName = /(?<=^\?|&)[^=&#]*:\/\/[^=&#]*/g;
  * differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
   if (!specialScheme.test(url)) return /[@?#]/.test(url) ? REDACTED : url;
-  // The first `#` starts the fragment, which is dropped, and the first `?` before it the query,
-  // even inside a quoted value, as the URL parser reads the text; other values are replaced on
-  // each side of those.
+  // The first `#` starts the fragment, which is dropped, even inside a quoted value, as the URL
+  // parser reads the text; other values are replaced only before it. A closed value between
+  // escaped quotes that holds the first `?`, which starts the query as the parser reads it, keeps
+  // that `?`, so what follows the value stays in the query.
   const whole = url.replace(urlOpenValue, REDACTED);
   const hash = whole.indexOf("#");
   const fragment = hash === -1 ? "" : whole.slice(hash);
   const head = hash === -1 ? whole : whole.slice(0, hash);
-  const query = head.indexOf("?");
-  const path = (query === -1 ? head : head.slice(0, query)).replace(urlEscapedValues, REDACTED);
-  if (query === -1) return scrubUrl(path + fragment, state);
+  const question = head.indexOf("?");
+  const opened = head.replace(
+    urlEscapedValues,
+    (value: string, closed: string | undefined, at: number) =>
+      closed !== undefined && at < question && question < at + value.length
+        ? `${REDACTED}?${REDACTED}`
+        : REDACTED,
+  );
+  const query = opened.indexOf("?");
+  if (query === -1) return scrubUrl(opened + fragment, state);
   return scrubUrl(
-    path +
-      head
-        .slice(query)
-        .replace(urlEscapedValues, REDACTED)
-        .replace(urlQueryValue, REDACTED)
-        .replace(urlQueryName, REDACTED) +
+    opened.slice(0, query) +
+      opened.slice(query).replace(urlQueryValue, REDACTED).replace(urlQueryName, REDACTED) +
       fragment,
     state,
   );
