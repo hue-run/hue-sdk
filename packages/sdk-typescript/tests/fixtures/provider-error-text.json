@@ -695,6 +695,14 @@
     {
       "input": "GET wss://h.example.comaccess_token='a#b'/x=\\\\\\\"synthetic-h6\\\\\\\" failed",
       "expected": "GET [redacted][redacted]"
+    },
+    {
+      "input": "Bearer\\token synthetic-tab-token-a failed",
+      "expected": "Bearer\\t[redacted] [redacted] failed"
+    },
+    {
+      "input": "{\"error\": \"Bearer \\token synthetic-tab-token-b\"}",
+      "expected": "{\"error\": \"Bearer \\t[redacted] [redacted]\"}"
     }
   ]
 }

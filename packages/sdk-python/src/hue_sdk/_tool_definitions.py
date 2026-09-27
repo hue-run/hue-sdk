@@ -151,15 +151,14 @@ _URL_ESCAPED_VALUES = re.compile(
     rf"(?<==)(?:({_URL_ESCAPED_VALUE})|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
 )
 _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
-# A query name holding a ``:`` (another URL, ``?mongodb://u:…@…``, or a pair, ``&token:…``) or a
-# scheme and an escaped space (``&Bearer%20…``), which would be exported as a name, the text rules
-# never reading it; the URL keeps its extent, so its later values are replaced as ever. A name
-# starts at the query's ``?`` or an ``&``, not at a ``?`` inside a value.
+# A query name holding a ``:`` (another URL, ``?mongodb://u:…@…``, or a pair, ``&token:…``) or
+# starting with a scheme and an escaped space (``&Bearer%20…``), which would be exported as a name,
+# the text rules never reading it; the URL keeps its extent, so its later values are replaced as
+# ever. A name starts at the query's ``?`` or an ``&``, not at a ``?`` inside a value.
 _URL_QUERY_NAME = re.compile(
     r"(?:(?<=\A\?)|(?<=&))(?:[^=&#]*:|(?:bearer|basic|token)(?:%20|%09|\+))[^=&#]*",
     re.IGNORECASE,
 )
-_QUERY_OR_FRAGMENT_START = re.compile(r"[?#]")
 # Where a word starts: after a character that is not a word character, or after a JSON escape
 # (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
 _WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
@@ -284,7 +283,9 @@ def _scrub_text_urls(
             while start < index and text[start] not in _SCHEME_LETTERS:
                 start += 1
             end = _url_end(text, index) if start < index else index + 3
-            if end > index + 3:
+            # A scheme at the end of a cut text may have lost its URL there, so it is replaced
+            # whole too.
+            if start < index and (end > index + 3 or (cut and end == len(text))):
                 url = text[start:end]
                 if cut and end == len(text):
                     replaced = REDACTED
@@ -300,7 +301,7 @@ def _scrub_text_urls(
                 # rewrite can take the key or scheme word apart from the value, is replaced whole
                 # instead.
                 if replaced not in (url, REDACTED):
-                    boundary = _QUERY_OR_FRAGMENT_START.search(url)
+                    boundary = _QUERY_OR_FRAGMENT.search(url)
                     to = end if boundary is None else start + boundary.start()
                     count = bisect_left(starts, to)
                     if count and reach[count - 1] > index + 3:
@@ -497,14 +498,15 @@ def _pair_spans(text: str) -> list[tuple[int, int]]:
 
 def _authorization_spans(text: str) -> list[tuple[int, int]]:
     """The credential after each authorization scheme. A scheme word can end an earlier credential
-    (``…~bearer SECRET``), so the search resumes at each credential, which is read at most once
-    more."""
+    (``…~bearer SECRET``) or start inside its escaped separator (``Bearer\token SECRET``, ``\t``
+    being the separator), so the search resumes after each scheme word, reading its credential at
+    most once more."""
     spans: list[tuple[int, int]] = []
     position = 0
     while (match := _AUTHORIZATION_VALUE.search(text, position)) is not None:
         credential = match.start() + len(match[1]) + len(match[2] or match[3])
         spans.append((credential, match.end()))
-        position = credential
+        position = match.start() + len(match[1])
     return spans
 
 

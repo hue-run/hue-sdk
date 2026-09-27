@@ -159,7 +159,8 @@ function scrubTextUrls(
     while (start < index && !isSchemeLetter(text.charCodeAt(start))) start++;
     if (start === index) continue;
     const end = urlEnd(text, index);
-    if (end === index + 3) continue;
+    // A scheme at the end of a cut text may have lost its URL there, so it is replaced whole too.
+    if (end === index + 3 && !(cut && end === text.length)) continue;
     const url = text.slice(start, end);
     let scrubbed = cut && end === text.length ? REDACTED : scrubTextUrl(url, state);
     // A URL rewritten around a pair or scheme credential before its query, where the rewrite can
@@ -208,8 +209,8 @@ const urlQueryValue = new RegExp(
   String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|\\?["'][^\r\n]*$)`,
   "g",
 );
-/** A query name holding a `:` (another URL, `?mongodb://u:…@…`, or a pair, `&token:…`) or a scheme
- * and an escaped space (`&Bearer%20…`), which would be exported as a name, the text rules never
+/** A query name holding a `:` (another URL, `?mongodb://u:…@…`, or a pair, `&token:…`) or starting
+ * with a scheme and an escaped space (`&Bearer%20…`), which would be exported as a name, the text rules never
  * reading it; the URL keeps its extent, so its later values are replaced as ever. A name starts at
  * the query's `?` or an `&`, not at a `?` inside a value. */
 const urlQueryName = /(?<=^\?|&)(?:[^=&#]*:|(?:bearer|basic|token)(?:%20|%09|\+))[^=&#]*/gi;
@@ -454,14 +455,16 @@ function pairSpans(text: string): Span[] {
 }
 
 /** The credential after each authorization scheme. A scheme word can end an earlier credential
- * (`…~bearer SECRET`), so the search resumes at each credential, which is read at most once more. */
+ * (`…~bearer SECRET`) or start inside its escaped separator (`Bearer\token SECRET`, `\t` being the
+ * separator), so the search resumes after each scheme word, reading its credential at most once
+ * more. */
 function authorizationSpans(text: string): Span[] {
   const spans: Span[] = [];
   authorizationValue.lastIndex = 0;
   for (let match = authorizationValue.exec(text); match; match = authorizationValue.exec(text)) {
     const credential = match.index + match[1]!.length + (match[2] ?? match[3])!.length;
     spans.push([credential, match.index + match[0].length]);
-    authorizationValue.lastIndex = credential;
+    authorizationValue.lastIndex = match.index + match[1]!.length;
   }
   return spans;
 }

@@ -30,8 +30,8 @@ refuses to publish a version without a matching entry below.
   or a query value (`=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as
   a query name. Such a value no longer takes in the next key of the JSON around the URL
   (`?state=","client_secret":"…"`), the value of a key or scheme word that a URL takes in
-  (`?t="a"&Bearer …`) is still replaced after it, and a query name holding a `:` or a scheme and an
-  escaped space (`?mongodb://u:…@…`, `&token:…`, `&Bearer%20…`) is replaced. A URL that would be
+  (`?t="a"&Bearer …`) is still replaced after it, and a query name holding a `:` or starting with a
+  scheme and an escaped space (`?mongodb://u:…@…`, `&token:…`, `&Bearer%20…`) is replaced. A URL that would be
   rewritten with a credential in its host or path is replaced whole, and a URL nested in another's
   path (`…/p&mongodb://u:…@…`) loses its userinfo, or all of it when its scheme is not `http(s)`,
   `ws(s)` or `ftp`. Only the first 16,384 code points are scrubbed; a

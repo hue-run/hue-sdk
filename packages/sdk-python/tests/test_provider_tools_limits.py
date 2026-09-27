@@ -453,6 +453,10 @@ def test_a_text_longer_than_16_384_code_points_is_scrubbed_to_there_and_cut():
     assert len(scrubbed) < 16_384
 
 
+def test_a_scheme_that_a_cut_text_ends_right_after_is_replaced_whole():
+    assert scrub_credential_text("see x>synthetic-cut-glue-wss://", True) == "see x>[redacted]"
+
+
 def test_a_run_of_backslashes_in_a_value_that_does_not_close_is_read_once():
     # Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
     # would not finish.

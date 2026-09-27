@@ -349,6 +349,10 @@ test("a text longer than 16,384 code points is scrubbed to there and cut", () =>
   expect(scrubbed.length).toBeLessThan(16_384);
 });
 
+test("a scheme that a cut text ends right after is replaced whole", () => {
+  expect(scrubCredentialText("see x>synthetic-cut-glue-wss://", true)).toBe("see x>[redacted]");
+});
+
 test("a run of backslashes in a value that does not close is read once", () => {
   // Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
   // would not finish.
