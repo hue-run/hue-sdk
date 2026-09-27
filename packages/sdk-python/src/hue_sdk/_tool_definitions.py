@@ -154,10 +154,10 @@ _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"
 # Each query name: from the query's ``?`` or an ``&`` to its ``=``, not from a ``?`` inside a
 # value.
 _QUERY_NAME = re.compile(r"(?:(?<=\A\?)|(?<=&))[^=&#]+")
-# A scheme word, where a word starts or after an escape, before an escape, which may be of any
-# space (``%20``, ``%0B``, ``%C2%A0``, ``\t``, ``\\t``, ``\u0020``), or ``+``, a form's space, as
-# in ``&Bearer%20…`` or ``&amp;%20Basic%2B…``; not before an escaped bracket, as in an array's name
-# (``token%5B%5D``).
+# A scheme word, where no letter or digit comes before it or after an escape, before an escape,
+# which may be of any space (``%20``, ``%0B``, ``%C2%A0``, ``\t``, ``\\t``, ``\u0020``), or ``+``,
+# a form's space, as in ``&Bearer%20…`` or ``&amp;%20Basic%2B…``; not before an escaped bracket, as
+# in an array's name (``token%5B%5D``).
 _ESCAPED_SCHEME = re.compile(
     r"(?:(?<![a-z0-9])|(?<=%[0-9a-f]{2})|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4}))"
     r"(?:bearer|basic|token)(?:%(?!5b|5d)|\\|\+)",
@@ -241,16 +241,16 @@ _BRACKET_TOKEN = re.compile(
 # An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
 # a delimiter; a value already replaced, or a scheme whose credential was, is left alone.
 _BARE_VALUE = re.compile(
-    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;&}})\]\\])"
+    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;&}})\]\\<>`])"
     rf"|(?:bearer|basic|token)[{_JS_SPACE}])"
-    rf"(?:\[redacted\](?=[^{_JS_SPACE}\"',;&}})\]\\]))?[^{_JS_SPACE}\"',;&}})\]]+",
+    rf"(?:\[redacted\](?=[^{_JS_SPACE}\"',;&}})\]\\<>`]))?[^{_JS_SPACE}\"',;&}})\]]+",
     re.IGNORECASE | re.ASCII,
 )
 # An ``Authorization`` header's unquoted value: its scheme and the credential after it (``Bot …``,
 # ``OAuth1 …``), or a lone credential. One already replaced is left alone.
 _AUTHORIZATION_BARE = re.compile(
-    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;}})\]\\]))"
-    rf"((?:\[redacted\](?=[^{_JS_SPACE}\"',;}})\]\\]))?[^{_JS_SPACE}\"',;}})\]]+)"
+    rf"(\\?[\"']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^{_JS_SPACE}\"',;&}})\]\\<>`]))"
+    rf"((?:\[redacted\](?=[^{_JS_SPACE}\"',;&}})\]\\<>`]))?[^{_JS_SPACE}\"',;}})\]]+)"
     rf"(?:[ \t]+(?:\[redacted\]|[^{_JS_SPACE}\"',;}})\]]+))?"
 )
 
@@ -271,8 +271,9 @@ def _scrub_text_urls(
     end of a ``cut`` text may have lost its ``@`` or ``?`` there, so it is replaced whole. Each URL
     it replaces is added to ``changes``: where it starts and ends, and how much longer its
     replacement is; where each URL it does not replace whole lies in the scrubbed text is added to
-    ``kept``. One replaced whole because a span of ``closing``, or the userinfo in ``nested`` of a
-    URL nested in it, lies in its host or path is added to ``whole``: where its ``[redacted]`` lies
+    ``kept``. One replaced whole because a span of ``closing`` reaches its host or path from before
+    its ``://`` or starts there (not in its own userinfo), or the userinfo in ``nested`` of a URL
+    nested in it starts there, is added to ``whole``: where its ``[redacted]`` lies
     in the scrubbed text, and the URL as it would have been rewritten. A query name overlapping a
     span of ``hidden`` is replaced. Each list of spans is sorted by start."""
     scrub = _Scrub()
@@ -662,9 +663,10 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
     escaped-quoted, bare, or a whole ``[…]`` or ``{…}``) become ``[redacted]``. A JSON or ``%``
     escape (``\n``, ``\u0022``, ``%20``) ends a word as a space does. A quote that does not close
     on its line runs to the end of the line, and a URL's quoted query value is replaced whole.
-    ``cut`` says the text was cut from a longer one, so a URL, scheme or prefixed token that runs to
-    its end is replaced whole. Only the first 16,384 code points are read: a longer text is cut
-    there, and ``…`` marks it. Identical to the TypeScript SDK's ``scrubCredentialText``.
+    ``cut`` says the text was cut from a longer one, so a URL or prefixed token that runs to its end
+    is replaced whole, as is the word of scheme characters it ends in, which may start a URL's
+    scheme. Only the first 16,384 code points are read: a longer text is cut there, and ``…``
+    marks it. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
     if len(text) > _MAX_SCRUBBED_TEXT:
         return f"{_scrub_credential_text_unbounded(text[:_MAX_SCRUBBED_TEXT], True)}…"
@@ -704,7 +706,9 @@ def _scrub_credential_text_unbounded(text: str, cut: bool = False) -> str:
     plain, userinfo, values = _plain_url_spans(text) if "://" in text else ([], [], [])
     closing = sorted([*credentials, *plain, *values])
     whole: list[tuple[int, str]] = []
-    hidden = sorted([*credentials, *plain, *userinfo])
+    # A credential starting in a URL's own userinfo, which the rewrite drops with its key, does not
+    # hide the names after it.
+    hidden = sorted([*_outside_userinfo(credentials, userinfo), *plain, *userinfo])
     scrubbed = _scrub_text_urls(text, cut, changes, kept, closing, whole, userinfo, hidden)
     net = sorted([*plain, *userinfo, *values])
     # Every rule reads the same text and their matches are replaced together, so no rule's
@@ -754,8 +758,8 @@ def _plain_url_spans(
     """What the text hides with each URL read as before escaped quotes were, where it lies in the
     text, each list sorted by start. The first is all of a URL with another scheme holding ``@``,
     ``?`` or ``#``, or of one the parser refuses, and each pair, scheme or prefixed-token credential
-    of the text with those URLs replaced, one starting or ending in a URL starting or ending with
-    it. The second
+    of the text with its URLs replaced as that reading replaces them, one starting or ending in a
+    URL starting or ending with it. The second
     is each other URL's userinfo, after any ``/`` or ``\\`` that follow its ``://``, as the parser
     skips them, and the third its query values and fragment."""
     spans: list[tuple[int, int]] = []
@@ -823,6 +827,21 @@ def _plain_url_spans(
         )
     )
     return hidden, userinfo, values
+
+
+def _outside_userinfo(
+    spans: list[tuple[int, int]], userinfo: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """The spans of ``spans`` (sorted by start) that do not start inside a span of ``userinfo``
+    (sorted, disjoint)."""
+    kept: list[tuple[int, int]] = []
+    following = 0
+    for span in spans:
+        while following < len(userinfo) and userinfo[following][1] <= span[0]:
+            following += 1
+        if not (following < len(userinfo) and userinfo[following][0] <= span[0]):
+            kept.append(span)
+    return kept
 
 
 def _spans_before_urls(

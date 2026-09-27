@@ -137,8 +137,9 @@ type UrlChange = [start: number, end: number, growth: number];
  * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
  * `cut` text may have lost its `@` or `?` there, so it is replaced whole. Each URL it replaces is
  * added to `changes`, and where each URL it does not replace whole lies in the scrubbed text to
- * `kept`. One replaced whole because a span of `closing`, or the userinfo in `nested` of a URL
- * nested in it, lies in its host or path is added to `whole`: where its `[redacted]` lies in the
+ * `kept`. One replaced whole because a span of `closing` reaches its host or path from before its
+ * `://` or starts there (not in its own userinfo), or the userinfo in `nested` of a URL nested in
+ * it starts there, is added to `whole`: where its `[redacted]` lies in the
  * scrubbed text, and the URL as it would have been rewritten. A query name overlapping a span of
  * `hidden` is replaced. Each list of spans is sorted by start. */
 function scrubTextUrls(
@@ -256,10 +257,10 @@ const urlQueryValue = new RegExp(
 );
 /** Each query name: from the query's `?` or an `&` to its `=`, not from a `?` inside a value. */
 const queryName = /(?<=^\?|&)[^=&#]+/g;
-/** A scheme word, where a word starts or after an escape, before an escape, which may be of any
- * space (`%20`, `%0B`, `%C2%A0`, `\t`, `\\t`, `\u0020`), or `+`, a form's space, as in
- * `&Bearer%20…` or `&amp;%20Basic%2B…`; not before an escaped bracket, as in an array's name
- * (`token%5B%5D`). */
+/** A scheme word, where no letter or digit comes before it or after an escape, before an escape,
+ * which may be of any space (`%20`, `%0B`, `%C2%A0`, `\t`, `\\t`, `\u0020`), or `+`, a form's
+ * space, as in `&Bearer%20…` or `&amp;%20Basic%2B…`; not before an escaped bracket, as in an
+ * array's name (`token%5B%5D`). */
 const escapedScheme =
   /(?:(?<![a-z0-9])|(?<=%[0-9a-f]{2})|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4}))(?:bearer|basic|token)(?:%(?!5b|5d)|\\|\+)/i;
 /** Whether a query name, which would be exported as a name, the text rules never reading it, holds
@@ -410,11 +411,11 @@ const bracketToken = new RegExp(
 /** An unquoted value, or one whose quote does not close on its line, up to whitespace, a quote or
  * a delimiter; a value already replaced, or a scheme whose credential was, is left alone. */
 const bareValue =
-  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;&})\]\\])|(?:bearer|basic|token)\s)(?:\[redacted\](?=[^\s"',;&})\]\\]))?[^\s"',;&})\]]+/iy;
+  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;&})\]\\<>`])|(?:bearer|basic|token)\s)(?:\[redacted\](?=[^\s"',;&})\]\\<>`]))?[^\s"',;&})\]]+/iy;
 /** An `Authorization` header's unquoted value: its scheme and the credential after it (`Bot …`,
  * `OAuth1 …`), or a lone credential. One already replaced is left alone. */
 const authorizationBare =
-  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;})\]\\]))((?:\[redacted\](?=[^\s"',;})\]\\]))?[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
+  /(\\?["']?)(?!(?:\[redacted\]|%5Bredacted%5D)(?![^\s"',;&})\]\\<>`]))((?:\[redacted\](?=[^\s"',;&})\]\\<>`]))?[^\s"',;})\]]+)(?:[ \t]+(?:\[redacted\]|[^\s"',;})\]]+))?/y;
 
 function normalizedKey(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, "");
@@ -618,9 +619,9 @@ function redactSpans(text: string, spans: Span[]): string {
  * escaped-quoted, bare, or a whole `[…]` or `{…}`) become `[redacted]`. A JSON or `%` escape
  * (`\n`, `\u0022`, `%20`) ends a word as a space does. A quote that does not close on its line
  * runs to the end of the line, and a URL's quoted query value is replaced whole. `cut` says the
- * text was cut from a longer one, so a URL, scheme or prefixed token that runs to its end is
- * replaced whole. Only the first 16,384 code points are read: a longer text is cut there, and `…`
- * marks it.
+ * text was cut from a longer one, so a URL or prefixed token that runs to its end is replaced
+ * whole, as is the word of scheme characters it ends in, which may start a URL's scheme. Only the
+ * first 16,384 code points are read: a longer text is cut there, and `…` marks it.
  */
 export function scrubCredentialText(text: string, cut = false): string {
   if (text.length > MAX_SCRUBBED_TEXT) {
@@ -671,7 +672,11 @@ export function scrubCredentialTextUnbounded(text: string, cut = false): string 
     closing,
     whole,
     plain.userinfo,
-    [...hiding, ...plain.userinfo].sort(([a], [b]) => a - b),
+    // A credential starting in a URL's own userinfo, which the rewrite drops with its key, does
+    // not hide the names after it.
+    [...outsideUserinfo(credentials, plain.userinfo), ...plain.hidden, ...plain.userinfo].sort(
+      ([a], [b]) => a - b,
+    ),
   );
   const net = [...plain.hidden, ...plain.userinfo, ...plain.values].sort(([a], [b]) => a - b);
   // Every rule reads the same text and their matches are replaced together, so no rule's
@@ -708,7 +713,8 @@ const plainUrlPiece = /[^\s"'<>`]+|(?<==)"[^"<>`\r\n]*"|(?<==)'[^'<>`\r\n]*'|(?<
 /** What the text hides with each URL read as before escaped quotes were, where it lies in the
  * text, each list sorted by start. `hidden` is all of a URL with another scheme holding `@`, `?`
  * or `#`, or of one the parser refuses, and each pair, scheme or prefixed-token credential of the
- * text with those URLs replaced, one starting or ending in a URL starting or ending with it. `userinfo` is each
+ * text with its URLs replaced as that reading replaces them, one starting or ending in a URL
+ * starting or ending with it. `userinfo` is each
  * other URL's userinfo, after any `/` or `\` that follow its `://`, as the parser skips them, and
  * `values` its query values and fragment. */
 function plainUrlSpans(text: string): { hidden: Span[]; userinfo: Span[]; values: Span[] } {
@@ -772,6 +778,16 @@ function plainUrlSpans(text: string): { hidden: Span[]; userinfo: Span[]; values
     ),
   ].sort(([a], [b]) => a - b);
   return { hidden, userinfo, values };
+}
+
+/** The spans of `spans` (sorted by start) that do not start inside a span of `userinfo` (sorted,
+ * disjoint). */
+function outsideUserinfo(spans: Span[], userinfo: Span[]): Span[] {
+  let next = 0;
+  return spans.filter(([start]) => {
+    while (next < userinfo.length && userinfo[next]![1] <= start) next++;
+    return !(next < userinfo.length && userinfo[next]![0] <= start);
+  });
 }
 
 /** The spans of a text whose URLs `changes` replaced, moved back to where their text lies before:

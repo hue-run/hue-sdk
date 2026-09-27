@@ -51,18 +51,18 @@ refuses to publish a version without a matching entry below.
   (`?state=","client_secret":"…"`), the value of a key or scheme word that a URL takes in
   (`?t="a"&Bearer …`) is still replaced after it, and a query name holding a `:`, a scheme word
   before an escape other than of a bracket, or a credential pair once `%3A` and `%3D` are read
-  (`?mongodb://u:…@…`, `&token:…`, `&Bearer%20…`, `&client_secret%3A…`) is replaced. Where a URL
-  now ends sooner or later than 0.11.0 read it, what 0.11.0 hid there stays hidden: a URL that
-  would be rewritten with a credential (a prefixed token included), or with what 0.11.0 hid, in
-  its host or path is replaced whole, and so is a query name that holds some of it; a credential
-  in its own userinfo, which is dropped, does not count. A URL nested in another's path
-  (`…/p&mongodb://u:…@…`) loses its userinfo, after any extra `/`, or, when its scheme is not
-  `http(s)`, `ws(s)` or `ftp` and it holds an `@`, everything to the end of that path. Only the
-  first 16,384 code points are scrubbed; a URL, scheme or prefixed token that this cut interrupts
-  is now replaced whole, and the text is still scrubbed before it is cut to 1,024 characters. Hue's
-  OAuth tokens (`hue_at_`, `hue_rt_`, `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack
-  refresh tokens (`xoxe-`) and Google OAuth client secrets (`GOCSPX-`) are replaced by their
-  prefix. **Wire**
+  (`?mongodb://u:…@…`, `&token:…`, `&Bearer%20…`, `&client_secret%3A…`) is replaced. A URL that
+  would be rewritten with a credential (a prefixed token included) in its host or path is replaced
+  whole; one in its own userinfo, which is dropped, does not count. Where a URL now ends sooner or
+  later than 0.11.0 read it, what 0.11.0 hid there stays hidden: around the URL, by replacing a
+  rewritten URL whole that holds some of it in its host or path, and in a query name. A URL nested
+  in another's path (`…/p&mongodb://u:…@…`) loses its userinfo, after any extra `/`, or, when its
+  scheme is not `http(s)`, `ws(s)` or `ftp` and it holds an `@`, everything to the end of that
+  path. Only the first 16,384 code points are scrubbed; a URL or prefixed token that this cut
+  interrupts is now replaced whole, as is the word of scheme characters the cut ends in, and the
+  text is still scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`,
+  `hue_rt_`, `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and
+  Google OAuth client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.
