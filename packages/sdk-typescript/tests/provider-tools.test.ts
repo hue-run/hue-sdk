@@ -349,8 +349,12 @@ test("a text longer than 16,384 code points is scrubbed to there and cut", () =>
   expect(scrubbed.length).toBeLessThan(16_384);
 });
 
-test("a scheme that a cut text ends right after is replaced whole", () => {
-  expect(scrubCredentialText("see x>synthetic-cut-glue-wss://", true)).toBe("see x>[redacted]");
+test("a scheme that a cut text ends in or right after is replaced whole", () => {
+  for (const end of ["wss://", "wss:/", "wss:", "ws"])
+    expect(scrubCredentialText(`see x>synthetic-cut-glue-${end}`, true)).toBe("see x>[redacted]");
+  // The 16,384-code-point cut falls inside the `://`.
+  const text = `${"a ".repeat(8_179)}synthetic-cap-glue-redis://h?x=1`;
+  expect(scrubCredentialText(text)).toBe(`${"a ".repeat(8_179)}[redacted]…`);
 });
 
 test("a run of backslashes in a value that does not close is read once", () => {

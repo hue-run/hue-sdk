@@ -442,7 +442,7 @@
     },
     {
       "input": "{\"redirect_uri\":\"https://app.example.test/cb?state=\",\"client_secret\":\"synthetic-after-url-plain def\"}",
-      "expected": "{\"redirect_uri\":\"https://app.example.test/cb?state=%5Bredacted%5D\"client_secret\":\"[redacted]\"}"
+      "expected": "{\"redirect_uri\":\"https://app.example.test/cb?state=%5Bredacted%5D[redacted]\":\"[redacted]\"}"
     },
     {
       "input": "GET https://api.example.test/v1/items?filter=\"name\";sig=synthetic-after-quote failed",
@@ -703,6 +703,34 @@
     {
       "input": "{\"error\": \"Bearer \\token synthetic-tab-token-b\"}",
       "expected": "{\"error\": \"Bearer \\t[redacted] [redacted]\"}"
+    },
+    {
+      "input": "GET wss://h.example.test/?t=\\\"a b\\\"&Authorization:synthetic-hid-1&synthetic-hid-2=\\\"c\\\" failed",
+      "expected": "GET wss://h.example.test/?t=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET http://h.example.test/?q=\\\"a b\\\"&amp;mongodb://u:synthetic-hid-3@h&amp;synthetic-hid-4 failed",
+      "expected": "GET http://h.example.test/?q=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p?a=\\\"b\\\"&next=\"redis://h?k=\"\"synthetic-net-1 failed",
+      "expected": "GET https://h.example.test/p?a=%5Bredacted%5D&next=%5Bredacted%5D[redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/p?x=1&Basic%2Bsynthetic-esc-1&amp;Bearer\\\\tsynthetic-esc-2=1 failed",
+      "expected": "GET https://h.example.test/p?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p?x=1&client_secret%3Asynthetic-dec-1&amp;password%3Dsynthetic-dec-2=1 failed",
+      "expected": "GET https://h.example.test/p?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "error: mongodb://h/?q=\\\"a\\\"&Authorization: http://u;x@h.example.test synthetic-b2",
+      "expected": "error: [redacted] [redacted][redacted]"
+    },
+    {
+      "input": "GET mongodb://h/?q=\\\"a\\\"&Authorization:http://;@h\tsynthetic-b1 failed",
+      "expected": "GET [redacted][redacted] failed"
     }
   ]
 }

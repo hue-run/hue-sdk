@@ -453,8 +453,12 @@ def test_a_text_longer_than_16_384_code_points_is_scrubbed_to_there_and_cut():
     assert len(scrubbed) < 16_384
 
 
-def test_a_scheme_that_a_cut_text_ends_right_after_is_replaced_whole():
-    assert scrub_credential_text("see x>synthetic-cut-glue-wss://", True) == "see x>[redacted]"
+def test_a_scheme_that_a_cut_text_ends_in_or_right_after_is_replaced_whole():
+    for end in ("wss://", "wss:/", "wss:", "ws"):
+        assert scrub_credential_text(f"see x>synthetic-cut-glue-{end}", True) == "see x>[redacted]"
+    # The 16,384-code-point cut falls inside the ``://``.
+    text = "a " * 8_179 + "synthetic-cap-glue-redis://h?x=1"
+    assert scrub_credential_text(text) == "a " * 8_179 + "[redacted]…"
 
 
 def test_a_run_of_backslashes_in_a_value_that_does_not_close_is_read_once():
