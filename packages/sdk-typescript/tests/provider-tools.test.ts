@@ -357,6 +357,15 @@ test("a scheme that a cut text ends in or right after is replaced whole", () => 
   expect(scrubCredentialText(text)).toBe(`${"a ".repeat(8_179)}[redacted]…`);
 });
 
+test("a run of Authorization values inside each other's first word is read once", () => {
+  // Each value starting inside the one before's first word ends where that one does; were each
+  // read again to the end, 20,000 of them would take seconds.
+  const started = performance.now();
+  for (const value of ["Authorization=>%5Bredacted%5D\\", "Authorization=%5Bredacted%5D&"])
+    expect(scrubCredentialTextUnbounded(value.repeat(20_000))).not.toContain("%5Bredacted%5D");
+  expect(performance.now() - started).toBeLessThan(1_000);
+});
+
 test("a run of backslashes in a value that does not close is read once", () => {
   // Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
   // would not finish.

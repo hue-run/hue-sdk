@@ -548,8 +548,7 @@ function pairSpans(text: string): Span[] {
         start > authorization.from &&
         start < authorization.firstEnd &&
         !opensQuote(text, start) &&
-        !text.startsWith("[redacted]", start) &&
-        !text.startsWith("%5Bredacted%5D", start)
+        !text.startsWith("[redacted]", start)
       ) {
         open = 0;
         end = authorization.end;

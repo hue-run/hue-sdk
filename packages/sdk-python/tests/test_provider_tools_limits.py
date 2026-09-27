@@ -461,6 +461,15 @@ def test_a_scheme_that_a_cut_text_ends_in_or_right_after_is_replaced_whole():
     assert scrub_credential_text(text) == "a " * 8_179 + "[redacted]…"
 
 
+def test_a_run_of_authorization_values_inside_each_others_first_word_is_read_once():
+    # Each value starting inside the one before's first word ends where that one does; were each
+    # read again to the end, 20,000 of them would take seconds.
+    started = time.perf_counter()
+    for value in ("Authorization=>%5Bredacted%5D\\", "Authorization=%5Bredacted%5D&"):
+        assert "%5Bredacted%5D" not in _scrub_credential_text_unbounded(value * 20_000)
+    assert time.perf_counter() - started < 3
+
+
 def test_a_run_of_backslashes_in_a_value_that_does_not_close_is_read_once():
     # Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
     # would not finish.

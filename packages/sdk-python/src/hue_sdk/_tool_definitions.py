@@ -610,7 +610,6 @@ def _pair_spans(text: str) -> list[tuple[int, int]]:
                 and authorization[0] < start < authorization[1]
                 and not _opens_quote(text, start)
                 and not text.startswith("[redacted]", start)
-                and not text.startswith("%5Bredacted%5D", start)
             ):
                 opening, end = 0, authorization[2]
             else:
