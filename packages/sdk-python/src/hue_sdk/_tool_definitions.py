@@ -154,11 +154,14 @@ _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"
 # Each query name: from the query's ``?`` or an ``&`` to its ``=``, not from a ``?`` inside a
 # value.
 _QUERY_NAME = re.compile(r"(?:(?<=\A\?)|(?<=&))[^=&#]+")
-# A scheme word before an escape, which may be of any space (``%20``, ``%0B``, ``%C2%A0``, ``\t``,
-# ``\\t``, ``\u0020``), or ``+``, a form's space, as in ``&Bearer%20…`` or ``&amp;Basic%2B…``; not
-# before an escaped bracket, as in an array's name (``token%5B%5D``).
+# A scheme word, where a word starts or after an escape, before an escape, which may be of any
+# space (``%20``, ``%0B``, ``%C2%A0``, ``\t``, ``\\t``, ``\u0020``), or ``+``, a form's space, as
+# in ``&Bearer%20…`` or ``&amp;%20Basic%2B…``; not before an escaped bracket, as in an array's name
+# (``token%5B%5D``).
 _ESCAPED_SCHEME = re.compile(
-    r"(?<![a-z0-9])(?:bearer|basic|token)(?:%(?!5b|5d)|\\|\+)", re.I | re.A
+    r"(?:(?<![a-z0-9])|(?<=%[0-9a-f]{2})|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4}))"
+    r"(?:bearer|basic|token)(?:%(?!5b|5d)|\\|\+)",
+    re.I | re.A,
 )
 _ESCAPED_COLON = re.compile("%3a", re.IGNORECASE)
 _ESCAPED_EQUALS = re.compile("%3d", re.IGNORECASE)
@@ -323,18 +326,21 @@ def _scrub_text_urls(
                 # A URL rewritten around a pair or scheme credential before its query, where the
                 # rewrite can take the key or scheme word apart from the value, is replaced whole
                 # instead, as is one around what the text read on its own hid there, which the
-                # rewrite keeps: its host and path are kept. The URL's own userinfo, after its
-                # ``://`` and any ``/`` or ``\``, is not such a span.
+                # rewrite keeps: its host and path are kept. A span starting in the URL's own
+                # userinfo, which the rewrite drops, is not such a span
+                # (``https://x-access-token:…@github.com/…``).
                 if replaced not in (url, REDACTED):
                     boundary = _QUERY_OR_FRAGMENT.search(url)
                     to = end if boundary is None else start + boundary.start()
-                    count = bisect_left(starts, to)
-                    authority = index + 3
-                    while authority < end and text[authority] in "/\\":
-                        authority += 1
-                    first = bisect_left(nested_starts, authority + 1)
-                    if (count and reach[count - 1] > index + 3) or (
-                        first < len(nested_starts) and nested_starts[first] < to
+                    authority, at = _userinfo_span(text, index, end)
+                    host = at + 1 if at > authority else index + 3
+                    count = bisect_left(starts, index + 3)
+                    first = bisect_left(starts, host)
+                    nested_first = bisect_left(nested_starts, authority + 1)
+                    if (
+                        (count and reach[count - 1] > index + 3)
+                        or (first < len(starts) and starts[first] < to)
+                        or (nested_first < len(nested_starts) and nested_starts[nested_first] < to)
                     ):
                         if whole is not None:
                             whole.append((length + start - copied, replaced))
@@ -350,6 +356,18 @@ def _scrub_text_urls(
         index = text.find("://", index + 1)
     parts.append(text[copied:])
     return "".join(parts)
+
+
+def _userinfo_span(text: str, index: int, end: int) -> tuple[int, int]:
+    """Where the userinfo of the URL whose ``://`` is at ``index``, ending at ``end``, lies: after
+    any ``/`` or ``\\`` that follow ``://``, as the parser skips them, to the last ``@`` before a
+    ``/``, ``\\``, ``?`` or ``#``; an empty span at its start when it has no ``@``."""
+    authority = index + 3
+    while authority < end and text[authority] in "/\\":
+        authority += 1
+    boundary = _AUTHORITY_END.search(text, authority, end)
+    at = text.rfind("@", authority, end if boundary is None else boundary.start())
+    return authority, authority if at == -1 else at
 
 
 def _is_credential_name(name: str) -> bool:
@@ -664,17 +682,29 @@ def _scrub_credential_text_unbounded(text: str, cut: bool = False) -> str:
     texts; callers use ``scrub_credential_text``."""
     changes: list[tuple[int, int, int]] = []
     kept: list[tuple[int, int]] = []
-    # The text's pairs and schemes before its URLs are replaced: a URL can take in a key or scheme
-    # whose value follows it (``…&password=\"…``), and one rewritten around a credential is
-    # replaced whole.
-    credentials = sorted([*_pair_spans(text), *_authorization_spans(text)]) if "://" in text else []
+    # The text's pairs, schemes and prefixed tokens before its URLs are replaced: a URL can take in
+    # a key or scheme whose value follows it (``…&password=\"…``), one rewritten around a
+    # credential is replaced whole, and the parser can join a token in a host to the letter before
+    # it.
+    credentials = (
+        sorted(
+            [
+                *_pair_spans(text),
+                *_authorization_spans(text),
+                *(match.span() for match in _PREFIXED_TOKEN.finditer(text)),
+            ]
+        )
+        if "://" in text
+        else []
+    )
     # What the text hides with its URLs read as they were before escaped quotes were: a URL read
     # now can end sooner or later, and neither may export what that reading hid. A query name
-    # never overlaps a query value or fragment that reading hid.
+    # overlaps a query value or fragment that reading hid only in a URL starting inside it, whose
+    # host or path it then reaches, so those close a URL but are not checked against names.
     plain, userinfo, values = _plain_url_spans(text) if "://" in text else ([], [], [])
-    closing = sorted([*credentials, *plain])
+    closing = sorted([*credentials, *plain, *values])
     whole: list[tuple[int, str]] = []
-    hidden = sorted([*closing, *userinfo])
+    hidden = sorted([*credentials, *plain, *userinfo])
     scrubbed = _scrub_text_urls(text, cut, changes, kept, closing, whole, userinfo, hidden)
     net = sorted([*plain, *userinfo, *values])
     # Every rule reads the same text and their matches are replaced together, so no rule's
@@ -723,8 +753,9 @@ def _plain_url_spans(
 ) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]]]:
     """What the text hides with each URL read as before escaped quotes were, where it lies in the
     text, each list sorted by start. The first is all of a URL with another scheme holding ``@``,
-    ``?`` or ``#``, or of one the parser refuses, and each pair or scheme credential of the text
-    with those URLs replaced, one starting or ending in a URL starting or ending with it. The second
+    ``?`` or ``#``, or of one the parser refuses, and each pair, scheme or prefixed-token credential
+    of the text with those URLs replaced, one starting or ending in a URL starting or ending with
+    it. The second
     is each other URL's userinfo, after any ``/`` or ``\\`` that follow its ``://``, as the parser
     skips them, and the third its query values and fragment."""
     spans: list[tuple[int, int]] = []
@@ -760,11 +791,7 @@ def _plain_url_spans(
             if replaced == REDACTED:
                 spans.append((start, end))
             else:
-                authority = index + 3
-                while authority < end and text[authority] in "/\\":
-                    authority += 1
-                boundary = _AUTHORITY_END.search(text, authority, end)
-                at = text.rfind("@", authority, end if boundary is None else boundary.start())
+                authority, at = _userinfo_span(text, index, end)
                 if at > authority:
                     userinfo.append((authority, at))
                 hash_at = text.find("#", start, end)
@@ -787,7 +814,12 @@ def _plain_url_spans(
     hidden = sorted(
         spans
         + _spans_before_urls(
-            [*_pair_spans(replaced_text), *_authorization_spans(replaced_text)], changes
+            [
+                *_pair_spans(replaced_text),
+                *_authorization_spans(replaced_text),
+                *(match.span() for match in _PREFIXED_TOKEN.finditer(replaced_text)),
+            ],
+            changes,
         )
     )
     return hidden, userinfo, values

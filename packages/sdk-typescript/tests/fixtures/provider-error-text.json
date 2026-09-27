@@ -759,6 +759,30 @@
     {
       "input": "GET https://api.example.test/v1/items?x=1&Bearer%0Bsynthetic-esc-3=1&amp;Token%C2%A0synthetic-esc-4 failed",
       "expected": "GET https://api.example.test/v1/items?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;?t=\"https://b.example/?k=\"v\"&amp;x=https://u@h.example/synthetic-desync-1 failed",
+      "expected": "GET https://a.example/p=[redacted]&amp;?t=%5Bredacted%5D\"&amp;x=[redacted] failed"
+    },
+    {
+      "input": "GET https://a.example/p=\\\"x\\\"&amp;y?t=\"&amp;https://b.example/#f?=\"a\"&amp;https://u@h.example/synthetic-desync-2 failed",
+      "expected": "GET https://a.example/p=[redacted]&amp;y?t=%5Bredacted%5D[redacted][redacted] failed"
+    },
+    {
+      "input": "GET https://aésk-synthetic-idn-1.example/p=\\\"v\\\"#f failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://%73k-synthetic-idn-2.example/p=\"a?b c",
+      "expected": "GET [redacted]"
+    },
+    {
+      "input": "fatal: unable to access 'https://x-access-token:ghs_synthetic-git-1@github.com/org/repo.git/': 403",
+      "expected": "fatal: unable to access 'https://github.com/org/repo.git/': 403"
+    },
+    {
+      "input": "GET https://h.example/p?x=1&amp;%20Bearer%0Bsynthetic-esc-5=1 failed",
+      "expected": "GET https://h.example/p?x=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
     }
   ]
 }
