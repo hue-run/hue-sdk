@@ -22,10 +22,10 @@ refuses to publish a version without a matching entry below.
   recognizes in the resulting file (credential options and fields, known token prefixes, token-like
   URL path segments and query values), as `[redacted]` unless they only reference a variable or
   input such as `${HUE_MCP_KEY}`. Before, it printed other servers' literal tokens. Its output, and
-  the lines reporting what the command did, show Hue's URL with only its `toolsets`, `project` and
-  `read_only` selections.
-- `hue mcp install` refuses a symlinked `.cursor` or `.vscode` directory, as it already refused a
-  symlinked file. Before, it read and wrote `mcp.json` wherever that link pointed.
+  the lines reporting what the command did, show Hue's URL with every query value other than its
+  `toolsets`, `project` and `read_only` selections as `[redacted]`.
+- Security: `hue mcp install` refuses a symlinked `.cursor` or `.vscode` directory, as it already
+  refused a symlinked file. Before, it read and wrote `mcp.json` wherever that link pointed.
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.

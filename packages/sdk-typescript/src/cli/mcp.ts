@@ -542,7 +542,9 @@ function displayMcpUrl(url: string): string {
         name === "project" ||
         (name === "read_only" && /^(?:true|false)$/u.test(value));
       if (selection) return pair;
-      return PARAMETER_NAME.test(name) && scrubCredentialText(name) === name
+      return PARAMETER_NAME.test(name) &&
+        !TOKEN_SEGMENT.test(name) &&
+        scrubCredentialText(name) === name
         ? `${name}=${REDACTED}`
         : REDACTED;
     });
@@ -557,14 +559,14 @@ function displayMcpUrl(url: string): string {
  * `--key=VALUE`) and token-like URL path segments become `[redacted]` unless they only reference a
  * variable or input; other strings lose what `scrubCredentialText` finds (a known token prefix, a
  * `token=` pair, a URL's userinfo and query values). The server names under `serversKey` are not
- * read as field names. `url`, the address this command writes, is shown by {@link displayMcpUrl}.
+ * read as field names. `url`, the address this command writes, is shown as `shownUrl`.
  */
 function redactConfig(
   root: Record<string, unknown>,
   serversKey: "mcpServers" | "servers",
   url: string,
+  shownUrl: string,
 ): unknown {
-  const shownUrl = displayMcpUrl(url);
   const redact = (value: unknown, secret: boolean, depth: number, names: boolean): unknown => {
     if (depth > 256) return REDACTED;
     if (typeof value === "number") return secret ? REDACTED : value;
@@ -573,9 +575,12 @@ function redactConfig(
       if (REFERENCE_ONLY.test(value)) return value;
       if (secret) return REDACTED;
       const option = OPTION_VALUE.exec(value);
-      if (option && isCredentialName(option[2]!))
-        return REFERENCE_ONLY.test(option[3]!) ? value : `${option[1]}${REDACTED}`;
-      return scrubCredentialText(redactUrlPath(value));
+      if (!option) return scrubCredentialText(redactUrlPath(value));
+      if (REFERENCE_ONLY.test(option[3]!)) return value;
+      const shown = isCredentialName(option[2]!)
+        ? REDACTED
+        : scrubCredentialText(redactUrlPath(option[3]!));
+      return `${option[1]}${shown}`;
     }
     if (Array.isArray(value))
       return value.map((item: unknown, index) =>
@@ -1024,7 +1029,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   }
   if (parsed.values["dry-run"]) {
     // Other servers' entries can hold literal tokens; the file keeps them, the output does not.
-    const shown = json(redactConfig(merged, plan.key, url));
+    const shown = json(redactConfig(merged, plan.key, url, shownUrl));
     out(
       shown === content
         ? `Would write ${display}:`
