@@ -21,7 +21,7 @@ export function checkpointSegment(value: string, label: string): string {
 export function checkpointPath(directory: string, ...segments: [string, string][]): string {
   const root = resolve(directory);
   const path = resolve(root, ...segments.map(([value, label]) => checkpointSegment(value, label)));
-  if (path !== root && !path.startsWith(root + sep))
+  if (path !== root && !path.startsWith(root.endsWith(sep) ? root : root + sep))
     throw new Error("Checkpoint path escapes its directory");
   return path;
 }

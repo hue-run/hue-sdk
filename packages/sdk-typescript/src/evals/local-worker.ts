@@ -10,7 +10,7 @@ import type {
   RequestedAttemptProviderV2,
 } from "./attempt.js";
 import type { EvaluationClient } from "./client.js";
-import { CheckpointStore, checkpointPath } from "./checkpoint.js";
+import { CheckpointStore, checkpointPath, checkpointSegment } from "./checkpoint.js";
 import {
   pinRequestedAttemptV2,
   requestedAttemptV2,
@@ -351,18 +351,19 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
       );
       let experimentFinished = false;
       try {
+        const experimentId = checkpointSegment(claim.experimentId, "experiment id");
         const requested = requestedConfiguration
           ? pinRequestedAttemptV2(
               requestedConfiguration,
-              (await options.client.getExperiment(claim.experimentId)).config,
+              (await options.client.getExperiment(experimentId)).config,
             )
           : undefined;
         const report = await runExperiment({
           client: options.client,
           hue: options.hue,
-          experimentId: claim.experimentId,
+          experimentId,
           checkpointDirectory: checkpointPath(directory, [
-            `experiment-${claim.experimentId}`,
+            `experiment-${experimentId}`,
             "experiment id",
           ]),
           persistResultContent: true,

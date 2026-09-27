@@ -468,6 +468,12 @@ describe("local evaluation scorers", () => {
 });
 
 describe("checkpoint paths", () => {
+  test("accepts children of a filesystem root", () => {
+    expect(checkpointPath("/", ["project", "project id"], ["direct", "kind"])).toBe(
+      join("/", "project", "direct"),
+    );
+  });
+
   test("server-provided identifiers must be single path components", () => {
     const root = join(tmpdir(), "hue-root");
     expect(checkpointPath(root, ["proj_1", "project id"], ["direct", "kind"])).toBe(
