@@ -110,8 +110,9 @@ const urlPiece = new RegExp(
   String.raw`([^\s"'<>${"`"}\\]+)|(?<==)(?:"${notJsonBoundary('"')}[^"<>${"`"}\r\n]*"|'${notJsonBoundary("'")}[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|${openEscapedValue('"')}\\*(?=[\r\n]|$)|${openEscapedValue("'")}\\*(?=[\r\n]|$))|\\(?!["'])|(?<==)["']`,
   "y",
 );
-/** An `&` that starts another URL (`&mongodb://…`), which is not a query name of the one before. */
-const ampersandUrl = /&[a-z][a-z0-9+.-]*:\/\//i;
+/** An `&` that starts another URL (`&mongodb://…`), which is not a query name of the one before:
+ * scheme characters, at least one a letter, as `scrubTextUrls` reads a scheme back from `://`. */
+const ampersandUrl = /&[0-9+.-]*[a-z][a-z0-9+.-]*:\/\//i;
 /** Where the URL whose `://` is at `index` ends: `index + 3` when nothing after it is one, and
  * before an `&` in a run of its characters that starts another URL. */
 function urlEnd(text: string, index: number): number {

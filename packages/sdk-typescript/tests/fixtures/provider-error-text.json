@@ -567,6 +567,10 @@
     {
       "input": "GET https://h.example.test/p;password=\\'synthetic-path?escaped\\'#x failed",
       "expected": "GET https://h.example.test/p;password=[redacted] failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=\\\"abc\\\"&2mongodb://u:synthetic-amp-digit@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&2[redacted] failed"
     }
   ]
 }

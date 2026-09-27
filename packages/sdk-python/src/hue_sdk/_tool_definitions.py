@@ -125,8 +125,9 @@ _URL_PIECE = re.compile(
 )
 
 
-# An ``&`` that starts another URL (``&mongodb://…``), which is not a query name of the one before.
-_AMPERSAND_URL = re.compile(r"&[a-z][a-z0-9+.-]*://", re.IGNORECASE | re.ASCII)
+# An ``&`` that starts another URL (``&mongodb://…``), which is not a query name of the one before:
+# scheme characters, at least one a letter, as ``_scrub_text_urls`` reads a scheme back from ``://``.
+_AMPERSAND_URL = re.compile(r"&[0-9+.-]*[a-z][a-z0-9+.-]*://", re.IGNORECASE | re.ASCII)
 
 
 def _url_end(text: str, index: int) -> int:
