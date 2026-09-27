@@ -323,13 +323,16 @@ class HueSpan:
                 if call.error_type is not None:
                     child.set_attribute("error.type", call.error_type)
                     # The provider's error text is content: read only when content is captured.
-                    description = (
-                        self._client._text_content(
-                            "status.message", provider_error_description(call.error_text)
-                        )
-                        if call.error_text is not None
-                        else None
-                    )
+                    description = None
+                    if call.error_text is not None:
+                        # Each call's text is scrubbed on its own: one that cannot be leaves its
+                        # span without a description, counted, and the later calls recorded.
+                        try:
+                            scrubbed = provider_error_description(call.error_text)
+                        except Exception:
+                            self._client._record_issue()
+                        else:
+                            description = self._client._text_content("status.message", scrubbed)
                     child.otel_span.set_status(Status(StatusCode.ERROR, description))
         for listing in activity.listings:
             with self._client.span(

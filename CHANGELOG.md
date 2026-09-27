@@ -30,7 +30,8 @@ more credentials from exported MCP error text and `hue listen` messages, and pac
   reference a variable or input such as `${HUE_MCP_KEY}`. Before, it printed other servers' literal
   tokens. Its output, and the lines reporting what the command did, show Hue's URL with any
   token-like path segment and every query value other than its `toolsets`, `project` and `read_only`
-  selections as `[redacted]`.
+  selections as `[redacted]`. It shows a string longer than 16,384 code points only to there, ending
+  in `…`; the file it writes keeps the whole value.
 - Security: `hue mcp install` refuses a symlinked `.cursor` or `.vscode` directory, as it already
   refused a symlinked file, and a different file found in place of the one it read. Before, it read
   and wrote `mcp.json` wherever that link pointed. The checks run before the file is read and again
@@ -1052,6 +1053,14 @@ No registry release is claimed until publication and registry acceptance complet
 - A URL's query names are decoded and encoded together in C rather than byte by byte, so
   scrubbing a URL with thousands of parameters, in a tool definition's `url` or in MCP error text,
   takes about half the time it did. The exported text is unchanged.
+- On Python 3.13 and later, a URL with an `xn--` host label whose Punycode overflows
+  (`http://xn--11111111111111111w`) stopped the credential scrubber with `OverflowError`. In a
+  failed MCP call's error text, that call's span was exported with `error.type`
+  `builtins.OverflowError`, and the calls and listings after it in the same
+  `record_provider_tool_calls` were not recorded; a record whose tool definitions held such a URL
+  was dropped. Such a URL, and one whose parse fails in any other way, is now replaced whole with
+  `[redacted]`, as in the TypeScript SDK. Error text that still cannot be scrubbed leaves only its
+  own span without a description, counted as an instrumentation failure. **Wire**
 
 ### [0.6.1] - 2026-09-25
 

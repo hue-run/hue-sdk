@@ -803,6 +803,14 @@
     {
       "input": "token=>[redacted]synthetic-arrow-3 failed",
       "expected": "token=>[redacted] failed"
+    },
+    {
+      "input": "upstream failed at http://xn--11111111111111111w",
+      "expected": "upstream failed at [redacted]"
+    },
+    {
+      "input": "see https://xn--99999999999999999999999a.example/mcp?token=synthetic-overflow failed",
+      "expected": "see [redacted] failed"
     }
   ]
 }
