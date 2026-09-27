@@ -311,11 +311,12 @@ test("a bracketed value full of escaped quotes scrubs in linear time", () => {
 });
 
 test("a URL of any length is read to its end", () => {
-  // A URL is read a piece at a time; as one repeated pattern, a long one exhausted Bun's regular
-  // expression engine, which then matched nothing and left the URL as it was.
+  // A URL is read a piece at a time; as one repeated pattern, one of 600,000 pieces (each `a` and
+  // each backslash is one) exhausted Bun's regular expression engine, which then matched nothing
+  // and left the URL as it was.
   const started = performance.now();
   const scrubbed = scrubCredentialText(
-    `see https://h.example.test/?sig=synthetic-sig&p=${"a".repeat(600_000)}`,
+    `see https://h.example.test/?sig=synthetic-sig&p=${"a\\".repeat(300_000)}`,
   );
   expect(
     scrubbed.startsWith("see https://h.example.test/?sig=%5Bredacted%5D&p=%5Bredacted%5D"),
