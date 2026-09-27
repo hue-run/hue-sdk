@@ -10,10 +10,27 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.11.2] - 2026-09-27
+
+This release pins MCP connections to one project, matches the current Hue MCP toolsets and object
+vocabulary, and fixes bounded waits and shutdown behavior in the evaluation and listen CLIs.
+
 #### Added
 
+- `hue mcp install --project <id-or-slug>` pins a key or sign-in connection to one project and
+  names it `hue-<value>` so it can coexist with an organization-wide `hue` connection. Its tools
+  omit `project_id`; the printed sign-in Codex TOML sends the pin as `X-Hue-MCP-Project`.
+- `hue mcp install --toolsets` accepts the `author` and `evaluate` profiles and the current
+  `eval_sets`, `runs`, `judges`, `cases` and `runners` groups alongside the existing selections.
 - `EvaluationClient.getArtifact` and `completeArtifact` take an optional `{ signal }`, which ends
   the request and the client's own wait to send it again.
+
+#### Changed
+
+- `hue mcp install` validates the current MCP toolset names, uses product object names in its guide
+  and skill, and documents `https://mcp.hue.run/mcp` as the only production MCP URL.
+- Hue skill 0.5.9 describes pinned connections, current MCP parameter and result names, the catalog
+  executors and the current evaluation profiles and groups.
 
 #### Fixed
 
