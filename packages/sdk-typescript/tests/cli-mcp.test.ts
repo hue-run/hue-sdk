@@ -669,6 +669,21 @@ describe("hue mcp install", () => {
     );
     expect(patternDry.stdout).not.toContain(secrets[6]);
     expect(patternDry.stdout).toContain("/$&/mcp?api_key=[redacted]");
+    // A known token in the path, or a read_only value other than true or false, is left out too.
+    const pathDry = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--dry-run",
+        "--url",
+        `https://mcp.hue.run/mcp/hue_sk_abcdefghijklmnop?read_only=${secrets[7]}`,
+      ],
+      { cwd: root },
+    );
+    expect(pathDry.stdout).toContain("https://mcp.hue.run/mcp/[redacted]?read_only=[redacted]&");
+    expect(pathDry.stdout).not.toContain("hue_sk_");
+    expect(pathDry.stdout).not.toContain(secrets[7]);
     const keyWrite = await mcp(["install", "--client", "claude-code", "--url", keyUrl], {
       cwd: root,
     });

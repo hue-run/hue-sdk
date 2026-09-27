@@ -516,6 +516,11 @@ function redactEnvironmentItem(item: string): string {
 /** A URL path segment long and mixed enough to be a token, as some servers put their key there. */
 const TOKEN_SEGMENT = /^(?=[^/]*[A-Za-z])(?=[^/]*\d)[^/]{16,}$/u;
 
+/** Whether a URL path segment is token-like, or a credential `scrubCredentialText` knows. */
+function isTokenSegment(segment: string): boolean {
+  return TOKEN_SEGMENT.test(segment) || scrubCredentialText(segment) !== segment;
+}
+
 /** A URL with each token-like path segment replaced; any other string is returned as is. */
 function redactUrlPath(value: string): string {
   if (!/^(?:https?|wss?):\/\//iu.test(value)) return value;
@@ -526,9 +531,9 @@ function redactUrlPath(value: string): string {
     return value;
   }
   const segments = parsed.pathname.split("/");
-  if (!segments.some((segment) => TOKEN_SEGMENT.test(segment))) return value;
+  if (!segments.some(isTokenSegment)) return value;
   parsed.pathname = segments
-    .map((segment) => (TOKEN_SEGMENT.test(segment) ? REDACTED : segment))
+    .map((segment) => (isTokenSegment(segment) ? REDACTED : segment))
     .join("/");
   return parsed.href;
 }
