@@ -382,7 +382,9 @@ async function readJsonConfig(path: string, display: string): Promise<unknown> {
 /**
  * Refuses a symbolic link, or anything but a directory, between the working directory and the file
  * (`.cursor` or `.vscode`), as the file itself is refused. The working directory and its ancestors
- * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one.
+ * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one. This runs
+ * once, before the file is read; Node has no `openat`, so it cannot pin the directory against an
+ * account that can write the project and swaps it for a link before the write.
  */
 async function rejectLinkedParents(cwd: string, path: string, display: string): Promise<void> {
   let current = cwd;
@@ -421,17 +423,12 @@ async function rejectSymlink(path: string, display: string): Promise<Stats | und
  * Atomic write: temporary file, fsync, rename. A file it replaces keeps its permission bits, so one
  * kept at 0600 because it holds other servers' tokens is never widened, except that other accounts
  * lose write access; it keeps its group (or, when the group cannot be kept, its group and other
- * accounts get only the access both had). A new file is created owner-only, 0600 narrowed by the
- * umask: people and clients add literal tokens to these files.
+ * accounts get only the access both had), and its owner when root runs the command. A new file is
+ * created owner-only, 0600 narrowed by the umask: people and clients add literal tokens to these
+ * files.
  */
-async function writeConfigFile(
-  cwd: string,
-  path: string,
-  text: string,
-  display: string,
-): Promise<void> {
+async function writeConfigFile(path: string, text: string, display: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await rejectLinkedParents(cwd, path, display);
   const existing = await rejectSymlink(path, display);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   try {
@@ -445,11 +442,14 @@ async function writeConfigFile(
       if (existing) {
         // Other accounts never keep write access: they could add a server command to run.
         let mode = existing.mode & 0o775;
-        // The new file has the process's group (the directory's on macOS), which may differ. When
-        // the group cannot be kept, its members and everyone else get only what both had.
-        if ((await handle.stat()).gid !== existing.gid) {
+        // The new file has the process's group (the directory's on macOS), which may differ, and
+        // root's owner. When the group cannot be kept, its members and everyone else get only what
+        // both had.
+        const root = process.geteuid?.() === 0;
+        const created = await handle.stat();
+        if (created.gid !== existing.gid || (root && created.uid !== existing.uid)) {
           try {
-            await handle.chown(-1, existing.gid);
+            await handle.chown(root ? existing.uid : -1, existing.gid);
           } catch {
             const shared = (mode >> 3) & mode & 0o007;
             mode = (mode & 0o700) | (shared << 3) | shared;
@@ -461,7 +461,6 @@ async function writeConfigFile(
     } finally {
       await handle.close();
     }
-    await rejectLinkedParents(cwd, path, display);
     await rejectSymlink(path, display);
     await rename(temporary, path);
   } catch (error) {
@@ -481,13 +480,13 @@ const REFERENCE_ONLY =
 /** Names `isCredentialKey` leaves out that configurations use for a credential field or option. */
 const CREDENTIAL_NAMES = new Set(["auth", "pat", "bearer", "env"]);
 
-/** `isCredentialKey`, `CREDENTIAL_NAMES`, or a name ending in `key`, `keys` or `header`. */
+/** `isCredentialKey`, `CREDENTIAL_NAMES`, or a name ending in `key`, `keys`, `header` or `headers`. */
 function isCredentialName(name: string): boolean {
   const normalized = name.toLowerCase().replace(/[-_]/g, "");
   return (
     isCredentialKey(name) ||
     CREDENTIAL_NAMES.has(normalized) ||
-    /(?:keys?|header)$/u.test(normalized)
+    /(?:keys?|headers?)$/u.test(normalized)
   );
 }
 
@@ -1062,7 +1061,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return 0;
   }
   try {
-    await writeConfigFile(cwd, path, content, display);
+    await writeConfigFile(path, content, display);
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }

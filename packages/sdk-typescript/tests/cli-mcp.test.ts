@@ -441,6 +441,21 @@ describe("hue mcp install", () => {
     },
   );
 
+  test.skipIf(process.geteuid?.() !== 0)(
+    "run as root, a replaced file keeps its owner and group",
+    async () => {
+      const root = await temporaryRoot();
+      const file = join(root, ".mcp.json");
+      await writeFile(file, "{}\n");
+      await chown(file, 12345, 12346);
+      await chmod(file, 0o600);
+      expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
+      const info = await lstat(file);
+      expect([info.uid, info.gid]).toEqual([12345, 12346]);
+      expect(await mode(file)).toBe(0o600);
+    },
+  );
+
   test("refuses a symbolic link to the config's directory, but not to the working directory", async () => {
     const root = await temporaryRoot();
     const outside = await temporaryRoot();
@@ -500,6 +515,8 @@ describe("hue mcp install", () => {
       "Abc123Def456Ghi789Jkl",
       "docker-env-option-value",
       "bare-assignment-value",
+      "http-headers-map-value",
+      "extra-headers-map-value",
     ];
     const existing = JSON.stringify({
       mcpServers: {
@@ -547,6 +564,12 @@ describe("hue mcp install", () => {
           secretKey: secrets[17],
           authHeader: secrets[18],
           url: `https://mcp.example.com/s/${secrets[11]}/mcp`,
+        },
+        // Header maps under other names, such as Codex's http_headers.
+        plural: {
+          url: "https://mcp.example.com/mcp",
+          http_headers: { "X-Custom": secrets[24] },
+          extraHeaders: { "X-Other": secrets[25] },
         },
         // Only an entry is exempt as a server name, not a stray value named like a credential.
         "stray-token": secrets[20],
@@ -619,6 +642,11 @@ describe("hue mcp install", () => {
       secretKey: "[redacted]",
       authHeader: "[redacted]",
       url: "https://mcp.example.com/s/[redacted]/mcp",
+    });
+    expect(shown.mcpServers.plural).toEqual({
+      url: "https://mcp.example.com/mcp",
+      http_headers: { "X-Custom": "[redacted]" },
+      extraHeaders: { "X-Other": "[redacted]" },
     });
     expect(shown.mcpServers["stray-token"] as unknown).toBe("[redacted]");
     expect(shown.servers).toEqual({ token: "[redacted]" });
