@@ -615,6 +615,14 @@
     {
       "input": "GET https://h.example.test/p;password=\\\"a?synthetic-open-question#x failed",
       "expected": "GET https://h.example.test/p;password=[redacted]"
+    },
+    {
+      "input": "GET https://h.example.test/path&mongodb://user:synthetic-nested-path-a@db.example.test/x failed",
+      "expected": "GET https://h.example.test/path&mongodb://%5Bredacted%5D@db.example.test/x failed"
+    },
+    {
+      "input": "see https://h.example.test/path/mongodb://user:synthetic-nested-path-b@db.example.test/x ok",
+      "expected": "see https://h.example.test/path/mongodb://%5Bredacted%5D@db.example.test/x ok"
     }
   ]
 }

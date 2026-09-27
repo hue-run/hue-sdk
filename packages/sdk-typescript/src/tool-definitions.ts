@@ -177,6 +177,9 @@ const urlQueryValue = new RegExp(
   String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|\\?["'][^\r\n]*$)`,
   "g",
 );
+/** The userinfo of a URL nested in another's path: text after a `://` up to an `@` before any
+ * `/`, `\`, `?` or `#`. */
+const nestedUserinfo = /:\/\/[^\s/\\?#@]*@/g;
 /** A query name holding another URL (`?mongodb://u:…@…`, `&x://…`), which would be exported as a
  * name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
  * query's `?` or an `&`, not at a `?` inside a value. */
@@ -202,9 +205,18 @@ function scrubTextUrl(url: string, state: ScrubState): string {
         : REDACTED,
   );
   const query = opened.indexOf("?");
-  if (query === -1) return scrubUrl(opened + fragment, state);
+  // A URL nested in the path (`…/p&mongodb://u:…@…`) loses its userinfo, written as the URL
+  // writes a replaced value, since the path is kept and the nested URL is not read on its own.
+  const pathEnd = query === -1 ? opened.length : query;
+  const authority = opened.indexOf("://") + 3;
+  const slash = opened.slice(authority, pathEnd).search(/[/\\]/);
+  const pathStart = slash === -1 ? pathEnd : authority + slash;
+  const before =
+    opened.slice(0, pathStart) +
+    opened.slice(pathStart, pathEnd).replace(nestedUserinfo, "://%5Bredacted%5D@");
+  if (query === -1) return scrubUrl(before + fragment, state);
   return scrubUrl(
-    opened.slice(0, query) +
+    before +
       opened.slice(query).replace(urlQueryValue, REDACTED).replace(urlQueryName, REDACTED) +
       fragment,
     state,

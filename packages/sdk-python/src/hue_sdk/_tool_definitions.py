@@ -151,6 +151,10 @@ _URL_ESCAPED_VALUES = re.compile(
     rf"(?<==)(?:({_URL_ESCAPED_VALUE})|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
 )
 _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
+# The start of a URL's path after its host, and the userinfo of a URL nested in the path: text
+# after a ``://`` up to an ``@`` before any ``/``, ``\``, ``?`` or ``#``.
+_PATH_START = re.compile(r"[/\\]")
+_NESTED_USERINFO = re.compile(rf"://[^{_JS_SPACE}/\\?#@]*@")
 # A query name holding another URL (``?mongodb://u:…@…``, ``&x://…``), which would be exported as
 # a name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
 # query's ``?`` or an ``&``, not at a ``?`` inside a value.
@@ -307,10 +311,18 @@ def _url_values_replaced(url: str) -> str:
         head,
     )
     query = opened.find("?")
+    # A URL nested in the path (``…/p&mongodb://u:…@…``) loses its userinfo, written as the URL
+    # writes a replaced value, since the path is kept and the nested URL is not read on its own.
+    path_end = len(opened) if query == -1 else query
+    slash = _PATH_START.search(opened, opened.find("://") + 3, path_end)
+    path_start = path_end if slash is None else slash.start()
+    before = opened[:path_start] + _NESTED_USERINFO.sub(
+        "://%5Bredacted%5D@", opened[path_start:path_end]
+    )
     if query == -1:
-        return opened + fragment
+        return before + fragment
     queried = _URL_QUERY_NAME.sub(REDACTED, _URL_QUERY_VALUE.sub(REDACTED, opened[query:]))
-    return opened[:query] + queried + fragment
+    return before + queried + fragment
 
 
 def _normalized_key(key: str) -> str:
