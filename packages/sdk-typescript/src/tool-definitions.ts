@@ -178,23 +178,30 @@ const urlQueryValue = new RegExp(
   "g",
 );
 /** A query name holding another URL (`?mongodb://u:…@…`, `&x://…`), which would be exported as a
- * name; the rest of the query is kept, so nothing after it is shown. */
-const urlQueryName = /(?<=[?&])[^=&#]*:\/\/[^=&#]*/g;
+ * name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
+ * query's `?` or an `&`, not at a `?` inside a value. */
+const urlQueryName = /(?<=^\?|&)[^=&#]*:\/\/[^=&#]*/g;
 /** A URL in free text, its quoted values replaced. One with another scheme, which runtimes parse
  * differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
   if (!specialScheme.test(url)) return /[@?#]/.test(url) ? REDACTED : url;
-  // The first `#` starts the fragment, which is dropped, even inside a quoted value, as the URL
-  // parser reads the text; other values are replaced only before it.
+  // The first `#` starts the fragment, which is dropped, and the first `?` before it the query,
+  // even inside a quoted value, as the URL parser reads the text; other values are replaced on
+  // each side of those.
   const whole = url.replace(urlOpenValue, REDACTED);
   const hash = whole.indexOf("#");
   const fragment = hash === -1 ? "" : whole.slice(hash);
-  const opened = (hash === -1 ? whole : whole.slice(0, hash)).replace(urlEscapedValues, REDACTED);
-  const query = opened.indexOf("?");
-  if (query === -1) return scrubUrl(opened + fragment, state);
+  const head = hash === -1 ? whole : whole.slice(0, hash);
+  const query = head.indexOf("?");
+  const path = (query === -1 ? head : head.slice(0, query)).replace(urlEscapedValues, REDACTED);
+  if (query === -1) return scrubUrl(path + fragment, state);
   return scrubUrl(
-    opened.slice(0, query) +
-      opened.slice(query).replace(urlQueryValue, REDACTED).replace(urlQueryName, REDACTED) +
+    path +
+      head
+        .slice(query)
+        .replace(urlEscapedValues, REDACTED)
+        .replace(urlQueryValue, REDACTED)
+        .replace(urlQueryName, REDACTED) +
       fragment,
     state,
   );

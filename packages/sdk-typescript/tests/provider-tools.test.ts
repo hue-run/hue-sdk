@@ -325,6 +325,16 @@ test("a URL of 600,000 pieces is read to its end", () => {
   expect(performance.now() - started).toBeLessThan(5_000);
 });
 
+test("a query full of `?` is read once for names holding a URL", () => {
+  // A name starts at the query's `?` or an `&`; were every `?` a start, each would be read to the
+  // end of the query.
+  const started = performance.now();
+  expect(scrubCredentialText(`https://h.example.test/?${"?".repeat(100_000)}`)).toContain(
+    "https://h.example.test/?",
+  );
+  expect(performance.now() - started).toBeLessThan(5_000);
+});
+
 test("a run of backslashes in a value that does not close is read once", () => {
   // Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
   // would not finish.

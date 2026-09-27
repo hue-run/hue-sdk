@@ -428,6 +428,16 @@ def test_a_url_of_600_000_pieces_is_read_to_its_end():
     assert time.perf_counter() - started < 10
 
 
+def test_a_query_full_of_question_marks_is_read_once_for_names_holding_a_url():
+    # A name starts at the query's ``?`` or an ``&``; were every ``?`` a start, each would be read
+    # to the end of the query.
+    started = time.perf_counter()
+    assert "https://h.example.test/?" in scrub_credential_text(
+        "https://h.example.test/?" + "?" * 100_000
+    )
+    assert time.perf_counter() - started < 10
+
+
 def test_a_run_of_backslashes_in_a_value_that_does_not_close_is_read_once():
     # Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
     # would not finish.

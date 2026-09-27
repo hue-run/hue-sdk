@@ -152,8 +152,9 @@ _URL_ESCAPED_VALUES = re.compile(
 )
 _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
 # A query name holding another URL (``?mongodb://u:…@…``, ``&x://…``), which would be exported as
-# a name; the rest of the query is kept, so nothing after it is shown.
-_URL_QUERY_NAME = re.compile(r"(?<=[?&])[^=&#]*://[^=&#]*")
+# a name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
+# query's ``?`` or an ``&``, not at a ``?`` inside a value.
+_URL_QUERY_NAME = re.compile(r"(?:(?<=\A\?)|(?<=&))[^=&#]*://[^=&#]*")
 # Where a word starts: after a character that is not a word character, or after a JSON escape
 # (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
 _WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
@@ -288,17 +289,19 @@ def _scrub_text_urls(
 def _url_values_replaced(url: str) -> str:
     """A URL's quoted values replaced: one it ends in or one between backslash-escaped quotes,
     wherever it is, and each other in its query. The first ``#`` starts the fragment, which is
-    dropped, even inside a quoted value, as the URL parser reads the text; values other than one
-    it ends in are replaced only before it."""
+    dropped, and the first ``?`` before it the query, even inside a quoted value, as the URL parser
+    reads the text; values other than one it ends in are replaced on each side of those."""
     whole = _URL_OPEN_VALUE.sub(REDACTED, url, count=1)
     hash_at = whole.find("#")
     fragment = "" if hash_at == -1 else whole[hash_at:]
-    opened = _URL_ESCAPED_VALUES.sub(REDACTED, whole if hash_at == -1 else whole[:hash_at])
-    query = opened.find("?")
+    head = whole if hash_at == -1 else whole[:hash_at]
+    query = head.find("?")
+    path = _URL_ESCAPED_VALUES.sub(REDACTED, head if query == -1 else head[:query])
     if query == -1:
-        return opened + fragment
-    queried = _URL_QUERY_NAME.sub(REDACTED, _URL_QUERY_VALUE.sub(REDACTED, opened[query:]))
-    return opened[:query] + queried + fragment
+        return path + fragment
+    queried = _URL_ESCAPED_VALUES.sub(REDACTED, head[query:])
+    queried = _URL_QUERY_NAME.sub(REDACTED, _URL_QUERY_VALUE.sub(REDACTED, queried))
+    return path + queried + fragment
 
 
 def _normalized_key(key: str) -> str:

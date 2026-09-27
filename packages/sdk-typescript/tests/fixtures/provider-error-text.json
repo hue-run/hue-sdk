@@ -603,6 +603,14 @@
     {
       "input": "GET ftp://h.example.test/?x=\\'a#b\\'&HTTPS:/synthetic-name-after-escaped-hash failed",
       "expected": "GET ftp://h.example.test/?x=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\\\"a?b\\\"&code=synthetic-escaped-question failed",
+      "expected": "GET https://h.example.test/p=[redacted]?b%5C%22=%5Bredacted%5D&code=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/p=\\'a?b\\'&code=synthetic-escaped-question-single failed",
+      "expected": "GET https://h.example.test/p=[redacted]?b%5C%27=%5Bredacted%5D&code=%5Bredacted%5D failed"
     }
   ]
 }
