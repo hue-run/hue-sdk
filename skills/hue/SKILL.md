@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.9"
+  version: "0.5.10"
 ---
 
 # Hue tracing
@@ -78,6 +78,8 @@ SDK constructors do not automatically read environment variables. For another Hu
 ## Capture and instrument full traces
 
 Recommend content capture: `captureContent: true` / `capture_content=True`. Trace inspection, evaluations and judges in Hue read the recorded content. The value is required; always pass it explicitly. In the plan you show the user, state what content capture sends to Hue: supported prompts/messages, responses and tool inputs/outputs, alongside available model/provider identifiers, usage, timing, errors and existing correlation. The user's approval of that plan authorizes content capture. Choose metadata-only (`false`) only if the user declines or an existing application policy forbids sending that content to another service. Preserve redaction and credential filtering in both modes. Do not invent missing fields.
+
+For redaction, read the [redaction recipe](https://docs.hue.run/guides/redaction) and identify the provider and exporter that actually send the records. TypeScript's `redact(value, path)` belongs on `createHue`, or on `createHueTransport` when reusing a provider. Python's `redactor(field, value)` covers Hue helper content, not arbitrary external spans; scrub those at their producer or collector. Configure each exporter separately, including Langfuse when present. Use the recipe's email example as a starting point, adapt it to the application's fields, and verify synthetic exported content plus unchanged application results. Do not promise automatic PII detection or coverage of every field.
 
 Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry and Vercel content attributes at export when capture is disabled (Python requires 0.2.0); still configure the chosen instrumentor's own input/output capture controls to match the chosen policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
 
