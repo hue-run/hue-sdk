@@ -158,6 +158,9 @@ _QUERY_NAME = re.compile(r"(?:(?<=\A\?)|(?<=&))[^=&#]+")
 _ESCAPED_SCHEME = re.compile(r"(?<![a-z0-9])(?:bearer|basic|token)(?:%|\\|\+)", re.I | re.A)
 _ESCAPED_COLON = re.compile("%3a", re.IGNORECASE)
 _ESCAPED_EQUALS = re.compile("%3d", re.IGNORECASE)
+_SCHEME_WORD = re.compile("bearer|basic|token", re.IGNORECASE | re.ASCII)
+# What any name ``_is_credential_name`` holds has: a ``:``, ``%3A``, ``%3D`` or a scheme word.
+_CREDENTIAL_NAME_MARK = re.compile(":|%3[ad]|bearer|basic|token", re.IGNORECASE | re.ASCII)
 # Where a word starts: after a character that is not a word character, or after a JSON escape
 # (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
 _WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
@@ -343,8 +346,12 @@ def _is_credential_name(name: str) -> bool:
     as ever."""
     if ":" in name or _ESCAPED_SCHEME.search(name):
         return True
-    separated = _ESCAPED_EQUALS.sub("=", _ESCAPED_COLON.sub(":", name))
-    return bool(_pair_spans(separated)) or bool(_authorization_spans(name))
+    # A pair needs a ``:`` or ``=``, which a name holds only escaped, and a scheme credential its
+    # word, so most names are never read.
+    separated = _ESCAPED_EQUALS.sub("=", _ESCAPED_COLON.sub(":", name)) if "%" in name else name
+    return (separated != name and bool(_pair_spans(separated))) or (
+        _SCHEME_WORD.search(name) is not None and bool(_authorization_spans(name))
+    )
 
 
 def _position_before(edits: list[tuple[int, int, int]]) -> Callable[[int], int]:
@@ -406,16 +413,21 @@ def _url_values_replaced(url: str, hides: Callable[[int, int], bool] | None = No
         return REDACTED
 
     valued = _URL_QUERY_VALUE.sub(quote, opened[query:])
+    # A name can hold a credential only where the query holds a ``:``, ``%3A``, ``%3D`` or a scheme
+    # word, and ``hides`` is passed only when what it covers overlaps the URL, so most queries'
+    # names are not read one by one.
+    if hides is None and not _CREDENTIAL_NAME_MARK.search(valued):
+        return opened[:query] + valued + fragment
     before_quoted = _position_before(quoted)
     before_escaped = _position_before(escaped)
 
     def name(match: re.Match[str]) -> str:
-        begin = before_escaped(before_quoted(query + match.start()))
-        if _is_credential_name(match[0]) or (
-            hides is not None and hides(begin, begin + len(match[0]))
-        ):
+        if _is_credential_name(match[0]):
             return REDACTED
-        return match[0]
+        if hides is None:
+            return match[0]
+        begin = before_escaped(before_quoted(query + match.start()))
+        return REDACTED if hides(begin, begin + len(match[0])) else match[0]
 
     return opened[:query] + _QUERY_NAME.sub(name, valued) + fragment
 

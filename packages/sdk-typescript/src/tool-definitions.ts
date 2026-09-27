@@ -229,9 +229,17 @@ const escapedScheme = /(?<![a-z0-9])(?:bearer|basic|token)(?:%|\\|\+)/i;
  * its extent, so its later values are replaced as ever. */
 function isCredentialName(name: string): boolean {
   if (name.includes(":") || escapedScheme.test(name)) return true;
-  const separated = name.replace(/%3a/gi, ":").replace(/%3d/gi, "=");
-  return pairSpans(separated).length > 0 || authorizationSpans(name).length > 0;
+  // A pair needs a `:` or `=`, which a name holds only escaped, and a scheme credential its word,
+  // so most names are never read.
+  const separated = name.includes("%") ? name.replace(/%3a/gi, ":").replace(/%3d/gi, "=") : name;
+  return (
+    (separated !== name && pairSpans(separated).length > 0) ||
+    (schemeWord.test(name) && authorizationSpans(name).length > 0)
+  );
 }
+const schemeWord = /bearer|basic|token/i;
+/** What any name `isCredentialName` holds has: a `:`, `%3A`, `%3D` or a scheme word. */
+const credentialNameMark = /:|%3[ad]|bearer|basic|token/i;
 /** A replacement: where it starts and its length in the text after it, and how much longer it
  * made the text. */
 type Edit = [start: number, length: number, growth: number];
@@ -288,11 +296,19 @@ function scrubTextUrl(
     grown += REDACTED.length - value.length;
     return REDACTED;
   });
+  // A name can hold a credential only where the query holds a `:`, `%3A`, `%3D` or a scheme word,
+  // and overlap what `hides` covers only where that covers any of the URL, so most queries' names
+  // are not read one by one.
+  const overlaps = hides(0, url.length);
+  if (!overlaps && !credentialNameMark.test(valued))
+    return scrubUrl(opened.slice(0, query) + valued + fragment, state);
   const beforeQuoted = positionBefore(quoted);
   const beforeEscaped = positionBefore(escaped);
   const named = valued.replace(queryName, (name: string, at: number) => {
+    if (isCredentialName(name)) return REDACTED;
+    if (!overlaps) return name;
     const from = beforeEscaped(beforeQuoted(query + at));
-    return isCredentialName(name) || hides(from, from + name.length) ? REDACTED : name;
+    return hides(from, from + name.length) ? REDACTED : name;
   });
   return scrubUrl(opened.slice(0, query) + named + fragment, state);
 }
