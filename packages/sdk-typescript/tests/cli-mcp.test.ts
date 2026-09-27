@@ -390,6 +390,10 @@ describe("hue mcp install", () => {
     await chmod(join(root, ".cursor", "mcp.json"), 0o644);
     expect((await mcp(["install", "--client", "cursor"], { cwd: root })).code).toBe(0);
     expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o644);
+    // Except that other accounts lose write access, which would let them add a command to run.
+    await chmod(join(root, ".cursor", "mcp.json"), 0o666);
+    expect((await mcp(["install", "--client", "cursor"], { cwd: root })).code).toBe(0);
+    expect(await mode(join(root, ".cursor", "mcp.json"))).toBe(0o664);
     expect((await readdir(join(root, ".cursor"))).sort()).toEqual(["mcp.json"]);
   });
 
@@ -522,6 +526,8 @@ describe("hue mcp install", () => {
             `--url=https://mcp.example.com/s/${secrets[21]}/sse`,
             "-e",
             `DEBUG=${secrets[22]}`,
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
             `STRIPE_KEY=${secrets[23]}`,
             "LOG_LEVEL=debug",
             "/work",
@@ -590,7 +596,9 @@ describe("hue mcp install", () => {
         "[redacted]",
         "--url=https://mcp.example.com/s/[redacted]/sse",
         "-e",
-        "[redacted]",
+        "DEBUG=[redacted]",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
         "STRIPE_KEY=[redacted]",
         "LOG_LEVEL=debug",
         "/work",

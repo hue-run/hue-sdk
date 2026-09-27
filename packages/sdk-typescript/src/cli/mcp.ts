@@ -419,10 +419,10 @@ async function rejectSymlink(path: string, display: string): Promise<Stats | und
 
 /**
  * Atomic write: temporary file, fsync, rename. A file it replaces keeps its permission bits, so one
- * kept at 0600 because it holds other servers' tokens is never widened, and keeps its group when
- * those bits grant the group access (or loses the group bits when the group cannot be kept). A new
- * file is created owner-only, 0600 narrowed by the umask: people and clients add literal tokens to
- * these files.
+ * kept at 0600 because it holds other servers' tokens is never widened, except that other accounts
+ * lose write access; it keeps its group when those bits grant the group access (or loses the group
+ * bits when the group cannot be kept). A new file is created owner-only, 0600 narrowed by the
+ * umask: people and clients add literal tokens to these files.
  */
 async function writeConfigFile(
   cwd: string,
@@ -443,7 +443,8 @@ async function writeConfigFile(
     try {
       await handle.writeFile(text, "utf8");
       if (existing) {
-        let mode = existing.mode & 0o777;
+        // Other accounts never keep write access: they could add a server command to run.
+        let mode = existing.mode & 0o775;
         // The new file has the process's group (the directory's on macOS), which may differ.
         if (mode & 0o070 && (await handle.stat()).gid !== existing.gid) {
           try {
@@ -490,16 +491,26 @@ function isCredentialName(name: string): boolean {
 
 /**
  * An `args` option whose next item is its value and names a credential: `--api-key`, `--header`,
- * `-H`, the header option of curl and `mcp-remote`, or `-e`, Docker's environment option.
+ * or `-H`, the header option of curl and `mcp-remote`.
  */
 function isCredentialOption(item: unknown): boolean {
-  if (item === "-H" || item === "-e") return true;
+  if (item === "-H") return true;
   const name = typeof item === "string" ? /^--?([A-Za-z][\w-]*)$/u.exec(item)?.[1] : undefined;
   return name !== undefined && isCredentialName(name);
 }
 
-/** `--name=value`, or `NAME=value` as `env` and Docker's `-e` take it, as an `args` item. */
+/** `--name=value`, or `NAME=value` as `env` takes it, as an `args` item. */
 const OPTION_VALUE = /^(-{0,2}([A-Za-z][\w-]*)=)(.*)$/su;
+/**
+ * The item after Docker's `-e` or `--env`, as an environment value is shown: a variable name alone
+ * (passed through from the environment) as is, `NAME=VALUE` with its value redacted.
+ */
+function redactEnvironmentItem(item: string): string {
+  const assignment = /^([A-Za-z_]\w*)=(.*)$/su.exec(item);
+  if (!assignment) return /^[A-Za-z_]\w*$/u.test(item) ? item : REDACTED;
+  return REFERENCE_ONLY.test(assignment[2]!) ? item : `${assignment[1]}=${REDACTED}`;
+}
+
 /** A URL path segment long and mixed enough to be a token, as some servers put their key there. */
 const TOKEN_SEGMENT = /^(?=[^/]*[A-Za-z])(?=[^/]*\d)[^/]{16,}$/u;
 
@@ -583,9 +594,12 @@ function redactConfig(
       return `${option[1]}${shown}`;
     }
     if (Array.isArray(value))
-      return value.map((item: unknown, index) =>
-        redact(item, secret || isCredentialOption(value[index - 1]), depth + 1, false),
-      );
+      return value.map((item: unknown, index) => {
+        const previous = value[index - 1];
+        if (!secret && typeof item === "string" && (previous === "-e" || previous === "--env"))
+          return redactEnvironmentItem(item);
+        return redact(item, secret || isCredentialOption(previous), depth + 1, false);
+      });
     if (!isRecord(value)) return value;
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [

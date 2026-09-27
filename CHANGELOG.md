@@ -16,8 +16,9 @@ refuses to publish a version without a matching entry below.
   Since 0.5.0 it wrote every file with mode `0644`, so a `.mcp.json`, `.cursor/mcp.json` or
   `.vscode/mcp.json` kept at `0600` because it holds other servers' literal tokens became readable
   by every local account. A replaced file now keeps its permissions (and its group, when they grant
-  the group access); a new file is created `0600`. A file an earlier version already made
-  world-readable keeps that mode: run `chmod 600` on one that holds tokens.
+  the group access), except that other accounts lose write access; a new file is created `0600`. A
+  file an earlier version already made world-readable keeps that mode: run `chmod 600` on one that
+  holds tokens.
 - Security: `hue mcp install --dry-run` shows header and `env` values, and other credentials it
   recognizes in the resulting file (credential options and fields, known token prefixes, token-like
   URL path segments and query values), as `[redacted]` unless they only reference a variable or
