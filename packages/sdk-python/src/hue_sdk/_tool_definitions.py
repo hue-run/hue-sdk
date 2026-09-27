@@ -115,9 +115,10 @@ _OPEN_ESCAPED_SINGLE = rf"\\'(?:{_ESCAPED_SINGLE})*"
 # one whose quote does not close on its line, to the end of the line whatever it holds; a backslash
 # that opens no escaped quote; or a quote after ``=`` that opens no value. ``_url_values_replaced``
 # replaces the quoted values. Pieces are read one at a time, as in the TypeScript SDK, where one
-# repeated pattern could exhaust the regular expression engine's backtracking stack.
+# repeated pattern could exhaust the regular expression engine's backtracking stack on a URL of
+# many pieces.
 _URL_PIECE = re.compile(
-    rf"([^{_JS_SPACE}\"'<>`\\]+)|(?<==)(?:\"{_NOT_JSON_BOUNDARY_DOUBLE}[^\"<>`\r\n]*\""
+    rf"[^{_JS_SPACE}\"'<>`\\]+|(?<==)(?:\"{_NOT_JSON_BOUNDARY_DOUBLE}[^\"<>`\r\n]*\""
     rf"|'{_NOT_JSON_BOUNDARY_SINGLE}[^'<>`\r\n]*'|{_URL_ESCAPED_VALUE}"
     r"|(?:\"[^\"\r\n]*|'[^'\r\n]*)(?=[\r\n]|\Z)"
     rf"|{_OPEN_ESCAPED_DOUBLE}\\*(?=[\r\n]|\Z)|{_OPEN_ESCAPED_SINGLE}\\*(?=[\r\n]|\Z))"
@@ -125,20 +126,11 @@ _URL_PIECE = re.compile(
 )
 
 
-# An ``&`` that starts another URL (``&mongodb://…``), which is not a query name of the one before:
-# scheme characters, at least one a letter, as ``_scrub_text_urls`` reads a scheme back from ``://``.
-_AMPERSAND_URL = re.compile(r"&[0-9+.-]*[a-z][a-z0-9+.-]*://", re.IGNORECASE | re.ASCII)
-
-
 def _url_end(text: str, index: int) -> int:
     """Where the URL whose ``://`` is at ``index`` ends: ``index + 3`` when nothing after it is
-    one, and before an ``&`` in a run of its characters that starts another URL."""
+    one."""
     end = index + 3
     while (piece := _URL_PIECE.match(text, end)) is not None:
-        if piece.start(1) != -1 and (
-            following := _AMPERSAND_URL.search(text, piece.start(1), piece.end(1))
-        ):
-            return following.start()
         end = piece.end()
     return end
 
@@ -159,6 +151,9 @@ _URL_ANY_VALUE = re.compile(
     rf"|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
 )
 _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
+# A query name holding another URL (``?mongodb://u:…@…``, ``&x://…``), which would be exported as
+# a name; the rest of the query is kept, so nothing after it is shown.
+_URL_QUERY_NAME = re.compile(r"(?<=[?&])[^=&#]*://[^=&#]*")
 # Where a word starts: after a character that is not a word character, or after a JSON escape
 # (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
 _WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
@@ -299,7 +294,8 @@ def _url_values_replaced(url: str) -> str:
     if query == -1 or (fragment != -1 and fragment < query):
         return url
     end = len(url) if fragment == -1 else fragment
-    return url[:query] + _URL_QUERY_VALUE.sub(REDACTED, url[query:end]) + url[end:]
+    queried = _URL_QUERY_NAME.sub(REDACTED, _URL_QUERY_VALUE.sub(REDACTED, url[query:end]))
+    return url[:query] + queried + url[end:]
 
 
 def _normalized_key(key: str) -> str:

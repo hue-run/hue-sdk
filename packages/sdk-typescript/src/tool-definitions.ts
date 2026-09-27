@@ -104,25 +104,17 @@ const openEscapedValue = (quote: string) => String.raw`\\${quote}(?:${escapedUni
  * one between backslash-escaped quotes (`?token=\"…\"`) that ends the URL or its query value; one
  * whose quote does not close on its line, to the end of the line whatever it holds; a backslash
  * that opens no escaped quote; or a quote after `=` that opens no value. `scrubTextUrl` replaces
- * the quoted values. Pieces are read one at a time, not by one repeated pattern, so no length of
- * URL can exhaust a regular expression engine's backtracking stack. */
+ * the quoted values. Pieces are read one at a time, not by one repeated pattern, so no number of
+ * pieces can exhaust a regular expression engine's backtracking stack. */
 const urlPiece = new RegExp(
-  String.raw`([^\s"'<>${"`"}\\]+)|(?<==)(?:"${notJsonBoundary('"')}[^"<>${"`"}\r\n]*"|'${notJsonBoundary("'")}[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|${openEscapedValue('"')}\\*(?=[\r\n]|$)|${openEscapedValue("'")}\\*(?=[\r\n]|$))|\\(?!["'])|(?<==)["']`,
+  String.raw`[^\s"'<>${"`"}\\]+|(?<==)(?:"${notJsonBoundary('"')}[^"<>${"`"}\r\n]*"|'${notJsonBoundary("'")}[^'<>${"`"}\r\n]*'|${urlEscapedValue('"')}|${urlEscapedValue("'")}|(?:"[^"\r\n]*|'[^'\r\n]*)(?=[\r\n]|$)|${openEscapedValue('"')}\\*(?=[\r\n]|$)|${openEscapedValue("'")}\\*(?=[\r\n]|$))|\\(?!["'])|(?<==)["']`,
   "y",
 );
-/** An `&` that starts another URL (`&mongodb://…`), which is not a query name of the one before:
- * scheme characters, at least one a letter, as `scrubTextUrls` reads a scheme back from `://`. */
-const ampersandUrl = /&[0-9+.-]*[a-z][a-z0-9+.-]*:\/\//i;
-/** Where the URL whose `://` is at `index` ends: `index + 3` when nothing after it is one, and
- * before an `&` in a run of its characters that starts another URL. */
+/** Where the URL whose `://` is at `index` ends: `index + 3` when nothing after it is one. */
 function urlEnd(text: string, index: number): number {
   let end = index + 3;
   urlPiece.lastIndex = end;
-  for (let piece = urlPiece.exec(text); piece; piece = urlPiece.exec(text)) {
-    const next = piece[1] === undefined ? null : ampersandUrl.exec(piece[1]);
-    if (next) return end + next.index;
-    end = urlPiece.lastIndex;
-  }
+  while (urlPiece.test(text)) end = urlPiece.lastIndex;
   return end;
 }
 const isSchemeLetter = (code: number) => (code | 0x20) >= 0x61 && (code | 0x20) <= 0x7a;
@@ -184,6 +176,9 @@ const urlQueryValue = new RegExp(
   String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|\\?["'][^\r\n]*$)`,
   "g",
 );
+/** A query name holding another URL (`?mongodb://u:…@…`, `&x://…`), which would be exported as a
+ * name; the rest of the query is kept, so nothing after it is shown. */
+const urlQueryName = /(?<=[?&])[^=&#]*:\/\/[^=&#]*/g;
 /** A URL in free text, its quoted values replaced. One with another scheme, which runtimes parse
  * differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
@@ -195,7 +190,7 @@ function scrubTextUrl(url: string, state: ScrubState): string {
   const end = hash === -1 ? opened.length : hash;
   return scrubUrl(
     opened.slice(0, query) +
-      opened.slice(query, end).replace(urlQueryValue, REDACTED) +
+      opened.slice(query, end).replace(urlQueryValue, REDACTED).replace(urlQueryName, REDACTED) +
       opened.slice(end),
     state,
   );

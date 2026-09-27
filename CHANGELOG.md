@@ -30,8 +30,8 @@ refuses to publish a version without a matching entry below.
   or a query value (`=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as
   a query name. Such a value no longer takes in the next key of the JSON around the URL
   (`?state=","client_secret":"…"`), the value of a key or scheme word that a URL takes in
-  (`?t="a"&Bearer …`) is still replaced after it, and a URL after an `&` (`&mongodb://u:…@…`) is
-  read as its own URL, not a query name. Only the first 16,384 code points are scrubbed; a
+  (`?t="a"&Bearer …`) is still replaced after it, and a query name holding another URL
+  (`?mongodb://u:…@…`, `&x://…`) is replaced. Only the first 16,384 code points are scrubbed; a
   URL or prefixed token that this cut interrupts is now replaced whole, and the text is still
   scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`, `hue_rt_`,
   `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and Google OAuth

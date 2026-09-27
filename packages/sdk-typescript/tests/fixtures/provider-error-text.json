@@ -494,15 +494,15 @@
     },
     {
       "input": "GET https://api.example.test/p?code=\\\"abc\\\"&mongodb://u:synthetic-amp-escaped@db.example.test/x failed",
-      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&[redacted] failed"
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
     },
     {
       "input": "GET https://api.example.test/p?code=\"abc\"&mongodb://u:synthetic-amp-plain@db.example.test/x failed",
-      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&[redacted] failed"
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
     },
     {
       "input": "GET https://api.example.test/p?code=abc&mongodb://u:synthetic-amp-bare@db.example.test/x failed",
-      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&[redacted] failed"
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
     },
     {
       "input": "{\"error\":\"password=\\\"synthetic-tail-d1 synthetic-second-1\\",
@@ -570,7 +570,31 @@
     },
     {
       "input": "GET https://api.example.test/p?code=\\\"abc\\\"&2mongodb://u:synthetic-amp-digit@db.example.test/x failed",
-      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&2[redacted] failed"
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?mongodb://u:synthetic-first-name@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://api.example.test/p?code=abc&%mongodb://u:synthetic-amp-percent@db.example.test/x failed",
+      "expected": "GET https://api.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET mongodb://h.example.test/?a=1&x://synthetic-nested-opaque failed",
+      "expected": "GET [redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/#access_token=t&https://h2.example.test/synthetic-nested-fragment failed",
+      "expected": "GET https://h.example.test/ failed"
+    },
+    {
+      "input": "GET https://h.example.test/?a=1&https://h2.example.test/p&sig=synthetic-nested-sig failed",
+      "expected": "GET https://h.example.test/?a=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D&sig=%5Bredacted%5D failed"
+    },
+    {
+      "input": "GET https://h.example.test/?a=1&x://h2.example.test/p=synthetic-nested-value failed",
+      "expected": "GET https://h.example.test/?a=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
     }
   ]
 }
