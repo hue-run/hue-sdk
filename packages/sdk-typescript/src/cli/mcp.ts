@@ -490,16 +490,16 @@ function isCredentialName(name: string): boolean {
 
 /**
  * An `args` option whose next item is its value and names a credential: `--api-key`, `--header`,
- * or `-H`, the header option of curl and `mcp-remote`.
+ * `-H`, the header option of curl and `mcp-remote`, or `-e`, Docker's environment option.
  */
 function isCredentialOption(item: unknown): boolean {
-  if (item === "-H") return true;
+  if (item === "-H" || item === "-e") return true;
   const name = typeof item === "string" ? /^--?([A-Za-z][\w-]*)$/u.exec(item)?.[1] : undefined;
   return name !== undefined && isCredentialName(name);
 }
 
-/** `--name=value`, as an `args` item. */
-const OPTION_VALUE = /^(--?([A-Za-z][\w-]*)=)(.*)$/su;
+/** `--name=value`, or `NAME=value` as `env` and Docker's `-e` take it, as an `args` item. */
+const OPTION_VALUE = /^(-{0,2}([A-Za-z][\w-]*)=)(.*)$/su;
 /** A URL path segment long and mixed enough to be a token, as some servers put their key there. */
 const TOKEN_SEGMENT = /^(?=[^/]*[A-Za-z])(?=[^/]*\d)[^/]{16,}$/u;
 
@@ -968,7 +968,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   const shownUrl = displayMcpUrl(url);
   // What the command reports doing; a command a person is to run is printed as given.
   const shownCommand = (command: CliCommand) =>
-    command.display.replaceAll(shellWord(url), shellWord(shownUrl));
+    command.display.replaceAll(shellWord(url), () => shellWord(shownUrl));
   const plan = planFor(clientId, auth, scope, url, serverName);
   if (parsed.values.print) {
     stdout.write(plan.snippet);

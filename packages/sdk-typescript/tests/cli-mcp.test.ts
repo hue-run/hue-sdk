@@ -489,6 +489,8 @@ describe("hue mcp install", () => {
       "root-servers-token-value",
       "stray-server-token-value",
       "Abc123Def456Ghi789Jkl",
+      "docker-env-option-value",
+      "bare-assignment-value",
     ];
     const existing = JSON.stringify({
       mcpServers: {
@@ -518,6 +520,10 @@ describe("hue mcp install", () => {
             "--access-key",
             secrets[16],
             `--url=https://mcp.example.com/s/${secrets[21]}/sse`,
+            "-e",
+            `DEBUG=${secrets[22]}`,
+            `STRIPE_KEY=${secrets[23]}`,
+            "LOG_LEVEL=debug",
             "/work",
           ],
           env: { SERVICE_TOKEN: secrets[4], OTHER: "${OTHER_KEY}", PIN: Number(secrets[12]) },
@@ -583,6 +589,10 @@ describe("hue mcp install", () => {
         "--access-key",
         "[redacted]",
         "--url=https://mcp.example.com/s/[redacted]/sse",
+        "-e",
+        "[redacted]",
+        "STRIPE_KEY=[redacted]",
+        "LOG_LEVEL=debug",
         "/work",
       ],
       env: { SERVICE_TOKEN: "[redacted]", OTHER: "${OTHER_KEY}", PIN: "[redacted]" },
@@ -632,6 +642,20 @@ describe("hue mcp install", () => {
     expect(codexDry.stdout).toBe(
       "Would run: codex mcp add hue --url 'https://mcp.hue.run/mcp?api_key=[redacted]&[redacted]&[redacted]&toolsets=traces,docs' --bearer-token-env-var HUE_MCP_KEY\n",
     );
+    // A replacement pattern in the URL stays literal.
+    const patternDry = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--dry-run",
+        "--url",
+        `https://mcp.hue.run/$&/mcp?api_key=${secrets[6]}`,
+      ],
+      { cwd: root },
+    );
+    expect(patternDry.stdout).not.toContain(secrets[6]);
+    expect(patternDry.stdout).toContain("/$&/mcp?api_key=[redacted]");
     const keyWrite = await mcp(["install", "--client", "claude-code", "--url", keyUrl], {
       cwd: root,
     });
