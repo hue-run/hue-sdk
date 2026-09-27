@@ -9,7 +9,11 @@ import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { createHue, HueExportError } from "../src/index.js";
-import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoint.js";
+import {
+  CheckpointIdentityError,
+  CheckpointStore,
+  checkpointPath,
+} from "../src/evals/checkpoint.js";
 import {
   ArtifactSizeError,
   builtins,
@@ -460,6 +464,20 @@ describe("local evaluation scorers", () => {
         ],
       }),
     ).toEqual({ state: "error", error: { type: "LocalScorerError" } });
+  });
+});
+
+describe("checkpoint paths", () => {
+  test("server-provided identifiers must be single path components", () => {
+    const root = join(tmpdir(), "hue-root");
+    expect(checkpointPath(root, ["proj_1", "project id"], ["direct", "kind"])).toBe(
+      join(root, "proj_1", "direct"),
+    );
+    expect(checkpointPath(root, ["experiment-abc.DEF-9", "experiment id"])).toBe(
+      join(root, "experiment-abc.DEF-9"),
+    );
+    for (const bad of ["../escape", "..", ".", "a/b", "a\\b", "", ".hidden", "/abs", "a\0b"])
+      expect(() => checkpointPath(root, [bad, "project id"])).toThrow(/Refusing to use project id/);
   });
 });
 

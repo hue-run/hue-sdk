@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import type { HueClient } from "../client.js";
 import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
@@ -9,7 +8,7 @@ import type {
   WorldHandoff,
 } from "../environment/types.js";
 import { HueApiError, type EvaluationClient } from "./client.js";
-import { CheckpointStore } from "./checkpoint.js";
+import { CheckpointStore, checkpointPath } from "./checkpoint.js";
 import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";
 import { aggregateBounds, digest, json } from "./json.js";
 import { normalizeScorerDefinitionForPublication } from "./scorer-publication.js";
@@ -800,7 +799,10 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       client: options.client,
       hue: options.hue,
       experimentId,
-      checkpointDirectory: join(store.directory, `experiment-${experimentId}`),
+      checkpointDirectory: checkpointPath(store.directory, [
+        `experiment-${experimentId}`,
+        "experiment id",
+      ]),
       persistResultContent: options.persistResultContent,
       traceEvidence: options.traceEvidence,
       ...(options.traceNotAccepted ? { traceNotAccepted: options.traceNotAccepted } : {}),
