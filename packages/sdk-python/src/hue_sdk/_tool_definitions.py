@@ -151,10 +151,15 @@ _URL_ESCAPED_VALUES = re.compile(
     rf"(?<==)(?:({_URL_ESCAPED_VALUE})|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
 )
 _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
-# A query name holding another URL (``?mongodb://u:…@…``, ``&x://…``), which would be exported as
-# a name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
-# query's ``?`` or an ``&``, not at a ``?`` inside a value.
-_URL_QUERY_NAME = re.compile(r"(?:(?<=\A\?)|(?<=&))[^=&#]*://[^=&#]*")
+# A query name holding a ``:`` (another URL, ``?mongodb://u:…@…``, or a pair, ``&token:…``) or a
+# scheme and an escaped space (``&Bearer%20…``), which would be exported as a name, the text rules
+# never reading it; the URL keeps its extent, so its later values are replaced as ever. A name
+# starts at the query's ``?`` or an ``&``, not at a ``?`` inside a value.
+_URL_QUERY_NAME = re.compile(
+    r"(?:(?<=\A\?)|(?<=&))(?:[^=&#]*:|(?:bearer|basic|token)(?:%20|%09|\+))[^=&#]*",
+    re.IGNORECASE,
+)
+_QUERY_OR_FRAGMENT_START = re.compile(r"[?#]")
 # Where a word starts: after a character that is not a word character, or after a JSON escape
 # (``\n``, ``\t``, ``\u0022``) or ``%`` escape, which ends in one.
 _WORD_START = r"(?:(?<![a-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9a-f]{4})|(?<=%[0-9a-f]{2}))"
@@ -247,6 +252,8 @@ def _scrub_text_urls(
     cut: bool = False,
     changes: list[tuple[int, int, int]] | None = None,
     kept: list[tuple[int, int]] | None = None,
+    credentials: list[tuple[int, int]] | None = None,
+    whole: list[tuple[int, str]] | None = None,
 ) -> str:
     """Scrub each URL in free text. Each ``://`` is found by search and its scheme read back from
     it: up to 64 scheme characters, starting at a letter, so a longer run before ``://`` still
@@ -254,8 +261,14 @@ def _scrub_text_urls(
     end of a ``cut`` text may have lost its ``@`` or ``?`` there, so it is replaced whole. Each URL
     it replaces is added to ``changes``: where it starts and ends, and how much longer its
     replacement is; where each URL it does not replace whole lies in the scrubbed text is added to
-    ``kept``."""
+    ``kept``. One replaced whole because of a credential in ``credentials`` is added to ``whole``:
+    where its ``[redacted]`` lies in the scrubbed text, and the URL as it would have been
+    rewritten."""
     scrub = _Scrub()
+    spans = credentials or []
+    starts = [span[0] for span in spans]
+    # The furthest any credential span starting at or before each one reaches.
+    reach = list(accumulate((span[1] for span in spans), max))
     # Each URL's scrubbed text, as a text can repeat one many times.
     scrubbed: dict[str, str] = {}
     parts: list[str] = []
@@ -283,6 +296,17 @@ def _scrub_text_urls(
                     replaced = REDACTED
                 else:
                     replaced = url
+                # A URL rewritten around a pair or scheme credential before its query, where the
+                # rewrite can take the key or scheme word apart from the value, is replaced whole
+                # instead.
+                if replaced not in (url, REDACTED):
+                    boundary = _QUERY_OR_FRAGMENT_START.search(url)
+                    to = end if boundary is None else start + boundary.start()
+                    count = bisect_left(starts, to)
+                    if count and reach[count - 1] > index + 3:
+                        if whole is not None:
+                            whole.append((length + start - copied, replaced))
+                        replaced = REDACTED
                 if changes is not None and replaced != url:
                     changes.append((start, end, len(replaced) - len(url)))
                 before = text[copied:start]
@@ -520,15 +544,35 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
     escape (``\n``, ``\u0022``, ``%20``) ends a word as a space does. A quote that does not close
     on its line runs to the end of the line, and a URL's quoted query value is replaced whole.
     ``cut`` says the text was cut from a longer one, so a URL or prefixed token that runs to its
-    end is replaced whole. Identical to the TypeScript SDK's ``scrubCredentialText``.
+    end is replaced whole. Only the first 16,384 code points are read: a longer text is cut there,
+    and ``…`` marks it. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
+    if len(text) > _MAX_SCRUBBED_TEXT:
+        return f"{_scrub_credential_text_unbounded(text[:_MAX_SCRUBBED_TEXT], True)}…"
+    return _scrub_credential_text_unbounded(text, cut)
+
+
+# The most of a text ``scrub_credential_text`` reads, in code points, as of a provider's error
+# text: a longer one is cut there and ``…`` marks the cut, so no caller hands a regular expression
+# engine a text long enough to exhaust it.
+_MAX_SCRUBBED_TEXT = 16_384
+
+
+def _scrub_credential_text_unbounded(text: str, cut: bool = False) -> str:
+    """``scrub_credential_text`` without its bound on the text's length, for tests that time long
+    texts; callers use ``scrub_credential_text``."""
     changes: list[tuple[int, int, int]] = []
     kept: list[tuple[int, int]] = []
-    scrubbed = _scrub_text_urls(text, cut, changes, kept)
+    # The text's pairs and schemes before its URLs are replaced: a URL can take in a key or scheme
+    # whose value follows it (``…&password=\"…``), and one rewritten around a credential is
+    # replaced whole.
+    credentials = sorted([*_pair_spans(text), *_authorization_spans(text)]) if "://" in text else []
+    whole: list[tuple[int, str]] = []
+    scrubbed = _scrub_text_urls(text, cut, changes, kept, credentials, whole)
     # Every rule reads the same text and their matches are replaced together, so no rule's
-    # replacement can hide text another rule would have matched. A URL can take in a key or scheme
-    # whose value follows it (``…&password=\"…``), so the text's pairs and schemes before its URLs
-    # were replaced are read too.
+    # replacement can hide text another rule would have matched. The pairs and schemes of the text
+    # with each URL replaced whole rewritten instead are read too, so what a value that runs out of
+    # such a URL reaches is replaced as it was when the URL was rewritten.
     tokens = _CUT_PREFIXED_TOKEN if cut else _PREFIXED_TOKEN
     spans = [
         *_pair_spans(scrubbed),
@@ -537,8 +581,30 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
         *_nested_userinfo_spans(scrubbed, kept),
     ]
     if changes:
-        spans += _spans_beside_urls([*_pair_spans(text), *_authorization_spans(text)], changes)
+        spans += _spans_beside_urls(credentials, changes)
+    if whole:
+        spans += _rewritten_spans(scrubbed, whole)
     return _redact_spans(scrubbed, spans)
+
+
+def _rewritten_spans(text: str, whole: list[tuple[int, str]]) -> list[tuple[int, int]]:
+    """The pair and scheme spans of the text with each URL replaced whole rewritten instead, cut
+    to the text outside those URLs and moved to where it is in ``text``."""
+    parts: list[str] = []
+    length = 0
+    copied = 0
+    changes: list[tuple[int, int, int]] = []
+    for at, url in whole:
+        before = text[copied:at]
+        parts.append(before + url)
+        changes.append(
+            (length + len(before), length + len(before) + len(url), len(REDACTED) - len(url))
+        )
+        length += len(before) + len(url)
+        copied = at + len(REDACTED)
+    parts.append(text[copied:])
+    rewritten = "".join(parts)
+    return _spans_beside_urls([*_pair_spans(rewritten), *_authorization_spans(rewritten)], changes)
 
 
 # A URL nested in another's path (``…/p&mongodb://u:…@…``): its ``://`` (or ``:\\``), then its
@@ -546,12 +612,14 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
 # userinfo is read.
 _NESTED_USERINFO = re.compile(rf":[/\\]{{2}}[^{_JS_SPACE}/\\?#]*@")
 _QUERY_OR_FRAGMENT = re.compile(r"[?#]")
+_NESTED_SCHEME_SEPARATOR = re.compile(r":[/\\]{2}")
 _PATH_START = re.compile(r"[/\\]")
 
 
 def _nested_userinfo_spans(text: str, urls: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """The userinfo of each URL nested in the path of a URL not replaced whole: the path is kept
-    and the nested URL is not read on its own."""
+    """The userinfo of each URL nested in the path of a URL not replaced whole, and the whole of
+    one with another scheme that holds an ``@``: the path is kept and the nested URL is not read on
+    its own."""
     spans: list[tuple[int, int]] = []
     for start, end in urls:
         authority = text.find("://", start, end) + 3
@@ -563,6 +631,28 @@ def _nested_userinfo_spans(text: str, urls: list[tuple[int, int]]) -> list[tuple
         for match in _NESTED_USERINFO.finditer(text, slash.start(), path_end):
             if match.start() + 3 < match.end() - 1:
                 spans.append((match.start() + 3, match.end() - 1))
+        # A nested URL with another scheme and an ``@`` is replaced whole, to the path's end, as it
+        # is when read on its own.
+        last_at = text.rfind("@", slash.start(), path_end)
+        for match in _NESTED_SCHEME_SEPARATOR.finditer(text, slash.start(), path_end):
+            colon = match.start()
+            if last_at < colon:
+                break
+            scheme_start = colon
+            while (
+                scheme_start > slash.start()
+                and colon - scheme_start < 64
+                and text[scheme_start - 1] in _SCHEME_CHARACTERS
+            ):
+                scheme_start -= 1
+            while scheme_start < colon and text[scheme_start] not in _SCHEME_LETTERS:
+                scheme_start += 1
+            if scheme_start == colon or _SPECIAL_TEXT_SCHEME.fullmatch(
+                text[scheme_start : colon + 1]
+            ):
+                continue
+            spans.append((scheme_start, path_end))
+            break
     return spans
 
 

@@ -135,14 +135,20 @@ type UrlChange = [start: number, end: number, growth: number];
  * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
  * `cut` text may have lost its `@` or `?` there, so it is replaced whole. Each URL it replaces is
  * added to `changes`, and where each URL it does not replace whole lies in the scrubbed text to
- * `kept`. */
+ * `kept`. One replaced whole because of a credential in `credentials` is added to `whole`: where
+ * its `[redacted]` lies in the scrubbed text, and the URL as it would have been rewritten. */
 function scrubTextUrls(
   text: string,
   state: ScrubState,
   cut = false,
   changes: UrlChange[] = [],
   kept: Span[] = [],
+  credentials: Span[] = [],
+  whole: Array<[at: number, rewritten: string]> = [],
 ): string {
+  // The furthest any credential span starting at or before each one reaches.
+  const reach: number[] = [];
+  for (const [, end] of credentials) reach.push(Math.max(end, reach.at(-1) ?? 0));
   let result = "";
   let copied = 0;
   for (let index = text.indexOf("://"); index !== -1; index = text.indexOf("://", index + 1)) {
@@ -155,7 +161,16 @@ function scrubTextUrls(
     const end = urlEnd(text, index);
     if (end === index + 3) continue;
     const url = text.slice(start, end);
-    const scrubbed = cut && end === text.length ? REDACTED : scrubTextUrl(url, state);
+    let scrubbed = cut && end === text.length ? REDACTED : scrubTextUrl(url, state);
+    // A URL rewritten around a pair or scheme credential before its query, where the rewrite can
+    // take the key or scheme word apart from the value, is replaced whole instead.
+    if (scrubbed !== url && scrubbed !== REDACTED) {
+      const before = /[?#]/.exec(url);
+      if (reaches(credentials, reach, index + 3, before ? start + before.index : end)) {
+        whole.push([result.length + start - copied, scrubbed]);
+        scrubbed = REDACTED;
+      }
+    }
     if (scrubbed !== url) changes.push([start, end, scrubbed.length - url.length]);
     result += text.slice(copied, start);
     if (scrubbed !== REDACTED) kept.push([result.length, result.length + scrubbed.length]);
@@ -163,6 +178,18 @@ function scrubTextUrls(
     copied = end;
   }
   return result + text.slice(copied);
+}
+/** Whether a span of `spans` (sorted by start, `reach` their running furthest end) overlaps
+ * `from` to `to`. */
+function reaches(spans: Span[], reach: number[], from: number, to: number): boolean {
+  let low = 0;
+  let high = spans.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (spans[middle]![0] < to) low = middle + 1;
+    else high = middle;
+  }
+  return low > 0 && reach[low - 1]! > from;
 }
 /** Schemes WHATWG parses as hierarchical, which both SDKs serialize alike. */
 const specialScheme = /^(?:https?|wss?|ftp):/i;
@@ -181,10 +208,11 @@ const urlQueryValue = new RegExp(
   String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|\\?["'][^\r\n]*$)`,
   "g",
 );
-/** A query name holding another URL (`?mongodb://u:…@…`, `&x://…`), which would be exported as a
- * name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
- * query's `?` or an `&`, not at a `?` inside a value. */
-const urlQueryName = /(?<=^\?|&)[^=&#]*:\/\/[^=&#]*/g;
+/** A query name holding a `:` (another URL, `?mongodb://u:…@…`, or a pair, `&token:…`) or a scheme
+ * and an escaped space (`&Bearer%20…`), which would be exported as a name, the text rules never
+ * reading it; the URL keeps its extent, so its later values are replaced as ever. A name starts at
+ * the query's `?` or an `&`, not at a `?` inside a value. */
+const urlQueryName = /(?<=^\?|&)(?:[^=&#]*:|(?:bearer|basic|token)(?:%20|%09|\+))[^=&#]*/gi;
 /** A URL in free text, its quoted values replaced. One with another scheme, which runtimes parse
  * differently, is replaced whole when it could carry userinfo, a query or a fragment. */
 function scrubTextUrl(url: string, state: ScrubState): string {
@@ -479,25 +507,66 @@ function redactSpans(text: string, spans: Span[]): string {
  * (`\n`, `\u0022`, `%20`) ends a word as a space does. A quote that does not close on its line
  * runs to the end of the line, and a URL's quoted query value is replaced whole. `cut` says the
  * text was cut from a longer one, so a URL or prefixed token that runs to its end is replaced
- * whole.
+ * whole. Only the first 16,384 code points are read: a longer text is cut there, and `…` marks it.
  */
 export function scrubCredentialText(text: string, cut = false): string {
+  if (text.length > MAX_SCRUBBED_TEXT) {
+    let kept = "";
+    let seen = 0;
+    for (const character of text) {
+      if (seen++ === MAX_SCRUBBED_TEXT) return `${scrubCredentialTextUnbounded(kept, true)}…`;
+      kept += character;
+    }
+  }
+  return scrubCredentialTextUnbounded(text, cut);
+}
+
+/** The most of a text `scrubCredentialText` reads, in code points, as of a provider's error text:
+ * a longer one is cut there and `…` marks the cut, so no caller hands a regular expression engine
+ * a text long enough to exhaust it. */
+const MAX_SCRUBBED_TEXT = 16_384;
+
+/** `scrubCredentialText` without its bound on the text's length, for tests that time long texts;
+ * callers use `scrubCredentialText`. */
+export function scrubCredentialTextUnbounded(text: string, cut = false): string {
   const changes: UrlChange[] = [];
   const kept: Span[] = [];
-  const scrubbed = scrubTextUrls(text, { changed: false }, cut, changes, kept);
+  // The text's pairs and schemes before its URLs are replaced: a URL can take in a key or scheme
+  // whose value follows it (`…&password=\"…`), and one rewritten around a credential is replaced
+  // whole.
+  const credentials = text.includes("://")
+    ? [...pairSpans(text), ...authorizationSpans(text)].sort(([a], [b]) => a - b)
+    : [];
+  const whole: Array<[number, string]> = [];
+  const scrubbed = scrubTextUrls(text, { changed: false }, cut, changes, kept, credentials, whole);
   // Every rule reads the same text and their matches are replaced together, so no rule's
-  // replacement can hide text another rule would have matched. A URL can take in a key or scheme
-  // whose value follows it (`…&password=\"…`), so the text's pairs and schemes before its URLs
-  // were replaced are read too.
+  // replacement can hide text another rule would have matched. The pairs and schemes of the text
+  // with each URL replaced whole rewritten instead are read too, so what a value that runs out of
+  // such a URL reaches is replaced as it was when the URL was rewritten.
   return redactSpans(scrubbed, [
     ...pairSpans(scrubbed),
     ...matchSpans(scrubbed, cut ? cutPrefixedToken : prefixedToken),
     ...authorizationSpans(scrubbed),
     ...nestedUserinfoSpans(scrubbed, kept),
-    ...(changes.length
-      ? spansBesideUrls([...pairSpans(text), ...authorizationSpans(text)], changes)
-      : []),
+    ...(changes.length ? spansBesideUrls(credentials, changes) : []),
+    ...(whole.length ? rewrittenSpans(scrubbed, whole) : []),
   ]);
+}
+
+/** The pair and scheme spans of the text with each URL replaced whole rewritten instead, cut to
+ * the text outside those URLs and moved to where it is in `text`. */
+function rewrittenSpans(text: string, whole: Array<[number, string]>): Span[] {
+  let rewritten = "";
+  let copied = 0;
+  const changes: UrlChange[] = [];
+  for (const [at, url] of whole) {
+    rewritten += text.slice(copied, at);
+    changes.push([rewritten.length, rewritten.length + url.length, REDACTED.length - url.length]);
+    rewritten += url;
+    copied = at + REDACTED.length;
+  }
+  rewritten += text.slice(copied);
+  return spansBesideUrls([...pairSpans(rewritten), ...authorizationSpans(rewritten)], changes);
 }
 
 /** A URL nested in another's path (`…/p&mongodb://u:…@…`): its `://` (or `:\\`), then its
@@ -505,8 +574,9 @@ export function scrubCredentialText(text: string, cut = false): string {
  * read. */
 const nestedUserinfo = /:[/\\]{2}[^\s/\\?#]*@/g;
 
-/** The userinfo of each URL nested in the path of a URL not replaced whole: the path is kept and
- * the nested URL is not read on its own. */
+/** The userinfo of each URL nested in the path of a URL not replaced whole, and the whole of one
+ * with another scheme that holds an `@`: the path is kept and the nested URL is not read on its
+ * own. */
 function nestedUserinfoSpans(text: string, urls: Span[]): Span[] {
   const spans: Span[] = [];
   for (const [start, end] of urls) {
@@ -521,6 +591,25 @@ function nestedUserinfoSpans(text: string, urls: Span[]): Span[] {
       const from = start + pathStart + match.index + 3;
       const to = start + pathStart + match.index + match[0].length - 1;
       if (from < to) spans.push([from, to]);
+    }
+    // A nested URL with another scheme and an `@` is replaced whole, to the path's end, as it is
+    // when read on its own.
+    const lastAt = url.lastIndexOf("@", pathEnd - 1);
+    for (const match of url.slice(pathStart, pathEnd).matchAll(/:[/\\]{2}/g)) {
+      const colon = pathStart + match.index;
+      if (lastAt < colon) break;
+      let schemeStart = colon;
+      while (
+        schemeStart > pathStart &&
+        colon - schemeStart < 64 &&
+        isSchemeCharacter(url.charCodeAt(schemeStart - 1))
+      )
+        schemeStart--;
+      while (schemeStart < colon && !isSchemeLetter(url.charCodeAt(schemeStart))) schemeStart++;
+      if (schemeStart === colon || specialScheme.test(`${url.slice(schemeStart, colon)}:`))
+        continue;
+      spans.push([start + schemeStart, start + pathEnd]);
+      break;
     }
   }
   return spans;

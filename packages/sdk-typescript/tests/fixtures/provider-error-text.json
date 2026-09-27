@@ -562,11 +562,11 @@
     },
     {
       "input": "{'error': 'GET https://h.example.test/v1/token=\\'synthetic-path-escaped\\'#top failed'}",
-      "expected": "{'error': 'GET https://h.example.test/v1/token=[redacted] failed'}"
+      "expected": "{'error': 'GET [redacted] failed'}"
     },
     {
       "input": "GET https://h.example.test/p;password=\\'synthetic-path?escaped\\'#x failed",
-      "expected": "GET https://h.example.test/p;password=[redacted] failed"
+      "expected": "GET [redacted] failed"
     },
     {
       "input": "GET https://api.example.test/p?code=\\\"abc\\\"&2mongodb://u:synthetic-amp-digit@db.example.test/x failed",
@@ -614,31 +614,87 @@
     },
     {
       "input": "GET https://h.example.test/p;password=\\\"a?synthetic-open-question#x failed",
-      "expected": "GET https://h.example.test/p;password=[redacted]"
+      "expected": "GET [redacted]"
     },
     {
       "input": "GET https://h.example.test/path&mongodb://user:synthetic-nested-path-a@db.example.test/x failed",
-      "expected": "GET https://h.example.test/path&mongodb://[redacted]@db.example.test/x failed"
+      "expected": "GET https://h.example.test/path&[redacted] failed"
     },
     {
       "input": "see https://h.example.test/path/mongodb://user:synthetic-nested-path-b@db.example.test/x ok",
-      "expected": "see https://h.example.test/path/mongodb://[redacted]@db.example.test/x ok"
+      "expected": "see https://h.example.test/path/[redacted] ok"
     },
     {
       "input": "GET https://h.example.test/p/x://password=p@synthetic-nested-key failed",
-      "expected": "GET https://h.example.test/p/x://[redacted] failed"
+      "expected": "GET https://h.example.test/p/[redacted] failed"
     },
     {
       "input": "GET https://h.example.test/p/mongodb://user:p@synthetic-nested-last-at@db.example.test/x failed",
-      "expected": "GET https://h.example.test/p/mongodb://[redacted]@db.example.test/x failed"
+      "expected": "GET https://h.example.test/p/[redacted] failed"
     },
     {
       "input": "GET https://h.example.test/p/p&mongodb:\\\\user:synthetic-nested-backslash@db.example.test/x?q=1 failed",
-      "expected": "GET https://h.example.test/p/p&mongodb://[redacted]@db.example.test/x?q=%5Bredacted%5D failed"
+      "expected": "GET https://h.example.test/p/p&[redacted]?q=%5Bredacted%5D failed"
     },
     {
       "input": "GET https://h.example.test/p/p&mongodb:\\\\user:synthetic-nested-backslash-bare@db.example.test/x failed",
-      "expected": "GET https://h.example.test/p/p&mongodb:\\\\[redacted]@db.example.test/x failed"
+      "expected": "GET https://h.example.test/p/p&[redacted] failed"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&token:synthetic-reg-1 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&password:synthetic-reg-2 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&x-api-key:synthetic-reg-3 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&client_secret:synthetic-reg-4 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&headers:{synthetic-reg-5} failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed\"}"
+    },
+    {
+      "input": "{\"error\":\"GET https://h.example.test/p?code=\\\"abc\\\"&Authorization:Bearer%20synthetic-reg-6 failed\"}",
+      "expected": "{\"error\":\"GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D[redacted]\"}"
+    },
+    {
+      "input": "GET https://h.example.test/p?code=\\\"abc\\\"&Bearer%20synthetic-reg-7 failed",
+      "expected": "GET https://h.example.test/p?code=%5Bredacted%5D&%5Bredacted%5D=%5Bredacted%5D failed"
+    },
+    {
+      "input": "next=http://api.example.test/Authorization:Bearer%20synthetic-path-auth/x=y?headers=\"a&x=\"b synthetic-after-header-word\"&c=1",
+      "expected": "next=[redacted][redacted]\"&c=1"
+    },
+    {
+      "input": "ftp://u:p@api.example.test/x&q=\\'abc\\'&mongodb://u:p@db.example.test/x&q=synthetic-nested-opaque-query",
+      "expected": "ftp://api.example.test/x&q=[redacted]&[redacted]"
+    },
+    {
+      "input": "password=\"synthetic-plain-open-a synthetic-plain-open-b\\",
+      "expected": "password=\"[redacted]"
+    },
+    {
+      "input": "password='synthetic-plain-open-c synthetic-plain-open-d\\\nnext",
+      "expected": "password='[redacted]\nnext"
+    },
+    {
+      "input": "password=\"synthetic-plain-open-e synthetic-plain-open-f\\\\\\",
+      "expected": "password=\"[redacted]"
+    },
+    {
+      "input": "GET wss://h.example.comaccess_token='synthetic-h1#synthetic-h2'/x=\\\\\\\"synthetic-h3\\\\\\\"/;sig='x'?access_token='y failed",
+      "expected": "GET [redacted][redacted]'x'?access_token='[redacted]"
+    },
+    {
+      "input": "GET wss://h.example.comaccess_token='a#b'/x=\\\\\\\"synthetic-h6\\\\\\\" failed",
+      "expected": "GET [redacted][redacted]"
     }
   ]
 }

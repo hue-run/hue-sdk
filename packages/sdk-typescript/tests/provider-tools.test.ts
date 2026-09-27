@@ -4,7 +4,11 @@ import {
   hostedToolActivity,
   providerErrorDescription,
 } from "../src/provider-tools.js";
-import { scrubCredentialText, toolCatalogSummary } from "../src/tool-definitions.js";
+import {
+  scrubCredentialText,
+  scrubCredentialTextUnbounded,
+  toolCatalogSummary,
+} from "../src/tool-definitions.js";
 import errorTexts from "./fixtures/provider-error-text.json" with { type: "json" };
 import listingDigest from "./fixtures/provider-tool-listing.json" with { type: "json" };
 import plantedSecrets from "./fixtures/planted-secrets.json" with { type: "json" };
@@ -295,7 +299,7 @@ test("what the 16,384-code-point scan cuts through is redacted to the cut, as in
 test("an escaped space ends a credential, so a run of them scrubs in linear time", () => {
   // Each `Bearer%20` starts a credential; were `%20` part of one, each would run to the end.
   const started = performance.now();
-  const scrubbed = scrubCredentialText("Bearer%20".repeat(111_112));
+  const scrubbed = scrubCredentialTextUnbounded("Bearer%20".repeat(111_112));
   expect(scrubbed.startsWith("Bearer%20[redacted]%20[redacted]%20")).toBe(true);
   expect(scrubbed).not.toContain("Bearer%20Bearer");
   expect(performance.now() - started).toBeLessThan(5_000);
@@ -306,33 +310,43 @@ test("a bracketed value full of escaped quotes scrubs in linear time", () => {
   // from each escaped quote inside it.
   const started = performance.now();
   const text = String.raw`token: [\"${String.raw`\\\"`.repeat(50_000)}"`;
-  expect(scrubCredentialText(text)).toBe("token: [redacted]");
+  expect(scrubCredentialTextUnbounded(text)).toBe("token: [redacted]");
   expect(performance.now() - started).toBeLessThan(5_000);
 });
 
-test("a URL of 600,000 pieces is read to its end", () => {
-  // A URL is read a piece at a time; as one repeated pattern, one of 600,000 pieces (each `a` and
-  // each backslash is one) exhausted Bun's regular expression engine, which then matched nothing
-  // and left the URL as it was.
+test("a URL of 500,000 escaped values is read to its end", () => {
+  // A URL is read a piece at a time; as one repeated pattern, a URL this long made Bun's regular
+  // expression engine (1.4) match nothing and leave it as it was, and a shorter one Bun 1.3's.
   const started = performance.now();
-  const scrubbed = scrubCredentialText(
-    `see https://h.example.test/?sig=synthetic-sig&p=${"a\\".repeat(300_000)}`,
+  const scrubbed = scrubCredentialTextUnbounded(
+    `see https://h.example.test/?sig=synthetic-sig${'&a=\\"x\\"'.repeat(500_000)}`,
   );
   expect(
-    scrubbed.startsWith("see https://h.example.test/?sig=%5Bredacted%5D&p=%5Bredacted%5D"),
+    scrubbed.startsWith("see https://h.example.test/?sig=%5Bredacted%5D&a=%5Bredacted%5D"),
   ).toBe(true);
   expect(scrubbed).not.toContain("synthetic-sig");
-  expect(performance.now() - started).toBeLessThan(5_000);
+  expect(performance.now() - started).toBeLessThan(20_000);
 });
 
 test("a query full of `?` is read once for names holding a URL", () => {
   // A name starts at the query's `?` or an `&`; were every `?` a start, each would be read to the
   // end of the query.
   const started = performance.now();
-  expect(scrubCredentialText(`https://h.example.test/?${"?".repeat(100_000)}`)).toContain(
+  expect(scrubCredentialTextUnbounded(`https://h.example.test/?${"?".repeat(100_000)}`)).toContain(
     "https://h.example.test/?",
   );
   expect(performance.now() - started).toBeLessThan(5_000);
+});
+
+test("a text longer than 16,384 code points is scrubbed to there and cut", () => {
+  // An escaped value this long in a URL is past what Bun's regular expression engine reads, which
+  // then matched nothing and left the value as it was.
+  const scrubbed = scrubCredentialText(
+    `see https://h.example.test/?t=\\"synthetic-long-value${"b".repeat(200_000)}`,
+  );
+  expect(scrubbed).not.toContain("synthetic-long-value");
+  expect(scrubbed.endsWith("…")).toBe(true);
+  expect(scrubbed.length).toBeLessThan(16_384);
 });
 
 test("a run of backslashes in a value that does not close is read once", () => {
@@ -341,12 +355,12 @@ test("a run of backslashes in a value that does not close is read once", () => {
   for (const count of [80, 200]) {
     const started = performance.now();
     providerErrorDescription(`{"error": "token=\\"${"\\".repeat(count)}"x"}`);
-    scrubCredentialText(String.raw`token: [\"${"\\".repeat(count)}"x`);
+    scrubCredentialTextUnbounded(String.raw`token: [\"${"\\".repeat(count)}"x`);
     expect(performance.now() - started).toBeLessThan(100);
   }
   const started = performance.now();
   for (const value of [String.raw`token=\"`, String.raw`token: [\"`, String.raw`?t=\"`])
-    scrubCredentialText(`${value}${"\\".repeat(200_000)}x\n`);
+    scrubCredentialTextUnbounded(`${value}${"\\".repeat(200_000)}x\n`);
   expect(performance.now() - started).toBeLessThan(5_000);
 });
 
@@ -372,7 +386,9 @@ test("every secret planted in the shared corpus is redacted, one case at a time 
   });
   expect(leaked).toEqual([]);
   // The whole corpus as one text: every secret still redacted, in time linear in its length.
-  const whole = scrubCredentialText(plantedSecrets.cases.map(({ input }) => input).join("\n"));
+  const whole = scrubCredentialTextUnbounded(
+    plantedSecrets.cases.map(({ input }) => input).join("\n"),
+  );
   expect(
     plantedSecrets.cases.flatMap(({ secrets }) =>
       secrets.filter((secret) => whole.includes(secret)),
