@@ -33,14 +33,18 @@ import {
   toolsetsMcpUrl,
 } from "../src/cli/mcp.js";
 
-// `open` passes through, after `beforeOpen` when a test sets it, so a test can change the tree at the
-// moment the command creates its temporary file.
+// `mkdir` and `open` pass through, after `before` when a test sets it, so a test can change the tree
+// as the command prepares its write or creates its temporary file.
 const realFilesystem = { ...filesystem };
-let beforeOpen: ((path: string) => Promise<void>) | undefined;
+let before: ((call: "mkdir" | "open", path: string) => Promise<void>) | undefined;
 void mock.module("node:fs/promises", () => ({
   ...realFilesystem,
+  mkdir: async (...args: Parameters<typeof filesystem.mkdir>) => {
+    await before?.("mkdir", String(args[0]));
+    return realFilesystem.mkdir(...args);
+  },
   open: async (...args: Parameters<typeof filesystem.open>) => {
-    await beforeOpen?.(String(args[0]));
+    await before?.("open", String(args[0]));
     return realFilesystem.open(...args);
   },
 }));
@@ -497,9 +501,9 @@ describe("hue mcp install", () => {
     // rename, so the file outside is not replaced.
     await rm(join(root, ".cursor"));
     await mkdir(join(root, ".cursor"));
-    beforeOpen = async (path) => {
-      if (!path.startsWith(join(root, ".cursor", "."))) return;
-      beforeOpen = undefined;
+    before = async (call, path) => {
+      if (call !== "open" || !path.startsWith(join(root, ".cursor", "."))) return;
+      before = undefined;
       await rm(join(root, ".cursor"), { recursive: true });
       await symlink(outside, join(root, ".cursor"));
     };
@@ -508,11 +512,41 @@ describe("hue mcp install", () => {
       expect(swapped.code).toBe(1);
       expect(swapped.stderr).toContain(".cursor is a symbolic link");
     } finally {
-      beforeOpen = undefined;
+      before = undefined;
     }
     expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
     expect(await readdir(outside)).toEqual(["mcp.json"]);
     await rm(join(root, ".cursor"));
+
+    // A real directory swapped in after the read, with a world-readable mcp.json, is not written:
+    // the replacement would take that file's mode while holding the tokens read from the first one.
+    await mkdir(join(root, ".cursor"));
+    const kept = JSON.stringify({
+      mcpServers: { other: { headers: { Authorization: `Bearer ${token}` } } },
+    });
+    await writeFile(join(root, ".cursor", "mcp.json"), kept, { mode: 0o600 });
+    await chmod(join(root, ".cursor", "mcp.json"), 0o600);
+    before = async (call) => {
+      if (call !== "mkdir") return;
+      before = undefined;
+      await filesystem.rename(join(root, ".cursor"), join(root, "cursor-read"));
+      await mkdir(join(root, ".cursor"));
+      await writeFile(join(root, ".cursor", "mcp.json"), "{}\n", { mode: 0o644 });
+      await chmod(join(root, ".cursor", "mcp.json"), 0o644);
+    };
+    try {
+      const replaced = await mcp(["install", "--client", "cursor"], { cwd: root });
+      expect(replaced.code).toBe(1);
+      expect(replaced.stderr).toContain(
+        "Refusing to write .cursor/mcp.json: it changed while the command ran.",
+      );
+    } finally {
+      before = undefined;
+    }
+    expect(await readdir(join(root, ".cursor"))).toEqual(["mcp.json"]);
+    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe("{}\n");
+    expect(await readFile(join(root, "cursor-read", "mcp.json"), "utf8")).toBe(kept);
+    await rm(join(root, ".cursor"), { recursive: true });
 
     // The working directory itself may be reached through a link, as /tmp, /var and some home
     // directories are on macOS; only the directories the command names below it are checked.

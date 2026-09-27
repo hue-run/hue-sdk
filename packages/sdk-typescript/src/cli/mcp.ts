@@ -354,12 +354,16 @@ function mergeVscodeInput(
   return { ...root, inputs: [...others, input] };
 }
 
-async function readJsonConfig(path: string, display: string): Promise<unknown> {
+/** The parsed file, if any, and the file it was read from, so the write can replace that one. */
+async function readJsonConfig(
+  path: string,
+  display: string,
+): Promise<{ config: unknown; file?: Stats }> {
   let info;
   try {
     info = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { config: undefined };
     throw new ConfigError(`Cannot read ${display}: ${(error as Error).message}`);
   }
   if (info.isSymbolicLink())
@@ -369,9 +373,9 @@ async function readJsonConfig(path: string, display: string): Promise<unknown> {
   if (info.size > MAX_CONFIG_BYTES)
     throw new ConfigError(`Refusing to use ${display}: it is larger than 1 MiB.`);
   const text = await readFile(path, "utf8");
-  if (!text.trim()) return undefined;
+  if (!text.trim()) return { config: undefined, file: info };
   try {
-    return JSON.parse(text) as unknown;
+    return { config: JSON.parse(text) as unknown, file: info };
   } catch {
     throw new ConfigError(
       `${display} is not valid JSON (comments are not supported); fix it or add the snippet by hand.`,
@@ -432,9 +436,14 @@ async function writeConfigFile(
   path: string,
   text: string,
   display: string,
+  read: Stats | undefined,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const existing = await rejectSymlink(path, display);
+  // The file replaced must be the one read: the content merged it, and its mode and group are kept.
+  // Another file in its place, such as one in a directory swapped in meanwhile, is refused.
+  if (existing?.dev !== read?.dev || existing?.ino !== read?.ino)
+    throw new ConfigError(`Refusing to write ${display}: it changed while the command ran.`);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   try {
     const handle = await open(
@@ -1047,10 +1056,12 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   const display = displayPath(cwd, path);
   let merged: Record<string, unknown>;
   let content: string;
+  let read: Stats | undefined;
   try {
     await rejectLinkedParents(cwd, path, display);
     const existing = await readJsonConfig(path, display);
-    merged = mergeServerEntry(existing, plan.key, plan.entry, display, serverName);
+    read = existing.file;
+    merged = mergeServerEntry(existing.config, plan.key, plan.entry, display, serverName);
     if (plan.input) merged = mergeVscodeInput(merged, plan.input, display);
     content = json(merged);
   } catch (error) {
@@ -1070,7 +1081,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return 0;
   }
   try {
-    await writeConfigFile(cwd, path, content, display);
+    await writeConfigFile(cwd, path, content, display, read);
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }
