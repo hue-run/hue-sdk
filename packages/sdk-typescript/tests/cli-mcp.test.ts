@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   chmod,
   chown,
@@ -13,6 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { chownSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -31,6 +32,22 @@ import {
   shellWord,
   toolsetsMcpUrl,
 } from "../src/cli/mcp.js";
+
+// `mkdir` and `open` pass through, after `before` when a test sets it, so a test can change the tree
+// as the command prepares its write or creates its temporary file.
+const realFilesystem = { ...filesystem };
+let before: ((call: "mkdir" | "open", path: string) => Promise<void>) | undefined;
+void mock.module("node:fs/promises", () => ({
+  ...realFilesystem,
+  mkdir: async (...args: Parameters<typeof filesystem.mkdir>) => {
+    await before?.("mkdir", String(args[0]));
+    return realFilesystem.mkdir(...args);
+  },
+  open: async (...args: Parameters<typeof filesystem.open>) => {
+    await before?.("open", String(args[0]));
+    return realFilesystem.open(...args);
+  },
+}));
 
 const roots: string[] = [];
 async function temporaryRoot(): Promise<string> {
@@ -441,6 +458,21 @@ describe("hue mcp install", () => {
     },
   );
 
+  test.skipIf(process.geteuid?.() !== 0)(
+    "run as root, a replaced file keeps its owner and group",
+    async () => {
+      const root = await temporaryRoot();
+      const file = join(root, ".mcp.json");
+      await writeFile(file, "{}\n");
+      await chmod(file, 0o600);
+      await chown(file, 12345, 12346);
+      expect((await mcp(["install", "--client", "claude-code"], { cwd: root })).code).toBe(0);
+      const info = await lstat(file);
+      expect([info.uid, info.gid]).toEqual([12345, 12346]);
+      expect(await mode(file)).toBe(0o600);
+    },
+  );
+
   test("refuses a symbolic link to the config's directory, but not to the working directory", async () => {
     const root = await temporaryRoot();
     const outside = await temporaryRoot();
@@ -464,6 +496,57 @@ describe("hue mcp install", () => {
     }
     expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
     expect(await readdir(outside)).toEqual(["mcp.json"]);
+
+    // A link swapped in after the read, before the temporary file is created, is refused before the
+    // rename, so the file outside is not replaced.
+    await rm(join(root, ".cursor"));
+    await mkdir(join(root, ".cursor"));
+    before = async (call, path) => {
+      if (call !== "open" || !path.startsWith(join(root, ".cursor", "."))) return;
+      before = undefined;
+      await rm(join(root, ".cursor"), { recursive: true });
+      await symlink(outside, join(root, ".cursor"));
+    };
+    try {
+      const swapped = await mcp(["install", "--client", "cursor"], { cwd: root });
+      expect(swapped.code).toBe(1);
+      expect(swapped.stderr).toContain(".cursor is a symbolic link");
+    } finally {
+      before = undefined;
+    }
+    expect(await readFile(join(outside, "mcp.json"), "utf8")).toBe(elsewhere);
+    expect(await readdir(outside)).toEqual(["mcp.json"]);
+    await rm(join(root, ".cursor"));
+
+    // A real directory swapped in after the read, with a world-readable mcp.json, is not written:
+    // the replacement would take that file's mode while holding the tokens read from the first one.
+    await mkdir(join(root, ".cursor"));
+    const kept = JSON.stringify({
+      mcpServers: { other: { headers: { Authorization: `Bearer ${token}` } } },
+    });
+    await writeFile(join(root, ".cursor", "mcp.json"), kept, { mode: 0o600 });
+    await chmod(join(root, ".cursor", "mcp.json"), 0o600);
+    before = async (call) => {
+      if (call !== "mkdir") return;
+      before = undefined;
+      await filesystem.rename(join(root, ".cursor"), join(root, "cursor-read"));
+      await mkdir(join(root, ".cursor"));
+      await writeFile(join(root, ".cursor", "mcp.json"), "{}\n", { mode: 0o644 });
+      await chmod(join(root, ".cursor", "mcp.json"), 0o644);
+    };
+    try {
+      const replaced = await mcp(["install", "--client", "cursor"], { cwd: root });
+      expect(replaced.code).toBe(1);
+      expect(replaced.stderr).toContain(
+        "Refusing to write .cursor/mcp.json: it changed while the command ran.",
+      );
+    } finally {
+      before = undefined;
+    }
+    expect(await readdir(join(root, ".cursor"))).toEqual(["mcp.json"]);
+    expect(await readFile(join(root, ".cursor", "mcp.json"), "utf8")).toBe("{}\n");
+    expect(await readFile(join(root, "cursor-read", "mcp.json"), "utf8")).toBe(kept);
+    await rm(join(root, ".cursor"), { recursive: true });
 
     // The working directory itself may be reached through a link, as /tmp, /var and some home
     // directories are on macOS; only the directories the command names below it are checked.
@@ -500,6 +583,8 @@ describe("hue mcp install", () => {
       "Abc123Def456Ghi789Jkl",
       "docker-env-option-value",
       "bare-assignment-value",
+      "http-headers-map-value",
+      "extra-headers-map-value",
     ];
     const existing = JSON.stringify({
       mcpServers: {
@@ -547,6 +632,12 @@ describe("hue mcp install", () => {
           secretKey: secrets[17],
           authHeader: secrets[18],
           url: `https://mcp.example.com/s/${secrets[11]}/mcp`,
+        },
+        // Header maps under other names, such as Codex's http_headers.
+        plural: {
+          url: "https://mcp.example.com/mcp",
+          http_headers: { "X-Custom": secrets[24] },
+          extraHeaders: { "X-Other": secrets[25] },
         },
         // Only an entry is exempt as a server name, not a stray value named like a credential.
         "stray-token": secrets[20],
@@ -619,6 +710,11 @@ describe("hue mcp install", () => {
       secretKey: "[redacted]",
       authHeader: "[redacted]",
       url: "https://mcp.example.com/s/[redacted]/mcp",
+    });
+    expect(shown.mcpServers.plural).toEqual({
+      url: "https://mcp.example.com/mcp",
+      http_headers: { "X-Custom": "[redacted]" },
+      extraHeaders: { "X-Other": "[redacted]" },
     });
     expect(shown.mcpServers["stray-token"] as unknown).toBe("[redacted]");
     expect(shown.servers).toEqual({ token: "[redacted]" });

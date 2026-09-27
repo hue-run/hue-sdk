@@ -15,10 +15,10 @@ refuses to publish a version without a matching entry below.
 - Security: `hue mcp install` no longer makes a client configuration it replaces world-readable.
   Since 0.5.0 it wrote every file with mode `0644`, so a `.mcp.json`, `.cursor/mcp.json` or
   `.vscode/mcp.json` kept at `0600` because it holds other servers' literal tokens became readable
-  by every local account. A replaced file now keeps its permission bits and its group, except that
-  other accounts lose write access; an access control list on it is not kept. A new file is created
-  `0600`. A file an earlier version already made world-readable keeps that mode: run `chmod 600` on
-  one that holds tokens.
+  by every local account. A replaced file now keeps its permission bits, its group and, run as root,
+  its owner, except that other accounts lose write access; an access control list on it is not kept.
+  A new file is created `0600`. A file an earlier version already made world-readable keeps that
+  mode: run `chmod 600` on one that holds tokens.
 - Security: `hue mcp install --dry-run` shows header and `env` values, and other credentials it
   recognizes in the resulting file (credential options and fields, known token prefixes, token-like
   URL path segments and query values, the last percent-encoded), as `[redacted]` unless they only
@@ -27,7 +27,10 @@ refuses to publish a version without a matching entry below.
   token-like path segment and every query value other than its `toolsets`, `project` and `read_only`
   selections as `[redacted]`.
 - Security: `hue mcp install` refuses a symlinked `.cursor` or `.vscode` directory, as it already
-  refused a symlinked file. Before, it read and wrote `mcp.json` wherever that link pointed.
+  refused a symlinked file, and a different file found in place of the one it read. Before, it read
+  and wrote `mcp.json` wherever that link pointed. The checks run before the file is read and again
+  before the rename, but are not atomic against an account that can write the project directory and
+  races the command.
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.

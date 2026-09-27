@@ -354,12 +354,16 @@ function mergeVscodeInput(
   return { ...root, inputs: [...others, input] };
 }
 
-async function readJsonConfig(path: string, display: string): Promise<unknown> {
+/** The parsed file, if any, and the file it was read from, so the write can replace that one. */
+async function readJsonConfig(
+  path: string,
+  display: string,
+): Promise<{ config: unknown; file?: Stats }> {
   let info;
   try {
     info = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { config: undefined };
     throw new ConfigError(`Cannot read ${display}: ${(error as Error).message}`);
   }
   if (info.isSymbolicLink())
@@ -369,9 +373,9 @@ async function readJsonConfig(path: string, display: string): Promise<unknown> {
   if (info.size > MAX_CONFIG_BYTES)
     throw new ConfigError(`Refusing to use ${display}: it is larger than 1 MiB.`);
   const text = await readFile(path, "utf8");
-  if (!text.trim()) return undefined;
+  if (!text.trim()) return { config: undefined, file: info };
   try {
-    return JSON.parse(text) as unknown;
+    return { config: JSON.parse(text) as unknown, file: info };
   } catch {
     throw new ConfigError(
       `${display} is not valid JSON (comments are not supported); fix it or add the snippet by hand.`,
@@ -382,7 +386,9 @@ async function readJsonConfig(path: string, display: string): Promise<unknown> {
 /**
  * Refuses a symbolic link, or anything but a directory, between the working directory and the file
  * (`.cursor` or `.vscode`), as the file itself is refused. The working directory and its ancestors
- * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one.
+ * are not checked: on macOS `/tmp` and `/var` are links, and a home directory can be one. This runs
+ * before the file is read and again before the rename. Node has no `openat`, so it cannot pin the
+ * directory against an account that can write the project and swaps a link in after the last check.
  */
 async function rejectLinkedParents(cwd: string, path: string, display: string): Promise<void> {
   let current = cwd;
@@ -421,18 +427,23 @@ async function rejectSymlink(path: string, display: string): Promise<Stats | und
  * Atomic write: temporary file, fsync, rename. A file it replaces keeps its permission bits, so one
  * kept at 0600 because it holds other servers' tokens is never widened, except that other accounts
  * lose write access; it keeps its group (or, when the group cannot be kept, its group and other
- * accounts get only the access both had). A new file is created owner-only, 0600 narrowed by the
- * umask: people and clients add literal tokens to these files.
+ * accounts get only the access both had), and its owner when root runs the command. A new file is
+ * created owner-only, 0600 narrowed by the umask: people and clients add literal tokens to these
+ * files.
  */
 async function writeConfigFile(
   cwd: string,
   path: string,
   text: string,
   display: string,
+  read: Stats | undefined,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await rejectLinkedParents(cwd, path, display);
   const existing = await rejectSymlink(path, display);
+  // The file replaced must be the one read: the content merged it, and its mode and group are kept.
+  // Another file in its place, such as one in a directory swapped in meanwhile, is refused.
+  if (existing?.dev !== read?.dev || existing?.ino !== read?.ino)
+    throw new ConfigError(`Refusing to write ${display}: it changed while the command ran.`);
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   try {
     const handle = await open(
@@ -447,7 +458,8 @@ async function writeConfigFile(
         let mode = existing.mode & 0o775;
         // The new file has the process's group (the directory's on macOS), which may differ. When
         // the group cannot be kept, its members and everyone else get only what both had.
-        if ((await handle.stat()).gid !== existing.gid) {
+        const created = await handle.stat();
+        if (created.gid !== existing.gid) {
           try {
             await handle.chown(-1, existing.gid);
           } catch {
@@ -456,6 +468,11 @@ async function writeConfigFile(
           }
         }
         await handle.chmod(mode);
+        // Root also gives the file back to its owner, last: changing the mode of another account's
+        // file would need CAP_FOWNER. If it cannot, the write fails and the old file stays in place,
+        // rather than leaving one its owner cannot read.
+        if (process.geteuid?.() === 0 && created.uid !== existing.uid)
+          await handle.chown(existing.uid, -1);
       }
       await handle.sync();
     } finally {
@@ -481,13 +498,13 @@ const REFERENCE_ONLY =
 /** Names `isCredentialKey` leaves out that configurations use for a credential field or option. */
 const CREDENTIAL_NAMES = new Set(["auth", "pat", "bearer", "env"]);
 
-/** `isCredentialKey`, `CREDENTIAL_NAMES`, or a name ending in `key`, `keys` or `header`. */
+/** `isCredentialKey`, `CREDENTIAL_NAMES`, or a name ending in `key`, `keys`, `header` or `headers`. */
 function isCredentialName(name: string): boolean {
   const normalized = name.toLowerCase().replace(/[-_]/g, "");
   return (
     isCredentialKey(name) ||
     CREDENTIAL_NAMES.has(normalized) ||
-    /(?:keys?|header)$/u.test(normalized)
+    /(?:keys?|headers?)$/u.test(normalized)
   );
 }
 
@@ -1039,10 +1056,12 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
   const display = displayPath(cwd, path);
   let merged: Record<string, unknown>;
   let content: string;
+  let read: Stats | undefined;
   try {
     await rejectLinkedParents(cwd, path, display);
     const existing = await readJsonConfig(path, display);
-    merged = mergeServerEntry(existing, plan.key, plan.entry, display, serverName);
+    read = existing.file;
+    merged = mergeServerEntry(existing.config, plan.key, plan.entry, display, serverName);
     if (plan.input) merged = mergeVscodeInput(merged, plan.input, display);
     content = json(merged);
   } catch (error) {
@@ -1062,7 +1081,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     return 0;
   }
   try {
-    await writeConfigFile(cwd, path, content, display);
+    await writeConfigFile(cwd, path, content, display, read);
   } catch (error) {
     return fail(`Could not write ${display}: ${(error as Error).message}`);
   }
