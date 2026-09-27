@@ -10,6 +10,11 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.11.3] - 2026-09-27
+
+This release fixes security issues in `hue mcp install` and evaluation checkpoint paths, scrubs
+more credentials from exported MCP error text and `hue listen` messages, and paces `hue listen`.
+
 #### Fixed
 
 - Security: `hue mcp install` no longer makes a client configuration it replaces world-readable.
@@ -1007,6 +1012,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+### [0.6.2] - 2026-09-27
+
 #### Added
 
 - Provider tool spans from `record_provider_tool_calls` carry `hue.tool.call.position`, the
@@ -1016,7 +1023,7 @@ No registry release is claimed until publication and registry acceptance complet
   any record's tool definitions. **Wire**
 - With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
   its ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…` exactly
-  as the TypeScript SDK's next release does, before your `redactor` sees it as `status.message`.
+  as TypeScript SDK 0.11.3 does, before your `redactor` sees it as `status.message`.
   Without content capture the span keeps `error.type` only. **Wire**
 
 #### Fixed
