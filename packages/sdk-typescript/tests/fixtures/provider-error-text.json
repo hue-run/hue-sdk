@@ -618,11 +618,23 @@
     },
     {
       "input": "GET https://h.example.test/path&mongodb://user:synthetic-nested-path-a@db.example.test/x failed",
-      "expected": "GET https://h.example.test/path&mongodb://%5Bredacted%5D@db.example.test/x failed"
+      "expected": "GET https://h.example.test/path&mongodb://[redacted]@db.example.test/x failed"
     },
     {
       "input": "see https://h.example.test/path/mongodb://user:synthetic-nested-path-b@db.example.test/x ok",
-      "expected": "see https://h.example.test/path/mongodb://%5Bredacted%5D@db.example.test/x ok"
+      "expected": "see https://h.example.test/path/mongodb://[redacted]@db.example.test/x ok"
+    },
+    {
+      "input": "GET https://h.example.test/p/x://password=p@synthetic-nested-key failed",
+      "expected": "GET https://h.example.test/p/x://[redacted] failed"
+    },
+    {
+      "input": "GET https://h.example.test/p/mongodb://user:p@synthetic-nested-last-at@db.example.test/x failed",
+      "expected": "GET https://h.example.test/p/mongodb://[redacted]@db.example.test/x failed"
+    },
+    {
+      "input": "GET https://h.example.test/p/p&mongodb:\\\\user:synthetic-nested-backslash@db.example.test/x?q=1 failed",
+      "expected": "GET https://h.example.test/p/p&mongodb://[redacted]@db.example.test/x?q=%5Bredacted%5D failed"
     }
   ]
 }

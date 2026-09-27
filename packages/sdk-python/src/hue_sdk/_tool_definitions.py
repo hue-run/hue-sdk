@@ -151,10 +151,6 @@ _URL_ESCAPED_VALUES = re.compile(
     rf"(?<==)(?:({_URL_ESCAPED_VALUE})|{_OPEN_ESCAPED_DOUBLE}\\*\Z|{_OPEN_ESCAPED_SINGLE}\\*\Z)"
 )
 _URL_QUERY_VALUE = re.compile(r"(?<==)(?:\"[^\"<>`\r\n]*\"|'[^'<>`\r\n]*'|\\?[\"'][^\r\n]*\Z)")
-# The start of a URL's path after its host, and the userinfo of a URL nested in the path: text
-# after a ``://`` up to an ``@`` before any ``/``, ``\``, ``?`` or ``#``.
-_PATH_START = re.compile(r"[/\\]")
-_NESTED_USERINFO = re.compile(rf"://[^{_JS_SPACE}/\\?#@]*@")
 # A query name holding another URL (``?mongodb://u:…@…``, ``&x://…``), which would be exported as
 # a name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
 # query's ``?`` or an ``&``, not at a ``?`` inside a value.
@@ -247,18 +243,23 @@ _AUTHORIZATION_BARE = re.compile(
 
 
 def _scrub_text_urls(
-    text: str, cut: bool = False, changes: list[tuple[int, int, int]] | None = None
+    text: str,
+    cut: bool = False,
+    changes: list[tuple[int, int, int]] | None = None,
+    kept: list[tuple[int, int]] | None = None,
 ) -> str:
     """Scrub each URL in free text. Each ``://`` is found by search and its scheme read back from
     it: up to 64 scheme characters, starting at a letter, so a longer run before ``://`` still
     leaves a URL to scrub and a long run such as ``a.a.a…`` costs one pass. A URL that runs to the
     end of a ``cut`` text may have lost its ``@`` or ``?`` there, so it is replaced whole. Each URL
     it replaces is added to ``changes``: where it starts and ends, and how much longer its
-    replacement is."""
+    replacement is; where each URL it keeps lies in the scrubbed text is added to ``kept``."""
     scrub = _Scrub()
     # Each URL's scrubbed text, as a text can repeat one many times.
     scrubbed: dict[str, str] = {}
     parts: list[str] = []
+    # The length of the parts so far.
+    length = 0
     copied = 0
     index = text.find("://")
     while index != -1:
@@ -283,7 +284,11 @@ def _scrub_text_urls(
                     replaced = url
                 if changes is not None and replaced != url:
                     changes.append((start, end, len(replaced) - len(url)))
-                parts.append(text[copied:start] + replaced)
+                before = text[copied:start]
+                if kept is not None and replaced != REDACTED:
+                    kept.append((length + len(before), length + len(before) + len(replaced)))
+                parts.append(before + replaced)
+                length += len(before) + len(replaced)
                 copied = end
         index = text.find("://", index + 1)
     parts.append(text[copied:])
@@ -311,18 +316,10 @@ def _url_values_replaced(url: str) -> str:
         head,
     )
     query = opened.find("?")
-    # A URL nested in the path (``…/p&mongodb://u:…@…``) loses its userinfo, written as the URL
-    # writes a replaced value, since the path is kept and the nested URL is not read on its own.
-    path_end = len(opened) if query == -1 else query
-    slash = _PATH_START.search(opened, opened.find("://") + 3, path_end)
-    path_start = path_end if slash is None else slash.start()
-    before = opened[:path_start] + _NESTED_USERINFO.sub(
-        "://%5Bredacted%5D@", opened[path_start:path_end]
-    )
     if query == -1:
-        return before + fragment
+        return opened + fragment
     queried = _URL_QUERY_NAME.sub(REDACTED, _URL_QUERY_VALUE.sub(REDACTED, opened[query:]))
-    return before + queried + fragment
+    return opened[:query] + queried + fragment
 
 
 def _normalized_key(key: str) -> str:
@@ -525,7 +522,8 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
     end is replaced whole. Identical to the TypeScript SDK's ``scrubCredentialText``.
     """
     changes: list[tuple[int, int, int]] = []
-    scrubbed = _scrub_text_urls(text, cut, changes)
+    kept: list[tuple[int, int]] = []
+    scrubbed = _scrub_text_urls(text, cut, changes, kept)
     # Every rule reads the same text and their matches are replaced together, so no rule's
     # replacement can hide text another rule would have matched. A URL can take in a key or scheme
     # whose value follows it (``…&password=\"…``), so the text's pairs and schemes before its URLs
@@ -535,10 +533,35 @@ def scrub_credential_text(text: str, cut: bool = False) -> str:
         *_pair_spans(scrubbed),
         *(match.span() for match in tokens.finditer(scrubbed)),
         *_authorization_spans(scrubbed),
+        *_nested_userinfo_spans(scrubbed, kept),
     ]
     if changes:
         spans += _spans_beside_urls([*_pair_spans(text), *_authorization_spans(text)], changes)
     return _redact_spans(scrubbed, spans)
+
+
+# A URL nested in another's path (``…/p&mongodb://u:…@…``): its ``://``, then its userinfo to the
+# last ``@`` before a ``/``, ``\``, ``?``, ``#`` or whitespace, as a URL's own userinfo is read.
+_NESTED_USERINFO = re.compile(rf"://[^{_JS_SPACE}/\\?#]*@")
+_QUERY_OR_FRAGMENT = re.compile(r"[?#]")
+_PATH_START = re.compile(r"[/\\]")
+
+
+def _nested_userinfo_spans(text: str, urls: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The userinfo of each URL nested in the path of a URL the text keeps: the path is kept and
+    the nested URL is not read on its own."""
+    spans: list[tuple[int, int]] = []
+    for start, end in urls:
+        authority = text.find("://", start, end) + 3
+        boundary = _QUERY_OR_FRAGMENT.search(text, authority, end)
+        path_end = end if boundary is None else boundary.start()
+        slash = _PATH_START.search(text, authority, path_end)
+        if slash is None:
+            continue
+        for match in _NESTED_USERINFO.finditer(text, slash.start(), path_end):
+            if match.start() + 3 < match.end() - 1:
+                spans.append((match.start() + 3, match.end() - 1))
+    return spans
 
 
 def _spans_beside_urls(

@@ -134,12 +134,13 @@ type UrlChange = [start: number, end: number, growth: number];
  * up to 64 scheme characters, starting at a letter, so a longer run before `://` still leaves a
  * URL to scrub and a long run such as `a.a.a…` costs one pass. A URL that runs to the end of a
  * `cut` text may have lost its `@` or `?` there, so it is replaced whole. Each URL it replaces is
- * added to `changes`. */
+ * added to `changes`, and where each URL it keeps lies in the scrubbed text to `kept`. */
 function scrubTextUrls(
   text: string,
   state: ScrubState,
   cut = false,
   changes: UrlChange[] = [],
+  kept: Span[] = [],
 ): string {
   let result = "";
   let copied = 0;
@@ -155,7 +156,9 @@ function scrubTextUrls(
     const url = text.slice(start, end);
     const scrubbed = cut && end === text.length ? REDACTED : scrubTextUrl(url, state);
     if (scrubbed !== url) changes.push([start, end, scrubbed.length - url.length]);
-    result += text.slice(copied, start) + scrubbed;
+    result += text.slice(copied, start);
+    if (scrubbed !== REDACTED) kept.push([result.length, result.length + scrubbed.length]);
+    result += scrubbed;
     copied = end;
   }
   return result + text.slice(copied);
@@ -177,9 +180,6 @@ const urlQueryValue = new RegExp(
   String.raw`(?<==)(?:"[^"<>${"`"}\r\n]*"|'[^'<>${"`"}\r\n]*'|\\?["'][^\r\n]*$)`,
   "g",
 );
-/** The userinfo of a URL nested in another's path: text after a `://` up to an `@` before any
- * `/`, `\`, `?` or `#`. */
-const nestedUserinfo = /:\/\/[^\s/\\?#@]*@/g;
 /** A query name holding another URL (`?mongodb://u:…@…`, `&x://…`), which would be exported as a
  * name; the URL keeps its extent, so its later values are replaced as ever. A name starts at the
  * query's `?` or an `&`, not at a `?` inside a value. */
@@ -205,18 +205,9 @@ function scrubTextUrl(url: string, state: ScrubState): string {
         : REDACTED,
   );
   const query = opened.indexOf("?");
-  // A URL nested in the path (`…/p&mongodb://u:…@…`) loses its userinfo, written as the URL
-  // writes a replaced value, since the path is kept and the nested URL is not read on its own.
-  const pathEnd = query === -1 ? opened.length : query;
-  const authority = opened.indexOf("://") + 3;
-  const slash = opened.slice(authority, pathEnd).search(/[/\\]/);
-  const pathStart = slash === -1 ? pathEnd : authority + slash;
-  const before =
-    opened.slice(0, pathStart) +
-    opened.slice(pathStart, pathEnd).replace(nestedUserinfo, "://%5Bredacted%5D@");
-  if (query === -1) return scrubUrl(before + fragment, state);
+  if (query === -1) return scrubUrl(opened + fragment, state);
   return scrubUrl(
-    before +
+    opened.slice(0, query) +
       opened.slice(query).replace(urlQueryValue, REDACTED).replace(urlQueryName, REDACTED) +
       fragment,
     state,
@@ -491,7 +482,8 @@ function redactSpans(text: string, spans: Span[]): string {
  */
 export function scrubCredentialText(text: string, cut = false): string {
   const changes: UrlChange[] = [];
-  const scrubbed = scrubTextUrls(text, { changed: false }, cut, changes);
+  const kept: Span[] = [];
+  const scrubbed = scrubTextUrls(text, { changed: false }, cut, changes, kept);
   // Every rule reads the same text and their matches are replaced together, so no rule's
   // replacement can hide text another rule would have matched. A URL can take in a key or scheme
   // whose value follows it (`…&password=\"…`), so the text's pairs and schemes before its URLs
@@ -500,10 +492,36 @@ export function scrubCredentialText(text: string, cut = false): string {
     ...pairSpans(scrubbed),
     ...matchSpans(scrubbed, cut ? cutPrefixedToken : prefixedToken),
     ...authorizationSpans(scrubbed),
+    ...nestedUserinfoSpans(scrubbed, kept),
     ...(changes.length
       ? spansBesideUrls([...pairSpans(text), ...authorizationSpans(text)], changes)
       : []),
   ]);
+}
+
+/** A URL nested in another's path (`…/p&mongodb://u:…@…`): its `://`, then its userinfo to the
+ * last `@` before a `/`, `\`, `?`, `#` or whitespace, as a URL's own userinfo is read. */
+const nestedUserinfo = /:\/\/[^\s/\\?#]*@/g;
+
+/** The userinfo of each URL nested in the path of a URL the text keeps: the path is kept and the
+ * nested URL is not read on its own. */
+function nestedUserinfoSpans(text: string, urls: Span[]): Span[] {
+  const spans: Span[] = [];
+  for (const [start, end] of urls) {
+    const url = text.slice(start, end);
+    const authority = url.indexOf("://") + 3;
+    const boundary = url.slice(authority).search(/[?#]/);
+    const pathEnd = boundary === -1 ? url.length : authority + boundary;
+    const slash = url.slice(authority, pathEnd).search(/[/\\]/);
+    if (slash === -1) continue;
+    const pathStart = authority + slash;
+    for (const match of url.slice(pathStart, pathEnd).matchAll(nestedUserinfo)) {
+      const from = start + pathStart + match.index + 3;
+      const to = start + pathStart + match.index + match[0].length - 1;
+      if (from < to) spans.push([from, to]);
+    }
+  }
+  return spans;
 }
 
 /** The spans moved to where their text is once the URLs are replaced: one starting inside a
