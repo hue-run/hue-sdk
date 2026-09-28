@@ -693,6 +693,8 @@ process.stdout.write(JSON.stringify({
     hasApiKey: "HUE_API_KEY" in process.env,
     worldToken: process.env.HUE_WORLD_TOKEN,
     gmailMirror: process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL,
+    staleMirror: process.env.HUE_SIM_NOTION_MCP_URL ?? null,
+    signingKey: process.env.HUE_WORLD_TOKEN_KEY ?? null,
     mcpConfig: process.env.HUE_MCP_CONFIG
       ? JSON.parse(readFileSync(process.env.HUE_MCP_CONFIG, "utf8"))
       : null,
@@ -946,7 +948,15 @@ describe("hue eval", () => {
             "--revision",
             "cmd",
           ],
-          { cwd },
+          {
+            cwd,
+            // A case with no world starts from the same filtered parent: another world's mirror
+            // and a server's signing key left in the runner's shell never reach the agent.
+            env: {
+              HUE_SIM_NOTION_MCP_URL: "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+              HUE_WORLD_TOKEN_KEY: "test-signing-key",
+            },
+          },
         );
         expect(result.status).toBe(0);
         expectNoSecrets(result);
@@ -989,6 +999,8 @@ describe("hue eval", () => {
             worldId: world!.id,
             // The project key never reaches the agent unless the caller opts in.
             hasApiKey: false,
+            staleMirror: null,
+            signingKey: null,
             mcpConfig: null,
           },
         });
@@ -1052,7 +1064,14 @@ describe("hue eval", () => {
             "--json",
             "--content",
           ],
-          { cwd },
+          {
+            cwd,
+            // Another world's mirror and a server's signing key, left in the runner's shell.
+            env: {
+              HUE_SIM_NOTION_MCP_URL: "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+              HUE_WORLD_TOKEN_KEY: "test-signing-key",
+            },
+          },
         );
         expect(result.status).toBe(0);
         expectNoSecrets(result);
@@ -1068,6 +1087,8 @@ describe("hue eval", () => {
           url: mirror,
           worldToken: "[redacted]",
           gmailMirror: mirror,
+          staleMirror: null,
+          signingKey: null,
           hasApiKey: false,
           executionId: world!.executionId,
           worldId: world!.id,
