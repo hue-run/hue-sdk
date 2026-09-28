@@ -13,6 +13,7 @@ import {
   agentEnvironment,
   isHueControlPlaneCredential,
   stripHueControlPlaneCredentials,
+  withoutWorldVariables,
   writeMcpConfig,
 } from "../environment/world.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
@@ -703,15 +704,19 @@ function redacting<Context, Answer>(
 }
 
 /** The parent environment an agent child starts from: without Hue control-plane credentials
- * unless `--allow-hue-credentials` was passed. */
+ * unless `--allow-hue-credentials` was passed, and without any world variable. */
 function parentEnvironment(allowHueCredentials: boolean): Record<string, string> {
-  return allowHueCredentials
-    ? Object.fromEntries(
-        Object.entries(process.env).filter(
-          (entry): entry is [string, string] => entry[1] !== undefined,
-        ),
-      )
-    : stripHueControlPlaneCredentials(process.env);
+  // A world variable left in this process's environment belongs to another world: only the
+  // current case's world sets them, whether or not the case has one.
+  return withoutWorldVariables(
+    allowHueCredentials
+      ? Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        )
+      : stripHueControlPlaneCredentials(process.env),
+  );
 }
 
 function commandAdapter(

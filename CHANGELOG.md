@@ -10,6 +10,13 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Fixed
+
+- Security: `hue eval --command` no longer passes a world variable inherited from its own
+  environment (`HUE_SIM_*_URL`, `HUE_SIM_*_ALIAS`, `HUE_MCP_*`, `HUE_WORLD_*`) to the agent
+  command. Only the current case's world sets them, so an agent can no longer reach a surface
+  outside that world with its token.
+
 ### [0.11.3] - 2026-09-27
 
 This release fixes security issues in `hue mcp install` and evaluation checkpoint paths, scrubs

@@ -256,6 +256,35 @@ describe("world handoff helpers", () => {
     expect(agentEnvironment(world, { parent: { HUE_WORLD_TOKEN: "stale" } }).HUE_WORLD_TOKEN).toBe(
       token,
     );
+    // Nor does another world's mirror survive: this world's token must never reach it.
+    const stale = agentEnvironment(world, {
+      parent: {
+        HUE_SIM_NOTION_MCP_URL: "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+        HUE_SIM_SLACK_MCP_ALIAS: "https://elsewhere.test/mcp",
+        HUE_MCP_CONFIG: "/tmp/old-world.json",
+        HUE_MCP_URL: "https://elsewhere.test/mcp",
+        // A signing key in a developer's shell is the server's, never an agent's.
+        HUE_WORLD_TOKEN_KEY: "test-signing-key",
+        HUE_MCP_KEY: "hue_mcp_project",
+        OPENAI_API_KEY: "customer-model-key",
+      },
+      legacyMcpVariables: false,
+      includeHueCredentials: true,
+    });
+    for (const name of [
+      "HUE_SIM_NOTION_MCP_URL",
+      "HUE_SIM_SLACK_MCP_ALIAS",
+      "HUE_MCP_CONFIG",
+      "HUE_MCP_URL",
+      "HUE_WORLD_TOKEN_KEY",
+    ])
+      expect(stale).not.toHaveProperty(name);
+    expect(stale.HUE_SIM_GOOGLE_GMAIL_MCP_URL).toBe(mirror);
+    // Every other variable passes through as before.
+    expect(stale).toMatchObject({
+      HUE_MCP_KEY: "hue_mcp_project",
+      OPENAI_API_KEY: "customer-model-key",
+    });
     expect(isHueControlPlaneCredential("X", "hue_sk_test_abc_def")).toBe(true);
     expect(isHueControlPlaneCredential("X", "sk-live-not-hue")).toBe(false);
     expect(stripHueControlPlaneCredentials(parent)).toEqual({
