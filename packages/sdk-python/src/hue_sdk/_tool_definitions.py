@@ -1225,7 +1225,9 @@ def _domain_to_ascii(domain: str) -> str:
         if label.startswith("xn--"):
             try:
                 decoded = label[4:].encode("ascii").decode("punycode")
-            except (UnicodeError, ValueError):
+            except (UnicodeError, ValueError, OverflowError):
+                # CPython 3.13 and later raise OverflowError for Punycode whose code point
+                # overflows (``xn--11111111111111111w``), where earlier versions raise UnicodeError.
                 raise _InvalidUrl from None
             if (
                 not decoded
@@ -1335,7 +1337,7 @@ class _Scrub:
         if scheme and scheme.group()[:-1].lower() in _SPECIAL_PORTS:
             try:
                 scrubbed = _scrub_special_url(scheme.group()[:-1].lower(), text[scheme.end() :])
-            except ValueError:
+            except Exception:
                 # Refused by WHATWG, or anything else that stops the parse: never export it.
                 scrubbed = REDACTED
             if scrubbed is None:
