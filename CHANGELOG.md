@@ -13,9 +13,11 @@ refuses to publish a version without a matching entry below.
 #### Fixed
 
 - Security: `hue eval --command` no longer passes a world variable inherited from its own
-  environment (`HUE_SIM_*_URL`, `HUE_SIM_*_ALIAS`, `HUE_MCP_*`, `HUE_WORLD_*`) to the agent
-  command. Only the current case's world sets them, so an agent can no longer reach a surface
-  outside that world with its token.
+  environment (`HUE_SIM_*_URL`, `HUE_SIM_*_ALIAS`, `HUE_WORLD_*`, and `HUE_MCP_CONFIG`,
+  `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT`) to the agent command. Only the current
+  case's world sets them, so an agent can no longer reach a surface outside that world with its
+  token. `HUE_MCP_KEY` is a project key, not a world variable: it still reaches the command only
+  with `--allow-hue-credentials`.
 
 ### [0.11.3] - 2026-09-27
 

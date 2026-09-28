@@ -948,7 +948,15 @@ describe("hue eval", () => {
             "--revision",
             "cmd",
           ],
-          { cwd },
+          {
+            cwd,
+            // A case with no world starts from the same filtered parent: another world's mirror
+            // and a server's signing key left in the runner's shell never reach the agent.
+            env: {
+              HUE_SIM_NOTION_MCP_URL: "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+              HUE_WORLD_TOKEN_KEY: "test-signing-key",
+            },
+          },
         );
         expect(result.status).toBe(0);
         expectNoSecrets(result);
