@@ -791,8 +791,9 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
   out("Next steps:");
   if (stored.includes("coding-agent"))
     // `hue mcp install` defaults to production; a non-default origin needs its own endpoint.
+    // Without --auth it configures sign-in unless HUE_MCP_KEY is exported, so name the key stored.
     out(
-      `  hue mcp install --client claude-code${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
+      `  hue mcp install --client claude-code --auth key${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
     );
   if (stored.includes("evaluations"))
     out(`  hue eval --case "<name>" ./hue-agent.ts --env-file ${envDisplay}`);

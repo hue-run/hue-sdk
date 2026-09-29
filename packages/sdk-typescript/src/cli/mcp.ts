@@ -10,9 +10,10 @@ import { isCredentialKey, scrubCredentialText } from "../tool-definitions.js";
 /**
  * `hue mcp install`: writes or prints the coding-agent configuration for Hue's MCP server. The
  * shapes are those of Hue's published connection guide (https://docs.hue.run/agents/mcp-server),
- * kept as a separate copy here. Key configurations reference the `HUE_MCP_KEY` environment
- * variable (or a VS Code password input); sign-in configurations hold no credential. A key value
- * is never written.
+ * kept as a separate copy here. Sign-in configurations hold no credential; key configurations
+ * reference the `HUE_MCP_KEY` environment variable (or a VS Code password input). A key value is
+ * never written. Without `--auth`, a client that can sign in does unless a key is asked for or
+ * already set up (`defaultAuth`).
  */
 
 /** Streams, environment and working directory for {@link runMcpCommand}; tests inject these. */
@@ -105,18 +106,20 @@ export const MCP_USAGE = `Usage: hue mcp install --client <claude-code|codex|con
                        [--toolsets NAMES] [--url URL]
                        [--scope project|user] [--dry-run] [--print]
 
-Configure a coding agent to use the Hue MCP server. A key configuration references the
-${ENV_VAR} environment variable; a key value is never written. A sign-in configuration holds
-only the URL: the client opens Hue in a browser, where you approve access to the projects of
-one organization.
+Configure a coding agent to use the Hue MCP server. A sign-in configuration holds only the
+URL: the client opens Hue in a browser, where you approve access to the projects of one
+organization. A key configuration references the ${ENV_VAR} environment variable; a key value
+is never written.
 
 Options:
   --client NAME   Coding agent to configure (required)
-  --auth MODE     key: reference ${ENV_VAR} (the default, except for conductor)
-                  oauth: URL only, sign in with Hue in the client (claude-code, codex and
-                  conductor; the default for conductor)
-  --read-only     key only: add ?read_only=true to the URL so write tools are hidden. A
-                  sign-in connection has Read and write access; use a Read key for read-only
+  --auth MODE     oauth: URL only, sign in with Hue in the client (claude-code, codex and
+                  conductor; their default)
+                  key: reference ${ENV_VAR} (the default for the other clients, with
+                  --read-only, and for claude-code and codex when ${ENV_VAR} is set)
+  --read-only     Add ?read_only=true to a key configuration's URL so write tools are
+                  hidden; selects a key without --auth. A sign-in connection has Read and
+                  write access; use a Read key for read-only
   --project VALUE Pin the connection to one project by id or slug. Its tools omit project_id,
                   and the server is named hue-<value> so it can coexist with an unpinned hue
   --toolsets NAMES
@@ -840,6 +843,37 @@ function planFor(
   }
 }
 
+/**
+ * The authentication used without `--auth`, and the line saying why. A client that can sign in
+ * does, unless a key is asked for: read-only access (`--read-only`, or `read_only` in `--url`),
+ * which a sign-in connection does not have, or, for Claude Code and Codex, `HUE_MCP_KEY` set in
+ * `env`, so rerunning the command keeps a working key setup. Only the variable's presence is
+ * checked. Conductor signed in by default before and keeps doing so: its agents read the
+ * login-shell environment Conductor captures, not this shell's. The other clients only take a
+ * key, so they get no line.
+ */
+function defaultAuth(
+  client: ClientId,
+  readOnly: "--read-only" | "read_only in --url" | undefined,
+  env: NodeJS.ProcessEnv,
+): { auth: AuthMode; note?: string } {
+  if (!OAUTH_CLIENTS.includes(client)) return { auth: "key" };
+  if (readOnly)
+    return {
+      auth: "key",
+      note: `Using a key: ${readOnly} needs one, since a sign-in connection has Read and write access.`,
+    };
+  if (client !== "conductor" && env[ENV_VAR])
+    return {
+      auth: "key",
+      note: `Using a key (${ENV_VAR} is set); pass --auth oauth to sign in with Hue instead.`,
+    };
+  return {
+    auth: "oauth",
+    note: `Using sign-in with Hue (${client === "conductor" ? "Conductor's default" : `${ENV_VAR} is not set`}); pass --auth key to use a key instead.`,
+  };
+}
+
 function nextSteps(
   client: ClientId,
   auth: AuthMode,
@@ -849,7 +883,7 @@ function nextSteps(
   const label = CLIENT_LABELS[client];
   const approve = project
     ? `Sign in to Hue and approve the connection. It acts only on the pinned project ${project}, within your role; for read-only access, use a Read project key with --auth key.`
-    : "Sign in to Hue and approve the connection. It can read and write every active project in the organization you choose, within your role; for read-only access, use a Read project key with --auth key.";
+    : "Sign in to Hue and approve the connection. It can read and write every active project in the organization the consent page names, within your role; for read-only access, use a Read project key with --auth key.";
   let lines: string[];
   if (auth === "oauth")
     lines =
@@ -935,10 +969,10 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       2,
     );
   const clientId = client as ClientId;
-  const auth = parsed.values.auth ?? (clientId === "conductor" ? "oauth" : "key");
-  if (auth !== "key" && auth !== "oauth")
+  const explicitAuth = parsed.values.auth;
+  if (explicitAuth !== undefined && explicitAuth !== "key" && explicitAuth !== "oauth")
     return fail(`--auth must be key or oauth.\n\n${MCP_USAGE}`, 2);
-  if (auth === "oauth" && !OAUTH_CLIENTS.includes(clientId))
+  if (explicitAuth === "oauth" && !OAUTH_CLIENTS.includes(clientId))
     return fail(
       clientId === "cursor"
         ? "--auth oauth is not available for cursor: Hue does not yet accept Cursor's sign-in callback. Use a key (the default), or sign in from claude-code or codex."
@@ -956,11 +990,15 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       "--url must be an HTTPS URL such as https://mcp.hue.run/mcp (plain HTTP is accepted for loopback test servers only).",
       2,
     );
+  const readOnly = parsed.values["read-only"]
+    ? "--read-only"
+    : new URL(url).searchParams.has("read_only")
+      ? "read_only in --url"
+      : undefined;
+  const { auth, note }: { auth: AuthMode; note?: string } =
+    explicitAuth === undefined ? defaultAuth(clientId, readOnly, env) : { auth: explicitAuth };
   // A sign-in connection's access is chosen when it is approved; read_only is not part of it.
-  if (
-    auth === "oauth" &&
-    (parsed.values["read-only"] || new URL(url).searchParams.has("read_only"))
-  )
+  if (auth === "oauth" && readOnly)
     return fail(
       "A sign-in connection has Read and write access and cannot be made read-only by its URL. For read-only access, use a Read project key (--auth key), or add --read-only to a key configuration.",
       2,
@@ -1005,6 +1043,8 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     toolsets = selected.toolsets;
   }
   url = toolsetsMcpUrl(url, toolsets);
+  // On stderr, so --print and --dry-run output stays as it was.
+  if (note) stderr.write(`${note}\n`);
   const shownUrl = displayMcpUrl(url);
   // What the command reports doing; a command a person is to run is printed as given.
   const shownCommand = (command: CliCommand) =>

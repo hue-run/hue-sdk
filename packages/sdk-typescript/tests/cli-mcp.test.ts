@@ -173,6 +173,19 @@ const CODEX_TOML = `[mcp_servers.hue]\nurl = "https://mcp.hue.run/mcp"\nbearer_t
 /** Claude Code, Codex and Conductor list every tool unless --toolsets says otherwise. */
 const ALL_URL = "https://mcp.hue.run/mcp?toolsets=all";
 const CLAUDE_CODE_ALL_JSON = CLAUDE_CODE_JSON.replace("https://mcp.hue.run/mcp", ALL_URL);
+const CLAUDE_CODE_SIGN_IN_ALL_JSON = CLAUDE_CODE_SIGN_IN_JSON.replace(
+  "https://mcp.hue.run/mcp",
+  ALL_URL,
+);
+const CODEX_SIGN_IN_ALL_TOML =
+  '[mcp_servers.hue]\nurl = "https://mcp.hue.run/mcp"\nhttp_headers = { "X-Hue-MCP-Toolsets" = "all" }\nsupports_parallel_tool_calls = true\n';
+/** The line saying which authentication was chosen without --auth, and why. */
+const SIGN_IN_NOTE =
+  "Using sign-in with Hue (HUE_MCP_KEY is not set); pass --auth key to use a key instead.\n";
+const KEY_NOTE =
+  "Using a key (HUE_MCP_KEY is set); pass --auth oauth to sign in with Hue instead.\n";
+const CONDUCTOR_NOTE =
+  "Using sign-in with Hue (Conductor's default); pass --auth key to use a key instead.\n";
 const CODEX_ALL_TOML = CODEX_TOML.replace("https://mcp.hue.run/mcp", ALL_URL);
 
 describe("hue mcp install", () => {
@@ -250,15 +263,15 @@ describe("hue mcp install", () => {
   test("claude-code writes a new .mcp.json with the canonical content, owner-only", async () => {
     const root = await temporaryRoot();
     const result = await mcp(["mcp", "install", "--client", "claude-code"], { cwd: root });
-    expect(result.stderr).toBe("");
+    // Without HUE_MCP_KEY, Claude Code signs in: the file holds only the URL.
+    expect(result.stderr).toBe(SIGN_IN_NOTE);
     expect(result.code).toBe(0);
-    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(CLAUDE_CODE_ALL_JSON);
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(CLAUDE_CODE_SIGN_IN_ALL_JSON);
     // People and clients add other servers' literal tokens to this file later.
     expect(await mode(join(root, ".mcp.json"))).toBe(0o600);
     expect(await readdir(root)).toEqual([".mcp.json"]);
     expect(result.stdout).toContain(`Wrote .mcp.json with the "hue" MCP server (${ALL_URL}).`);
-    expect(result.stdout).toContain("Export HUE_MCP_KEY in the shell that starts Claude Code");
-    expect(result.stdout).toContain(".env.hue");
+    expect(result.stdout).toContain("run /mcp, select hue and choose Authenticate");
     expect(result.stdout).toContain(MCP_VERIFY_PROMPT);
   });
 
@@ -284,7 +297,7 @@ describe("hue mcp install", () => {
     );
     expect(staging.code).toBe(0);
     expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(
-      CLAUDE_CODE_JSON.replace(
+      CLAUDE_CODE_SIGN_IN_JSON.replace(
         "https://mcp.hue.run/mcp",
         "https://mcp.staging.hue.run/mcp?toolsets=all",
       ),
@@ -316,11 +329,7 @@ describe("hue mcp install", () => {
     expect(merged).toEqual({
       mcpServers: {
         other: { command: "npx", args: ["other-server"] },
-        hue: {
-          type: "http",
-          url: ALL_URL,
-          headers: { Authorization: "Bearer ${HUE_MCP_KEY}" },
-        },
+        hue: { type: "http", url: ALL_URL },
       },
       custom: true,
     });
@@ -366,7 +375,7 @@ describe("hue mcp install", () => {
     const invalid = await mcp(["install", "--client", "claude-code"], { cwd: root });
     expect(invalid.code).toBe(1);
     expect(invalid.stderr).toContain(".mcp.json is not valid JSON");
-    expect(invalid.stderr).toContain('"Authorization": "Bearer ${HUE_MCP_KEY}"');
+    expect(invalid.stderr).toContain(`"url": "${ALL_URL}"`);
     expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(
       '{ "mcpServers": { /* comment */ } }',
     );
@@ -660,7 +669,8 @@ describe("hue mcp install", () => {
       env: { PATH: join(root, "empty-bin"), HUE_MCP_KEY: "hue_live_must_not_leak" },
     });
     expect(dry.code).toBe(0);
-    expect(dry.stderr).toBe("");
+    // HUE_MCP_KEY is set, so the key configuration is kept; only its presence is reported.
+    expect(dry.stderr).toBe(KEY_NOTE);
     for (const secret of [...secrets, "hue_live_must_not_leak"])
       expect(dry.stdout).not.toContain(secret);
     expect(
@@ -749,9 +759,10 @@ describe("hue mcp install", () => {
       '"url": "https://mcp.hue.run/mcp?api_key=[redacted]&[redacted]&[redacted]&read_only=true&toolsets=traces,docs"',
     );
     // So is every line that reports what the command does; the file keeps the URL as given.
-    const codexDry = await mcp(["install", "--client", "codex", "--dry-run", "--url", keyUrl], {
-      cwd: root,
-    });
+    const codexDry = await mcp(
+      ["install", "--client", "codex", "--auth", "key", "--dry-run", "--url", keyUrl],
+      { cwd: root },
+    );
     expect(codexDry.stdout).toBe(
       "Would run: codex mcp add hue --url 'https://mcp.hue.run/mcp?api_key=[redacted]&[redacted]&[redacted]&toolsets=traces,docs' --bearer-token-env-var HUE_MCP_KEY\n",
     );
@@ -825,7 +836,10 @@ describe("hue mcp install", () => {
     expect(dry.code).toBe(0);
     expect(dry.stdout.startsWith("Would write .mcp.json:\n{\n")).toBe(true);
     expect(dry.stdout).toContain('"other": {}');
-    expect(dry.stdout).toContain('"Authorization": "Bearer ${HUE_MCP_KEY}"');
+    expect(dry.stdout).toContain(`"url": "${ALL_URL}"`);
+    expect(dry.stdout).not.toContain("Authorization");
+    // The line naming the chosen authentication goes to stderr, leaving the output as it was.
+    expect(dry.stderr).toBe(SIGN_IN_NOTE);
     expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(
       JSON.stringify({ mcpServers: { other: {} } }),
     );
@@ -836,7 +850,8 @@ describe("hue mcp install", () => {
     await expect(lstat(join(root, ".cursor"))).rejects.toThrow();
 
     const toml = await mcp(["install", "--client", "codex", "--print"], { cwd: root });
-    expect(toml.stdout).toBe(CODEX_ALL_TOML);
+    expect(toml.stdout).toBe(CODEX_SIGN_IN_ALL_TOML);
+    expect(toml.stderr).toBe(SIGN_IN_NOTE);
     const cliDry = await mcp(["install", "--client", "gemini", "--dry-run"], { cwd: root });
     expect(cliDry.code).toBe(0);
     expect(cliDry.stdout).toBe(
@@ -856,7 +871,7 @@ describe("hue mcp install", () => {
 
   test("codex prints the TOML block when its CLI is absent and runs it when present", async () => {
     const root = await temporaryRoot();
-    const absent = await mcp(["install", "--client", "codex"], { cwd: root });
+    const absent = await mcp(["install", "--client", "codex", "--auth", "key"], { cwd: root });
     expect(absent.code).toBe(0);
     expect(absent.stdout).toContain("codex is not on PATH");
     expect(absent.stdout).toContain("~/.codex/config.toml");
@@ -886,9 +901,10 @@ describe("hue mcp install", () => {
 
   test("claude-code --scope user runs claude mcp add or prints the command", async () => {
     const root = await temporaryRoot();
-    const absent = await mcp(["install", "--client", "claude-code", "--scope", "user"], {
-      cwd: root,
-    });
+    const absent = await mcp(
+      ["install", "--client", "claude-code", "--scope", "user", "--auth", "key"],
+      { cwd: root },
+    );
     expect(absent.code).toBe(0);
     expect(absent.stdout).toContain("claude is not on PATH");
     expect(absent.stdout).toContain(
@@ -960,9 +976,7 @@ describe("hue mcp install", () => {
     });
     expect(project.stderr).toBe("");
     expect(project.code).toBe(0);
-    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(
-      CLAUDE_CODE_SIGN_IN_JSON.replace("https://mcp.hue.run/mcp", ALL_URL),
-    );
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(CLAUDE_CODE_SIGN_IN_ALL_JSON);
     expect(project.stdout).toContain("run /mcp, select hue and choose Authenticate");
     expect(project.stdout).toContain("approve the connection");
     expect(project.stdout).toContain("use a Read project key with --auth key");
@@ -1016,7 +1030,7 @@ describe("hue mcp install", () => {
     expect(cursor.stderr).toContain("Cursor's sign-in callback");
     for (const argv of [
       ["install", "--client", "claude-code", "--auth", "oauth", "--read-only"],
-      ["install", "--client", "conductor", "--read-only"],
+      ["install", "--client", "conductor", "--auth", "oauth", "--read-only"],
       [
         "install",
         "--client",
@@ -1033,6 +1047,145 @@ describe("hue mcp install", () => {
       expect(result.stdout).toBe("");
     }
     expect(await readdir(root)).toEqual([]);
+  });
+
+  test("without --auth, claude-code, codex and conductor sign in when HUE_MCP_KEY is not set", async () => {
+    const root = await temporaryRoot();
+    // An empty variable holds no key.
+    for (const env of [
+      { PATH: join(root, "empty-bin") },
+      { PATH: join(root, "empty-bin"), HUE_MCP_KEY: "" },
+    ]) {
+      const claude = await mcp(["install", "--client", "claude-code", "--dry-run"], {
+        cwd: root,
+        env,
+      });
+      expect(claude.code).toBe(0);
+      expect(claude.stdout).toBe(`Would write .mcp.json:\n${CLAUDE_CODE_SIGN_IN_ALL_JSON}`);
+      expect(claude.stderr).toBe(SIGN_IN_NOTE);
+      const codex = await mcp(["install", "--client", "codex", "--dry-run"], { cwd: root, env });
+      expect(codex.stdout).toBe(`Would run: codex mcp add hue --url '${ALL_URL}'\n`);
+      expect(codex.stderr).toBe(SIGN_IN_NOTE);
+    }
+    const conductor = await mcp(["install", "--client", "conductor", "--dry-run"], { cwd: root });
+    expect(conductor.stdout).toBe(
+      `Would run: claude mcp add --transport http --scope user hue '${ALL_URL}'\n` +
+        `Would run: codex mcp add hue --url '${ALL_URL}'\n`,
+    );
+    expect(conductor.stderr).toBe(CONDUCTOR_NOTE);
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  test("HUE_MCP_KEY in the environment keeps a key for claude-code and codex, not conductor", async () => {
+    const root = await temporaryRoot();
+    const env = { PATH: join(root, "empty-bin"), HUE_MCP_KEY: "hue_live_must_not_leak" };
+    const claude = await mcp(["install", "--client", "claude-code"], { cwd: root, env });
+    expect(claude.code).toBe(0);
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(CLAUDE_CODE_ALL_JSON);
+    expect(claude.stderr).toBe(KEY_NOTE);
+    expect(claude.stdout).toContain("Export HUE_MCP_KEY in the shell that starts Claude Code");
+    expect(claude.stdout).toContain(".env.hue");
+    const codex = await mcp(["install", "--client", "codex", "--print"], { cwd: root, env });
+    expect(codex.stdout).toBe(CODEX_ALL_TOML);
+    expect(codex.stderr).toBe(KEY_NOTE);
+    // Conductor's agents read the login-shell environment Conductor captures, not this shell's.
+    const conductor = await mcp(["install", "--client", "conductor", "--dry-run"], {
+      cwd: root,
+      env,
+    });
+    expect(conductor.stdout).not.toContain("HUE_MCP_KEY");
+    expect(conductor.stderr).toBe(CONDUCTOR_NOTE);
+    for (const result of [claude, codex, conductor])
+      expect(result.stdout + result.stderr).not.toContain("hue_live_must_not_leak");
+  });
+
+  test("the default follows the injected environment, not the process's", async () => {
+    const root = await temporaryRoot();
+    const saved = process.env.HUE_MCP_KEY;
+    process.env.HUE_MCP_KEY = "hue_live_process_only";
+    try {
+      const result = await mcp(["install", "--client", "codex", "--dry-run"], { cwd: root });
+      expect(result.stdout).toBe(`Would run: codex mcp add hue --url '${ALL_URL}'\n`);
+      expect(result.stderr).toBe(SIGN_IN_NOTE);
+    } finally {
+      if (saved === undefined) delete process.env.HUE_MCP_KEY;
+      else process.env.HUE_MCP_KEY = saved;
+    }
+  });
+
+  test("--read-only, or read_only in --url, selects a key without --auth", async () => {
+    const root = await temporaryRoot();
+    const readOnlyUrl = "https://mcp.hue.run/mcp?read_only=true&toolsets=all";
+    const conductor = await mcp(["install", "--client", "conductor", "--read-only", "--dry-run"], {
+      cwd: root,
+    });
+    expect(conductor.code).toBe(0);
+    expect(conductor.stdout).toBe(
+      `Would run: claude mcp add --transport http --scope user hue '${readOnlyUrl}' --header 'Authorization: Bearer \${HUE_MCP_KEY}'\n` +
+        `Would run: codex mcp add hue --url '${readOnlyUrl}' --bearer-token-env-var HUE_MCP_KEY\n`,
+    );
+    expect(conductor.stderr).toBe(
+      "Using a key: --read-only needs one, since a sign-in connection has Read and write access.\n",
+    );
+    const claude = await mcp(["install", "--client", "claude-code", "--read-only"], { cwd: root });
+    expect(claude.code).toBe(0);
+    expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(
+      CLAUDE_CODE_JSON.replace("https://mcp.hue.run/mcp", readOnlyUrl),
+    );
+    const codex = await mcp(
+      [
+        "install",
+        "--client",
+        "codex",
+        "--dry-run",
+        "--url",
+        "https://mcp.hue.run/mcp?read_only=true",
+      ],
+      { cwd: root },
+    );
+    expect(codex.code).toBe(0);
+    expect(codex.stdout).toBe(
+      `Would run: codex mcp add hue --url '${readOnlyUrl}' --bearer-token-env-var HUE_MCP_KEY\n`,
+    );
+    expect(codex.stderr).toBe(
+      "Using a key: read_only in --url needs one, since a sign-in connection has Read and write access.\n",
+    );
+  });
+
+  test("an explicit --auth wins over the default and prints no note", async () => {
+    const root = await temporaryRoot();
+    const withKey = { PATH: join(root, "empty-bin"), HUE_MCP_KEY: "hue_live_must_not_leak" };
+    const oauth = await mcp(["install", "--client", "codex", "--auth", "oauth", "--dry-run"], {
+      cwd: root,
+      env: withKey,
+    });
+    expect(oauth.stdout).toBe(`Would run: codex mcp add hue --url '${ALL_URL}'\n`);
+    expect(oauth.stderr).toBe("");
+    for (const client of ["claude-code", "codex", "conductor"]) {
+      const key = await mcp(["install", "--client", client, "--auth", "key", "--print"], {
+        cwd: root,
+      });
+      expect(key.code).toBe(0);
+      expect(key.stdout).toContain("HUE_MCP_KEY");
+      expect(key.stderr).toBe("");
+    }
+  });
+
+  test("cursor, vscode, windsurf and gemini use a key without a note", async () => {
+    const root = await temporaryRoot();
+    const snippets = {
+      cursor: CURSOR_OBSERVE_JSON,
+      vscode: VSCODE_JSON,
+      windsurf: WINDSURF_JSON,
+      gemini:
+        "gemini mcp add --scope user --transport http hue https://mcp.hue.run/mcp --header 'Authorization: Bearer ${HUE_MCP_KEY}'\n",
+    };
+    for (const [client, snippet] of Object.entries(snippets)) {
+      const result = await mcp(["install", "--client", client, "--print"], { cwd: root });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe(snippet);
+      expect(result.stderr).toBe("");
+    }
   });
 
   test("--read-only adds read_only=true to a key configuration's URL", async () => {
@@ -1169,7 +1322,7 @@ describe("hue mcp install", () => {
     });
     expect(claude.code).toBe(0);
     expect(await readFile(join(root, ".mcp.json"), "utf8")).toBe(
-      CLAUDE_CODE_JSON.replace(
+      CLAUDE_CODE_SIGN_IN_JSON.replace(
         "https://mcp.hue.run/mcp",
         "https://mcp.hue.run/mcp?toolsets=observe",
       ),
@@ -1296,14 +1449,13 @@ describe("hue mcp install", () => {
       cwd: root,
     });
     expect(pinned.code).toBe(0);
-    expect(pinned.stderr).toBe("");
+    expect(pinned.stderr).toBe(SIGN_IN_NOTE);
     expect(JSON.parse(await readFile(join(root, ".mcp.json"), "utf8"))).toEqual({
       mcpServers: {
         hue: { type: "http", url: DEFAULT_MCP_URL },
         "hue-support-agent": {
           type: "http",
           url: "https://mcp.hue.run/mcp?project=support-agent&toolsets=all",
-          headers: { Authorization: "Bearer ${HUE_MCP_KEY}" },
         },
       },
     });

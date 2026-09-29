@@ -84,8 +84,9 @@ or remote execution. See the [setup CLI contract](./CLI.md) for the supported sh
 
 For an existing account, `hue login` validates keys created in Hue Settings and stores them in
 `.env.hue` without printing them, and `hue mcp install --client claude-code` (or `codex`,
-`conductor`, `cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration that
-references `HUE_MCP_KEY`, or with `--auth oauth` only the URL, for signing in with Hue. See
+`conductor`, `cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration: only the
+URL for signing in with Hue (the default for Claude Code, Codex and Conductor), or a reference to
+`HUE_MCP_KEY` for the other clients and with `--auth key`. See
 [Sign in and store keys](./CLI.md#sign-in-and-store-keys) and
 [Install the MCP for your coding agent](./CLI.md#install-the-mcp-for-your-coding-agent).
 

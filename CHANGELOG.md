@@ -10,6 +10,21 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- `hue mcp install --client claude-code` and `codex` sign in with Hue by default, as `conductor`
+  already did: without `--auth` they configure only the server URL, and the client opens Hue in a
+  browser to approve the connection. They keep a key when `HUE_MCP_KEY` is set in the environment
+  (only its presence is checked), so running the command again for a working key setup keeps it.
+  `--read-only`, or `read_only` in `--url`, also selects a key, for `conductor` too, which refused
+  `--read-only` without `--auth key` before. `cursor`, `vscode`, `windsurf` and `gemini` still use a
+  key. The command names its choice, and how to change it, in one line on stderr. To keep a key,
+  pass `--auth key` or set `HUE_MCP_KEY`.
+- `hue login` prints `hue mcp install --client claude-code --auth key` as its next step, so the
+  configuration uses the key it stored. After a sign-in installation, `hue mcp install` names the
+  organization the consent page shows instead of one you choose: Hue's consent page has no
+  organization picker.
+
 #### Fixed
 
 - Security: `hue eval --command` no longer passes a world variable inherited from its own
