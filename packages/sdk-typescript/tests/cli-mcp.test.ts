@@ -104,7 +104,8 @@ async function fakeCli(root: string, name: string, exitCode = 0) {
 }
 
 /**
- * A fake codex that keeps one entry as `codex mcp get --json` reports it (exiting 1 without one)
+ * A fake codex that keeps one entry as `codex mcp get --json` reports it (exiting 1 with Codex's
+ * "No MCP server named" error without one)
  * and, like Codex, writes the entry on `mcp add` before any sign-in, then exits `addExit`.
  */
 async function fakeCodex(root: string, addExit = 0) {
@@ -116,7 +117,7 @@ async function fakeCodex(root: string, addExit = 0) {
     join(bin, "codex"),
     `#!/bin/sh
 case "$2" in
-  get) [ -f ${JSON.stringify(entry)} ] || exit 1; /bin/cat ${JSON.stringify(entry)} ;;
+  get) [ -f ${JSON.stringify(entry)} ] || { printf "Error: No MCP server named '%s' found.\\n" "$3" >&2; exit 1; }; /bin/cat ${JSON.stringify(entry)} ;;
   add)
     printf '%s\\n' "$@" > ${JSON.stringify(record)}
     if [ "$6" = --bearer-token-env-var ]; then key="\\"$7\\""; else key=null; fi
@@ -220,6 +221,8 @@ const SIGN_IN_NOTE =
   "Using sign-in with Hue (HUE_MCP_KEY is not set); pass --auth key to use a key instead.\n";
 const KEY_NOTE =
   "Using a key (HUE_MCP_KEY is set); pass --auth oauth to sign in with Hue instead.\n";
+const UNKNOWN_CODEX_NOTE =
+  "Using a key: Codex's configuration could not be read to keep an existing entry; pass --auth oauth to sign in with Hue instead.\n";
 const CONDUCTOR_NOTE =
   "Using sign-in with Hue (Conductor's default); pass --auth key to use a key instead.\n";
 const CODEX_ALL_TOML = CODEX_TOML.replace("https://mcp.hue.run/mcp", ALL_URL);
@@ -888,7 +891,12 @@ describe("hue mcp install", () => {
     expect(printed.stdout).toBe(CURSOR_OBSERVE_JSON);
     await expect(lstat(join(root, ".cursor"))).rejects.toThrow();
 
-    const toml = await mcp(["install", "--client", "codex", "--print"], { cwd: root });
+    // A codex that holds no hue entry, so the default signs in.
+    const fresh = await fakeCodex(await temporaryRoot());
+    const toml = await mcp(["install", "--client", "codex", "--print"], {
+      cwd: root,
+      env: fresh.env,
+    });
     expect(toml.stdout).toBe(CODEX_SIGN_IN_ALL_TOML);
     expect(toml.stderr).toBe(SIGN_IN_NOTE);
     const cliDry = await mcp(["install", "--client", "gemini", "--dry-run"], { cwd: root });
@@ -1102,9 +1110,18 @@ describe("hue mcp install", () => {
       expect(claude.code).toBe(0);
       expect(claude.stdout).toBe(`Would write .mcp.json:\n${CLAUDE_CODE_SIGN_IN_ALL_JSON}`);
       expect(claude.stderr).toBe(SIGN_IN_NOTE);
-      const codex = await mcp(["install", "--client", "codex", "--dry-run"], { cwd: root, env });
+      // Codex confirms it holds no hue entry, so there is no key to keep.
+      const fresh = await fakeCodex(await temporaryRoot());
+      const codex = await mcp(["install", "--client", "codex", "--dry-run"], {
+        cwd: root,
+        env: { ...env, PATH: fresh.env.PATH },
+      });
       expect(codex.stdout).toBe(`Would run: codex mcp add hue --url '${ALL_URL}'\n`);
       expect(codex.stderr).toBe(SIGN_IN_NOTE);
+      // Without a codex to ask, a key it may hold is kept, as 0.11.3 did.
+      const unasked = await mcp(["install", "--client", "codex", "--print"], { cwd: root, env });
+      expect(unasked.stdout).toBe(CODEX_ALL_TOML);
+      expect(unasked.stderr).toBe(UNKNOWN_CODEX_NOTE);
     }
     const conductor = await mcp(["install", "--client", "conductor", "--dry-run"], { cwd: root });
     expect(conductor.stdout).toBe(
@@ -1143,7 +1160,11 @@ describe("hue mcp install", () => {
     const saved = process.env.HUE_MCP_KEY;
     process.env.HUE_MCP_KEY = "hue_live_process_only";
     try {
-      const result = await mcp(["install", "--client", "codex", "--dry-run"], { cwd: root });
+      const fresh = await fakeCodex(await temporaryRoot());
+      const result = await mcp(["install", "--client", "codex", "--dry-run"], {
+        cwd: root,
+        env: fresh.env,
+      });
       expect(result.stdout).toBe(`Would run: codex mcp add hue --url '${ALL_URL}'\n`);
       expect(result.stderr).toBe(SIGN_IN_NOTE);
     } finally {
@@ -1327,6 +1348,35 @@ describe("hue mcp install", () => {
     });
     expect(failed.code).toBe(1);
     expect(failed.stderr).toContain("codex exited with code 1. Run this command yourself:");
+  });
+
+  test("a failed Codex add over the same entry Codex already held is a failure, not a registration", async () => {
+    const root = await temporaryRoot();
+    const codex = await fakeCodex(root, 1);
+    // The first run leaves exactly the entry the second one would write.
+    await mcp(["install", "--client", "codex", "--auth", "oauth"], { cwd: root, env: codex.env });
+    const again = await mcp(["install", "--client", "codex", "--auth", "oauth"], {
+      cwd: root,
+      env: codex.env,
+    });
+    expect(again.code).toBe(1);
+    expect(again.stdout).not.toContain("Registered");
+    expect(again.stderr).toContain("codex exited with code 1. Run this command yourself:");
+  });
+
+  test("a Codex that cannot be asked about its entry keeps the key default", async () => {
+    const root = await temporaryRoot();
+    // Every codex command fails with an error other than Codex's missing-server one.
+    const broken = await fakeCli(root, "codex", 2);
+    const result = await mcp(["install", "--client", "codex", "--dry-run"], {
+      cwd: root,
+      env: { PATH: broken.env.PATH },
+    });
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(
+      `Would run: codex mcp add hue --url '${ALL_URL}' --bearer-token-env-var HUE_MCP_KEY\n`,
+    );
+    expect(result.stderr).toBe(UNKNOWN_CODEX_NOTE);
   });
 
   test("Hue reads only read_only=true or 1; sign-in refuses any read_only in --url", async () => {

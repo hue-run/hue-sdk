@@ -709,30 +709,50 @@ function runClientCli(
   });
 }
 
-/** A client CLI's standard output if it exits 0 within ten seconds, else null; none is shown. */
+/**
+ * A client CLI's exit code and output within ten seconds, none of it shown; null when it could not
+ * start or ran out of time.
+ */
 function readClientCli(
   executable: string,
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
-): Promise<string | null> {
-  return new Promise<string | null>((resolveRun) => {
+): Promise<{ code: number; stdout: string; stderr: string } | null> {
+  return new Promise((resolveRun) => {
     try {
-      const child = spawn(executable, args, { ...options, stdio: ["ignore", "pipe", "ignore"] });
-      const chunks: Buffer[] = [];
-      let size = 0;
-      const timer = setTimeout(() => child.kill(), 10_000);
-      child.stdout.on("data", (chunk: Buffer) => {
-        size += chunk.length;
-        if (size <= MAX_CONFIG_BYTES) chunks.push(chunk);
-      });
+      const child = spawn(executable, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+      const collect = () => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        return {
+          add: (chunk: Buffer) => {
+            size += chunk.length;
+            if (size <= MAX_CONFIG_BYTES) chunks.push(chunk);
+          },
+          text: () => (size <= MAX_CONFIG_BYTES ? Buffer.concat(chunks).toString() : null),
+        };
+      };
+      const out = collect();
+      const err = collect();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill();
+      }, 10_000);
+      child.stdout.on("data", out.add);
+      child.stderr.on("data", err.add);
       child.once("error", () => {
         clearTimeout(timer);
         resolveRun(null);
       });
       child.once("close", (code) => {
         clearTimeout(timer);
+        const stdout = out.text();
+        const stderr = err.text();
         resolveRun(
-          code === 0 && size <= MAX_CONFIG_BYTES ? Buffer.concat(chunks).toString() : null,
+          timedOut || code === null || stdout === null || stderr === null
+            ? null
+            : { code, stdout, stderr },
         );
       });
     } catch {
@@ -771,26 +791,42 @@ async function readClaudeProjectEntry(
   return { url: entry.url, auth, source: ".mcp.json" };
 }
 
-/** The server's HTTP entry in Codex's configuration, as `codex mcp get --json` reports it. */
+/**
+ * The server's entry in Codex's configuration, as `codex mcp get --json` reports it: `found` with
+ * its exact output, `none` when Codex says it has no such server (or holds one that is not an HTTP
+ * Hue entry), or `unknown` when Codex could not be asked or answered otherwise, which is never
+ * taken for `none`.
+ */
 async function readCodexEntry(
   executable: string,
   serverName: string,
   options: { cwd: string; env: NodeJS.ProcessEnv },
-): Promise<ExistingEntry | undefined> {
-  const text = await readClientCli(executable, ["mcp", "get", serverName, "--json"], options);
+): Promise<
+  { state: "found"; entry: ExistingEntry; raw: string } | { state: "none" } | { state: "unknown" }
+> {
+  const result = await readClientCli(executable, ["mcp", "get", serverName, "--json"], options);
+  if (!result) return { state: "unknown" };
+  if (result.code !== 0)
+    return result.stderr.includes(`No MCP server named '${serverName}' found`)
+      ? { state: "none" }
+      : { state: "unknown" };
   let transport: unknown;
   try {
-    transport = (JSON.parse(text ?? "") as { transport?: unknown }).transport;
+    transport = (JSON.parse(result.stdout) as { transport?: unknown }).transport;
   } catch {
-    return undefined;
+    return { state: "unknown" };
   }
   if (!isRecord(transport) || typeof transport.url !== "string" || !parseMcpUrl(transport.url))
-    return undefined;
+    return { state: "none" };
   const key =
     Boolean(transport.bearer_token_env_var) ||
     hasAuthorization(transport.http_headers) ||
     hasAuthorization(transport.env_http_headers);
-  return { url: transport.url, auth: key ? "key" : "oauth", source: "Codex's configuration" };
+  return {
+    state: "found",
+    entry: { url: transport.url, auth: key ? "key" : "oauth", source: "Codex's configuration" },
+    raw: result.stdout,
+  };
 }
 
 /** Validates the MCP endpoint: HTTPS, or HTTP for loopback test servers; no credentials or hash. */
@@ -952,7 +988,7 @@ function planFor(
 function defaultAuth(
   client: ClientId,
   readOnly: "--read-only" | "read_only in --url" | undefined,
-  existing: ExistingEntry | undefined,
+  existing: ExistingEntry | "unknown" | undefined,
   env: NodeJS.ProcessEnv,
 ): { auth: AuthMode; keepReadOnly?: boolean; note?: string } {
   if (!OAUTH_CLIENTS.includes(client)) return { auth: "key" };
@@ -961,7 +997,7 @@ function defaultAuth(
       auth: "key",
       note: `Using a key: ${readOnly} needs one, since a sign-in connection has Read and write access.`,
     };
-  if (existing?.auth === "key") {
+  if (existing !== "unknown" && existing?.auth === "key") {
     const keepReadOnly = isReadOnlyUrl(existing.url);
     return {
       auth: "key",
@@ -971,7 +1007,7 @@ function defaultAuth(
         : `Keeping a key, as the existing entry in ${existing.source} has; pass --auth oauth to sign in with Hue instead.`,
     };
   }
-  if (existing)
+  if (existing && existing !== "unknown")
     return {
       auth: "oauth",
       note: `Keeping sign-in with Hue, as the existing entry in ${existing.source} has; pass --auth key to use a key instead.`,
@@ -980,6 +1016,12 @@ function defaultAuth(
     return {
       auth: "key",
       note: `Using a key (${ENV_VAR} is set); pass --auth oauth to sign in with Hue instead.`,
+    };
+  // Codex could not say whether it holds an entry, so a key it may hold is kept, as before.
+  if (existing === "unknown")
+    return {
+      auth: "key",
+      note: `Using a key: Codex's configuration could not be read to keep an existing entry; pass --auth oauth to sign in with Hue instead.`,
     };
   return {
     auth: "oauth",
@@ -1143,13 +1185,22 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       : undefined;
   // Without --auth or read_only, an existing entry keeps its choice. A user-scope `claude mcp add`
   // refuses a name it already has, and Conductor keeps its default, so only these two are read.
-  let existing: ExistingEntry | undefined;
+  let existing: ExistingEntry | "unknown" | undefined;
   if (explicitAuth === undefined && !parsed.values["read-only"] && !urlReadOnly) {
     if (clientId === "claude-code" && scope === "project")
       existing = await readClaudeProjectEntry(cwd, serverName);
     else if (clientId === "codex") {
+      // Sign-in is the default only once Codex confirms it has no entry to keep.
       const codex = await findExecutable("codex", env);
-      if (codex) existing = await readCodexEntry(codex, serverName, { cwd, env });
+      const lookup = codex
+        ? await readCodexEntry(codex, serverName, { cwd, env })
+        : { state: "unknown" as const };
+      existing =
+        lookup.state === "found"
+          ? lookup.entry
+          : lookup.state === "unknown"
+            ? "unknown"
+            : undefined;
     }
   }
   const { auth, keepReadOnly, note }: ReturnType<typeof defaultAuth> =
@@ -1226,6 +1277,11 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
         out(command.display);
         continue;
       }
+      // What Codex held before, so a failed add is not mistaken for this run's registration.
+      const codexSignIn = auth === "oauth" && command.executable === "codex";
+      const before = codexSignIn
+        ? await readCodexEntry(executable, serverName, { cwd, env })
+        : undefined;
       out(`Running: ${shownCommand(command)}`);
       const code = await runClientCli(executable, command.args, { cwd, env, stdout, stderr });
       if (code === 0) {
@@ -1233,10 +1289,16 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
         continue;
       }
       // Codex writes its entry before signing in, so a sign-in that timed out or was denied
-      // leaves the server registered; `codex mcp login` signs in again.
-      if (code !== null && auth === "oauth" && command.executable === "codex") {
-        const entry = await readCodexEntry(executable, serverName, { cwd, env });
-        if (entry?.auth === "oauth" && entry.url === url) {
+      // leaves the server registered; `codex mcp login` signs in again. Only an entry this run
+      // wrote counts: one Codex already held unchanged proves nothing about this add.
+      if (code !== null && codexSignIn) {
+        const after = await readCodexEntry(executable, serverName, { cwd, env });
+        const wrote =
+          after.state === "found" &&
+          after.entry.auth === "oauth" &&
+          after.entry.url === url &&
+          (before?.state === "none" || (before?.state === "found" && before.raw !== after.raw));
+        if (wrote) {
           out(
             `Registered the "${serverName}" MCP server (${shownUrl}) with Codex, but its sign-in did not finish. Run codex mcp login ${serverName} to sign in.`,
           );
