@@ -293,18 +293,22 @@ export function caseTraceparent(span: {
   return `00-${span.traceId}-${span.spanId}-${(flags & 0xff).toString(16).padStart(2, "0")}`;
 }
 
-/** What a deployment's credential-free gateway health said: `on` (200 with
- * `gateway: "simulation"`), `off` (the empty 404 the disabled handler answers, with no
- * `x-hue-diagnostic`), or `unknown` for anything else. */
+/** What a deployment's credential-free gateway probe said: `on` (the gateway answered, with its
+ * health or with a refusal carrying `x-hue-diagnostic`), `off` (the empty 404 the disabled
+ * handler answers, with no `x-hue-diagnostic`), or `unknown` for anything else. */
 export type GatewayState = "on" | "off" | "unknown";
 
 const gatewayStates = new Map<string, Promise<GatewayState>>();
 /**
- * Whether the deployment serves the simulation gateway, from its credential-free health
- * endpoint: 200 with `gateway: "simulation"` is on, the disabled handler's empty 404 (no
- * `x-hue-diagnostic`) is off, and anything else (a network failure, a timeout, a redirect, a
- * refusal carrying a diagnostic, another status or body) is unknown. Probed only after a create
- * was refused; on and off are remembered per origin, unknown is probed again next time.
+ * Whether the deployment serves the simulation gateway, from a credential-free probe of the
+ * gateway's reserved health path with no app named (`/api/sim/_hue/health`), so the answer does
+ * not depend on which apps the deployment mirrors. The gateway answers it on its own host with
+ * its health, 200 with `gateway: "simulation"`, and on the application host with a refusal that
+ * carries `x-hue-diagnostic` (`unmirrored_provider`: the reserved segment is no app); either is
+ * on, since only the enabled gateway writes that header. The disabled handler's empty 404 (no
+ * `x-hue-diagnostic`) is off, and anything else (a network failure, a timeout, a redirect, another
+ * status or body) is unknown. Probed only after a create was refused; on and off are remembered
+ * per origin, unknown is probed again next time.
  */
 export function gatewayState(
   baseUrl: string,
@@ -313,13 +317,12 @@ export function gatewayState(
   const origin = new URL(baseUrl).origin;
   const remembered = gatewayStates.get(origin);
   if (remembered) return remembered;
-  const probe: Promise<GatewayState> = fetchImpl(
-    `${origin}/api/sim/gmailmcp.googleapis.com/_hue/health`,
-    { redirect: "error", signal: AbortSignal.timeout(5_000) },
-  )
+  const probe: Promise<GatewayState> = fetchImpl(`${origin}/api/sim/_hue/health`, {
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  })
     .then(async (response): Promise<GatewayState> => {
-      if (response.status === 404)
-        return response.headers.has("x-hue-diagnostic") ? "unknown" : "off";
+      if (response.status === 404) return response.headers.has("x-hue-diagnostic") ? "on" : "off";
       if (!response.ok) return "unknown";
       const body = (await response.json()) as { gateway?: unknown };
       return body.gateway === "simulation" ? "on" : "unknown";
