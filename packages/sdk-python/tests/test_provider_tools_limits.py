@@ -13,7 +13,11 @@ from hue_sdk._provider_tools import (
     hosted_tool_activity,
     provider_error_description,
 )
-from hue_sdk._tool_definitions import scrub_credential_text, tool_catalog_summary
+from hue_sdk._tool_definitions import (
+    _scrub_credential_text_unbounded,
+    scrub_credential_text,
+    tool_catalog_summary,
+)
 
 ERROR_TEXT_FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -357,10 +361,127 @@ def test_error_text_is_scrubbed_and_bounded_identically_to_the_typescript_sdk():
         assert provider_error_description(case["input"]) == case["expected"]
     assert provider_error_description("x" * 1_100) == "x" * 1_024 + "\u2026"
     assert provider_error_description("x" * 1_024) == "x" * 1_024
-    # Scrubbed before the cut: a credential that straddles the bound never shows a prefix.
-    straddling = provider_error_description("a" * 1_015 + " token=synthetic-secret-value")
-    assert "synthetic" not in straddling and straddling.endswith("\u2026")
+    # Scrubbed before the cut: the 1,024th code point falls inside ``[redacted]``, never inside a
+    # credential, where cutting first would leave its start to be scrubbed on its own.
+    assert (
+        provider_error_description("a" * 1_015 + " token=synthetic-secret-value")
+        == "a" * 1_015 + " token=[r\u2026"
+    )
+    assert (
+        provider_error_description("a" * 1_010 + ' password="synthetic two words"')
+        == "a" * 1_010 + ' password="[re\u2026'
+    )
     assert len(provider_error_description("\U0001f600" * 1_030)) == 1_025
+
+
+@pytest.mark.parametrize(
+    ("kept", "rest", "exported"),
+    [
+        ('password="synthetic-first synth', 'etic-second"', 'password="[redacted]'),
+        ("https://synthetic-us", "er:synthetic-pass@mcp.example.test/", "[redacted]"),
+        ("see hue_sk_syn", "thetic0123456789", "see [redacted]"),
+        ('headers={"Authorization": "Bot synth', 'etic"}', "headers=[redacted]"),
+        # Text the cut does not interrupt keeps its words.
+        (
+            "see https://mcp.example.test/sse next ",
+            "words",
+            "see https://mcp.example.test/sse next ",
+        ),
+    ],
+)
+def test_what_the_scan_cuts_through_is_redacted_to_the_cut_as_in_the_typescript_sdk(
+    kept: str, rest: str, exported: str
+):
+    # The long value before it is scrubbed to ``[redacted]``, so the text at the 16,384-code-point
+    # cut is exported; ``kept`` ends at the cut and ``rest`` is past it.
+    lead = "token=" + "x" * 16_000 + " "
+    filler = "y" * (16_384 - len(lead) - len(kept) - 1)
+    assert (
+        provider_error_description(f"{lead}{filler} {kept}{rest}")
+        == f"token=[redacted] {filler} {exported}\u2026"
+    )
+
+
+def test_an_escaped_space_ends_a_credential_so_a_run_of_them_scrubs_in_linear_time():
+    # Each ``Bearer%20`` starts a credential; were ``%20`` part of one, each would run to the end.
+    started = time.perf_counter()
+    scrubbed = _scrub_credential_text_unbounded("Bearer%20" * 111_112)
+    assert scrubbed.startswith("Bearer%20[redacted]%20[redacted]%20")
+    assert "Bearer%20Bearer" not in scrubbed
+    assert time.perf_counter() - started < 10
+
+
+def test_a_bracketed_value_full_of_escaped_quotes_scrubs_in_linear_time():
+    # A string between backslash-escaped quotes that a bare quote ends is read once, not again
+    # from each escaped quote inside it.
+    started = time.perf_counter()
+    text = 'token: [\\"' + '\\\\\\"' * 50_000 + '"'
+    assert _scrub_credential_text_unbounded(text) == "token: [redacted]"
+    assert time.perf_counter() - started < 10
+
+
+def test_a_url_of_500_000_escaped_values_is_read_to_its_end():
+    # A URL is read a piece at a time, as in the TypeScript SDK, where one repeated pattern made
+    # Bun's regular expression engine match nothing on a URL this long.
+    started = time.perf_counter()
+    scrubbed = _scrub_credential_text_unbounded(
+        "see https://h.example.test/?sig=synthetic-sig" + '&a=\\"x\\"' * 500_000
+    )
+    assert scrubbed.startswith("see https://h.example.test/?sig=%5Bredacted%5D&a=%5Bredacted%5D")
+    assert "synthetic-sig" not in scrubbed
+    assert time.perf_counter() - started < 30
+
+
+def test_a_query_full_of_question_marks_is_read_once_for_names_holding_a_url():
+    # A name starts at the query's ``?`` or an ``&``; were every ``?`` a start, each would be read
+    # to the end of the query.
+    started = time.perf_counter()
+    assert "https://h.example.test/?" in _scrub_credential_text_unbounded(
+        "https://h.example.test/?" + "?" * 100_000
+    )
+    assert time.perf_counter() - started < 10
+
+
+def test_a_text_longer_than_16_384_code_points_is_scrubbed_to_there_and_cut():
+    # As in the TypeScript SDK, where an escaped value this long in a URL is past what Bun's
+    # regular expression engine reads.
+    scrubbed = scrub_credential_text(
+        'see https://h.example.test/?t=\\"synthetic-long-value' + "b" * 200_000
+    )
+    assert "synthetic-long-value" not in scrubbed
+    assert scrubbed.endswith("…")
+    assert len(scrubbed) < 16_384
+
+
+def test_a_scheme_that_a_cut_text_ends_in_or_right_after_is_replaced_whole():
+    for end in ("wss://", "wss:/", "wss:", "ws"):
+        assert scrub_credential_text(f"see x>synthetic-cut-glue-{end}", True) == "see x>[redacted]"
+    # The 16,384-code-point cut falls inside the ``://``.
+    text = "a " * 8_179 + "synthetic-cap-glue-redis://h?x=1"
+    assert scrub_credential_text(text) == "a " * 8_179 + "[redacted]…"
+
+
+def test_a_run_of_authorization_values_inside_each_others_first_word_is_read_once():
+    # Each value starting inside the one before's first word ends where that one does; were each
+    # read again to the end, 20,000 of them would take seconds.
+    started = time.perf_counter()
+    for value in ("Authorization=>%5Bredacted%5D\\", "Authorization=%5Bredacted%5D&"):
+        assert "%5Bredacted%5D" not in _scrub_credential_text_unbounded(value * 20_000)
+    assert time.perf_counter() - started < 3
+
+
+def test_a_run_of_backslashes_in_a_value_that_does_not_close_is_read_once():
+    # Each run can be read only one way; were it two, 80 backslashes would take seconds and 200
+    # would not finish.
+    for count in (80, 200):
+        started = time.perf_counter()
+        provider_error_description('{"error": "token=\\"' + "\\" * count + '"x"}')
+        _scrub_credential_text_unbounded('token: [\\"' + "\\" * count + '"x')
+        assert time.perf_counter() - started < 0.1
+    started = time.perf_counter()
+    for value in ('token=\\"', 'token: [\\"', '?t=\\"'):
+        _scrub_credential_text_unbounded(value + "\\" * 200_000 + "x\n")
+    assert time.perf_counter() - started < 10
 
 
 def test_server_address_keeps_an_underscore_in_a_host_name():
@@ -402,6 +523,6 @@ def test_every_secret_planted_in_the_shared_corpus_is_redacted_alone_or_all_at_o
     ]
     assert leaked == []
     # The whole corpus as one text: every secret still redacted, in time linear in its length.
-    whole = scrub_credential_text("\n".join(case["input"] for case in cases))
+    whole = _scrub_credential_text_unbounded("\n".join(case["input"] for case in cases))
     assert [secret for case in cases for secret in case["secrets"] if secret in whole] == []
     assert time.perf_counter() - started < 10

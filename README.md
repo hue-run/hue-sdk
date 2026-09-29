@@ -64,10 +64,10 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is [`0.11.2`](https://www.npmjs.com/package/@hue-run/sdk), with
-`hue mcp install` sign-in with Hue, Conductor, project pinning, read-only and current toolset options (every tool for agents that search their own tools), live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
+The published TypeScript package is [`0.11.4`](https://www.npmjs.com/package/@hue-run/sdk), with
+`hue mcp install` sign-in with Hue (the default for Claude Code, Codex and Conductor), Conductor, project pinning, read-only and current toolset options (every tool for agents that search their own tools), live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
 `runLocalAgent()`, V2 environments and the local
-[setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.6.1`](https://pypi.org/project/hue-run/), with live spans, the same
+[setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.6.2`](https://pypi.org/project/hue-run/), with live spans, the same
 product-named evaluation client methods and the MCP `mcp=` option. Existing low-level
 methods remain callable. Setup's Python path still installs its separately tested
 package pin. Package checks use synthetic local services.
@@ -118,7 +118,7 @@ The agent first has you create a **Read and write** Hue API key and store it you
 
 To keep the skill in your project for later sessions, install it with the [skills CLI](https://github.com/vercel-labs/skills): `npx skills add hue-run/hue-sdk --skill hue`. It installs from the default branch; to try an unmerged skill change, pass the path of a local checkout instead of `hue-run/hue-sdk`.
 
-To connect the [Hue MCP server](https://docs.hue.run/agents/mcp-server) by hand, use its production URL, `https://mcp.hue.run/mcp`. The `hue` executable handles the configuration: `hue login` validates a **Read and write** key created in Settings and stores it in `.env.hue`, and `hue mcp install --client claude-code` (also `codex`, `conductor`, `cursor`, `vscode`, `windsurf` and `gemini`) writes the client configuration, which references the `HUE_MCP_KEY` environment variable rather than a key value. With `--auth oauth` (Claude Code, Codex and Conductor), the configuration holds only the URL and you sign in with Hue in the client instead of using a key. See [Install the MCP for your coding agent](./packages/sdk-typescript/CLI.md#install-the-mcp-for-your-coding-agent).
+To connect the [Hue MCP server](https://docs.hue.run/agents/mcp-server) by hand, use its production URL, `https://mcp.hue.run/mcp`. The `hue` executable handles the configuration: `hue mcp install --client claude-code` (also `codex` and `conductor`) writes only the URL, and you sign in with Hue in the client. The other clients (`cursor`, `vscode`, `windsurf` and `gemini`), `--read-only` and `--auth key` use a key: the configuration references the `HUE_MCP_KEY` environment variable (VS Code prompts for the key), never a key value, and `hue login` validates a **Read and write** key created in Settings and stores it in `.env.hue` (`hue login --keys coding-agent` also accepts a **Read** key, for read-only access). See [Install the MCP for your coding agent](./packages/sdk-typescript/CLI.md#install-the-mcp-for-your-coding-agent), which also says when a rerun keeps an existing key.
 
 For production request handlers, follow [production safety](https://docs.hue.run/guides/production-safety). The strict setup example above intentionally exposes delivery failures.
 

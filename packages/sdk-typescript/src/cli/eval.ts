@@ -13,6 +13,7 @@ import {
   agentEnvironment,
   isHueControlPlaneCredential,
   stripHueControlPlaneCredentials,
+  withoutWorldVariables,
   writeMcpConfig,
 } from "../environment/world.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
@@ -27,7 +28,7 @@ import type {
   ScorerVersion,
 } from "../evals/types.js";
 import { TargetResult } from "../evals/types.js";
-import { CheckpointIdentityError, CheckpointStore } from "../evals/checkpoint.js";
+import { CheckpointIdentityError, CheckpointStore, checkpointPath } from "../evals/checkpoint.js";
 import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
 import { safeFilename } from "../evals/files.js";
 import { digest } from "../evals/json.js";
@@ -703,15 +704,19 @@ function redacting<Context, Answer>(
 }
 
 /** The parent environment an agent child starts from: without Hue control-plane credentials
- * unless `--allow-hue-credentials` was passed. */
+ * unless `--allow-hue-credentials` was passed, and without any world variable. */
 function parentEnvironment(allowHueCredentials: boolean): Record<string, string> {
-  return allowHueCredentials
-    ? Object.fromEntries(
-        Object.entries(process.env).filter(
-          (entry): entry is [string, string] => entry[1] !== undefined,
-        ),
-      )
-    : stripHueControlPlaneCredentials(process.env);
+  // A world variable left in this process's environment belongs to another world: only the
+  // current case's world sets them, whether or not the case has one.
+  return withoutWorldVariables(
+    allowHueCredentials
+      ? Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        )
+      : stripHueControlPlaneCredentials(process.env),
+  );
 }
 
 function commandAdapter(
@@ -966,9 +971,13 @@ async function prepareCheckpointDirectory(
   explicit: string | undefined,
   agentKey: string,
   projectId: string,
-  leaf: string,
+  ...leaf: string[]
 ): Promise<string> {
-  if (explicit) return join(resolve(explicit), projectId, leaf);
+  const segments: [string, string][] = [
+    [projectId, "project id"],
+    ...leaf.map((part): [string, string] => [part, "checkpoint kind"]),
+  ];
+  if (explicit) return checkpointPath(explicit, ...segments);
   const root = resolve(".hue", "eval");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const ignore = join(root, ".gitignore");
@@ -977,7 +986,7 @@ async function prepareCheckpointDirectory(
   } catch {
     await writeFile(ignore, "*\n", { flag: "wx", mode: 0o600 }).catch(() => undefined);
   }
-  return join(root, agentKey, projectId, leaf);
+  return checkpointPath(join(root, agentKey), ...segments);
 }
 
 /** Worker-side client that reports registration and claims without changing the worker. */
@@ -1474,7 +1483,7 @@ async function runDirect(
       client,
       hue: run.hue,
       experimentId,
-      checkpointDirectory: join(store.directory, experimentId),
+      checkpointDirectory: checkpointPath(store.directory, [experimentId, "experiment id"]),
       // Outputs, error messages and explanations are stored unless opted out; --content governs
       // only the telemetry.
       persistResultContent: !values["no-output"],
@@ -1556,7 +1565,8 @@ async function runWorker(
     values["checkpoint-dir"],
     agent.key,
     project.id,
-    join("worker", slug(agent.revision) || "dev"),
+    "worker",
+    slug(agent.revision) || "dev",
   );
   let current: LocalAgentClaim | undefined;
   client.onRegistered = (registered) => {

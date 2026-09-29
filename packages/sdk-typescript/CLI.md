@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.11.2`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.11.4`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -141,7 +141,7 @@ uses the observed predecessor for compare-and-swap. A conflict refreshes status 
 At most 32 distinct handoff IDs exist per installation; `SETUP_HANDOFF_LIMIT` is terminal. Replacing a
 handoff does not create a trial, reset quota or rerun business work.
 
-## Sign in and store keys
+## Store project keys
 
 `hue login` stores keys that a person creates in Hue; it never mints one, because setup
 credentials are deliberately isolated from ordinary project keys. It prints the key settings page
@@ -185,14 +185,27 @@ for staging). Hue's Settings page does not show these snippets; this command kee
 
 `--auth` chooses how the client authenticates:
 
-- `key` (the default, except for `conductor`) references the `HUE_MCP_KEY` environment variable,
-  which `hue login` stores in `.env.hue`. A key value is never written.
 - `oauth` configures the URL only. The client opens Hue in a browser, where you sign in and
   approve the connection; no key is involved. A new sign-in connection has **Read and
-  write** access to every active project in the organization you choose, within your role, so an
-  agent first calls `list_projects` and passes the chosen project's id as `project_id`. It is available
-  for `claude-code`, `codex` and `conductor`. Hue does not yet accept Cursor's sign-in callback, so
-  `cursor` and the other clients use a key.
+  write** access to every active project in the organization the consent page names, within your
+  role, so an agent first calls `list_projects` and passes the chosen project's id as `project_id`.
+  The approval lasts 30 days; then sign in again. Sign-in covers the MCP server only: tracing and
+  `hue eval` still use a project key as `HUE_API_KEY`. It is available for `claude-code`, `codex`
+  and `conductor`. Hue does not yet accept Cursor's sign-in callback, so `cursor` and the other
+  clients use a key.
+- `key` references the `HUE_MCP_KEY` environment variable, which `hue login` stores in
+  `.env.hue`. A key value is never written. Use a key for read-only access (a **Read** key, which
+  only `hue login --keys coding-agent` accepts), for a run that cannot complete a browser sign-in
+  (CI, `claude -p`), or for access that must outlast 30 days.
+
+Without `--auth`, `claude-code`, `codex` and `conductor` sign in and the other clients use a key.
+`--read-only` (or `read_only=true` in `--url`) selects a key. Otherwise `claude-code` and `codex`
+keep the choice of the server's existing entry, in `./.mcp.json` or as `codex mcp get` reports it,
+so a rerun that changes `--toolsets` keeps a key and its `read_only`; for a new entry they use a
+key when `HUE_MCP_KEY` is set (only its presence is checked). When `codex` is on `PATH` but `codex mcp get` fails
+for another reason, the command asks for `--auth` rather than guess which to keep. `conductor` keeps signing in, since
+its agents read the login-shell environment Conductor captures rather than your terminal's. The
+command names its choice on stderr; pass `--auth` to replace an entry as given.
 
 `--project <id-or-slug>` pins either kind of connection to one project. The command adds or
 replaces `?project=<value>` while keeping `toolsets`, and names the server `hue-<value>` so it can
@@ -203,10 +216,11 @@ The printed sign-in Codex TOML keeps its URL bare and sends `X-Hue-MCP-Project` 
 credential cannot reach it, Hue returns HTTP `404`; change or remove `--project`, because signing
 in again does not change the credential's reach.
 
-`--read-only` adds `?read_only=true` to a key configuration's URL, so Hue hides and rejects write
+`--read-only` selects a key and adds `?read_only=true` to its URL, so Hue hides and rejects write
 tools whatever the key allows. A project key, with or without it, keeps reaching its one project.
-With `--auth oauth` it is refused: a sign-in connection has **Read and write** access, so use a
-**Read** project key for read-only access.
+With `--auth oauth` it is refused, as is any `read_only` in a sign-in `--url` (Hue reads only
+`true` or `1`): a sign-in connection has **Read and write** access, so use a **Read** project key
+for read-only access.
 
 `--toolsets <names>` chooses the tools the connection lists: `all`; the profiles `observe`
 (production reads), `author` (author evaluations) and `evaluate` (run an agent against a case);
@@ -233,9 +247,9 @@ reviewed cases `case_id`, environment versions `environment_version_id`, and tra
 
 | Client | Key (`--auth key`) | Sign-in (`--auth oauth`) |
 | --- | --- | --- |
-| `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. | Merges `mcpServers.hue` with only `type` and `url` into `./.mcp.json`; `--scope user` runs `claude mcp add --transport http --scope user hue URL`. Then run `/mcp` in Claude Code, select `hue` and choose **Authenticate**. |
-| `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. | Runs `codex mcp add hue --url URL`, which can start sign-in right away; `codex mcp login hue` starts or repeats it. The printed TOML block keeps its URL bare and sends the selection as the `X-Hue-MCP-Toolsets` header. |
-| `conductor` | Runs the Claude Code user-scope and Codex key commands above. | The default: runs `claude mcp add --transport http --scope user hue URL` and `codex mcp add hue --url URL`. Then use `hue`'s authentication action in Conductor's MCP status (the plug icon or `/mcp-status`). |
+| `claude-code` | Merges `mcpServers.hue` into `./.mcp.json`. `--scope user` runs `claude mcp add --transport http --scope user hue URL --header 'Authorization: Bearer ${HUE_MCP_KEY}'` when `claude` is on `PATH`, otherwise prints it. | Merges `mcpServers.hue` with only `type` and `url` into `./.mcp.json`; `--scope user` runs `claude mcp add --transport http --scope user hue URL`. Then restart Claude Code, run `/mcp`, select `hue` and choose **Authenticate**. |
+| `codex` | Runs `codex mcp add hue --url URL --bearer-token-env-var HUE_MCP_KEY`, or prints the `[mcp_servers.hue]` TOML block for `~/.codex/config.toml`. | Runs `codex mcp add hue --url URL`, which signs in at once and waits up to 5 minutes for the browser; without `--auth` and outside a terminal (CI, an agent's shell tool) the command prints it instead. A sign-in that does not finish leaves the server registered, and `codex mcp login hue` signs in. Then start a new Codex session. The printed TOML block keeps its URL bare and sends the selection as the `X-Hue-MCP-Toolsets` header. |
+| `conductor` | Runs the Claude Code user-scope and Codex key commands above. | Runs `claude mcp add --transport http --scope user hue URL` and `codex mcp add hue --url URL` (printed outside a terminal, as for `codex`). Then use `hue`'s authentication action in Conductor's MCP status (the plug icon or `/mcp-status`). |
 | `cursor` | Merges `mcpServers.hue` into `./.cursor/mcp.json` with `${env:HUE_MCP_KEY}`. | Refused. |
 | `vscode` | Merges `servers.hue` and the `hue-mcp-key` password input into `./.vscode/mcp.json`. | Refused. |
 | `windsurf` | Prints the `serverUrl` snippet for `~/.codeium/windsurf/mcp_config.json`; nothing is written to the home directory. | Refused. |
@@ -255,17 +269,39 @@ again with `--auth key`.
 JSON files are parsed and merged: other servers, inputs and top-level fields are kept, only the
 selected server entry is replaced (`hue`, or `hue-<value>` with `--project`), and invalid JSON
 (including comments) is refused together with the snippet
-to add by hand. Files are written with mode `0644` through a temporary file and an atomic rename;
-symlinks are refused. `--dry-run` prints the resulting file content or commands without writing or
-running; `--print` prints only the snippet. Client CLIs run without a shell, so the
-`${HUE_MCP_KEY}` reference reaches them literally; the printed commands use single quotes for the
-same reason, and quote a URL with a query such as `?read_only=true`, whose `?` is a zsh glob.
+to add by hand. Files are written through a temporary file and an atomic rename. A new file is
+owner-only (mode `0600`, narrowed further by the umask), because other servers' literal tokens often
+end up in it; a replaced file keeps its read, write and execute permissions, so a file kept at
+`0600` is never widened, except that other accounts lose write access (they could add a command for
+the client to run). It keeps its group, and its owner when root runs the command (if root cannot
+give the file back, the write fails and the old file stays); when the group cannot be kept, the
+group and other accounts get only the access both had. Setuid, setgid and sticky bits are dropped,
+and an access control list is not kept: the replacement has only the mode bits, whose group bits are
+the list's mask, plus any default list the directory gives new files, whose entries then get up to
+the group's access. Restore a list afterwards if you use one. A symlinked file, or a symlinked
+`.cursor` or `.vscode` directory, is refused; the current directory itself may be reached through a
+symlink. The directory is checked before the file is read and again before the rename, and a
+different file found in place of the one read is refused, but not atomically: an account that can
+write the project directory and races the command can still swap in a link between the last check
+and the rename. `--dry-run` prints the resulting file content or commands without writing or
+running. In printed file content, every header and `env` value, and each other credential it
+recognizes (a known token prefix, the value of an option such as `--api-key VALUE`, `-H VALUE`,
+`-e NAME=VALUE` or `--token=VALUE`, a field or assignment such as `clientSecret`, `key` or
+`STRIPE_KEY=`, a token-like URL path segment, a URL's query values, which read `%5Bredacted%5D`), is
+shown as `[redacted]` unless the whole value is a variable or input reference such as
+`Bearer ${HUE_MCP_KEY}`; the file keeps the values. Hue's own URL shows its `toolsets`, `project`
+and `read_only` selections, with every other query value and any token-like path segment as
+`[redacted]`, there and in the lines that report what the command did; a command printed for you to
+run keeps `--url` as given. `--print` prints only the snippet. Client CLIs run without a shell, so
+the `${HUE_MCP_KEY}` reference reaches them literally; the printed commands use single quotes for
+the same reason, and quote a URL with a query such as `?read_only=true`, whose `?` is a zsh glob.
 
 After a key installation the command reminds you to export `HUE_MCP_KEY` in the shell that starts
 the client (VS Code prompts for the key instead). A desktop app started from the Dock or a launcher
 does not see that shell's variables, and Conductor's agents read the login-shell environment that
-Conductor captures, so sign-in is the simpler choice there. After a sign-in installation it names
-the client's authentication action. Both end with the prompt that verifies the connection:
+Conductor captures, so sign-in is the simpler choice there. After a sign-in installation it says
+how the client loads the server (restart Claude Code, or a new Codex session) and names its
+authentication action. Both end with the prompt that verifies the connection:
 `Use the Hue MCP: call list_projects and confirm which project to inspect. Then call get_project_context and show that project's traces from the last 24 hours that need attention or have errors, with links; if there are none, show its 5 most recent traces. For an organization connection, pass the project's id or slug as project_id on each call after list_projects.` A pinned installation instead verifies `connection.pinned: true` and omits `project_id`. `list_projects` returns a project key's one project too. Exit codes:
 `0` done or printed, `1` failed, `2` usage error.
 
@@ -433,7 +469,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.11.2.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.11.4.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -444,7 +480,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.11.2.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.11.4.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json

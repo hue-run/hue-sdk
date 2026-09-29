@@ -275,6 +275,101 @@
         "sha256": "747fc6522365e9f05ce67135a3914865176bcc5a72c1b5fde796bac0877fdfc5",
         "size": 70000
       }
+    },
+    {
+      "name": "a data: URL whose parameter only starts with base64 is its text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/plain;base64x,",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "9f9f32f0bb321c6dcd4f3d8072621ec82f694c44ae37f8b2cd56dc8a273c3baa",
+        "size": 68000
+      }
+    },
+    {
+      "name": "a data: URL whose parameter value is base64 is its text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/plain;charset=base64,",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "9f9f32f0bb321c6dcd4f3d8072621ec82f694c44ae37f8b2cd56dc8a273c3baa",
+        "size": 68000
+      }
+    },
+    {
+      "name": "a data: URL whose parameter ends with base64 is its text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/plain;x-base64,",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "9f9f32f0bb321c6dcd4f3d8072621ec82f694c44ae37f8b2cd56dc8a273c3baa",
+        "size": 68000
+      }
+    },
+    {
+      "name": "a data: URL whose base64 parameter has a value is its text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:text/plain;base64=1,",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "9f9f32f0bb321c6dcd4f3d8072621ec82f694c44ae37f8b2cd56dc8a273c3baa",
+        "size": 68000
+      }
+    },
+    {
+      "name": "a data: URL whose media type ends in base64 is its text",
+      "part": {
+        "type": "blob",
+        "modality": "document",
+        "mime_type": "text/plain"
+      },
+      "key": "content",
+      "content": {
+        "prefix": "data:application/x-base64,",
+        "unit": "QUJD",
+        "times": 17000,
+        "suffix": ""
+      },
+      "expected": {
+        "sha256": "9f9f32f0bb321c6dcd4f3d8072621ec82f694c44ae37f8b2cd56dc8a273c3baa",
+        "size": 68000
+      }
     }
   ]
 }

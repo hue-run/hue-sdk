@@ -40,10 +40,12 @@ function hueStandIn(
     traces?: "refuse" | "drop" | "retry-after";
     /** Grade as a scorer that never reads the execution state. */
     ignoreExecutionState?: boolean;
+    /** Project id the stand-in reports; a hostile origin may return anything. */
+    projectId?: string;
   } = {},
 ) {
   const state = { verdict: options.verdict ?? "pass", deferredPolls: options.deferredPolls ?? 0 };
-  const projectId = randomUUID();
+  const projectId = options.projectId ?? randomUUID();
   const environmentId = randomUUID();
   const environmentVersionId = randomUUID();
   const dataset = {
@@ -691,6 +693,8 @@ process.stdout.write(JSON.stringify({
     hasApiKey: "HUE_API_KEY" in process.env,
     worldToken: process.env.HUE_WORLD_TOKEN,
     gmailMirror: process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL,
+    staleMirror: process.env.HUE_SIM_NOTION_MCP_URL ?? null,
+    signingKey: process.env.HUE_WORLD_TOKEN_KEY ?? null,
     mcpConfig: process.env.HUE_MCP_CONFIG
       ? JSON.parse(readFileSync(process.env.HUE_MCP_CONFIG, "utf8"))
       : null,
@@ -890,6 +894,39 @@ describe("hue eval", () => {
   );
 
   test(
+    "refuses a project id from the origin that would leave the checkpoint directory",
+    async () => {
+      const f = hueStandIn({ projectId: "../../escaped" });
+      const cwd = await workspace();
+      const checkpoints = join(cwd, "state", "checkpoints");
+      try {
+        const result = await hue(
+          [
+            "--scenario",
+            f.scenario.id,
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--checkpoint-dir",
+            checkpoints,
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("Refusing to use project id");
+        expect(existsSync(join(cwd, "escaped"))).toBe(false);
+        expect(existsSync(checkpoints)).toBe(false);
+        expect(f.experiments.size).toBe(0);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
     "spawns --command per case with the scoped environment and emits JSON",
     async () => {
       const f = hueStandIn();
@@ -911,7 +948,15 @@ describe("hue eval", () => {
             "--revision",
             "cmd",
           ],
-          { cwd },
+          {
+            cwd,
+            // A case with no world starts from the same filtered parent: another world's mirror
+            // and a server's signing key left in the runner's shell never reach the agent.
+            env: {
+              HUE_SIM_NOTION_MCP_URL: "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+              HUE_WORLD_TOKEN_KEY: "test-signing-key",
+            },
+          },
         );
         expect(result.status).toBe(0);
         expectNoSecrets(result);
@@ -954,6 +999,8 @@ describe("hue eval", () => {
             worldId: world!.id,
             // The project key never reaches the agent unless the caller opts in.
             hasApiKey: false,
+            staleMirror: null,
+            signingKey: null,
             mcpConfig: null,
           },
         });
@@ -1017,7 +1064,14 @@ describe("hue eval", () => {
             "--json",
             "--content",
           ],
-          { cwd },
+          {
+            cwd,
+            // Another world's mirror and a server's signing key, left in the runner's shell.
+            env: {
+              HUE_SIM_NOTION_MCP_URL: "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+              HUE_WORLD_TOKEN_KEY: "test-signing-key",
+            },
+          },
         );
         expect(result.status).toBe(0);
         expectNoSecrets(result);
@@ -1033,6 +1087,8 @@ describe("hue eval", () => {
           url: mirror,
           worldToken: "[redacted]",
           gmailMirror: mirror,
+          staleMirror: null,
+          signingKey: null,
           hasApiKey: false,
           executionId: world!.executionId,
           worldId: world!.id,

@@ -65,6 +65,9 @@ const IDLE_PULL_FLOOR_MS = 1_000;
 /** The least time between the starts of pulls that forwarded something, so a Hue that answers
  * every pull at once with new deliveries is pulled at most 20 times a second. */
 const BUSY_PULL_FLOOR_MS = 50;
+/** The most of a text from elsewhere (an error message, a URL) that is scrubbed and printed, in
+ * code points, as of a provider's error text; a longer one is cut there and `…` marks the cut. */
+const MAX_FOREIGN_TEXT = 16_384;
 /** A stop request this soon after the first is the same one: under `npx`, npm forwards the
  * terminal's SIGINT to a process group that already received it. */
 const REPEATED_STOP_MS = 1_000;
@@ -599,7 +602,15 @@ export async function runListenCommand(argv: string[], io: ListenCommandIo = {})
     for (const secret of secrets) out = out.replaceAll(secret, "[redacted]");
     return out.replace(/[^\P{Cc}\n\t]|\p{Cf}/gu, " ");
   };
-  const foreign = (text: string) => scrubCredentialText(text);
+  const foreign = (text: string) => {
+    let kept = "";
+    let seen = 0;
+    for (const character of text) {
+      if (seen++ === MAX_FOREIGN_TEXT) return `${scrubCredentialText(kept, true)}…`;
+      kept += character;
+    }
+    return scrubCredentialText(text);
+  };
   const out = (line: string) => void stdout.write(`${clean(line)}\n`);
   const warn = (line: string) => void stderr.write(`${clean(line)}\n`);
 
