@@ -82,11 +82,12 @@ account linkage; the original request evidence is retained and business work is 
 claim. Setup never enables content capture or creates a simulation, Hue Run, evaluation, source capture
 or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
-For an existing account, `hue login` validates keys created in Hue Settings and stores them in
-`.env.hue` without printing them, and `hue mcp install --client claude-code` (or `codex`,
-`conductor`, `cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration that
-references `HUE_MCP_KEY`, or with `--auth oauth` only the URL, for signing in with Hue. See
-[Sign in and store keys](./CLI.md#sign-in-and-store-keys) and
+For an existing account, `hue mcp install --client claude-code` (or `codex`, `conductor`,
+`cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration. For Claude Code, Codex
+and Conductor it holds only the URL, and you sign in with Hue in the client; for the other clients,
+`--read-only` and `--auth key` it references `HUE_MCP_KEY` (VS Code prompts for the key).
+`hue login` validates keys created in Hue Settings and stores them in `.env.hue` without printing
+them. See [Store project keys](./CLI.md#store-project-keys) and
 [Install the MCP for your coding agent](./CLI.md#install-the-mcp-for-your-coding-agent).
 
 `checkConnection()` rejects with `HueConnectionError`: its fixed message is safe to log, `status`

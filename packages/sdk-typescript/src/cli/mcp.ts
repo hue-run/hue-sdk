@@ -10,9 +10,10 @@ import { isCredentialKey, scrubCredentialText } from "../tool-definitions.js";
 /**
  * `hue mcp install`: writes or prints the coding-agent configuration for Hue's MCP server. The
  * shapes are those of Hue's published connection guide (https://docs.hue.run/agents/mcp-server),
- * kept as a separate copy here. Key configurations reference the `HUE_MCP_KEY` environment
- * variable (or a VS Code password input); sign-in configurations hold no credential. A key value
- * is never written.
+ * kept as a separate copy here. Sign-in configurations hold no credential; key configurations
+ * reference the `HUE_MCP_KEY` environment variable (or a VS Code password input). A key value is
+ * never written. Without `--auth`, a client that can sign in does unless a key is asked for or
+ * already set up (`defaultAuth`).
  */
 
 /** Streams, environment and working directory for {@link runMcpCommand}; tests inject these. */
@@ -105,18 +106,21 @@ export const MCP_USAGE = `Usage: hue mcp install --client <claude-code|codex|con
                        [--toolsets NAMES] [--url URL]
                        [--scope project|user] [--dry-run] [--print]
 
-Configure a coding agent to use the Hue MCP server. A key configuration references the
-${ENV_VAR} environment variable; a key value is never written. A sign-in configuration holds
-only the URL: the client opens Hue in a browser, where you approve access to the projects of
-one organization.
+Configure a coding agent to use the Hue MCP server. A sign-in configuration holds only the
+URL: the client opens Hue in a browser, where you approve access to the projects of one
+organization. A key configuration references the ${ENV_VAR} environment variable; a key value
+is never written.
 
 Options:
   --client NAME   Coding agent to configure (required)
-  --auth MODE     key: reference ${ENV_VAR} (the default, except for conductor)
-                  oauth: URL only, sign in with Hue in the client (claude-code, codex and
-                  conductor; the default for conductor)
-  --read-only     key only: add ?read_only=true to the URL so write tools are hidden. A
-                  sign-in connection has Read and write access; use a Read key for read-only
+  --auth MODE     oauth: URL only, sign in with Hue in the client (claude-code, codex and
+                  conductor; their default)
+                  key: reference ${ENV_VAR} (the default for the other clients and with
+                  --read-only). Without --auth, claude-code and codex keep the choice of
+                  an existing entry, and use a key for a new one when ${ENV_VAR} is set
+  --read-only     Add ?read_only=true to a key configuration's URL so write tools are
+                  hidden; selects a key without --auth. A sign-in connection has Read and
+                  write access; use a Read key for read-only
   --project VALUE Pin the connection to one project by id or slug. Its tools omit project_id,
                   and the server is named hue-<value> so it can coexist with an unpinned hue
   --toolsets NAMES
@@ -137,7 +141,9 @@ Options:
 Files: claude-code .mcp.json, cursor .cursor/mcp.json, vscode .vscode/mcp.json (relative to the
 current directory). codex and gemini use their own CLI when it is on PATH; windsurf prints the
 snippet for its user configuration file. conductor registers the server for its Claude Code
-(user scope) and Codex agents with their CLIs, printing the command for a CLI not on PATH.`;
+(user scope) and Codex agents with their CLIs, printing the command for a CLI not on PATH.
+codex mcp add signs in at once and waits up to 5 minutes for the browser, so without --auth
+and outside a terminal the command prints it instead of running it.`;
 
 const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -312,6 +318,11 @@ export function readOnlyMcpUrl(url: string): string {
   const parsed = new URL(url);
   parsed.searchParams.set("read_only", "true");
   return parsed.href;
+}
+
+/** Whether Hue treats the URL as read-only: it honors only `read_only=true` or `read_only=1`. */
+function isReadOnlyUrl(url: string): boolean {
+  return ["true", "1"].includes(new URL(url).searchParams.get("read_only") ?? "");
 }
 
 class ConfigError extends Error {
@@ -562,9 +573,9 @@ const PARAMETER_NAME = /^[A-Za-z_][\w.-]{0,31}$/u;
 
 /**
  * The URL this command writes, as its output shows it: the selections it validated (`toolsets`,
- * `project`, and `read_only` when true or false) are kept; any other query value, and a token-like
- * path segment, becomes `[redacted]`. `parseMcpUrl` has already refused userinfo and a fragment.
- * Commands printed for a person to run keep the URL as given.
+ * `project`, and `read_only` when true, false, 1 or 0) are kept; any other query value, and a
+ * token-like path segment, becomes `[redacted]`. `parseMcpUrl` has already refused userinfo and a
+ * fragment. Commands printed for a person to run keep the URL as given.
  */
 function displayMcpUrl(url: string): string {
   const parsed = new URL(url);
@@ -577,7 +588,7 @@ function displayMcpUrl(url: string): string {
       const selection =
         name === "toolsets" ||
         name === "project" ||
-        (name === "read_only" && /^(?:true|false)$/u.test(value));
+        (name === "read_only" && /^(?:true|false|1|0)$/u.test(value));
       if (selection) return pair;
       return PARAMETER_NAME.test(name) &&
         !TOKEN_SEGMENT.test(name) &&
@@ -642,6 +653,10 @@ function redactConfig(
   return redact(root, false, 0, false);
 }
 
+/** Whether a person is likely watching: login.ts opens a browser on the same test. */
+const isTerminal = (stream: NodeJS.WritableStream) =>
+  (stream as { isTTY?: boolean }).isTTY === true;
+
 async function findExecutable(name: string, env: NodeJS.ProcessEnv): Promise<string | null> {
   const searchPath = env.PATH ?? env.Path ?? "";
   const extensions =
@@ -692,6 +707,126 @@ function runClientCli(
       resolveRun(null);
     }
   });
+}
+
+/**
+ * A client CLI's exit code and output within ten seconds, none of it shown; null when it could not
+ * start or ran out of time.
+ */
+function readClientCli(
+  executable: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<{ code: number; stdout: string; stderr: string } | null> {
+  return new Promise((resolveRun) => {
+    try {
+      const child = spawn(executable, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+      const collect = () => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        return {
+          add: (chunk: Buffer) => {
+            size += chunk.length;
+            if (size <= MAX_CONFIG_BYTES) chunks.push(chunk);
+          },
+          text: () => (size <= MAX_CONFIG_BYTES ? Buffer.concat(chunks).toString() : null),
+        };
+      };
+      const out = collect();
+      const err = collect();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill();
+      }, 10_000);
+      child.stdout.on("data", out.add);
+      child.stderr.on("data", err.add);
+      child.once("error", () => {
+        clearTimeout(timer);
+        resolveRun(null);
+      });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        const stdout = out.text();
+        const stderr = err.text();
+        resolveRun(
+          timedOut || code === null || stdout === null || stderr === null
+            ? null
+            : { code, stdout, stderr },
+        );
+      });
+    } catch {
+      resolveRun(null);
+    }
+  });
+}
+
+/** How an existing entry for the server authenticates: a default keeps it. */
+interface ExistingEntry {
+  url: string;
+  auth: AuthMode;
+  /** Where the entry was found, as the note on stderr names it. */
+  source: string;
+}
+
+const hasAuthorization = (headers: unknown) =>
+  isRecord(headers) && Object.keys(headers).some((name) => name.toLowerCase() === "authorization");
+
+/** The server's HTTP entry in `./.mcp.json`; an unreadable file is reported by the write. */
+async function readClaudeProjectEntry(
+  cwd: string,
+  serverName: string,
+): Promise<ExistingEntry | undefined> {
+  let config: unknown;
+  try {
+    ({ config } = await readJsonConfig(resolve(cwd, ".mcp.json"), ".mcp.json"));
+  } catch {
+    return undefined;
+  }
+  const servers = isRecord(config) ? config.mcpServers : undefined;
+  const entry = isRecord(servers) ? servers[serverName] : undefined;
+  if (!isRecord(entry) || typeof entry.url !== "string" || !parseMcpUrl(entry.url))
+    return undefined;
+  const auth = hasAuthorization(entry.headers) ? "key" : "oauth";
+  return { url: entry.url, auth, source: ".mcp.json" };
+}
+
+/**
+ * The server's entry in Codex's configuration, as `codex mcp get --json` reports it: `found` with
+ * its exact output, `none` when Codex says it has no such server (or holds one that is not an HTTP
+ * Hue entry), or `unknown` when Codex could not be asked or answered otherwise, which is never
+ * taken for `none`.
+ */
+async function readCodexEntry(
+  executable: string,
+  serverName: string,
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<
+  { state: "found"; entry: ExistingEntry; raw: string } | { state: "none" } | { state: "unknown" }
+> {
+  const result = await readClientCli(executable, ["mcp", "get", serverName, "--json"], options);
+  if (!result) return { state: "unknown" };
+  if (result.code !== 0)
+    return result.stderr.includes(`No MCP server named '${serverName}' found`)
+      ? { state: "none" }
+      : { state: "unknown" };
+  let transport: unknown;
+  try {
+    transport = (JSON.parse(result.stdout) as { transport?: unknown }).transport;
+  } catch {
+    return { state: "unknown" };
+  }
+  if (!isRecord(transport) || typeof transport.url !== "string" || !parseMcpUrl(transport.url))
+    return { state: "none" };
+  const key =
+    Boolean(transport.bearer_token_env_var) ||
+    hasAuthorization(transport.http_headers) ||
+    hasAuthorization(transport.env_http_headers);
+  return {
+    state: "found",
+    entry: { url: transport.url, auth: key ? "key" : "oauth", source: "Codex's configuration" },
+    raw: result.stdout,
+  };
 }
 
 /** Validates the MCP endpoint: HTTPS, or HTTP for loopback test servers; no credentials or hash. */
@@ -840,25 +975,81 @@ function planFor(
   }
 }
 
+/**
+ * The authentication used without `--auth`, and the line saying why. A client that can sign in
+ * does, unless a key is asked for: read-only access (`--read-only`, or `read_only=true` in
+ * `--url`), which a sign-in connection does not have. For Claude Code and Codex, an existing entry
+ * keeps its choice, so rerunning the command, to change `--toolsets` for instance, never swaps a
+ * working setup; a key keeps its `read_only`. A new entry uses a key when `HUE_MCP_KEY` is set in
+ * `env`; only the variable's presence is checked. Conductor signed in by default before and keeps
+ * doing so: its agents read the login-shell environment Conductor captures, not this shell's. The
+ * other clients only take a key, so they get no line.
+ */
+function defaultAuth(
+  client: ClientId,
+  readOnly: "--read-only" | "read_only in --url" | undefined,
+  existing: ExistingEntry | undefined,
+  env: NodeJS.ProcessEnv,
+): { auth: AuthMode; keepReadOnly?: boolean; note?: string } {
+  if (!OAUTH_CLIENTS.includes(client)) return { auth: "key" };
+  if (readOnly)
+    return {
+      auth: "key",
+      note: `Using a key: ${readOnly} needs one, since a sign-in connection has Read and write access.`,
+    };
+  if (existing?.auth === "key") {
+    const keepReadOnly = isReadOnlyUrl(existing.url);
+    return {
+      auth: "key",
+      keepReadOnly,
+      note: keepReadOnly
+        ? `Keeping a read-only key, as the existing entry in ${existing.source} has; pass --auth key to drop read_only, or --auth oauth to sign in with Hue instead.`
+        : `Keeping a key, as the existing entry in ${existing.source} has; pass --auth oauth to sign in with Hue instead.`,
+    };
+  }
+  if (existing)
+    return {
+      auth: "oauth",
+      note: `Keeping sign-in with Hue, as the existing entry in ${existing.source} has; pass --auth key to use a key instead.`,
+    };
+  if (client !== "conductor" && env[ENV_VAR])
+    return {
+      auth: "key",
+      note: `Using a key (${ENV_VAR} is set); pass --auth oauth to sign in with Hue instead.`,
+    };
+  return {
+    auth: "oauth",
+    note: `Using sign-in with Hue (${client === "conductor" ? "Conductor's default" : `${ENV_VAR} is not set`}); pass --auth key to use a key instead.`,
+  };
+}
+
 function nextSteps(
   client: ClientId,
   auth: AuthMode,
   serverName: string,
   project: string | undefined,
+  scope: "project" | "user",
+  readOnly: boolean,
 ): string[] {
   const label = CLIENT_LABELS[client];
   const approve = project
     ? `Sign in to Hue and approve the connection. It acts only on the pinned project ${project}, within your role; for read-only access, use a Read project key with --auth key.`
-    : "Sign in to Hue and approve the connection. It can read and write every active project in the organization you choose, within your role; for read-only access, use a Read project key with --auth key.";
+    : "Sign in to Hue and approve the connection. It can read and write every active project in the organization the consent page names, within your role; for read-only access, use a Read project key with --auth key.";
+  // A read-only configuration needs a key: plain hue login refuses a Read key.
+  const stored = readOnly
+    ? "hue login --keys coding-agent stores it in .env.hue and accepts a Read key"
+    : "hue login stores it in .env.hue";
   let lines: string[];
   if (auth === "oauth")
     lines =
       client === "claude-code"
-        ? [`In Claude Code, run /mcp, select ${serverName} and choose Authenticate. ${approve}`]
+        ? [
+            `Restart Claude Code (for example claude --continue)${scope === "project" ? ` and approve ${serverName} from .mcp.json` : ""}, then run /mcp, select ${serverName} and choose Authenticate. ${approve}`,
+          ]
         : client === "codex"
           ? [
               `If Codex did not open Hue in your browser, run: codex mcp login ${serverName}`,
-              approve,
+              `${approve} Then start a new Codex session, which loads ${serverName}.`,
             ]
           : [
               `In Conductor, open MCP status from the plug icon or /mcp-status, refresh, and use ${serverName}'s authentication action. ${approve}`,
@@ -870,13 +1061,13 @@ function nextSteps(
     ];
   else if (client === "conductor")
     lines = [
-      `Conductor agents read ${ENV_VAR} from the login-shell environment Conductor captures, so export it there, not only in a terminal; hue login stores it in .env.hue. Sign-in (--auth oauth) needs no variable.`,
+      `Conductor agents read ${ENV_VAR} from the login-shell environment Conductor captures, so export it there, not only in a terminal; ${stored}.${readOnly ? "" : " Sign-in (--auth oauth) needs no variable."}`,
     ];
   else
     lines = [
-      `Export ${ENV_VAR} in the shell that starts ${label}; hue login stores it in .env.hue:`,
+      `Export ${ENV_VAR} in the shell that starts ${label}; ${stored}:`,
       "  set -a; . ./.env.hue; set +a",
-      `An app started from the Dock or a launcher does not see that shell's variables; start ${label} from the shell${OAUTH_CLIENTS.includes(client) ? ", or sign in instead with --auth oauth" : ""}.`,
+      `An app started from the Dock or a launcher does not see that shell's variables; start ${label} from the shell${OAUTH_CLIENTS.includes(client) && !readOnly ? ", or sign in instead with --auth oauth" : ""}.`,
     ];
   // `codex mcp add` has no option for it, so a registered server gets the line by hand.
   if (client === "codex" || client === "conductor")
@@ -935,10 +1126,10 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       2,
     );
   const clientId = client as ClientId;
-  const auth = parsed.values.auth ?? (clientId === "conductor" ? "oauth" : "key");
-  if (auth !== "key" && auth !== "oauth")
+  const explicitAuth = parsed.values.auth;
+  if (explicitAuth !== undefined && explicitAuth !== "key" && explicitAuth !== "oauth")
     return fail(`--auth must be key or oauth.\n\n${MCP_USAGE}`, 2);
-  if (auth === "oauth" && !OAUTH_CLIENTS.includes(clientId))
+  if (explicitAuth === "oauth" && !OAUTH_CLIENTS.includes(clientId))
     return fail(
       clientId === "cursor"
         ? "--auth oauth is not available for cursor: Hue does not yet accept Cursor's sign-in callback. Use a key (the default), or sign in from claude-code or codex."
@@ -956,16 +1147,6 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       "--url must be an HTTPS URL such as https://mcp.hue.run/mcp (plain HTTP is accepted for loopback test servers only).",
       2,
     );
-  // A sign-in connection's access is chosen when it is approved; read_only is not part of it.
-  if (
-    auth === "oauth" &&
-    (parsed.values["read-only"] || new URL(url).searchParams.has("read_only"))
-  )
-    return fail(
-      "A sign-in connection has Read and write access and cannot be made read-only by its URL. For read-only access, use a Read project key (--auth key), or add --read-only to a key configuration.",
-      2,
-    );
-  if (parsed.values["read-only"]) url = readOnlyMcpUrl(url);
   // --project replaces a pin already in --url. Without it, validate and keep the URL's pin.
   const urlProjects = new URL(url).searchParams.getAll("project");
   let projectValue = parsed.values.project;
@@ -990,6 +1171,48 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     project = selected.project;
     serverName = selected.serverName;
   }
+  const urlReadOnly = new URL(url).searchParams.has("read_only");
+  const readOnly = parsed.values["read-only"]
+    ? "--read-only"
+    : isReadOnlyUrl(url)
+      ? "read_only in --url"
+      : undefined;
+  // Without --auth or read_only, an existing entry keeps its choice. A user-scope `claude mcp add`
+  // refuses a name it already has, and Conductor keeps its default, so only these two are read.
+  let existing: ExistingEntry | undefined;
+  if (explicitAuth === undefined && !parsed.values["read-only"] && !urlReadOnly) {
+    if (clientId === "claude-code" && scope === "project")
+      existing = await readClaudeProjectEntry(cwd, serverName);
+    else if (clientId === "codex") {
+      // Without codex on PATH nothing is run, so nothing Codex holds is replaced. With it, an
+      // entry that cannot be read may hold either a key or a sign-in, so the command does not
+      // guess which to keep.
+      const codex = await findExecutable("codex", env);
+      const lookup = codex ? await readCodexEntry(codex, serverName, { cwd, env }) : undefined;
+      if (lookup?.state === "unknown")
+        return fail(
+          `Could not read Codex's "${serverName}" entry (codex mcp get failed), so the command will not guess whether to keep a key or sign-in. Pass --auth oauth or --auth key.`,
+          2,
+        );
+      if (lookup?.state === "found") existing = lookup.entry;
+    }
+  }
+  const { auth, keepReadOnly, note }: ReturnType<typeof defaultAuth> =
+    explicitAuth === undefined
+      ? defaultAuth(clientId, readOnly, existing, env)
+      : { auth: explicitAuth };
+  // A sign-in connection's access is chosen when it is approved; read_only is not part of it.
+  if (auth === "oauth" && readOnly)
+    return fail(
+      "A sign-in connection has Read and write access and cannot be made read-only by its URL. For read-only access, use a Read project key (--auth key), or add --read-only to a key configuration.",
+      2,
+    );
+  if (auth === "oauth" && urlReadOnly)
+    return fail(
+      "Remove read_only from --url: a sign-in URL does not carry it, since a sign-in connection has Read and write access, and Hue reads only read_only=true or 1. For read-only access, use a Read project key (--auth key).",
+      2,
+    );
+  if (parsed.values["read-only"] || keepReadOnly) url = readOnlyMcpUrl(url);
   url = projectMcpUrl(url, project);
   // --toolsets wins over a selection already in --url, which wins over the client's default.
   // Both sources are validated: Hue ignores an unknown name and would list its default.
@@ -1005,6 +1228,8 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     toolsets = selected.toolsets;
   }
   url = toolsetsMcpUrl(url, toolsets);
+  // On stderr, so --print and --dry-run output stays as it was.
+  if (note) stderr.write(`${note}\n`);
   const shownUrl = displayMcpUrl(url);
   // What the command reports doing; a command a person is to run is printed as given.
   const shownCommand = (command: CliCommand) =>
@@ -1014,7 +1239,7 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
     stdout.write(plan.snippet);
     return 0;
   }
-  const steps = nextSteps(clientId, auth, serverName, project);
+  const steps = nextSteps(clientId, auth, serverName, project, scope, isReadOnlyUrl(url));
 
   if (plan.kind === "manual") {
     out(plan.hint);
@@ -1029,6 +1254,9 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       return 0;
     }
     let failed = false;
+    // `codex mcp add` signs in at once and waits up to five minutes for the browser. Outside a
+    // terminal (CI, an agent's shell tool) nobody may finish that, so a default sign-in prints it.
+    const deferCodex = auth === "oauth" && explicitAuth === undefined && !isTerminal(stdout);
     for (const command of plan.commands) {
       const executable = await findExecutable(command.executable, env);
       if (!executable) {
@@ -1036,11 +1264,40 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
         out(command.display);
         continue;
       }
+      if (deferCodex && command.executable === "codex") {
+        out(
+          "Not running codex mcp add: it signs in at once and waits up to 5 minutes for the browser, and no terminal is attached. Run it where you can sign in, or pass --auth oauth to run it here and wait:",
+        );
+        out(command.display);
+        continue;
+      }
+      // What Codex held before, so a failed add is not mistaken for this run's registration.
+      const codexSignIn = auth === "oauth" && command.executable === "codex";
+      const before = codexSignIn
+        ? await readCodexEntry(executable, serverName, { cwd, env })
+        : undefined;
       out(`Running: ${shownCommand(command)}`);
       const code = await runClientCli(executable, command.args, { cwd, env, stdout, stderr });
       if (code === 0) {
         out(`Registered the "${serverName}" MCP server (${shownUrl}) with ${command.label}.`);
         continue;
+      }
+      // Codex writes its entry before signing in, so a sign-in that timed out or was denied
+      // leaves the server registered; `codex mcp login` signs in again. Only an entry this run
+      // wrote counts: one Codex already held unchanged proves nothing about this add.
+      if (code !== null && codexSignIn) {
+        const after = await readCodexEntry(executable, serverName, { cwd, env });
+        const wrote =
+          after.state === "found" &&
+          after.entry.auth === "oauth" &&
+          after.entry.url === url &&
+          (before?.state === "none" || (before?.state === "found" && before.raw !== after.raw));
+        if (wrote) {
+          out(
+            `Registered the "${serverName}" MCP server (${shownUrl}) with Codex, but its sign-in did not finish. Run codex mcp login ${serverName} to sign in.`,
+          );
+          continue;
+        }
       }
       failed = true;
       stderr.write(

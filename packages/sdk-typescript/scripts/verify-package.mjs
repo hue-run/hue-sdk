@@ -344,6 +344,33 @@ if (
   installedPinnedMcp.stdout !== expectedPinnedMcp
 )
   throw new Error("Installed hue mcp install did not preserve the project pin");
+// Without --auth, the installed CLI signs Claude Code in unless HUE_MCP_KEY is set, and names its
+// choice on stderr so --print stays a snippet; it checks the variable's presence, never prints it.
+{
+  const printed = (value) =>
+    spawnSync(
+      join(minimal, "node_modules", ".bin", "hue"),
+      ["mcp", "install", "--client", "claude-code", "--print"],
+      {
+        cwd: minimal,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, HUE_MCP_KEY: value },
+      },
+    );
+  const signIn = printed("");
+  const key = printed("hue_package_check_value");
+  if (
+    signIn.status !== 0 ||
+    signIn.stdout.includes("Authorization") ||
+    !signIn.stderr.startsWith("Using sign-in with Hue") ||
+    key.status !== 0 ||
+    !key.stdout.includes("Bearer ${HUE_MCP_KEY}") ||
+    !key.stderr.startsWith("Using a key") ||
+    `${key.stdout}${key.stderr}`.includes("hue_package_check_value")
+  )
+    throw new Error("Installed hue mcp install did not choose sign-in or a key by HUE_MCP_KEY");
+}
 // The installed CLI keeps a client configuration held at 0600 for another server's token at 0600,
 // leaves that token out of --dry-run and refuses a symlinked config directory.
 {

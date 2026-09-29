@@ -10,6 +10,29 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- `hue mcp install --client claude-code` and `codex` sign in with Hue by default, as `conductor`
+  already did: without `--auth` they configure only the server URL, and the client opens Hue in a
+  browser to approve the connection. They keep the choice of the server's existing entry, in
+  `./.mcp.json` or as `codex mcp get` reports it, so a rerun keeps a key and its `read_only`; a new
+  entry uses a key when `HUE_MCP_KEY` is set (only its presence is checked). When `codex mcp get`
+  fails for another reason, the command asks for `--auth` rather than guess. `--read-only`, or
+  `read_only=true` or `1` in `--url` (the values Hue reads), also selects a key, for `conductor`
+  too, which refused `--read-only` without `--auth key` before. A sign-in configuration still
+  refuses any other `read_only` value in `--url`. `cursor`, `vscode`, `windsurf` and `gemini` still
+  use a key. The command names its choice, and how to change it, in one line on stderr; `--auth
+  key` configures a key.
+- Without `--auth` and outside a terminal (CI, an agent's shell tool), `codex` and `conductor`
+  print `codex mcp add` instead of running it: it signs in at once and waits up to 5 minutes for the
+  browser. When a Codex sign-in does not finish but Codex registered the server, the command no
+  longer fails: it names `codex mcp login hue` and prints the next steps.
+- `hue login` prints `hue mcp install --client claude-code --auth key` as its next step, so the
+  configuration uses the key it stored. The sign-in next steps no longer ask you to choose an
+  organization, since Hue's consent page has no organization picker, and say to restart Claude Code
+  or start a new Codex session. After `--read-only`, the key steps name
+  `hue login --keys coding-agent`, which accepts a **Read** key, instead of suggesting sign-in.
+
 #### Fixed
 
 - Security: `hue eval --command` no longer passes a world variable inherited from its own
