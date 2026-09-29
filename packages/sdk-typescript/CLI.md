@@ -202,9 +202,8 @@ Without `--auth`, `claude-code`, `codex` and `conductor` sign in and the other c
 `--read-only` (or `read_only=true` in `--url`) selects a key. Otherwise `claude-code` and `codex`
 keep the choice of the server's existing entry, in `./.mcp.json` or as `codex mcp get` reports it,
 so a rerun that changes `--toolsets` keeps a key and its `read_only`; for a new entry they use a
-key when `HUE_MCP_KEY` is set (only its presence is checked). `codex` signs in only once Codex
-reports it has no `hue` entry: when Codex is not on `PATH` or `codex mcp get` fails otherwise, it
-keeps a key, as before. `conductor` keeps signing in, since
+key when `HUE_MCP_KEY` is set (only its presence is checked). When `codex` is on `PATH` but `codex mcp get` fails
+for another reason, the command asks for `--auth` rather than guess which to keep. `conductor` keeps signing in, since
 its agents read the login-shell environment Conductor captures rather than your terminal's. The
 command names its choice on stderr; pass `--auth` to replace an entry as given.
 

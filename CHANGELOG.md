@@ -16,8 +16,8 @@ refuses to publish a version without a matching entry below.
   already did: without `--auth` they configure only the server URL, and the client opens Hue in a
   browser to approve the connection. They keep the choice of the server's existing entry, in
   `./.mcp.json` or as `codex mcp get` reports it, so a rerun keeps a key and its `read_only`; a new
-  entry uses a key when `HUE_MCP_KEY` is set (only its presence is checked). `codex` signs in only
-  once Codex reports no `hue` entry; when Codex cannot be asked, it keeps a key. `--read-only`, or
+  entry uses a key when `HUE_MCP_KEY` is set (only its presence is checked). When `codex mcp get`
+  fails for another reason, the command asks for `--auth` rather than guess. `--read-only`, or
   `read_only=true` or `1` in `--url` (the values Hue reads), also selects a key, for `conductor`
   too, which refused `--read-only` without `--auth key` before. A sign-in configuration still
   refuses any other `read_only` value in `--url`. `cursor`, `vscode`, `windsurf` and `gemini` still

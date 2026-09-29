@@ -988,7 +988,7 @@ function planFor(
 function defaultAuth(
   client: ClientId,
   readOnly: "--read-only" | "read_only in --url" | undefined,
-  existing: ExistingEntry | "unknown" | undefined,
+  existing: ExistingEntry | undefined,
   env: NodeJS.ProcessEnv,
 ): { auth: AuthMode; keepReadOnly?: boolean; note?: string } {
   if (!OAUTH_CLIENTS.includes(client)) return { auth: "key" };
@@ -997,7 +997,7 @@ function defaultAuth(
       auth: "key",
       note: `Using a key: ${readOnly} needs one, since a sign-in connection has Read and write access.`,
     };
-  if (existing !== "unknown" && existing?.auth === "key") {
+  if (existing?.auth === "key") {
     const keepReadOnly = isReadOnlyUrl(existing.url);
     return {
       auth: "key",
@@ -1007,7 +1007,7 @@ function defaultAuth(
         : `Keeping a key, as the existing entry in ${existing.source} has; pass --auth oauth to sign in with Hue instead.`,
     };
   }
-  if (existing && existing !== "unknown")
+  if (existing)
     return {
       auth: "oauth",
       note: `Keeping sign-in with Hue, as the existing entry in ${existing.source} has; pass --auth key to use a key instead.`,
@@ -1016,12 +1016,6 @@ function defaultAuth(
     return {
       auth: "key",
       note: `Using a key (${ENV_VAR} is set); pass --auth oauth to sign in with Hue instead.`,
-    };
-  // Codex could not say whether it holds an entry, so a key it may hold is kept, as before.
-  if (existing === "unknown")
-    return {
-      auth: "key",
-      note: `Using a key: Codex's configuration could not be read to keep an existing entry; pass --auth oauth to sign in with Hue instead.`,
     };
   return {
     auth: "oauth",
@@ -1185,22 +1179,22 @@ export async function runMcpCommand(argv: string[], io: McpCommandIo = {}): Prom
       : undefined;
   // Without --auth or read_only, an existing entry keeps its choice. A user-scope `claude mcp add`
   // refuses a name it already has, and Conductor keeps its default, so only these two are read.
-  let existing: ExistingEntry | "unknown" | undefined;
+  let existing: ExistingEntry | undefined;
   if (explicitAuth === undefined && !parsed.values["read-only"] && !urlReadOnly) {
     if (clientId === "claude-code" && scope === "project")
       existing = await readClaudeProjectEntry(cwd, serverName);
     else if (clientId === "codex") {
-      // Sign-in is the default only once Codex confirms it has no entry to keep.
+      // Without codex on PATH nothing is run, so nothing Codex holds is replaced. With it, an
+      // entry that cannot be read may hold either a key or a sign-in, so the command does not
+      // guess which to keep.
       const codex = await findExecutable("codex", env);
-      const lookup = codex
-        ? await readCodexEntry(codex, serverName, { cwd, env })
-        : { state: "unknown" as const };
-      existing =
-        lookup.state === "found"
-          ? lookup.entry
-          : lookup.state === "unknown"
-            ? "unknown"
-            : undefined;
+      const lookup = codex ? await readCodexEntry(codex, serverName, { cwd, env }) : undefined;
+      if (lookup?.state === "unknown")
+        return fail(
+          `Could not read Codex's "${serverName}" entry (codex mcp get failed), so the command will not guess whether to keep a key or sign-in. Pass --auth oauth or --auth key.`,
+          2,
+        );
+      if (lookup?.state === "found") existing = lookup.entry;
     }
   }
   const { auth, keepReadOnly, note }: ReturnType<typeof defaultAuth> =
