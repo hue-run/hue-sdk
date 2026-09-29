@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.11.4] - 2026-09-29
+
+This release makes sign-in with Hue the default of `hue mcp install` for Claude Code and Codex
+while keeping existing key setups, and stops `hue eval --command` from passing inherited world
+variables to the agent.
+
 #### Changed
 
 - `hue mcp install --client claude-code` and `codex` sign in with Hue by default, as `conductor`
