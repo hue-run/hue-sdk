@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.10"
+  version: "0.6.0"
 ---
 
 # Hue tracing
@@ -14,12 +14,20 @@ Help the developer get an application request into Hue with useful parent/child 
 
 Read the application's repository instructions and inspect its runtime, dependency versions, request/stream lifecycle, and existing OpenTelemetry initialization. Keep the application's prompts, provider, outputs, and dependency versions unless the user requested a change. Use its package manager and existing secret workflow.
 
+Map the application before choosing a path: every process a request passes through, its language and runtime, and how work moves between them (HTTP, queue message, subprocess, RPC, webhook). Choose a path for each process and include the map in the plan. One trace should cover one request across all of them.
+
 | Application | Path |
 | --- | --- |
 | Node.js 22 or 24, without existing OTel setup | [TypeScript SDK](https://docs.hue.run/sdks/typescript) |
-| Bun 1.4 (server-side) | [TypeScript SDK](https://docs.hue.run/sdks/typescript); the installed-package suite and reference chatbot run under Bun in CI, resource-bound checks on Node only |
+| Bun 1.4 (server-side); other Bun versions are untested | [TypeScript SDK](https://docs.hue.run/sdks/typescript); the installed-package suite and reference chatbot run under Bun in CI, resource-bound checks on Node only. Do not upgrade Bun to add tracing, and verify delivery as below |
 | Python 3.10+ | [Python SDK](https://docs.hue.run/sdks/python) |
 | Existing OTel provider or framework instrumentation | [OpenTelemetry integration](https://docs.hue.run/integrations/opentelemetry); retain the provider and other exporters |
+| OpenAI or Anthropic calls (official client or raw HTTP), including OpenAI-compatible routers | Wrap each provider call in `model()` and record GenAI message parts: [OpenAI](https://docs.hue.run/integrations/openai), [Anthropic](https://docs.hue.run/integrations/anthropic), [compatible providers](https://docs.hue.run/integrations/openai-compatible). Record as `provider` the service that served the call |
+| A hand-rolled agent loop | [Agent loop](https://docs.hue.run/tracing/agent-loop): one root span, one `model()` per provider call, one `tool()` per tool with the model's call id |
+| Several processes (orchestrator plus workers, sandboxes or VMs) | One client per process; pass trace context and identifiers explicitly: [distributed tracing](https://docs.hue.run/tracing/distributed-tracing). A sandbox or VM that runs model-written code gets a **Tracing only** key, never the **Read and write** key |
+| Event-driven or background work (chat bots, webhooks, schedules) | [Event-driven work](https://docs.hue.run/tracing/event-driven): start the root where the work starts, not in the acknowledgement handler |
+| Already exporting to Langfuse | [Keep Langfuse and add Hue](https://docs.hue.run/integrations/langfuse): attach Hue to the same provider and do not add `model()` around calls Langfuse already records |
+| Any other language (Go, Java, Ruby, Rust, .NET) | A standard OTLP/HTTP exporter: [send from any language](https://docs.hue.run/integrations/opentelemetry#send-from-any-language) |
 
 Check [compatibility](https://docs.hue.run/sdks/compatibility) and the installed package's API before editing. Receipt helpers require TypeScript `0.1.3` or Python `0.1.1`; check package availability and release notes before using them. Read only the guide relevant to the application's stack. The [documentation index](https://docs.hue.run/llms.txt) helps find other supported integrations.
 
@@ -53,19 +61,19 @@ inactive; do not run it.
 
 ## Install and configure
 
-Use the current [installation guide](https://docs.hue.run/installation) and verify that the intended package version is published before installing it:
+Install the version the [installation guide](https://docs.hue.run/installation) names, and verify that it is published before installing it:
 
 ```sh
 # TypeScript: run in the application directory.
-npm install @hue-run/sdk
+npm install @hue-run/sdk@<version from the installation guide>
 ```
 
 ```sh
 # Python: use the application's existing Python environment.
-python -m pip install hue-run
+python -m pip install "hue-run==<version from the installation guide>"
 ```
 
-Adapt the install command to the app's package manager, for example `uv add hue-run` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If the user has no Hue account or key, proceed as described under Get a Hue API key. If a package is unavailable or another credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
+Adapt the install command to the app's package manager, for example `uv add "hue-run==<version>"` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If the user has no Hue account or key, proceed as described under Get a Hue API key. If a package is unavailable or another credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
 
 The user creates a **Read and write** project service key in Hue under **Settings → Integrations & API keys** and configures it as `HUE_API_KEY` for development through the application's existing secret workflow. This one key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server. Keep it on development machines: before the application runs on a production server, tell the user to create a separate **Tracing only** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the application; never request it in chat or put it in browser code, fixtures, committed files, or logs.
 
@@ -73,7 +81,7 @@ The user creates a **Read and write** project service key in Hue under **Setting
 - **Python:** for serving applications, pass `api_key`, a stable `service_name`, and explicit `capture_content` to `create_hue_safe` (requires 0.1.3). Hue Cloud is the default; omit `base_url` for ordinary cloud use. Use strict `Hue` and `validate_project()` in a separate setup diagnostic. Older Python `0.1.0.dev0` installations still require an explicit origin.
 - **Direct OTLP:** configure `https://app.hue.run/api/v1/otlp/v1/traces` and, when needed, `/api/v1/otlp/v1/logs` with `Authorization: Bearer <project-service-key>`. These are full signal URLs for an OTLP HTTP exporter. `GET /api/v1/projects/current` with the same header optionally verifies the project without sending telemetry. Configure `service.name` on the existing provider resource.
 
-SDK constructors do not automatically read environment variables. For another Hue deployment, use its configured origin. A custom SDK origin excludes API paths; the standard OTLP exporter needs its full signal endpoint. Never change the model provider's API base URL to Hue.
+Hue's constructor options do not read environment variables. In Python, the OpenTelemetry provider Hue creates still follows OpenTelemetry's own environment defaults, such as the sampler (`OTEL_TRACES_SAMPLER`) and `OTEL_SDK_DISABLED`. For another Hue deployment, use its configured origin. A custom SDK origin excludes API paths; the standard OTLP exporter needs its full signal endpoint. Never change the model provider's API base URL to Hue.
 
 ## Capture and instrument full traces
 
@@ -83,21 +91,25 @@ For redaction, read the [redaction recipe](https://docs.hue.run/guides/redaction
 
 Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry and Vercel content attributes at export when capture is disabled (Python requires 0.2.0); still configure the chosen instrumentor's own input/output capture controls to match the chosen policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
 
-Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()`, `model()` (requires 0.2.0) and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument every request path that calls a model or tool, not only one: add model/tool child spans, preserve propagated parent context, and reuse the application's session identifier when available. Then verify at least one real request as described under Verify delivery, and report which instrumented paths you did not exercise. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent. When wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` (requires 0.4.1) or `mcp=` to Python `hue.tool` (requires 0.2.3) so the span records `mcp.server.name` from `initialize`; do not infer the server from a generic tool name.
+Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()`, `model()` (requires 0.2.0) and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Record each provider call in exactly one model span: if Langfuse, an instrumentor or a framework integration already records it on a provider Hue exports from, do not add `model()` around it, because nested or duplicate model spans remove or double the trace's token total. Inside `model()`, record messages as GenAI parts (`text`, `tool_call` in the output, `tool_call_response` in the next call's input), converting from the provider's format as [model calls](https://docs.hue.run/tracing/model-calls) shows; for a streamed response, record the assembled reply once the stream completes, not each chunk. Pass the system prompt and tool definitions as `systemInstructions` / `system_instructions` and `tools`, and pass the model's tool-call id as the tool span's `callId` / `call_id`. Instrument every request path that calls a model or tool, not only one: add model/tool child spans, preserve propagated parent context, and reuse the application's session identifier when available. Then verify at least one real request as described under Verify delivery, and report which instrumented paths you did not exercise. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent. When wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` (requires 0.4.1) or `mcp=` to Python `hue.tool` (requires 0.2.3) so the span records `mcp.server.name` from `initialize`; do not infer the server from a generic tool name.
 
 For AI SDK 7, `hueTelemetry()` from `@hue-run/sdk/ai-sdk` provides per-call integrations. Those replace the global integrations for that call. If existing telemetry must keep receiving the call, follow the existing-provider guide and attach Hue's transport to that provider instead. Direct OTLP users keep their framework instrumentation without adding Hue wrappers.
 
 Keep spans open until streamed work completes or aborts. A returned streaming `Response` is not generation completion. Use the framework's completion/background-lifetime hooks; see the [Next.js streaming recipe](https://docs.hue.run/integrations/opentelemetry#flush-streamed-responses-in-next-js). Preserve application errors and cancellations while recording their span status. Add short comments where initialization, capture, or delivery behavior needs explanation.
 
+Record identity and deployment on every process: the application's session id (`sessionId`/`session_id`), an opaque user id (`userId`/`user_id`), the tenant or workspace id when there is one (`workspaceId`/`workspace_id`), a stable `hue.trace.name` attribute per kind of work, and on the resource `service.version` and `deployment.environment.name` (`production`, `staging` or `development`; only `production` marks production traffic). Identifiers go on spans, not only the resource: set them on the span that opens the trace, and nested Hue helpers inherit them (TypeScript span options; Python `hue.context(session_id=..., user_id=..., workspace_id=...)` around that span). For the resource, a TypeScript client that creates its own provider takes `serviceVersion` and `resourceAttributes`. When Hue attaches to an existing provider, as with Langfuse or other OpenTelemetry setups, those options do not apply: set both attributes on that provider's resource. Python has no resource option, so pass a `TracerProvider` you own, created with that resource, as `tracer_provider=`. Put the request's user text on the root span's input and what the user received on its output. See [what a good trace looks like](https://docs.hue.run/tracing/overview) and [environments and releases](https://docs.hue.run/tracing/environments-and-releases).
+
 ## Isolate serving requests from Hue failures
 
 Read [production safety](https://docs.hue.run/guides/production-safety). These APIs require TypeScript 0.1.5 or Python 0.1.3; verify publication/installation first. Use `createHueSafe` / `create_hue_safe` once per serving process (after fork in Python). Explicitly read `HUE_TRACING_ENABLED` and pass `enabled`; `false` disables Hue without needing a key. Use `flushSafe` / `shutdownSafe` or `force_flush_safe` / `shutdown_safe` with an appropriate bounded deadline (default 1 second). Preserve borrowed-provider ownership.
+
+Place the client where each worker process starts: in a FastAPI or Starlette lifespan handler, gunicorn's `post_fork` when the app is preloaded, or module scope for a single-process server. When a request arrives from another instrumented process of this application with a `traceparent` header, start the request span with `hue.extract(headers)` as its parent. Only when a local HTTP-server or framework span that is not exported to Hue is active, and there is no upstream Hue parent, start the request span with an empty parent (`parentContext: ROOT_CONTEXT` from `@opentelemetry/api`, or `parent_context=Context()` from `opentelemetry.context`), or add Hue's processor to that provider; otherwise the trace waits for a parent that never arrives. In Python, only `span()` takes `parent_context`: open the request span with it and nest `model()` and `tool()` inside.
 
 Keep strict connection, flush and receipt checks in a separate setup/diagnostic path; do not gate application readiness or a customer response on Hue. Do not rerun business work after a telemetry failure. Verify a collector outage, oversized capture, failing redactor, original exception/cancellation and queue overflow against the application's actual entry point. Assert the same result/error and exactly one tool invocation. Observe sanitized cumulative failure/drop counters through a health channel independent of Hue. Explain that bounded memory queues can lose records and cannot guarantee survival of process termination or arbitrary third-party hooks.
 
 ## Verify delivery
 
-Run the application's relevant checks and exercise the changed request path, including a controlled error. Use its existing test setup and a synthetic provider or loopback collector for automated verification; do not replace its production provider. A live model request requires an already authorized, configured test.
+Run the application's relevant checks and exercise each instrumented process, including a controlled error. Use its existing test setup and a synthetic provider or loopback collector for automated verification; do not replace its production provider. When the app has no provider test double, ask the user before making one live request with their existing configuration. For event-driven apps, send one event in a development workspace or replay a recorded fixture event through the real handler. For several processes, collect the trace ID and one span ID per process and verify them together with MCP `verify_trace`, or with `GET /api/v1/traces/{traceId}/receipt` and repeated `expectedSpanId` from a language without a Hue SDK.
 
 - **TypeScript:** await `flush()` after work completes; handle `HueExportError` and its delivery report. For a standalone script, await `shutdownSafe()` in `finally`. Stop shared clients when the server stops, not after each request.
 - **Python:** inspect the booleans from `force_flush()` and `shutdown()` and `export_status` on failure. Context-manager exit alone does not prove successful delivery.
@@ -258,7 +270,7 @@ See [troubleshooting](https://docs.hue.run/guides/troubleshooting) for delivery 
 
 End with one of these, filled in with the actual values. If the user has a Hue account and a **Read** or **Read and write** key and the Hue MCP server is not connected, close that message by offering to connect it with that key: the user also stores it as `HUE_MCP_KEY` themselves if it is not set yet, then you follow step 4 of the [agent setup page](https://docs.hue.run/guides/agent-setup.md), whose client configuration reads `HUE_MCP_KEY`. Do not offer it after a keyless setup, such as tracing against a local OpenTelemetry collector.
 
-- Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`). I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
+- Verified: "Tracing is installed (`<package>@<version>`, capture `<value>`) in processes `<list>`. I exercised `<request>`; receipt `<traceUrl>` confirms spans `<ids>` and fields `<fields>`. Remaining: `<none or items>`."
 - Needs a key or a run: "Code changes are complete and tested against a loopback receiver. Configure `HUE_API_KEY` through `<secret workflow>` and run `<command>`; then I can verify the stored trace."
 - Investigated production: "In `<window>`, Hue counted `<total_count of each query, named by its filters: all traces, status error, needs attention; "at least" when total_count_capped>`; I opened `<sample size>` with `get_trace`. Hue recorded `<errors, attention states, trace-check results or timings, with trace links>`. My reading: `<conclusions, marked as mine>`. Not covered: `<filters, features or fields Hue lacks>`."
-- Blocked: "I stopped before guessing: `<specific ambiguity or failure>`. Next step: `<concrete decision or documentation link>`."
+- Blocked: "I stopped before guessing: `<specific ambiguity or failure, or a process you could not exercise>`. Next step: `<concrete decision or documentation link>`."
