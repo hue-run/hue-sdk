@@ -155,6 +155,66 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
     assert "receipt-verified=true" in confirmation.stdout
     assert environment["HUE_API_KEY"] not in confirmation.stdout + confirmation.stderr
 
+    # Identity crosses processes from the installed wheel: a producer prints its carrier inside
+    # hue.context() and a span, and a consumer extracts it with identity=True and exports.
+    producer = subprocess.run(
+        [
+            str(python),
+            "-c",
+            """
+import json, os
+from hue_sdk import Hue
+with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=False) as hue:
+    headers = {'baggage': 'hue-world=0b7c2d4e-1f3a-4b5c-8d9e-0a1b2c3d4e5f'}
+    with hue.context(session_id='wheel session', user_id='org_1:U9', workspace_id='T1'):
+        with hue.span('producer'):
+            Hue.inject(headers, identity=True)
+    assert hue.force_flush()
+print(json.dumps(headers))
+""",
+        ],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    carrier = json.loads(producer.stdout)
+    assert carrier["baggage"] == (
+        "hue-world=0b7c2d4e-1f3a-4b5c-8d9e-0a1b2c3d4e5f,"
+        "hue.session.id=wheel%20session,hue.user.id=org_1%3AU9,hue.workspace.id=T1"
+    )
+    subprocess.run(
+        [
+            str(python),
+            "-c",
+            """
+import json, os, sys
+from hue_sdk import Hue
+with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=False) as hue:
+    with hue.span('consumer', parent_context=Hue.extract(json.loads(sys.argv[1]), identity=True)):
+        with hue.tool('lookup'):
+            pass
+    assert hue.force_flush()
+""",
+            producer.stdout,
+        ],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    exported = {span.name: span for span in receiver.spans()[len(spans) :]}
+    assert set(exported) == {"producer", "consumer", "execute_tool lookup"}
+    assert len({span.trace_id for span in exported.values()}) == 1
+    assert exported["consumer"].parent_span_id == exported["producer"].span_id
+    for span in exported.values():
+        values = {item.key: item.value.string_value for item in span.attributes}
+        assert values["gen_ai.conversation.id"] == "wheel session"
+        assert values["user.id"] == "org_1:U9"
+        assert values["hue.workspace.id"] == "T1"
+
     # Exercise failure boundaries against this wheel too: the copied tests run
     # outside the checkout, with no editable package or source-path fallback.
     subprocess.run(
@@ -165,7 +225,13 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
     )
     receipt_tests = tmp_path / "receipt-tests"
     receipt_tests.mkdir()
-    for name in ("conftest.py", "test_receipts.py", "test_isolation.py", "test_live_spans.py"):
+    for name in (
+        "conftest.py",
+        "test_receipts.py",
+        "test_isolation.py",
+        "test_live_spans.py",
+        "test_propagation.py",
+    ):
         shutil.copyfile(package / "tests" / name, receipt_tests / name)
     subprocess.run(
         [str(python), "-m", "pytest", "-q", str(receipt_tests)],

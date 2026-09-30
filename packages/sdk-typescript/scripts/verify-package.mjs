@@ -862,6 +862,8 @@ const installedPackageTests = [
   "provider-tools.test.ts",
   "provider-tool-spans.test.ts",
   "inline-files.test.ts",
+  // Identity baggage across a real process boundary, and the codec against the shared fixture.
+  "propagation.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -963,6 +965,7 @@ void [transition, event, options, backend];
           '"../src/tool-definitions.js"',
           '"../node_modules/@hue-run/sdk/dist/tool-definitions.js"',
         )
+        .replaceAll('"../src/propagation.js"', '"../node_modules/@hue-run/sdk/dist/propagation.js"')
         .replaceAll(
           '"../src/inline-files.js"',
           '"../node_modules/@hue-run/sdk/dist/inline-files.js"',
