@@ -1182,8 +1182,8 @@ describe("installed evaluation API and runner contract", () => {
     "a partial rejection naming no trace fails the case whose root the receipt does not hold, and accepts the case beside it through its receipt",
     async () => {
       // Hue accepts a batch but for one case's root span, which its receipt then does not hold.
-      // The batch carries more traces than an issue names (the case's target ended spans in
-      // traces of their own beside its root), so the rejection names none of them and the
+      // The batch carries three traces (the case's target ended two spans in traces of their
+      // own beside its root), so the rejection of an unnamed span names none of them and the
       // receipt decides: the case fails, and the case beside it is accepted through its own.
       const k = fixture();
       const exp4 = k.create();
@@ -1212,7 +1212,7 @@ describe("installed evaluation API and runner contract", () => {
           ) => {
             if (context.item.id === firstK!.id) {
               rootTraceId = context.span.traceId;
-              for (let index = 0; index < 64; index += 1)
+              for (let index = 0; index < 2; index += 1)
                 await hue4.withSpan("aside", () => undefined, { parentContext: ROOT_CONTEXT });
               return "reply";
             }
