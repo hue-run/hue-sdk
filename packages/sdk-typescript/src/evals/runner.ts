@@ -477,18 +477,24 @@ async function traceLanded(
   hue: HueClient,
   trace: { traceId: string; spanId: string; spans?: number } | undefined,
 ): Promise<boolean> {
-  if (!trace) return false;
+  // Without the count of spans the case ended, the receipt cannot tell a lost child span from a
+  // landed trace, and does not accept.
+  if (!trace || trace.spans === undefined) return false;
+  const deadline = Date.now() + RECEIPT_WAIT_MS;
   try {
-    const verification = await hue.verifyTrace(trace.traceId, {
-      expectedSpanIds: [trace.spanId],
-      timeoutMillis: RECEIPT_WAIT_MS,
-    });
-    // The root span present and every span the case ended held: a lost child span is not
-    // hidden behind a root that landed.
-    return (
-      verification.verified &&
-      (trace.spans === undefined || (verification.receipt?.spanCount ?? 0) >= trace.spans)
-    );
+    for (;;) {
+      // The root span present and every span the case ended held: a lost child span is not
+      // hidden behind a root that landed. The receipt answers as soon as the root is there, so
+      // spans still arriving behind it are polled for until the wait ends.
+      const verification = await hue.verifyTrace(trace.traceId, {
+        expectedSpanIds: [trace.spanId],
+        timeoutMillis: Math.max(250, deadline - Date.now()),
+      });
+      if (verification.verified && (verification.receipt?.spanCount ?? 0) >= trace.spans)
+        return true;
+      if (!verification.verified || Date.now() + RECEIPT_POLL_MS >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, RECEIPT_POLL_MS));
+    }
   } catch {
     return false;
   }
@@ -496,6 +502,8 @@ async function traceLanded(
 /** How long a receipt is polled for the root span after a flush reported a failure: ingestion
  * of an accepted batch is not instant, and a span that is not there by then was not delivered. */
 const RECEIPT_WAIT_MS = 5_000;
+/** How often the receipt is read again while the root is there but spans are still arriving. */
+const RECEIPT_POLL_MS = 500;
 async function scoresFor(
   versions: ScorerVersion[],
   context: ScoreContext,
@@ -912,23 +920,32 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           const decided = checkpoint as Prepared;
           const traceId = decided.trace?.traceId;
           // Every span the case ended has reached the exporter by now; the receipt is held to
-          // that count, so a lost child span is not hidden behind a root span that landed.
-          if (decided.trace && traceId !== undefined)
-            decided.trace.spans = options.hue.transport.spansEnded(traceId);
+          // that count, so a lost child span is not hidden behind a root span that landed. The
+          // count is saved before anything is decided, so a process that stops here leaves a
+          // pending checkpoint the receipt can be held to; a transport that does not count (an
+          // older or borrowed one) leaves no count, and the receipt then cannot accept.
+          if (decided.trace && traceId !== undefined) {
+            const spans = options.hue.transport.spansEnded?.(traceId);
+            if (spans !== undefined) {
+              decided.trace.spans = spans;
+              await store.write(file, decided);
+            }
+          }
           if (options.hue.transport.getFailureSequence() !== failureSequenceBefore) {
-            const issues = options.hue.transport
-              .getIssues()
-              .filter(
-                (issue) => issue.sequence > failureSequenceBefore && issue.kind !== "warning",
-              );
+            const retained = options.hue.transport.getIssues();
+            const issues = retained.filter(
+              (issue) => issue.sequence > failureSequenceBefore && issue.kind !== "warning",
+            );
             const named = issues.filter(
               (issue) =>
                 issue.traceIds && (traceId === undefined || issue.traceIds.includes(traceId)),
             );
             // An issue naming no trace, and a failure whose issue the bounded history has already
-            // rolled past, may be anyone's.
+            // rolled past (the oldest retained issue is younger than the first this case could
+            // have caused), may be anyone's.
             const unattributed = issues.filter((issue) => !issue.traceIds);
-            const evicted = issues.length === 0;
+            const evicted =
+              issues.length === 0 || (retained[0]?.sequence ?? 0) > failureSequenceBefore + 1;
             if (named.length) {
               checkpoint.exportState = "failed";
               await store.write(file, checkpoint);

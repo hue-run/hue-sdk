@@ -18,9 +18,10 @@ refuses to publish a version without a matching entry below.
   trace active where it happened. The runner reads them after each case's flush: a failure that
   names the case's trace marks that case `failed` (its evidence is incomplete, and resume refuses
   it), one that names only other traces leaves it accepted, and one that names no trace is
-  decided by the case's trace receipt, at once or on resume, where the presence of its root span
-  accepts a checkpoint still `pending`. One case's telemetry failure no longer flags the cases
-  running beside it.
+  decided by the case's trace receipt, at once or on resume for a checkpoint still `pending`: the
+  receipt must hold the case's root span and at least as many spans as the case ended, which the
+  checkpoint records at the flush. One case's telemetry failure no longer flags the cases running
+  beside it.
 
 #### Added
 

@@ -244,7 +244,14 @@ export class HueTransport {
           logs.onEmit(queued as Parameters<LogRecordProcessor["onEmit"]>[0]);
         } catch {
           if (admitted) this.finish("logs", [admitted]);
-          this.issue("logs", "invalid", 1, "Telemetry processor could not accept a record");
+          this.issue(
+            "logs",
+            "invalid",
+            1,
+            "Telemetry processor could not accept a record",
+            undefined,
+            traceIdsOf([log]),
+          );
         }
       },
       forceFlush: () => logs.forceFlush(),
@@ -497,9 +504,10 @@ export class HueTransport {
 
   /** Spans of a trace this transport has handed to its exporter, by trace id, for the newest
    * traces only: a runner compares the count with the trace receipt's span count to know that
-   * every span of a case landed, not only the root. Zero for a trace it does not remember. */
-  spansEnded(traceId: string): number {
-    return this.endedSpans.get(traceId) ?? 0;
+   * every span of a case landed, not only the root. Undefined for a trace it does not remember,
+   * which is not the same as none: the caller must not take an unknown count for complete. */
+  spansEnded(traceId: string): number | undefined {
+    return this.endedSpans.get(traceId);
   }
   private endedSpans = new Map<string, number>();
   private countEnded(span: ReadableSpan): void {
@@ -813,8 +821,12 @@ class ReportingExporter<T extends RecordValue> {
           const placeholderRejections = downgrade ? Math.min(count, placeholders) : 0;
           if (downgrade) this.transport.rejectPlaceholders(placeholderRejections);
           const remaining = count - placeholderRejections;
-          // Rejections are not matched to records. Attribute them to real records first.
+          // Rejections are not matched to records. Attribute them to real records first. A
+          // rejection in a batch of one trace is that trace's; in a batch of several it names
+          // none, since the innocent traces' records may have been accepted, and each case's
+          // receipt decides.
           rejected = Math.min(remaining, real);
+          const rejectedTraceIds = traceIds && traceIds.length === 1 ? traceIds : undefined;
           if (remaining || (partial?.errorMessage && !downgrade))
             this.transport.issue(
               this.signal,
@@ -826,7 +838,7 @@ class ReportingExporter<T extends RecordValue> {
                   ? "Hue rejected in-progress span placeholders"
                   : "Hue returned an ingestion warning",
               undefined,
-              traceIds,
+              rejectedTraceIds,
             );
           // Do not pass backend error text or raw response bytes into the global OTel diagnostic logger.
           return {};
