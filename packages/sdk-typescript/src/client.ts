@@ -15,7 +15,7 @@ import {
 } from "@opentelemetry/api";
 import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { isTracingSuppressed, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
@@ -30,15 +30,26 @@ import { toolCatalogSummary } from "./tool-definitions.js";
 import { encodeContent, noopSpan, safeSpan, type EncodeLimits } from "./safety.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
+import {
+  baggageKey,
+  carriedIdentity,
+  mergeIdentityBaggage,
+  readIdentityBaggage,
+  remoteIdentity,
+  withIdentity,
+  type Identity,
+} from "./propagation.js";
 import { sdkVersion } from "./version.js";
 import { MAX_BODY_BYTES, MAX_FILE_DATA_BYTES } from "./config.js";
 import type {
   ExportReport,
+  ExtractOptions,
   FileRecord,
   FlushableLoggerProvider,
   FlushableTracerProvider,
   HueOptions,
   HueSpan,
+  InjectOptions,
   ModelOptions,
   ProjectConnection,
   SpanOptions,
@@ -146,6 +157,25 @@ function errorType(error: unknown): string {
   return error instanceof Error && error.name ? String(error.name) : "Error";
 }
 
+/** An OpenTelemetry `Context`, told apart from an options object by its two methods. */
+function isContext(value: unknown): value is Context {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as Partial<Context>).getValue === "function" &&
+    typeof (value as Partial<Context>).setValue === "function"
+  );
+}
+
+/** Per field: the remote identity of an explicit or ambient parent, else the inherited scope. */
+function overlay(remote: Identity, inherited: Identity | undefined): Identity {
+  return {
+    sessionId: remote.sessionId ?? inherited?.sessionId,
+    userId: remote.userId ?? inherited?.userId,
+    workspaceId: remote.workspaceId ?? inherited?.workspaceId,
+  };
+}
+
 /** Local async context preserves nesting without registering or replacing global OTel providers. */
 class ContextualTracer implements Tracer {
   constructor(
@@ -158,6 +188,10 @@ class ContextualTracer implements Tracer {
     if (!this.enabled()) return noopSpan();
     try {
       const active = this.storage.getStore();
+      const effective = parent ?? active?.context ?? context.active();
+      // A parent from an opted-in extract() outranks the inherited scope, as in withSpan.
+      const remote = remoteIdentity(effective);
+      const identity = remote ? overlay(remote, active) : active;
       return safeSpan(
         this.source.startSpan(
           name,
@@ -165,12 +199,12 @@ class ContextualTracer implements Tracer {
             ...options,
             attributes: {
               ...options.attributes,
-              ...(active?.sessionId ? { "gen_ai.conversation.id": active.sessionId } : {}),
-              ...(active?.userId ? { "user.id": active.userId } : {}),
-              ...(active?.workspaceId ? { "hue.workspace.id": active.workspaceId } : {}),
+              ...(identity?.sessionId ? { "gen_ai.conversation.id": identity.sessionId } : {}),
+              ...(identity?.userId ? { "user.id": identity.userId } : {}),
+              ...(identity?.workspaceId ? { "hue.workspace.id": identity.workspaceId } : {}),
             },
           },
-          parent ?? active?.context ?? context.active(),
+          effective,
         ),
         this.failed,
       );
@@ -218,14 +252,24 @@ class ContextualTracer implements Tracer {
     // A disabled client creates no span and leaves the application's active context untouched.
     const created = isSpanContextValid(span.spanContext());
     let active = parent;
+    let store: LocalContext = { ...this.storage.getStore(), context: active };
     if (created)
       try {
         active = trace.setSpan(parent, span);
+        store = { ...store, context: active };
+        // Helpers in the callback inherit a remote parent's identity through the local scope.
+        const remote = remoteIdentity(parent);
+        if (remote) {
+          const identity = overlay(remote, store);
+          store = { ...store, ...identity, context: withIdentity(active, identity, false) };
+          active = store.context;
+        }
       } catch {
         this.failed();
         active = trace.setSpan(ROOT_CONTEXT, span);
+        store = { ...this.storage.getStore(), context: active };
       }
-    return this.storage.run({ ...this.storage.getStore(), context: active }, () =>
+    return this.storage.run(store, () =>
       created
         ? runInContext(active, () => callback(span) as ReturnType<F>, this.failed)
         : (callback(span) as ReturnType<F>),
@@ -350,11 +394,21 @@ export class HueClient {
     if (this.enabled && !this.closed) {
       try {
         const inherited = this.storage.getStore();
+        const parent = options.parentContext ?? inherited?.context ?? context.active();
+        // Per field: explicit options, then an identity an opted-in extract() put on the parent,
+        // then the enclosing helper. A helper's own context is marked local, so only an explicit
+        // parentContext, or the active context outside any helper, can carry a remote identity.
+        const remote = remoteIdentity(parent);
+        const identity: Identity = {
+          sessionId: identifier(options.sessionId ?? remote?.sessionId ?? inherited?.sessionId),
+          userId: identifier(options.userId ?? remote?.userId ?? inherited?.userId),
+          workspaceId: identifier(
+            options.workspaceId ?? remote?.workspaceId ?? inherited?.workspaceId,
+          ),
+        };
         active = {
-          context: options.parentContext ?? inherited?.context ?? context.active(),
-          sessionId: identifier(options.sessionId ?? inherited?.sessionId),
-          userId: identifier(options.userId ?? inherited?.userId),
-          workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
+          context: withIdentity(parent, identity, false),
+          ...identity,
           model: inherited?.model,
         };
         span = this.storage.run(active, () =>
@@ -551,25 +605,87 @@ export class HueClient {
   }
 
   /**
-   * Writes W3C `traceparent` for the active span into a carrier; never the API key or baggage.
-   * Propagation also runs for a disabled or closed client so downstream tracing stays connected.
+   * Writes W3C `traceparent` for the active span into a carrier, never the API key. With
+   * `{ identity: true }` it also writes the context's session, user and workspace identifiers as
+   * W3C `baggage` members, replacing any `hue.*` identity members already there and keeping every
+   * other member. Propagation also runs for a disabled or closed client so downstream tracing
+   * stays connected.
    */
-  inject(carrier: Record<string, string>, activeContext: Context = this.getContext()): void {
+  inject(carrier: Record<string, string>, activeContext?: Context): void;
+  inject(carrier: Record<string, string>, options: InjectOptions): void;
+  inject(carrier: Record<string, string>, contextOrOptions?: Context | InjectOptions): void {
+    const options =
+      contextOrOptions !== null &&
+      typeof contextOrOptions === "object" &&
+      !isContext(contextOrOptions)
+        ? contextOrOptions
+        : undefined;
+    const activeContext = options
+      ? (options.context ?? this.getContext())
+      : contextOrOptions === undefined
+        ? this.getContext()
+        : (contextOrOptions as Context);
     try {
       propagator.inject(activeContext, carrier, defaultTextMapSetter);
     } catch {
       this.transport.instrumentationFailure();
     }
+    if (options?.identity === undefined || options.identity === false) return;
+    const failed = () => {
+      if (this.enabled && !this.closed) this.transport.instrumentationFailure();
+    };
+    if (options.identity !== true) return failed();
+    try {
+      const key = baggageKey(carrier);
+      const current: unknown = Object.hasOwn(carrier, key) ? carrier[key] : undefined;
+      const existing = Array.isArray(current) ? current.join(",") : current;
+      if (existing !== undefined && typeof existing !== "string") return failed();
+      // As OpenTelemetry's propagators do, write nothing new under suppressed tracing; still strip.
+      const identity = isTracingSuppressed(activeContext)
+        ? {}
+        : (carriedIdentity(activeContext) ?? {});
+      const result = mergeIdentityBaggage(existing, identity);
+      if (result.value === undefined) delete carrier[key];
+      else carrier[key] = result.value;
+      if (result.ownMemberTooLong > 0) failed();
+    } catch {
+      failed();
+    }
   }
 
-  /** Reads W3C trace context from a carrier for use as `parentContext`. */
-  extract(carrier: Record<string, string | string[] | undefined>): Context {
+  /**
+   * Reads W3C trace context from a carrier for use as `parentContext`. With `{ identity: true }` it
+   * also reads `hue.session.id`, `hue.user.id` and `hue.workspace.id` from `baggage`; `withSpan`,
+   * `model`, `tool` and Hue's tracer, started under the result (as `parentContext`, or as the
+   * active context when your application registered an OpenTelemetry context manager), then
+   * record them unless you pass `sessionId`, `userId` or `workspaceId` yourself. Invalid or
+   * oversized baggage is ignored. Use `identity` only for carriers written by
+   * `inject(carrier, { identity: true })` in your own service, never on a public request.
+   */
+  extract(
+    carrier: Record<string, string | string[] | undefined>,
+    options?: ExtractOptions,
+  ): Context {
+    let extracted = ROOT_CONTEXT;
     try {
-      return propagator.extract(ROOT_CONTEXT, carrier, defaultTextMapGetter);
+      extracted = propagator.extract(ROOT_CONTEXT, carrier, defaultTextMapGetter);
     } catch {
       this.transport.instrumentationFailure();
-      return ROOT_CONTEXT;
     }
+    if (options?.identity === undefined || options.identity === false) return extracted;
+    if (options.identity !== true) {
+      if (this.enabled && !this.closed) this.transport.instrumentationFailure();
+      return extracted;
+    }
+    try {
+      // Remote input: invalid baggage is ignored, never counted, so it cannot fail a flush.
+      const key = baggageKey(carrier);
+      const identity = readIdentityBaggage(Object.hasOwn(carrier, key) ? carrier[key] : undefined);
+      if (identity) extracted = withIdentity(extracted, identity, true);
+    } catch {
+      // A carrier whose reads throw applies no identity.
+    }
+    return extracted;
   }
 
   /**

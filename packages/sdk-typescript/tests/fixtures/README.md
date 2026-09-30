@@ -81,3 +81,13 @@ own text, base64 characters before a final newline, `data:` URLs whose data does
 which are hashed as their text, a `data:` URL with millions of parameters, and text and a
 percent-escaped `data:` URL with a lone surrogate, which both SDKs write as U+FFFD. Both suites
 check the file.
+
+# Identity baggage fixture
+
+`identity-baggage.json` is synthetic; both suites read the same file. `encode` cases give an
+identity and an existing `baggage` value (or none) with the exact value `inject(..., { identity:
+true })` writes (`null`: no header), including cases that only strip forged `hue.*` members, and
+`omittedTooLong`, the Hue members left out for exceeding 4,096 bytes. `decode` cases give a
+header and the identity `extract(..., { identity: true })` reads from it, or `null`. Values cover
+`:`, space, `+`, `,`, `;`, `=`, `%`, `"`, `\`, `é`, CJK, an emoji, a 4,079-byte value that fills a
+4,096-byte member, and malformed, non-UTF-8, conflicting and oversized input.

@@ -167,8 +167,40 @@ export interface SpanOptions {
   workspaceId?: string;
   /** Recorded as `input.value` when `captureContent` is true; any JSON-encodable value. */
   input?: unknown;
-  /** Explicit parent context, for example from {@link HueClient.extract}. */
+  /**
+   * Explicit parent context, for example from {@link HueClient.extract}. Identifiers that
+   * `extract(carrier, { identity: true })` read apply to this span and its nested helpers, below
+   * explicit `sessionId`, `userId` and `workspaceId`.
+   */
   parentContext?: Context;
+}
+
+/** Options for {@link HueClient.inject}. */
+export interface InjectOptions {
+  /**
+   * Also write the session, user and workspace identifiers in effect for the injected context as
+   * W3C `baggage` members `hue.session.id`, `hue.user.id` and `hue.workspace.id`, replacing any
+   * `hue.*` identity members already in the carrier. Other members of an existing `baggage` value
+   * are kept. Off by default. Baggage reaches every service the carrier is sent to, and
+   * OpenTelemetry-instrumented services forward it on their own calls: use opaque identifiers,
+   * not names or email addresses.
+   */
+  identity?: boolean;
+  /** Context to inject; defaults to {@link HueClient.getContext}. */
+  context?: Context;
+}
+
+/** Options for {@link HueClient.extract}. */
+export interface ExtractOptions {
+  /**
+   * Also read `hue.session.id`, `hue.user.id` and `hue.workspace.id` from the carrier's W3C
+   * `baggage`, so spans started under the result record them. Off by default. Enable it only when
+   * the immediate sender wrote the carrier with `inject(carrier, { identity: true })`, which
+   * replaces any forwarded `hue.*` members. Never enable it on a public request, or behind a hop
+   * whose OpenTelemetry baggage propagator forwards inbound baggage: such a hop passes on members
+   * an attacker chose.
+   */
+  identity?: boolean;
 }
 
 /**

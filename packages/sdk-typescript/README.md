@@ -412,11 +412,23 @@ The application's providers own the resource in this mode, so `resourceAttribute
 transport options is ignored and reported as a `warning` issue; set `deployment.environment.name`
 and similar attributes on your own providers.
 
-For external parent context pass `parentContext` to `withSpan`. Across processes, use
-`hue.inject(carrier)` inside the producing span and `hue.extract(carrier)` in the worker; both
-speak W3C `traceparent` only and never include the API key or baggage. Hue registers no global
-propagator, so `propagation.inject()` from `@opentelemetry/api` is a no-op unless your
-application configured one. `getContext()` exposes the helper's current context for APIs taking
+For external parent context pass `parentContext` to `withSpan`. Across processes, call
+`hue.inject(carrier)` inside the producing span and pass `hue.extract(carrier)` as `parentContext`
+in the worker; by default both speak W3C `traceparent` only and never include the API key. Hue
+already attributes the whole trace from its root span, so you need identity propagation only when
+the worker's own spans must carry the identifiers: while the root span is still open or was never
+exported, when the worker starts its own trace, or across several hops. Then (requires 0.12.0)
+use `hue.inject(carrier, { identity: true })` and `hue.extract(carrier, { identity: true })`: the
+carrier also gets `baggage` members `hue.session.id`, `hue.user.id` and `hue.workspace.id`
+(replacing earlier ones, keeping others, never the API key), and spans started under the extracted
+context record them unless you pass your own. The extracted context applies as `parentContext`, or
+as the active context only if your application registered an OpenTelemetry context manager.
+Enable `identity` on `extract` only when your own service wrote the carrier with
+`inject(carrier, { identity: true })`, never on a public request, and use opaque identifiers:
+baggage reaches every service the carrier is sent to. `inject` writes identity only from a Hue
+helper's context or an extracted context; the Python SDK also writes a `hue.context()` block's
+identity with no span. Hue registers no global propagator, so `propagation.inject()` from
+`@opentelemetry/api` is a no-op unless your application configured one. `getContext()` exposes the helper's current context for APIs taking
 an explicit context. Session, user and workspace identifiers (`sessionId` as
 `gen_ai.conversation.id`, `userId` as `user.id`, and `workspaceId` as `hue.workspace.id` for the
 application workspace or tenant) are inherited within a client callback and are

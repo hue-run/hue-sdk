@@ -14,6 +14,7 @@ from time import monotonic, time_ns
 from typing import Any
 
 import requests
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry._logs import LoggerProvider as ApiLoggerProvider
 from opentelemetry._logs import NoOpLoggerProvider, SeverityNumber
@@ -27,6 +28,17 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from opentelemetry.util.types import AttributeValue
 
 from ._otel_compat import encode_logs
+from ._propagation import (
+    IDENTITY_KEYS,
+    current_identity,
+    identity_scope,
+    inject_identity,
+    is_identifier,
+    read_carrier,
+    remote_identity,
+    with_remote_identity,
+    without_remote,
+)
 from ._provider_tools import (
     ABSENT,
     hosted_server_addresses,
@@ -273,7 +285,11 @@ class HueSpan:
         addresses = hosted_server_addresses(named, request)
         activity = hosted_tool_activity(named, response, self._client.capture_content)
         self._client._record_issues(activity.skipped)
-        parent = trace.set_span_in_context(self.otel_span)
+        # An identity attached from Hue.extract(..., identity=True) must not reach these children as
+        # an explicit parent's: the model span already resolved it below any nested hue.context().
+        parent = trace.set_span_in_context(
+            self.otel_span, without_remote(otel_context.get_current())
+        )
 
         def server(label: str | None) -> dict[str, AttributeValue]:
             attributes: dict[str, AttributeValue] = {}
@@ -768,12 +784,14 @@ class Hue:
         """Task-local attributes inherited by nested Hue helpers; no global baggage changes.
 
         ``workspace_id`` is the application workspace or tenant the work runs in, recorded as
-        ``hue.workspace.id``.
+        ``hue.workspace.id``. ``Hue.inject(headers, identity=True)`` inside the block propagates
+        these identifiers, even before any span starts.
         """
         if not self._active:
             yield
             return
         token = None
+        scope_token = None
         try:
             attributes = dict(self._context_attributes.get() or {})
             if session_id is not None:
@@ -788,11 +806,17 @@ class Hue:
                     attributes.pop("hue.workspace.id", None)
                     self._record_issue()
             token = self._context_attributes.set(attributes)
+            scope_token = identity_scope.set(attributes)
         except Exception:
             self._record_issue()
         try:
             yield
         finally:
+            if scope_token is not None:
+                try:
+                    identity_scope.reset(scope_token)
+                except Exception:
+                    self._record_issue()
             if token is not None:
                 try:
                     self._context_attributes.reset(token)
@@ -812,10 +836,39 @@ class Hue:
         otel_span: trace.Span = trace.INVALID_SPAN
         scope = None
         record_attributes: dict[str, str] | None = None
+        identity_tokens: tuple[Any, Any] | None = None
+        cleared = None
         if self._active:
             try:
                 inherited = self._context_attributes.get() or {}
-                merged = {**inherited, **(attributes or {})}
+                current = otel_context.get_current()
+                # A remote identity from Hue.extract(..., identity=True): on an explicit parent it
+                # outranks the enclosing hue.context(); attached as the current context it ranks
+                # below it. Without one this is the plain path.
+                explicit = remote_identity(parent_context) if parent_context is not None else None
+                ambient = remote_identity(current) if parent_context is None else None
+                if explicit is None and ambient is None:
+                    merged = {**inherited, **(attributes or {})}
+                else:
+                    # Identifier keys in this span's own attributes act as explicit scope, so
+                    # helpers nested in the block record them too.
+                    own = {
+                        key: value
+                        for key in IDENTITY_KEYS
+                        if is_identifier(value := (attributes or {}).get(key))
+                    }
+                    inherited = {**(ambient or {}), **inherited, **(explicit or {}), **own}
+                    merged = {**inherited, **(attributes or {})}
+                    identity_tokens = (
+                        self._context_attributes.set(dict(inherited)),
+                        identity_scope.set(dict(inherited)),
+                    )
+                # Helpers in the block resolve their identity from this span's scope: an attached
+                # remote identity must not reach them again from the current context, neither over
+                # a nested hue.context() nor under an explicit parent that carries none.
+                plain = without_remote(current)
+                if plain is not current:
+                    cleared = otel_context.attach(plain)
                 # Copied now so log_inference keeps the enclosing model() metadata and session
                 # even after their blocks exit.
                 record_attributes = dict(self._model_scope.get() or {})
@@ -850,6 +903,17 @@ class Hue:
             if scope is not None:
                 try:
                     scope.__exit__(None, None, None)
+                except Exception:
+                    self._record_issue()
+            if cleared is not None:
+                try:
+                    otel_context.detach(cleared)
+                except Exception:
+                    self._record_issue()
+            if identity_tokens is not None:
+                try:
+                    identity_scope.reset(identity_tokens[1])
+                    self._context_attributes.reset(identity_tokens[0])
                 except Exception:
                     self._record_issue()
             try:
@@ -961,19 +1025,52 @@ class Hue:
         return fallback
 
     @staticmethod
-    def inject(headers: MutableMapping[str, str]) -> None:
-        """Inject current W3C trace context; never include the Hue API key or baggage."""
+    def inject(headers: MutableMapping[str, str], *, identity: bool = False) -> None:
+        """Inject current W3C trace context; never the Hue API key.
+
+        With ``identity=True`` also write the session, user and workspace identifiers in effect
+        (the innermost ``hue.context()`` block or identity-applying ``span``, else an extracted
+        identity attached as the current context) as W3C ``baggage`` members ``hue.session.id``,
+        ``hue.user.id`` and ``hue.workspace.id``, replacing any ``hue.*`` identity members already
+        in ``headers`` and keeping other members. Being static, it reads the innermost block of
+        any client. Baggage reaches every service the headers are sent to: use opaque identifiers.
+        """
         try:
             TraceContextTextMapPropagator().inject(headers)
         except Exception:
             pass
+        if identity is not True:
+            return
+        # A static method has no client whose counters it could update: failures are ignored.
+        try:
+            inject_identity(headers, current_identity())
+        except Exception:
+            pass
 
     @staticmethod
-    def extract(headers: Mapping[str, str]) -> Context:
+    def extract(headers: Mapping[str, str], *, identity: bool = False) -> Context:
+        """Return an OpenTelemetry ``Context`` to pass as ``span(parent_context=...)``.
+
+        With ``identity=True`` also read ``hue.session.id``, ``hue.user.id`` and
+        ``hue.workspace.id`` from ``baggage``; spans started under the result (as
+        ``parent_context`` or after ``context.attach``), and helpers nested in them, record them.
+        Enable it only for headers that ``Hue.inject(headers, identity=True)`` wrote in your own
+        service, never on a public request. Invalid or oversized baggage is ignored.
+        """
         try:
-            return TraceContextTextMapPropagator().extract(headers)
+            extracted = TraceContextTextMapPropagator().extract(headers)
         except Exception:
-            return Context()
+            extracted = Context()
+        if identity is not True:
+            return extracted
+        try:
+            # Remote input: an invalid value is ignored and never counted.
+            fields = read_carrier(headers)
+            if fields:
+                extracted = with_remote_identity(extracted, fields)
+        except Exception:
+            pass
+        return extracted
 
     def validate_project(self) -> Project:
         self._ensure_open()

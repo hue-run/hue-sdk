@@ -10,6 +10,25 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `inject(carrier, { identity: true })` also writes the session, user and workspace identifiers of
+  the injected context as W3C `baggage` members `hue.session.id`, `hue.user.id` and
+  `hue.workspace.id`, next to `traceparent`, each value percent-encoded UTF-8. Any `hue.*` identity
+  members already in the carrier are removed first, even when there is no identity to write; every
+  other member, such as `hue-world`, is kept byte for byte. A Hue member over 4,096 bytes is left
+  out and counted as an instrumentation failure; a carrier that would pass 8,192 bytes or 64
+  members is only stripped, without counting. `extract(carrier, { identity: true })` reads them
+  back: `withSpan`, `model`, `tool` and Hue's tracer, started under the result (as
+  `parentContext`, or as the active context when a context manager is registered), and the helpers
+  nested in them, record them as if they were passed as `sessionId`, `userId` and `workspaceId`,
+  and explicit options still win. Invalid or oversized inbound baggage is ignored and never
+  counted. Without `identity`, both methods behave as before and ignore baggage. Enable `identity`
+  on `extract` only for carriers your own service wrote with `inject(carrier, { identity: true })`,
+  never on a public request. Unlike the Python SDK, `inject` writes identity only from a Hue
+  helper's context or an extracted context. New types `InjectOptions` and `ExtractOptions`.
+  **Wire**
+
 ### [0.11.4] - 2026-09-29
 
 This release makes sign-in with Hue the default of `hue mcp install` for Claude Code and Codex
@@ -1050,6 +1069,28 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- `Hue.inject(headers, identity=True)` also writes the session, user and workspace identifiers in
+  effect as W3C `baggage` members `hue.session.id`, `hue.user.id` and `hue.workspace.id`, next to
+  `traceparent`, each value percent-encoded UTF-8 exactly as the TypeScript SDK writes it: those of
+  the innermost `hue.context()` block, even when no span is current (unlike TypeScript), else of an
+  extracted identity attached as the current context. Any `hue.*` identity members already in
+  `headers` are removed first, even when there is no identity to write; every other member, such as
+  `hue-world`, is kept byte for byte, and a header that would pass 8,192 bytes or 64 members is only
+  stripped. `Hue.extract(headers, identity=True)` reads them back: `span(parent_context=...)`, or
+  `span()` under the extracted context attached with `context.attach`, and the `model`, `tool`,
+  `span`, `log_inference` and `record_provider_tool_calls` helpers nested in it, record them.
+  Identifier keys in a span's own `attributes` (`gen_ai.conversation.id`, `user.id`,
+  `hue.workspace.id`) act as explicit scope for its nested helpers when a remote identity applies,
+  and a `hue.context()` opened inside the block still wins. A disabled client's own `context()`
+  and `span()` supply no identity, so it relays one only from an attached context; `inject` is
+  static, so with several clients it writes the innermost `hue.context()` block of any client. An
+  invalid inbound value is ignored without affecting `force_flush()`. Without `identity`, both
+  methods behave as before and ignore baggage. Enable `identity` on `extract` only for headers
+  your own service wrote with `Hue.inject(headers, identity=True)`, never on a public request.
+  **Wire**
 
 ### [0.6.2] - 2026-09-27
 
