@@ -109,10 +109,9 @@ export class TargetTimeoutError extends Error {
     this.name = "TargetTimeoutError";
   }
 }
-/** The target's outcome is saved but the telemetry it requires was never acknowledged: the
- * one transport every case shares did not deliver, so the next case would meet it too. Restore
- * or export the trace, or complete with omitted evidence through the client; the target is
- * never rerun. */
+/** The target's outcome is saved but the telemetry it requires was never acknowledged on an
+ * earlier attempt. Restore or export the trace, or complete with omitted evidence through the
+ * client; the target is never rerun. It is this case's own state, not the run's. */
 export class TraceExportUnacknowledgedError extends Error {
   constructor(
     /** The execution whose saved outcome waits for its trace. */
@@ -417,10 +416,12 @@ async function allPages<T>(
  * a target outcome left uncertain because its world could not be sealed or read back. Starting
  * more cases into it only piles up the same failure; the run is resumed later instead. */
 function systemic(error: unknown): boolean {
+  // A saved outcome still waiting for its trace (`TraceExportUnacknowledgedError`) is not
+  // systemic: the flush failed on an earlier attempt, telemetry may have recovered since, and
+  // the cases beside it can complete now; only a live export failure stops new cases.
   return (
     error instanceof HueApiError ||
     error instanceof HueExportError ||
-    error instanceof TraceExportUnacknowledgedError ||
     error instanceof TargetOutcomeUncertainError
   );
 }

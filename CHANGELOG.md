@@ -33,7 +33,7 @@ refuses to publish a version without a matching entry below.
 - `hue eval --worker` reports failed polls, resumed and given-up runs.
 - `TraceExportUnacknowledgedError`: the error a resumed case throws when its saved outcome still
   waits for a trace export Hue never acknowledged, in place of a plain `Error` with the same
-  message; the pool counts it as systemic and starts no further case into it.
+  message; it is that case's own state on resume, and the cases beside it still run.
 
 #### Changed
 

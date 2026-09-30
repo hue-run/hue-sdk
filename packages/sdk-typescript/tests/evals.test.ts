@@ -557,10 +557,16 @@ describe("installed evaluation API and runner contract", () => {
     try {
       await expect(runExperiment(options)).rejects.toBeInstanceOf(HueExportError);
       expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toEqual([]);
-      // The first case's missing acknowledgement is the shared transport's failure: the resume
-      // does not start the second case into it.
-      await expect(runExperiment(options)).rejects.toBeInstanceOf(TraceExportUnacknowledgedError);
-      expect(calls).toBe(1);
+      // The first case's saved outcome still waits for its trace, that case's own state on
+      // resume: the second case beside it still runs (and fails the same way here), and both are
+      // reported, the saved one as its typed error.
+      const resumed = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(resumed).toBeInstanceOf(AggregateError);
+      expect((resumed as AggregateError).errors[0]).toBeInstanceOf(TraceExportUnacknowledgedError);
+      expect(calls).toBe(2);
     } finally {
       await hue.shutdown();
       f.server.stop(true);
