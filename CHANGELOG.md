@@ -31,6 +31,9 @@ refuses to publish a version without a matching entry below.
   told through its `signal`, its case ends as an `error` of type `TargetTimeout` and the world
   is sealed abandoned, so a hung agent ends its case instead of holding the run open.
 - `hue eval --worker` reports failed polls, resumed and given-up runs.
+- `TraceExportUnacknowledgedError`: the error a resumed case throws when its saved outcome still
+  waits for a trace export Hue never acknowledged, in place of a plain `Error` with the same
+  message; the pool counts it as systemic and starts no further case into it.
 
 #### Changed
 
