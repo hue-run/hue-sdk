@@ -157,6 +157,8 @@ function fixture(options: {
   claimStatuses?: number[];
   /** The lifetime of each world the fixture creates; ten minutes by default. */
   worldTtlMs?: number;
+  /** Statuses the connection check answers before it answers the project. */
+  connectionStatuses?: number[];
   /** The status the queue answers an attention completion with; 200 records it. */
   attentionStatus?: number;
 }) {
@@ -241,6 +243,7 @@ function fixture(options: {
   let queueState: "queued" | "claimed" | "completed" | "attention" = "queued";
   let claimedWorkerId: string | undefined;
   const claimStatuses = [...(options.claimStatuses ?? [])];
+  const connectionStatuses = [...(options.connectionStatuses ?? [])];
   const worldTtlMs = options.worldTtlMs ?? 600_000;
   let claims = 0;
   let completionFailures = options.completionFailures ?? (options.failCompletionOnce ? 1 : 0);
@@ -251,6 +254,10 @@ function fixture(options: {
       expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
       const url = new URL(request.url);
       const path = url.pathname.replace("/api/v1", "");
+      if (path === "/projects/current") {
+        const refusal = connectionStatuses.shift();
+        if (refusal !== undefined) return new Response(null, { status: refusal });
+      }
       if (path === "/projects/current")
         return Response.json({
           id: projectId,
@@ -1599,5 +1606,36 @@ test("a completion callback's own failure is thrown as itself, and a refusal to 
   } finally {
     await hue2.shutdown();
     revoked.server.stop(true);
+  }
+});
+
+test("a transient failure of the startup connection check is reported and polled through", async () => {
+  const f = fixture({ capabilityStatus: 200, connectionStatuses: [502] });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "startup-retry",
+    captureContent: false,
+  });
+  const pollErrors: unknown[] = [];
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-startup-retry-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      pollIntervalMillis: 250,
+      onPollError: (error) => {
+        pollErrors.push(error);
+      },
+      target: () => "reply",
+    });
+    expect(pollErrors.map((error) => (error as { status?: number }).status)).toEqual([502]);
+    expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
   }
 });

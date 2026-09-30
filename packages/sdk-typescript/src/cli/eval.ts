@@ -1628,7 +1628,9 @@ async function runWorker(
         ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
         files: context.files,
         outputDirectory: context.outputDirectory,
-        signal,
+        // The case's own signal: the worker stopping, or the world's deadline passing, both
+        // end a command that would otherwise keep running past its timed-out case.
+        signal: context.signal ?? signal,
       });
     },
     async onCompleted(report) {

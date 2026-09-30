@@ -358,7 +358,20 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
   if (options.environmentClient.baseUrl !== options.client.baseUrl)
     throw new Error("Environments and evaluations must use the same Hue origin");
   const directory = resolve(options.checkpointDirectory);
-  const project = await options.client.checkConnection();
+  // The first read is polled like the claims that follow: Hue not answering at startup is not
+  // a reason for the worker to exit; a refusal Hue decided on still is.
+  let project: Awaited<ReturnType<EvaluationClient["checkConnection"]>>;
+  for (let failures = 0; ; ) {
+    try {
+      project = await options.client.checkConnection();
+      break;
+    } catch (error) {
+      if (!isTransientApiError(error) || options.signal?.aborted) throw error;
+      failures++;
+      await options.onPollError?.(error);
+      await wait(Math.min(interval * 2 ** Math.min(failures, 6), 60_000), options.signal);
+    }
+  }
   const store = await CheckpointStore.acquire(directory, {
     kind: "local-agent-worker",
     projectId: project.id,
