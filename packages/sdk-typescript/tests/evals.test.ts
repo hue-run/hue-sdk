@@ -1,3 +1,4 @@
+import { ROOT_CONTEXT } from "@opentelemetry/api";
 import { describe, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
@@ -103,6 +104,8 @@ function fixture() {
   const rejectedCases = new Set<string>();
   /** Signals whose next batch Hue accepts partially, rejecting one record without naming it. */
   const partialRejections = new Set<"traces" | "logs">();
+  /** Cases whose spans Hue counts as rejected in every batch and never holds. */
+  const partiallyRejectedCases = new Set<string>();
   const wire: string[] = [];
   let completeFailures = 0;
   let telemetryFailures = 0;
@@ -206,15 +209,44 @@ function fixture() {
           }
         }
         wire.push(JSON.stringify(value));
-        if (isTrace)
+        // A batch accepted but for one case's spans: Hue counts them, names none, and holds
+        // every other trace's spans, so only the receipts tell the cases apart.
+        const dropped = new Set<string>();
+        let rejectedSpans = 0;
+        if (isTrace) {
+          for (const resource of value.resourceSpans)
+            for (const scope of resource.scopeSpans)
+              for (const span of scope.spans) {
+                const caseId = (
+                  span.attributes as { key: string; value: { stringValue?: string } }[] | undefined
+                )?.find((attribute) => attribute.key === "hue.dataset.case.id")?.value.stringValue;
+                if (caseId !== undefined && partiallyRejectedCases.has(caseId))
+                  dropped.add(Buffer.from(span.traceId, "base64").toString("hex"));
+              }
           for (const resource of value.resourceSpans)
             for (const scope of resource.scopeSpans)
               for (const span of scope.spans) {
                 const traceId = Buffer.from(span.traceId, "base64").toString("hex");
+                if (dropped.has(traceId)) {
+                  rejectedSpans += 1;
+                  continue;
+                }
                 traceIds.add(traceId);
                 if (!spanIds.has(traceId)) spanIds.set(traceId, new Set());
                 spanIds.get(traceId)!.add(Buffer.from(span.spanId, "base64").toString("hex"));
               }
+        }
+        if (rejectedSpans > 0) {
+          const responseType = otlp.lookupType(
+            "opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse",
+          );
+          const encoded = responseType
+            .encode(responseType.create({ partialSuccess: { rejectedSpans } }))
+            .finish();
+          return new Response(new Uint8Array(encoded), {
+            headers: { "Content-Type": "application/x-protobuf" },
+          });
+        }
         return new Response(new Uint8Array(), {
           headers: { "Content-Type": "application/x-protobuf" },
         });
@@ -437,6 +469,8 @@ function fixture() {
     spanIdsOf: (traceId: string) => spanIds.get(traceId),
     /** Hue accepts the next batch of the signal but for one record it does not name. */
     rejectOnePartially: (signal: "traces" | "logs") => partialRejections.add(signal),
+    /** Hue accepts every batch but for this case's spans, which it counts and never holds. */
+    rejectCasePartially: (caseId: string) => partiallyRejectedCases.add(caseId),
     failResult: () => (resultFailures = 1),
     failStart: () => (startFailures = 1),
     truncateItemPage: () => (truncatedItemPages = 1),
@@ -1069,47 +1103,160 @@ describe("installed evaluation API and runner contract", () => {
       await hue2.shutdown();
       g.server.stop(true);
     }
-    // A log batch accepted but for one unnamed record names every trace in it: the receipt
-    // counts spans, not logs, so the cases whose logs it carried fail rather than pass blind.
+    // A log batch of two cases accepted but for one unnamed record names both traces: the
+    // receipt counts spans, not logs, so it could not tell whose record was lost, and both cases
+    // fail rather than pass blind. The first case's target waits for the second's record, and the
+    // second's for the first's root to end, so one flush carries both records.
     const h = fixture();
     const exp3 = h.create();
+    const [firstH, secondH] = h.cases;
     const hue3 = createHue({
       apiKey: key,
       baseUrl: h.baseUrl,
       serviceName: "attributed-partial-logs",
       captureContent: true,
     });
+    const checkpoints3 = await directory();
+    let firstRoot: string | undefined;
+    let releaseSecond!: () => void;
+    const secondRecorded = new Promise<void>((resolve) => (releaseSecond = resolve));
     try {
       h.rejectOnePartially("logs");
       const outcome = await runExperiment({
         client: h.client,
         hue: hue3,
         experimentId: exp3.id,
-        checkpointDirectory: await directory(),
+        checkpointDirectory: checkpoints3,
         persistResultContent: true,
+        concurrency: 2,
         traceEvidence: { mode: "required" as const },
-        target: () => {
-          hue3.recordMessages({ input: [{ role: "user", content: "hello" }] });
+        target: async (
+          _inputs: JsonValue,
+          context: { item: { id: string }; span: { traceId: string } },
+        ) => {
+          if (context.item.id === firstH!.id) {
+            firstRoot = context.span.traceId;
+            await secondRecorded;
+            hue3.recordMessages({ input: [{ role: "user", content: "hello" }] });
+            return "reply";
+          }
+          hue3.recordMessages({ input: [{ role: "user", content: "hello again" }] });
+          releaseSecond();
+          while (firstRoot === undefined || !hue3.transport.spansEnded(firstRoot))
+            await new Promise((resolve) => setTimeout(resolve, 5));
           return "reply";
         },
       }).then(
         () => undefined,
         (reason: unknown) => reason,
       );
-      expect(outcome).toBeInstanceOf(HueExportError);
-      expect(
-        hue3.transport
-          .getIssues()
-          .some(
-            (issue) =>
-              issue.kind === "rejected" && issue.signal === "logs" && issue.traceIds?.length,
-          ),
-      ).toBe(true);
+      // Both cases fail as themselves, so the run reports the two failures together.
+      expect(outcome).toBeInstanceOf(AggregateError);
+      expect((outcome as AggregateError).errors).toHaveLength(2);
+      for (const error of (outcome as AggregateError).errors)
+        expect(error).toBeInstanceOf(HueExportError);
+      const read = async (id: string) =>
+        JSON.parse(await readFile(join(checkpoints3, `case-${id}.json`), "utf8")) as {
+          value: { exportState: string; trace: { traceId: string }; completion?: unknown };
+        };
+      const first3 = await read(firstH!.id);
+      const second3 = await read(secondH!.id);
+      const rejectedLogs = hue3.transport
+        .getIssues()
+        .filter((issue) => issue.kind === "rejected" && issue.signal === "logs");
+      expect(rejectedLogs).toHaveLength(1);
+      expect([...rejectedLogs[0]!.traceIds!].sort()).toEqual(
+        [first3.value.trace.traceId, second3.value.trace.traceId].sort(),
+      );
+      for (const saved of [first3, second3]) {
+        expect(saved.value.exportState).toBe("failed");
+        expect(saved.value.completion).toBeUndefined();
+      }
+      expect(h.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(0);
     } finally {
       await hue3.shutdown();
       h.server.stop(true);
     }
   });
+  test(
+    "a partial rejection naming no trace fails the case whose root the receipt does not hold, and accepts the case beside it through its receipt",
+    async () => {
+      // Hue accepts a batch but for one case's root span, which its receipt then does not hold.
+      // The batch carries more traces than an issue names (the case's target ended spans in
+      // traces of their own beside its root), so the rejection names none of them and the
+      // receipt decides: the case fails, and the case beside it is accepted through its own.
+      const k = fixture();
+      const exp4 = k.create();
+      const [firstK, secondK] = k.cases;
+      const hue4 = createHue({
+        apiKey: key,
+        baseUrl: k.baseUrl,
+        serviceName: "attributed-partial-case",
+        captureContent: false,
+      });
+      const checkpoints4 = await directory();
+      let rootTraceId: string | undefined;
+      try {
+        k.rejectCasePartially(firstK!.id);
+        const outcome = await runExperiment({
+          client: k.client,
+          hue: hue4,
+          experimentId: exp4.id,
+          checkpointDirectory: checkpoints4,
+          persistResultContent: true,
+          concurrency: 2,
+          traceEvidence: { mode: "required" as const },
+          target: async (
+            _inputs: JsonValue,
+            context: { item: { id: string }; span: { traceId: string } },
+          ) => {
+            if (context.item.id === firstK!.id) {
+              rootTraceId = context.span.traceId;
+              for (let index = 0; index < 64; index += 1)
+                await hue4.withSpan("aside", () => undefined, { parentContext: ROOT_CONTEXT });
+              return "reply";
+            }
+            // The other case ends after this root has, so no flush of its own exports the
+            // asides in a batch without it.
+            while (rootTraceId === undefined || !hue4.transport.spansEnded(rootTraceId))
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            return "reply";
+          },
+        }).then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+        expect(outcome).toBeInstanceOf(HueExportError);
+        expect(
+          (outcome as HueExportError).issues.some(
+            (issue) => issue.kind === "rejected" && issue.traceIds === undefined,
+          ),
+        ).toBe(true);
+        const read = async (id: string) =>
+          JSON.parse(await readFile(join(checkpoints4, `case-${id}.json`), "utf8")) as {
+            value: {
+              exportState: string;
+              trace: { traceId: string; spans?: number };
+              completion?: unknown;
+            };
+          };
+        const refused = await read(firstK!.id);
+        const landed = await read(secondK!.id);
+        expect(refused.value.exportState).toBe("pending");
+        expect(refused.value.completion).toBeUndefined();
+        expect(k.spansHeld(refused.value.trace.traceId)).toBe(0);
+        expect(landed.value.exportState).toBe("accepted");
+        expect(landed.value.completion).toBeDefined();
+        expect(landed.value.trace.spans).toBe(1);
+        expect(k.spansHeld(landed.value.trace.traceId)).toBe(1);
+        expect(k.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(1);
+      } finally {
+        await hue4.shutdown();
+        k.server.stop(true);
+      }
+    },
+    { timeout: 20_000 },
+  );
   test("every non-local and unknown scorer pin is deferred without uploading placeholders", async () => {
     const f = fixture();
     const hosted = version({
