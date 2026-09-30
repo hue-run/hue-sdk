@@ -39,10 +39,9 @@ identity_scope: ContextVar[Mapping[str, AttributeValue] | None] = ContextVar(
     "hue_identity_scope", default=None
 )
 
-# A W3C baggage value in which every ``%`` starts an escape: baggage-octets plus ``%XX``.
-_ENCODED_VALUE = re.compile(
-    r"(?:[\x21\x23\x24\x26-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]|%[0-9A-Fa-f]{2})+"
-)
+# W3C baggage-octets (``%`` included), and a ``%`` that does not start a two-digit hex escape.
+_BAGGAGE_OCTETS = re.compile(r"[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+")
+_BARE_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
 def is_identifier(value: object) -> TypeGuard[str]:
@@ -139,7 +138,8 @@ def merge_identity_baggage(existing: str | None, identity: Mapping[str, str]) ->
 
 
 def _decode(raw: str) -> str | None:
-    if not _ENCODED_VALUE.fullmatch(raw):
+    # Every ``%`` must start an escape; neither expression backtracks.
+    if not _BAGGAGE_OCTETS.fullmatch(raw) or _BARE_PERCENT.search(raw):
         return None
     try:
         # ``unquote`` would leave a malformed escape in place; ``+`` stays a literal ``+``.

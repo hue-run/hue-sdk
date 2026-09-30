@@ -221,6 +221,42 @@ def test_attributes_identifiers_are_explicit_scope_for_nested_helpers(receiver):
     assert headers["baggage"] == "hue.session.id=remote,hue.user.id=explicit"
 
 
+def test_explicit_parent_without_identity_hides_an_attached_identity(receiver):
+    # As in TypeScript, where helpers nested in a span resolve from its scope, not the active one.
+    token = context.attach(remote("hue.session.id=remote,hue.user.id=ru"))
+    try:
+        with Hue(receiver.url, KEY, capture_content=False) as hue:
+            plain = Hue.extract({"traceparent": TRACEPARENT})
+            with hue.span("explicit", parent_context=plain):
+                with hue.model("m", provider="synthetic"):
+                    pass
+                headers: dict[str, str] = {}
+                Hue.inject(headers, identity=True)
+            assert hue.force_flush()
+    finally:
+        context.detach(token)
+    spans = {span.name: span for span in receiver.spans()}
+    assert identity(spans["explicit"]) == (None, None, None)
+    assert identity(spans["chat m"]) == (None, None, None)
+    assert "baggage" not in headers
+
+
+def test_invalid_identifier_attributes_do_not_replace_a_remote_identity(receiver):
+    extracted = remote("hue.session.id=remote,hue.user.id=ru")
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.span("s", parent_context=extracted, attributes={"user.id": ""}):
+            with hue.tool("t"):
+                pass
+            headers: dict[str, str] = {}
+            Hue.inject(headers, identity=True)
+        assert hue.force_flush()
+    spans = {span.name: span for span in receiver.spans()}
+    # The span keeps its own attribute as given; its scope, nested helpers and inject agree.
+    assert identity(spans["s"]) == ("remote", "", None)
+    assert identity(spans["execute_tool t"]) == ("remote", "ru", None)
+    assert headers["baggage"] == "hue.session.id=remote,hue.user.id=ru"
+
+
 def test_attached_remote_identity_does_not_override_nested_context(receiver):
     token = context.attach(remote("hue.session.id=remote,hue.user.id=ru"))
     try:

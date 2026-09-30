@@ -33,6 +33,7 @@ from ._propagation import (
     current_identity,
     identity_scope,
     inject_identity,
+    is_identifier,
     read_carrier,
     remote_identity,
     with_remote_identity,
@@ -854,7 +855,7 @@ class Hue:
                     own = {
                         key: value
                         for key in IDENTITY_KEYS
-                        if type(value := (attributes or {}).get(key)) is str
+                        if is_identifier(value := (attributes or {}).get(key))
                     }
                     inherited = {**(ambient or {}), **inherited, **(explicit or {}), **own}
                     merged = {**inherited, **(attributes or {})}
@@ -862,11 +863,12 @@ class Hue:
                         self._context_attributes.set(dict(inherited)),
                         identity_scope.set(dict(inherited)),
                     )
-                    # Helpers in the block that derive a parent from the current context must not
-                    # apply the remote identity again over a nested hue.context().
-                    plain = without_remote(current)
-                    if plain is not current:
-                        cleared = otel_context.attach(plain)
+                # Helpers in the block resolve their identity from this span's scope: an attached
+                # remote identity must not reach them again from the current context, neither over
+                # a nested hue.context() nor under an explicit parent that carries none.
+                plain = without_remote(current)
+                if plain is not current:
+                    cleared = otel_context.attach(plain)
                 # Copied now so log_inference keeps the enclosing model() metadata and session
                 # even after their blocks exit.
                 record_attributes = dict(self._model_scope.get() or {})
@@ -1030,8 +1032,8 @@ class Hue:
         (the innermost ``hue.context()`` block or identity-applying ``span``, else an extracted
         identity attached as the current context) as W3C ``baggage`` members ``hue.session.id``,
         ``hue.user.id`` and ``hue.workspace.id``, replacing any ``hue.*`` identity members already
-        in ``headers`` and keeping other members. Baggage reaches every service the headers are
-        sent to: use opaque identifiers.
+        in ``headers`` and keeping other members. Being static, it reads the innermost block of
+        any client. Baggage reaches every service the headers are sent to: use opaque identifiers.
         """
         try:
             TraceContextTextMapPropagator().inject(headers)

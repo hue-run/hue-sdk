@@ -101,8 +101,15 @@ function encode(value: string): string {
   );
 }
 
-const OWS = /^[ \t]+|[ \t]+$/g;
-const trimOws = (text: string) => text.replace(OWS, "");
+const isOws = (code: number) => code === 0x20 || code === 0x09;
+/** Removes optional whitespace (spaces and tabs) at both ends, in linear time. */
+function trimOws(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && isOws(text.charCodeAt(start))) start++;
+  while (end > start && isOws(text.charCodeAt(end - 1))) end--;
+  return text.slice(start, end);
+}
 
 /** A member's key: the text before the first `=` and before any `;`, without optional whitespace. */
 function memberKey(member: string): string {
@@ -157,11 +164,13 @@ export function mergeIdentityBaggage(
   return { value, ownMemberTooLong };
 }
 
-/** A W3C baggage value with every `%` starting an escape: baggage-octets plus `%XX`. */
-const ENCODED_VALUE = /^(?:[\x21\x23\x24\x26-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]|%[0-9A-Fa-f]{2})+$/;
+/** W3C baggage-octets (`%` included), and a `%` that does not start a two-digit hex escape. */
+const BAGGAGE_OCTETS = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/;
+const BARE_PERCENT = /%(?![0-9A-Fa-f]{2})/;
 
 function decode(raw: string): string | undefined {
-  if (!ENCODED_VALUE.test(raw)) return undefined;
+  // Every `%` must start an escape; neither expression backtracks.
+  if (!BAGGAGE_OCTETS.test(raw) || BARE_PERCENT.test(raw)) return undefined;
   try {
     // decodeURIComponent rejects escapes that are not strict UTF-8; `+` stays a literal `+`.
     return decodeURIComponent(raw);

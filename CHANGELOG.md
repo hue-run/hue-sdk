@@ -1084,11 +1084,13 @@ No registry release is claimed until publication and registry acceptance complet
   `span`, `log_inference` and `record_provider_tool_calls` helpers nested in it, record them.
   Identifier keys in a span's own `attributes` (`gen_ai.conversation.id`, `user.id`,
   `hue.workspace.id`) act as explicit scope for its nested helpers when a remote identity applies,
-  and a `hue.context()` opened inside the block still wins. A disabled client relays an identity
-  only from an attached context. An invalid inbound value is ignored without affecting
-  `force_flush()`. Without `identity`, both methods behave as before and ignore baggage. Enable
-  `identity` on `extract` only for headers your own service wrote with
-  `Hue.inject(headers, identity=True)`, never on a public request. **Wire**
+  and a `hue.context()` opened inside the block still wins. A disabled client's own `context()`
+  and `span()` supply no identity, so it relays one only from an attached context; `inject` is
+  static, so with several clients it writes the innermost `hue.context()` block of any client. An
+  invalid inbound value is ignored without affecting `force_flush()`. Without `identity`, both
+  methods behave as before and ignore baggage. Enable `identity` on `extract` only for headers
+  your own service wrote with `Hue.inject(headers, identity=True)`, never on a public request.
+  **Wire**
 
 ### [0.6.2] - 2026-09-27
 
