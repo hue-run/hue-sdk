@@ -354,15 +354,25 @@ interface Prepared {
   complete: CompleteExecution;
   completion?: Completion;
   scores: SavedResult[];
-  /** `not_accepted`: the case is completed as failed with its evidence omitted. */
-  exportState: "pending" | "accepted" | "not_accepted";
+  /** `accepted`: every export the flush covered was acknowledged, or the failures it reported
+   * named other traces. `failed`: an export failure named this case's trace, so its evidence is
+   * incomplete and resume refuses it. `pending`: no flush decided it (a crash before the flush
+   * ended, an issue naming no trace); resume asks the trace receipt for the root span.
+   * `not_accepted`: the case is completed as failed with its evidence omitted. */
+  exportState: "pending" | "accepted" | "failed" | "not_accepted";
   /** The issues behind a `not_accepted` export. */
   telemetryIssues?: TelemetryIssueCount[];
+  /** The case's root span, and how many spans of its trace the transport had handed to the
+   * exporter by the flush, which the trace receipt is asked for: its root span present and at
+   * least that many spans held say the case's telemetry landed. Absent on a checkpoint an older
+   * runner saved. */
+  trace?: { traceId: string; spanId: string; spans?: number };
 }
 /** The target finished and its generated files are staged; publication and scoring can resume. */
 interface Uploading {
   stage: "uploading";
   executionId: string;
+  trace?: { traceId: string; spanId: string; spans?: number };
   state: TerminalState;
   hasOutput: boolean;
   output?: JsonValue;
@@ -460,6 +470,40 @@ async function pool<T>(
     );
   }
 }
+/** Whether Hue holds the case's telemetry, read from the trace receipt: its root span and at
+ * least as many spans as the case ended; false when they are not there by the wait's end or the
+ * receipt cannot be read, and for a checkpoint an older runner saved without the span. */
+async function traceLanded(
+  hue: HueClient,
+  trace: { traceId: string; spanId: string; spans?: number } | undefined,
+): Promise<boolean> {
+  // Without the count of spans the case ended, the receipt cannot tell a lost child span from a
+  // landed trace, and does not accept.
+  if (!trace || trace.spans === undefined) return false;
+  const deadline = Date.now() + RECEIPT_WAIT_MS;
+  try {
+    for (;;) {
+      // The root span present and every span the case ended held: a lost child span is not
+      // hidden behind a root that landed. The receipt answers as soon as the root is there, so
+      // spans still arriving behind it are polled for until the wait ends.
+      const verification = await hue.verifyTrace(trace.traceId, {
+        expectedSpanIds: [trace.spanId],
+        timeoutMillis: Math.max(250, deadline - Date.now()),
+      });
+      if (verification.verified && (verification.receipt?.spanCount ?? 0) >= trace.spans)
+        return true;
+      if (!verification.verified || Date.now() + RECEIPT_POLL_MS >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, RECEIPT_POLL_MS));
+    }
+  } catch {
+    return false;
+  }
+}
+/** How long a receipt is polled for the root span after a flush reported a failure: ingestion
+ * of an accepted batch is not instant, and a span that is not there by then was not delivered. */
+const RECEIPT_WAIT_MS = 5_000;
+/** How often the receipt is read again while the root is there but spans are still arriving. */
+const RECEIPT_POLL_MS = 500;
 async function scoresFor(
   versions: ScorerVersion[],
   context: ScoreContext,
@@ -680,6 +724,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         complete,
         scores,
         exportState: "pending",
+        ...(saved.trace ? { trace: saved.trace } : {}),
       };
       await store.write(file, prepared);
       return prepared;
@@ -838,6 +883,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             const uploading: Uploading = {
               stage: "uploading",
               executionId: execution.id,
+              trace: { traceId: span.traceId, spanId: span.spanId },
               state,
               hasOutput: output !== undefined,
               ...(options.persistResultContent && output !== undefined ? { output } : {}),
@@ -860,18 +906,60 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         // End root before waiting for both OTLP signals. Export failure leaves the prepared checkpoint intact.
         let exportError: Error | undefined;
         try {
-          await options.hue.flush();
-          // Another concurrent flush may already have surfaced this failure. OTLP
-          // partial acknowledgements do not identify individual rejected records.
-          if (options.hue.transport.getFailureSequence() !== failureSequenceBefore)
-            throw new HueExportError(
-              options.hue.transport
-                .getIssues()
-                .filter(
-                  (issue) => issue.sequence > failureSequenceBefore && issue.kind !== "warning",
-                ),
-              options.hue.transport.getReport(),
+          // The flush itself throws for any failure since the last flush; the issues it recorded
+          // are read below, where they are attributed.
+          await options.hue.flush().catch((error: unknown) => {
+            if (!(error instanceof HueExportError)) throw error;
+          });
+          // The transport is shared by every case in flight, so a failure the flush reports may
+          // be another case's. Each issue names the traces of the records it concerned: one that
+          // names this trace is this case's failure, final because its evidence is incomplete;
+          // one that names only others is not this case's; one that names no trace (a processor
+          // flush that failed) may be anyone's, and this case's trace receipt decides: its root
+          // span landed, or the case stays pending for the receipt to decide again on resume.
+          const decided = checkpoint as Prepared;
+          const traceId = decided.trace?.traceId;
+          // Every span the case ended has reached the exporter by now; the receipt is held to
+          // that count, so a lost child span is not hidden behind a root span that landed. The
+          // count is saved before anything is decided, so a process that stops here leaves a
+          // pending checkpoint the receipt can be held to; a transport that does not count (an
+          // older or borrowed one) leaves no count, and the receipt then cannot accept.
+          if (decided.trace && traceId !== undefined) {
+            const spans = options.hue.transport.spansEnded?.(traceId);
+            if (spans !== undefined) {
+              decided.trace.spans = spans;
+              await store.write(file, decided);
+            }
+          }
+          if (options.hue.transport.getFailureSequence() !== failureSequenceBefore) {
+            const retained = options.hue.transport.getIssues();
+            const issues = retained.filter(
+              (issue) => issue.sequence > failureSequenceBefore && issue.kind !== "warning",
             );
+            const named = issues.filter(
+              (issue) =>
+                issue.traceIds && (traceId === undefined || issue.traceIds.includes(traceId)),
+            );
+            // An issue naming no trace, and a failure whose issue the bounded history has already
+            // rolled past (the oldest retained issue is younger than the first this case could
+            // have caused), may be anyone's.
+            const unattributed = issues.filter((issue) => !issue.traceIds);
+            const evicted =
+              issues.length === 0 || (retained[0]?.sequence ?? 0) > failureSequenceBefore + 1;
+            if (named.length) {
+              checkpoint.exportState = "failed";
+              await store.write(file, checkpoint);
+              throw new HueExportError(
+                [...named, ...unattributed],
+                options.hue.transport.getReport(),
+              );
+            }
+            if (
+              (unattributed.length || evicted) &&
+              !(await traceLanded(options.hue, decided.trace))
+            )
+              throw new HueExportError(unattributed, options.hue.transport.getReport());
+          }
         } catch (error) {
           exportError = error as Error;
         }
@@ -920,6 +1008,18 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       }
       const prepared = checkpoint as Prepared;
       await options.client.getExecution(prepared.executionId);
+      // A saved outcome no flush decided on is asked about through its trace receipt: the root
+      // span there says the case's export landed before the process stopped, or that a later
+      // flush of the same transport delivered it. An export failure that named this trace is
+      // final: the evidence is incomplete whatever the receipt holds.
+      if (
+        prepared.exportState === "pending" &&
+        prepared.complete.traceEvidence !== "omit" &&
+        (await traceLanded(options.hue, prepared.trace))
+      ) {
+        prepared.exportState = "accepted";
+        await store.write(file, prepared);
+      }
       if (prepared.exportState !== "accepted" && prepared.complete.traceEvidence !== "omit")
         throw new TraceExportUnacknowledgedError(prepared.executionId);
       const save = () => store.write(file, prepared);

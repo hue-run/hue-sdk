@@ -104,6 +104,13 @@ export interface ExportIssue {
   status?: number;
   /** Fixed, sanitized description; never server text or content. */
   message: string;
+  /** The traces the records concerned belonged to, when the issue arose with records in hand
+   * (a refused or rejected batch, a dropped record, a record the processor could not accept, a
+   * capture failure inside a span): up to 64 distinct ids, so a caller running several traces
+   * at once can tell whose telemetry the issue was. Absent for an issue without records (a
+   * processor flush that failed) and for a batch of more traces than that; such an issue may
+   * concern any trace in flight. */
+  traceIds?: string[];
 }
 
 /** Cumulative delivery counters and current queue gauges for one transport. */

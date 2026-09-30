@@ -576,6 +576,10 @@ function platform(
         const subject = subjects.get(subjectMatch[1]!);
         return subject ? Response.json(subject) : new Response(null, { status: 404 });
       }
+      // The receipt a resume asks for a saved outcome no flush decided: this platform holds no
+      // trace, so the case stays refused.
+      if (/^\/traces\/[0-9a-f]{32}\/receipt$/.test(path))
+        return Response.json({ code: "TRACE_NOT_FOUND" }, { status: 404 });
       throw new Error(`Unexpected request ${request.method} ${path}`);
     },
   });

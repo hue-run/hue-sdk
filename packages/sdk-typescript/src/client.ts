@@ -49,6 +49,7 @@ import type {
   TraceVerification,
   SafeLifecycleOptions,
   SafeLifecycleResult,
+  Signal,
 } from "./types.js";
 
 interface LocalContext {
@@ -254,6 +255,19 @@ export class HueClient {
   readonly enabled: boolean;
   private logger: Logger;
   private storage = new AsyncLocalStorage<LocalContext>();
+  /** Reports a contained capture or instrumentation failure, named to the trace active where
+   * it happened when there is one. */
+  private instrumentationFailed(signal: Signal = "traces", count = 1): void {
+    let traceId: string | undefined;
+    try {
+      traceId = trace
+        .getSpan(this.storage.getStore()?.context ?? context.active())
+        ?.spanContext().traceId;
+    } catch {
+      // The failure is recorded without a trace.
+    }
+    this.transport.instrumentationFailure(signal, undefined, count, traceId);
+  }
   private tracerProvider: FlushableTracerProvider;
   private loggerProvider: FlushableLoggerProvider;
   private ownedProviders?: { tracer: TracerProvider; logger: LoggerProvider };
@@ -308,7 +322,7 @@ export class HueClient {
       this.tracerProvider.getTracer(HUE_SCOPE, sdkVersion),
       this.storage,
       () => this.enabled && !this.closed,
-      () => this.transport.instrumentationFailure(),
+      () => this.instrumentationFailed(),
     );
     this.logger = this.loggerProvider.getLogger(HUE_SCOPE, sdkVersion);
   }
@@ -331,7 +345,7 @@ export class HueClient {
     try {
       return this.storage.getStore()?.context ?? context.active();
     } catch {
-      this.transport.instrumentationFailure();
+      this.instrumentationFailed();
       return ROOT_CONTEXT;
     }
   }
@@ -365,7 +379,7 @@ export class HueClient {
           ),
         );
       } catch {
-        this.transport.instrumentationFailure();
+        this.instrumentationFailed();
       }
     }
     // A disabled or failed client creates no span; the application's own active span then stays
@@ -376,7 +390,7 @@ export class HueClient {
       try {
         spanContext = trace.setSpan(active.context, span);
       } catch {
-        this.transport.instrumentationFailure();
+        this.instrumentationFailed();
         spanContext = trace.setSpan(ROOT_CONTEXT, span);
       }
     const handle: HueSpan = {
@@ -394,7 +408,7 @@ export class HueClient {
         if (this.enabled && !this.closed && options.input !== undefined)
           handle.setInput(options.input);
       } catch {
-        this.transport.instrumentationFailure();
+        this.instrumentationFailed();
       }
       try {
         return await callback(handle);
@@ -409,9 +423,7 @@ export class HueClient {
     // instrumentations (HTTP clients, provider SDKs) join this trace when the application has
     // registered a context manager. Hue still registers none itself.
     return this.storage.run({ ...active, context: spanContext }, () =>
-      created
-        ? runInContext(spanContext, execute, () => this.transport.instrumentationFailure())
-        : execute(),
+      created ? runInContext(spanContext, execute, () => this.instrumentationFailed()) : execute(),
     );
   }
 
@@ -439,7 +451,7 @@ export class HueClient {
       if (value === undefined) return;
       // A blank or non-string label is omitted and counted; the tool call itself still runs.
       if (isLabel(value)) attributes[key] = value;
-      else if (this.enabled && !this.closed) this.transport.instrumentationFailure();
+      else if (this.enabled && !this.closed) this.instrumentationFailed();
     };
     stamp("gen_ai.tool.call.id", options.callId);
     stamp("mcp.server.name", options.mcp?.name);
@@ -480,7 +492,7 @@ export class HueClient {
     const active = this.enabled && !this.closed;
     const label = (value: unknown, fallback: string): string => {
       if (isLabel(value)) return value;
-      if (active) this.transport.instrumentationFailure();
+      if (active) this.instrumentationFailed();
       return fallback;
     };
     const requestModel = label(model, "unknown");
@@ -539,13 +551,13 @@ export class HueClient {
     ] as const) {
       if (value === undefined) continue;
       if (!Number.isInteger(value) || value < 0) {
-        this.transport.instrumentationFailure();
+        this.instrumentationFailed();
         continue;
       }
       try {
         span.setAttribute(key, value);
       } catch {
-        this.transport.instrumentationFailure();
+        this.instrumentationFailed();
       }
     }
   }
@@ -558,7 +570,7 @@ export class HueClient {
     try {
       propagator.inject(activeContext, carrier, defaultTextMapSetter);
     } catch {
-      this.transport.instrumentationFailure();
+      this.instrumentationFailed();
     }
   }
 
@@ -567,7 +579,7 @@ export class HueClient {
     try {
       return propagator.extract(ROOT_CONTEXT, carrier, defaultTextMapGetter);
     } catch {
-      this.transport.instrumentationFailure();
+      this.instrumentationFailed();
       return ROOT_CONTEXT;
     }
   }
@@ -585,7 +597,7 @@ export class HueClient {
       span.setStatus({ code: SpanStatusCode.ERROR });
       span.addEvent("exception", { "exception.type": type });
     } catch {
-      this.transport.instrumentationFailure();
+      this.instrumentationFailed();
     }
   }
 
@@ -634,7 +646,7 @@ export class HueClient {
           if (inherited !== undefined) attributes[key] = inherited;
         } else if (typeof explicit === "string" && explicit.trim() && explicit.length <= 256)
           attributes[key] = explicit;
-        else this.transport.instrumentationFailure("logs");
+        else this.instrumentationFailed("logs");
       };
       stamp("gen_ai.operation.name", messages.operation, enclosing?.model?.operation);
       stamp("gen_ai.provider.name", messages.provider, enclosing?.model?.provider);
@@ -648,7 +660,7 @@ export class HueClient {
         body: JSON.parse(encodeContent(body)),
       });
     } catch {
-      this.transport.instrumentationFailure("logs");
+      this.instrumentationFailed("logs");
     }
   }
 
@@ -678,8 +690,7 @@ export class HueClient {
       const parent = options.parentContext ?? store?.context ?? context.active();
       const addresses = hostedServerAddresses(provider, options.request);
       const activity = hostedToolActivity(provider, response);
-      if (activity.skipped > 0)
-        this.transport.instrumentationFailure("traces", undefined, activity.skipped);
+      if (activity.skipped > 0) this.instrumentationFailed("traces", activity.skipped);
       const server = (label: string | undefined): Attributes => {
         const attributes: Attributes = {};
         if (label === undefined) return attributes;
@@ -695,7 +706,7 @@ export class HueClient {
         ] as const) {
           if (value === undefined) continue;
           if (isLabel(value)) attributes[key] = value;
-          else this.transport.instrumentationFailure();
+          else this.instrumentationFailed();
         }
         const address = addresses.get(label);
         if (address !== undefined) attributes["server.address"] = address;
@@ -759,13 +770,13 @@ export class HueClient {
               toolCatalogSummary(encodeContent(listing.definitions, catalogLimits)),
             );
           } catch {
-            this.transport.instrumentationFailure();
+            this.instrumentationFailed();
           }
         if (listing.errorType !== undefined) fail(span, listing.errorType);
         span.end();
       }
     } catch {
-      this.transport.instrumentationFailure();
+      this.instrumentationFailed();
     }
   }
 
@@ -833,11 +844,11 @@ export class HueClient {
       if (byteSize !== undefined) attributes["hue.file.size"] = byteSize;
       if (this.captureContent && name !== undefined) {
         if (isLabel(name)) attributes["hue.file.name"] = name;
-        else this.transport.instrumentationFailure();
+        else this.instrumentationFailed();
       }
       span.addEvent("hue.file", attributes);
     } catch {
-      this.transport.instrumentationFailure();
+      this.instrumentationFailed();
     }
   }
 
@@ -846,7 +857,7 @@ export class HueClient {
     try {
       span.setAttribute(key, encodeContent(value));
     } catch {
-      this.transport.instrumentationFailure();
+      this.instrumentationFailed();
     }
   }
 
