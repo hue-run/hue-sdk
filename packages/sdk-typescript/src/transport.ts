@@ -822,11 +822,13 @@ class ReportingExporter<T extends RecordValue> {
           if (downgrade) this.transport.rejectPlaceholders(placeholderRejections);
           const remaining = count - placeholderRejections;
           // Rejections are not matched to records. Attribute them to real records first. A
-          // rejection in a batch of one trace is that trace's; in a batch of several it names
-          // none, since the innocent traces' records may have been accepted, and each case's
-          // receipt decides.
+          // rejection of spans in a batch of one trace is that trace's; in a batch of several it
+          // names none, since the innocent traces' spans may have been accepted, and each case's
+          // receipt decides. A rejection of log records names every trace in the batch: the
+          // receipt counts spans, not logs, so it could not tell whose logs were lost.
           rejected = Math.min(remaining, real);
-          const rejectedTraceIds = traceIds && traceIds.length === 1 ? traceIds : undefined;
+          const rejectedTraceIds =
+            this.signal === "logs" || (traceIds && traceIds.length === 1) ? traceIds : undefined;
           if (remaining || (partial?.errorMessage && !downgrade))
             this.transport.issue(
               this.signal,
