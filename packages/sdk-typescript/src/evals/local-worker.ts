@@ -402,9 +402,11 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
         });
       } catch (completion) {
         if (completion instanceof HueApiError && completion.status === 409) outcome = "refused";
-        // A transient refusal past the client's retries leaves the run claimed; the next claim
-        // returns it and the attempt count gives it up again.
-        else return false;
+        // A transient failure past the client's retries leaves the run claimed; the next claim
+        // returns it and the attempt count gives it up again. A refusal Hue decided on (a
+        // revoked key, a disabled agent) is what needs fixing, and is thrown as itself.
+        else if (isTransientApiError(completion)) return false;
+        else throw completion;
       }
       const attempt = attempts.get(claim.runId) ?? 0;
       attempts.delete(claim.runId);
@@ -451,6 +453,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
         Math.min(15_000, Math.max(1_000, interval)),
       );
       let experimentFinished = false;
+      let queueCompleted = false;
       try {
         const requested = requestedConfiguration
           ? pinRequestedAttemptV2(
@@ -523,10 +526,14 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           workerId,
           state: "completed",
         });
+        queueCompleted = true;
         attempts.delete(claim.runId);
         settled++;
         await options.onCompleted?.(report);
       } catch (error) {
+        // The run is completed in the queue: a failure after that is the caller's own
+        // (`onCompleted` threw) and is thrown as itself, not reported as a retry that cannot be.
+        if (queueCompleted) throw error;
         if (experimentFinished && error instanceof HueApiError && error.status === 409) {
           // The experiment finished, but Hue no longer accepts this worker's completion: the
           // run was released or cancelled meanwhile. Its outcome is recorded; nothing to resume.

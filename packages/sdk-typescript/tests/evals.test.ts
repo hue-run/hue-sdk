@@ -26,6 +26,7 @@ import {
   scoreLocally,
   sourceDigest,
   TargetOutcomeUncertainError,
+  TraceExportUnacknowledgedError,
   UncertainExecutionError,
   type Completion,
   type EvaluationRun,
@@ -556,12 +557,10 @@ describe("installed evaluation API and runner contract", () => {
     try {
       await expect(runExperiment(options)).rejects.toBeInstanceOf(HueExportError);
       expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toEqual([]);
-      // The first case's missing acknowledgement is its own failure: the resume still runs the
-      // second case beside it, which fails the same way, and reports both.
-      await expect(runExperiment(options)).rejects.toThrow(
-        "trace export acknowledgement is unavailable",
-      );
-      expect(calls).toBe(2);
+      // The first case's missing acknowledgement is the shared transport's failure: the resume
+      // does not start the second case into it.
+      await expect(runExperiment(options)).rejects.toBeInstanceOf(TraceExportUnacknowledgedError);
+      expect(calls).toBe(1);
     } finally {
       await hue.shutdown();
       f.server.stop(true);

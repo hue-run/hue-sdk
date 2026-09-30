@@ -109,6 +109,21 @@ export class TargetTimeoutError extends Error {
     this.name = "TargetTimeoutError";
   }
 }
+/** The target's outcome is saved but the telemetry it requires was never acknowledged: the
+ * one transport every case shares did not deliver, so the next case would meet it too. Restore
+ * or export the trace, or complete with omitted evidence through the client; the target is
+ * never rerun. */
+export class TraceExportUnacknowledgedError extends Error {
+  constructor(
+    /** The execution whose saved outcome waits for its trace. */
+    readonly executionId: string,
+  ) {
+    super(
+      "Target outcome is saved but trace export acknowledgement is unavailable. Restore/export the trace or explicitly complete with omitted evidence through the client; never rerun the target.",
+    );
+    this.name = "TraceExportUnacknowledgedError";
+  }
+}
 /** Thrown when the target or world may have committed but acknowledgement is unavailable. */
 export class TargetOutcomeUncertainError extends Error {
   constructor(
@@ -405,6 +420,7 @@ function systemic(error: unknown): boolean {
   return (
     error instanceof HueApiError ||
     error instanceof HueExportError ||
+    error instanceof TraceExportUnacknowledgedError ||
     error instanceof TargetOutcomeUncertainError
   );
 }
@@ -904,9 +920,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       const prepared = checkpoint as Prepared;
       await options.client.getExecution(prepared.executionId);
       if (prepared.exportState !== "accepted" && prepared.complete.traceEvidence !== "omit")
-        throw new Error(
-          "Target outcome is saved but trace export acknowledgement is unavailable. Restore/export the trace or explicitly complete with omitted evidence through the client; never rerun the target.",
-        );
+        throw new TraceExportUnacknowledgedError(prepared.executionId);
       const save = () => store.write(file, prepared);
       const notAccepted: TelemetryNotAccepted | undefined =
         prepared.exportState === "not_accepted"

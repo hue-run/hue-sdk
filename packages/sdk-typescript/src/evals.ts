@@ -14,6 +14,7 @@ export {
   TargetCancelledError,
   TargetOutcomeUncertainError,
   TargetTimeoutError,
+  TraceExportUnacknowledgedError,
 } from "./evals/runner.js";
 export type {
   RunExperimentOptions,

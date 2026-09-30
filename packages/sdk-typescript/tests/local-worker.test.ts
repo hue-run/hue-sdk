@@ -157,6 +157,8 @@ function fixture(options: {
   claimStatuses?: number[];
   /** The lifetime of each world the fixture creates; ten minutes by default. */
   worldTtlMs?: number;
+  /** The status the queue answers an attention completion with; 200 records it. */
+  attentionStatus?: number;
 }) {
   const provider = options.providerOutcome ? providerContract() : undefined;
   const projectId = randomUUID();
@@ -295,6 +297,8 @@ function fixture(options: {
         });
         if (options.providerOutcome === "lost_ack" && body.state === "attention")
           return new Response(null, { status: 503 });
+        if (body.state === "attention" && options.attentionStatus !== undefined)
+          return new Response(null, { status: options.attentionStatus });
         queueState = body.state as "completed" | "attention";
         return Response.json({ runId: localRunId, state: body.state });
       }
@@ -1529,5 +1533,71 @@ test("a target that hangs is stopped at its world's deadline, its case ends as a
   } finally {
     await hue.shutdown();
     f.server.stop(true);
+  }
+});
+
+test("a completion callback's own failure is thrown as itself, and a refusal to record attention Hue decided on is thrown rather than retried", async () => {
+  // onCompleted throws after the queue completed the run: the error is the caller's, not a
+  // retry the worker could make, and reaches it unchanged.
+  const completed = fixture({ capabilityStatus: 200 });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: completed.baseUrl,
+    serviceName: "callback-failure",
+    captureContent: false,
+  });
+  const failures: LocalRunFailure[] = [];
+  try {
+    await expect(
+      runLocalAgent({
+        client: createEvaluationClient({ apiKey: key, baseUrl: completed.baseUrl }),
+        environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: completed.baseUrl }),
+        hue,
+        checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-callback-failure-")),
+        agent: { key: "reference", name: "Reference", revision: "1" },
+        maxRuns: 1,
+        onRunFailed: (failure) => {
+          failures.push(failure);
+        },
+        onCompleted() {
+          throw new Error("Synthetic reporting failure");
+        },
+        target: () => "reply",
+      }),
+    ).rejects.toThrow("Synthetic reporting failure");
+    expect(failures).toEqual([]);
+    expect(completed.queueState()).toBe("completed");
+  } finally {
+    await hue.shutdown();
+    completed.server.stop(true);
+  }
+  // The queue refuses to record attention with a 403 (a revoked key): that refusal is what
+  // needs fixing, so it is thrown as itself instead of the run being retried.
+  const revoked = fixture({ capabilityStatus: 200, attentionStatus: 403 });
+  const hue2 = createHue({
+    apiKey: key,
+    baseUrl: revoked.baseUrl,
+    serviceName: "revoked-attention",
+    captureContent: false,
+  });
+  try {
+    await expect(
+      runLocalAgent({
+        client: createEvaluationClient({ apiKey: key, baseUrl: revoked.baseUrl }),
+        environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: revoked.baseUrl }),
+        hue: hue2,
+        checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-revoked-attention-")),
+        agent: { key: "reference", name: "Reference", revision: "1" },
+        maxRuns: 1,
+        pollIntervalMillis: 250,
+        target: () => NaN,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(revoked.calls.localRun).toEqual([
+      { state: "attention", failureType: "OutcomeSerializationError" },
+    ]);
+  } finally {
+    await hue2.shutdown();
+    revoked.server.stop(true);
   }
 });

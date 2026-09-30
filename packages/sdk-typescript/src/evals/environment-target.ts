@@ -502,9 +502,11 @@ export async function runEnvironmentTarget(
       if (!Number.isFinite(expiresAt)) return;
       timer = setTimeout(
         () => {
+          // The timeout is decided before the target is told: a target that rejects with its
+          // own abort error on the signal must not win the race and be saved as its own error.
           const error = new TargetTimeoutError(run.id, run.expiresAt);
-          deadline.abort(error);
           reject(error);
+          deadline.abort(error);
         },
         Math.max(0, expiresAt + DEADLINE_MARGIN_MS - Date.now()),
       );
