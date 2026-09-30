@@ -16,6 +16,8 @@ import {
   HueExportError,
   contentPrefixes,
   type ExportIssue,
+  type HueClient,
+  type HueSpan,
 } from "../src/index.js";
 import { hueTelemetry } from "../src/ai-sdk.js";
 import { OpenTelemetry } from "@ai-sdk/otel";
@@ -3535,5 +3537,391 @@ describe("Kill switch and safe initialization", () => {
     expect(issues[1]!.message).toBe("Hue is disabled: provider failure");
     await borrowed.shutdownSafe();
     await transport.shutdown();
+  });
+});
+
+describe("setUsage cache and reasoning counts", () => {
+  type Case = {
+    name: string;
+    usage: Record<string, unknown>;
+    failures: number;
+    recorded: Record<string, number>;
+  };
+  const cases: Case[] = [
+    {
+      name: "records every count when the input includes its cache counts",
+      usage: {
+        inputTokens: 1100,
+        outputTokens: 20,
+        cacheReadTokens: 1000,
+        cacheWriteTokens: 50,
+        reasoningTokens: 5,
+      },
+      failures: 0,
+      recorded: {
+        "gen_ai.usage.input_tokens": 1100,
+        "gen_ai.usage.output_tokens": 20,
+        "gen_ai.usage.cache_read.input_tokens": 1000,
+        "gen_ai.usage.cache_creation.input_tokens": 50,
+        "gen_ai.usage.reasoning.output_tokens": 5,
+      },
+    },
+    {
+      name: "records an input equal to its cache counts",
+      usage: { inputTokens: 1000, cacheReadTokens: 900, cacheWriteTokens: 100 },
+      failures: 0,
+      recorded: {
+        "gen_ai.usage.input_tokens": 1000,
+        "gen_ai.usage.cache_read.input_tokens": 900,
+        "gen_ai.usage.cache_creation.input_tokens": 100,
+      },
+    },
+    {
+      name: "records all three for an inclusive input (cost cases)",
+      usage: { inputTokens: 1100, cacheReadTokens: 1000 },
+      failures: 0,
+      recorded: {
+        "gen_ai.usage.input_tokens": 1100,
+        "gen_ai.usage.cache_read.input_tokens": 1000,
+      },
+    },
+    {
+      name: "refuses an input smaller than its cache counts but keeps output and reasoning",
+      usage: { inputTokens: 100, cacheReadTokens: 1000, outputTokens: 10, reasoningTokens: 4 },
+      failures: 1,
+      recorded: {
+        "gen_ai.usage.output_tokens": 10,
+        "gen_ai.usage.reasoning.output_tokens": 4,
+      },
+    },
+    {
+      name: "refuses an input smaller than the sum of cache reads and writes",
+      usage: { inputTokens: 100, cacheReadTokens: 60, cacheWriteTokens: 60, outputTokens: 1 },
+      failures: 1,
+      recorded: { "gen_ai.usage.output_tokens": 1 },
+    },
+    {
+      name: "records cache counts without an input count",
+      usage: { cacheReadTokens: 30, cacheWriteTokens: 7, outputTokens: 3 },
+      failures: 0,
+      recorded: {
+        "gen_ai.usage.cache_read.input_tokens": 30,
+        "gen_ai.usage.cache_creation.input_tokens": 7,
+        "gen_ai.usage.output_tokens": 3,
+      },
+    },
+    {
+      name: "treats null cache and reasoning counts as absent, without a failure",
+      usage: {
+        inputTokens: 12,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+      },
+      failures: 0,
+      recorded: { "gen_ai.usage.input_tokens": 12 },
+    },
+    {
+      name: "still counts a null input or output count as invalid",
+      usage: { inputTokens: null, outputTokens: null, cacheReadTokens: 4 },
+      failures: 2,
+      recorded: { "gen_ai.usage.cache_read.input_tokens": 4 },
+    },
+    {
+      name: "omits and counts each invalid cache or reasoning count",
+      usage: {
+        inputTokens: 5,
+        outputTokens: 6,
+        cacheReadTokens: -1,
+        cacheWriteTokens: 1.5,
+        reasoningTokens: "3",
+      },
+      failures: 3,
+      recorded: { "gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 6 },
+    },
+    {
+      name: "checks the input against valid cache counts only",
+      usage: { inputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: Number.NaN },
+      failures: 1,
+      recorded: {
+        "gen_ai.usage.input_tokens": 5,
+        "gen_ai.usage.cache_read.input_tokens": 2,
+      },
+    },
+  ];
+  const usageKeys = [
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+    "gen_ai.usage.cache_read.input_tokens",
+    "gen_ai.usage.cache_creation.input_tokens",
+    "gen_ai.usage.reasoning.output_tokens",
+  ];
+  for (const item of cases)
+    test(item.name, async () => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "usage",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.model("synthetic-model", (span) => span.setUsage(item.usage as never), {
+          provider: "synthetic",
+        });
+        const result = await hue.flushSafe();
+        expect(result.report.instrumentationFailures).toBe(item.failures);
+        const model = endpoint.requests
+          .flatMap((request) => request.records)
+          .find((span) => span.name === "chat synthetic-model")!;
+        const recorded: Record<string, number> = {};
+        for (const key of usageKeys) {
+          const value = attr(model, key)?.intValue;
+          if (value !== undefined) recorded[key] = Number(value);
+        }
+        expect(recorded).toEqual(item.recorded);
+      } finally {
+        await hue.shutdown().catch(() => undefined);
+        endpoint.server.stop(true);
+      }
+    });
+
+  test("records the new counts on a withSpan handle too, and nothing on a disabled client", async () => {
+    const disabled = createHue({ enabled: false });
+    await disabled.withSpan("request", (span) =>
+      span.setUsage({ inputTokens: 1, cacheReadTokens: 5, reasoningTokens: -1 }),
+    );
+    expect(disabled.transport.getReport().instrumentationFailures).toBe(0);
+    await disabled.shutdownSafe();
+  });
+});
+
+/**
+ * The provider wrappers' internal model-call hook. It is stripped from the published declarations,
+ * so the installed-package run reaches the packed runtime through this local type.
+ */
+interface ModelCall {
+  handle: HueSpan;
+  context: ReturnType<typeof context.active>;
+  lastActivity: [number, number];
+  touch(): void;
+  run<T>(work: () => T): T;
+  end(error?: unknown, endTime?: [number, number]): void;
+}
+function beginModel(
+  hue: HueClient,
+  model: unknown,
+  options: Record<string, unknown>,
+): ModelCall | undefined {
+  return (
+    hue as unknown as { beginModel(model: unknown, options: unknown): ModelCall | undefined }
+  ).beginModel(model, options);
+}
+
+describe("beginModel", () => {
+  type TimedRecord = WireRecord & {
+    startTimeUnixNano: string;
+    endTimeUnixNano: string;
+    kind?: number;
+  };
+  const spansOf = (endpoint: ReturnType<typeof receiver>) =>
+    endpoint.requests.flatMap((request) => request.records) as TimedRecord[];
+  const client = (endpoint: ReturnType<typeof receiver>, captureContent = true) =>
+    createHue({
+      apiKey,
+      serviceName: "begin-model",
+      captureContent,
+      baseUrl: endpoint.url,
+      liveSpans: false,
+    });
+
+  test("starts model()'s span under the active span and ends it only through end()", async () => {
+    const endpoint = receiver();
+    const hue = client(endpoint);
+    try {
+      let call: ModelCall | undefined;
+      await hue.withSpan(
+        "request",
+        () => {
+          call = beginModel(hue, "synthetic-model", {
+            provider: "synthetic",
+            input: [{ role: "user", parts: [{ type: "text", content: "hi" }] }],
+            systemInstructions: [{ type: "text", content: "be brief" }],
+            attributes: { "gen_ai.request.max_tokens": 64, "gen_ai.request.model": "override" },
+          });
+        },
+        { sessionId: "session-1", userId: "user-1" },
+      );
+      await hue.flush();
+      // The model span outlives the callback that started it.
+      expect(spansOf(endpoint).map((span) => span.name)).toEqual(["request"]);
+      call!.handle.setOutput([{ role: "assistant", parts: [{ type: "text", content: "hello" }] }]);
+      call!.handle.setUsage({ inputTokens: 3, outputTokens: 2, cacheReadTokens: null });
+      call!.end();
+      call!.end(new TypeError("ignored after the first end"));
+      await hue.flush();
+      const spans = spansOf(endpoint);
+      const root = spans.find((span) => span.name === "request")!;
+      const model = spans.filter((span) => span.name === "chat synthetic-model");
+      expect(model).toHaveLength(1);
+      expect(model[0]!.parentSpanId).toBe(root.spanId);
+      expect(model[0]!.traceId).toBe(root.traceId);
+      expect(model[0]!.kind).toBe(3); // SPAN_KIND_CLIENT
+      expect(attr(model[0]!, "gen_ai.operation.name")?.stringValue).toBe("chat");
+      expect(attr(model[0]!, "gen_ai.request.model")?.stringValue).toBe("synthetic-model");
+      expect(attr(model[0]!, "gen_ai.provider.name")?.stringValue).toBe("synthetic");
+      expect(attr(model[0]!, "gen_ai.request.max_tokens")?.intValue).toBe("64");
+      expect(attr(model[0]!, "gen_ai.conversation.id")?.stringValue).toBe("session-1");
+      expect(attr(model[0]!, "user.id")?.stringValue).toBe("user-1");
+      expect(attr(model[0]!, "error.type")).toBeUndefined();
+      expect(JSON.parse(attr(model[0]!, "gen_ai.input.messages")!.stringValue!)).toEqual([
+        { role: "user", parts: [{ type: "text", content: "hi" }] },
+      ]);
+      expect(JSON.parse(attr(model[0]!, "gen_ai.system_instructions")!.stringValue!)).toEqual([
+        { type: "text", content: "be brief" },
+      ]);
+      expect(JSON.parse(attr(model[0]!, "gen_ai.output.messages")!.stringValue!)).toEqual([
+        { role: "assistant", parts: [{ type: "text", content: "hello" }] },
+      ]);
+      expect(attr(model[0]!, "gen_ai.usage.input_tokens")?.intValue).toBe("3");
+      expect(BigInt(model[0]!.endTimeUnixNano)).toBeGreaterThanOrEqual(
+        BigInt(model[0]!.startTimeUnixNano),
+      );
+      expect(hue.transport.getReport().instrumentationFailures).toBe(0);
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("run restores the call-time scope after it ended, even inside another session", async () => {
+    const endpoint = receiver();
+    const manager = new AsyncLocalStorageContextManager().enable();
+    expect(context.setGlobalContextManager(manager)).toBe(true);
+    const hue = client(endpoint);
+    try {
+      const call = await hue.withSpan("first", () => beginModel(hue, "m", { provider: "openai" }), {
+        sessionId: "s1",
+        workspaceId: "w1",
+      });
+      await hue.withSpan(
+        "second",
+        () =>
+          call!.run(() => {
+            expect(hue.getContext()).toBe(call!.context);
+            expect(trace.getSpanContext(context.active())?.spanId).toBe(call!.handle.spanId);
+            return hue.tool("lookup", {}, () => "done");
+          }),
+        { sessionId: "s2" },
+      );
+      call!.end();
+      await hue.flush();
+      const spans = spansOf(endpoint);
+      const model = spans.find((span) => span.name === "chat m")!;
+      const child = spans.find((span) => span.name === "execute_tool lookup")!;
+      expect(child.parentSpanId).toBe(model.spanId);
+      expect(attr(child, "gen_ai.conversation.id")?.stringValue).toBe("s1");
+      expect(attr(child, "hue.workspace.id")?.stringValue).toBe("w1");
+    } finally {
+      context.disable();
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("run runs its work exactly once and passes results and errors through", async () => {
+    const hue = createHue({
+      apiKey,
+      serviceName: "begin-model",
+      captureContent: false,
+      baseUrl: "http://127.0.0.1:9",
+      liveSpans: false,
+    });
+    const call = beginModel(hue, "m", { provider: "synthetic" })!;
+    let runs = 0;
+    expect(call.run(() => ++runs)).toBe(1);
+    const failure = new RangeError("provider failure");
+    expect(() =>
+      call.run(() => {
+        runs++;
+        throw failure;
+      }),
+    ).toThrow(failure);
+    expect(runs).toBe(2);
+    call.end(failure);
+    expect(hue.transport.getReport().instrumentationFailures).toBe(0);
+    await hue.shutdownSafe({ timeoutMillis: 200 });
+  });
+
+  test("end records the error type and an explicit end time", async () => {
+    const endpoint = receiver();
+    const hue = client(endpoint, false);
+    try {
+      const abandoned = beginModel(hue, "abandoned", { provider: "synthetic" })!;
+      const touched = beginModel(hue, "touched", { provider: "synthetic" })!;
+      const failed = beginModel(hue, "failed", { provider: "synthetic" })!;
+      const start = abandoned.lastActivity;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      touched.touch();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // An abandoned call ends at its last activity, not when it is noticed.
+      abandoned.end(undefined, abandoned.lastActivity);
+      touched.end(undefined, touched.lastActivity);
+      failed.end(new RangeError("secret message"));
+      await hue.flush();
+      const spans = spansOf(endpoint);
+      const find = (name: string) => spans.find((span) => span.name === `chat ${name}`)!;
+      const nanos = (time: readonly [number, number]) =>
+        BigInt(time[0]) * 1_000_000_000n + BigInt(time[1]);
+      expect(find("abandoned").endTimeUnixNano).toBe(find("abandoned").startTimeUnixNano);
+      expect(BigInt(find("abandoned").startTimeUnixNano)).toBe(nanos(start));
+      const touchedDuration =
+        BigInt(find("touched").endTimeUnixNano) - BigInt(find("touched").startTimeUnixNano);
+      expect(touchedDuration).toBeGreaterThanOrEqual(15_000_000n);
+      expect(touchedDuration).toBeLessThan(
+        BigInt(find("failed").endTimeUnixNano) - BigInt(find("failed").startTimeUnixNano),
+      );
+      expect(attr(find("failed"), "error.type")?.stringValue).toBe("RangeError");
+      expect(find("failed").status?.code).toBe(2);
+      expect(endpoint.requests.map((request) => request.raw).join("")).not.toContain("secret");
+    } finally {
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("returns undefined for a disabled or closed client, counting nothing", async () => {
+    const disabled = createHue({ enabled: false });
+    expect(beginModel(disabled, "m", { provider: "" })).toBeUndefined();
+    expect(disabled.transport.getReport().instrumentationFailures).toBe(0);
+    await disabled.shutdownSafe();
+    const closed = createHue({
+      apiKey,
+      serviceName: "begin-model",
+      captureContent: false,
+      baseUrl: "http://127.0.0.1:9",
+    });
+    await closed.shutdownSafe({ timeoutMillis: 200 });
+    expect(beginModel(closed, "m", { provider: "synthetic" })).toBeUndefined();
+    expect(closed.transport.getReport().instrumentationFailures).toBe(0);
+  });
+
+  test("validates labels as model() does and returns undefined when the span cannot start", async () => {
+    const endpoint = receiver();
+    const hue = client(endpoint, false);
+    try {
+      const call = beginModel(hue, "", { provider: " ", name: "\u0000" })!;
+      call.end();
+      expect(hue.transport.getReport().instrumentationFailures).toBe(3);
+      // An invalid session makes the span unable to start: the caller runs the provider directly.
+      expect(beginModel(hue, "m", { provider: "synthetic", sessionId: "" })).toBeUndefined();
+      expect(hue.transport.getReport().instrumentationFailures).toBe(4);
+      await hue.flushSafe();
+      const model = spansOf(endpoint).find((span) => span.name === "chat unknown")!;
+      expect(attr(model, "gen_ai.provider.name")?.stringValue).toBe("unknown");
+    } finally {
+      await hue.shutdown().catch(() => undefined);
+      endpoint.server.stop(true);
+    }
   });
 });

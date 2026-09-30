@@ -98,6 +98,20 @@ def _file_bytes(content: str) -> bytes:
     return content.encode("utf-8") if decoded is None else decoded
 
 
+def inline_file_digest(content: str) -> dict[str, Any] | None:
+    """The identity admission gives an inline file part's content larger than the limit.
+
+    ``{"sha256": ..., "size": ...}`` of the file's bytes, read with the byte rules admission uses
+    (a data: URL by its own encoding, base64 content decoded, anything else as UTF-8), or None when
+    the file is small enough to stay inline. Provider wrappers pre-hash large parts with it so a
+    large file does not push the whole message past its field limit.
+    """
+    data = _file_bytes(content)
+    if len(data) <= INLINE_FILE_LIMIT:
+        return None
+    return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
 def _content_key(part: dict[str, Any]) -> str | None:
     """The key holding a part's inline content: GenAI ``blob`` parts and AI SDK 6 ``file`` parts."""
     kind = part.get("type")
@@ -118,11 +132,11 @@ class _Hash:
         key = _content_key(value)
         inline = value.get(key) if key is not None else None
         if key is not None and isinstance(inline, str):
-            data = _file_bytes(inline)
-            if len(data) > INLINE_FILE_LIMIT:
+            digest = inline_file_digest(inline)
+            if digest is not None:
                 self.changed = True
                 rest = {name: item for name, item in value.items() if name != key}
-                return {**rest, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                return {**rest, **digest}
         return {name: self.node(item, depth + 1) for name, item in value.items()}
 
 

@@ -10,6 +10,17 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `TokenUsage` accepts `cacheReadTokens`, `cacheWriteTokens` and `reasoningTokens`, which
+  `setUsage` records as `gen_ai.usage.cache_read.input_tokens`,
+  `gen_ai.usage.cache_creation.input_tokens` and `gen_ai.usage.reasoning.output_tokens`; `null` is
+  treated as absent for these three. `inputTokens` is the whole prompt including cached tokens: for
+  Anthropic Messages pass `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+  `setUsage` refuses an `inputTokens` smaller than its cache counts as an instrumentation failure
+  and then records neither the input nor the cache counts, while output and reasoning counts are
+  still recorded. **Wire**
+
 ### [0.11.4] - 2026-09-29
 
 This release makes sign-in with Hue the default of `hue mcp install` for Claude Code and Codex
@@ -1050,6 +1061,16 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- `HueSpan.set_usage` accepts `cache_read_tokens`, `cache_write_tokens` and `reasoning_tokens`,
+  recorded as `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
+  and `gen_ai.usage.reasoning.output_tokens`. `input_tokens` is the whole prompt including cached
+  tokens: for Anthropic Messages pass `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens`. `set_usage` refuses an `input_tokens` smaller than its cache counts
+  as an instrumentation failure and then records neither the input nor the cache counts, while
+  output and reasoning counts are still recorded. **Wire**
 
 ### [0.6.2] - 2026-09-27
 

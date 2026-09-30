@@ -9,7 +9,12 @@ from typing import Any
 
 import pytest
 
-from hue_sdk._inline_files import INLINE_FILE_LIMIT, _file_bytes, hash_inline_files
+from hue_sdk._inline_files import (
+    INLINE_FILE_LIMIT,
+    _file_bytes,
+    hash_inline_files,
+    inline_file_digest,
+)
 
 # The TypeScript suite reads the same file; each digest is of the bytes the case was built from.
 # A checkout without the TypeScript fixtures skips these tests rather than failing to collect;
@@ -55,6 +60,25 @@ def test_inline_file_digest_matches_the_shared_fixture(case: dict[str, Any]) -> 
     assert (exported["content"] if file else exported["parts"])[0] == {
         **case["part"],
         **case["expected"],
+    }
+
+
+# Provider wrappers pre-hash a part themselves; the digest must be the one admission would give.
+@needs_fixture
+@pytest.mark.parametrize("case", DIGEST_FIXTURE["cases"], ids=lambda case: case["name"])
+def test_inline_file_digest_agrees_with_admission(case: dict[str, Any]) -> None:
+    spec = case["content"]
+    content = spec["prefix"] + spec["unit"] * spec["times"] + spec["suffix"]
+    assert inline_file_digest(content) == case["expected"]
+
+
+def test_inline_file_digest_keeps_a_file_of_exactly_the_limit_inline() -> None:
+    data = bytes([1]) * (INLINE_FILE_LIMIT + 1)
+    assert inline_file_digest(base64.b64encode(data[:INLINE_FILE_LIMIT]).decode("ascii")) is None
+    encoded = base64.b64encode(data).decode("ascii")
+    assert inline_file_digest(f"data:image/png;base64,{encoded}") == {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": INLINE_FILE_LIMIT + 1,
     }
 
 

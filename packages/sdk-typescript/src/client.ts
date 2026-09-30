@@ -9,13 +9,14 @@ import {
   trace,
   type Attributes,
   type Context,
+  type HrTime,
   type Span,
   type SpanOptions as OtelSpanOptions,
   type Tracer,
 } from "@opentelemetry/api";
 import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { millisToHrTime, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
@@ -59,6 +60,31 @@ interface LocalContext {
   /** Request metadata of the enclosing `model()` call, copied onto message records. */
   model?: { operation: string; provider: string; requestModel: string };
 }
+/**
+ * @internal A model span started by {@link HueClient.beginModel} that outlives the callback that
+ * started it, for provider wrappers whose calls settle later (a lazily parsed promise, a stream).
+ */
+export interface ModelCall {
+  /** The span's handle: `setInput` / `setOutput` record GenAI messages, as inside `model()`. */
+  handle: HueSpan;
+  /** Context with the model span active, for `recordProviderToolCalls` and child spans. */
+  context: Context;
+  /** The last observed activity: the call's start until {@link ModelCall.touch} moves it. */
+  lastActivity: HrTime;
+  /** Sets {@link ModelCall.lastActivity} to now, on the clock the span's start and end use. */
+  touch(): void;
+  /**
+   * Runs `work` exactly once with the call-time Hue scope restored (the model span as parent, the
+   * session, user and workspace captured at start) and the span as OpenTelemetry's active span.
+   */
+  run<T>(work: () => T): T;
+  /**
+   * Ends the span once; later calls do nothing. A defined `error` is recorded as `recordError`
+   * does. `endTime` defaults to now; pass {@link ModelCall.lastActivity} for an abandoned call.
+   */
+  end(error?: unknown, endTime?: HrTime): void;
+}
+
 /**
  * Attach mode: the application owns its OpenTelemetry providers and passes the transport whose
  * processors it attached to them. The client flushes these providers but never shuts them down.
@@ -234,6 +260,14 @@ class ContextualTracer implements Tracer {
 }
 
 const propagator = new W3CTraceContextPropagator();
+/** The usage attributes `setUsage` records, from {@link TokenUsage}. */
+const usageKeys = {
+  input: "gen_ai.usage.input_tokens",
+  output: "gen_ai.usage.output_tokens",
+  cacheRead: "gen_ai.usage.cache_read.input_tokens",
+  cacheWrite: "gen_ai.usage.cache_creation.input_tokens",
+  reasoning: "gen_ai.usage.reasoning.output_tokens",
+} as const;
 /** A provider tool listing's bounds before its catalog summary: one export request, 64 levels and
  * 65,536 values, as the Python SDK's content snapshot. */
 const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, depth: 64 };
@@ -345,40 +379,8 @@ export class HueClient {
     callback: (span: HueSpan) => Promise<T> | T,
     options: SpanOptions = {},
   ): Promise<T> {
-    let span = noopSpan();
-    let active: LocalContext = { context: this.getContext() };
-    if (this.enabled && !this.closed) {
-      try {
-        const inherited = this.storage.getStore();
-        active = {
-          context: options.parentContext ?? inherited?.context ?? context.active(),
-          sessionId: identifier(options.sessionId ?? inherited?.sessionId),
-          userId: identifier(options.userId ?? inherited?.userId),
-          workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
-          model: inherited?.model,
-        };
-        span = this.storage.run(active, () =>
-          this.tracer.startSpan(
-            name,
-            { kind: options.kind ?? SpanKind.INTERNAL, attributes: options.attributes },
-            active.context,
-          ),
-        );
-      } catch {
-        this.transport.instrumentationFailure();
-      }
-    }
-    // A disabled or failed client creates no span; the application's own active span then stays
-    // visible through getContext(), inject() and HueSpan.context instead of an invalid one.
-    const created = isSpanContextValid(span.spanContext());
-    let spanContext = active.context;
-    if (created)
-      try {
-        spanContext = trace.setSpan(active.context, span);
-      } catch {
-        this.transport.instrumentationFailure();
-        spanContext = trace.setSpan(ROOT_CONTEXT, span);
-      }
+    const { span, created, scope } = this.openScope(name, options);
+    const spanContext = scope.context;
     const handle: HueSpan = {
       span,
       context: spanContext,
@@ -408,11 +410,62 @@ export class HueClient {
     // The span is also OpenTelemetry's active span while the callback runs, so spans from other
     // instrumentations (HTTP clients, provider SDKs) join this trace when the application has
     // registered a context manager. Hue still registers none itself.
-    return this.storage.run({ ...active, context: spanContext }, () =>
+    return this.storage.run(scope, () =>
       created
         ? runInContext(spanContext, execute, () => this.transport.instrumentationFailure())
         : execute(),
     );
+  }
+
+  /**
+   * Starts a span under the active Hue span, inheriting or overriding the session, user and
+   * workspace, and returns it with the Hue scope its callback runs in (the scope's context has the
+   * span active). A disabled, closed or failed client starts no span (`created` is false) and the
+   * scope keeps the current context.
+   */
+  private openScope(
+    name: string,
+    options: SpanOptions & { startTime?: HrTime },
+  ): { span: Span; created: boolean; scope: LocalContext } {
+    let span = noopSpan();
+    let active: LocalContext = { context: this.getContext() };
+    if (this.enabled && !this.closed) {
+      try {
+        const inherited = this.storage.getStore();
+        active = {
+          context: options.parentContext ?? inherited?.context ?? context.active(),
+          sessionId: identifier(options.sessionId ?? inherited?.sessionId),
+          userId: identifier(options.userId ?? inherited?.userId),
+          workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
+          model: inherited?.model,
+        };
+        span = this.storage.run(active, () =>
+          this.tracer.startSpan(
+            name,
+            {
+              kind: options.kind ?? SpanKind.INTERNAL,
+              attributes: options.attributes,
+              ...(options.startTime === undefined ? {} : { startTime: options.startTime }),
+            },
+            active.context,
+          ),
+        );
+      } catch {
+        this.transport.instrumentationFailure();
+      }
+    }
+    // A disabled or failed client creates no span; the application's own active span then stays
+    // visible through getContext(), inject() and HueSpan.context instead of an invalid one.
+    const created = isSpanContextValid(span.spanContext());
+    let spanContext = active.context;
+    if (created)
+      try {
+        spanContext = trace.setSpan(active.context, span);
+      } catch {
+        this.transport.instrumentationFailure();
+        spanContext = trace.setSpan(ROOT_CONTEXT, span);
+      }
+    return { span, created, scope: { ...active, context: spanContext } };
   }
 
   /**
@@ -475,22 +528,7 @@ export class HueClient {
     callback: (span: HueSpan) => Promise<T> | T,
     options: ModelOptions,
   ): Promise<T> {
-    // A disabled or closed client creates no span, so invalid metadata is not an instrumentation
-    // failure either; only an active client records it (matching the other helpers).
-    const active = this.enabled && !this.closed;
-    const label = (value: unknown, fallback: string): string => {
-      if (isLabel(value)) return value;
-      if (active) this.transport.instrumentationFailure();
-      return fallback;
-    };
-    const requestModel = label(model, "unknown");
-    const operation = label(options?.operation ?? "chat", "chat");
-    const provider = label(options?.provider, "unknown");
-    const name =
-      options?.name === undefined
-        ? `${operation} ${requestModel}`
-        : label(options.name, `${operation} ${requestModel}`);
-    const metadata = { operation, provider, requestModel };
+    const { name, metadata, attributes } = this.modelMetadata(model, options);
     const {
       sessionId,
       userId,
@@ -522,32 +560,160 @@ export class HueClient {
         workspaceId,
         parentContext,
         kind: SpanKind.CLIENT,
-        attributes: {
-          "gen_ai.operation.name": operation,
-          "gen_ai.request.model": requestModel,
-          "gen_ai.provider.name": provider,
-        },
+        attributes,
       },
     );
   }
 
+  /**
+   * @internal Starts a model span that outlives the current callback; used by provider wrappers.
+   * The span has `model()`'s name, kind, attributes and parent, plus `options.attributes` (which
+   * cannot replace the three GenAI request keys), and ends only through {@link ModelCall.end}.
+   * Returns `undefined` for a disabled or closed client, or when the span could not start (counted),
+   * so the caller runs the provider call directly.
+   */
+  beginModel(
+    model: string,
+    options: ModelOptions & { attributes?: Attributes },
+  ): ModelCall | undefined {
+    if (!this.enabled || this.closed) return undefined;
+    const { name, metadata, attributes } = this.modelMetadata(model, options);
+    // One clock for start, activity and end: the span's own default start (wall time in
+    // milliseconds) advanced by the monotonic clock, so an explicit end time never precedes it.
+    const wall = Date.now();
+    const started = performance.now();
+    const now = (): HrTime => millisToHrTime(wall + (performance.now() - started));
+    const { span, created, scope } = this.openScope(name, {
+      sessionId: options?.sessionId,
+      userId: options?.userId,
+      workspaceId: options?.workspaceId,
+      parentContext: options?.parentContext,
+      kind: SpanKind.CLIENT,
+      attributes: { ...options?.attributes, ...attributes },
+      startTime: millisToHrTime(wall),
+    });
+    if (!created) return undefined;
+    // recordMessages and helpers run inside `run` inherit the request metadata, as in model().
+    const store: LocalContext = { ...scope, model: metadata };
+    const handle: HueSpan = {
+      span,
+      context: scope.context,
+      traceId: span.spanContext().traceId,
+      spanId: span.spanContext().spanId,
+      setInput: (value) => this.setContent(span, "gen_ai.input.messages", value),
+      setOutput: (value) => this.setContent(span, "gen_ai.output.messages", value),
+      setUsage: (usage) => this.setUsage(span, usage),
+    };
+    if (options?.input !== undefined) handle.setInput(options.input);
+    if (options?.systemInstructions !== undefined)
+      this.setContent(span, "gen_ai.system_instructions", options.systemInstructions);
+    if (options?.tools !== undefined)
+      this.setContent(span, "gen_ai.tool.definitions", options.tools);
+    let ended = false;
+    const call: ModelCall = {
+      handle,
+      context: scope.context,
+      lastActivity: millisToHrTime(wall),
+      touch: () => {
+        call.lastActivity = now();
+      },
+      run: (work) =>
+        this.storage.run(store, () =>
+          runInContext(store.context, work, () => this.transport.instrumentationFailure()),
+        ),
+      end: (error, endTime) => {
+        if (ended) return;
+        ended = true;
+        if (error !== undefined) this.recordError(span, error);
+        span.end(endTime ?? now());
+      },
+    };
+    return call;
+  }
+
+  /**
+   * The span name, request metadata and GenAI attributes of a `model()` call. An invalid label
+   * falls back to its default and, on an active client, counts one instrumentation failure; a
+   * disabled or closed client creates no span, so it counts nothing (matching the other helpers).
+   */
+  private modelMetadata(
+    model: unknown,
+    options: Partial<ModelOptions> | undefined,
+  ): {
+    name: string;
+    metadata: NonNullable<LocalContext["model"]>;
+    attributes: Attributes;
+  } {
+    const active = this.enabled && !this.closed;
+    const label = (value: unknown, fallback: string): string => {
+      if (isLabel(value)) return value;
+      if (active) this.transport.instrumentationFailure();
+      return fallback;
+    };
+    const requestModel = label(model, "unknown");
+    const operation = label(options?.operation ?? "chat", "chat");
+    const provider = label(options?.provider, "unknown");
+    const name =
+      options?.name === undefined
+        ? `${operation} ${requestModel}`
+        : label(options.name, `${operation} ${requestModel}`);
+    return {
+      name,
+      metadata: { operation, provider, requestModel },
+      attributes: {
+        "gen_ai.operation.name": operation,
+        "gen_ai.request.model": requestModel,
+        "gen_ai.provider.name": provider,
+      },
+    };
+  }
+
   private setUsage(span: Span, usage: TokenUsage): void {
     if (!this.enabled || this.closed) return;
-    for (const [key, value] of [
-      ["gen_ai.usage.input_tokens", usage?.inputTokens],
-      ["gen_ai.usage.output_tokens", usage?.outputTokens],
-    ] as const) {
-      if (value === undefined) continue;
-      if (!Number.isInteger(value) || value < 0) {
-        this.transport.instrumentationFailure();
-        continue;
+    const counts = new Map<string, number>();
+    try {
+      for (const [key, value, nullable] of [
+        [usageKeys.input, usage?.inputTokens, false],
+        [usageKeys.output, usage?.outputTokens, false],
+        // The cache and reasoning counts come straight from provider payloads, where `null`
+        // means "not reported" (Anthropic's unused cache fields), so it is absent, not invalid.
+        [usageKeys.cacheRead, usage?.cacheReadTokens, true],
+        [usageKeys.cacheWrite, usage?.cacheWriteTokens, true],
+        [usageKeys.reasoning, usage?.reasoningTokens, true],
+      ] as const) {
+        if (value === undefined || (nullable && value === null)) continue;
+        if (!Number.isInteger(value) || (value as number) < 0) {
+          this.transport.instrumentationFailure();
+          continue;
+        }
+        counts.set(key, value as number);
       }
+    } catch {
+      this.transport.instrumentationFailure();
+      return;
+    }
+    // `gen_ai.usage.input_tokens` includes cached input. A count smaller than its cache parts is
+    // the provider's cache-exclusive figure (Anthropic's `input_tokens`); pricing it as inclusive
+    // would underestimate, so neither it nor the cache counts are recorded.
+    const input = counts.get(usageKeys.input);
+    const read = counts.get(usageKeys.cacheRead);
+    const write = counts.get(usageKeys.cacheWrite);
+    if (
+      input !== undefined &&
+      (read !== undefined || write !== undefined) &&
+      input < (read ?? 0) + (write ?? 0)
+    ) {
+      this.transport.instrumentationFailure();
+      counts.delete(usageKeys.input);
+      counts.delete(usageKeys.cacheRead);
+      counts.delete(usageKeys.cacheWrite);
+    }
+    for (const [key, value] of counts)
       try {
         span.setAttribute(key, value);
       } catch {
         this.transport.instrumentationFailure();
       }
-    }
   }
 
   /**

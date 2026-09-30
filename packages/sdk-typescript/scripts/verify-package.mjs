@@ -92,6 +92,10 @@ if (!values.archive && !values["registry-version"]) {
     if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
       throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);
   }
+  // The provider wrappers' model-call hook is internal to the SDK too.
+  const clientTypes = readFileSync(join(staging, "dist", "client.d.ts"), "utf8");
+  if (/^\s+beginModel\(/m.test(clientTypes) || /\binterface ModelCall\b/.test(clientTypes))
+    throw new Error("dist/client.d.ts exposes the internal beginModel() / ModelCall");
   run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], staging);
   // Bun's packer must agree with npm's file inventory; the release artifact stays npm pack.
   const bunPack = spawnSync("bun", ["--no-env-file", "pm", "pack", "--dry-run"], {

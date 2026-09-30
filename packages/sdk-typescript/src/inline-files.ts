@@ -70,6 +70,19 @@ function fileBytes(content: string): Buffer {
   return decoded ?? Buffer.from(content, "utf8");
 }
 
+/**
+ * The identity export gives an inline file part's content when its bytes exceed
+ * {@link INLINE_FILE_LIMIT}: their SHA-256 and byte size, read with the byte rules admission uses
+ * (a `data:` URL by its own encoding, base64 content decoded, anything else as UTF-8). `undefined`
+ * when the file is small enough to stay inline. Internal: provider wrappers pre-hash large parts
+ * with it so a large file does not push the whole message past its field limit.
+ */
+export function inlineFileDigest(content: string): { sha256: string; size: number } | undefined {
+  const bytes = fileBytes(content);
+  if (bytes.byteLength <= INLINE_FILE_LIMIT) return undefined;
+  return { sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength };
+}
+
 interface HashState {
   changed: boolean;
 }
@@ -87,15 +100,11 @@ function hashNode(value: unknown, state: HashState, depth: number): unknown {
   const key = contentKey(part);
   const inline = key === undefined ? undefined : part[key];
   if (key !== undefined && typeof inline === "string") {
-    const bytes = fileBytes(inline);
-    if (bytes.byteLength > INLINE_FILE_LIMIT) {
+    const digest = inlineFileDigest(inline);
+    if (digest !== undefined) {
       const { [key]: _omitted, ...rest } = part;
       state.changed = true;
-      return {
-        ...rest,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        size: bytes.byteLength,
-      };
+      return { ...rest, ...digest };
     }
   }
   return Object.fromEntries(
