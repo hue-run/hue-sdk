@@ -161,6 +161,8 @@ function fixture(options: {
   connectionStatuses?: number[];
   /** The status the queue answers an attention completion with; 200 records it. */
   attentionStatus?: number;
+  /** The status every execution completion answers; 200 completes it. */
+  completionStatus?: number;
 }) {
   const provider = options.providerOutcome ? providerContract() : undefined;
   const projectId = randomUUID();
@@ -548,6 +550,8 @@ function fixture(options: {
           completionFailures--;
           return new Response(null, { status: 503 });
         }
+        if (options.completionStatus !== undefined)
+          return new Response(null, { status: options.completionStatus });
         // Mirrors the server guard: completion refuses an open linked world.
         const linked = [...worlds.values()].find((world) => world.executionId === execution.id);
         if (linked?.status === "open") return new Response(null, { status: 409 });
@@ -1634,6 +1638,40 @@ test("a transient failure of the startup connection check is reported and polled
     });
     expect(pollErrors.map((error) => (error as { status?: number }).status)).toEqual([502]);
     expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
+  }
+});
+
+test("a refusal that would recur is given up as attention at once instead of being retried", async () => {
+  // Hue refuses the completion for good (409): no resume changes that, so the run is given up
+  // on the first attempt with the refusal's name, and the worker goes on.
+  const f = fixture({ capabilityStatus: 200, completionStatus: 409 });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "recurring-refusal",
+    captureContent: false,
+  });
+  const failures: LocalRunFailure[] = [];
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-recurring-refusal-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      pollIntervalMillis: 250,
+      onRunFailed: (failure) => {
+        failures.push(failure);
+      },
+      target: () => "reply",
+    });
+    expect(failures.map((failure) => failure.outcome)).toEqual(["attention"]);
+    expect((failures[0]!.error as { status?: number }).status).toBe(409);
+    expect(f.calls.localRun).toEqual([{ state: "attention", failureType: "HueApiError" }]);
   } finally {
     await hue.shutdown();
     f.server.stop(true);

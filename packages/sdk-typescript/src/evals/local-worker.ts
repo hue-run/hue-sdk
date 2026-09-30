@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import type { EnvironmentClient } from "../environment/client.js";
+import { isTransientEnvironmentError, type EnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
 import type { WorldHandoff } from "../environment/types.js";
 import type {
@@ -10,6 +10,7 @@ import type {
   RequestedAttemptProviderV2,
 } from "./attempt.js";
 import { HueApiError, isTransientApiError } from "./client.js";
+import { HueExportError } from "../transport.js";
 import type { EvaluationClient } from "./client.js";
 import { CheckpointStore, checkpointPath, checkpointSegment } from "./checkpoint.js";
 import {
@@ -20,9 +21,7 @@ import {
 } from "./environment-target.js";
 import {
   runExperiment,
-  OutcomeSerializationError,
-  TargetOutcomeUncertainError,
-  UncertainExecutionError,
+  TraceExportUnacknowledgedError,
   type RunExperimentTargetContext,
   type RunnerReport,
   type TelemetryNotAccepted,
@@ -190,10 +189,11 @@ export interface RunLocalAgentOptions {
   /** Stop after this many runs settle: completed, or given up as `attention`. Useful for
    * one-shot jobs and deterministic acceptance. Omit to keep polling. */
   maxRuns?: number;
-  /** How many times one run is resumed after an operational failure (a request Hue refused
-   * transiently past the client's own retries, a world seal not read back, a lost network)
-   * before the worker gives it up as `attention`. Default 5, range 1–20. An outcome that is
-   * unsafe to resume (uncertain target outcome, unserializable output) is attention at once. */
+  /** How many times one run is resumed after a transient failure (a request Hue refused
+   * transiently past the client's own retries, a world seal not read back, a lost network,
+   * telemetry not accepted) before the worker gives it up as `attention`. Default 5, range
+   * 1–20. A failure that would recur (an uncertain target outcome, an unserializable output, a
+   * refusal Hue decided on, an input the SDK refuses) is attention at once. */
   maxRunAttempts?: number;
   /** The lifetime of each world the worker creates for a case, in seconds (1–86400); the
    * server's default, an hour, applies when omitted. The target is stopped when the world
@@ -320,18 +320,23 @@ export interface LocalRunFailure extends LocalAgentClaim {
   waitMillis?: number;
 }
 
-/** An outcome the worker must not resume on its own: the target may have run without a saved
- * outcome, or its output cannot be saved. Nested failures of a concurrent run count. */
-function needsAttention(error: unknown, seen = new Set<unknown>()): boolean {
+/** A failure worth resuming: one that changes on its own. Hue or a world not answering or
+ * refusing transiently past the client's retries, telemetry not accepted or not yet
+ * acknowledged, or a run of such failures across concurrent cases. Everything else, an outcome
+ * unsafe to resume (the target may have run without a saved outcome, an output that cannot be
+ * saved), a refusal Hue decided on, an input the SDK refuses (a case file whose bytes differ
+ * from its manifest), would recur on the next attempt and is given up as attention at once. */
+function resumable(error: unknown, seen = new Set<unknown>()): boolean {
   if (
-    error instanceof TargetOutcomeUncertainError ||
-    error instanceof UncertainExecutionError ||
-    error instanceof OutcomeSerializationError
+    isTransientApiError(error) ||
+    isTransientEnvironmentError(error) ||
+    error instanceof HueExportError ||
+    error instanceof TraceExportUnacknowledgedError
   )
     return true;
-  if (!(error instanceof AggregateError) || seen.has(error)) return false;
+  if (!(error instanceof AggregateError) || seen.has(error) || !error.errors.length) return false;
   seen.add(error);
-  return error.errors.some((nested: unknown) => needsAttention(nested, seen));
+  return error.errors.every((nested: unknown) => resumable(nested, seen));
 }
 
 /**
@@ -553,18 +558,18 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           attempts.delete(claim.runId);
           settled++;
           await options.onRunFailed?.({ ...claim, error, attempt: 0, outcome: "refused" });
-        } else if (!experimentFinished && needsAttention(error)) {
-          // Unsafe to resume: the target may have run without a saved outcome, or its output
-          // cannot be saved. A project member decides; the worker goes on to other runs. When
-          // Hue cannot record that for `maxRunAttempts` polls, the worker stops with the error:
-          // it can reach neither an outcome nor a record of one.
+        } else if (!experimentFinished && !resumable(error)) {
+          // A failure that would recur: unsafe to resume, refused by Hue, or an input the SDK
+          // refuses. A project member decides; the worker goes on to other runs. When Hue cannot
+          // record that for `maxRunAttempts` polls, the worker stops with the error: it can
+          // reach neither an outcome nor a record of one.
           if (!(await giveUp(claim, error))) {
             const attempt = bump(claim);
             if (attempt >= maxRunAttempts) throw error;
             await wait(backoff(attempt), options.signal);
           }
         } else {
-          // An operational failure: the outcome so far is checkpointed, and the claim stays with
+          // A transient failure: the outcome so far is checkpointed, and the claim stays with
           // this worker, so the next claim returns the same run and the experiment resumes where
           // it stopped. After `maxRunAttempts` such failures the run is given up as attention;
           // when even that cannot be recorded, the worker stops with the error.

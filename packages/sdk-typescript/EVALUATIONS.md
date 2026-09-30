@@ -257,11 +257,13 @@ idempotency key (the worker's own register, claim, heartbeat and completion incl
 again after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up to
 `maxAttempts` (default 4) times; a mutation without a key is sent once. A registration or claim
 that still fails transiently is reported through `onPollError` and polled again with a growing
-wait; a refusal Hue decided on (a revoked key, a disabled agent) is thrown. Completion or
-result-upload failures keep the run claimed by the durable worker identity: the next claim
-returns it to the same process, which resumes saved uploads without invoking the candidate again
-(`onRunFailed` says `retry`), and after `maxRunAttempts` (default 5) such failures the run is
-given up as `attention` for a project member to requeue or cancel from its run page. A lost
+wait; a refusal Hue decided on (a revoked key, a disabled agent) is thrown. A transient failure
+of a completion or result upload keeps the run claimed by the durable worker identity: the next
+claim returns it to the same process, which resumes saved uploads without invoking the candidate
+again (`onRunFailed` says `retry`), and after `maxRunAttempts` (default 5) such failures the run
+is given up as `attention` for a project member to requeue or cancel from its run page; a failure
+that would recur (a refusal Hue decided on, a case file whose bytes differ from its manifest) is
+given up at once. A lost
 world-seal acknowledgement is recovered by reading authoritative world state. If the seal or
 candidate outcome cannot be confirmed, or an outcome cannot be serialized, the run is given up
 as `attention` at once and the worker goes on to other runs; when Hue cannot record that either,

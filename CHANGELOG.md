@@ -20,11 +20,13 @@ refuses to publish a version without a matching entry below.
   without a key and the credential-bearing attempt preparation are still sent once.
 - `runLocalAgent` no longer stops with one failure. A registration or claim that fails
   transiently past the client's retries is reported through `onPollError` and polled again with
-  a growing wait. A claimed run whose attempt fails operationally keeps its claim and is resumed
+  a growing wait. A claimed run whose attempt fails transiently keeps its claim and is resumed
   by the same process from its checkpoints (`onRunFailed` says `retry`), and after
   `maxRunAttempts` (default 5) failures is given up as `attention` for a project member to
-  requeue or cancel; an outcome unsafe to resume is attention at once, and a completion Hue
-  refuses because the run was released or cancelled meanwhile is reported as `refused`.
+  requeue or cancel; a failure that would recur (an outcome unsafe to resume, a refusal Hue
+  decided on, an input the SDK refuses such as a case file whose bytes differ from its manifest)
+  is attention at once, and a completion Hue refuses because the run was released or cancelled
+  meanwhile is reported as `refused`.
   `maxRuns` counts runs that settled either way. `worldTtlSeconds` sets each world's lifetime,
   and the candidate receives `signal` in its context.
 - `TargetTimeoutError`: a target still running five seconds past its world's `expiresAt` is
