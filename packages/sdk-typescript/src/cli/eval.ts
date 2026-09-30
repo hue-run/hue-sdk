@@ -1599,6 +1599,22 @@ async function runWorker(
     deprecationWarnings: false,
     signal,
     ...(maxRuns === undefined ? {} : { maxRuns }),
+    onPollError(error) {
+      output.error(`Hue did not answer the poll (${explain(error)}); polling again`);
+    },
+    onRunFailed(failure) {
+      const run = `Run ${failure.runId}`;
+      if (failure.outcome === "retry")
+        output.error(
+          `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round((failure.waitMillis ?? 0) / 1000)} s`,
+        );
+      else if (failure.outcome === "attention")
+        output.error(
+          `${run} needs attention (${explain(failure.error)}); requeue or cancel it from its run page`,
+        );
+      else
+        output.error(`${run} was released or cancelled in Hue; its outcome here is not recorded`);
+    },
     target(inputs, tools: Record<string, EnvironmentTool>, context) {
       output.log(`[${context.item.externalKey}] agent started`);
       return adapter(inputs, {

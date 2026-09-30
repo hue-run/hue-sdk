@@ -22,7 +22,7 @@ import {
   type SurfaceBindingV2,
 } from "./attempt.js";
 import type { EvaluationClient } from "./client.js";
-import { TargetCancelledError, TargetOutcomeUncertainError } from "./runner.js";
+import { TargetCancelledError, TargetOutcomeUncertainError, TargetTimeoutError } from "./runner.js";
 import type {
   ExperimentCase,
   JsonValue,
@@ -180,6 +180,9 @@ export interface RunEnvironmentTargetOptions {
 export const MAX_GRACE_WAIT_MS = 10_000;
 export const SEAL_POLL_MS = 250;
 export const SEAL_WAIT_MS = 30_000;
+/** How long past the world's `expiresAt` the target is given before it is stopped: room for a
+ * last call in flight at the deadline and for clock skew between the worker and Hue. */
+export const DEADLINE_MARGIN_MS = 5_000;
 
 /** The seal wait's bounds. Only tests shorten them; the helpers always use the defaults. */
 export interface SealTiming {
@@ -487,20 +490,49 @@ export async function runEnvironmentTarget(
     }
     if (options.signal?.aborted) throw new TargetCancelledError();
     await progress({ type: "target_started", environmentRunId: run.id });
-    const output = await options.target(options.inputs, {
-      config: context.config,
-      item: context.item,
-      executionId: context.executionId,
-      environmentRunId: run.id,
-      trace: { traceId: context.span.traceId, spanId: context.span.spanId },
-      tools,
-      ...(world ? { world } : {}),
-      ...(mcp ? { mcp } : {}),
-      ...(connectionBundle ? { connectionBundle } : {}),
-      files: structuredClone(context.files),
-      outputDirectory: context.outputDirectory,
-      signal: options.signal,
+    // The world's deadline bounds the target: once the world expires its mirrors refuse every
+    // call, so an agent still running can achieve nothing more. The target is told through its
+    // signal a moment after the deadline and, whether or not it listens, its case ends as a
+    // `TargetTimeout` and the world is sealed abandoned; a promise that never settles is left
+    // behind rather than holding the run open for good.
+    const expiresAt = Date.parse(run.expiresAt);
+    const deadline = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      if (!Number.isFinite(expiresAt)) return;
+      timer = setTimeout(
+        () => {
+          const error = new TargetTimeoutError(run.id, run.expiresAt);
+          deadline.abort(error);
+          reject(error);
+        },
+        Math.max(0, expiresAt + DEADLINE_MARGIN_MS - Date.now()),
+      );
     });
+    let output: JsonValue | TargetResult | undefined;
+    try {
+      output = await Promise.race([
+        options.target(options.inputs, {
+          config: context.config,
+          item: context.item,
+          executionId: context.executionId,
+          environmentRunId: run.id,
+          trace: { traceId: context.span.traceId, spanId: context.span.spanId },
+          tools,
+          ...(world ? { world } : {}),
+          ...(mcp ? { mcp } : {}),
+          ...(connectionBundle ? { connectionBundle } : {}),
+          files: structuredClone(context.files),
+          outputDirectory: context.outputDirectory,
+          signal: options.signal
+            ? AbortSignal.any([options.signal, deadline.signal])
+            : deadline.signal,
+        }),
+        timedOut,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
     await seal(options.environmentClient, run.id, context.executionId, "completed", timing);
     finalized = true;
     await Promise.resolve(progress({ type: "world_sealed", environmentRunId: run.id })).catch(
