@@ -1604,11 +1604,12 @@ async function runWorker(
     },
     onRunFailed(failure) {
       const run = `Run ${failure.runId}`;
-      if (failure.outcome === "retry")
+      if (failure.outcome === "retry") {
+        const waitMillis = failure.waitMillis ?? 0;
         output.error(
-          `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round((failure.waitMillis ?? 0) / 1000)} s`,
+          `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round(waitMillis / 1000)} s`,
         );
-      else if (failure.outcome === "attention")
+      } else if (failure.outcome === "attention")
         output.error(
           `${run} needs attention (${explain(failure.error)}); requeue or cancel it from its run page`,
         );

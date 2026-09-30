@@ -21,7 +21,6 @@ import {
 } from "./environment-target.js";
 import {
   runExperiment,
-  TraceExportUnacknowledgedError,
   type RunExperimentTargetContext,
   type RunnerReport,
   type TelemetryNotAccepted,
@@ -321,17 +320,17 @@ export interface LocalRunFailure extends LocalAgentClaim {
 }
 
 /** A failure worth resuming: one that changes on its own. Hue or a world not answering or
- * refusing transiently past the client's retries, telemetry not accepted or not yet
- * acknowledged, or a run of such failures across concurrent cases. Everything else, an outcome
- * unsafe to resume (the target may have run without a saved outcome, an output that cannot be
- * saved), a refusal Hue decided on, an input the SDK refuses (a case file whose bytes differ
- * from its manifest), would recur on the next attempt and is given up as attention at once. */
+ * refusing transiently past the client's retries, telemetry not accepted at the flush, or a run
+ * of such failures across concurrent cases. Everything else, an outcome unsafe to resume (the
+ * target may have run without a saved outcome, an output that cannot be saved), a saved outcome
+ * whose trace was never acknowledged (a resume does not export it again), a refusal Hue decided
+ * on, an input the SDK refuses (a case file whose bytes differ from its manifest), would recur on
+ * the next attempt and is given up as attention at once. */
 function resumable(error: unknown, seen = new Set<unknown>()): boolean {
   if (
     isTransientApiError(error) ||
     isTransientEnvironmentError(error) ||
-    error instanceof HueExportError ||
-    error instanceof TraceExportUnacknowledgedError
+    error instanceof HueExportError
   )
     return true;
   if (!(error instanceof AggregateError) || seen.has(error) || !error.errors.length) return false;
