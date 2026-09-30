@@ -65,6 +65,7 @@ interface ExportSink {
     count: number,
     message: string,
     status?: number,
+    traceIds?: string[],
   ): void;
   placeholderMarkers(record: RecordValue): Attributes | undefined;
   placeholderSettled(record: RecordValue): boolean;
@@ -213,10 +214,18 @@ export class HueTransport {
           const queued = this.enqueue("traces", span);
           if (!queued) return;
           admitted = queued as ReadableSpan;
+          this.countEnded(admitted);
           spans.onEnd(admitted);
         } catch {
           if (admitted) this.finish("traces", [admitted]);
-          this.issue("traces", "invalid", 1, "Telemetry processor could not accept a record");
+          this.issue(
+            "traces",
+            "invalid",
+            1,
+            "Telemetry processor could not accept a record",
+            undefined,
+            traceIdsOf([span]),
+          );
         }
       },
       forceFlush: () => spans.forceFlush(),
@@ -251,6 +260,9 @@ export class HueTransport {
   private enqueue(signal: Signal, record: RecordValue, advisory = false): RecordValue | undefined {
     const pending = signal === "traces" ? this.spans : this.logs;
     if (advisory && (this.closed || pending.size >= 2048 / 4)) return undefined;
+    // A record dropped here names its trace, so a runner with several traces in flight knows
+    // whose telemetry is missing; a log record names the trace of the span it was emitted in.
+    const traceIds = traceIdsOf([record]);
     if (this.closed || pending.size >= 2048) {
       this.issue(
         signal,
@@ -259,6 +271,8 @@ export class HueTransport {
         this.closed
           ? "Telemetry emitted after transport shutdown"
           : "Telemetry queue reached 2048 records",
+        undefined,
+        traceIds,
       );
       return undefined;
     }
@@ -288,6 +302,8 @@ export class HueTransport {
         "dropped",
         1,
         "Telemetry snapshot exceeded its byte or complexity budget or contained unsupported data",
+        undefined,
+        traceIds,
       );
       return undefined;
     }
@@ -396,6 +412,7 @@ export class HueTransport {
     count: number,
     message: string,
     status?: number,
+    traceIds?: string[],
   ): void {
     if (kind === "dropped") this.dropped[signal] += count;
     if (kind === "rejected") this.rejected[signal] += count;
@@ -407,6 +424,7 @@ export class HueTransport {
       count,
       message,
       ...(status !== undefined ? { status } : {}),
+      ...(traceIds !== undefined ? { traceIds } : {}),
     };
     if (kind !== "warning") this.failureSequence = issue.sequence;
     this.issues.push(issue);
@@ -436,14 +454,17 @@ export class HueTransport {
   }
 
   /** @internal Counts a helper capture or instrumentation failure that preserved application execution. */
+  /** Records a capture or instrumentation failure, named to the trace it happened in when the
+   * caller knows it, so a runner with several traces in flight can tell whose it was. */
   instrumentationFailure(
     signal: Signal = "traces",
     message = "Telemetry capture or instrumentation failed; application execution was preserved",
     count = 1,
+    traceId?: string,
   ): void {
     if (!Number.isSafeInteger(count) || count < 1) return;
     this.instrumentationFailures += count;
-    this.issue(signal, "invalid", 0, message);
+    this.issue(signal, "invalid", 0, message, undefined, traceId ? [traceId] : undefined);
   }
 
   /** Cumulative counters and current queue gauges. */
@@ -472,6 +493,25 @@ export class HueTransport {
   /** Monotonic failure marker, retained even when the bounded issue history rolls over. */
   getFailureSequence(): number {
     return this.failureSequence;
+  }
+
+  /** Spans of a trace this transport has handed to its exporter, by trace id, for the newest
+   * traces only: a runner compares the count with the trace receipt's span count to know that
+   * every span of a case landed, not only the root. Zero for a trace it does not remember. */
+  spansEnded(traceId: string): number {
+    return this.endedSpans.get(traceId) ?? 0;
+  }
+  private endedSpans = new Map<string, number>();
+  private countEnded(span: ReadableSpan): void {
+    let traceId: string;
+    try {
+      traceId = span.spanContext().traceId;
+    } catch {
+      return;
+    }
+    this.endedSpans.set(traceId, (this.endedSpans.get(traceId) ?? 0) + 1);
+    if (this.endedSpans.size > MAX_REMEMBERED_TRACES)
+      this.endedSpans.delete(this.endedSpans.keys().next().value!);
   }
 
   /**
@@ -534,6 +574,31 @@ export class HueTransport {
   }
 }
 
+/** The distinct trace ids of a batch, or undefined past 64 of them, when an issue would name too
+ * many traces to tell one apart; a record whose context cannot be read is left out. */
+const MAX_ISSUE_TRACE_IDS = 64;
+/** How many traces' ended-span counts one transport remembers; the oldest is forgotten first. */
+const MAX_REMEMBERED_TRACES = 10_000;
+function traceIdsOf(records: readonly RecordValue[]): string[] | undefined {
+  const ids = new Set<string>();
+  for (const record of records) {
+    try {
+      // A span reports its context; a log record carries the span's identifiers.
+      const traceId =
+        "spanContext" in record && typeof record.spanContext === "function"
+          ? (record as ReadableSpan).spanContext().traceId
+          : (record as ReadableLogRecord).spanContext?.traceId;
+      if (traceId) ids.add(traceId);
+    } catch {
+      // A record without a readable context names no trace.
+    }
+    if (ids.size > MAX_ISSUE_TRACE_IDS) return undefined;
+  }
+  // No readable trace names nobody, which is not the same as naming no one's: the issue may
+  // concern any trace in flight.
+  return ids.size ? [...ids] : undefined;
+}
+
 class ReportingExporter<T extends RecordValue> {
   private pending = new Set<Promise<void>>();
   constructor(
@@ -592,7 +657,7 @@ class ReportingExporter<T extends RecordValue> {
     const cache: ResourceCache = new WeakMap();
     let failed = false;
     let redactedBytes = 0;
-    const invalid = (placeholder: boolean, message: string) => {
+    const invalid = (placeholder: boolean, message: string, record?: T) => {
       if (placeholder)
         this.transport.issue(
           this.signal,
@@ -602,7 +667,14 @@ class ReportingExporter<T extends RecordValue> {
         );
       else {
         failed = true;
-        this.transport.issue(this.signal, "invalid", 1, message);
+        this.transport.issue(
+          this.signal,
+          "invalid",
+          1,
+          message,
+          undefined,
+          record ? traceIdsOf([record]) : undefined,
+        );
       }
     };
     const send = async (batch: T[]) => {
@@ -656,6 +728,7 @@ class ReportingExporter<T extends RecordValue> {
         invalid(
           markers !== undefined,
           "Telemetry record could not be redacted or exceeds supported content limits",
+          record,
         );
       }
     }
@@ -671,7 +744,7 @@ class ReportingExporter<T extends RecordValue> {
       try {
         recordBytes = this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
       } catch {
-        invalid(placeholders.has(record), "Telemetry record could not be serialized");
+        invalid(placeholders.has(record), "Telemetry record could not be serialized", record);
         continue;
       }
       const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
@@ -681,7 +754,11 @@ class ReportingExporter<T extends RecordValue> {
         batchBytes = 0;
       }
       if (recordBytes > limit) {
-        invalid(placeholders.has(record), "Telemetry record exceeds the 1 MiB request limit");
+        invalid(
+          placeholders.has(record),
+          "Telemetry record exceeds the 1 MiB request limit",
+          record,
+        );
         continue;
       }
       batch.push(record);
@@ -695,6 +772,9 @@ class ReportingExporter<T extends RecordValue> {
   private async send(records: T[], placeholders = 0): Promise<boolean> {
     const options = this.transport.options;
     const real = records.length - placeholders;
+    // The traces this batch carries, spans or the log records emitted in their spans, so a loss
+    // or rejection names whose telemetry it was.
+    const traceIds = traceIdsOf(records);
     // A loss involving only placeholders is a warning. Mixed losses count only real records.
     const lose = (message: string, status?: number): boolean => {
       this.transport.issue(
@@ -703,6 +783,7 @@ class ReportingExporter<T extends RecordValue> {
         real || placeholders,
         real ? message : `${message} (in-progress span placeholders only)`,
         status,
+        traceIds,
       );
       return !real;
     };
@@ -744,6 +825,8 @@ class ReportingExporter<T extends RecordValue> {
                 : remaining
                   ? "Hue rejected in-progress span placeholders"
                   : "Hue returned an ingestion warning",
+              undefined,
+              traceIds,
             );
           // Do not pass backend error text or raw response bytes into the global OTel diagnostic logger.
           return {};

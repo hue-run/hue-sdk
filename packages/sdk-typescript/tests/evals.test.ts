@@ -96,6 +96,11 @@ function fixture() {
   const requests: { path: string; body: Record<string, unknown> }[] = [];
   const receipts = new Map<string, { body: string; response: unknown }>();
   const traceIds = new Set<string>();
+  /** Span ids Hue holds, by trace, as the receipt reports them. */
+  const spanIds = new Map<string, Set<string>>();
+  /** Case ids whose next export batch (the one carrying the case's root span) is refused, as a
+   * collector refuses a batch: every span in it, this case's and any other's, does not land. */
+  const rejectedCases = new Set<string>();
   const wire: string[] = [];
   let completeFailures = 0;
   let telemetryFailures = 0;
@@ -161,14 +166,48 @@ function fixture() {
           `opentelemetry.proto.collector.${isTrace ? "trace" : "logs"}.v1.Export${isTrace ? "Trace" : "Logs"}ServiceRequest`,
         );
         const value = type.toObject(type.decode(bytes), { bytes: String, longs: String });
+        if (isTrace) {
+          const spans = (value.resourceSpans as { scopeSpans: { spans: unknown[] }[] }[]).flatMap(
+            (resource) => resource.scopeSpans.flatMap((scope) => scope.spans),
+          ) as { attributes?: { key: string; value: { stringValue?: string } }[] }[];
+          const caseOf = (span: (typeof spans)[number]) =>
+            span.attributes?.find((attribute) => attribute.key === "hue.dataset.case.id")?.value
+              .stringValue;
+          const rejected = spans
+            .map(caseOf)
+            .find((id) => id !== undefined && rejectedCases.has(id));
+          if (rejected) {
+            rejectedCases.delete(rejected);
+            return new Response(null, { status: 500 });
+          }
+        }
         wire.push(JSON.stringify(value));
         if (isTrace)
           for (const resource of value.resourceSpans)
             for (const scope of resource.scopeSpans)
-              for (const span of scope.spans)
-                traceIds.add(Buffer.from(span.traceId, "base64").toString("hex"));
+              for (const span of scope.spans) {
+                const traceId = Buffer.from(span.traceId, "base64").toString("hex");
+                traceIds.add(traceId);
+                if (!spanIds.has(traceId)) spanIds.set(traceId, new Set());
+                spanIds.get(traceId)!.add(Buffer.from(span.spanId, "base64").toString("hex"));
+              }
         return new Response(new Uint8Array(), {
           headers: { "Content-Type": "application/x-protobuf" },
+        });
+      }
+      const receiptMatch = /^\/traces\/([0-9a-f]{32})\/receipt$/.exec(path);
+      if (receiptMatch && request.method === "GET") {
+        const held = spanIds.get(receiptMatch[1]!);
+        if (!held) return Response.json({ code: "TRACE_NOT_FOUND" }, { status: 404 });
+        const expected = url.searchParams.getAll("expectedSpanId");
+        return Response.json({
+          traceId: receiptMatch[1],
+          spanCount: held.size,
+          revision: 1,
+          fields: { input: false, output: false, model: false, usage: false, session: false },
+          matchedSpanIds: expected.filter((id) => held.has(id)),
+          missingSpanIds: expected.filter((id) => !held.has(id)),
+          traceUrl: `${url.origin}/traces/${receiptMatch[1]}`,
         });
       }
       const body =
@@ -366,6 +405,12 @@ function fixture() {
     executions,
     failComplete: () => (completeFailures = 1),
     failTelemetry: () => (telemetryFailures = 1),
+    /** Refuses the next export batch carrying this case's root span. */
+    rejectCase: (caseId: string) => rejectedCases.add(caseId),
+    /** Forgets one held span of the trace, as if a child span's batch had never landed. */
+    forgetSpan: (traceId: string, spanId: string) => spanIds.get(traceId)?.delete(spanId),
+    spansHeld: (traceId: string) => spanIds.get(traceId)?.size ?? 0,
+    spanIdsOf: (traceId: string) => spanIds.get(traceId),
     failResult: () => (resultFailures = 1),
     failStart: () => (startFailures = 1),
     truncateItemPage: () => (truncatedItemPages = 1),
@@ -716,6 +761,200 @@ describe("installed evaluation API and runner contract", () => {
     } finally {
       spy.mockRestore();
       await hue.shutdownSafe();
+      f.server.stop(true);
+    }
+  });
+  test("an export failure is attributed to the traces it concerned: the case beside it completes, and the failed case alone is refused on resume", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first, second] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "attributed-export",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    const calls: string[] = [];
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      concurrency: 2,
+      traceEvidence: { mode: "required" as const },
+      target: async (_inputs: JsonValue, context: { item: { id: string } }) => {
+        calls.push(context.item.id);
+        // The first case ends at once, so its root span is flushed in a batch of its own; the
+        // second is still running then and flushes later.
+        if (context.item.id !== first!.id) await new Promise((resolve) => setTimeout(resolve, 400));
+        return "reply";
+      },
+    };
+    // Hue refuses the batch that carries the first case's root span.
+    f.rejectCase(first!.id);
+    try {
+      const error = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(HueExportError);
+      expect(calls.sort()).toEqual([first!.id, second!.id].sort());
+      // Only the second case completed; the first's saved outcome is marked failed, and the
+      // refused batch's issue names its trace.
+      const completions = f.requests.filter((request) => request.path.endsWith("/complete"));
+      expect(completions).toHaveLength(1);
+      const saved = JSON.parse(
+        await readFile(join(checkpointDirectory, `case-${first!.id}.json`), "utf8"),
+      ) as { value: { exportState: string; trace?: { traceId: string; spanId: string } } };
+      expect(saved.value.exportState).toBe("failed");
+      expect(saved.value.trace?.traceId).toMatch(/^[0-9a-f]{32}$/);
+      expect(
+        (error as HueExportError).issues.some(
+          (issue) =>
+            issue.kind === "failed" && issue.traceIds?.includes(saved.value.trace!.traceId),
+        ),
+      ).toBe(true);
+      // Resume refuses the failed case as itself, runs no target again and completes nothing more.
+      await expect(runExperiment(options)).rejects.toBeInstanceOf(TraceExportUnacknowledgedError);
+      expect(calls).toHaveLength(2);
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(1);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("an instrumentation failure in one case flags that case alone, and a case no flush decided is accepted through its trace receipt", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first, second] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "attributed-instrumentation",
+      // Content capture on, so the case span encodes the output the target sets.
+      captureContent: true,
+    });
+    const checkpointDirectory = await directory();
+    const calls: string[] = [];
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      concurrency: 2,
+      traceEvidence: { mode: "required" as const },
+      target: async (
+        _inputs: JsonValue,
+        context: { item: { id: string }; span: { setOutput(value: unknown): void } },
+      ) => {
+        calls.push(context.item.id);
+        if (context.item.id === first!.id)
+          // A Proxy is refused before its traps run: a contained capture failure in this case.
+          context.span.setOutput(new Proxy({}, {}));
+        else await new Promise((resolve) => setTimeout(resolve, 200));
+        return "reply";
+      },
+    };
+    try {
+      const error = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+      expect(error).toBeInstanceOf(HueExportError);
+      expect(calls.sort()).toEqual([first!.id, second!.id].sort());
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(1);
+      const file = join(checkpointDirectory, `case-${first!.id}.json`);
+      const saved = JSON.parse(await readFile(file, "utf8")) as {
+        value: { exportState: string; trace: { traceId: string } };
+      };
+      expect(saved.value.exportState).toBe("failed");
+      // A checkpoint no flush decided on (a process that stopped before its flush ended) is
+      // asked about through its trace receipt on resume: its root span landed, so it completes.
+      const manifest = JSON.parse(
+        await readFile(join(checkpointDirectory, "manifest.json"), "utf8"),
+      );
+      const store = await CheckpointStore.acquire(checkpointDirectory, manifest.value.identity);
+      try {
+        await store.write(`case-${first!.id}`, { ...saved.value, exportState: "pending" });
+      } finally {
+        await store.release();
+      }
+      const report = await runExperiment(options);
+      expect(report.subjectIds).toHaveLength(2);
+      expect(calls).toHaveLength(2);
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(2);
+      // The receipt is held to the spans the case ended: the checkpoint records them.
+      const accepted = JSON.parse(await readFile(file, "utf8")) as {
+        value: { exportState: string; trace: { traceId: string; spans?: number } };
+      };
+      expect(accepted.value.exportState).toBe("accepted");
+      expect(accepted.value.trace.spans).toBe(f.spansHeld(accepted.value.trace.traceId));
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("a pending checkpoint whose trace lost a child span is refused although its root landed", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "attributed-children",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      traceEvidence: { mode: "required" as const },
+      target: async (_inputs: JsonValue, context: { item: { id: string } }) => {
+        // A child span inside the first case; its loss must not hide behind the root.
+        if (context.item.id === first!.id) await hue.withSpan("child", () => "worked");
+        return "reply";
+      },
+    };
+    try {
+      await runExperiment(options);
+      const file = join(checkpointDirectory, `case-${first!.id}.json`);
+      const saved = JSON.parse(await readFile(file, "utf8")) as {
+        value: { exportState: string; trace: { traceId: string; spanId: string; spans: number } };
+      };
+      expect(saved.value.exportState).toBe("accepted");
+      expect(saved.value.trace.spans).toBe(2);
+      // Reset the first case to pending and forget its child span at Hue: the root is still
+      // there, but the receipt holds fewer spans than the case ended, so resume refuses it.
+      const manifest = JSON.parse(
+        await readFile(join(checkpointDirectory, "manifest.json"), "utf8"),
+      );
+      const store = await CheckpointStore.acquire(checkpointDirectory, manifest.value.identity);
+      try {
+        const { completion: _completion, ...pending } = saved.value as { completion?: unknown };
+        await store.write(`case-${first!.id}`, { ...pending, exportState: "pending" });
+      } finally {
+        await store.release();
+      }
+      const child = [...(f.spanIdsOf(saved.value.trace.traceId) ?? [])].find(
+        (id) => id !== saved.value.trace.spanId,
+      );
+      expect(child).toBeDefined();
+      f.forgetSpan(saved.value.trace.traceId, child!);
+      expect(f.spansHeld(saved.value.trace.traceId)).toBe(1);
+      const resumed = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(resumed).toBeInstanceOf(TraceExportUnacknowledgedError);
+    } finally {
+      await hue.shutdown();
       f.server.stop(true);
     }
   });

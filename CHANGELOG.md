@@ -12,6 +12,18 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- Export issues name the traces of the records they concerned (`ExportIssue.traceIds`, up to 64
+  ids): a refused or rejected batch names the traces in it, a dropped record and a record the
+  processor could not accept name theirs, and a capture or instrumentation failure names the
+  trace active where it happened. The runner reads them after each case's flush: a failure that
+  names the case's trace marks that case `failed` (its evidence is incomplete, and resume refuses
+  it), one that names only other traces leaves it accepted, and one that names no trace is
+  decided by the case's trace receipt, at once or on resume, where the presence of its root span
+  accepts a checkpoint still `pending`. One case's telemetry failure no longer flags the cases
+  running beside it.
+
+#### Added
+
 - `EvaluationClient` sends a read, or a mutation the server deduplicates by its idempotency key
   (the local worker's register, claim, heartbeat, completion and capability routes included),
   again after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up
