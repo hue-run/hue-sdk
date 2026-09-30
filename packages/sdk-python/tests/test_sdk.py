@@ -1716,5 +1716,18 @@ def test_shutdown_ends_abandoned_calls_before_it_stops_accepting_spans(receiver)
     assert call is not None
     call.end_when_collected(_Stream())
     gc.collect()
+    assert list(hue._abandoned) == [call]
+    stop_accepting = hue._span_processor.stop_accepting
+    seen: list[tuple[bool, int]] = []
+
+    def observed() -> None:
+        # The drain runs after the client is closed to new calls and right before this.
+        seen.append((hue._closed, len(hue._abandoned)))
+        stop_accepting()
+
+    hue._span_processor.stop_accepting = observed
     assert hue.shutdown()
+    assert seen and set(seen) == {(True, 0)}
     assert [span.name for span in receiver.spans()] == ["chat abandoned"]
+    # A closed client starts no new model call, so none can be abandoned after the drain.
+    assert hue._begin_model("late", provider="synthetic") is None

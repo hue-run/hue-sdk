@@ -1342,8 +1342,6 @@ class Hue:
         repeated calls never launch extra workers. Borrowed providers stay usable.
         """
         self._validate_timeout(timeout_millis)
-        # Abandoned calls end before the processors stop accepting spans.
-        self._drain_abandoned()
         if self._pid != os.getpid():
             return False
         if not self.enabled:
@@ -1353,6 +1351,10 @@ class Hue:
         with self._shutdown_lock:
             if not self._closed:
                 self._closed = True
+                # Closed first, so no new model call starts; then queued abandoned calls end
+                # immediately before the processors stop accepting spans. A stream collected after
+                # this point belongs to a shut-down client, whose spans are no longer exported.
+                self._drain_abandoned()
                 self._span_processor.stop_accepting()
                 self._log_processor.stop_accepting()
 
