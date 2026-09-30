@@ -1397,3 +1397,324 @@ def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver,
     assert (exported.status.message == "private description") is capture_content
     telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
     assert (b"private" in telemetry) is capture_content
+
+
+_USAGE_KEYS = (
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+    "gen_ai.usage.cache_read.input_tokens",
+    "gen_ai.usage.cache_creation.input_tokens",
+    "gen_ai.usage.reasoning.output_tokens",
+)
+
+
+@pytest.mark.parametrize(
+    ("usage", "failures", "recorded"),
+    [
+        pytest.param(
+            {
+                "input_tokens": 1100,
+                "output_tokens": 20,
+                "cache_read_tokens": 1000,
+                "cache_write_tokens": 50,
+                "reasoning_tokens": 5,
+            },
+            0,
+            {
+                "gen_ai.usage.input_tokens": 1100,
+                "gen_ai.usage.output_tokens": 20,
+                "gen_ai.usage.cache_read.input_tokens": 1000,
+                "gen_ai.usage.cache_creation.input_tokens": 50,
+                "gen_ai.usage.reasoning.output_tokens": 5,
+            },
+            id="every count when the input includes its cache counts",
+        ),
+        pytest.param(
+            {"input_tokens": 1000, "cache_read_tokens": 900, "cache_write_tokens": 100},
+            0,
+            {
+                "gen_ai.usage.input_tokens": 1000,
+                "gen_ai.usage.cache_read.input_tokens": 900,
+                "gen_ai.usage.cache_creation.input_tokens": 100,
+            },
+            id="an input equal to its cache counts",
+        ),
+        pytest.param(
+            {"input_tokens": 1100, "cache_read_tokens": 1000},
+            0,
+            {"gen_ai.usage.input_tokens": 1100, "gen_ai.usage.cache_read.input_tokens": 1000},
+            id="an inclusive input",
+        ),
+        pytest.param(
+            {
+                "input_tokens": 100,
+                "cache_read_tokens": 1000,
+                "output_tokens": 10,
+                "reasoning_tokens": 4,
+            },
+            1,
+            {"gen_ai.usage.output_tokens": 10, "gen_ai.usage.reasoning.output_tokens": 4},
+            id="an input smaller than its cache counts is refused, output kept",
+        ),
+        pytest.param(
+            {
+                "input_tokens": 100,
+                "cache_read_tokens": 60,
+                "cache_write_tokens": 60,
+                "output_tokens": 1,
+            },
+            1,
+            {"gen_ai.usage.output_tokens": 1},
+            id="an input smaller than cache reads plus writes is refused",
+        ),
+        pytest.param(
+            {"cache_read_tokens": 30, "cache_write_tokens": 7, "output_tokens": 3},
+            0,
+            {
+                "gen_ai.usage.cache_read.input_tokens": 30,
+                "gen_ai.usage.cache_creation.input_tokens": 7,
+                "gen_ai.usage.output_tokens": 3,
+            },
+            id="cache counts without an input count",
+        ),
+        pytest.param(
+            {
+                "input_tokens": 12,
+                "cache_read_tokens": None,
+                "cache_write_tokens": None,
+                "reasoning_tokens": None,
+            },
+            0,
+            {"gen_ai.usage.input_tokens": 12},
+            id="None counts are absent without a failure",
+        ),
+        pytest.param(
+            {
+                "input_tokens": 5,
+                "output_tokens": 6,
+                "cache_read_tokens": -1,
+                "cache_write_tokens": True,
+                "reasoning_tokens": 1.5,
+            },
+            3,
+            {"gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 6},
+            id="each invalid cache or reasoning count is omitted and counted",
+        ),
+        pytest.param(
+            {"input_tokens": 5, "cache_read_tokens": 2, "cache_write_tokens": "9"},
+            1,
+            {"gen_ai.usage.input_tokens": 5, "gen_ai.usage.cache_read.input_tokens": 2},
+            id="the input is checked against valid cache counts only",
+        ),
+    ],
+)
+def test_set_usage_records_cache_and_reasoning_counts(receiver, usage, failures, recorded):
+    with Hue(receiver.url, KEY, capture_content=False, live_spans=False) as hue:
+        with hue.model("synthetic-model", provider="synthetic") as model:
+            model.set_usage(**usage)
+        assert hue.force_flush() is (failures == 0)
+        assert hue.export_status.instrumentation_failures == failures
+    (span,) = [span for span in receiver.spans() if span.name == "chat synthetic-model"]
+    values = attrs(span)
+    assert {key: values[key].int_value for key in _USAGE_KEYS if key in values} == recorded
+
+
+def test_set_usage_records_nothing_on_a_disabled_client():
+    hue = Hue(enabled=False, capture_content=False)
+    with hue.span("request") as span:
+        span.set_usage(input_tokens=1, cache_read_tokens=5, reasoning_tokens=-1)
+    assert hue.export_status.instrumentation_failures == 0
+
+
+def test_begin_model_starts_a_model_span_that_ends_only_through_end(receiver):
+    with Hue(receiver.url, KEY, capture_content=True, live_spans=False) as hue:
+        with hue.context(session_id="session-1", user_id="user-1"):
+            with hue.span("request"):
+                call = hue._begin_model(
+                    "synthetic-model",
+                    provider="synthetic",
+                    attributes={"gen_ai.request.max_tokens": 64, "gen_ai.request.model": "x"},
+                )
+        assert call is not None
+        assert hue.force_flush()
+        # The model span outlives the block that started it.
+        assert [span.name for span in receiver.spans()] == ["request"]
+        call.handle.set_input([{"role": "user", "parts": [{"type": "text", "content": "hi"}]}])
+        call.handle.set_usage(input_tokens=3, output_tokens=2, cache_read_tokens=None)
+        call.end()
+        call.end(RuntimeError("ignored after the first end"))
+        assert hue.force_flush()
+    spans = {span.name: span for span in receiver.spans()}
+    root, model = spans["request"], spans["chat synthetic-model"]
+    assert model.parent_span_id == root.span_id and model.trace_id == root.trace_id
+    assert model.kind == 3  # SPAN_KIND_CLIENT
+    values = attrs(model)
+    assert values["gen_ai.operation.name"].string_value == "chat"
+    assert values["gen_ai.request.model"].string_value == "synthetic-model"
+    assert values["gen_ai.provider.name"].string_value == "synthetic"
+    assert values["gen_ai.request.max_tokens"].int_value == 64
+    assert values["gen_ai.conversation.id"].string_value == "session-1"
+    assert values["user.id"].string_value == "user-1"
+    assert values["gen_ai.usage.input_tokens"].int_value == 3
+    assert "error.type" not in values
+    assert json.loads(values["gen_ai.input.messages"].string_value) == [
+        {"role": "user", "parts": [{"type": "text", "content": "hi"}]}
+    ]
+    assert model.end_time_unix_nano >= model.start_time_unix_nano
+
+
+def test_begin_model_activate_restores_the_call_time_scope(receiver):
+    with Hue(receiver.url, KEY, capture_content=False, live_spans=False) as hue:
+        with hue.context(session_id="s1", workspace_id="w1"):
+            with hue.span("first"):
+                call = hue._begin_model("m", provider="openai")
+        assert call is not None
+        with hue.context(session_id="s2"):
+            with hue.span("second"):
+                with call.activate():
+                    assert trace.get_current_span() is call.handle.otel_span
+                    with hue.tool("lookup"):
+                        pass
+                assert trace.get_current_span() is not call.handle.otel_span
+            assert hue._context_attributes.get() == {"gen_ai.conversation.id": "s2"}
+        call.end()
+        assert hue.force_flush()
+    spans = {span.name: span for span in receiver.spans()}
+    model, child = spans["chat m"], spans["execute_tool lookup"]
+    assert child.parent_span_id == model.span_id
+    assert attrs(child)["gen_ai.conversation.id"].string_value == "s1"
+    assert attrs(child)["hue.workspace.id"].string_value == "w1"
+
+
+def test_begin_model_activate_passes_exceptions_through(receiver):
+    with Hue(receiver.url, KEY, capture_content=False, live_spans=False) as hue:
+        call = hue._begin_model("m", provider="synthetic")
+        assert call is not None
+        failure = ValueError("provider failure")
+        with pytest.raises(ValueError) as raised:
+            with call.activate():
+                raise failure
+        assert raised.value is failure
+        call.end(failure)
+        assert hue.force_flush()
+    (model,) = receiver.spans()
+    assert attrs(model)["error.type"].string_value == "builtins.ValueError"
+    assert model.status.code == 2
+    assert b"provider failure" not in b"".join(body for _, _, body in receiver.requests)
+
+
+def test_begin_model_ends_at_an_explicit_time(receiver):
+    with Hue(receiver.url, KEY, capture_content=False, live_spans=False) as hue:
+        call = hue._begin_model("m", provider="synthetic")
+        assert call is not None
+        started = call.last_activity_ns
+        time.sleep(0.02)
+        call.touch()
+        touched = call.last_activity_ns
+        time.sleep(0.02)
+        call.end(end_time=call.last_activity_ns)
+        assert hue.force_flush()
+    (model,) = receiver.spans()
+    assert model.start_time_unix_nano == started
+    assert model.end_time_unix_nano == touched
+    assert touched - started >= 15_000_000
+
+
+def test_begin_model_returns_none_for_a_disabled_or_closed_client(receiver):
+    disabled = Hue(enabled=False, capture_content=False)
+    assert disabled._begin_model("m", provider="") is None
+    assert disabled.export_status.instrumentation_failures == 0
+    closed = Hue(receiver.url, KEY, capture_content=False)
+    assert closed.shutdown()
+    assert closed._begin_model("m", provider="synthetic") is None
+    assert closed.export_status.instrumentation_failures == 0
+
+
+def test_begin_model_validates_labels_as_model_does(receiver):
+    with Hue(receiver.url, KEY, capture_content=False, live_spans=False) as hue:
+        call = hue._begin_model(None, provider=3, name=b"x")
+        assert call is not None
+        call.end()
+        assert not hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 3
+    (model,) = receiver.spans()
+    assert model.name == "chat unknown"
+    assert attrs(model)["gen_ai.provider.name"].string_value == "unknown"
+
+
+class _Stream:
+    """Stands in for a provider stream: collected only by the cyclic collector, like the SDK's."""
+
+    def __init__(self) -> None:
+        self.cycle = self
+
+
+def test_an_abandoned_call_is_queued_in_gc_and_ended_at_the_next_drain(receiver):
+    import gc
+
+    collecting = False
+    ended_during_gc: list[bool] = []
+
+    def watch(phase: str, _info: dict[str, int]) -> None:
+        nonlocal collecting
+        collecting = phase == "start"
+
+    class Recorder(SimpleSpanProcessor):
+        def on_end(self, span):
+            ended_during_gc.append(collecting)
+            super().on_end(span)
+
+    memory = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(Recorder(memory))
+    hue = Hue(receiver.url, KEY, capture_content=False, tracer_provider=provider, live_spans=False)
+    gc.callbacks.append(watch)
+    try:
+        call = hue._begin_model("abandoned", provider="synthetic")
+        kept = hue._begin_model("kept", provider="synthetic")
+        assert call is not None and kept is not None
+        stream, other = _Stream(), _Stream()
+        call.end_when_collected(stream)
+        kept.end_when_collected(other)
+        time.sleep(0.01)
+        call.touch()
+        last = call.last_activity_ns
+        # A call that ends normally cancels its finalizer.
+        kept.end()
+        del stream, other
+        gc.collect()
+        # The finalizer only queued the call: no span ended inside garbage collection.
+        assert list(hue._abandoned) == [call]
+        assert call.handle.otel_span.is_recording()
+        assert ended_during_gc == [False]
+        time.sleep(0.01)
+        assert hue.force_flush()
+        assert not hue._abandoned
+        spans = {span.name: span for span in memory.get_finished_spans()}
+        assert spans["chat abandoned"].end_time == last
+        assert ended_during_gc == [False, False]
+        # A later _begin_model drains too.
+        again = hue._begin_model("again", provider="synthetic")
+        assert again is not None
+        again.end_when_collected(_Stream())
+        gc.collect()
+        assert list(hue._abandoned) == [again]
+        assert hue._begin_model("next", provider="synthetic") is not None
+        assert not hue._abandoned
+        assert "chat again" in {span.name for span in memory.get_finished_spans()}
+    finally:
+        gc.callbacks.remove(watch)
+        assert hue.shutdown()
+    assert ended_during_gc and not any(ended_during_gc)
+
+
+def test_shutdown_ends_abandoned_calls_before_it_stops_accepting_spans(receiver):
+    import gc
+
+    hue = Hue(receiver.url, KEY, capture_content=False, live_spans=False)
+    call = hue._begin_model("abandoned", provider="synthetic")
+    assert call is not None
+    call.end_when_collected(_Stream())
+    gc.collect()
+    assert hue.shutdown()
+    assert [span.name for span in receiver.spans()] == ["chat abandoned"]

@@ -5,6 +5,8 @@ import json
 import math
 import os
 import re
+import weakref
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -52,6 +54,9 @@ from .transport import (
 
 Redactor = Callable[[str, Any], Any]
 _MISSING = object()
+_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+_CACHE_READ_TOKENS = "gen_ai.usage.cache_read.input_tokens"
+_CACHE_WRITE_TOKENS = "gen_ai.usage.cache_creation.input_tokens"
 _FILE_ROLES = frozenset({"input", "attachment", "output"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_FILE_DATA_BYTES = 25 * 1024 * 1024
@@ -123,6 +128,118 @@ class Project:
     name: str
     slug: str
     organization_id: str
+
+
+def _abandon(pending: deque[_ModelCall], call: _ModelCall) -> None:
+    """Finalizer callback for a call whose stream was collected unfinished.
+
+    It runs inside garbage collection, possibly on another thread and during Hue's own export, so
+    it only enqueues: no lock, no OpenTelemetry work, no span access. ``Hue._drain_abandoned``
+    ends the call later.
+    """
+    pending.append(call)
+
+
+class _ModelCall:
+    """A model span started by ``Hue._begin_model`` that outlives the block that started it.
+
+    Provider wrappers use it for calls that finish later, such as a stream read after the call
+    returned. ``handle`` records messages and usage as ``Hue.model`` does.
+    """
+
+    def __init__(
+        self,
+        client: Hue,
+        handle: HueSpan,
+        start_ns: int,
+        context_attributes: dict[str, AttributeValue],
+        model_scope: dict[str, str],
+    ) -> None:
+        self.handle = handle
+        # The last observed activity: the call's start until ``touch`` moves it.
+        self.last_activity_ns = start_ns
+        self._client = client
+        self._context_attributes = context_attributes
+        self._model_scope = model_scope
+        self._lock = Lock()
+        self._ended = False
+        self._finalizer: weakref.finalize[Any, Any] | None = None
+
+    def touch(self) -> None:
+        """Set ``last_activity_ns`` to now, on the clock the span's start and end use."""
+        self.last_activity_ns = max(self.last_activity_ns, time_ns())
+
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        """Restore the call-time scope for the block: the model span as the current span, and the
+        session, user, workspace and request metadata captured when the call started."""
+        client = self._client
+        resets: list[Callable[[], object]] = []
+        try:
+            scope = trace.use_span(
+                self.handle.otel_span,
+                end_on_exit=False,
+                record_exception=False,
+                set_status_on_exception=False,
+            )
+            scope.__enter__()
+            resets.append(lambda: scope.__exit__(None, None, None))
+            attributes = client._context_attributes.set(dict(self._context_attributes))
+            resets.append(lambda: client._context_attributes.reset(attributes))
+            model = client._model_scope.set(dict(self._model_scope))
+            resets.append(lambda: client._model_scope.reset(model))
+        except Exception:
+            client._record_issue()
+        try:
+            yield
+        finally:
+            for reset in reversed(resets):
+                try:
+                    reset()
+                except Exception:
+                    client._record_issue()
+
+    def end_when_collected(self, target: object) -> None:
+        """End this call at its last activity once ``target`` is garbage-collected unfinished.
+
+        The finalizer only queues the call; the next ``_begin_model``, ``force_flush`` or
+        ``shutdown`` ends it, outside garbage collection. ``end`` cancels the finalizer.
+        """
+        finalizer = weakref.finalize(target, _abandon, self._client._abandoned, self)
+        # Never at interpreter exit: a queued call there has no later drain to end it.
+        finalizer.atexit = False  # type: ignore[misc]
+        with self._lock:
+            if not self._ended:
+                self._finalizer = finalizer
+                return
+        finalizer.detach()
+
+    def end(self, error: BaseException | None = None, end_time: int | None = None) -> None:
+        """End the span once; later calls do nothing. Never called from a finalizer.
+
+        A given ``error`` is recorded as ``HueSpan.record_error`` does. ``end_time`` (nanoseconds
+        since the epoch) defaults to now; an abandoned call passes ``last_activity_ns``.
+        """
+        with self._lock:
+            if self._ended:
+                return
+            self._ended = True
+            finalizer, self._finalizer = self._finalizer, None
+        if finalizer is not None:
+            finalizer.detach()
+        client = self._client
+        # A forked child neither records nor ends the parent's span.
+        if client._pid != os.getpid():
+            return
+        if error is not None:
+            try:
+                self.handle.record_error(error)
+            except Exception:
+                client._record_issue()
+        try:
+            self.handle.otel_span.end(end_time=end_time)
+        except Exception:
+            client._record_issue()
 
 
 class HueSpan:
@@ -198,19 +315,64 @@ class HueSpan:
         )
 
     def set_usage(
-        self, *, input_tokens: int | None = None, output_tokens: int | None = None
+        self,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
     ) -> None:
+        """Record provider-reported token counts; ``None`` leaves a count absent.
+
+        ``input_tokens`` is the whole prompt in tokens, including tokens read from or written to a
+        prompt cache (``gen_ai.usage.input_tokens``). For Anthropic Messages pass ``input_tokens +
+        cache_read_input_tokens + cache_creation_input_tokens``; OpenAI's ``prompt_tokens`` /
+        ``input_tokens`` already include cached tokens. ``output_tokens`` is the provider-reported
+        completion tokens, including reasoning (``gen_ai.usage.output_tokens``).
+        ``cache_read_tokens`` (``gen_ai.usage.cache_read.input_tokens``) and
+        ``cache_write_tokens`` (``gen_ai.usage.cache_creation.input_tokens``) are the input tokens
+        read from and written to cache, already included in ``input_tokens``;
+        ``reasoning_tokens`` (``gen_ai.usage.reasoning.output_tokens``) is already included in
+        ``output_tokens``.
+
+        Each count must be a nonnegative integer; an invalid one is omitted and counted as an
+        instrumentation failure. An ``input_tokens`` smaller than ``cache_read_tokens +
+        cache_write_tokens`` is not inclusive of its cache counts: it is counted as one
+        instrumentation failure and neither the input nor the cache counts are recorded, while
+        output and reasoning counts still are.
+        """
         if not self._client._active:
             return
+        counts: dict[str, int] = {}
         for key, value in (
-            ("gen_ai.usage.input_tokens", input_tokens),
+            (_INPUT_TOKENS, input_tokens),
             ("gen_ai.usage.output_tokens", output_tokens),
+            (_CACHE_READ_TOKENS, cache_read_tokens),
+            (_CACHE_WRITE_TOKENS, cache_write_tokens),
+            ("gen_ai.usage.reasoning.output_tokens", reasoning_tokens),
         ):
             if value is not None:
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     self._client._record_issue()
                     continue
-                self.set_attribute(key, value)
+                counts[key] = value
+        # gen_ai.usage.input_tokens includes cached input. A count smaller than its cache parts is
+        # the provider's cache-exclusive figure (Anthropic's input_tokens); pricing it as
+        # inclusive would underestimate, so neither it nor the cache counts are recorded.
+        inputs = counts.get(_INPUT_TOKENS)
+        read = counts.get(_CACHE_READ_TOKENS)
+        write = counts.get(_CACHE_WRITE_TOKENS)
+        if (
+            inputs is not None
+            and (read is not None or write is not None)
+            and inputs < (read or 0) + (write or 0)
+        ):
+            self._client._record_issue()
+            for key in (_INPUT_TOKENS, _CACHE_READ_TOKENS, _CACHE_WRITE_TOKENS):
+                counts.pop(key, None)
+        for key, value in counts.items():
+            self.set_attribute(key, value)
 
     def record_error(self, error: BaseException) -> None:
         """Record error type and status. Exception messages and stacks are never captured."""
@@ -572,6 +734,8 @@ class Hue:
         self.capture_content = capture_content
         self._issues = 0
         self._issues_lock = Lock()
+        # Model calls whose stream was collected unfinished, queued by their finalizers.
+        self._abandoned: deque[_ModelCall] = deque()
         self._redactor = redactor
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._timeout = export_timeout_seconds
@@ -874,33 +1038,20 @@ class Hue:
         ``gen_ai.tool.definitions`` when content is captured, like ``set_input``: any JSON value,
         ideally in the GenAI semantic-convention shapes.
         """
-        model = self._metadata_string(model, "unknown")
-        operation = self._metadata_string(operation, "chat")
-        provider = self._metadata_string(provider, "unknown")
-        name = self._metadata_string(name, "") if name is not None else ""
+        span_name, request = self._model_metadata(model, provider, operation, name)
         token = None
         if self._active:
             try:
                 # log_inference on this helper, and on helpers created inside the block, copies
                 # the request metadata onto its record, like TypeScript's inherited scope.
-                token = self._model_scope.set(
-                    {
-                        "gen_ai.operation.name": operation,
-                        "gen_ai.provider.name": provider,
-                        "gen_ai.request.model": model,
-                    }
-                )
+                token = self._model_scope.set(dict(request))
             except Exception:
                 self._record_issue()
         try:
             with self.span(
-                name or f"{operation} {model}",
+                span_name,
                 kind=SpanKind.CLIENT,
-                attributes={
-                    "gen_ai.operation.name": operation,
-                    "gen_ai.request.model": model,
-                    "gen_ai.provider.name": provider,
-                },
+                attributes=request,
                 _category="model",
             ) as span:
                 for key, value in (
@@ -916,6 +1067,73 @@ class Hue:
                     self._model_scope.reset(token)
                 except Exception:
                     self._record_issue()
+
+    def _model_metadata(
+        self, model: Any, provider: Any, operation: Any, name: Any
+    ) -> tuple[str, dict[str, str]]:
+        """The span name and GenAI request attributes of a model call, as ``model`` records them."""
+        model = self._metadata_string(model, "unknown")
+        operation = self._metadata_string(operation, "chat")
+        provider = self._metadata_string(provider, "unknown")
+        name = self._metadata_string(name, "") if name is not None else ""
+        return name or f"{operation} {model}", {
+            "gen_ai.operation.name": operation,
+            "gen_ai.request.model": model,
+            "gen_ai.provider.name": provider,
+        }
+
+    def _begin_model(
+        self,
+        model: str,
+        *,
+        provider: str,
+        operation: str = "chat",
+        name: str | None = None,
+        attributes: Mapping[str, AttributeValue] | None = None,
+    ) -> _ModelCall | None:
+        """Start a model span that outlives the current block; used by provider wrappers.
+
+        The span has ``model``'s name, kind, attributes and parent (the current span), plus
+        ``attributes``, which cannot replace the three GenAI request keys. It ends only through
+        ``_ModelCall.end``. None for a disabled, closed or forked client, or when the span could
+        not start (counted), so the caller runs the provider call directly.
+        """
+        self._drain_abandoned()
+        if not self._active:
+            return None
+        span_name, request = self._model_metadata(model, provider, operation, name)
+        try:
+            inherited = dict(self._context_attributes.get() or {})
+            record_attributes = dict(request)
+            session_id = inherited.get("gen_ai.conversation.id")
+            if isinstance(session_id, str):
+                record_attributes["gen_ai.conversation.id"] = session_id
+            start_ns = time_ns()
+            otel_span = self.tracer.start_span(
+                span_name,
+                attributes={**inherited, **(attributes or {}), **request},
+                kind=SpanKind.CLIENT,
+                start_time=start_ns,
+            )
+        except Exception:
+            self._record_issue()
+            return None
+        handle = HueSpan(self, otel_span, "model", record_attributes)
+        return _ModelCall(self, handle, start_ns, inherited, request)
+
+    def _drain_abandoned(self) -> None:
+        """End each model call a finalizer queued, at its last observed activity.
+
+        Runs outside garbage collection, before any processor work: at the start of
+        ``_begin_model``, ``force_flush`` and ``shutdown``.
+        """
+        pending = self._abandoned
+        while True:
+            try:
+                call = pending.popleft()
+            except IndexError:
+                return
+            call.end(end_time=call.last_activity_ns)
 
     @contextmanager
     def tool(
@@ -1059,6 +1277,7 @@ class Hue:
         this is not an exactly-once or durable-queue guarantee.
         """
         self._validate_timeout(timeout_millis)
+        self._drain_abandoned()
         if self._pid != os.getpid():
             return False
         if not self.enabled:
@@ -1123,6 +1342,8 @@ class Hue:
         repeated calls never launch extra workers. Borrowed providers stay usable.
         """
         self._validate_timeout(timeout_millis)
+        # Abandoned calls end before the processors stop accepting spans.
+        self._drain_abandoned()
         if self._pid != os.getpid():
             return False
         if not self.enabled:

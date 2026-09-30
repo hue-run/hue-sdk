@@ -259,10 +259,22 @@ export interface FileRecord {
 
 /** Provider-reported token counts for {@link HueSpan.setUsage}. */
 export interface TokenUsage {
-  /** Provider-reported prompt tokens (`gen_ai.usage.input_tokens`). */
+  /** The whole prompt in tokens, including tokens read from or written to a prompt cache
+   * (`gen_ai.usage.input_tokens`). For Anthropic Messages pass `input_tokens +
+   * cache_read_input_tokens + cache_creation_input_tokens`; OpenAI's `prompt_tokens` /
+   * `input_tokens` already include cached tokens. */
   inputTokens?: number;
-  /** Provider-reported completion tokens (`gen_ai.usage.output_tokens`). */
+  /** Provider-reported completion tokens, including reasoning (`gen_ai.usage.output_tokens`). */
   outputTokens?: number;
+  /** Provider-reported input tokens read from cache (`gen_ai.usage.cache_read.input_tokens`);
+   * already included in `inputTokens`. `null` is treated as absent. */
+  cacheReadTokens?: number | null;
+  /** Provider-reported input tokens written to cache (`gen_ai.usage.cache_creation.input_tokens`);
+   * already included in `inputTokens`. `null` is treated as absent. */
+  cacheWriteTokens?: number | null;
+  /** Provider-reported reasoning tokens (`gen_ai.usage.reasoning.output_tokens`); already
+   * included in `outputTokens`. `null` is treated as absent. */
+  reasoningTokens?: number | null;
 }
 
 /**
@@ -317,7 +329,12 @@ export interface HueSpan {
   setInput(value: unknown): void;
   /** Records `output.value` (or `gen_ai.output.messages` inside `model()`); any JSON-encodable value. */
   setOutput(value: unknown): void;
-  /** Records nonnegative integer token counts; invalid values are omitted and counted as instrumentation failures. */
+  /**
+   * Records nonnegative integer token counts; invalid values are omitted and counted as
+   * instrumentation failures. An `inputTokens` smaller than `cacheReadTokens + cacheWriteTokens`
+   * is not inclusive of its cache counts: it is counted as one instrumentation failure and neither
+   * the input nor the cache counts are recorded, while output and reasoning counts still are.
+   */
   setUsage(usage: TokenUsage): void;
 }
 

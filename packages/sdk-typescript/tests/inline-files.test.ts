@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import fixture from "./fixtures/inline-file-digests.json" with { type: "json" };
-import { hashInlineFiles, INLINE_FILE_LIMIT } from "../src/inline-files.js";
+import { hashInlineFiles, INLINE_FILE_LIMIT, inlineFileDigest } from "../src/inline-files.js";
 
 test("the shared digest fixture uses the SDK's inline file limit", () => {
   expect(fixture.limit).toBe(INLINE_FILE_LIMIT);
@@ -30,6 +30,24 @@ for (const item of fixture.cases)
       ...item.expected,
     });
   });
+
+// Provider wrappers pre-hash a part themselves; the digest must be the one admission would give.
+for (const item of fixture.cases)
+  test(`inlineFileDigest agrees with admission: ${item.name}`, () => {
+    const { prefix, unit, times, suffix } = item.content;
+    expect(inlineFileDigest(`${prefix}${unit.repeat(times)}${suffix}`)).toEqual(
+      item.expected ?? undefined,
+    );
+  });
+
+test("inlineFileDigest keeps a file of exactly the limit inline and hashes one byte more", () => {
+  const bytes = Buffer.alloc(INLINE_FILE_LIMIT + 1, 1);
+  expect(inlineFileDigest(bytes.subarray(0, INLINE_FILE_LIMIT).toString("base64"))).toBeUndefined();
+  expect(inlineFileDigest(`data:image/png;base64,${bytes.toString("base64")}`)).toEqual({
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    size: INLINE_FILE_LIMIT + 1,
+  });
+});
 
 test("a data: URL with millions of parameters is still decoded by its own encoding", () => {
   // Past where a pattern repeated per parameter overflows Node's stack or stops matching in Bun.
