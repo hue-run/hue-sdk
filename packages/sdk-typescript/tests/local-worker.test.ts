@@ -25,6 +25,7 @@ import {
   type Experiment,
   type ExperimentCase,
   type LocalAgentTargetContext,
+  type LocalRunFailure,
   type LocalScorer,
   type RunLocalAgentOptions,
   type ScorerVersion,
@@ -152,6 +153,16 @@ function fixture(options: {
   completionFailures?: number;
   providerOutcome?: ProviderOutcome;
   scorer?: LocalScorer;
+  /** Statuses the claim route answers before it claims: a queue's transient refusals. */
+  claimStatuses?: number[];
+  /** The lifetime of each world the fixture creates; ten minutes by default. */
+  worldTtlMs?: number;
+  /** Statuses the connection check answers before it answers the project. */
+  connectionStatuses?: number[];
+  /** The status the queue answers an attention completion with; 200 records it. */
+  attentionStatus?: number;
+  /** The status every execution completion answers; 200 completes it. */
+  completionStatus?: number;
 }) {
   const provider = options.providerOutcome ? providerContract() : undefined;
   const projectId = randomUUID();
@@ -233,6 +244,10 @@ function fixture(options: {
   };
   let queueState: "queued" | "claimed" | "completed" | "attention" = "queued";
   let claimedWorkerId: string | undefined;
+  const claimStatuses = [...(options.claimStatuses ?? [])];
+  const connectionStatuses = [...(options.connectionStatuses ?? [])];
+  const worldTtlMs = options.worldTtlMs ?? 600_000;
+  let claims = 0;
   let completionFailures = options.completionFailures ?? (options.failCompletionOnce ? 1 : 0);
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -241,6 +256,10 @@ function fixture(options: {
       expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
       const url = new URL(request.url);
       const path = url.pathname.replace("/api/v1", "");
+      if (path === "/projects/current") {
+        const refusal = connectionStatuses.shift();
+        if (refusal !== undefined) return new Response(null, { status: refusal });
+      }
       if (path === "/projects/current")
         return Response.json({
           id: projectId,
@@ -265,6 +284,9 @@ function fixture(options: {
           createdAt: new Date().toISOString(),
         });
       if (path === "/local-agent-worker/claim") {
+        claims++;
+        const refusal = claimStatuses.shift();
+        if (refusal !== undefined) return new Response(null, { status: refusal });
         if (
           queueState === "completed" ||
           queueState === "attention" ||
@@ -284,6 +306,8 @@ function fixture(options: {
         });
         if (options.providerOutcome === "lost_ack" && body.state === "attention")
           return new Response(null, { status: 503 });
+        if (body.state === "attention" && options.attentionStatus !== undefined)
+          return new Response(null, { status: options.attentionStatus });
         queueState = body.state as "completed" | "attention";
         return Response.json({ runId: localRunId, state: body.state });
       }
@@ -349,7 +373,7 @@ function fixture(options: {
           clockNs: "0",
           stateDigest: digest,
           maxSteps: 50,
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          expiresAt: new Date(Date.now() + worldTtlMs).toISOString(),
           actions: [],
         });
       }
@@ -483,7 +507,7 @@ function fixture(options: {
           stepCount: 0,
           maxSteps: 50,
           clockNs: "0",
-          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          expiresAt: new Date(Date.now() + worldTtlMs).toISOString(),
           createdAt: new Date().toISOString(),
           sealedAt: world.status === "open" ? null : new Date().toISOString(),
           stateDigest: digest,
@@ -526,6 +550,8 @@ function fixture(options: {
           completionFailures--;
           return new Response(null, { status: 503 });
         }
+        if (options.completionStatus !== undefined)
+          return new Response(null, { status: options.completionStatus });
         // Mirrors the server guard: completion refuses an open linked world.
         const linked = [...worlds.values()].find((world) => world.executionId === execution.id);
         if (linked?.status === "open") return new Response(null, { status: 409 });
@@ -565,6 +591,8 @@ function fixture(options: {
       queueState = "queued";
     },
     queueState: () => queueState,
+    claims: () => claims,
+    items,
   };
 }
 
@@ -679,7 +707,7 @@ describe("local agent worker", () => {
     let targets = 0;
     try {
       await runLocalAgent({
-        client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+        client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
         environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
         hue,
         checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-local-worker-")),
@@ -894,7 +922,11 @@ describe("local agent worker", () => {
     });
     let targetCalls = 0;
     const options: RunLocalAgentOptions = {
-      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      // Single-attempt everywhere: the queue refuses to record attention for good here, and the
+      // worker must stop with the uncertain error once it cannot record it, not loop.
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
+      maxRunAttempts: 1,
+      pollIntervalMillis: 250,
       environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
       hue,
       checkpointDirectory: directory,
@@ -963,8 +995,10 @@ test("local candidates receive only cloned inputs, configuration, identities and
           "item",
           "mcp",
           "outputDirectory",
+          "signal",
           "trace",
         ]);
+        expect(context.signal).toBeInstanceOf(AbortSignal);
         expect(context.files).toEqual([]);
         expect(context.item).toEqual({ id: f.item.id, externalKey: "pinned" });
         expect(Object.keys(context.mcp!).sort()).toEqual(["expiresAt", "token", "url"]);
@@ -1133,6 +1167,7 @@ test.each([false, true])(
     });
     const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-seal-uncertain-"));
     let targets = 0;
+    const failures: LocalRunFailure[] = [];
     const options = {
       client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
       environmentClient: createEnvironmentClient({
@@ -1144,6 +1179,9 @@ test.each([false, true])(
       checkpointDirectory,
       agent: { key: "reference", name: "Reference", revision: "1" },
       maxRuns: 1,
+      onRunFailed: (failure: LocalRunFailure) => {
+        failures.push(failure);
+      },
       target() {
         targets++;
         if (targetError) throw new Error("Synthetic candidate failure");
@@ -1151,7 +1189,12 @@ test.each([false, true])(
       },
     };
     try {
-      await expect(runLocalAgent(options)).rejects.toBeInstanceOf(TargetOutcomeUncertainError);
+      // The worker gives the uncertain outcome up as attention and keeps polling; it does not
+      // die with the run.
+      await runLocalAgent(options);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]!.outcome).toBe("attention");
+      expect(failures[0]!.error).toBeInstanceOf(TargetOutcomeUncertainError);
       expect(targets).toBe(1);
       expect(f.calls.worldReads).toBe(1);
       expect(f.calls.finishes.map((finish) => finish.status)).toEqual(
@@ -1163,7 +1206,9 @@ test.each([false, true])(
         { state: "attention", failureType: "TargetOutcomeUncertainError" },
       ]);
       f.reclaim();
-      await expect(runLocalAgent(options)).rejects.toBeInstanceOf(UncertainExecutionError);
+      await runLocalAgent(options);
+      expect(failures).toHaveLength(2);
+      expect(failures[1]!.error).toBeInstanceOf(UncertainExecutionError);
       expect(targets).toBe(1);
       expect(f.calls.finishes).toHaveLength(targetError ? 0 : 1);
       expect(f.calls.completions).toEqual([]);
@@ -1179,7 +1224,9 @@ test.each([false, true])(
   },
 );
 
-test("a failed completion upload retains the worker claim and resumes without rerunning the candidate", async () => {
+test("a completion Hue refuses transiently is resumed by the same worker process without rerunning the candidate", async () => {
+  // Single-attempt client: the 503 reaches the worker, whose claim is kept and whose next claim
+  // resumes the saved outcome in the same process; the default client would absorb it.
   const f = fixture({ capabilityStatus: 200, failCompletionOnce: true });
   const hue = createHue({
     apiKey: key,
@@ -1189,30 +1236,30 @@ test("a failed completion upload retains the worker claim and resumes without re
   });
   const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-worker-upload-"));
   let targets = 0;
+  const failures: LocalRunFailure[] = [];
   const options = {
-    client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+    client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
     environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
     hue,
     checkpointDirectory,
     agent: { key: "reference", name: "Reference", revision: "1" },
     maxRuns: 1,
+    pollIntervalMillis: 250,
+    onRunFailed: (failure: LocalRunFailure) => {
+      failures.push(failure);
+    },
     target() {
       targets++;
       return "reply saved";
     },
   };
   try {
-    await expect(runLocalAgent(options)).rejects.toMatchObject({ status: 503 });
-    expect(targets).toBe(1);
-    expect(f.calls.finishes.map((finish) => finish.status)).toEqual(["completed"]);
-    expect(f.calls.completions).toEqual([]);
-    expect(f.calls.localRun).toEqual([]);
-    expect(f.queueState()).toBe("claimed");
-    // The queue returns the same claim to the durable worker identity on process restart.
-    // No operator reset or synthetic requeue is needed for a recoverable upload failure.
     await runLocalAgent(options);
     expect(targets).toBe(1);
-    expect(f.calls.finishes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ outcome: "retry", attempt: 1, waitMillis: 500 });
+    expect((failures[0]!.error as { status?: number }).status).toBe(503);
+    expect(f.calls.finishes.map((finish) => finish.status)).toEqual(["completed"]);
     expect(f.calls.completions).toHaveLength(1);
     expect(f.calls.completions[0]).toMatchObject({ state: "succeeded" });
     expect(f.calls.localRun).toEqual([{ state: "completed" }]);
@@ -1242,8 +1289,9 @@ test.each(["uncertain", "operational"] as const)(
     });
     const checkpointDirectory = await mkdtemp(join(tmpdir(), "hue-concurrent-recovery-"));
     let targets = 0;
+    const failures: LocalRunFailure[] = [];
     const options = {
-      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
       environmentClient: createEnvironmentClient({
         apiKey: key,
         baseUrl: f.baseUrl,
@@ -1254,41 +1302,48 @@ test.each(["uncertain", "operational"] as const)(
       agent: { key: "reference", name: "Reference", revision: "1" },
       concurrency: 2,
       maxRuns: 1,
+      pollIntervalMillis: 250,
+      onRunFailed: (entry: LocalRunFailure) => {
+        failures.push(entry);
+      },
       target() {
         targets++;
         return "reply saved";
       },
     };
     try {
-      const failureResult = await runLocalAgent(options).then(
-        () => undefined,
-        (error: unknown) => error,
-      );
-      expect(failureResult).toBeInstanceOf(AggregateError);
-      expect((failureResult as AggregateError).errors).toHaveLength(2);
+      await runLocalAgent(options);
       expect(targets).toBe(2);
-      expect(f.calls.completions).toEqual([]);
       if (failure === "uncertain") {
+        // Both concurrent attempts are uncertain: the run is given up as attention at once, the
+        // worker goes on, and a requeue finds the running checkpoints refusing to replay.
+        expect(failures).toHaveLength(1);
+        expect(failures[0]!.outcome).toBe("attention");
+        expect(failures[0]!.error).toBeInstanceOf(AggregateError);
         expect(
-          (failureResult as AggregateError).errors.every(
+          (failures[0]!.error as AggregateError).errors.every(
             (error: unknown) => error instanceof TargetOutcomeUncertainError,
           ),
         ).toBe(true);
+        expect(f.calls.completions).toEqual([]);
         expect(f.queueState()).toBe("attention");
         expect(f.calls.localRun).toEqual([{ state: "attention", failureType: "AggregateError" }]);
         f.reclaim();
-        await expect(runLocalAgent(options)).rejects.toBeInstanceOf(AggregateError);
+        await runLocalAgent(options);
+        expect(failures).toHaveLength(2);
+        expect(failures[1]!.outcome).toBe("attention");
         expect(f.queueState()).toBe("attention");
         expect(f.calls.completions).toEqual([]);
       } else {
-        expect(f.queueState()).toBe("claimed");
-        expect(f.calls.localRun).toEqual([]);
-        await runLocalAgent(options);
+        // Both completions failed operationally once: the claim was kept and the same process
+        // resumed the saved outcomes without invoking the candidates again.
+        expect(failures.map((entry) => entry.outcome)).toEqual(["retry"]);
         expect(f.queueState()).toBe("completed");
         expect(f.calls.completions).toHaveLength(2);
         expect(f.calls.completions.every((completion) => completion.state === "succeeded")).toBe(
           true,
         );
+        expect(f.calls.localRun).toEqual([{ state: "completed" }]);
       }
       expect(targets).toBe(2);
       expect(f.calls.finishes).toHaveLength(2);
@@ -1315,27 +1370,310 @@ test("nested aggregate failures retain an unsafe-to-resume queue decision", asyn
     throw new AggregateError([new AggregateError([new TargetOutcomeUncertainError(executionId)])]);
   };
   let targets = 0;
+  const failures: LocalRunFailure[] = [];
   try {
-    await expect(
-      runLocalAgent({
-        client,
-        environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
-        hue,
-        checkpointDirectory,
-        agent: { key: "reference", name: "Reference", revision: "1" },
-        maxRuns: 1,
-        target() {
-          targets++;
-          return "reply saved";
-        },
-      }),
-    ).rejects.toBeInstanceOf(AggregateError);
+    await runLocalAgent({
+      client,
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory,
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      onRunFailed: (failure) => {
+        failures.push(failure);
+      },
+      target() {
+        targets++;
+        return "reply saved";
+      },
+    });
     expect(targets).toBe(1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.outcome).toBe("attention");
+    expect(failures[0]!.error).toBeInstanceOf(AggregateError);
     expect(f.queueState()).toBe("attention");
     expect(f.calls.localRun).toEqual([{ state: "attention", failureType: "AggregateError" }]);
   } finally {
     await hue.shutdown();
     f.server.stop(true);
     await rm(checkpointDirectory, { recursive: true, force: true });
+  }
+});
+
+test("a transient claim refusal is absorbed by the client, and one past its attempts keeps the worker polling", async () => {
+  const absorbed = fixture({ capabilityStatus: 200, claimStatuses: [502] });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: absorbed.baseUrl,
+    serviceName: "claim-retry",
+    captureContent: false,
+  });
+  const pollErrors: unknown[] = [];
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: absorbed.baseUrl }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: absorbed.baseUrl }),
+      hue,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-claim-retry-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      pollIntervalMillis: 250,
+      onPollError: (error) => {
+        pollErrors.push(error);
+      },
+      target: () => "reply",
+    });
+    expect(absorbed.claims()).toBe(2);
+    expect(pollErrors).toEqual([]);
+    expect(absorbed.queueState()).toBe("completed");
+  } finally {
+    await hue.shutdown();
+    absorbed.server.stop(true);
+  }
+  // With a single-attempt client the refusal reaches the poll loop, which reports it, waits and
+  // polls again instead of exiting the worker.
+  const surfaced = fixture({ capabilityStatus: 200, claimStatuses: [502, 503] });
+  const hue2 = createHue({
+    apiKey: key,
+    baseUrl: surfaced.baseUrl,
+    serviceName: "claim-poll",
+    captureContent: false,
+  });
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: surfaced.baseUrl, maxAttempts: 1 }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: surfaced.baseUrl }),
+      hue: hue2,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-claim-poll-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      pollIntervalMillis: 250,
+      onPollError: (error) => {
+        pollErrors.push(error);
+      },
+      target: () => "reply",
+    });
+    expect(surfaced.claims()).toBe(3);
+    expect(pollErrors.map((error) => (error as { status?: number }).status)).toEqual([502, 503]);
+    expect(surfaced.queueState()).toBe("completed");
+  } finally {
+    await hue2.shutdown();
+    surfaced.server.stop(true);
+  }
+});
+
+test("a case whose outcome cannot be saved does not block the case beside it, and the run is given up as attention", async () => {
+  // Case one's output is unserializable, its own failure and unsafe to resume; case two beside
+  // it still runs and completes, and the run is given up at once with the failure's name.
+  const f = fixture({ capabilityStatus: 200, caseCount: 2 });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "case-isolation",
+    captureContent: false,
+  });
+  const failures: LocalRunFailure[] = [];
+  const targets: string[] = [];
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-case-isolation-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      pollIntervalMillis: 250,
+      onRunFailed: (failure) => {
+        failures.push(failure);
+      },
+      target(_inputs, _tools, context) {
+        targets.push(context.item.externalKey);
+        return context.item.externalKey === "pinned" ? NaN : "reply";
+      },
+    });
+    expect(targets.sort()).toEqual([...f.items.map((entry) => entry.externalKey)].sort());
+    expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
+    expect(failures.map((failure) => failure.outcome)).toEqual(["attention"]);
+    expect(f.calls.localRun).toEqual([
+      { state: "attention", failureType: "OutcomeSerializationError" },
+    ]);
+    expect(f.calls.experimentFinished).toBe(0);
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
+  }
+});
+
+test("a target that hangs is stopped at its world's deadline, its case ends as a timeout and the world is sealed abandoned", async () => {
+  const f = fixture({ capabilityStatus: 200, worldTtlMs: -4_000 });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "world-deadline",
+    captureContent: false,
+  });
+  const startedAt = performance.now();
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-world-deadline-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      worldTtlSeconds: 1,
+      target: (_inputs, _tools, context) =>
+        new Promise((_, reject) => {
+          // A candidate that listens stops; one that does not is left behind either way.
+          context.signal?.addEventListener("abort", () =>
+            reject(
+              context.signal!.reason instanceof Error
+                ? context.signal!.reason
+                : new Error(String(context.signal!.reason)),
+            ),
+          );
+        }),
+    });
+    expect(performance.now() - startedAt).toBeLessThan(5_000);
+    expect(f.calls.completions).toEqual([
+      expect.objectContaining({ state: "error", errorType: "TargetTimeout" }),
+    ]);
+    expect([...f.worlds.values()].map((world) => world.status)).toEqual(["abandoned"]);
+    expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+    expect(f.calls.experimentFinished).toBe(1);
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
+  }
+});
+
+test("a completion callback's own failure is thrown as itself, and a refusal to record attention Hue decided on is thrown rather than retried", async () => {
+  // onCompleted throws after the queue completed the run: the error is the caller's, not a
+  // retry the worker could make, and reaches it unchanged.
+  const completed = fixture({ capabilityStatus: 200 });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: completed.baseUrl,
+    serviceName: "callback-failure",
+    captureContent: false,
+  });
+  const failures: LocalRunFailure[] = [];
+  try {
+    await expect(
+      runLocalAgent({
+        client: createEvaluationClient({ apiKey: key, baseUrl: completed.baseUrl }),
+        environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: completed.baseUrl }),
+        hue,
+        checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-callback-failure-")),
+        agent: { key: "reference", name: "Reference", revision: "1" },
+        maxRuns: 1,
+        onRunFailed: (failure) => {
+          failures.push(failure);
+        },
+        onCompleted() {
+          throw new Error("Synthetic reporting failure");
+        },
+        target: () => "reply",
+      }),
+    ).rejects.toThrow("Synthetic reporting failure");
+    expect(failures).toEqual([]);
+    expect(completed.queueState()).toBe("completed");
+  } finally {
+    await hue.shutdown();
+    completed.server.stop(true);
+  }
+  // The queue refuses to record attention with a 403 (a revoked key): that refusal is what
+  // needs fixing, so it is thrown as itself instead of the run being retried.
+  const revoked = fixture({ capabilityStatus: 200, attentionStatus: 403 });
+  const hue2 = createHue({
+    apiKey: key,
+    baseUrl: revoked.baseUrl,
+    serviceName: "revoked-attention",
+    captureContent: false,
+  });
+  try {
+    await expect(
+      runLocalAgent({
+        client: createEvaluationClient({ apiKey: key, baseUrl: revoked.baseUrl }),
+        environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: revoked.baseUrl }),
+        hue: hue2,
+        checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-revoked-attention-")),
+        agent: { key: "reference", name: "Reference", revision: "1" },
+        maxRuns: 1,
+        pollIntervalMillis: 250,
+        target: () => NaN,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(revoked.calls.localRun).toEqual([
+      { state: "attention", failureType: "OutcomeSerializationError" },
+    ]);
+  } finally {
+    await hue2.shutdown();
+    revoked.server.stop(true);
+  }
+});
+
+test("a transient failure of the startup connection check is reported and polled through", async () => {
+  const f = fixture({ capabilityStatus: 200, connectionStatuses: [502] });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "startup-retry",
+    captureContent: false,
+  });
+  const pollErrors: unknown[] = [];
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-startup-retry-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      pollIntervalMillis: 250,
+      onPollError: (error) => {
+        pollErrors.push(error);
+      },
+      target: () => "reply",
+    });
+    expect(pollErrors.map((error) => (error as { status?: number }).status)).toEqual([502]);
+    expect(f.calls.localRun).toEqual([{ state: "completed" }]);
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
+  }
+});
+
+test("a refusal that would recur is given up as attention at once instead of being retried", async () => {
+  // Hue refuses the completion for good (409): no resume changes that, so the run is given up
+  // on the first attempt with the refusal's name, and the worker goes on.
+  const f = fixture({ capabilityStatus: 200, completionStatus: 409 });
+  const hue = createHue({
+    apiKey: key,
+    baseUrl: f.baseUrl,
+    serviceName: "recurring-refusal",
+    captureContent: false,
+  });
+  const failures: LocalRunFailure[] = [];
+  try {
+    await runLocalAgent({
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      environmentClient: createEnvironmentClient({ apiKey: key, baseUrl: f.baseUrl }),
+      hue,
+      checkpointDirectory: await mkdtemp(join(tmpdir(), "hue-recurring-refusal-")),
+      agent: { key: "reference", name: "Reference", revision: "1" },
+      maxRuns: 1,
+      pollIntervalMillis: 250,
+      onRunFailed: (failure) => {
+        failures.push(failure);
+      },
+      target: () => "reply",
+    });
+    expect(failures.map((failure) => failure.outcome)).toEqual(["attention"]);
+    expect((failures[0]!.error as { status?: number }).status).toBe(409);
+    expect(f.calls.localRun).toEqual([{ state: "attention", failureType: "HueApiError" }]);
+  } finally {
+    await hue.shutdown();
+    f.server.stop(true);
   }
 });

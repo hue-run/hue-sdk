@@ -844,7 +844,7 @@ try {
   // agent-visible files with the world; the evaluator-only template stays with the grader.
   const world = await fixture([graderVersion], { world: true });
   /** One worker run against `f`, with its own telemetry client for that origin. */
-  const worker = async (f, target) => {
+  const worker = async (f, target, extra = {}) => {
     const hue = createHue({
       apiKey: key,
       baseUrl: f.baseUrl,
@@ -866,6 +866,7 @@ try {
         scorers: [grader],
         maxRuns: 1,
         target,
+        ...extra,
       });
     } finally {
       await hue.shutdown();
@@ -932,19 +933,33 @@ try {
       "Installed world case with files: agent-visible files handed over with the world, letter linked, case files removed",
     );
 
-    // Bytes that differ from the manifest are refused before any execution or world exists.
+    // Bytes that differ from the manifest are refused before any execution or world exists: a
+    // failure that would recur, so the worker gives the run up as attention at once, names the
+    // refusal to onRunFailed, and goes on rather than retrying or dying.
     const tampered = await fixture([graderVersion], { world: true, tamper: true });
     try {
       let targets = 0;
-      await assert.rejects(
-        worker(tampered, () => {
+      const failures = [];
+      await worker(
+        tampered,
+        () => {
           targets++;
           return "unexpected";
-        }),
-        (error) =>
-          error instanceof CaseFileError &&
+        },
+        { onRunFailed: (failure) => failures.push(failure) },
+      );
+      assert.equal(failures.length, 1);
+      assert.equal(failures[0].outcome, "attention");
+      const error = failures[0].error;
+      assert.ok(
+        error instanceof CaseFileError &&
           error.code === "case_file_mismatch" &&
           error.artifactId === tampered.inputs.source.id,
+        "the refusal reaches onRunFailed as the CaseFileError",
+      );
+      assert.deepEqual(
+        tampered.calls.localRuns.map((run) => [run.state, run.failureType]),
+        [["attention", "CaseFileError"]],
       );
       tampered.assertClean();
       assert.equal(targets, 0);
@@ -959,9 +974,19 @@ try {
     // A name that is not one safe file name is refused before anything is downloaded.
     const traversal = await fixture([graderVersion], { world: true, sourceName: "../escape.pdf" });
     try {
-      await assert.rejects(
-        worker(traversal, () => "unexpected"),
-        (error) => error instanceof CaseFileError && error.code === "case_file_name_refused",
+      const failures = [];
+      await worker(traversal, () => "unexpected", {
+        onRunFailed: (failure) => failures.push(failure),
+      });
+      assert.equal(failures.length, 1);
+      assert.ok(
+        failures[0].error instanceof CaseFileError &&
+          failures[0].error.code === "case_file_name_refused",
+        "the refusal reaches onRunFailed as the CaseFileError",
+      );
+      assert.deepEqual(
+        traversal.calls.localRuns.map((run) => [run.state, run.failureType]),
+        [["attention", "CaseFileError"]],
       );
       traversal.assertClean();
       assert.deepEqual(traversal.calls.downloads, []);

@@ -95,6 +95,34 @@ export class TargetCancelledError extends Error {
     this.name = "TargetCancelledError";
   }
 }
+/** Thrown by the environment target when the target did not return before its world's deadline.
+ * The world is sealed abandoned and the attempt saved as an `error` of type `TargetTimeout`, so a
+ * hung agent ends its case instead of holding the run open. */
+export class TargetTimeoutError extends Error {
+  constructor(
+    /** The world whose deadline passed. */
+    readonly environmentRunId: string,
+    /** The world's `expiresAt`. */
+    readonly expiresAt: string,
+  ) {
+    super(`Target did not finish before its world ${environmentRunId} expired at ${expiresAt}`);
+    this.name = "TargetTimeoutError";
+  }
+}
+/** The target's outcome is saved but the telemetry it requires was never acknowledged on an
+ * earlier attempt. Restore or export the trace, or complete with omitted evidence through the
+ * client; the target is never rerun. It is this case's own state, not the run's. */
+export class TraceExportUnacknowledgedError extends Error {
+  constructor(
+    /** The execution whose saved outcome waits for its trace. */
+    readonly executionId: string,
+  ) {
+    super(
+      "Target outcome is saved but trace export acknowledgement is unavailable. Restore/export the trace or explicitly complete with omitted evidence through the client; never rerun the target.",
+    );
+    this.name = "TraceExportUnacknowledgedError";
+  }
+}
 /** Thrown when the target or world may have committed but acknowledgement is unavailable. */
 export class TargetOutcomeUncertainError extends Error {
   constructor(
@@ -382,6 +410,26 @@ async function allPages<T>(
   } while (after !== undefined);
   return items;
 }
+/** A failure the next case would meet too: Hue not answering or refusing (a transient failure
+ * past the client's retries, a lost connection, a refusal such as a finished experiment or a
+ * world that cannot be sealed), telemetry not accepted by the one transport the cases share, or
+ * a target outcome left uncertain because its world could not be sealed or read back. Starting
+ * more cases into it only piles up the same failure; the run is resumed later instead. */
+function systemic(error: unknown): boolean {
+  // A saved outcome still waiting for its trace (`TraceExportUnacknowledgedError`) is not
+  // systemic: the flush failed on an earlier attempt, telemetry may have recovered since, and
+  // the cases beside it can complete now; only a live export failure stops new cases.
+  return (
+    error instanceof HueApiError ||
+    error instanceof HueExportError ||
+    error instanceof TargetOutcomeUncertainError
+  );
+}
+/** Runs every case, `concurrency` at a time. One case's own failure (an attempt without a saved
+ * outcome, an output that cannot be saved, inputs the SDK refuses) does not stop the cases
+ * beside or after it: each is attempted, and the failures are thrown together at the end, so a
+ * resume has only the failed cases left to publish. A systemic failure stops new cases from
+ * starting, while the cases in flight finish; the run resumes when Hue answers again. */
 async function pool<T>(
   items: T[],
   concurrency: number,
@@ -389,24 +437,28 @@ async function pool<T>(
 ): Promise<void> {
   let position = 0;
   const failures: unknown[] = [];
+  let stop = false;
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-      while (position < items.length && !failures.length) {
+      while (position < items.length && !stop) {
         const item = items[position++];
         try {
           await execute(item);
         } catch (error) {
           failures.push(error);
+          if (systemic(error)) stop = true;
         }
       }
     }),
   );
   if (failures.length === 1) throw failures[0];
-  if (failures.length)
+  if (failures.length) {
+    const first = failures[0];
     throw new AggregateError(
       failures,
-      "Multiple case operations failed; resume uses saved outcomes",
+      `${failures.length} case operations failed; resume uses saved outcomes. First: ${first instanceof Error ? first.message : String(first)}`,
     );
+  }
 }
 async function scoresFor(
   versions: ScorerVersion[],
@@ -559,8 +611,15 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     const filesRoot = resolve(options.filesDirectory ?? join(options.checkpointDirectory, "files"));
     const sanitize = (message: string) =>
       message.slice(0, 4000).toWellFormed().replaceAll("\u0000", "");
+    // A target stopped at its world's deadline is a `TargetTimeout`, told apart from an error the
+    // target raised itself: the agent did not finish, rather than finishing wrongly.
     const errorPayload = (error: unknown): TypedError => ({
-      type: error instanceof OutputTooLargeError ? "OutputTooLarge" : "TargetError",
+      type:
+        error instanceof OutputTooLargeError
+          ? "OutputTooLarge"
+          : error instanceof TargetTimeoutError
+            ? "TargetTimeout"
+            : "TargetError",
       ...(options.persistResultContent && error instanceof Error
         ? { message: sanitize(error.message) }
         : {}),
@@ -862,9 +921,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       const prepared = checkpoint as Prepared;
       await options.client.getExecution(prepared.executionId);
       if (prepared.exportState !== "accepted" && prepared.complete.traceEvidence !== "omit")
-        throw new Error(
-          "Target outcome is saved but trace export acknowledgement is unavailable. Restore/export the trace or explicitly complete with omitted evidence through the client; never rerun the target.",
-        );
+        throw new TraceExportUnacknowledgedError(prepared.executionId);
       const save = () => store.write(file, prepared);
       const notAccepted: TelemetryNotAccepted | undefined =
         prepared.exportState === "not_accepted"

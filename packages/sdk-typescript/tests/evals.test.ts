@@ -26,6 +26,7 @@ import {
   scoreLocally,
   sourceDigest,
   TargetOutcomeUncertainError,
+  TraceExportUnacknowledgedError,
   UncertainExecutionError,
   type Completion,
   type EvaluationRun,
@@ -348,7 +349,9 @@ function fixture() {
     },
   });
   const baseUrl = `http://127.0.0.1:${server.port}`;
-  const client = createEvaluationClient({ apiKey: key, baseUrl });
+  // Single-attempt, so the one-shot failures below reach the runner and exercise its resume
+  // path; the client's own retries are covered by their own tests.
+  const client = createEvaluationClient({ apiKey: key, baseUrl, maxAttempts: 1 });
   return {
     server,
     client,
@@ -554,10 +557,16 @@ describe("installed evaluation API and runner contract", () => {
     try {
       await expect(runExperiment(options)).rejects.toBeInstanceOf(HueExportError);
       expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toEqual([]);
-      await expect(runExperiment(options)).rejects.toThrow(
-        "trace export acknowledgement is unavailable",
+      // The first case's saved outcome still waits for its trace, that case's own state on
+      // resume: the second case beside it still runs (and fails the same way here), and both are
+      // reported, the saved one as its typed error.
+      const resumed = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
       );
-      expect(calls).toBe(1);
+      expect(resumed).toBeInstanceOf(AggregateError);
+      expect((resumed as AggregateError).errors[0]).toBeInstanceOf(TraceExportUnacknowledgedError);
+      expect(calls).toBe(2);
     } finally {
       await hue.shutdown();
       f.server.stop(true);
@@ -1974,10 +1983,22 @@ describe("installed evaluation API and runner contract", () => {
         return NaN;
       },
     };
+    // A case's unserializable output is its own failure: the case beside it still runs, and
+    // both are reported; on resume neither invokes its target again.
+    const everyCaseUnserializable = async (run: Promise<unknown>) => {
+      const error = await run.then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toHaveLength(2);
+      for (const nested of (error as AggregateError).errors)
+        expect(nested).toBeInstanceOf(OutcomeSerializationError);
+    };
     try {
-      await expect(runExperiment(options)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      await expect(runExperiment(options)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      expect(calls).toBe(1);
+      await everyCaseUnserializable(runExperiment(options));
+      await everyCaseUnserializable(runExperiment(options));
+      expect(calls).toBe(2);
       const cyclic: Record<string, JsonValue> = {};
       cyclic.self = cyclic;
       const cycleOptions = {
@@ -1989,18 +2010,27 @@ describe("installed evaluation API and runner contract", () => {
           return cyclic;
         },
       };
-      await expect(runExperiment(cycleOptions)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      await expect(runExperiment(cycleOptions)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      expect(calls).toBe(2);
+      await everyCaseUnserializable(runExperiment(cycleOptions));
+      await everyCaseUnserializable(runExperiment(cycleOptions));
+      expect(calls).toBe(4);
       const other = {
         ...options,
         experimentId: f.create().id,
         checkpointDirectory: await directory(),
       };
+      // A start Hue refused is systemic: no further case starts. On resume the first case's
+      // start is uncertain and refused; the second, never started, runs and fails its own way.
       f.failStart();
       await expect(runExperiment(other)).rejects.toBeInstanceOf(HueApiError);
-      await expect(runExperiment(other)).rejects.toBeInstanceOf(UncertainExecutionError);
-      expect(calls).toBe(2);
+      expect(calls).toBe(4);
+      const resumed = await runExperiment(other).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(resumed).toBeInstanceOf(AggregateError);
+      expect((resumed as AggregateError).errors[0]).toBeInstanceOf(UncertainExecutionError);
+      expect((resumed as AggregateError).errors[1]).toBeInstanceOf(OutcomeSerializationError);
+      expect(calls).toBe(5);
     } finally {
       await hue.shutdown();
       f.server.stop(true);

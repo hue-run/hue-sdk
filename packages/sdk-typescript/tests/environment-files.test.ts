@@ -21,6 +21,7 @@ import {
   type ExperimentCase,
   type LocalAgentTargetContext,
   type LocalScorer,
+  type LocalRunFailure,
   type RunLocalAgentOptions,
   type ScoreContext,
   type ScorerVersion,
@@ -644,6 +645,30 @@ function worker(
   }).finally(() => hue.shutdownSafe({ timeoutMillis: 2000 }));
 }
 
+/** Runs the worker against a queue that serves its claim once, with single-attempt clients so an
+ * injected failure reaches the worker, and returns what the worker did with the run: the failures
+ * `onRunFailed` saw, in order. A failure that would recur is given up as attention on its first
+ * attempt; a transient one is resumed in the same process, and the run settles either way. */
+async function failures(
+  f: ReturnType<typeof platform>,
+  checkpointDirectory: string,
+  overrides: Partial<RunLocalAgentOptions>,
+): Promise<LocalRunFailure[]> {
+  const seen: LocalRunFailure[] = [];
+  const { onRunFailed, ...rest } = overrides;
+  await worker(f, checkpointDirectory, {
+    client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
+    pollIntervalMillis: 250,
+    maxRunAttempts: 2,
+    ...rest,
+    async onRunFailed(failure) {
+      seen.push(failure);
+      await onRunFailed?.(failure);
+    },
+  });
+  return seen;
+}
+
 describe("environment target files (environment-files:v1)", () => {
   test("the agent receives only the verified agent-visible file with its world, and its letter is uploaded and linked", async () => {
     let scored: ScoreContext | undefined;
@@ -680,8 +705,10 @@ describe("environment target files (environment-files:v1)", () => {
           const file = context.files[0]!;
           const letter = join(context.outputDirectory, "Citacion.docx");
           await writeFile(letter, "carta de citación");
+          // The candidate's signal is not cloneable; everything else is.
+          const { signal: _signal, ...cloneable } = context;
           seen = {
-            context: structuredClone(context),
+            context: structuredClone(cloneable) as LocalAgentTargetContext,
             bytes: await readFile(file.path),
             modes: {
               file: await mode(file.path),
@@ -788,19 +815,34 @@ describe("environment target files (environment-files:v1)", () => {
         { path: letter, filename: "Citacion.docx", contentType: docx, primary: true },
       ]);
     };
+    let betweenAttempts: { caseFiles: string[]; outputs: string[]; staged?: string } | undefined;
     try {
-      await expect(worker(f, directory, { target })).rejects.toMatchObject({ status: 500 });
-      // The agent's inputs and work are gone; the staged letter stays for the upload to resume.
-      expect((await readdir(caseDirectory)).sort()).toEqual(["outputs"]);
-      expect(await readdir(join(caseDirectory, "outputs"))).toEqual(["Citacion.docx"]);
+      // The upload's 500 is transient: the worker keeps the claim and resumes in process. Between
+      // the attempts the agent's inputs and work are gone; the staged letter stays for the upload.
+      const seen = await failures(f, directory, {
+        target,
+        onRunFailed: async (failure) => {
+          if (failure.outcome === "retry")
+            betweenAttempts = {
+              caseFiles: (await readdir(caseDirectory)).sort(),
+              outputs: await readdir(join(caseDirectory, "outputs")),
+              staged: [...f.artifacts.values()].find((item) => item.filename === "Citacion.docx")
+                ?.state,
+            };
+        },
+      });
+      expect(betweenAttempts).toEqual({
+        caseFiles: ["outputs"],
+        outputs: ["Citacion.docx"],
+        staged: "reserved",
+      });
+      // The resume publishes the staged letter without invoking the agent again. The run is then
+      // given up, as before, because the first attempt's trace export was never acknowledged;
+      // with the upload settled, nothing of the case is kept.
+      expect(seen.map((failure) => failure.outcome)).toEqual(["retry", "attention"]);
+      expect((seen[0]!.error as { status?: number }).status).toBe(500);
+      expect(String(seen[1]!.error)).toMatch(/trace export acknowledgement is unavailable/);
       const staged = [...f.artifacts.values()].find((item) => item.filename === "Citacion.docx");
-      expect(staged?.state).toBe("reserved");
-      // The resume publishes the staged letter without invoking the agent again. The runner then
-      // stops, as before, because the first attempt's trace export was never acknowledged; with
-      // the upload settled, nothing of the case is kept.
-      await expect(worker(f, directory, { target })).rejects.toThrow(
-        /trace export acknowledgement is unavailable/,
-      );
       expect(staged?.state).toBe("ready");
       expect(Buffer.from(staged!.bytes!).toString()).toBe("carta de citación");
     } finally {
@@ -830,14 +872,19 @@ describe("environment target files (environment-files:v1)", () => {
     };
     let kept: string[] | undefined;
     try {
-      await expect(worker(f, directory, { target })).rejects.toMatchObject({ status: 500 });
-      // The resume reads its `uploading` checkpoint, then the case; a second Ctrl+C lands there.
-      f.hooks.caseRead = () => {
-        f.hooks.caseRead = undefined;
-        runForcedExitCleanups();
-        kept = existsSync(outputs) ? readdirSync(outputs) : [];
-      };
-      await worker(f, directory, { target }).catch(() => undefined);
+      // After the upload's 500 the worker resumes in process; the resume reads its `uploading`
+      // checkpoint, then the case, and a second Ctrl+C lands there.
+      await failures(f, directory, {
+        target,
+        onRunFailed: (failure) => {
+          if (failure.outcome !== "retry" || kept !== undefined) return;
+          f.hooks.caseRead = () => {
+            f.hooks.caseRead = undefined;
+            runForcedExitCleanups();
+            kept = existsSync(outputs) ? readdirSync(outputs) : [];
+          };
+        },
+      }).catch(() => undefined);
     } finally {
       f.stop();
     }
@@ -857,19 +904,27 @@ describe("environment target files (environment-files:v1)", () => {
         { path: letter, filename: "Citacion.docx", contentType: docx, primary: true },
       ]);
     };
+    let betweenAttempts: string[] | undefined;
     try {
-      await expect(worker(f, directory, { target })).rejects.toMatchObject({ status: 500 });
-      expect(await readdir(caseDirectory)).toEqual(["outputs"]);
-      // The saved `uploading` checkpoint no longer matches its digest: it can never be resumed.
-      const checkpoint = join(store, `case-${f.frozenCase.id}.json`);
-      const saved = JSON.parse(await readFile(checkpoint, "utf8")) as {
-        value: { hasOutput: boolean };
-      };
-      saved.value.hasOutput = !saved.value.hasOutput;
-      await writeFile(checkpoint, JSON.stringify(saved));
-      await expect(worker(f, directory, { target })).rejects.toThrow(
-        "Checkpoint integrity check failed",
-      );
+      // After the upload's 500 and before the in-process resume, the saved `uploading` checkpoint
+      // is altered so it no longer matches its digest: it can never be resumed, and the run is
+      // given up as attention with the integrity failure.
+      const seen = await failures(f, directory, {
+        target,
+        onRunFailed: async (failure) => {
+          if (failure.outcome !== "retry") return;
+          betweenAttempts = await readdir(caseDirectory);
+          const checkpoint = join(store, `case-${f.frozenCase.id}.json`);
+          const saved = JSON.parse(await readFile(checkpoint, "utf8")) as {
+            value: { hasOutput: boolean };
+          };
+          saved.value.hasOutput = !saved.value.hasOutput;
+          await writeFile(checkpoint, JSON.stringify(saved));
+        },
+      });
+      expect(betweenAttempts).toEqual(["outputs"]);
+      expect(seen.map((failure) => failure.outcome)).toEqual(["retry", "attention"]);
+      expect(String(seen[1]!.error)).toContain("Checkpoint integrity check failed");
     } finally {
       f.stop();
     }
@@ -882,18 +937,20 @@ describe("environment target files (environment-files:v1)", () => {
     const directory = await mkdtemp(join(tmpdir(), "hue-environment-files-mismatch-"));
     let targets = 0;
     try {
-      const outcome = worker(f, directory, {
+      // A refusal that would recur: the run is given up as attention on its first attempt.
+      const seen = await failures(f, directory, {
         target() {
           targets++;
           return "unexpected";
         },
       });
-      await expect(outcome).rejects.toMatchObject({
+      expect(seen.map((failure) => failure.outcome)).toEqual(["attention"]);
+      expect(seen[0]!.error).toMatchObject({
         name: "CaseFileError",
         code: "case_file_mismatch",
         artifactId: f.source.id,
       });
-      await expect(outcome).rejects.toThrow(/does not match its pinned size and SHA-256/);
+      expect(String(seen[0]!.error)).toMatch(/does not match its pinned size and SHA-256/);
     } finally {
       f.stop();
     }
@@ -922,15 +979,15 @@ describe("environment target files (environment-files:v1)", () => {
     const directory = await mkdtemp(join(tmpdir(), "hue-environment-files-evaluator-"));
     let targets = 0;
     try {
-      await expect(
-        worker(f, directory, {
-          scorers: [scorer],
-          target() {
-            targets++;
-            return "unexpected";
-          },
-        }),
-      ).rejects.toMatchObject({
+      const seen = await failures(f, directory, {
+        scorers: [scorer],
+        target() {
+          targets++;
+          return "unexpected";
+        },
+      });
+      expect(seen.map((failure) => failure.outcome)).toEqual(["attention"]);
+      expect(seen[0]!.error).toMatchObject({
         name: "CaseFileError",
         code: "case_file_mismatch",
         artifactId: f.answerKey.id,
@@ -952,14 +1009,14 @@ describe("environment target files (environment-files:v1)", () => {
     f.enqueue();
     let targets = 0;
     try {
-      await expect(
-        worker(f, directory, {
-          target() {
-            targets++;
-            return "unexpected";
-          },
-        }),
-      ).rejects.toMatchObject({
+      const seen = await failures(f, directory, {
+        target() {
+          targets++;
+          return "unexpected";
+        },
+      });
+      expect(seen.map((failure) => failure.outcome)).toEqual(["attention"]);
+      expect(seen[0]!.error).toMatchObject({
         name: "CaseFileError",
         code: "case_file_name_refused",
         artifactId: f.source.id,

@@ -10,6 +10,45 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `EvaluationClient` sends a read, or a mutation the server deduplicates by its idempotency key
+  (the local worker's register, claim, heartbeat, completion and capability routes included),
+  again after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up
+  to `maxAttempts` (default 4) times with a jittered backoff. `isTransientApiError` names those
+  failures; `HueApiError` carries Hue's `X-Hue-Diagnostic` code as `diagnostic`. A mutation
+  without a key and the credential-bearing attempt preparation are still sent once.
+- `runLocalAgent` no longer stops with one failure. A registration or claim that fails
+  transiently past the client's retries is reported through `onPollError` and polled again with
+  a growing wait. A claimed run whose attempt fails transiently keeps its claim and is resumed
+  by the same process from its checkpoints (`onRunFailed` says `retry`), and after
+  `maxRunAttempts` (default 5) failures is given up as `attention` for a project member to
+  requeue or cancel; a failure that would recur (an outcome unsafe to resume, a refusal Hue
+  decided on, an input the SDK refuses such as a case file whose bytes differ from its manifest)
+  is attention at once, and a completion Hue refuses because the run was released or cancelled
+  meanwhile is reported as `refused`.
+  `maxRuns` counts runs that settled either way. `worldTtlSeconds` sets each world's lifetime,
+  and the candidate receives `signal` in its context.
+- `TargetTimeoutError`: a target still running five seconds past its world's `expiresAt` is
+  told through its `signal`, its case ends as an `error` of type `TargetTimeout` and the world
+  is sealed abandoned, so a hung agent ends its case instead of holding the run open.
+- `hue eval --worker` reports failed polls, resumed and given-up runs.
+- `TraceExportUnacknowledgedError`: the error a resumed case throws when its saved outcome still
+  waits for a trace export Hue never acknowledged, in place of a plain `Error` with the same
+  message; it is that case's own state on resume, and the cases beside it still run.
+
+#### Changed
+
+- **Breaking:** the runner's case pool no longer stops at a case's own failure (an attempt
+  without a saved outcome, an unserializable output, refused inputs): the cases beside it run,
+  and the failures are thrown together as an `AggregateError` naming its first cause. A failure
+  the next case would meet too (Hue not answering or refusing, telemetry not accepted, a world
+  that could not be sealed) still stops new cases. Callers that matched a single error class on
+  a multi-case run now inspect `AggregateError.errors`.
+- **Breaking:** `runLocalAgent` resolves, rather than rejects, when a run is given up as
+  attention; the failure reaches `onRunFailed`. It still rejects on a refusal Hue decided on
+  (a revoked key, a disabled agent, a malformed claim) and when it cannot record attention.
+
 ### [0.11.4] - 2026-09-29
 
 This release makes sign-in with Hue the default of `hue mcp install` for Claude Code and Codex
