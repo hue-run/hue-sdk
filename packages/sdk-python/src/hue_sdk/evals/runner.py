@@ -70,15 +70,26 @@ _RECEIPT_WAIT_SECONDS = 5.0
 _RECEIPT_POLL_SECONDS = 0.5
 
 
+# One case reads its receipt at a time: the client runs one verification worker, and a case
+# waiting behind another must not spend its own wait in the queue.
+_receipt_turn = Lock()
+
+
 def _trace_landed(hue: Hue, trace: dict[str, Any] | None) -> bool:
     """Whether Hue holds the case's root span and every span the case ended, from the receipt.
 
     False when the span is not there by the wait's end, when the receipt cannot be read, and for
     a checkpoint saved without the count of spans the case ended: without it the receipt cannot
-    tell a lost child span from a landed trace, and does not accept.
+    tell a lost child span from a landed trace, and does not accept. Cases in flight take turns,
+    each with the whole wait from the moment its turn starts.
     """
     if not trace or trace.get("spans") is None:
         return False
+    with _receipt_turn:
+        return _trace_landed_now(hue, trace)
+
+
+def _trace_landed_now(hue: Hue, trace: dict[str, Any]) -> bool:
     deadline = monotonic() + _RECEIPT_WAIT_SECONDS
     try:
         while True:
