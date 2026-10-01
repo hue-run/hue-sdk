@@ -1422,3 +1422,27 @@ def test_builtin_scorers_is_the_documented_name_and_builtins_stays_an_alias():
     assert evals.builtins is not stdlib_builtins
     assert {"builtin_scorers", "builtins"} <= set(evals.__all__)
     assert builtin_scorers.exact_match() == builtins.exact_match()
+
+
+def test_pending_evidence_completes_in_the_true_state_when_the_export_fails(
+    evaluation_receiver, tmp_path
+):
+    receiver = evaluation_receiver
+    receiver.fail_otlp = True
+    arguments = options(
+        receiver, tmp_path, lambda *_: "reply", evidence=TraceEvidence("pending")
+    )
+    try:
+        report = run_experiment(**arguments)
+        assert len(report.subject_ids) == 1
+        assert receiver.complete_body["traceEvidence"] == "pending"
+        assert "omissionReason" not in receiver.complete_body
+        assert receiver.complete_body["state"] == "succeeded"
+    finally:
+        arguments["hue"].shutdown()
+    with pytest.raises(ValueError, match="omission reason"):
+        run_experiment(
+            **options(
+                receiver, tmp_path, lambda *_: "reply", evidence=TraceEvidence("pending", "why")
+            )
+        )

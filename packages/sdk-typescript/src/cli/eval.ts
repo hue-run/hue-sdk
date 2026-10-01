@@ -158,6 +158,10 @@ Output and limits:
   --save-version                  Freeze an unsaved eval-set version before running
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
   --concurrency <n>               Cases in flight, 1-64 (default: 1)
+  --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
+                                  (default) completes it as failed with the evidence omitted;
+                                  pending completes it in its true state with the trace still to
+                                  arrive, which Hue attaches once its export is complete
   --timeout <seconds>             Per-case --command timeout (default: 600)
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
   -h, --help                      Show this help
@@ -169,6 +173,12 @@ covers them. Exit codes: 0 every case passed, 1 a case failed, errored or is inc
 `;
 
 /** Thrown for invalid arguments or configuration; exits with status 2. */
+/** The `--trace-not-accepted` policy: the failed-case default, or pending evidence. */
+function traceNotAcceptedPolicy(value: string | undefined): "fail_case" | "pending" {
+  if (value === undefined || value === "fail_case") return "fail_case";
+  if (value === "pending") return "pending";
+  throw new UsageError("--trace-not-accepted must be fail_case or pending");
+}
 class UsageError extends Error {
   constructor(message: string) {
     super(message);
@@ -213,6 +223,7 @@ function parse(argv: string[]) {
         json: { type: "boolean", default: false },
         content: { type: "boolean", default: false },
         "no-output": { type: "boolean", default: false },
+        "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
         "checkpoint-dir": { type: "string" },
         concurrency: { type: "string" },
@@ -1349,7 +1360,7 @@ async function runOnce(
     persistResultContent: !values["no-output"],
     traceEvidence: { mode: "required" },
     // A case whose telemetry Hue did not accept fails instead of staying started.
-    traceNotAccepted: "fail_case",
+    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
     onTelemetryNotAccepted: telemetry.report,
     concurrency,
     agentRevision: agent.revision,
@@ -1488,7 +1499,7 @@ async function runDirect(
       // only the telemetry.
       persistResultContent: !values["no-output"],
       traceEvidence: { mode: "required" },
-      traceNotAccepted: "fail_case",
+      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
       onTelemetryNotAccepted: telemetry.report,
       concurrency: run.concurrency,
       scorers: [],
@@ -1594,7 +1605,7 @@ async function runWorker(
     },
     scorers: [],
     concurrency,
-    traceNotAccepted: "fail_case",
+    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
     onTelemetryNotAccepted: telemetry.report,
     deprecationWarnings: false,
     signal,

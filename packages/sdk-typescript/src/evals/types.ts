@@ -590,10 +590,13 @@ export interface CompleteExecution {
   error?: TypedError;
   /** Trace revision the stored snapshot must have reached. */
   expectedTraceRevision?: number;
-  /** Whether stored trace evidence is required or explicitly omitted. */
-  traceEvidence?: "required" | "omit";
+  /** Whether stored trace evidence is required, explicitly omitted, or pending: declared and
+   * still to arrive, which Hue attaches once the export is complete. */
+  traceEvidence?: "required" | "omit" | "pending";
   /** Why trace evidence was omitted. */
   omissionReason?: string;
+  /** With `pending`: how many spans the case ended, which Hue holds the arriving trace to. */
+  traceSpanCount?: number;
 }
 /** Result of {@link EvaluationClient.completeExecution}. */
 export interface Completion {
@@ -653,8 +656,9 @@ export interface Subject {
   experimentId: string;
   /** Attempt number of the execution. */
   attempt: number;
-  /** Whether trace evidence was captured, omitted with a reason or not requested. */
-  traceEvidence: "captured" | "omitted" | "not_requested";
+  /** Whether trace evidence was captured, omitted with a reason, not requested, or is pending
+   * (declared and still to arrive; Hue attaches it once the export is complete). */
+  traceEvidence: "captured" | "omitted" | "not_requested" | "pending";
   /** Declared OpenTelemetry trace ID, or `null`. */
   traceExternalId: string | null;
   /** Reason trace evidence was omitted, or `null`. */

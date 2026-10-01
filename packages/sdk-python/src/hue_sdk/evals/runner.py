@@ -233,6 +233,7 @@ def run_experiment(
     if not isinstance(trace_evidence, TraceEvidence) or trace_evidence.mode not in (
         "required",
         "omit",
+        "pending",
     ):
         raise TypeError("Choose a trace evidence policy explicitly.")
     if trace_evidence.mode == "omit" and (
@@ -241,8 +242,8 @@ def run_experiment(
         or len(trace_evidence.reason) > 4000
     ):
         raise ValueError("Omitting trace evidence requires a bounded reason.")
-    if trace_evidence.mode == "required" and trace_evidence.reason is not None:
-        raise ValueError("Required evidence cannot include an omission reason.")
+    if trace_evidence.mode != "omit" and trace_evidence.reason is not None:
+        raise ValueError("Only omitted evidence carries an omission reason.")
     if hue.base_url != client.base_url:
         raise ValueError("Telemetry and evaluations must use the same Hue origin.")
     project, telemetry_project = client.check_connection(), hue.validate_project()
@@ -403,7 +404,11 @@ def run_experiment(
                         if target_error is not None
                         else {}
                     ),
-                    "traceEvidence": trace_evidence.mode,
+                    # A pending policy asks for the trace as required until the export's
+                    # outcome is known.
+                    "traceEvidence": (
+                        "required" if trace_evidence.mode == "pending" else trace_evidence.mode
+                    ),
                     **(
                         {"omissionReason": trace_evidence.reason}
                         if trace_evidence.mode == "omit"
@@ -421,13 +426,25 @@ def run_experiment(
             if hue.force_flush():
                 checkpoint["exportState"] = "accepted"
                 store.write(file, checkpoint)
+            elif trace_evidence.mode == "pending":
+                # The export was not acknowledged: complete in the execution's true state with
+                # the trace pending, and Hue attaches it once it arrives in full.
+                checkpoint["complete"]["traceEvidence"] = "pending"
+                store.write(file, checkpoint)
             elif trace_evidence.mode != "omit":
                 raise TelemetryExportError(execution["id"])
         client.get_execution(checkpoint["executionId"])
         if (
-            checkpoint["exportState"] != "accepted"
-            and checkpoint["complete"]["traceEvidence"] != "omit"
+            trace_evidence.mode == "pending"
+            and checkpoint["exportState"] != "accepted"
+            and checkpoint["complete"]["traceEvidence"] != "pending"
         ):
+            # A resumed checkpoint whose export never reached its outcome completes pending too.
+            checkpoint["complete"]["traceEvidence"] = "pending"
+            store.write(file, checkpoint)
+        if checkpoint["exportState"] != "accepted" and checkpoint["complete"][
+            "traceEvidence"
+        ] not in ("omit", "pending"):
             raise TelemetryExportError(checkpoint["executionId"])
 
         def save() -> None:
