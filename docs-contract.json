@@ -498,7 +498,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.11.4"
+      "version": "0.12.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
