@@ -9,6 +9,7 @@ from threading import Event, Lock
 from time import monotonic, sleep
 from typing import Any, cast
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 from opentelemetry.context import Context
 
@@ -70,9 +71,19 @@ _RECEIPT_WAIT_SECONDS = 5.0
 _RECEIPT_POLL_SECONDS = 0.5
 
 
-# One case reads its receipt at a time: the client runs one verification worker, and a case
-# waiting behind another must not spend its own wait in the queue.
-_receipt_turn = Lock()
+# One case per client reads its receipt at a time: the client runs one verification worker, and
+# a case waiting behind another must not spend its own wait in the queue. Runs on different
+# clients do not wait for one another.
+_receipt_turns: WeakKeyDictionary[Hue, Lock] = WeakKeyDictionary()
+_receipt_turns_lock = Lock()
+
+
+def _receipt_turn(hue: Hue) -> Lock:
+    with _receipt_turns_lock:
+        turn = _receipt_turns.get(hue)
+        if turn is None:
+            turn = _receipt_turns[hue] = Lock()
+        return turn
 
 
 def _trace_landed(hue: Hue, trace: dict[str, Any] | None) -> bool:
@@ -85,7 +96,7 @@ def _trace_landed(hue: Hue, trace: dict[str, Any] | None) -> bool:
     """
     if not trace or trace.get("spans") is None:
         return False
-    with _receipt_turn:
+    with _receipt_turn(hue):
         return _trace_landed_now(hue, trace)
 
 
