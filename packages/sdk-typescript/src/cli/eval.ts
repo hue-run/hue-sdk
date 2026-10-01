@@ -1715,6 +1715,8 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
   let json = false;
   try {
     const { values, positionals } = parse(argv);
+    // A usage error before anything is prepared or created: no run is left to recover from it.
+    traceNotAcceptedPolicy(values["trace-not-accepted"]);
     json = values.json;
     const output: Output = {
       log: (line) => (json ? process.stderr : process.stdout).write(`${line}\n`),

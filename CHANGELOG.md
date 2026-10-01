@@ -1125,9 +1125,11 @@ No registry release is claimed until publication and registry acceptance complet
 #### Added
 
 - `TraceEvidence("pending")`: a case whose export `force_flush` did not acknowledge completes in
-  its true state with `traceEvidence: "pending"`, and Hue attaches the trace once its export is
-  complete or records it omitted a day later; a resumed checkpoint whose export never reached its
-  outcome completes the same way. Only `omit` carries a reason.
+  its true state with `traceEvidence: "pending"` and the count of spans this process ended in its
+  trace (`traceSpanCount`, from the new `Hue.spans_ended`), so Hue attaches the trace once it
+  holds every span, or records it omitted a day later; a resumed checkpoint whose export never
+  reached its outcome completes the same way, without a count when another process ended its
+  spans. Only `omit` carries a reason.
 
 ### [0.6.2] - 2026-09-27
 

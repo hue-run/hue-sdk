@@ -501,6 +501,11 @@ function pendingCompletion(prepared: Prepared) {
   delete prepared.complete.omissionReason;
   if (prepared.trace?.spans !== undefined) prepared.complete.traceSpanCount = prepared.trace.spans;
 }
+/** The reverse, once the receipt accepted the trace after all: required evidence, no count. */
+function acceptedCompletion(prepared: Prepared) {
+  prepared.complete.traceEvidence = "required";
+  delete prepared.complete.traceSpanCount;
+}
 async function traceLanded(
   hue: HueClient,
   trace: { traceId: string; spanId: string; spans?: number } | undefined,
@@ -1055,6 +1060,9 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         (await traceLanded(options.hue, prepared.trace))
       ) {
         prepared.exportState = "accepted";
+        // A completion made pending by an earlier receipt read is required again: the trace
+        // landed, so Hue freezes it at completion as for any accepted case.
+        if (prepared.complete.traceEvidence === "pending") acceptedCompletion(prepared);
         await store.write(file, prepared);
       }
       // Under the pending policy a saved outcome the receipt does not accept, whether no flush

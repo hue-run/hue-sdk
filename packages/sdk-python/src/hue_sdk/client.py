@@ -1049,6 +1049,15 @@ class Hue:
             poll_lock=self._receipt_lock,
         )
 
+    def spans_ended(self, trace_id: str) -> int | None:
+        """How many sampled spans of the trace (32 hex characters) have ended in this process,
+        or None when this process did not end them: what the evaluation runner tells Hue a
+        pending trace must hold before it is frozen."""
+        try:
+            return self._span_processor.spans_ended(int(trace_id, 16))
+        except (ValueError, AttributeError):
+            return None
+
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         """Drain pending telemetry. False means a timeout or a recorded export failure.
 

@@ -1436,6 +1436,8 @@ def test_pending_evidence_completes_in_the_true_state_when_the_export_fails(
         assert receiver.complete_body["traceEvidence"] == "pending"
         assert "omissionReason" not in receiver.complete_body
         assert receiver.complete_body["state"] == "succeeded"
+        # The case ended one span (its root); Hue holds the arriving trace to that count.
+        assert receiver.complete_body["traceSpanCount"] == 1
     finally:
         arguments["hue"].shutdown()
     with pytest.raises(ValueError, match="omission reason"):

@@ -29,6 +29,8 @@ from .transport import MAX_BATCH_BYTES, PendingSpan
 # The instrumentation scope of ``Hue.tracer``; its spans are always announced while open.
 HUE_TRACER_SCOPE = "hue-run"
 LIVE_SPAN_LIMIT = 1024
+# Traces whose ended-span counts are kept for the evaluation runner.
+_ENDED_TRACES_LIMIT = 4096
 LIVE_SPAN_INTERVAL_SECONDS = 0.5
 # Lets start-time helper input (``set_input`` just after entering) reach the placeholder.
 LIVE_SPAN_MIN_AGE_SECONDS = 0.1
@@ -301,7 +303,15 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         self._live_spans = live_spans
         self._live: dict[int, _LiveSpan] = {}
         self._next_tick = 0.0
+        # Sampled spans ended per trace, for the evaluation runner to tell Hue how many spans a
+        # case's trace holds when it completes with the trace pending; bounded, oldest traces out.
+        self._ended_by_trace: dict[int, int] = {}
         super().__init__(exporter, encode, max_records, max_bytes, capture_content)
+
+    def spans_ended(self, trace_id: int) -> int | None:
+        """How many sampled spans of ``trace_id`` have ended in this process; None when the
+        trace is unknown here (another process ended it, or it aged out of the bounded table)."""
+        return self._ended_by_trace.get(trace_id)
 
     @property
     def _live_active(self) -> bool:
@@ -352,6 +362,14 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
             except Exception:
                 pass
         if span.context and span.context.trace_flags.sampled:
+            try:
+                trace_id = span.context.trace_id
+                count = self._ended_by_trace.pop(trace_id, 0) + 1
+                self._ended_by_trace[trace_id] = count
+                while len(self._ended_by_trace) > _ENDED_TRACES_LIMIT:
+                    del self._ended_by_trace[next(iter(self._ended_by_trace))]
+            except Exception:
+                pass
             self._enqueue(span)
 
     def _advisory(self, item: Any) -> bool:

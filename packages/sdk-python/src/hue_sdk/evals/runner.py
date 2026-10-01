@@ -204,6 +204,20 @@ class OutputTooLargeError(ValueError):
         )
 
 
+def _pending_completion(checkpoint: dict[str, Any], hue: Hue) -> None:
+    """Complete with the trace pending: declared and still to arrive, with how many spans this
+    process ended in it when it knows, so a root span alone is never taken for the trace."""
+    complete = checkpoint["complete"]
+    complete["traceEvidence"] = "pending"
+    complete.pop("omissionReason", None)
+    trace_id = checkpoint.get("traceExternalId")
+    count = hue.spans_ended(trace_id) if isinstance(trace_id, str) else None
+    if count:
+        complete["traceSpanCount"] = count
+    else:
+        complete.pop("traceSpanCount", None)
+
+
 def _error_message(error: Exception) -> str:
     # The caller opted into storing result content; the API still rejects NUL and lone surrogates.
     return "".join(
@@ -418,6 +432,7 @@ def run_experiment(
                 checkpoint = {
                     "stage": "prepared",
                     "executionId": execution["id"],
+                    "traceExternalId": span.trace_id,
                     "complete": complete,
                     "scores": scores,
                     "exportState": "pending",
@@ -428,8 +443,9 @@ def run_experiment(
                 store.write(file, checkpoint)
             elif trace_evidence.mode == "pending":
                 # The export was not acknowledged: complete in the execution's true state with
-                # the trace pending, and Hue attaches it once it arrives in full.
-                checkpoint["complete"]["traceEvidence"] = "pending"
+                # the trace pending and the count of spans this process ended in it, so Hue
+                # attaches the trace only once it holds every one of them.
+                _pending_completion(checkpoint, hue)
                 store.write(file, checkpoint)
             elif trace_evidence.mode != "omit":
                 raise TelemetryExportError(execution["id"])
@@ -439,8 +455,9 @@ def run_experiment(
             and checkpoint["exportState"] != "accepted"
             and checkpoint["complete"]["traceEvidence"] != "pending"
         ):
-            # A resumed checkpoint whose export never reached its outcome completes pending too.
-            checkpoint["complete"]["traceEvidence"] = "pending"
+            # A resumed checkpoint whose export never reached its outcome completes pending too;
+            # a process that did not end its spans cannot count them, and sends no count.
+            _pending_completion(checkpoint, hue)
             store.write(file, checkpoint)
         if checkpoint["exportState"] != "accepted" and checkpoint["complete"][
             "traceEvidence"
