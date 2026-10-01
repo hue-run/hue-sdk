@@ -13,19 +13,22 @@ import { HueApiError } from "./client.js";
 export type ServiceFailureType = "ServiceRefused" | "ConnectionFailed" | "TimedOut";
 
 const TIMEOUT_NAMES = new Set(["TimeoutError", "APIConnectionTimeoutError", "APITimeoutError"]);
+/** Node's and Undici's codes for a call that timed out, connecting or waiting on the answer. */
+const TIMEOUT_CODES = new Set([
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
 const NETWORK_CODES = new Set([
   "ECONNRESET",
   "ECONNREFUSED",
   "ENOTFOUND",
   "EAI_AGAIN",
-  "ETIMEDOUT",
   "EPIPE",
   "ENETUNREACH",
   "EHOSTUNREACH",
   "UND_ERR_SOCKET",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
 ]);
 /** Links followed from the thrown error, and errors read at most. */
 const MAX_DEPTH = 6;
@@ -79,7 +82,13 @@ function names(error: object): string[] {
 const retryable = (status: unknown) =>
   typeof status === "number" &&
   (status === 408 || status === 429 || (status >= 500 && status < 600));
-const timedOut = (error: object) => names(error).some((name) => TIMEOUT_NAMES.has(name));
+function timedOut(error: object) {
+  const { code } = error as { code?: unknown };
+  return (
+    (typeof code === "string" && TIMEOUT_CODES.has(code)) ||
+    names(error).some((name) => TIMEOUT_NAMES.has(name))
+  );
+}
 function disconnected(error: object) {
   // Hue's clients report a request that got no usable response without a status.
   if (
@@ -116,7 +125,18 @@ function refused(error: object) {
   const exchanged = [headers, response, url, responseHeaders].some(
     (item) => item !== undefined && item !== null,
   );
-  return exchanged && (retryable(status) || retryable(statusCode));
+  // A fetch `Response` carries the status itself.
+  const answered =
+    response !== null && typeof response === "object"
+      ? (response as { status?: unknown; statusCode?: unknown })
+      : {};
+  return (
+    exchanged &&
+    (retryable(status) ||
+      retryable(statusCode) ||
+      retryable(answered.status) ||
+      retryable(answered.statusCode))
+  );
 }
 /** Whether any error shows the signal; one whose properties throw when read shows none. */
 const any = (errors: object[], signal: (error: object) => boolean) =>

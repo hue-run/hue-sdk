@@ -243,3 +243,20 @@ def test_exception_group_members_are_walked():
     assert error_type(group) == "ConnectionFailed"
     nested = ExceptionGroup("outer", [ValueError("b"), group])  # noqa: F821
     assert error_type(caused(nested, 2)) == "ConnectionFailed"
+
+
+def test_a_socket_timeout_errno_is_a_timeout_and_a_response_status_alone_refuses():
+    import errno
+
+    timed_out = OSError(errno.ETIMEDOUT, "Connection timed out")
+    assert error_type(timed_out) == "TimedOut"
+    assert error_type(TimeoutError("timed out")) == "TimedOut"
+
+    class _Answered(Exception):
+        def __init__(self, status: int) -> None:
+            super().__init__(f"HTTP {status}")
+            self.response = SimpleNamespace(status=status)
+
+    assert error_type(_Answered(429)) == "ServiceRefused"
+    assert error_type(_Answered(503)) == "ServiceRefused"
+    assert error_type(_Answered(400)) == "TargetError"

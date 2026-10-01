@@ -85,14 +85,10 @@ describe("service failures a target's throw shows", () => {
       "ECONNREFUSED",
       "ENOTFOUND",
       "EAI_AGAIN",
-      "ETIMEDOUT",
       "EPIPE",
       "ENETUNREACH",
       "EHOSTUNREACH",
       "UND_ERR_SOCKET",
-      "UND_ERR_CONNECT_TIMEOUT",
-      "UND_ERR_HEADERS_TIMEOUT",
-      "UND_ERR_BODY_TIMEOUT",
     ])
       expect(serviceFailureType(withCode(`request failed: ${code}`, code))).toBe(
         "ConnectionFailed",
@@ -216,5 +212,30 @@ describe("service failure chains", () => {
     expect(serviceFailureType(new AggregateError([hostile, new APIError(429)]))).toBe(
       "ServiceRefused",
     );
+  });
+});
+
+describe("timeouts by code and refusals by the response's own status", () => {
+  test("a Node or Undici timeout code is a timeout, not a failed connection", () => {
+    for (const code of [
+      "ETIMEDOUT",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_BODY_TIMEOUT",
+    ])
+      expect(
+        serviceFailureType(new TypeError("fetch failed", { cause: withCode(code, code) })),
+      ).toBe("TimedOut");
+    expect(serviceFailureType(withCode("socket hang up", "ECONNRESET"))).toBe("ConnectionFailed");
+  });
+  test("a retryable status on the error's response alone is a refusal", () => {
+    const answered = (status: number) =>
+      Object.assign(new Error(`HTTP ${status}`), { response: new Response(null, { status }) });
+    expect(serviceFailureType(answered(429))).toBe("ServiceRefused");
+    expect(serviceFailureType(answered(503))).toBe("ServiceRefused");
+    expect(serviceFailureType(answered(400))).toBeNull();
+    expect(
+      serviceFailureType(Object.assign(new Error("HTTP 502"), { response: { statusCode: 502 } })),
+    ).toBe("ServiceRefused");
   });
 });

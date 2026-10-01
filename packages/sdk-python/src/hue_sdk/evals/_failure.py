@@ -12,6 +12,7 @@ openai, anthropic) are recognized by class name, never imported.
 from __future__ import annotations
 
 import asyncio
+import errno
 from collections.abc import Callable
 from typing import Literal
 
@@ -82,8 +83,11 @@ def _world_not_created(error: BaseException) -> bool:
 
 
 def _timed_out(error: BaseException) -> bool:
-    return isinstance(error, (TimeoutError, asyncio.TimeoutError)) or bool(
-        _TIMEOUT_NAMES & _names(error)
+    # A socket that timed out reports ETIMEDOUT; socket.timeout is a TimeoutError since 3.10.
+    return (
+        isinstance(error, (TimeoutError, asyncio.TimeoutError))
+        or getattr(error, "errno", None) == errno.ETIMEDOUT
+        or bool(_TIMEOUT_NAMES & _names(error))
     )
 
 
@@ -116,6 +120,7 @@ def _refused(error: BaseException) -> bool:
         _retryable(getattr(error, "status", None))
         or _retryable(getattr(error, "status_code", None))
         or _retryable(getattr(response, "status_code", None))
+        or _retryable(getattr(response, "status", None))
     )
 
 

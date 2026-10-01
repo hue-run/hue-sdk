@@ -730,7 +730,9 @@ describe("local agent worker", () => {
     expect(f.calls.finishes.map((finish) => finish.status)).toEqual(["abandoned"]);
     expect(f.calls.finishes[0]!.idempotencyKey).toMatch(/^execution:[0-9a-f-]{36}:abandoned$/);
     expect(f.calls.completions).toHaveLength(1);
-    expect(f.calls.completions[0]).toMatchObject({ state: "error", errorType: "TargetError" });
+    // Hue refused the capability request with a retryable status: a service's refusal, counted
+    // as infrastructure, not the agent's own error.
+    expect(f.calls.completions[0]).toMatchObject({ state: "error", errorType: "ServiceRefused" });
     expect(f.calls.experimentFinished).toBe(1);
     expect(f.calls.localRun).toEqual([{ state: "completed" }]);
   });
