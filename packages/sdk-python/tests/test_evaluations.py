@@ -1429,9 +1429,7 @@ def test_pending_evidence_completes_in_the_true_state_when_the_export_fails(
 ):
     receiver = evaluation_receiver
     receiver.fail_otlp = True
-    arguments = options(
-        receiver, tmp_path, lambda *_: "reply", evidence=TraceEvidence("pending")
-    )
+    arguments = options(receiver, tmp_path, lambda *_: "reply", evidence=TraceEvidence("pending"))
     try:
         report = run_experiment(**arguments)
         assert len(report.subject_ids) == 1
