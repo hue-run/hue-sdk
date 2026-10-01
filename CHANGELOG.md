@@ -1148,6 +1148,17 @@ No registry release is claimed until publication and registry acceptance complet
   completes the case as `ConfigurationRejected` instead of `TargetError`: Hue counts it as
   configuration and leaves it out of the agent's pass rate, so an error from Hue's own clients is
   never filed as the agent's.
+- `TraceEvidence("pending")`: a case whose export `force_flush` did not acknowledge completes in
+  its true state with `traceEvidence: "pending"` and the count of spans the case ended, as the
+  checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
+  every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
+  completes the same way. Only `omit` carries a reason.
+
+- A target's exception is completed with an error type that says what stopped the case:
+  `EnvironmentSetupFailed` when `create_run` could not create the world (the new
+  `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
+  service the agent called, `ConnectionFailed` and `TimedOut`, beside the agent's own
+  `TargetError`. Hue counts the service failures as infrastructure.
 
 ### [0.6.3] - 2026-10-01
 
@@ -1179,22 +1190,6 @@ it or every case that follows. Additive; no capture, default budget or wire chan
   One case's telemetry failure no longer fails the cases running beside it, and a client's
   earlier failure no longer fails every later case; `Hue.force_flush()` keeps its cumulative
   answer.
-
-#### Added
-
-- `TraceEvidence("pending")`: a case whose export `force_flush` did not acknowledge completes in
-  its true state with `traceEvidence: "pending"` and the count of spans the case ended, as the
-  checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
-  every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
-  completes the same way. Only `omit` carries a reason.
-
-#### Added
-
-- A target's exception is completed with an error type that says what stopped the case:
-  `EnvironmentSetupFailed` when `create_run` could not create the world (the new
-  `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
-  service the agent called, `ConnectionFailed` and `TimedOut`, beside the agent's own
-  `TargetError`. Hue counts the service failures as infrastructure.
 
 ### [0.6.2] - 2026-09-27
 
