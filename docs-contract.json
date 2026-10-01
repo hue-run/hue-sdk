@@ -352,6 +352,7 @@
             "TelemetryNotAccepted",
             "TerminalState",
             "TraceExportUnacknowledgedError",
+            "TracePending",
             "TypedError",
             "UncertainExecutionError",
             "VerdictClient",
