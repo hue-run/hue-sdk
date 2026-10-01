@@ -5,8 +5,11 @@
 it: ``ServiceRefused`` for a retryable HTTP status (408, 429 or 5xx) from a model provider, Hue or
 another service, such as a rate limit or an outage; ``ConnectionFailed`` for a connection that
 failed; ``TimedOut`` for a call that timed out. Hue classes all four as infrastructure.
-``TargetError`` is the agent's own failure. Errors of optional dependencies (httpx, requests,
-openai, anthropic) are recognized by class name, never imported.
+``ConfigurationRejected`` for any other status Hue's own clients answered with (a 4xx: a key, a
+project, an environment version or a world Hue refused), the caller's configuration, which Hue
+classes as configuration; an error from Hue's own clients is never the agent's. ``TargetError``
+is the agent's own failure. Errors of optional dependencies (httpx, requests, openai, anthropic)
+are recognized by class name, never imported.
 """
 
 from __future__ import annotations
@@ -19,7 +22,12 @@ from typing import Literal
 from .client import HueApiError
 
 ErrorType = Literal[
-    "EnvironmentSetupFailed", "ServiceRefused", "ConnectionFailed", "TimedOut", "TargetError"
+    "EnvironmentSetupFailed",
+    "ServiceRefused",
+    "ConnectionFailed",
+    "TimedOut",
+    "ConfigurationRejected",
+    "TargetError",
 ]
 
 _TIMEOUT_NAMES = frozenset(
@@ -124,6 +132,16 @@ def _refused(error: BaseException) -> bool:
     )
 
 
+def _rejected(error: BaseException) -> bool:
+    """A status Hue's own client answered with that is not retryable: Hue refused the caller's
+    key, project, environment version or world, so the case could not run as configured. Only
+    Hue's clients show it; another service's 4xx stays the agent's."""
+    if not _hue_error(error):
+        return False
+    status = getattr(error, "status", None)
+    return isinstance(status, int) and not isinstance(status, bool) and not _retryable(status)
+
+
 def _any(errors: list[BaseException], signal: Callable[[BaseException], bool]) -> bool:
     """Whether any error shows the signal; one whose attributes raise when read shows none."""
     for error in errors:
@@ -137,7 +155,8 @@ def _any(errors: list[BaseException], signal: Callable[[BaseException], bool]) -
 
 def error_type(error: BaseException) -> ErrorType:
     """Classify a target's failure by the errors linked from it, in precedence order: a world that
-    was never created, a timeout, a failed connection, a retryable refusal, else the agent's."""
+    was never created, a timeout, a failed connection, a retryable refusal, a status Hue's own
+    client was refused with, else the agent's."""
     errors = _linked(error)
     if _any(errors, _world_not_created):
         return "EnvironmentSetupFailed"
@@ -147,4 +166,6 @@ def error_type(error: BaseException) -> ErrorType:
         return "ConnectionFailed"
     if _any(errors, _refused):
         return "ServiceRefused"
+    if _any(errors, _rejected):
+        return "ConfigurationRejected"
     return "TargetError"

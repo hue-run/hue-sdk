@@ -562,6 +562,10 @@ export interface TypedError {
   type: string;
   /** Optional message; stored only when result content is persisted. */
   message?: string;
+  /** For a runner of your own that writes a `type` of its own: the class Hue files it under
+   * (`agent`, `infrastructure`, `configuration`, `telemetry` or `unsupported`), which Hue reads
+   * only for a name it does not know. The SDK's own types need none. */
+  class?: "agent" | "infrastructure" | "configuration" | "telemetry" | "unsupported";
 }
 /** Input for {@link EvaluationClient.startExecution}. */
 export interface StartExecution {

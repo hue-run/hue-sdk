@@ -57,13 +57,21 @@ describe("service failures a target's throw shows", () => {
       new HueConnectionError("Hue rejected the project connection", 504),
     ])
       expect(serviceFailureType(error)).toBe("ServiceRefused");
-    // A refusal the caller caused (configuration, a missing gateway, a bad key) is its own.
+    // Any other status Hue answered (a missing gateway, a bad key, a world or version it refused)
+    // is the caller's configuration: Hue's own clients never show the agent's error.
     for (const error of [
       new HueEnvironmentError(409, undefined, "simulation_gateway_required"),
+      new HueEnvironmentError(400),
       new HueApiError(404),
+      new HueApiError(422),
       new HueConnectionError("Hue rejected the project connection", 401),
+      new HueConnectionError("Hue rejected the project connection", 403),
     ])
-      expect(serviceFailureType(error)).toBeNull();
+      expect(serviceFailureType(error)).toBe("ConfigurationRejected");
+    // Through a chain, and only from Hue's clients: another service's 4xx stays the agent's.
+    expect(serviceFailureType(wrapped(new HueApiError(404), 3))).toBe("ConfigurationRejected");
+    expect(serviceFailureType(new APIError(404))).toBeNull();
+    expect(serviceFailureType(callError(401))).toBeNull();
   });
 
   test("timeouts are TimedOut, including a connection timeout", async () => {
@@ -176,11 +184,12 @@ describe("service failure chains", () => {
     ).toBe("TimedOut");
   });
 
-  test("the most specific signal wins: a timeout, then a failed connection, then a refusal", () => {
+  test("the most specific signal wins: a timeout, then a failed connection, then a refusal, then Hue's rejection", () => {
     const signals = {
       TimedOut: () => new DOMException("timed out", "TimeoutError"),
       ConnectionFailed: refused,
       ServiceRefused: () => new APIError(503),
+      ConfigurationRejected: () => new HueEnvironmentError(409, undefined, "world_not_live"),
     };
     const order = Object.keys(signals) as (keyof typeof signals)[];
     order.forEach((expected, index) => {

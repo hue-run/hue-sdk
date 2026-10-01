@@ -6,11 +6,18 @@ import { HueApiError } from "./client.js";
  * What a target's throw shows about a service the agent called, when a service rather than the
  * agent's own code stopped it: `ServiceRefused` for a retryable HTTP status (408, 429 or 5xx) a
  * model provider, Hue or another service answered with, such as a rate limit or an outage;
- * `ConnectionFailed` for a connection that failed; `TimedOut` for a call that timed out. The
- * runner records the type on the execution in place of `TargetError`, and Hue classes all three
- * as infrastructure. Anything else is the agent's own error.
+ * `ConnectionFailed` for a connection that failed; `TimedOut` for a call that timed out; and
+ * `ConfigurationRejected` for any other status Hue's own clients answered with (a 4xx: a key, a
+ * project, an environment version or a world Hue refused), which is the caller's configuration.
+ * The runner records the type on the execution in place of `TargetError`; Hue classes the first
+ * three as infrastructure and the last as configuration, so an error from Hue's own clients is
+ * never filed as the agent's. Anything else is the agent's own error.
  */
-export type ServiceFailureType = "ServiceRefused" | "ConnectionFailed" | "TimedOut";
+export type ServiceFailureType =
+  | "ServiceRefused"
+  | "ConnectionFailed"
+  | "TimedOut"
+  | "ConfigurationRejected";
 
 const TIMEOUT_NAMES = new Set(["TimeoutError", "APIConnectionTimeoutError", "APITimeoutError"]);
 /** Node's and Undici's codes for a call that timed out, connecting or waiting on the answer. */
@@ -89,15 +96,19 @@ function timedOut(error: object) {
     names(error).some((name) => TIMEOUT_NAMES.has(name))
   );
 }
+/** An error one of Hue's own clients threw, which carries the status Hue answered or none. */
+function hueClientError(
+  error: object,
+): error is HueConnectionError | HueEnvironmentError | HueApiError {
+  return (
+    error instanceof HueConnectionError ||
+    error instanceof HueEnvironmentError ||
+    error instanceof HueApiError
+  );
+}
 function disconnected(error: object) {
   // Hue's clients report a request that got no usable response without a status.
-  if (
-    (error instanceof HueConnectionError ||
-      error instanceof HueEnvironmentError ||
-      error instanceof HueApiError) &&
-    error.status === undefined
-  )
-    return true;
+  if (hueClientError(error) && error.status === undefined) return true;
   const { code, message } = error as { code?: unknown; message?: unknown };
   const classes = names(error);
   return (
@@ -111,9 +122,7 @@ function disconnected(error: object) {
  * `url` or `responseHeaders`, a fetch `response`), so an agent's own error that only names a
  * status stays the agent's. */
 function refused(error: object) {
-  if (error instanceof HueApiError || error instanceof HueEnvironmentError)
-    return retryable(error.status);
-  if (error instanceof HueConnectionError) return retryable(error.status);
+  if (hueClientError(error)) return retryable(error.status);
   const { status, statusCode, headers, response, url, responseHeaders } = error as {
     status?: unknown;
     statusCode?: unknown;
@@ -138,6 +147,12 @@ function refused(error: object) {
       retryable(answered.statusCode))
   );
 }
+/** A status Hue's own client answered with that is not retryable: Hue refused the caller's key,
+ * project, environment version or world, so the case could not run as configured. Only Hue's
+ * clients show it; another service's 4xx stays the agent's. */
+function rejected(error: object) {
+  return hueClientError(error) && typeof error.status === "number" && !retryable(error.status);
+}
 /** Whether any error shows the signal; one whose properties throw when read shows none. */
 const any = (errors: object[], signal: (error: object) => boolean) =>
   errors.some((error) => {
@@ -149,11 +164,13 @@ const any = (errors: object[], signal: (error: object) => boolean) =>
   });
 
 /** The service failure a target's throw shows, by the errors linked from it, in precedence
- * order: a timeout, a failed connection, a retryable refusal; null for the agent's own error. */
+ * order: a timeout, a failed connection, a retryable refusal, a status Hue's own client was
+ * refused with; null for the agent's own error. */
 export function serviceFailureType(error: unknown): ServiceFailureType | null {
   const errors = linked(error);
   if (any(errors, timedOut)) return "TimedOut";
   if (any(errors, disconnected)) return "ConnectionFailed";
   if (any(errors, refused)) return "ServiceRefused";
+  if (any(errors, rejected)) return "ConfigurationRejected";
   return null;
 }
