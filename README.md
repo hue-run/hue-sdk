@@ -64,7 +64,9 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is [`0.11.4`](https://www.npmjs.com/package/@hue-run/sdk), with
+The published TypeScript package is [`0.12.0`](https://www.npmjs.com/package/@hue-run/sdk), with
+a local worker that retries transient failures and resumes a failed run from its checkpoints,
+export failures attributed to the traces they concerned,
 `hue mcp install` sign-in with Hue (the default for Claude Code, Codex and Conductor), Conductor, project pinning, read-only and current toolset options (every tool for agents that search their own tools), live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
 `runLocalAgent()`, V2 environments and the local
 [setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.6.2`](https://pypi.org/project/hue-run/), with live spans, the same
