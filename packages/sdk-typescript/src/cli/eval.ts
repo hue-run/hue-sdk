@@ -163,8 +163,8 @@ Output and limits:
 
 HUE_API_KEY must be a "Read and write" project key; it is never printed.
 Code evaluators pinned to a direct run are graded by Hue's executor after the upload; the wait
-covers them. Exit codes: 0 every case passed, 1 a case failed, errored or is incomplete,
-2 usage error, 130 interrupted.
+covers them. Exit codes: 0 every case passed, 1 a case failed, errored, is inconclusive or is
+incomplete, 2 usage error, 130 interrupted.
 `;
 
 /** Thrown for invalid arguments or configuration; exits with status 2. */
@@ -834,6 +834,14 @@ const STATE_LABEL: Record<CaseVerdict["state"], string> = {
   pending: "PENDING",
 };
 
+/** A skipped case whose deciding evaluator could not decide it, as an answer-graded case whose
+ * required judge could not run or answer: Hue's explanation begins "Inconclusive:". It is named
+ * apart from a case its evaluators did not grade, since it needs a judge, not another pin. */
+const inconclusive = (item: CaseVerdict): boolean =>
+  item.state === "skipped" && item.explanations.some((text) => /^inconclusive:/i.test(text));
+const stateLabel = (item: CaseVerdict): string =>
+  inconclusive(item) ? "INCONCLUSIVE" : STATE_LABEL[item.state];
+
 export function renderTable(verdicts: ExperimentVerdicts, output: Output): void {
   const cases = verdicts.summary.cases;
   // A column per metric name; a name several evaluators report, such as two judges' `verdict`,
@@ -873,7 +881,7 @@ export function renderTable(verdicts: ExperimentVerdicts, output: Output): void 
       // reporting the metric shows "-".
       return item.notApplicable?.includes(column.version) ? "n/a" : "-";
     }),
-    STATE_LABEL[item.state],
+    stateLabel(item),
   ]);
   const widths = header.map((cell, index) =>
     Math.max(cell.length, ...rows.map((row) => row[index]!.length)),
@@ -889,10 +897,12 @@ export function renderTable(verdicts: ExperimentVerdicts, output: Output): void 
   for (const item of verdicts.summary.cases) {
     if (item.state === "passed") continue;
     const details = [...item.errors.map((type) => `scorer error ${type}`), ...item.explanations];
-    for (const detail of details.length ? details : [STATE_LABEL[item.state].toLowerCase()])
+    for (const detail of details.length ? details : [stateLabel(item).toLowerCase()])
       output.log(`  ${item.externalKey}: ${detail}`);
   }
   const totals = verdicts.summary.totals;
+  const inconclusiveCount = cases.filter(inconclusive).length;
+  const skipped = totals.skipped - inconclusiveCount;
   const advisoryFailures = cases.reduce(
     (count, item) =>
       count +
@@ -903,7 +913,8 @@ export function renderTable(verdicts: ExperimentVerdicts, output: Output): void 
   );
   const extra = [
     totals.error ? `${totals.error} error` : "",
-    totals.skipped ? `${totals.skipped} skipped` : "",
+    inconclusiveCount ? `${inconclusiveCount} inconclusive` : "",
+    skipped > 0 ? `${skipped} skipped` : "",
     totals.pending ? `${totals.pending} pending` : "",
     totals.notApplicable
       ? `${totals.notApplicable} evaluator result${totals.notApplicable === 1 ? "" : "s"} not applicable`

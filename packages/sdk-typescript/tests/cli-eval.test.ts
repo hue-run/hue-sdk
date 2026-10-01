@@ -1526,6 +1526,43 @@ describe("hue eval", () => {
     expect(lines.at(-1)).toBe("2 of 2 cases passed (1 advisory failure not counted)");
   });
 
+  test("the verdict table names an inconclusive case apart from a skipped one, and counts them apart", () => {
+    const answer = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const row = (externalKey: string, state: CaseVerdict["state"], explanation?: string) => ({
+      ...verdictRow(externalKey, [{ name: "task_success", value: true, scorerVersionId: answer }]),
+      state,
+      passed: state === "passed",
+      metrics:
+        state === "passed" ? [{ name: "task_success", value: true, scorerVersionId: answer }] : [],
+      explanations: explanation ? [explanation] : [],
+    });
+    const lines = table(
+      [
+        row("answered", "passed"),
+        // An answer-graded case whose required judge could not run: Hue's result is skipped
+        // with an explanation that says so.
+        row(
+          "unjudged",
+          "skipped",
+          "Inconclusive: the required judge could not run (no model is configured)",
+        ),
+        row("unread", "skipped", "No evaluator read this case"),
+      ],
+      { passed: 1, skipped: 2 },
+    );
+    const widths = [8, 12, 12];
+    expect(lines.slice(2, 5)).toEqual([
+      tableLine(widths, ["answered", "PASS", "PASSED"]),
+      tableLine(widths, ["unjudged", "-", "INCONCLUSIVE"]),
+      tableLine(widths, ["unread", "-", "SKIPPED"]),
+    ]);
+    expect(lines.slice(5, 7)).toEqual([
+      "  unjudged: Inconclusive: the required judge could not run (no model is configured)",
+      "  unread: No evaluator read this case",
+    ]);
+    expect(lines.at(-1)).toBe("1 of 3 cases passed (1 inconclusive, 1 skipped)");
+  });
+
   test("a resume with another --no-output or --content choice names the flags to repeat", () => {
     // An unfinished run keeps its content policy (the checkpoint refuses a change); the message
     // says which flags resume it.

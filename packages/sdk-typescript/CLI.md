@@ -627,9 +627,9 @@ an interrupted run without invoking the agent again; a different selection is re
 unfinished one is resumed or its directory is removed.
 
 Exit codes: `0` every case passed the evaluators that apply to it (advisory ones never count),
-`1` a case failed, errored (including one no pinned evaluator applies to or decides), was skipped
-or Hue's checks were
-still pending at `--wait`, `2` usage or configuration error (including a missing key), `130`
+`1` a case failed, errored (including one no pinned evaluator applies to or decides), was skipped,
+was inconclusive (a required judge could not run or answer; the table says `INCONCLUSIVE` and the
+summary counts it apart from skipped cases) or Hue's checks were still pending at `--wait`, `2` usage or configuration error (including a missing key), `130`
 interrupted. On Node.js 22, load TypeScript adapters with `NODE_OPTIONS=--experimental-strip-types`;
 non-erasable syntax (enums, parameter properties, namespaces) needs a loader such as `--import tsx`
 on any Node.js version.

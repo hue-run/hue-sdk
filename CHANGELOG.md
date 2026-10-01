@@ -10,6 +10,14 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Changed
+
+- `hue eval` names an inconclusive case apart from a skipped one: a case whose deciding evaluator
+  could not decide it (its result is skipped with an explanation that begins `Inconclusive:`, as
+  when a required judge could not run or answer) shows `INCONCLUSIVE` in the verdict table and is
+  counted as `inconclusive`, not `skipped`, in the summary line. Exit codes are unchanged: such a
+  case still exits `1`.
+
 #### Fixed
 
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
