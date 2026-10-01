@@ -1,7 +1,7 @@
 """Public local evaluation client, runner and scorer declarations."""
 
 from ._json import MISSING
-from .client import EvaluationClient, HueApiError
+from .client import EvaluationClient, HueApiError, is_transient_api_error
 from .runner import (
     OutcomeSerializationError,
     TelemetryExportError,
@@ -16,6 +16,7 @@ __all__ = [
     "MISSING",
     "EvaluationClient",
     "HueApiError",
+    "is_transient_api_error",
     "LocalScorer",
     "OutcomeSerializationError",
     "RunnerReport",

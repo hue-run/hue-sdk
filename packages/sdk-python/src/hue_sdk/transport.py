@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
@@ -27,6 +28,7 @@ from opentelemetry.sdk._logs import ReadableLogRecord
 from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportResult
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
+from opentelemetry.trace import get_current_span
 
 from ._otel_compat import encode_logs, export_context
 from ._version import __version__
@@ -313,8 +315,106 @@ def _split_batches(
     return _split_batches(items[:middle], encode) + _split_batches(items[middle:], encode)
 
 
+# An issue names at most this many traces; a batch of more names none, and the receipts decide.
+MAX_ISSUE_TRACE_IDS = 64
+# The issues a client retains; a runner reads the ones younger than its case.
+MAX_RETAINED_ISSUES = 256
+
+
+@dataclass(frozen=True)
+class ExportIssue:
+    """One export failure, with the traces of the records it concerned.
+
+    ``kind`` is ``failed`` for a batch Hue refused or did not acknowledge and ``dropped`` for a
+    record the pipeline could not hold or encode. ``trace_ids`` names the traces whose records the
+    issue concerned, lowercase hexadecimal; ``None`` when the records named none or more than
+    ``MAX_ISSUE_TRACE_IDS``, so a case's trace receipt decides. ``sequence`` orders issues across
+    both signals; a client's ``export_failure_sequence()`` is the last one recorded.
+    """
+
+    signal: str
+    kind: str
+    count: int
+    message: str
+    sequence: int
+    trace_ids: tuple[str, ...] | None
+
+
+def _record_trace_id(record: Any) -> str | None:
+    """The trace a span or log record belongs to, or ``None`` for a record naming none."""
+    try:
+        if isinstance(record, PendingSpan):
+            return None
+        context = getattr(record, "context", None)
+        if context is None or not hasattr(context, "trace_id"):
+            inner = getattr(record, "log_record", record)
+            trace_id = getattr(inner, "trace_id", None)
+            if trace_id is None:
+                inner_context = getattr(inner, "context", None)
+                span = get_current_span(inner_context) if inner_context is not None else None
+                trace_id = span.get_span_context().trace_id if span is not None else None
+        else:
+            trace_id = context.trace_id
+        if not isinstance(trace_id, int) or trace_id == 0:
+            return None
+        return format(trace_id, "032x")
+    except Exception:
+        return None
+
+
+def trace_ids_of(records: Sequence[Any]) -> tuple[str, ...] | None:
+    """The distinct traces of the records, or ``None`` for none or more than the cap."""
+    ids: dict[str, None] = {}
+    for record in records:
+        trace_id = _record_trace_id(record)
+        if trace_id is not None:
+            ids[trace_id] = None
+        if len(ids) > MAX_ISSUE_TRACE_IDS:
+            return None
+    return tuple(ids) if ids else None
+
+
+class IssueLedger:
+    """The export issues of one client, in order, bounded, shared by both signals."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._sequence = 0
+        self._issues: deque[ExportIssue] = deque(maxlen=MAX_RETAINED_ISSUES)
+
+    def record(
+        self,
+        signal: str,
+        kind: str,
+        count: int,
+        message: str,
+        trace_ids: tuple[str, ...] | None,
+    ) -> None:
+        with self._lock:
+            self._sequence += 1
+            self._issues.append(
+                ExportIssue(signal, kind, max(1, count), message, self._sequence, trace_ids)
+            )
+
+    @property
+    def failure_sequence(self) -> int:
+        with self._lock:
+            return self._sequence
+
+    def issues(self) -> tuple[ExportIssue, ...]:
+        with self._lock:
+            return tuple(self._issues)
+
+
 class BoundedSpanExporter(SpanExporter):
-    def __init__(self, endpoint: str, headers: dict[str, str], timeout: float) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        headers: dict[str, str],
+        timeout: float,
+        ledger: IssueLedger | None = None,
+    ) -> None:
+        self._ledger = ledger or IssueLedger()
         self._session = SafeSession("traces")
         self._delegate = OTLPSpanExporter(
             endpoint=endpoint,
@@ -334,9 +434,19 @@ class BoundedSpanExporter(SpanExporter):
     def live_spans_rejected(self) -> bool:
         return self._session.live_spans_rejected
 
-    def record_failure(self) -> None:
+    def record_failure(
+        self, records: Sequence[Any] | None = None, kind: str = "dropped", count: int = 1
+    ) -> None:
+        """Count a failure the pipeline met outside an export, naming the records' traces."""
         with self._lock:
             self._failures += 1
+        self._ledger.record(
+            "traces",
+            kind,
+            count,
+            "Hue telemetry pipeline could not hold or encode trace records",
+            trace_ids_of(records) if records else None,
+        )
 
     @property
     def failures(self) -> int:
@@ -359,9 +469,26 @@ class BoundedSpanExporter(SpanExporter):
                 # Placeholders are advisory: a batch holding only placeholders never fails.
                 if not exported and placeholders < len(batch):
                     failed = True
+                    # The batch Hue refused or did not acknowledge names the traces in it.
+                    self._ledger.record(
+                        "traces",
+                        "failed",
+                        len(batch) - placeholders,
+                        "Hue did not accept a batch of trace records",
+                        trace_ids_of(batch),
+                    )
         except Exception:
             # Never surface record serialization errors containing customer values.
-            failed = failed or any(not isinstance(span, PendingSpan) for span in spans)
+            real = [span for span in spans if not isinstance(span, PendingSpan)]
+            if real and not failed:
+                self._ledger.record(
+                    "traces",
+                    "failed",
+                    len(real),
+                    "Hue telemetry pipeline could not encode trace records",
+                    trace_ids_of(real),
+                )
+            failed = failed or bool(real)
         if failed:
             with self._lock:
                 self._failures += 1
@@ -376,7 +503,14 @@ class BoundedSpanExporter(SpanExporter):
 
 
 class BoundedLogExporter(LogRecordExporter):
-    def __init__(self, endpoint: str, headers: dict[str, str], timeout: float) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        headers: dict[str, str],
+        timeout: float,
+        ledger: IssueLedger | None = None,
+    ) -> None:
+        self._ledger = ledger or IssueLedger()
         self._session = SafeSession("logs")
         self._delegate = OTLPLogExporter(
             endpoint=endpoint,
@@ -392,9 +526,19 @@ class BoundedLogExporter(LogRecordExporter):
     def ready(self) -> bool:
         return self._session.ready
 
-    def record_failure(self) -> None:
+    def record_failure(
+        self, records: Sequence[Any] | None = None, kind: str = "dropped", count: int = 1
+    ) -> None:
+        """Count a failure the pipeline met outside an export, naming the records' traces."""
         with self._lock:
             self._failures += 1
+        self._ledger.record(
+            "logs",
+            kind,
+            count,
+            "Hue telemetry pipeline could not hold or encode log records",
+            trace_ids_of(records) if records else None,
+        )
 
     @property
     def failures(self) -> int:
@@ -406,10 +550,27 @@ class BoundedLogExporter(LogRecordExporter):
         try:
             for chunk in _split_batches(batch, encode_logs):
                 if encode_logs(chunk).ByteSize() > MAX_BATCH_BYTES:
+                    accepted = False
+                else:
+                    accepted = self._delegate.export(chunk) is LogRecordExportResult.SUCCESS
+                if not accepted:
                     failed = True
-                elif self._delegate.export(chunk) is not LogRecordExportResult.SUCCESS:
-                    failed = True
+                    self._ledger.record(
+                        "logs",
+                        "failed",
+                        len(chunk),
+                        "Hue did not accept a batch of log records",
+                        trace_ids_of(chunk),
+                    )
         except Exception:
+            if not failed:
+                self._ledger.record(
+                    "logs",
+                    "failed",
+                    len(batch),
+                    "Hue telemetry pipeline could not encode log records",
+                    trace_ids_of(batch),
+                )
             failed = True
         if failed:
             with self._lock:

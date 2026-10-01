@@ -236,7 +236,7 @@ evidence = client.get_evidence(run["id"], section="ledger")
 `agent_environment` removes `HUE_API_KEY`, `HUE_MCP_KEY` and any `hue_sk_`, `hue_mcp_` or
 `hue_attempt_` value unless `include_hue_credentials=True`, and for one compatibility release also
 sets `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` from the first MCP mirror. Nothing
-here logs the token. The client waits Hue's `Retry-After` on 429 and 503 before retrying. Refusal errors expose a validated `HueEnvironmentError.diagnostic` from `X-Hue-Diagnostic` when the server sends one; the code distinguishes refusals with the same status without exposing response bodies.
+here logs the token. The client waits Hue's `Retry-After` on 429 and 503 before retrying, and sends a read, or a mutation keyed by `idempotencyKey`, again after a connection failure, a timeout or a 408 or 5xx without the header, up to `max_attempts` (default 4) times; `is_transient_api_error` names those failures. Refusal errors expose a validated `HueEnvironmentError.diagnostic` from `X-Hue-Diagnostic` when the server sends one; the code distinguishes refusals with the same status without exposing response bodies.
 
 ## Managed targets
 
