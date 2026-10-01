@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import type { HueClient } from "../client.js";
 import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
@@ -9,7 +8,7 @@ import type {
   WorldHandoff,
 } from "../environment/types.js";
 import { HueApiError, type EvaluationClient } from "./client.js";
-import { CheckpointStore } from "./checkpoint.js";
+import { CheckpointStore, checkpointPath, checkpointSegment } from "./checkpoint.js";
 import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";
 import { aggregateBounds, digest, json } from "./json.js";
 import { normalizeScorerDefinitionForPublication } from "./scorer-publication.js";
@@ -202,7 +201,7 @@ export interface RunSimulationOptions {
       };
   /** What a case does when required telemetry is not accepted; see
    * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */
-  traceNotAccepted?: "stop" | "fail_case";
+  traceNotAccepted?: "stop" | "fail_case" | "pending";
   /** Called as each case is failed for its telemetry; see `onTelemetryNotAccepted` of
    * {@link runExperiment}. */
   onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
@@ -775,7 +774,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
     let bindings = options.localScorers ?? [];
     if (!attempt.experimentId) {
       const resolved = await resolveExperiment(options, definition, attempt.idempotencyKey);
-      attempt.experimentId = resolved.experimentId;
+      attempt.experimentId = checkpointSegment(resolved.experimentId, "experiment id");
       bindings = resolved.bindings;
       attempt.stage = "running";
       await store.write("active-attempt", attempt);
@@ -787,7 +786,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
         ...(options.localScorers ?? []),
       ];
     }
-    const experimentId = attempt.experimentId;
+    const experimentId = checkpointSegment(attempt.experimentId, "experiment id");
     const runUrl = new URL(`/experiments/${experimentId}`, options.client.baseUrl).toString();
     await options.onProgress?.({ type: "run_created", experimentId, runUrl });
     const requested = requestedConfiguration
@@ -800,7 +799,10 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       client: options.client,
       hue: options.hue,
       experimentId,
-      checkpointDirectory: join(store.directory, `experiment-${experimentId}`),
+      checkpointDirectory: checkpointPath(store.directory, [
+        `experiment-${experimentId}`,
+        "experiment id",
+      ]),
       persistResultContent: options.persistResultContent,
       traceEvidence: options.traceEvidence,
       ...(options.traceNotAccepted ? { traceNotAccepted: options.traceNotAccepted } : {}),

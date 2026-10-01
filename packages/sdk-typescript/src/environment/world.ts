@@ -73,21 +73,39 @@ export interface AgentEnvironmentOptions {
   legacyMcpVariables?: boolean;
 }
 
+/** Variables a world or its server owns: a parent's value belongs to another world (a runner
+ * started inside a case, a shell left from an earlier run) or to the server (a signing key), and
+ * would send this world's token to a mirror this world does not have. The whole `HUE_WORLD_`
+ * prefix is the world's. */
+const WORLD_SCOPED =
+  /^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS))$/;
+
+/** `environment` without any variable a world or its server owns. */
+export function withoutWorldVariables(environment: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !WORLD_SCOPED.test(name)),
+  );
+}
+
 /**
  * The environment for an agent child process running one case (the coordination briefs'
- * recommended policy): the parent's variables minus Hue control-plane credentials, then the
- * world's carriers, which win over anything the parent set. Nothing here is logged.
+ * recommended policy): the parent's variables minus Hue control-plane credentials and any
+ * world-scoped variable, then the world's carriers. Nothing here is logged.
  */
 export function agentEnvironment(
   world: WorldHandoff,
   options: AgentEnvironmentOptions = {},
 ): Record<string, string> {
   const parent = options.parent ?? process.env;
-  const child: Record<string, string> = options.includeHueCredentials
-    ? Object.fromEntries(
-        Object.entries(parent).filter((entry): entry is [string, string] => entry[1] !== undefined),
-      )
-    : stripHueControlPlaneCredentials(parent);
+  const child = withoutWorldVariables(
+    options.includeHueCredentials
+      ? Object.fromEntries(
+          Object.entries(parent).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        )
+      : stripHueControlPlaneCredentials(parent),
+  );
   Object.assign(child, world.env);
   if (options.legacyMcpVariables ?? true) {
     const legacy = legacyMcpCapability(world);

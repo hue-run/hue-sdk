@@ -1,3 +1,4 @@
+import { ROOT_CONTEXT } from "@opentelemetry/api";
 import { describe, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
@@ -9,7 +10,11 @@ import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import { createHue, HueExportError } from "../src/index.js";
-import { CheckpointIdentityError, CheckpointStore } from "../src/evals/checkpoint.js";
+import {
+  CheckpointIdentityError,
+  CheckpointStore,
+  checkpointPath,
+} from "../src/evals/checkpoint.js";
 import {
   ArtifactSizeError,
   builtins,
@@ -22,6 +27,7 @@ import {
   scoreLocally,
   sourceDigest,
   TargetOutcomeUncertainError,
+  TraceExportUnacknowledgedError,
   UncertainExecutionError,
   type Completion,
   type EvaluationRun,
@@ -91,6 +97,15 @@ function fixture() {
   const requests: { path: string; body: Record<string, unknown> }[] = [];
   const receipts = new Map<string, { body: string; response: unknown }>();
   const traceIds = new Set<string>();
+  /** Span ids Hue holds, by trace, as the receipt reports them. */
+  const spanIds = new Map<string, Set<string>>();
+  /** Case ids whose next export batch (the one carrying the case's root span) is refused, as a
+   * collector refuses a batch: every span in it, this case's and any other's, does not land. */
+  const rejectedCases = new Set<string>();
+  /** Signals whose next batch Hue accepts partially, rejecting one record without naming it. */
+  const partialRejections = new Set<"traces" | "logs">();
+  /** Cases whose spans Hue counts as rejected in every batch and never holds. */
+  const partiallyRejectedCases = new Set<string>();
   const wire: string[] = [];
   let completeFailures = 0;
   let telemetryFailures = 0;
@@ -156,14 +171,99 @@ function fixture() {
           `opentelemetry.proto.collector.${isTrace ? "trace" : "logs"}.v1.Export${isTrace ? "Trace" : "Logs"}ServiceRequest`,
         );
         const value = type.toObject(type.decode(bytes), { bytes: String, longs: String });
+        if (partialRejections.delete(isTrace ? "traces" : "logs")) {
+          // Accepted but for one record; OTLP names no record, only a count.
+          const partial = isTrace ? { rejectedSpans: 1 } : { rejectedLogRecords: 1 };
+          const responseType = otlp.lookupType(
+            `opentelemetry.proto.collector.${isTrace ? "trace" : "logs"}.v1.Export${isTrace ? "Trace" : "Logs"}ServiceResponse`,
+          );
+          const encoded = responseType
+            .encode(responseType.create({ partialSuccess: partial }))
+            .finish();
+          if (isTrace)
+            for (const resource of value.resourceSpans)
+              for (const scope of resource.scopeSpans)
+                for (const span of scope.spans) {
+                  const traceId = Buffer.from(span.traceId, "base64").toString("hex");
+                  traceIds.add(traceId);
+                  if (!spanIds.has(traceId)) spanIds.set(traceId, new Set());
+                  spanIds.get(traceId)!.add(Buffer.from(span.spanId, "base64").toString("hex"));
+                }
+          return new Response(new Uint8Array(encoded), {
+            headers: { "Content-Type": "application/x-protobuf" },
+          });
+        }
+        if (isTrace) {
+          const spans = (value.resourceSpans as { scopeSpans: { spans: unknown[] }[] }[]).flatMap(
+            (resource) => resource.scopeSpans.flatMap((scope) => scope.spans),
+          ) as { attributes?: { key: string; value: { stringValue?: string } }[] }[];
+          const caseOf = (span: (typeof spans)[number]) =>
+            span.attributes?.find((attribute) => attribute.key === "hue.dataset.case.id")?.value
+              .stringValue;
+          const rejected = spans
+            .map(caseOf)
+            .find((id) => id !== undefined && rejectedCases.has(id));
+          if (rejected) {
+            rejectedCases.delete(rejected);
+            return new Response(null, { status: 500 });
+          }
+        }
         wire.push(JSON.stringify(value));
-        if (isTrace)
+        // A batch accepted but for one case's spans: Hue counts them, names none, and holds
+        // every other trace's spans, so only the receipts tell the cases apart.
+        const dropped = new Set<string>();
+        let rejectedSpans = 0;
+        if (isTrace) {
           for (const resource of value.resourceSpans)
             for (const scope of resource.scopeSpans)
-              for (const span of scope.spans)
-                traceIds.add(Buffer.from(span.traceId, "base64").toString("hex"));
+              for (const span of scope.spans) {
+                const caseId = (
+                  span.attributes as { key: string; value: { stringValue?: string } }[] | undefined
+                )?.find((attribute) => attribute.key === "hue.dataset.case.id")?.value.stringValue;
+                if (caseId !== undefined && partiallyRejectedCases.has(caseId))
+                  dropped.add(Buffer.from(span.traceId, "base64").toString("hex"));
+              }
+          for (const resource of value.resourceSpans)
+            for (const scope of resource.scopeSpans)
+              for (const span of scope.spans) {
+                const traceId = Buffer.from(span.traceId, "base64").toString("hex");
+                if (dropped.has(traceId)) {
+                  rejectedSpans += 1;
+                  continue;
+                }
+                traceIds.add(traceId);
+                if (!spanIds.has(traceId)) spanIds.set(traceId, new Set());
+                spanIds.get(traceId)!.add(Buffer.from(span.spanId, "base64").toString("hex"));
+              }
+        }
+        if (rejectedSpans > 0) {
+          const responseType = otlp.lookupType(
+            "opentelemetry.proto.collector.trace.v1.ExportTraceServiceResponse",
+          );
+          const encoded = responseType
+            .encode(responseType.create({ partialSuccess: { rejectedSpans } }))
+            .finish();
+          return new Response(new Uint8Array(encoded), {
+            headers: { "Content-Type": "application/x-protobuf" },
+          });
+        }
         return new Response(new Uint8Array(), {
           headers: { "Content-Type": "application/x-protobuf" },
+        });
+      }
+      const receiptMatch = /^\/traces\/([0-9a-f]{32})\/receipt$/.exec(path);
+      if (receiptMatch && request.method === "GET") {
+        const held = spanIds.get(receiptMatch[1]!);
+        if (!held) return Response.json({ code: "TRACE_NOT_FOUND" }, { status: 404 });
+        const expected = url.searchParams.getAll("expectedSpanId");
+        return Response.json({
+          traceId: receiptMatch[1],
+          spanCount: held.size,
+          revision: 1,
+          fields: { input: false, output: false, model: false, usage: false, session: false },
+          matchedSpanIds: expected.filter((id) => held.has(id)),
+          missingSpanIds: expected.filter((id) => !held.has(id)),
+          traceUrl: `${url.origin}/traces/${receiptMatch[1]}`,
         });
       }
       const body =
@@ -261,14 +361,19 @@ function fixture() {
         const execution = executions.get(executionMatch[1])!;
         if (!executionMatch[2]) return send(execution);
         if (completeFailures-- > 0) return new Response(null, { status: 503 });
-        if (body.traceEvidence !== "omit" && !traceIds.has(execution.traceExternalId!))
+        if (
+          body.traceEvidence !== "omit" &&
+          body.traceEvidence !== "pending" &&
+          !traceIds.has(execution.traceExternalId!)
+        )
           return new Response(null, { status: 409 });
         const item = cases.find((item) => item.id === execution.caseId)!;
         const subjectId = randomUUID();
         const evaluationItemId = randomUUID();
         const exp = experiments.get(execution.experimentId)!;
         const hasOutput = Object.hasOwn(body, "output");
-        const snapshot = body.traceEvidence === "omit" ? null : randomUUID();
+        const snapshot =
+          body.traceEvidence === "omit" || body.traceEvidence === "pending" ? null : randomUUID();
         const subject = {
           ...item,
           id: subjectId,
@@ -283,7 +388,11 @@ function fixture() {
           traceSnapshotId: snapshot,
           experimentId: exp.id,
           attempt: 1,
-          traceEvidence: snapshot ? "captured" : "omitted",
+          traceEvidence: snapshot
+            ? "captured"
+            : body.traceEvidence === "pending"
+              ? "pending"
+              : "omitted",
           traceExternalId: execution.traceExternalId,
           omissionReason: body.omissionReason ?? null,
         } as Subject;
@@ -344,7 +453,9 @@ function fixture() {
     },
   });
   const baseUrl = `http://127.0.0.1:${server.port}`;
-  const client = createEvaluationClient({ apiKey: key, baseUrl });
+  // Single-attempt, so the one-shot failures below reach the runner and exercise its resume
+  // path; the client's own retries are covered by their own tests.
+  const client = createEvaluationClient({ apiKey: key, baseUrl, maxAttempts: 1 });
   return {
     server,
     client,
@@ -359,6 +470,16 @@ function fixture() {
     executions,
     failComplete: () => (completeFailures = 1),
     failTelemetry: () => (telemetryFailures = 1),
+    /** Refuses the next export batch carrying this case's root span. */
+    rejectCase: (caseId: string) => rejectedCases.add(caseId),
+    /** Forgets one held span of the trace, as if a child span's batch had never landed. */
+    forgetSpan: (traceId: string, spanId: string) => spanIds.get(traceId)?.delete(spanId),
+    spansHeld: (traceId: string) => spanIds.get(traceId)?.size ?? 0,
+    spanIdsOf: (traceId: string) => spanIds.get(traceId),
+    /** Hue accepts the next batch of the signal but for one record it does not name. */
+    rejectOnePartially: (signal: "traces" | "logs") => partialRejections.add(signal),
+    /** Hue accepts every batch but for this case's spans, which it counts and never holds. */
+    rejectCasePartially: (caseId: string) => partiallyRejectedCases.add(caseId),
     failResult: () => (resultFailures = 1),
     failStart: () => (startFailures = 1),
     truncateItemPage: () => (truncatedItemPages = 1),
@@ -463,6 +584,26 @@ describe("local evaluation scorers", () => {
   });
 });
 
+describe("checkpoint paths", () => {
+  test("accepts children of a filesystem root", () => {
+    expect(checkpointPath("/", ["project", "project id"], ["direct", "kind"])).toBe(
+      join("/", "project", "direct"),
+    );
+  });
+
+  test("server-provided identifiers must be single path components", () => {
+    const root = join(tmpdir(), "hue-root");
+    expect(checkpointPath(root, ["proj_1", "project id"], ["direct", "kind"])).toBe(
+      join(root, "proj_1", "direct"),
+    );
+    expect(checkpointPath(root, ["experiment-abc.DEF-9", "experiment id"])).toBe(
+      join(root, "experiment-abc.DEF-9"),
+    );
+    for (const bad of ["../escape", "..", ".", "a/b", "a\\b", "", ".hidden", "/abs", "a\0b"])
+      expect(() => checkpointPath(root, [bad, "project id"])).toThrow(/Refusing to use project id/);
+  });
+});
+
 describe("checkpoint identity", () => {
   test("a resume with another content policy names the policy the run started with", async () => {
     const dir = await directory();
@@ -530,10 +671,16 @@ describe("installed evaluation API and runner contract", () => {
     try {
       await expect(runExperiment(options)).rejects.toBeInstanceOf(HueExportError);
       expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toEqual([]);
-      await expect(runExperiment(options)).rejects.toThrow(
-        "trace export acknowledgement is unavailable",
+      // The first case's saved outcome still waits for its trace, that case's own state on
+      // resume: the second case beside it still runs (and fails the same way here), and both are
+      // reported, the saved one as its typed error.
+      const resumed = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
       );
-      expect(calls).toBe(1);
+      expect(resumed).toBeInstanceOf(AggregateError);
+      expect((resumed as AggregateError).errors[0]).toBeInstanceOf(TraceExportUnacknowledgedError);
+      expect(calls).toBe(2);
     } finally {
       await hue.shutdown();
       f.server.stop(true);
@@ -686,6 +833,552 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("a service the agent called that refused, dropped the connection or timed out is recorded by what failed", async () => {
+    // Each pair of throws runs as one experiment of the fixture's two cases.
+    const runs: [unknown, unknown, string[]][] = [
+      [
+        // A model provider's rate limit, as the OpenAI and Anthropic SDKs throw it.
+        Object.assign(new Error("429 Too Many Requests"), {
+          status: 429,
+          headers: { "retry-after": "1" },
+        }),
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
+            code: "ECONNREFUSED",
+          }),
+        }),
+        ["ServiceRefused", "ConnectionFailed"],
+      ],
+      [
+        new Error("The model call failed", {
+          cause: new DOMException("The operation timed out", "TimeoutError"),
+        }),
+        // A refusal the agent caused is its own failure.
+        Object.assign(new Error("400 Bad Request"), { status: 400, headers: {} }),
+        ["TimedOut", "TargetError"],
+      ],
+    ];
+    for (const [first, second, expected] of runs) {
+      const f = fixture();
+      const exp = f.create();
+      const hue = createHue({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        serviceName: "service-failures",
+        captureContent: false,
+      });
+      let calls = 0;
+      try {
+        await runExperiment({
+          client: f.client,
+          hue,
+          experimentId: exp.id,
+          checkpointDirectory: await directory(),
+          persistResultContent: false,
+          traceEvidence: { mode: "omit" as const, reason: "Synthetic service failures" },
+          target: async () => {
+            calls++;
+            throw calls === 1 ? first : second;
+          },
+        });
+        const types = f.requests
+          .filter((request) => request.path.endsWith("/complete"))
+          .map((request) => (request.body.error as { type: string } | undefined)?.type);
+        expect(types).toEqual(expected);
+      } finally {
+        await hue.shutdown();
+        f.server.stop(true);
+      }
+    }
+  });
+  test("under traceNotAccepted pending a case whose own root-span batch was refused completes with its trace pending, beside the case that landed", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "pending-attributed",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    const calls: string[] = [];
+    f.rejectCase(first!.id);
+    try {
+      const report = await runExperiment({
+        client: f.client,
+        hue,
+        experimentId: exp.id,
+        checkpointDirectory,
+        persistResultContent: true,
+        concurrency: 2,
+        traceEvidence: { mode: "required" as const },
+        traceNotAccepted: "pending",
+        target: async (_inputs: JsonValue, context: { item: { id: string } }) => {
+          calls.push(context.item.id);
+          if (context.item.id !== first!.id)
+            await new Promise((resolve) => setTimeout(resolve, 400));
+          return "reply";
+        },
+      });
+      expect(report.subjectIds).toHaveLength(f.cases.length);
+      expect(calls).toHaveLength(f.cases.length);
+      expect(report.tracePending).toEqual([
+        {
+          caseId: first!.id,
+          caseKey: first!.externalKey,
+          executionId: expect.any(String),
+          spanCount: 1,
+        },
+      ]);
+      const completions = f.requests
+        .filter((request) => request.path.endsWith("/complete"))
+        .map((request) => request.body as { traceEvidence: string; traceSpanCount?: number });
+      expect(completions.map((body) => body.traceEvidence).sort()).toEqual(
+        ["pending", ...Array.from({ length: f.cases.length - 1 }, () => "required")].sort(),
+      );
+      expect(completions.find((body) => body.traceEvidence === "pending")!.traceSpanCount).toBe(1);
+      const states = [...f.subjects.values()].map((subject) => subject.traceEvidence);
+      expect(states.filter((state) => state === "pending")).toHaveLength(1);
+      expect(states.filter((state) => state === "captured")).toHaveLength(f.cases.length - 1);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("an export failure is attributed to the traces it concerned: the case beside it completes, and the failed case alone is refused on resume", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first, second] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "attributed-export",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    const calls: string[] = [];
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      concurrency: 2,
+      traceEvidence: { mode: "required" as const },
+      target: async (_inputs: JsonValue, context: { item: { id: string } }) => {
+        calls.push(context.item.id);
+        // The first case ends at once, so its root span is flushed in a batch of its own; the
+        // second is still running then and flushes later.
+        if (context.item.id !== first!.id) await new Promise((resolve) => setTimeout(resolve, 400));
+        return "reply";
+      },
+    };
+    // Hue refuses the batch that carries the first case's root span.
+    f.rejectCase(first!.id);
+    try {
+      const error = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(HueExportError);
+      expect(calls.sort()).toEqual([first!.id, second!.id].sort());
+      // Only the second case completed; the first's saved outcome is marked failed, and the
+      // refused batch's issue names its trace.
+      const completions = f.requests.filter((request) => request.path.endsWith("/complete"));
+      expect(completions).toHaveLength(1);
+      const saved = JSON.parse(
+        await readFile(join(checkpointDirectory, `case-${first!.id}.json`), "utf8"),
+      ) as { value: { exportState: string; trace?: { traceId: string; spanId: string } } };
+      expect(saved.value.exportState).toBe("failed");
+      expect(saved.value.trace?.traceId).toMatch(/^[0-9a-f]{32}$/);
+      expect(
+        (error as HueExportError).issues.some(
+          (issue) =>
+            issue.kind === "failed" && issue.traceIds?.includes(saved.value.trace!.traceId),
+        ),
+      ).toBe(true);
+      // Resume refuses the failed case as itself, runs no target again and completes nothing more.
+      await expect(runExperiment(options)).rejects.toBeInstanceOf(TraceExportUnacknowledgedError);
+      expect(calls).toHaveLength(2);
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(1);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("an instrumentation failure in one case flags that case alone, and a case no flush decided is accepted through its trace receipt", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first, second] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "attributed-instrumentation",
+      // Content capture on, so the case span encodes the output the target sets.
+      captureContent: true,
+    });
+    const checkpointDirectory = await directory();
+    const calls: string[] = [];
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      concurrency: 2,
+      traceEvidence: { mode: "required" as const },
+      target: async (
+        _inputs: JsonValue,
+        context: { item: { id: string }; span: { setOutput(value: unknown): void } },
+      ) => {
+        calls.push(context.item.id);
+        if (context.item.id === first!.id)
+          // A Proxy is refused before its traps run: a contained capture failure in this case.
+          context.span.setOutput(new Proxy({}, {}));
+        else await new Promise((resolve) => setTimeout(resolve, 200));
+        return "reply";
+      },
+    };
+    try {
+      const error = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+      expect(error).toBeInstanceOf(HueExportError);
+      expect(calls.sort()).toEqual([first!.id, second!.id].sort());
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(1);
+      const file = join(checkpointDirectory, `case-${first!.id}.json`);
+      const saved = JSON.parse(await readFile(file, "utf8")) as {
+        value: { exportState: string; trace: { traceId: string } };
+      };
+      expect(saved.value.exportState).toBe("failed");
+      // A checkpoint no flush decided on (a process that stopped before its flush ended) is
+      // asked about through its trace receipt on resume: its root span landed, so it completes.
+      const manifest = JSON.parse(
+        await readFile(join(checkpointDirectory, "manifest.json"), "utf8"),
+      );
+      const store = await CheckpointStore.acquire(checkpointDirectory, manifest.value.identity);
+      try {
+        await store.write(`case-${first!.id}`, { ...saved.value, exportState: "pending" });
+      } finally {
+        await store.release();
+      }
+      const report = await runExperiment(options);
+      expect(report.subjectIds).toHaveLength(2);
+      expect(calls).toHaveLength(2);
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(2);
+      // The receipt is held to the spans the case ended: the checkpoint records them.
+      const accepted = JSON.parse(await readFile(file, "utf8")) as {
+        value: { exportState: string; trace: { traceId: string; spans?: number } };
+      };
+      expect(accepted.value.exportState).toBe("accepted");
+      expect(accepted.value.trace.spans).toBe(f.spansHeld(accepted.value.trace.traceId));
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("a pending checkpoint whose trace lost a child span is refused although its root landed", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "attributed-children",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      traceEvidence: { mode: "required" as const },
+      target: async (_inputs: JsonValue, context: { item: { id: string } }) => {
+        // A child span inside the first case; its loss must not hide behind the root.
+        if (context.item.id === first!.id) await hue.withSpan("child", () => "worked");
+        return "reply";
+      },
+    };
+    try {
+      await runExperiment(options);
+      const file = join(checkpointDirectory, `case-${first!.id}.json`);
+      const saved = JSON.parse(await readFile(file, "utf8")) as {
+        value: { exportState: string; trace: { traceId: string; spanId: string; spans: number } };
+      };
+      expect(saved.value.exportState).toBe("accepted");
+      expect(saved.value.trace.spans).toBe(2);
+      // Reset the first case to pending and forget its child span at Hue: the root is still
+      // there, but the receipt holds fewer spans than the case ended, so resume refuses it.
+      const manifest = JSON.parse(
+        await readFile(join(checkpointDirectory, "manifest.json"), "utf8"),
+      );
+      const store = await CheckpointStore.acquire(checkpointDirectory, manifest.value.identity);
+      try {
+        const { completion: _completion, ...pending } = saved.value as { completion?: unknown };
+        await store.write(`case-${first!.id}`, { ...pending, exportState: "pending" });
+      } finally {
+        await store.release();
+      }
+      const child = [...(f.spanIdsOf(saved.value.trace.traceId) ?? [])].find(
+        (id) => id !== saved.value.trace.spanId,
+      );
+      expect(child).toBeDefined();
+      f.forgetSpan(saved.value.trace.traceId, child!);
+      expect(f.spansHeld(saved.value.trace.traceId)).toBe(1);
+      const resumed = await runExperiment(options).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(resumed).toBeInstanceOf(TraceExportUnacknowledgedError);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  });
+  test("a pending checkpoint without a span count is refused, a partially rejected span batch of two cases leaves the whole one accepted, and a partially rejected log batch fails its cases", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first, second] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "attributed-partials",
+      captureContent: true,
+    });
+    const checkpointDirectory = await directory();
+    const options = {
+      client: f.client,
+      hue,
+      experimentId: exp.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      concurrency: 2,
+      traceEvidence: { mode: "required" as const },
+      target: async (_inputs: JsonValue, context: { item: { id: string } }) => {
+        if (context.item.id === second!.id)
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        return "reply";
+      },
+    };
+    try {
+      // A completed run; then the first case's checkpoint is reset to pending without its span
+      // count: the receipt holds its root, but with nothing to hold the count to it refuses.
+      await runExperiment(options);
+      const file = join(checkpointDirectory, `case-${first!.id}.json`);
+      const saved = JSON.parse(await readFile(file, "utf8")) as {
+        value: { trace: { traceId: string; spanId: string; spans?: number }; completion?: unknown };
+      };
+      const manifest = JSON.parse(
+        await readFile(join(checkpointDirectory, "manifest.json"), "utf8"),
+      );
+      const store = await CheckpointStore.acquire(checkpointDirectory, manifest.value.identity);
+      try {
+        const { completion: _completion, ...pending } = saved.value;
+        await store.write(`case-${first!.id}`, {
+          ...pending,
+          exportState: "pending",
+          trace: { traceId: saved.value.trace.traceId, spanId: saved.value.trace.spanId },
+        });
+      } finally {
+        await store.release();
+      }
+      await expect(runExperiment(options)).rejects.toBeInstanceOf(TraceExportUnacknowledgedError);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+    // A span batch of two traces accepted but for one unnamed span names no trace: the innocent
+    // trace's spans may have been accepted, and each case's receipt decides. One trace alone is
+    // named.
+    const g = fixture();
+    const hue2 = createHue({
+      apiKey: key,
+      baseUrl: g.baseUrl,
+      serviceName: "attributed-partial-spans",
+      captureContent: false,
+    });
+    try {
+      g.rejectOnePartially("traces");
+      await hue2.withSpan("one", () => "a");
+      await hue2.withSpan("two", () => "b");
+      await hue2.flush().catch(() => undefined);
+      const shared = hue2.transport.getIssues().find((issue) => issue.kind === "rejected");
+      expect(shared).toBeDefined();
+      expect(shared!.traceIds).toBeUndefined();
+      g.rejectOnePartially("traces");
+      let alone = "";
+      await hue2.withSpan("three", (span) => {
+        alone = span.traceId;
+      });
+      await hue2.flush().catch(() => undefined);
+      const single = hue2.transport
+        .getIssues()
+        .filter((issue) => issue.kind === "rejected")
+        .at(-1);
+      expect(single!.traceIds).toEqual([alone]);
+    } finally {
+      await hue2.shutdown();
+      g.server.stop(true);
+    }
+    // A log batch of two cases accepted but for one unnamed record names both traces: the
+    // receipt counts spans, not logs, so it could not tell whose record was lost, and both cases
+    // fail rather than pass blind. The first case's target waits for the second's record, and the
+    // second's for the first's root to end, so one flush carries both records.
+    const h = fixture();
+    const exp3 = h.create();
+    const [firstH, secondH] = h.cases;
+    const hue3 = createHue({
+      apiKey: key,
+      baseUrl: h.baseUrl,
+      serviceName: "attributed-partial-logs",
+      captureContent: true,
+    });
+    const checkpoints3 = await directory();
+    let firstRoot: string | undefined;
+    let releaseSecond!: () => void;
+    const secondRecorded = new Promise<void>((resolve) => (releaseSecond = resolve));
+    try {
+      h.rejectOnePartially("logs");
+      const outcome = await runExperiment({
+        client: h.client,
+        hue: hue3,
+        experimentId: exp3.id,
+        checkpointDirectory: checkpoints3,
+        persistResultContent: true,
+        concurrency: 2,
+        traceEvidence: { mode: "required" as const },
+        target: async (
+          _inputs: JsonValue,
+          context: { item: { id: string }; span: { traceId: string } },
+        ) => {
+          if (context.item.id === firstH!.id) {
+            firstRoot = context.span.traceId;
+            await secondRecorded;
+            hue3.recordMessages({ input: [{ role: "user", content: "hello" }] });
+            return "reply";
+          }
+          hue3.recordMessages({ input: [{ role: "user", content: "hello again" }] });
+          releaseSecond();
+          while (firstRoot === undefined || !hue3.transport.spansEnded(firstRoot))
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          return "reply";
+        },
+      }).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      // Both cases fail as themselves, so the run reports the two failures together.
+      expect(outcome).toBeInstanceOf(AggregateError);
+      expect((outcome as AggregateError).errors).toHaveLength(2);
+      for (const error of (outcome as AggregateError).errors)
+        expect(error).toBeInstanceOf(HueExportError);
+      const read = async (id: string) =>
+        JSON.parse(await readFile(join(checkpoints3, `case-${id}.json`), "utf8")) as {
+          value: { exportState: string; trace: { traceId: string }; completion?: unknown };
+        };
+      const first3 = await read(firstH!.id);
+      const second3 = await read(secondH!.id);
+      const rejectedLogs = hue3.transport
+        .getIssues()
+        .filter((issue) => issue.kind === "rejected" && issue.signal === "logs");
+      expect(rejectedLogs).toHaveLength(1);
+      expect([...rejectedLogs[0]!.traceIds!].sort()).toEqual(
+        [first3.value.trace.traceId, second3.value.trace.traceId].sort(),
+      );
+      for (const saved of [first3, second3]) {
+        expect(saved.value.exportState).toBe("failed");
+        expect(saved.value.completion).toBeUndefined();
+      }
+      expect(h.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(0);
+    } finally {
+      await hue3.shutdown();
+      h.server.stop(true);
+    }
+  });
+  test(
+    "a partial rejection naming no trace fails the case whose root the receipt does not hold, and accepts the case beside it through its receipt",
+    async () => {
+      // Hue accepts a batch but for one case's root span, which its receipt then does not hold.
+      // The batch carries three traces (the case's target ended two spans in traces of their
+      // own beside its root), so the rejection of an unnamed span names none of them and the
+      // receipt decides: the case fails, and the case beside it is accepted through its own.
+      const k = fixture();
+      const exp4 = k.create();
+      const [firstK, secondK] = k.cases;
+      const hue4 = createHue({
+        apiKey: key,
+        baseUrl: k.baseUrl,
+        serviceName: "attributed-partial-case",
+        captureContent: false,
+      });
+      const checkpoints4 = await directory();
+      let rootTraceId: string | undefined;
+      try {
+        k.rejectCasePartially(firstK!.id);
+        const outcome = await runExperiment({
+          client: k.client,
+          hue: hue4,
+          experimentId: exp4.id,
+          checkpointDirectory: checkpoints4,
+          persistResultContent: true,
+          concurrency: 2,
+          traceEvidence: { mode: "required" as const },
+          target: async (
+            _inputs: JsonValue,
+            context: { item: { id: string }; span: { traceId: string } },
+          ) => {
+            if (context.item.id === firstK!.id) {
+              rootTraceId = context.span.traceId;
+              for (let index = 0; index < 2; index += 1)
+                await hue4.withSpan("aside", () => undefined, { parentContext: ROOT_CONTEXT });
+              return "reply";
+            }
+            // The other case ends after this root has, so no flush of its own exports the
+            // asides in a batch without it.
+            while (rootTraceId === undefined || !hue4.transport.spansEnded(rootTraceId))
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            return "reply";
+          },
+        }).then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+        expect(outcome).toBeInstanceOf(HueExportError);
+        expect(
+          (outcome as HueExportError).issues.some(
+            (issue) => issue.kind === "rejected" && issue.traceIds === undefined,
+          ),
+        ).toBe(true);
+        const read = async (id: string) =>
+          JSON.parse(await readFile(join(checkpoints4, `case-${id}.json`), "utf8")) as {
+            value: {
+              exportState: string;
+              trace: { traceId: string; spans?: number };
+              completion?: unknown;
+            };
+          };
+        const refused = await read(firstK!.id);
+        const landed = await read(secondK!.id);
+        expect(refused.value.exportState).toBe("pending");
+        expect(refused.value.completion).toBeUndefined();
+        expect(k.spansHeld(refused.value.trace.traceId)).toBe(0);
+        expect(landed.value.exportState).toBe("accepted");
+        expect(landed.value.completion).toBeDefined();
+        expect(landed.value.trace.spans).toBe(1);
+        expect(k.spansHeld(landed.value.trace.traceId)).toBe(1);
+        expect(k.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(1);
+      } finally {
+        await hue4.shutdown();
+        k.server.stop(true);
+      }
+    },
+    { timeout: 20_000 },
+  );
   test("every non-local and unknown scorer pin is deferred without uploading placeholders", async () => {
     const f = fixture();
     const hosted = version({
@@ -1950,10 +2643,22 @@ describe("installed evaluation API and runner contract", () => {
         return NaN;
       },
     };
+    // A case's unserializable output is its own failure: the case beside it still runs, and
+    // both are reported; on resume neither invokes its target again.
+    const everyCaseUnserializable = async (run: Promise<unknown>) => {
+      const error = await run.then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toHaveLength(2);
+      for (const nested of (error as AggregateError).errors)
+        expect(nested).toBeInstanceOf(OutcomeSerializationError);
+    };
     try {
-      await expect(runExperiment(options)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      await expect(runExperiment(options)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      expect(calls).toBe(1);
+      await everyCaseUnserializable(runExperiment(options));
+      await everyCaseUnserializable(runExperiment(options));
+      expect(calls).toBe(2);
       const cyclic: Record<string, JsonValue> = {};
       cyclic.self = cyclic;
       const cycleOptions = {
@@ -1965,18 +2670,27 @@ describe("installed evaluation API and runner contract", () => {
           return cyclic;
         },
       };
-      await expect(runExperiment(cycleOptions)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      await expect(runExperiment(cycleOptions)).rejects.toBeInstanceOf(OutcomeSerializationError);
-      expect(calls).toBe(2);
+      await everyCaseUnserializable(runExperiment(cycleOptions));
+      await everyCaseUnserializable(runExperiment(cycleOptions));
+      expect(calls).toBe(4);
       const other = {
         ...options,
         experimentId: f.create().id,
         checkpointDirectory: await directory(),
       };
+      // A start Hue refused is systemic: no further case starts. On resume the first case's
+      // start is uncertain and refused; the second, never started, runs and fails its own way.
       f.failStart();
       await expect(runExperiment(other)).rejects.toBeInstanceOf(HueApiError);
-      await expect(runExperiment(other)).rejects.toBeInstanceOf(UncertainExecutionError);
-      expect(calls).toBe(2);
+      expect(calls).toBe(4);
+      const resumed = await runExperiment(other).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      expect(resumed).toBeInstanceOf(AggregateError);
+      expect((resumed as AggregateError).errors[0]).toBeInstanceOf(UncertainExecutionError);
+      expect((resumed as AggregateError).errors[1]).toBeInstanceOf(OutcomeSerializationError);
+      expect(calls).toBe(5);
     } finally {
       await hue.shutdown();
       f.server.stop(true);

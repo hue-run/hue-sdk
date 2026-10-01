@@ -1060,7 +1060,7 @@ describe("file-based cases", () => {
     const checkpointDirectory = await directory();
     let invocations = 0;
     const options = {
-      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
       hue,
       experimentId: f.experiment.id,
       checkpointDirectory,
@@ -1184,7 +1184,7 @@ describe("file-based cases", () => {
     });
     const f = fixture({ scorers: [version(grader.definition)] });
     f.item.environmentVersionId = randomUUID();
-    const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl });
+    const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 });
     const hue = createHue({
       apiKey: key,
       baseUrl: f.baseUrl,

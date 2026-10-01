@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:16804c7db5988bc1ca1da351601ed56840a7535ef31fcf5f58b1666510e5a0d7",
+    "sha256": "sha256:28e2eb72a1f0d2dbe2c448628454207a20d7dd30f56ba396a2615f25451d11bc",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -85,6 +85,7 @@
             "builtin_scorers",
             "builtins",
             "define_local_scorer",
+            "is_transient_api_error",
             "rescore",
             "run_experiment",
             "score_locally"
@@ -102,7 +103,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.6.1"
+      "version": "0.6.3"
     },
     "typescript": {
       "bins": {
@@ -282,6 +283,7 @@
             "LocalAgentRegistration",
             "LocalAgentTargetContext",
             "LocalFile",
+            "LocalRunFailure",
             "LocalScorer",
             "Metric",
             "MetricDefinition",
@@ -346,9 +348,12 @@
             "TargetCancelledError",
             "TargetOutcomeUncertainError",
             "TargetResult",
+            "TargetTimeoutError",
             "TelemetryIssueCount",
             "TelemetryNotAccepted",
             "TerminalState",
+            "TraceExportUnacknowledgedError",
+            "TracePending",
             "TypedError",
             "UncertainExecutionError",
             "VerdictClient",
@@ -373,6 +378,7 @@
             "executionManifestDigestV2",
             "expectedAgentManifestV2",
             "getScenario",
+            "isTransientApiError",
             "listScenarios",
             "localAgentCapabilities",
             "matchByName",
@@ -494,7 +500,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.11.2"
+      "version": "0.12.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",

@@ -82,11 +82,12 @@ account linkage; the original request evidence is retained and business work is 
 claim. Setup never enables content capture or creates a simulation, Hue Run, evaluation, source capture
 or remote execution. See the [setup CLI contract](./CLI.md) for the supported shapes and release gates.
 
-For an existing account, `hue login` validates keys created in Hue Settings and stores them in
-`.env.hue` without printing them, and `hue mcp install --client claude-code` (or `codex`,
-`conductor`, `cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration that
-references `HUE_MCP_KEY`, or with `--auth oauth` only the URL, for signing in with Hue. See
-[Sign in and store keys](./CLI.md#sign-in-and-store-keys) and
+For an existing account, `hue mcp install --client claude-code` (or `codex`, `conductor`,
+`cursor`, `vscode`, `windsurf`, `gemini`) writes the Hue MCP configuration. For Claude Code, Codex
+and Conductor it holds only the URL, and you sign in with Hue in the client; for the other clients,
+`--read-only` and `--auth key` it references `HUE_MCP_KEY` (VS Code prompts for the key).
+`hue login` validates keys created in Hue Settings and stores them in `.env.hue` without printing
+them. See [Store project keys](./CLI.md#store-project-keys) and
 [Install the MCP for your coding agent](./CLI.md#install-the-mcp-for-your-coding-agent).
 
 `checkConnection()` rejects with `HueConnectionError`: its fixed message is safe to log, `status`
@@ -165,8 +166,10 @@ call carries `error.type` (`mcp_error`, the provider's status or error code) and
 text, credentials scrubbed (URL userinfo, query values and fragments, or the whole URL for a scheme
 other than `http(s)`, `ws(s)` and `ftp`; tokens with a known credential prefix such as `hue_sk_`,
 `sk-` or `xoxb-`; authorization-scheme credentials and an `Authorization` header's whole value;
-the value of a credential-named `key=value` or `key: value` pair, quoted or not) and cut to 1,024
-characters. An `mcp_list_tools`
+the value of a credential-named `key=value`, `key: value` or `key => value` pair, quoted, bare or
+a whole `[…]` or `{…}` (to the end of the text when it does not close), a quote that does not close
+on its line running to its end; a JSON or `%` escape such as `\n` or `%20` ends a word) and cut to
+1,024 characters and a `…`. An `mcp_list_tools`
 item becomes a `tools/list` child span with that server's `gen_ai.tool.definitions`; with
 `captureContent: false` it carries only `hue.tool.names` and `hue.tool.definitions.sha256`, the
 summary described below. Pass the request so each server's host is recorded as `server.address`

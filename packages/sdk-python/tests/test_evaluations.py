@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import gzip
 import inspect
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -15,15 +17,20 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread, current_thread
+from time import sleep
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+)
 
 import hue_sdk.evals._json as json_module
 import hue_sdk.evals.runner as runner_module
 from hue_sdk import Hue
+from hue_sdk.environment import WorldCreationError
 from hue_sdk.evals import (
     MISSING,
     EvaluationClient,
@@ -34,6 +41,7 @@ from hue_sdk.evals import (
     UncertainExecutionError,
     builtins,
     define_local_scorer,
+    is_transient_api_error,
     rescore,
     run_experiment,
     score_locally,
@@ -65,6 +73,13 @@ def evaluation_receiver():
         fail_complete=0,
         fail_result=0,
         fail_otlp=False,
+        # The case whose root span's batch Hue refuses whole, with a 500; its spans never land.
+        reject_case=None,
+        # Spans Hue holds, by trace: what the receipt route answers from.
+        held={},
+        raw=b"",
+        encoding=None,
+        query="",
         include_expected=True,
         output=None,
         inputs="sensitive-input",
@@ -158,7 +173,47 @@ def evaluation_receiver():
             "versions": [evaluator_version],
         }
         if "/otlp/" in path:
-            return (400, {}) if state.fail_otlp else (200, b"")
+            if state.fail_otlp:
+                return 400, {}
+            if path.endswith("/traces"):
+                data = gzip.decompress(state.raw) if state.encoding == "gzip" else state.raw
+                request = ExportTraceServiceRequest()
+                request.ParseFromString(data)
+                spans = [
+                    span
+                    for resource in request.resource_spans
+                    for scope in resource.scope_spans
+                    for span in scope.spans
+                ]
+
+                def case_of(span):
+                    for attribute in span.attributes:
+                        if attribute.key == "hue.dataset.case.id":
+                            return attribute.value.string_value
+                    return None
+
+                if state.reject_case is not None and any(
+                    case_of(span) == state.reject_case for span in spans
+                ):
+                    return 500, {}
+                for span in spans:
+                    state.held.setdefault(span.trace_id.hex(), set()).add(span.span_id.hex())
+            return 200, b""
+        receipt = re.fullmatch(r"/api/v1/traces/([0-9a-f]{32})/receipt", path)
+        if receipt is not None and method == "GET":
+            held = state.held.get(receipt.group(1))
+            if held is None:
+                return 404, {"code": "TRACE_NOT_FOUND"}
+            expected = parse_qs(state.query).get("expectedSpanId", [])
+            return 200, {
+                "traceId": receipt.group(1),
+                "spanCount": len(held),
+                "revision": 1,
+                "fields": {key: False for key in ("input", "output", "model", "usage", "session")},
+                "matchedSpanIds": [value for value in expected if value in held],
+                "missingSpanIds": [value for value in expected if value not in held],
+                "traceUrl": f"{state.url}/traces/{receipt.group(1)}",
+            }
         if path.endswith("/datasets"):
             return 200, {
                 "items": [registry_set],
@@ -350,6 +405,9 @@ def evaluation_receiver():
             body = json.loads(raw) if raw and "/otlp/" not in path else None
             with state.lock:
                 state.requests.append((method, path, raw))
+                state.raw = raw
+                state.encoding = self.headers.get("Content-Encoding")
+                state.query = urlsplit(self.path).query
                 status, value = dispatch(method, path, body)
                 payload = value if isinstance(value, bytes) else json.dumps(value).encode()
             self.send_response(status)
@@ -386,6 +444,118 @@ def options(receiver, tmp_path, target, *, persist=True, evidence=None):
         persist_result_content=persist,
         trace_evidence=evidence or TraceEvidence("required"),
     )
+
+
+def test_transient_failures_are_sent_again_for_reads_and_keyed_mutations_only():
+    seen: list[tuple[str, str]] = []
+    replies: list[tuple[int, dict[str, str]]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.answer()
+
+        def do_POST(self):
+            self.answer()
+
+        def answer(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            seen.append((self.command, urlsplit(self.path).path))
+            status, headers = replies.pop(0) if replies else (200, {})
+            payload = json.dumps({"id": "synthetic"} if status == 200 else {"error": "x"})
+            if headers.pop("X-Malformed", None):
+                payload = "{not json"
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        def log_message(self, *_args):
+            pass
+
+    def exchange(planned, call):
+        replies[:] = planned
+        seen.clear()
+        try:
+            return call(), None, len(seen)
+        except HueApiError as error:
+            return None, error, len(seen)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = EvaluationClient(f"http://127.0.0.1:{server.server_port}", "synthetic-key")
+        # A read meets a gateway's 502 and a 504 without Retry-After, and is sent again.
+        value, error, sends = exchange([(502, {}), (504, {})], client.check_connection)
+        assert value == {"id": "synthetic"} and error is None and sends == 3
+
+        # A mutation the server deduplicates by its key is sent again too.
+        def launch():
+            return client.create_experiment(
+                dataset_version_id=str(uuid4()),
+                scorer_version_ids=[str(uuid4())],
+                name="Keyed",
+                idempotency_key="k-" + "a" * 20,
+                config={},
+            )
+
+        value, error, sends = exchange([(502, {})], launch)
+        assert value == {"id": "synthetic"} and error is None and sends == 2
+
+        # A mutation without a key is sent once; its caller resolves the outcome first.
+        def create():
+            return client.create_dataset(name="Greetings", slug="greetings")
+
+        value, error, sends = exchange([(502, {})], create)
+        assert value is None and sends == 1
+        assert error is not None and error.status == 502 and is_transient_api_error(error)
+
+        # A refusal Hue decided on is not transient and is sent once, with its diagnostic.
+        value, error, sends = exchange(
+            [(409, {"X-Hue-Diagnostic": "run_finished"})], client.check_connection
+        )
+        assert value is None and sends == 1
+        assert error is not None and error.status == 409 and error.diagnostic == "run_finished"
+        assert not is_transient_api_error(error)
+        assert "run_finished" in str(error)
+
+        # The attempts are bounded: four 500s exhaust the default budget.
+        value, error, sends = exchange([(500, {})] * 4, client.check_connection)
+        assert value is None and sends == 4
+        assert error is not None and error.status == 500 and is_transient_api_error(error)
+
+        # A long Retry-After is the caller's error at once, and names the wait.
+        value, error, sends = exchange([(503, {"Retry-After": "30"})], client.check_connection)
+        assert value is None and sends == 1
+        assert error is not None and error.retry_after_seconds == 30
+
+        # A body the client refuses is Hue's answer, not a passing failure: sent once.
+        value, error, sends = exchange([(200, {"X-Malformed": "1"})], client.check_connection)
+        assert value is None and sends == 1
+        assert error is not None and error.reason == "malformed_response"
+        assert not is_transient_api_error(error)
+
+        once = EvaluationClient(
+            f"http://127.0.0.1:{server.server_port}", "synthetic-key", max_attempts=1
+        )
+        value, error, sends = exchange([(502, {})], once.check_connection)
+        assert value is None and sends == 1 and error is not None and error.status == 502
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # A connection nobody answers is transient too.
+    with pytest.raises(HueApiError) as refused:
+        EvaluationClient(
+            f"http://127.0.0.1:{server.server_port}", "synthetic-key", max_attempts=2
+        ).check_connection()
+    assert refused.value.status is None and is_transient_api_error(refused.value)
+    with pytest.raises(ValueError):
+        EvaluationClient("http://127.0.0.1:1", "synthetic-key", max_attempts=0)
 
 
 def test_requests_refused_with_a_short_retry_after_are_sent_again_and_others_are_not():
@@ -636,6 +806,9 @@ def test_real_http_retries_saved_completion_and_scores_without_replaying_target(
     receiver, calls = evaluation_receiver, []
     receiver.fail_complete = receiver.fail_result = 1
     arguments = options(receiver, tmp_path, lambda _inputs, _context: calls.append(1))
+    # Single-attempt, so each lost acknowledgement reaches the runner and exercises its resume
+    # path; the client's own retries are covered by their own test.
+    arguments["client"] = EvaluationClient(receiver.url, "synthetic-key", max_attempts=1)
     try:
         for _ in range(2):
             with pytest.raises(HueApiError) as failure:
@@ -727,6 +900,8 @@ def test_start_ambiguity_and_serialization_failure_never_reinvoke(evaluation_rec
     receiver, calls = evaluation_receiver, []
     receiver.fail_start = 1
     arguments = options(receiver, tmp_path, lambda *_: calls.append(1))
+    # Single-attempt, so the lost start acknowledgement reaches the runner.
+    arguments["client"] = EvaluationClient(receiver.url, "synthetic-key", max_attempts=1)
     try:
         with pytest.raises(HueApiError):
             run_experiment(**arguments)
@@ -1032,6 +1207,59 @@ def test_an_output_the_process_cannot_hold_fails_its_case_as_too_large(
         assert any(path.endswith("/finish") for _, path, *_ in evaluation_receiver.requests)
     finally:
         arguments["hue"].shutdown()
+
+
+def test_an_export_failure_is_attributed_to_its_own_case_and_the_case_beside_it_completes(
+    evaluation_receiver, tmp_path
+):
+    """Hue refuses the batch carrying the first case's root span while the second case is still
+    running. The refusal names the first trace alone: that case is marked ``failed`` and refused,
+    and the second case, whose flush still reports the client's earlier failure, is accepted
+    through its own trace receipt and completes. Before, one failure anywhere failed every case.
+    """
+    receiver = evaluation_receiver
+    later = str(uuid4())
+    receiver.extra_cases[later] = {}
+    receiver.reject_case = receiver.case_id
+    traces: dict[str, str] = {}
+
+    def target(_inputs, context):
+        traces[context.item["id"]] = context.span.trace_id
+        if context.item["id"] == later:
+            # Ends after the first case's flush, so its root travels in a batch of its own.
+            sleep(1.5)
+        return "reply"
+
+    arguments = options(receiver, tmp_path, target)
+    arguments["concurrency"] = 2
+    hue = arguments["hue"]
+    try:
+        with pytest.raises(TelemetryExportError) as refused:
+            run_experiment(**arguments)
+        assert refused.value.execution_id == receiver.execution["id"]
+        # The first case's saved outcome is marked failed and never completed.
+        first = json.loads((tmp_path / "checkpoints" / f"case-{receiver.case_id}.json").read_text())
+        assert first["value"]["exportState"] == "failed"
+        assert receiver.completion is None
+        assert any(
+            issue.kind == "failed"
+            and issue.signal == "traces"
+            and issue.trace_ids == (traces[receiver.case_id],)
+            for issue in hue.export_issues()
+        )
+        # The second case completed: its receipt holds its root, the one span it ended.
+        second = json.loads((tmp_path / "checkpoints" / f"case-{later}.json").read_text())
+        assert second["value"]["exportState"] == "accepted"
+        assert second["value"]["trace"]["spans"] == 1
+        assert receiver.extra_cases[later]["completion"]["executionId"]
+        assert receiver.held[traces[later]] == {second["value"]["trace"]["spanId"]}
+        assert not hue.force_flush()  # The client's cumulative flush still says so.
+        # Resume refuses the failed case as itself and runs no target again.
+        with pytest.raises(TelemetryExportError):
+            run_experiment(**arguments)
+        assert len(traces) == 2 and receiver.completion is None
+    finally:
+        hue.shutdown()
 
 
 def test_fresh_exporter_cannot_acknowledge_a_prior_failed_trace(evaluation_receiver, tmp_path):
@@ -1422,3 +1650,68 @@ def test_builtin_scorers_is_the_documented_name_and_builtins_stays_an_alias():
     assert evals.builtins is not stdlib_builtins
     assert {"builtin_scorers", "builtins"} <= set(evals.__all__)
     assert builtin_scorers.exact_match() == builtins.exact_match()
+
+
+class _APIStatusError(Exception):
+    """The shape of an openai or anthropic status error."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"Error code: {status_code}")
+        self.status_code = status_code
+        self.response = SimpleNamespace(status_code=status_code)
+
+
+@pytest.mark.parametrize("persist", [False, True])
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        pytest.param(lambda: RuntimeError("The agent gave up"), "TargetError", id="agent"),
+        pytest.param(lambda: _APIStatusError(400), "TargetError", id="agent-refusal"),
+        pytest.param(lambda: WorldCreationError(409), "EnvironmentSetupFailed", id="world"),
+        pytest.param(lambda: _APIStatusError(429), "ServiceRefused", id="rate-limit"),
+        pytest.param(lambda: HueApiError(503), "ServiceRefused", id="hue"),
+        pytest.param(lambda: ConnectionResetError("reset"), "ConnectionFailed", id="connection"),
+        pytest.param(lambda: TimeoutError("timed out"), "TimedOut", id="timeout"),
+    ],
+)
+def test_target_failures_are_recorded_by_what_stopped_the_case(
+    evaluation_receiver, tmp_path, raised, expected, persist
+):
+    error = raised()
+
+    def target(*_args):
+        raise error
+
+    arguments = options(evaluation_receiver, tmp_path, target, persist=persist)
+    try:
+        run_experiment(**arguments)
+        body = evaluation_receiver.complete_body
+        assert body["state"] == "error"
+        # The message is sent only when result content is persisted; the type always is.
+        assert body["error"] == {"type": expected, **({"message": str(error)} if persist else {})}
+    finally:
+        arguments["hue"].shutdown()
+
+
+def test_pending_evidence_completes_in_the_true_state_when_the_export_fails(
+    evaluation_receiver, tmp_path
+):
+    receiver = evaluation_receiver
+    receiver.fail_otlp = True
+    arguments = options(receiver, tmp_path, lambda *_: "reply", evidence=TraceEvidence("pending"))
+    try:
+        report = run_experiment(**arguments)
+        assert len(report.subject_ids) == 1
+        assert receiver.complete_body["traceEvidence"] == "pending"
+        assert "omissionReason" not in receiver.complete_body
+        assert receiver.complete_body["state"] == "succeeded"
+        # The case ended one span (its root); Hue holds the arriving trace to that count.
+        assert receiver.complete_body["traceSpanCount"] == 1
+    finally:
+        arguments["hue"].shutdown()
+    with pytest.raises(ValueError, match="omission reason"):
+        run_experiment(
+            **options(
+                receiver, tmp_path, lambda *_: "reply", evidence=TraceEvidence("pending", "why")
+            )
+        )

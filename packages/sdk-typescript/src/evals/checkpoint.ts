@@ -1,11 +1,30 @@
 import { constants, rmSync } from "node:fs";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { onForcedExit } from "./exit-cleanup.js";
 import { digest } from "./json.js";
 
 const CONTENT_POLICY = ["persistResultContent", "captureContent"] as const;
+
+const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** A server- or user-provided identifier that is safe as a single checkpoint path component:
+ * no separators, no `.`/`..`, and it stays directly inside the directory it is joined onto. */
+export function checkpointSegment(value: string, label: string): string {
+  if (typeof value !== "string" || !SEGMENT.test(value))
+    throw new Error(`Refusing to use ${label} ${JSON.stringify(value)} in a checkpoint path`);
+  return value;
+}
+
+/** `join(directory, ...segments)` after validating every segment. */
+export function checkpointPath(directory: string, ...segments: [string, string][]): string {
+  const root = resolve(directory);
+  const path = resolve(root, ...segments.map(([value, label]) => checkpointSegment(value, label)));
+  if (path !== root && !path.startsWith(root.endsWith(sep) ? root : root + sep))
+    throw new Error("Checkpoint path escapes its directory");
+  return path;
+}
 
 /** The checkpoint belongs to a run started with a different identity. When only its content
  * policy differs, `startedWith` holds the policy the unfinished run was started with. */

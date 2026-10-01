@@ -3,6 +3,7 @@ export {
   createEvaluationClient,
   EvaluationClient,
   HueApiError,
+  isTransientApiError,
 } from "./evals/client.js";
 export type { EvaluationClientOptions } from "./evals/client.js";
 export {
@@ -12,6 +13,8 @@ export {
   OutcomeSerializationError,
   TargetCancelledError,
   TargetOutcomeUncertainError,
+  TargetTimeoutError,
+  TraceExportUnacknowledgedError,
 } from "./evals/runner.js";
 export type {
   RunExperimentOptions,
@@ -20,6 +23,7 @@ export type {
   RunnerReport,
   TelemetryIssueCount,
   TelemetryNotAccepted,
+  TracePending,
 } from "./evals/runner.js";
 export { TargetResult, withFiles } from "./evals/types.js";
 export {
@@ -96,6 +100,7 @@ export {
 export type {
   LocalAgentDirectContext,
   LocalAgentTargetContext,
+  LocalRunFailure,
   RunLocalAgentOptions,
 } from "./evals/local-worker.js";
 

@@ -72,6 +72,10 @@ export interface EvaluationClientOptions {
   baseUrl?: string;
   /** Per-request budget in milliseconds, 100–60000. Default 10000. */
   timeoutMillis?: number;
+  /** Bounded attempts for a read or a mutation the server deduplicates by its key, after a
+   * connection failure, a timeout or a 408 or 5xx Hue did not time with `Retry-After`. Default 4,
+   * maximum 10; 1 sends every such request once. */
+  maxAttempts?: number;
 }
 /** Thrown for a failed evaluation API request; the message is fixed and never includes response text. */
 export class HueApiError extends Error {
@@ -80,12 +84,46 @@ export class HueApiError extends Error {
     readonly status?: number,
     /** Seconds Hue asked the caller to wait (`Retry-After` on a 429 or 503), when it said. */
     readonly retryAfterSeconds?: number,
+    /** Hue's `X-Hue-Diagnostic` code, which tells refusals of one status apart, when it sent one. */
+    readonly diagnostic?: string,
   ) {
     super(
-      status ? `Hue API request failed (HTTP ${status})` : "Hue API connection or response failed",
+      status
+        ? `Hue API request failed (HTTP ${status}${diagnostic ? `, ${diagnostic}` : ""})`
+        : "Hue API connection or response failed",
     );
     this.name = "HueApiError";
   }
+}
+const TRANSIENT = new Set([408, 429, 500, 502, 503, 504]);
+/**
+ * Whether the same request, sent again, can succeed: a connection failure, a timeout, or a status
+ * Hue answers while it cannot act yet (408, 429, 500, 502, 503, 504). A refusal Hue decided on,
+ * any other 4xx, is not, and no number of attempts changes it.
+ */
+export function isTransientApiError(error: unknown): boolean {
+  return (
+    error instanceof HueApiError && (error.status === undefined || TRANSIENT.has(error.status))
+  );
+}
+const DIAGNOSTIC = /^[a-z_]{1,64}$/;
+function diagnosticOf(response: Response): string | undefined {
+  const value = response.headers.get("x-hue-diagnostic");
+  return value !== null && DIAGNOSTIC.test(value) ? value : undefined;
+}
+/** Whether a request may be sent again after a transient failure: every read, and a mutation the
+ * server deduplicates, either by the `idempotencyKey` in its body or because its route is
+ * idempotent by design (the local worker's register, claim, heartbeat, completion and capability
+ * routes). A mutation without a key is sent once; its caller resolves the outcome before asking
+ * again. */
+function retryable(method: string, body: unknown, idempotent?: boolean): boolean {
+  if (idempotent !== undefined) return idempotent;
+  if (method === "GET") return true;
+  return (
+    body !== null &&
+    typeof body === "object" &&
+    typeof (body as { idempotencyKey?: unknown }).idempotencyKey === "string"
+  );
 }
 
 /** An artifact download that ran past the size its caller expected; the rest is not read. */
@@ -198,16 +236,21 @@ function refusalRetryAfter(response: Response): number | undefined {
 }
 /**
  * Typed client for Hue's evaluation REST API: datasets, scorers, experiments, executions, runs,
- * results and hosted judge jobs. No implicit mutation retry: callers retain stable idempotency keys
- * for experiments and results. The one exception is a request Hue refused before acting on it with
- * a short `Retry-After` (HTTP 429 or 503, at most 5 seconds): it is sent again after that wait, up
- * to four times. Responses are bounded to 4 MiB.
+ * results and hosted judge jobs. A request Hue refused before acting on it with a short
+ * `Retry-After` (HTTP 429 or 503, at most 5 seconds) is sent again after that wait whatever its
+ * method, up to four times; a longer wait is the caller's error, carried as `retryAfterSeconds`.
+ * A read, or a mutation the server deduplicates by its idempotency key, is also sent again after
+ * a failure Hue did not time, a connection failure, a timeout or a 408 or 5xx without the header,
+ * up to `maxAttempts` times with a jittered backoff. A mutation without a key is never retried
+ * implicitly: callers retain stable idempotency keys for experiments and results. Responses are
+ * bounded to 4 MiB.
  */
 export class EvaluationClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly timeoutMillis: number;
+  private readonly maxAttempts: number;
   constructor(options: EvaluationClientOptions) {
     const validated = validateOptions({
       ...options,
@@ -217,6 +260,10 @@ export class EvaluationClient {
     this.baseUrl = validated.baseUrl;
     this.apiKey = validated.apiKey;
     this.timeoutMillis = validated.timeoutMillis;
+    const attempts = options.maxAttempts ?? 4;
+    if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10)
+      throw new RangeError("maxAttempts must be 1–10");
+    this.maxAttempts = attempts;
   }
   /** Sends one request to Hue, again after the wait while Hue refuses it with a short
    * `Retry-After`. `init` runs for every attempt, so each has its own timeout; `signal` also ends
@@ -259,8 +306,12 @@ export class EvaluationClient {
     body?: unknown,
     bounds = { ...valueBounds, bytes: 1024 * 1024 },
     signal?: AbortSignal,
+    /** Overrides the retry decision `retryable` takes from the method and body. */
+    idempotent?: boolean,
   ): Promise<T> {
-    // Optional top-level fields are omitted intentionally; nested undefined remains invalid.
+    // Serialized once, outside the attempts: a body this client cannot encode is a caller error
+    // no attempt fixes. Optional top-level fields are omitted intentionally; nested undefined
+    // remains invalid.
     const payload =
       body === undefined
         ? undefined
@@ -272,6 +323,41 @@ export class EvaluationClient {
               bounds,
             ),
           );
+    const attempts = retryable(method, body, idempotent) ? this.maxAttempts : 1;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.requestOnce<T>(method, path, payload, signal);
+      } catch (error) {
+        // A refusal that carried `Retry-After` was already decided by `send`: sent again while
+        // the wait was short, the caller's error when it was long. This loop covers the failures
+        // Hue did not time: a lost connection, a timeout, a 5xx or 408 without the header.
+        if (
+          !isTransientApiError(error) ||
+          (error as HueApiError).retryAfterSeconds !== undefined ||
+          attempt >= attempts ||
+          signal?.aborted
+        )
+          throw error;
+        const backoff = Math.min(100 * 2 ** (attempt - 1), 2000);
+        const wait = backoff + Math.random() * backoff;
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", done);
+            resolve();
+          };
+          const timer = setTimeout(done, wait);
+          signal?.addEventListener("abort", done, { once: true });
+        });
+      }
+    }
+  }
+  private async requestOnce<T>(
+    method: string,
+    path: string,
+    payload: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const response = await this.send(
       `${this.baseUrl}/api/v1${path}`,
       () => ({
@@ -288,7 +374,7 @@ export class EvaluationClient {
     );
     if (!response.ok) {
       await response.body?.cancel();
-      throw new HueApiError(response.status, askedRetryAfter(response));
+      throw new HueApiError(response.status, askedRetryAfter(response), diagnosticOf(response));
     }
     try {
       const reader = response.body?.getReader();
@@ -602,11 +688,15 @@ export class EvaluationClient {
   async prepareAttempt(input: PrepareAttemptRequestV2) {
     const request = prepareAttemptInputV2.parse(input);
     const { executionId, ...body } = request;
+    // Sent once although keyed: a lost acknowledgement of a credential-bearing decision stays
+    // uncertain, and the worker never reacquires credentials.
     const response = await this.request<unknown>(
       "POST",
       `/experiment-executions/${executionId}/prepare-attempt`,
       body,
       { ...valueBounds, bytes: 128_000 },
+      undefined,
+      false,
     );
     try {
       return parsePrepareAttemptResultV2(response, request);
@@ -911,13 +1001,20 @@ export class EvaluationClient {
         key?: string;
         agentKey?: string;
       }
-    >("POST", "/local-agent-worker/register", input);
+    >("POST", "/local-agent-worker/register", input, undefined, undefined, true);
     // Hue's response names the key `agentKey`; read either name.
     return { ...agent, key: agent.key ?? agent.agentKey ?? input.key };
   }
   /** Claim a queued run for this agent and durable worker identity. */
   claimLocalAgentRun(input: { agentId: string; workerId: string }) {
-    return this.request<LocalAgentClaim | null>("POST", "/local-agent-worker/claim", input);
+    return this.request<LocalAgentClaim | null>(
+      "POST",
+      "/local-agent-worker/claim",
+      input,
+      undefined,
+      undefined,
+      true,
+    );
   }
   /** Refresh the lease of a claimed local run. */
   heartbeatLocalAgentRun(input: { runId: string; workerId: string }) {
@@ -926,7 +1023,7 @@ export class EvaluationClient {
       runId: string;
       /** The worker claim remains active. */
       active: true;
-    }>("POST", "/local-agent-worker/runs/heartbeat", input);
+    }>("POST", "/local-agent-worker/runs/heartbeat", input, undefined, undefined, true);
   }
   /** Report acknowledged completion or an execution requiring attention. */
   completeLocalAgentRun(input: {
@@ -940,7 +1037,7 @@ export class EvaluationClient {
       runId: string;
       /** Acknowledged terminal queue state. */
       state: "completed" | "attention";
-    }>("POST", "/local-agent-worker/runs/complete", input);
+    }>("POST", "/local-agent-worker/runs/complete", input, undefined, undefined, true);
   }
   /** Lists Scenarios (draft and published) of the project; requires a Read and write key. */
   listCaseConversions(page?: PageOptions) {
@@ -956,6 +1053,9 @@ export class EvaluationClient {
       "POST",
       "/local-agent-worker/mcp-capability",
       input,
+      undefined,
+      undefined,
+      true,
     );
   }
 }

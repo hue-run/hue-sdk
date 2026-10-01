@@ -8,7 +8,112 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [Unreleased]
+
+#### Added
+
+- A target's throw is completed with an error type that says what stopped the case: a service the
+  agent called that refused with a retryable status (`ServiceRefused`), whose connection failed
+  (`ConnectionFailed`) or that timed out (`TimedOut`), read from the error and its `cause`,
+  `lastError` and `errors` chains, beside the agent's own `TargetError`. Hue counts the three as
+  infrastructure and leaves them out of the agent's pass rate.
+- `traceNotAccepted: "pending"` on `runExperiment` and `runSimulation`, and `hue eval
+  --trace-not-accepted pending`: a case whose telemetry Hue did not accept in time completes in
+  its true state with `traceEvidence: "pending"` and the count of spans the case ended
+  (`traceSpanCount`), so Hue scores the sealed world at once and attaches the trace once it holds
+  every span, or records the evidence omitted a day later. Such cases are listed in
+  `RunnerReport.tracePending`. A saved outcome whose export the trace receipt does not accept on
+  resume completes the same way instead of being refused. Needs a Hue that knows pending
+  evidence; an older platform refuses the completion with 400.
+
+### [0.12.0] - 2026-10-01
+
+This release keeps a local worker running through transient failures: the client retries reads
+and keyed mutations, `runLocalAgent` polls on after a failed claim and resumes a failed run from
+its checkpoints before giving it up as attention, a hung target is ended at its world's expiry,
+and an export failure is attributed to the traces it concerned so one case's telemetry failure
+does not flag the cases beside it. Two **Breaking** entries under Changed need a look from
+callers that matched a single error class on a multi-case run or awaited `runLocalAgent` to
+reject on an attention run.
+
+#### Added
+
+- Export issues name the traces of the records they concerned (`ExportIssue.traceIds`, up to 64
+  ids): a refused or rejected batch names the traces in it, a dropped record and a record the
+  processor could not accept name theirs, and a capture or instrumentation failure names the
+  trace active where it happened. The runner reads them after each case's flush: a failure that
+  names the case's trace marks that case `failed` (its evidence is incomplete, and resume refuses
+  it), one that names only other traces leaves it accepted, and one that names no trace is
+  decided by the case's trace receipt, at once or on resume for a checkpoint still `pending`: the
+  receipt must hold the case's root span and at least as many spans as the case ended, which the
+  checkpoint records at the flush. One case's telemetry failure no longer flags the cases running
+  beside it.
+
+- `EvaluationClient` sends a read, or a mutation the server deduplicates by its idempotency key
+  (the local worker's register, claim, heartbeat, completion and capability routes included),
+  again after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up
+  to `maxAttempts` (default 4) times with a jittered backoff. `isTransientApiError` names those
+  failures; `HueApiError` carries Hue's `X-Hue-Diagnostic` code as `diagnostic`. A mutation
+  without a key and the credential-bearing attempt preparation are still sent once.
+- `runLocalAgent` no longer stops with one failure. A registration or claim that fails
+  transiently past the client's retries is reported through `onPollError` and polled again with
+  a growing wait. A claimed run whose attempt fails transiently keeps its claim and is resumed
+  by the same process from its checkpoints (`onRunFailed` says `retry`), and after
+  `maxRunAttempts` (default 5) failures is given up as `attention` for a project member to
+  requeue or cancel; a failure that would recur (an outcome unsafe to resume, a refusal Hue
+  decided on, an input the SDK refuses such as a case file whose bytes differ from its manifest)
+  is attention at once, and a completion Hue refuses because the run was released or cancelled
+  meanwhile is reported as `refused`.
+  `maxRuns` counts runs that settled either way. `worldTtlSeconds` sets each world's lifetime,
+  and the candidate receives `signal` in its context.
+- `TargetTimeoutError`: a target still running five seconds past its world's `expiresAt` is
+  told through its `signal`, its case ends as an `error` of type `TargetTimeout` and the world
+  is sealed abandoned, so a hung agent ends its case instead of holding the run open.
+- `hue eval --worker` reports failed polls, resumed and given-up runs.
+- `TraceExportUnacknowledgedError`: the error a resumed case throws when its saved outcome still
+  waits for a trace export Hue never acknowledged, in place of a plain `Error` with the same
+  message; it is that case's own state on resume, and the cases beside it still run.
+
+#### Changed
+
+- **Breaking:** the runner's case pool no longer stops at a case's own failure (an attempt
+  without a saved outcome, an unserializable output, refused inputs): the cases beside it run,
+  and the failures are thrown together as an `AggregateError` naming its first cause. A failure
+  the next case would meet too (Hue not answering or refusing, telemetry not accepted, a world
+  that could not be sealed) still stops new cases. Callers that matched a single error class on
+  a multi-case run now inspect `AggregateError.errors`.
+- **Breaking:** `runLocalAgent` resolves, rather than rejects, when a run is given up as
+  attention; the failure reaches `onRunFailed`. It still rejects on a refusal Hue decided on
+  (a revoked key, a disabled agent, a malformed claim) and when it cannot record attention.
+
+### [0.11.4] - 2026-09-29
+
+This release makes sign-in with Hue the default of `hue mcp install` for Claude Code and Codex
+while keeping existing key setups, and stops `hue eval --command` from passing inherited world
+variables to the agent.
+
+#### Changed
+
+- `hue mcp install --client claude-code` and `codex` sign in with Hue by default, as `conductor`
+  already did: without `--auth` they configure only the server URL, and the client opens Hue in a
+  browser to approve the connection. They keep the choice of the server's existing entry, in
+  `./.mcp.json` or as `codex mcp get` reports it, so a rerun keeps a key and its `read_only`; a new
+  entry uses a key when `HUE_MCP_KEY` is set (only its presence is checked). When `codex mcp get`
+  fails for another reason, the command asks for `--auth` rather than guess. `--read-only`, or
+  `read_only=true` or `1` in `--url` (the values Hue reads), also selects a key, for `conductor`
+  too, which refused `--read-only` without `--auth key` before. A sign-in configuration still
+  refuses any other `read_only` value in `--url`. `cursor`, `vscode`, `windsurf` and `gemini` still
+  use a key. The command names its choice, and how to change it, in one line on stderr; `--auth
+  key` configures a key.
+- Without `--auth` and outside a terminal (CI, an agent's shell tool), `codex` and `conductor`
+  print `codex mcp add` instead of running it: it signs in at once and waits up to 5 minutes for the
+  browser. When a Codex sign-in does not finish but Codex registered the server, the command no
+  longer fails: it names `codex mcp login hue` and prints the next steps.
+- `hue login` prints `hue mcp install --client claude-code --auth key` as its next step, so the
+  configuration uses the key it stored. The sign-in next steps no longer ask you to choose an
+  organization, since Hue's consent page has no organization picker, and say to restart Claude Code
+  or start a new Codex session. After `--read-only`, the key steps name
+  `hue login --keys coding-agent`, which accepts a **Read** key, instead of suggesting sign-in.
 
 #### Changed
 
@@ -20,6 +125,77 @@ refuses to publish a version without a matching entry below.
 
 #### Fixed
 
+- Security: `hue eval --command` no longer passes a world variable inherited from its own
+  environment (`HUE_SIM_*_URL`, `HUE_SIM_*_ALIAS`, `HUE_WORLD_*`, and `HUE_MCP_CONFIG`,
+  `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT`) to the agent command. Only the current
+  case's world sets them, so an agent can no longer reach a surface outside that world with its
+  token. `HUE_MCP_KEY` is a project key, not a world variable: it still reaches the command only
+  with `--allow-hue-credentials`.
+
+### [0.11.3] - 2026-09-27
+
+This release fixes security issues in `hue mcp install` and evaluation checkpoint paths, scrubs
+more credentials from exported MCP error text and `hue listen` messages, and paces `hue listen`.
+
+#### Fixed
+
+- Security: `hue mcp install` no longer makes a client configuration it replaces world-readable.
+  Since 0.5.0 it wrote every file with mode `0644`, so a `.mcp.json`, `.cursor/mcp.json` or
+  `.vscode/mcp.json` kept at `0600` because it holds other servers' literal tokens became readable
+  by every local account. A replaced file now keeps its permission bits, its group and, run as root,
+  its owner, except that other accounts lose write access; an access control list on it is not kept.
+  A new file is created `0600`. A file an earlier version already made world-readable keeps that
+  mode: run `chmod 600` on one that holds tokens.
+- Security: `hue mcp install --dry-run` shows header and `env` values, and other credentials it
+  recognizes in the resulting file (credential options and fields, known token prefixes, token-like
+  URL path segments and query values, the last percent-encoded), as `[redacted]` unless they only
+  reference a variable or input such as `${HUE_MCP_KEY}`. Before, it printed other servers' literal
+  tokens. Its output, and the lines reporting what the command did, show Hue's URL with any
+  token-like path segment and every query value other than its `toolsets`, `project` and `read_only`
+  selections as `[redacted]`. It shows a string longer than 16,384 code points only to there, ending
+  in `…`; the file it writes keeps the whole value.
+- Security: `hue mcp install` refuses a symlinked `.cursor` or `.vscode` directory, as it already
+  refused a symlinked file, and a different file found in place of the one it read. Before, it read
+  and wrote `mcp.json` wherever that link pointed. The checks run before the file is read and again
+  before the rename, but are not atomic against an account that can write the project directory and
+  races the command.
+- Security: `hue eval` and the SDK's `runSimulation` and `runLocalAgent` accept a project or
+  experiment id from Hue as a checkpoint path component only when it is a single name of letters,
+  digits, `.`, `_` and `-` that starts with a letter or digit, and refuse a resolved checkpoint path
+  outside its directory. Before, an id containing `../` from a hostile or compromised origin made
+  them create directories and write checkpoint files outside `.hue/eval` or `--checkpoint-dir`.
+- A failed OpenAI MCP call's error text, exported with `captureContent: true`, is scrubbed of
+  credentials it kept before. A JSON escape (`\n`, `\t`, `\u0022`) or `%` escape (`%20`, `%3D`) ends
+  a word as a space does, so a prefixed token, or `Bearer`, `Basic` or `Token`, right after one is
+  found (`…\nhue_sk_…`, `token%3Dghp_…`), as is a credential key that `:`, `=` or `=>` follows
+  (`\nheaders: …`), and an escaped space separates a scheme from its credential
+  (`Authorization%3A%20Bearer%20…`). A key or separator that is itself escaped (`%22token%22%3A`,
+  `\u0022token\u0022:`) is still not read. A credential key's whole `[…]` or `{…}` value is
+  replaced, where only its `[` or `{` was, and one that does not close is replaced to the end of the
+  text, and `key => value` pairs are read. JSON inside a JSON string keeps its escaped quotes
+  (`\\\"`) inside a value, and a value that only starts with `[redacted]` (`token=[redacted]…`) is
+  no longer taken for one already replaced. `hue listen` scrubs its messages with the same rules,
+  reading at most 16,384 code points of each and marking a cut with `…`. **Wire**
+- In the same text, a quoted value whose quote does not close on its line, as when the text was cut
+  inside it, is replaced to the end of the line, where only its first word was. A URL's quoted query
+  value (`?token="…"`), or a value between backslash-escaped quotes anywhere in it that ends the URL
+  or a query value (`=\"…\"&…`), is replaced whole, so an `&` inside it no longer leaves the rest as
+  a query name. The value of the next key of the JSON around such a value is no longer exported
+  (`?state=","client_secret":"…"`), the value of a key or scheme word that a URL takes in
+  (`?t="a"&Bearer …`) is still replaced after it, and a query name holding a `:`, a scheme word
+  before an escape other than of a bracket, or a credential pair once `%3A` and `%3D` are read
+  (`?mongodb://u:…@…`, `&token:…`, `&Bearer%20…`, `&client_secret%3A…`) is replaced. A URL that
+  would be rewritten with a credential (a prefixed token included) in its host or path is replaced
+  whole; one in its own userinfo, which is dropped, does not count. Where a URL now ends sooner or
+  later than 0.11.0 read it, what 0.11.0 hid there stays hidden: around the URL, by replacing a
+  rewritten URL whole that holds some of it in its host or path, and in a query name. A URL nested
+  in another's path (`…/p&mongodb://u:…@…`) loses its userinfo, after any extra `/`, or, when its
+  scheme is not `http(s)`, `ws(s)` or `ftp` and it holds an `@`, everything to the end of that
+  path. Only the first 16,384 code points are scrubbed; a URL or prefixed token that this cut
+  interrupts is now replaced whole, as is the word of scheme characters the cut ends in, and the
+  text is still scrubbed before it is cut to 1,024 characters. Hue's OAuth tokens (`hue_at_`,
+  `hue_rt_`, `hue_oauth_`), its `hue_ss_` and `hue_vt_` tokens, Slack refresh tokens (`xoxe-`) and
+  Google OAuth client secrets (`GOCSPX-`) are replaced by their prefix. **Wire**
 - `hue listen` repeats a waiting pull that forwarded something no sooner than 50 ms after it began,
   so a Hue that answers every pull at once with new deliveries is pulled at most 20 times a second;
   before, with a local receiver, it pulled about a thousand times a second.
@@ -161,17 +337,17 @@ These three entries were added after 0.11.0 was published; 0.11.0 already behave
   any record's tool definitions; before, it carried neither. Descriptions and schemas are still
   exported only with content capture. **Wire**
 - With `captureContent: true`, a failed OpenAI MCP call's span has the provider's error text as its
-  ERROR status description, credentials scrubbed and cut to 1,024 characters. Scrubbing drops an
-  `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values (quoted ones
-  included) with `[redacted]`, replaces a URL with any other scheme whole when it has an `@`, `?` or
-  `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`, `hue_mcp_`,
-  `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`, and `sk-`,
-  Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`, `Basic` or
-  `Token`, an `Authorization` header's whole value and the value of a credential-named `key=value`
-  or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API key:`; the
-  value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a pair inside
-  another pair's value). The `redact` hook sees the text as `status.message`. Without content
-  capture the span keeps `error.type` only. **Wire**
+  ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…`. Scrubbing
+  drops an `http(s)`, `ws(s)` or `ftp` URL's userinfo and fragment and replaces its query values
+  (quoted ones included) with `[redacted]`, replaces a URL with any other scheme whole when it has
+  an `@`, `?` or `#`, and replaces a token with a known credential prefix (Hue's `hue_sk_`,
+  `hue_mcp_`, `hue_world_`, `hue_attempt_`, `hue_sim_`, `hue_setup_`, `hue_install_` and `hue_inv_`,
+  and `sk-`, Stripe, Slack, Google OAuth, GitHub and GitLab tokens), the credential after `Bearer`,
+  `Basic` or `Token`, an `Authorization` header's whole value and the value of a credential-named
+  `key=value` or `key: value` pair (a key such as `--token` or `_authToken` included, as is `API
+  key:`; the value quoted, with backslash-escaped quotes as in JSON inside a string, or bare, and a
+  pair inside another pair's value). The `redact` hook sees the text as `status.message`. Without
+  content capture the span keeps `error.type` only. **Wire**
 
 - `hue mcp install --auth oauth` configures only the server URL, so the client signs in with Hue
   in the browser instead of sending a key: a URL-only `.mcp.json` or `claude mcp add` for
@@ -957,7 +1133,54 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.6.3] - 2026-10-01
+
+This release gives the Python evaluation client the TypeScript SDK's resilience: reads and keyed
+mutations are sent again after transient failures, and an export failure is attributed to the
+case whose trace it concerned, so one case's telemetry failure no longer fails the cases beside
+it or every case that follows. Additive; no capture, default budget or wire change.
+
+#### Added
+
+- `EvaluationClient` sends a read, or a mutation the server deduplicates by the `idempotencyKey`
+  in its body (`create_experiment`, `start_execution`, `complete_execution`, `finish_experiment`,
+  `submit_results`, `create_run`, `start_run_execution`, `complete_run_execution`, `finish_run`,
+  `create_scoring`, `submit_scoring_results`, `create_judge_jobs` and their keyed peers), again
+  after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up to
+  `max_attempts` (default 4, 1–10) times with a jittered backoff, as the TypeScript SDK does.
+  `is_transient_api_error` names those failures; `HueApiError` carries Hue's `X-Hue-Diagnostic`
+  code as `diagnostic`, the wait of a long `Retry-After` as `retry_after_seconds`, and
+  `reason="malformed_response"` for a body the client refused, which is not sent again. A
+  mutation without a key is still sent once.
+- Export issues name the traces of the records they concerned (`Hue.export_issues()`, each an
+  `ExportIssue` with `trace_ids` of up to 64 traces, `Hue.export_failure_sequence()` and
+  `Hue.spans_ended(trace_id)`). `run_experiment` reads them after each case's flush: a failure
+  that names the case's trace marks that case `failed` (its evidence is incomplete, and resume
+  refuses it), one that names only other traces leaves it accepted, and one that names no trace,
+  or a flush that did not succeed without a new failure, is decided by the case's trace receipt,
+  at once or on resume for a checkpoint still `pending`: the receipt must hold the case's root
+  span and at least as many spans as the case ended, which the checkpoint records at the flush.
+  One case's telemetry failure no longer fails the cases running beside it, and a client's
+  earlier failure no longer fails every later case; `Hue.force_flush()` keeps its cumulative
+  answer.
+
+#### Added
+
+- `TraceEvidence("pending")`: a case whose export `force_flush` did not acknowledge completes in
+  its true state with `traceEvidence: "pending"` and the count of spans the case ended, as the
+  checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
+  every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
+  completes the same way. Only `omit` carries a reason.
+
+#### Added
+
+- A target's exception is completed with an error type that says what stopped the case:
+  `EnvironmentSetupFailed` when `create_run` could not create the world (the new
+  `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
+  service the agent called, `ConnectionFailed` and `TimedOut`, beside the agent's own
+  `TargetError`. Hue counts the service failures as infrastructure.
+
+### [0.6.2] - 2026-09-27
 
 #### Added
 
@@ -967,9 +1190,9 @@ No registry release is claimed until publication and registry acceptance complet
   `hue.tool.names` and `hue.tool.definitions.sha256`, the same metadata-only summary export gives
   any record's tool definitions. **Wire**
 - With `capture_content=True`, a failed OpenAI MCP call's span has the provider's error text as
-  its ERROR status description, credentials scrubbed and cut to 1,024 characters exactly as the
-  TypeScript SDK does, after your `redactor` sees it as `status.message`. Without content capture
-  the span keeps `error.type` only. **Wire**
+  its ERROR status description, credentials scrubbed and cut to 1,024 characters and a `…` exactly
+  as TypeScript SDK 0.11.3 does, before your `redactor` sees it as `status.message`.
+  Without content capture the span keeps `error.type` only. **Wire**
 
 #### Fixed
 
@@ -979,21 +1202,33 @@ No registry release is claimed until publication and registry acceptance complet
   content is persisted, the TypeScript SDK's message naming the bound, and the other cases keep
   running. Output within the bounds that is not JSON still raises `OutcomeSerializationError`.
 - A large inline file whose text has a lone surrogate is hashed with U+FFFD in its place, as the
-  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. A
-  `data:` URL's parameters are read after matching its header, as in the TypeScript SDK.
+  TypeScript SDK hashes it; before, encoding it raised and the message was exported unhashed. The
+  lone surrogates are replaced once for the whole part. A `data:` URL's parameters are read after
+  matching its header, as in the TypeScript SDK. **Wire**
 - `server.address` keeps a host name with an underscore, such as a Docker Compose service
   (`http://mcp_server:8080`), as WHATWG URL parsing and the TypeScript SDK do; before, it was
-  dropped.
+  dropped. **Wire**
 - An output's JSON byte length is counted as the output is read, as in the TypeScript SDK, so an
   output too large to serialize is refused without serializing it (eleven references to a 50 MB
-  string took tens of seconds and a gigabyte); an output the process cannot hold in memory
-  completes its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values,
-  so an object of more than 10,000 members is no longer `OutputTooLarge`, and a list or object
-  with more elements than values left, or keys longer than the bytes left, is refused before it is
-  read. The output is read in the TypeScript SDK's order, and the byte bound is still checked
-  last, so both SDKs refuse an output for the same reason.
-- A large inline file's lone surrogates are replaced once for the whole part rather than in each
-  percent-escaped segment, which took seconds for an 8 MiB `data:` URL with many of them.
+  string took tens of seconds and a gigabyte); an output the process cannot hold in memory completes
+  its case as `OutputTooLarge`. Object keys no longer count toward the 20,000 values, so an object
+  of more than 10,000 members, which 0.6.1 refused with `OutcomeSerializationError`, is accepted as
+  in the TypeScript SDK, and a list or object with more elements than values left, or keys longer
+  than the bytes left, is refused before it is read. The output is read in the TypeScript SDK's
+  order, and the byte bound is still checked last, so both SDKs refuse an output for the same
+  reason.
+- A URL's query names are decoded and encoded together in C rather than byte by byte, so
+  scrubbing a URL with thousands of parameters, in a tool definition's `url` or in MCP error text,
+  takes about half the time it did. The exported text is unchanged.
+- On Python 3.13 and later, a URL with an `xn--` host label whose Punycode overflows
+  (`http://xn--11111111111111111w`) stopped the credential scrubber with `OverflowError`: with
+  content capture, a record whose tool definitions held one was dropped, and without it the record
+  lost `hue.tool.names` and `hue.tool.definitions.sha256`. Such a URL, and an `http`, `https`, `ws`,
+  `wss` or `ftp` URL whose parse fails in any other way, is now replaced whole with `[redacted]`, as
+  in the TypeScript SDK, including in the MCP error text this release exports. Each failed call's
+  error text is scrubbed on its own: text that cannot be scrubbed leaves only its span without a
+  description, counted as an instrumentation failure, and the later calls are still recorded.
+  **Wire**
 
 ### [0.6.1] - 2026-09-25
 

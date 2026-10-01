@@ -211,9 +211,13 @@
     {
       "url": "https://xn--a-.example/x?t=1",
       "scrubbed": "[redacted]"
+    },
+    {
+      "url": "https://xn--11111111111111111w.example/mcp?key=synthetic-overflow",
+      "scrubbed": "[redacted]"
     }
   ],
-  "sha256": "ba227bf4008aa611e6a077acfc8b1784636e61a16ad17691af6b3feb9de8f187",
+  "sha256": "5d67b19960d12cd3514a2e19dedb7b63fcea8ad58f20772fdd3b9cd1b91eba5a",
   "bigInteger": {
     "digits": 5000,
     "scrubbed": "[{\"type\":\"function\",\"name\":\"limits\",\"authorization\":\"[redacted]\",\"parameters\":{\"type\":\"integer\",\"maximum\":null}}]",

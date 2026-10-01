@@ -156,6 +156,72 @@ def test_failed_mcp_call_exports_scrubbed_error_text_only_under_content_capture(
     assert b"Upstream rejected" not in metadata_raw
 
 
+# Punycode whose code point overflows: CPython 3.13 and later raise OverflowError decoding it.
+OVERFLOWING_HOST_RESPONSE = {
+    "output": [
+        {
+            "type": "mcp_call",
+            "id": "mcp-1",
+            "name": "search",
+            "server_label": "gmail",
+            "arguments": "{}",
+            "error": "upstream failed at http://xn--11111111111111111w",
+        },
+        {
+            "type": "mcp_call",
+            "id": "mcp-2",
+            "name": "search",
+            "server_label": "gmail",
+            "arguments": "{}",
+            "error": "Rate limited",
+        },
+        {"type": "mcp_call", "id": "mcp-3", "name": "search", "server_label": "gmail"},
+        {"type": "mcp_list_tools", "server_label": "gmail", "tools": DEFINITIONS},
+    ]
+}
+
+
+def test_a_url_whose_punycode_overflows_is_redacted_and_the_later_calls_are_recorded(receiver):
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            span.record_provider_tool_calls(OVERFLOWING_HOST_RESPONSE)
+        hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 0
+    spans = receiver.spans()
+    first, second, third = named(spans, "execute_tool search")
+    assert attrs(first)["error.type"].string_value == "mcp_error"
+    assert first.status.code == 2
+    assert first.status.message == "upstream failed at [redacted]"
+    assert second.status.message == "Rate limited"
+    assert third.status.code != 2
+    assert len(named(spans, "tools/list")) == 1
+
+
+def test_error_text_that_cannot_be_scrubbed_omits_only_its_own_description(receiver, monkeypatch):
+    import hue_sdk.client
+
+    scrub = hue_sdk.client.provider_error_description
+
+    def failing(text):
+        if "xn--" in text:
+            raise RuntimeError("synthetic scrubber failure")
+        return scrub(text)
+
+    monkeypatch.setattr(hue_sdk.client, "provider_error_description", failing)
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            span.record_provider_tool_calls(OVERFLOWING_HOST_RESPONSE)
+        hue.force_flush()
+        assert hue.export_status.instrumentation_failures == 1
+    spans = receiver.spans()
+    first, second, third = named(spans, "execute_tool search")
+    assert attrs(first)["error.type"].string_value == "mcp_error"
+    assert first.status.code == 2 and first.status.message == ""
+    assert second.status.message == "Rate limited"
+    assert third.status.code != 2
+    assert len(named(spans, "tools/list")) == 1
+
+
 def test_the_redactor_sees_the_error_text_as_status_message(receiver):
     seen = []
 

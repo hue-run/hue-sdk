@@ -116,7 +116,7 @@ Both choices are required and independent:
 
 Frozen dataset inputs/references already exist on Hue. Their presence is independent of these switches. No output is inferred from telemetry. JavaScript `undefined` means unavailable output; JSON `null`, false, zero and empty string remain present values. Historical subjects with unavailable output produce skipped results without executing a scorer callback. A failed quality metric remains `state:"scored"` with `passed:false`. Target errors and scorer errors remain separate. Target error types are generalized to `TargetError`; when content is enabled, bounded messages may be stored. Never put credentials in error messages, output, custom metric values, names or metadata.
 
-`traceEvidence:{mode:"required"}` waits for trace and log export acknowledgement after the root span ends. The explicit alternative `{mode:"omit",reason:"..."}` stores the omission reason and declared trace ID without a fake snapshot. It can complete despite an export failure; export diagnostics remain available on the Hue client. There is no automatic fallback to omission. When required telemetry is not accepted, the runner by default keeps the saved outcome, leaves the execution started and rejects (`traceNotAccepted: "stop"`). With `traceNotAccepted: "fail_case"` it instead completes that case as failed (a `TelemetryNotAccepted` error, the evidence omitted with a reason starting `telemetry_not_accepted`, and no output or generated files attached, so no scorer can pass it), calls `onTelemetryNotAccepted(entry)` once, as soon as it completes the case (a resumed call only lists it), lists it in `report.telemetryNotAccepted` with sanitized issue counts, and goes on; `hue eval` uses this. A scorer that grades only the world can still score such a case, so treat a listed case as failed whatever its results say, as `hue eval` does.
+`traceEvidence:{mode:"required"}` waits for trace and log export acknowledgement after the root span ends. The transport is shared by every case in flight, so each export issue names the traces of the records it concerned (`ExportIssue.traceIds`): a refused or rejected batch, a dropped record, a capture failure inside a case. A failure that names the case's trace is that case's own and final (its checkpoint reads `failed`, and resume refuses it); one that names only other traces leaves the case accepted; one that names no trace (a processor flush that failed) or a rejection in a batch of several traces is decided by the case's trace receipt, at once or on resume for a checkpoint still `pending`: the receipt must hold the case's root span and at least as many spans as the case ended (the checkpoint records the count at the flush; without it the receipt does not accept). The explicit alternative `{mode:"omit",reason:"..."}` stores the omission reason and declared trace ID without a fake snapshot. It can complete despite an export failure; export diagnostics remain available on the Hue client. There is no automatic fallback to omission. When required telemetry is not accepted, the runner by default keeps the saved outcome, leaves the execution started and rejects (`traceNotAccepted: "stop"`). With `traceNotAccepted: "fail_case"` it instead completes that case as failed (a `TelemetryNotAccepted` error, the evidence omitted with a reason starting `telemetry_not_accepted`, and no output or generated files attached, so no scorer can pass it), calls `onTelemetryNotAccepted(entry)` once, as soon as it completes the case (a resumed call only lists it), lists it in `report.telemetryNotAccepted` with sanitized issue counts, and goes on; `hue eval` uses this. A scorer that grades only the world can still score such a case, so treat a listed case as failed whatever its results say, as `hue eval` does. `traceNotAccepted:"pending"` completes a case whose telemetry Hue did not accept in time in its true state with `traceEvidence:"pending"` and the count of spans the case ended (`traceSpanCount`): Hue scores the sealed world at once, attaches the trace once it holds every span (a root span alone is not the trace), or records the evidence omitted a day later; such cases are listed in `RunnerReport.tracePending`. A saved outcome whose export the receipt does not accept on resume completes the same way. `hue eval --trace-not-accepted pending` chooses it for the CLI.
 
 ## Local scorers
 
@@ -252,14 +252,30 @@ without invoking the target or scorers. A lost preparation acknowledgement remai
 and is never recovered through binding reads, credential refresh or target replay. Synthetic
 acceptance does not contact official Gmail or claim universal provider parity.
 
-Completion or result-upload failures keep the run claimed by the durable worker identity.
-Restart with the same checkpoint directory to resume saved uploads without invoking the
-candidate again. A lost world-seal acknowledgement is recovered by reading authoritative world
-state. If the seal or candidate outcome cannot be confirmed, or an outcome cannot be serialized,
-the worker reports `attention` and stops; operator investigation is required. Such runs are not
-automatically reclaimed, and presenting the same uncertain checkpoint again cannot replay the
-candidate. Public package acceptance proves this lifecycle against local fixtures; exact
-installed-registry-package to hosted-facade acceptance remains a post-publication Fern gate.
+The worker does not die with one failure. A read, or a mutation the server deduplicates by its
+idempotency key (the worker's own register, claim, heartbeat and completion included), is sent
+again after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up to
+`maxAttempts` (default 4) times; a mutation without a key is sent once. A registration or claim
+that still fails transiently is reported through `onPollError` and polled again with a growing
+wait; a refusal Hue decided on (a revoked key, a disabled agent) is thrown. A transient failure
+of a completion or result upload keeps the run claimed by the durable worker identity: the next
+claim returns it to the same process, which resumes saved uploads without invoking the candidate
+again (`onRunFailed` says `retry`), and after `maxRunAttempts` (default 5) such failures the run
+is given up as `attention` for a project member to requeue or cancel from its run page; a failure
+that would recur (a refusal Hue decided on, a case file whose bytes differ from its manifest) is
+given up at once. A lost
+world-seal acknowledgement is recovered by reading authoritative world state. If the seal or
+candidate outcome cannot be confirmed, or an outcome cannot be serialized, the run is given up
+as `attention` at once and the worker goes on to other runs; when Hue cannot record that either,
+the worker stops with the error. Presenting the same uncertain checkpoint again cannot replay the
+candidate. `maxRuns` counts runs that settled either way. Inside a run, one case's own failure
+does not stop the cases beside it; a failure every case would share (Hue not answering or
+refusing, telemetry not accepted, a world that could not be sealed) stops new cases from
+starting until the run resumes. Each world's lifetime is `worldTtlSeconds` (the server's default
+is an hour): a target still running past it is told through `context.signal`, its case ends as
+an `error` of type `TargetTimeout` and the world is sealed abandoned. Public package acceptance
+proves this lifecycle against local fixtures; exact installed-registry-package to hosted-facade
+acceptance remains a post-publication Fern gate.
 
 ## Direct cases and files
 
@@ -354,6 +370,8 @@ content type is saved as the target's error (`TargetError`), not as an uncertain
 files directory must be owned by the current user and closed to everyone else (mode 0700). A crash after the target finished resumes from the staged files without invoking the
 target again; if result content is not persisted, the JSON output cannot be reconstructed and the
 case is reported as uncertain.
+
+A target that throws completes its execution as `error` with a type that says what stopped the case. `TargetError` is the agent's own failure. A service the agent called that refused with a retryable status (408, 429 or 5xx, such as a model provider's rate limit or outage, when the error carries the exchange: headers, a response or a URL) is `ServiceRefused`; a connection that failed (`ECONNRESET`, `ECONNREFUSED`, `fetch failed`, an `APIConnectionError`) is `ConnectionFailed`; a call that timed out (`TimeoutError`, `APITimeoutError`) is `TimedOut`. The runner reads the error's `cause`, `lastError` and `errors` chains for these signals. Hue counts the three as infrastructure and leaves them out of the agent's pass rate; a refusal the agent caused (a 400) stays `TargetError`.
 
 `rescore` downloads a subject's frozen `files` — the pinned inputs and the generated outputs, with
 `role: "output"` for the documents a run produced — so a code evaluator can grade saved documents

@@ -1,7 +1,7 @@
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import type { EnvironmentClient } from "../environment/client.js";
+import { isTransientEnvironmentError, type EnvironmentClient } from "../environment/client.js";
 import type { EnvironmentTool } from "../environment/tools.js";
 import type { WorldHandoff } from "../environment/types.js";
 import type {
@@ -9,8 +9,10 @@ import type {
   AttemptConnectionBundleV2,
   RequestedAttemptProviderV2,
 } from "./attempt.js";
+import { HueApiError, isTransientApiError } from "./client.js";
+import { HueExportError } from "../transport.js";
 import type { EvaluationClient } from "./client.js";
-import { CheckpointStore } from "./checkpoint.js";
+import { CheckpointStore, checkpointPath, checkpointSegment } from "./checkpoint.js";
 import {
   pinRequestedAttemptV2,
   requestedAttemptV2,
@@ -19,9 +21,6 @@ import {
 } from "./environment-target.js";
 import {
   runExperiment,
-  OutcomeSerializationError,
-  TargetOutcomeUncertainError,
-  UncertainExecutionError,
   type RunExperimentTargetContext,
   type RunnerReport,
   type TelemetryNotAccepted,
@@ -29,6 +28,7 @@ import {
 import type {
   ExperimentCase,
   JsonValue,
+  LocalAgentClaim,
   LocalAgentRegistration,
   LocalFile,
   LocalScorer,
@@ -88,6 +88,9 @@ export interface LocalAgentTargetContext {
   /** Private directory for this case, removed after it; return generated files with
    * `withFiles`. */
   outputDirectory: string;
+  /** Ends when the worker stops or the world's deadline passes; a target that listens stops
+   * its work, and one that does not is left behind when its case ends as a `TargetTimeout`. */
+  signal?: AbortSignal;
 }
 
 /** Candidate-visible context for one queued ordinary case run directly on this machine. */
@@ -152,6 +155,7 @@ function localAgentTargetContext(context: EnvironmentTargetContext): LocalAgentT
       : {}),
     files: structuredClone(context.files),
     outputDirectory: context.outputDirectory,
+    ...(context.signal ? { signal: context.signal } : {}),
   };
 }
 
@@ -173,7 +177,7 @@ export interface RunLocalAgentOptions {
   concurrency?: number;
   /** What a case does when its telemetry is not accepted; see
    * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */
-  traceNotAccepted?: "stop" | "fail_case";
+  traceNotAccepted?: "stop" | "fail_case" | "pending";
   /** Called as each case is failed for its telemetry; see `onTelemetryNotAccepted` of
    * {@link runExperiment}. */
   onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;
@@ -181,8 +185,27 @@ export interface RunLocalAgentOptions {
   pollIntervalMillis?: number;
   /** Stops polling cooperatively; does not cancel an active callback. */
   signal?: AbortSignal;
-  /** Useful for one-shot jobs and deterministic acceptance. Omit to keep polling. */
+  /** Stop after this many runs settle: completed, or given up as `attention`. Useful for
+   * one-shot jobs and deterministic acceptance. Omit to keep polling. */
   maxRuns?: number;
+  /** How many times one run is resumed after a transient failure (a request Hue refused
+   * transiently past the client's own retries, a world seal not read back, a lost network,
+   * telemetry not accepted) before the worker gives it up as `attention`. Default 5, range
+   * 1–20. A failure that would recur (an uncertain target outcome, an unserializable output, a
+   * refusal Hue decided on, an input the SDK refuses) is attention at once. */
+  maxRunAttempts?: number;
+  /** The lifetime of each world the worker creates for a case, in seconds (1–86400); the
+   * server's default, an hour, applies when omitted. The target is stopped when the world
+   * expires: its case ends as a `TargetTimeout` error and the world is sealed abandoned. */
+  worldTtlSeconds?: number;
+  /** Called when a poll (registration or claim) fails transiently; the worker waits and polls
+   * again. A refusal it cannot recover from (a revoked key, a disabled agent) is thrown. */
+  onPollError?(error: unknown): void | Promise<void>;
+  /** Called when a claimed run's attempt fails: `retry` says the worker keeps the claim and
+   * resumes it after `waitMillis`; `attention` says the run was given up and needs a project
+   * member (requeue or cancel); `refused` says Hue no longer accepts this worker's outcome for
+   * the run (it was released or cancelled meanwhile). */
+  onRunFailed?(failure: LocalRunFailure): void | Promise<void>;
   /** Emit a one-time `DeprecationWarning` when the deployment serves a legacy world; on by default. */
   deprecationWarnings?: boolean;
   /** Opt into the experiment's immutable V2 provider profile. These three values are
@@ -282,16 +305,37 @@ function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function needsAttention(error: unknown, seen = new Set<unknown>()): boolean {
+/** Why a claimed run's attempt ended without completing, and what the worker did about it. */
+export interface LocalRunFailure extends LocalAgentClaim {
+  /** What failed. */
+  error: unknown;
+  /** Failed attempts of this run in this process, this one included; 0 when not counted. */
+  attempt: number;
+  /** `retry`: the claim is kept and the run resumes after `waitMillis`. `attention`: the run
+   * was given up for a project member to requeue or cancel. `refused`: Hue no longer accepts
+   * this worker's outcome for the run, which was released or cancelled meanwhile. */
+  outcome: "retry" | "attention" | "refused";
+  /** The wait before the run resumes, for `retry`. */
+  waitMillis?: number;
+}
+
+/** A failure worth resuming: one that changes on its own. Hue or a world not answering or
+ * refusing transiently past the client's retries, telemetry not accepted at the flush, or a run
+ * of such failures across concurrent cases. Everything else, an outcome unsafe to resume (the
+ * target may have run without a saved outcome, an output that cannot be saved), a saved outcome
+ * whose trace was never acknowledged (a resume does not export it again), a refusal Hue decided
+ * on, an input the SDK refuses (a case file whose bytes differ from its manifest), would recur on
+ * the next attempt and is given up as attention at once. */
+function resumable(error: unknown, seen = new Set<unknown>()): boolean {
   if (
-    error instanceof TargetOutcomeUncertainError ||
-    error instanceof UncertainExecutionError ||
-    error instanceof OutcomeSerializationError
+    isTransientApiError(error) ||
+    isTransientEnvironmentError(error) ||
+    error instanceof HueExportError
   )
     return true;
-  if (!(error instanceof AggregateError) || seen.has(error)) return false;
+  if (!(error instanceof AggregateError) || seen.has(error) || !error.errors.length) return false;
   seen.add(error);
-  return error.errors.some((nested: unknown) => needsAttention(nested, seen));
+  return error.errors.every((nested: unknown) => resumable(nested, seen));
 }
 
 /**
@@ -305,10 +349,33 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
   const maxRuns = options.maxRuns ?? Number.POSITIVE_INFINITY;
   if (!(maxRuns === Number.POSITIVE_INFINITY || (Number.isInteger(maxRuns) && maxRuns > 0)))
     throw new RangeError("maxRuns must be a positive integer");
+  const maxRunAttempts = options.maxRunAttempts ?? 5;
+  if (!Number.isInteger(maxRunAttempts) || maxRunAttempts < 1 || maxRunAttempts > 20)
+    throw new RangeError("maxRunAttempts must be 1–20");
+  if (
+    options.worldTtlSeconds !== undefined &&
+    (!Number.isInteger(options.worldTtlSeconds) ||
+      options.worldTtlSeconds < 1 ||
+      options.worldTtlSeconds > 86_400)
+  )
+    throw new RangeError("worldTtlSeconds must be 1–86400");
   if (options.environmentClient.baseUrl !== options.client.baseUrl)
     throw new Error("Environments and evaluations must use the same Hue origin");
   const directory = resolve(options.checkpointDirectory);
-  const project = await options.client.checkConnection();
+  // The first read is polled like the claims that follow: Hue not answering at startup is not
+  // a reason for the worker to exit; a refusal Hue decided on still is.
+  let project: Awaited<ReturnType<EvaluationClient["checkConnection"]>>;
+  for (let failures = 0; ; ) {
+    try {
+      project = await options.client.checkConnection();
+      break;
+    } catch (error) {
+      if (!isTransientApiError(error) || options.signal?.aborted) throw error;
+      failures++;
+      await options.onPollError?.(error);
+      await wait(Math.min(interval * 2 ** Math.min(failures, 6), 60_000), options.signal);
+    }
+  }
   const store = await CheckpointStore.acquire(directory, {
     kind: "local-agent-worker",
     projectId: project.id,
@@ -326,21 +393,74 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
       workerId = randomUUID();
       await store.write("worker-id", workerId);
     }
-    let completed = 0;
-    while (completed < maxRuns && !options.signal?.aborted) {
-      const agent = await options.client.registerLocalAgent({
-        ...options.agent,
-        capabilities,
-        scorerDigests:
-          options.agent.scorerDigests ??
-          options.scorers?.map((item) => item.definition.sourceDigest) ??
-          [],
-      });
-      const claim = await options.client.claimLocalAgentRun({ agentId: agent.id, workerId });
+    let settled = 0;
+    /** Consecutive poll failures, for the backoff between polls; reset by a poll that answers. */
+    let pollFailures = 0;
+    /** Consecutive failed attempts per claimed run; a run is given up at `maxRunAttempts`. */
+    const attempts = new Map<string, number>();
+    const bump = (claim: LocalAgentClaim) => {
+      const attempt = (attempts.get(claim.runId) ?? 0) + 1;
+      attempts.set(claim.runId, attempt);
+      return attempt;
+    };
+    /** The wait before the run is resumed: the poll interval doubled per attempt, at most a minute. */
+    const backoff = (attempt: number) => Math.min(interval * 2 ** Math.min(attempt, 6), 60_000);
+    /** Gives the run up as attention with the failure's name; a refusal to record it (the run
+     * was released or cancelled meanwhile) is reported as such and changes nothing else. */
+    const giveUp = async (claim: LocalAgentClaim, error: unknown) => {
+      const failureType = error instanceof Error ? error.name.slice(0, 200) : "WorkerError";
+      let outcome: LocalRunFailure["outcome"] = "attention";
+      try {
+        await options.client.completeLocalAgentRun({
+          runId: claim.runId,
+          workerId,
+          state: "attention",
+          failureType,
+        });
+      } catch (completion) {
+        if (completion instanceof HueApiError && completion.status === 409) outcome = "refused";
+        // A transient failure past the client's retries leaves the run claimed; the next claim
+        // returns it and the attempt count gives it up again. A refusal Hue decided on (a
+        // revoked key, a disabled agent) is what needs fixing, and is thrown as itself.
+        else if (isTransientApiError(completion)) return false;
+        else throw completion;
+      }
+      const attempt = attempts.get(claim.runId) ?? 0;
+      attempts.delete(claim.runId);
+      settled++;
+      await options.onRunFailed?.({ ...claim, error, attempt, outcome });
+      return true;
+    };
+    while (settled < maxRuns && !options.signal?.aborted) {
+      let claim: LocalAgentClaim | null;
+      try {
+        const agent = await options.client.registerLocalAgent({
+          ...options.agent,
+          capabilities,
+          scorerDigests:
+            options.agent.scorerDigests ??
+            options.scorers?.map((item) => item.definition.sourceDigest) ??
+            [],
+        });
+        claim = await options.client.claimLocalAgentRun({ agentId: agent.id, workerId });
+        pollFailures = 0;
+      } catch (error) {
+        // A transient failure past the client's own retries (Hue restarting, a network blip)
+        // does not end the worker: it waits, longer each time, and polls again. A refusal Hue
+        // decided on (a revoked key, a disabled agent, a changed registration) is thrown.
+        if (!isTransientApiError(error)) throw error;
+        pollFailures++;
+        await options.onPollError?.(error);
+        await wait(Math.min(interval * 2 ** Math.min(pollFailures, 6), 60_000), options.signal);
+        continue;
+      }
       if (!claim) {
         await wait(interval, options.signal);
         continue;
       }
+      // A claim naming an experiment id the checkpoint store refuses is a protocol violation,
+      // not an operational failure: it is thrown here, before the attempt, and never retried.
+      const experimentId = checkpointSegment(claim.experimentId, "experiment id");
       const heartbeat = setInterval(
         () => {
           void options.client
@@ -350,18 +470,22 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
         Math.min(15_000, Math.max(1_000, interval)),
       );
       let experimentFinished = false;
+      let queueCompleted = false;
       try {
         const requested = requestedConfiguration
           ? pinRequestedAttemptV2(
               requestedConfiguration,
-              (await options.client.getExperiment(claim.experimentId)).config,
+              (await options.client.getExperiment(experimentId)).config,
             )
           : undefined;
         const report = await runExperiment({
           client: options.client,
           hue: options.hue,
-          experimentId: claim.experimentId,
-          checkpointDirectory: join(directory, `experiment-${claim.experimentId}`),
+          experimentId,
+          checkpointDirectory: checkpointPath(directory, [
+            `experiment-${experimentId}`,
+            "experiment id",
+          ]),
           persistResultContent: true,
           // Worker dispatch uses the case pin: directTarget never receives a world.
           environmentEvidence: options.directTarget ? "when_pinned" : "required",
@@ -396,6 +520,7 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
               inputs,
               context,
               requested,
+              ttlSeconds: options.worldTtlSeconds,
               // The registered revision is the agent revision under test.
               agentRevision: options.agent.revision,
               deprecationWarnings: options.deprecationWarnings,
@@ -418,23 +543,47 @@ export async function runLocalAgent(options: RunLocalAgentOptions): Promise<void
           workerId,
           state: "completed",
         });
+        queueCompleted = true;
+        attempts.delete(claim.runId);
+        settled++;
         await options.onCompleted?.(report);
-        completed++;
       } catch (error) {
-        // A durable outcome can still need completion/result uploads. Leave operational
-        // failures claimed so the same worker can resume them through its checkpoints.
-        // Attention is terminal in the queue and is reserved for explicit unsafe-to-resume
-        // outcomes that require operator intervention.
-        if (!experimentFinished && needsAttention(error))
-          await options.client
-            .completeLocalAgentRun({
-              runId: claim.runId,
-              workerId,
-              state: "attention",
-              failureType: error instanceof Error ? error.name.slice(0, 200) : "WorkerError",
-            })
-            .catch(() => undefined);
-        throw error;
+        // The run is completed in the queue: a failure after that is the caller's own
+        // (`onCompleted` threw) and is thrown as itself, not reported as a retry that cannot be.
+        if (queueCompleted) throw error;
+        if (experimentFinished && error instanceof HueApiError && error.status === 409) {
+          // The experiment finished, but Hue no longer accepts this worker's completion: the
+          // run was released or cancelled meanwhile. Its outcome is recorded; nothing to resume.
+          attempts.delete(claim.runId);
+          settled++;
+          await options.onRunFailed?.({ ...claim, error, attempt: 0, outcome: "refused" });
+        } else if (!experimentFinished && !resumable(error)) {
+          // A failure that would recur: unsafe to resume, refused by Hue, or an input the SDK
+          // refuses. A project member decides; the worker goes on to other runs. When Hue cannot
+          // record that for `maxRunAttempts` polls, the worker stops with the error: it can
+          // reach neither an outcome nor a record of one.
+          if (!(await giveUp(claim, error))) {
+            const attempt = bump(claim);
+            if (attempt >= maxRunAttempts) throw error;
+            await wait(backoff(attempt), options.signal);
+          }
+        } else {
+          // A transient failure: the outcome so far is checkpointed, and the claim stays with
+          // this worker, so the next claim returns the same run and the experiment resumes where
+          // it stopped. After `maxRunAttempts` such failures the run is given up as attention;
+          // when even that cannot be recorded, the worker stops with the error.
+          const attempt = bump(claim);
+          if (attempt >= maxRunAttempts) {
+            if (!(await giveUp(claim, error))) {
+              if (attempt >= 2 * maxRunAttempts) throw error;
+              await wait(backoff(attempt), options.signal);
+            }
+          } else {
+            const waitMillis = backoff(attempt);
+            await options.onRunFailed?.({ ...claim, error, attempt, outcome: "retry", waitMillis });
+            await wait(waitMillis, options.signal);
+          }
+        }
       } finally {
         clearInterval(heartbeat);
       }

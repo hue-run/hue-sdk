@@ -13,6 +13,7 @@ import {
   agentEnvironment,
   isHueControlPlaneCredential,
   stripHueControlPlaneCredentials,
+  withoutWorldVariables,
   writeMcpConfig,
 } from "../environment/world.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
@@ -27,7 +28,7 @@ import type {
   ScorerVersion,
 } from "../evals/types.js";
 import { TargetResult } from "../evals/types.js";
-import { CheckpointIdentityError, CheckpointStore } from "../evals/checkpoint.js";
+import { CheckpointIdentityError, CheckpointStore, checkpointPath } from "../evals/checkpoint.js";
 import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
 import { safeFilename } from "../evals/files.js";
 import { digest } from "../evals/json.js";
@@ -157,6 +158,10 @@ Output and limits:
   --save-version                  Freeze an unsaved eval-set version before running
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
   --concurrency <n>               Cases in flight, 1-64 (default: 1)
+  --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
+                                  (default) completes it as failed with the evidence omitted;
+                                  pending completes it in its true state with the trace still to
+                                  arrive, which Hue attaches once its export is complete
   --timeout <seconds>             Per-case --command timeout (default: 600)
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
   -h, --help                      Show this help
@@ -168,6 +173,12 @@ incomplete, 2 usage error, 130 interrupted.
 `;
 
 /** Thrown for invalid arguments or configuration; exits with status 2. */
+/** The `--trace-not-accepted` policy: the failed-case default, or pending evidence. */
+function traceNotAcceptedPolicy(value: string | undefined): "fail_case" | "pending" {
+  if (value === undefined || value === "fail_case") return "fail_case";
+  if (value === "pending") return "pending";
+  throw new UsageError("--trace-not-accepted must be fail_case or pending");
+}
 class UsageError extends Error {
   constructor(message: string) {
     super(message);
@@ -212,6 +223,7 @@ function parse(argv: string[]) {
         json: { type: "boolean", default: false },
         content: { type: "boolean", default: false },
         "no-output": { type: "boolean", default: false },
+        "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
         "checkpoint-dir": { type: "string" },
         concurrency: { type: "string" },
@@ -703,15 +715,19 @@ function redacting<Context, Answer>(
 }
 
 /** The parent environment an agent child starts from: without Hue control-plane credentials
- * unless `--allow-hue-credentials` was passed. */
+ * unless `--allow-hue-credentials` was passed, and without any world variable. */
 function parentEnvironment(allowHueCredentials: boolean): Record<string, string> {
-  return allowHueCredentials
-    ? Object.fromEntries(
-        Object.entries(process.env).filter(
-          (entry): entry is [string, string] => entry[1] !== undefined,
-        ),
-      )
-    : stripHueControlPlaneCredentials(process.env);
+  // A world variable left in this process's environment belongs to another world: only the
+  // current case's world sets them, whether or not the case has one.
+  return withoutWorldVariables(
+    allowHueCredentials
+      ? Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        )
+      : stripHueControlPlaneCredentials(process.env),
+  );
 }
 
 function commandAdapter(
@@ -977,9 +993,13 @@ async function prepareCheckpointDirectory(
   explicit: string | undefined,
   agentKey: string,
   projectId: string,
-  leaf: string,
+  ...leaf: string[]
 ): Promise<string> {
-  if (explicit) return join(resolve(explicit), projectId, leaf);
+  const segments: [string, string][] = [
+    [projectId, "project id"],
+    ...leaf.map((part): [string, string] => [part, "checkpoint kind"]),
+  ];
+  if (explicit) return checkpointPath(explicit, ...segments);
   const root = resolve(".hue", "eval");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const ignore = join(root, ".gitignore");
@@ -988,7 +1008,7 @@ async function prepareCheckpointDirectory(
   } catch {
     await writeFile(ignore, "*\n", { flag: "wx", mode: 0o600 }).catch(() => undefined);
   }
-  return join(root, agentKey, projectId, leaf);
+  return checkpointPath(join(root, agentKey), ...segments);
 }
 
 /** Worker-side client that reports registration and claims without changing the worker. */
@@ -1351,7 +1371,7 @@ async function runOnce(
     persistResultContent: !values["no-output"],
     traceEvidence: { mode: "required" },
     // A case whose telemetry Hue did not accept fails instead of staying started.
-    traceNotAccepted: "fail_case",
+    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
     onTelemetryNotAccepted: telemetry.report,
     concurrency,
     agentRevision: agent.revision,
@@ -1485,12 +1505,12 @@ async function runDirect(
       client,
       hue: run.hue,
       experimentId,
-      checkpointDirectory: join(store.directory, experimentId),
+      checkpointDirectory: checkpointPath(store.directory, [experimentId, "experiment id"]),
       // Outputs, error messages and explanations are stored unless opted out; --content governs
       // only the telemetry.
       persistResultContent: !values["no-output"],
       traceEvidence: { mode: "required" },
-      traceNotAccepted: "fail_case",
+      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
       onTelemetryNotAccepted: telemetry.report,
       concurrency: run.concurrency,
       scorers: [],
@@ -1567,7 +1587,8 @@ async function runWorker(
     values["checkpoint-dir"],
     agent.key,
     project.id,
-    join("worker", slug(agent.revision) || "dev"),
+    "worker",
+    slug(agent.revision) || "dev",
   );
   let current: LocalAgentClaim | undefined;
   client.onRegistered = (registered) => {
@@ -1595,11 +1616,28 @@ async function runWorker(
     },
     scorers: [],
     concurrency,
-    traceNotAccepted: "fail_case",
+    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
     onTelemetryNotAccepted: telemetry.report,
     deprecationWarnings: false,
     signal,
     ...(maxRuns === undefined ? {} : { maxRuns }),
+    onPollError(error) {
+      output.error(`Hue did not answer the poll (${explain(error)}); polling again`);
+    },
+    onRunFailed(failure) {
+      const run = `Run ${failure.runId}`;
+      if (failure.outcome === "retry") {
+        const waitMillis = failure.waitMillis ?? 0;
+        output.error(
+          `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round(waitMillis / 1000)} s`,
+        );
+      } else if (failure.outcome === "attention")
+        output.error(
+          `${run} needs attention (${explain(failure.error)}); requeue or cancel it from its run page`,
+        );
+      else
+        output.error(`${run} was released or cancelled in Hue; its outcome here is not recorded`);
+    },
     target(inputs, tools: Record<string, EnvironmentTool>, context) {
       output.log(`[${context.item.externalKey}] agent started`);
       return adapter(inputs, {
@@ -1613,7 +1651,9 @@ async function runWorker(
         ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
         files: context.files,
         outputDirectory: context.outputDirectory,
-        signal,
+        // The case's own signal: the worker stopping, or the world's deadline passing, both
+        // end a command that would otherwise keep running past its timed-out case.
+        signal: context.signal ?? signal,
       });
     },
     async onCompleted(report) {
@@ -1686,6 +1726,8 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
   let json = false;
   try {
     const { values, positionals } = parse(argv);
+    // A usage error before anything is prepared or created: no run is left to recover from it.
+    traceNotAcceptedPolicy(values["trace-not-accepted"]);
     json = values.json;
     const output: Output = {
       log: (line) => (json ? process.stderr : process.stdout).write(`${line}\n`),

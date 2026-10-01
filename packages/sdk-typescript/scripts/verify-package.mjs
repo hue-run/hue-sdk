@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -344,6 +344,64 @@ if (
   installedPinnedMcp.stdout !== expectedPinnedMcp
 )
   throw new Error("Installed hue mcp install did not preserve the project pin");
+// Without --auth, the installed CLI signs Claude Code in unless HUE_MCP_KEY is set, and names its
+// choice on stderr so --print stays a snippet; it checks the variable's presence, never prints it.
+{
+  const printed = (value) =>
+    spawnSync(
+      join(minimal, "node_modules", ".bin", "hue"),
+      ["mcp", "install", "--client", "claude-code", "--print"],
+      {
+        cwd: minimal,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, HUE_MCP_KEY: value },
+      },
+    );
+  const signIn = printed("");
+  const key = printed("hue_package_check_value");
+  if (
+    signIn.status !== 0 ||
+    signIn.stdout.includes("Authorization") ||
+    !signIn.stderr.startsWith("Using sign-in with Hue") ||
+    key.status !== 0 ||
+    !key.stdout.includes("Bearer ${HUE_MCP_KEY}") ||
+    !key.stderr.startsWith("Using a key") ||
+    `${key.stdout}${key.stderr}`.includes("hue_package_check_value")
+  )
+    throw new Error("Installed hue mcp install did not choose sign-in or a key by HUE_MCP_KEY");
+}
+// The installed CLI keeps a client configuration held at 0600 for another server's token at 0600,
+// leaves that token out of --dry-run and refuses a symlinked config directory.
+{
+  const project = await mkdtemp(join(destination, "mcp-files-"));
+  const config = join(project, ".mcp.json");
+  const token = `ghp_package_check_${"t".repeat(24)}`;
+  const other = { type: "http", headers: { Authorization: `Bearer ${token}` } };
+  await writeFile(config, JSON.stringify({ mcpServers: { other } }), { mode: 0o600 });
+  await chmod(config, 0o600);
+  const install = (...args) =>
+    spawnSync(join(minimal, "node_modules", ".bin", "hue"), ["mcp", "install", ...args], {
+      cwd: project,
+      encoding: "utf8",
+      timeout: 5000,
+      env: process.env,
+    });
+  const dry = install("--client", "claude-code", "--dry-run");
+  if (dry.status !== 0 || dry.stdout.includes(token) || !dry.stdout.includes("[redacted]"))
+    throw new Error("Installed hue mcp install --dry-run printed another server's token");
+  const written = install("--client", "claude-code");
+  if (
+    written.status !== 0 ||
+    ((await stat(config)).mode & 0o777) !== 0o600 ||
+    !(await readFile(config, "utf8")).includes(token)
+  )
+    throw new Error("Installed hue mcp install widened an owner-only client configuration");
+  await symlink(await mkdtemp(join(destination, "mcp-elsewhere-")), join(project, ".cursor"));
+  const linked = install("--client", "cursor");
+  if (linked.status !== 1 || !linked.stderr.includes(".cursor is a symbolic link"))
+    throw new Error("Installed hue mcp install followed a symlinked .cursor directory");
+}
 // Node 22 and 24 read --env-file from the whole command line and exit before the CLI runs when that
 // file is missing, so the installed `hue login` must create a new env file through --env-path.
 {

@@ -1136,7 +1136,10 @@ process.stdout.write(key);
   }, 120_000);
 
   test("an interrupted run resumes the saved experiment without invoking the agent again", async () => {
-    const standIn = documentStandIn({ failCompletions: 1 });
+    // Every attempt of the completion fails (the client sends a keyed completion four times before
+    // it is the caller's error), so the first run stops with the outcome saved and the resume
+    // completes it.
+    const standIn = documentStandIn({ failCompletions: 4 });
     const cwd = await mkdtemp(join(tmpdir(), "hue-eval-direct-"));
     await writeFile(join(cwd, "agent.mjs"), agentSource);
     const args = [

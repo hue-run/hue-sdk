@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from hue_sdk._tool_definitions import _Scrub, scrub_tool_credentials, with_tool_catalog_summary
+from hue_sdk._tool_definitions import (
+    _domain_to_ascii,
+    _InvalidUrl,
+    _Scrub,
+    scrub_credential_text,
+    scrub_tool_credentials,
+    with_tool_catalog_summary,
+)
 
 URL_FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -215,6 +222,25 @@ def test_long_idn_hosts_are_refused_before_any_idna_work(monkeypatch):
         started = time.monotonic()
         assert _Scrub().url(f"https://{host}/mcp?token=secret") == "[redacted]"
         assert time.monotonic() - started < 1
+
+
+def test_punycode_whose_code_point_overflows_refuses_the_url():
+    # CPython 3.13 and later raise OverflowError decoding it, earlier versions UnicodeError; the
+    # URL is refused either way, as WHATWG refuses it.
+    with pytest.raises(_InvalidUrl):
+        _domain_to_ascii("xn--11111111111111111w")
+    assert _Scrub().url("http://xn--11111111111111111w/mcp") == "[redacted]"
+
+
+def test_any_failure_parsing_a_special_url_replaces_it_whole(monkeypatch):
+    import hue_sdk._tool_definitions as definitions
+
+    def broken(_domain):
+        raise RuntimeError("synthetic host parser failure")
+
+    monkeypatch.setattr(definitions, "_domain_to_ascii", broken)
+    assert _Scrub().url("https://mcp.example.test/sse?token=synthetic-secret") == "[redacted]"
+    assert scrub_credential_text("failed at https://mcp.example.test/sse") == "failed at [redacted]"
 
 
 def test_deep_request_content_without_non_finite_numbers_is_exported():

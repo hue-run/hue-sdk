@@ -256,6 +256,35 @@ describe("world handoff helpers", () => {
     expect(agentEnvironment(world, { parent: { HUE_WORLD_TOKEN: "stale" } }).HUE_WORLD_TOKEN).toBe(
       token,
     );
+    // Nor does another world's mirror survive: this world's token must never reach it.
+    const stale = agentEnvironment(world, {
+      parent: {
+        HUE_SIM_NOTION_MCP_URL: "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+        HUE_SIM_SLACK_MCP_ALIAS: "https://elsewhere.test/mcp",
+        HUE_MCP_CONFIG: "/tmp/old-world.json",
+        HUE_MCP_URL: "https://elsewhere.test/mcp",
+        // A signing key in a developer's shell is the server's, never an agent's.
+        HUE_WORLD_TOKEN_KEY: "test-signing-key",
+        HUE_MCP_KEY: "hue_mcp_project",
+        OPENAI_API_KEY: "customer-model-key",
+      },
+      legacyMcpVariables: false,
+      includeHueCredentials: true,
+    });
+    for (const name of [
+      "HUE_SIM_NOTION_MCP_URL",
+      "HUE_SIM_SLACK_MCP_ALIAS",
+      "HUE_MCP_CONFIG",
+      "HUE_MCP_URL",
+      "HUE_WORLD_TOKEN_KEY",
+    ])
+      expect(stale).not.toHaveProperty(name);
+    expect(stale.HUE_SIM_GOOGLE_GMAIL_MCP_URL).toBe(mirror);
+    // Every other variable passes through as before.
+    expect(stale).toMatchObject({
+      HUE_MCP_KEY: "hue_mcp_project",
+      OPENAI_API_KEY: "customer-model-key",
+    });
     expect(isHueControlPlaneCredential("X", "hue_sk_test_abc_def")).toBe(true);
     expect(isHueControlPlaneCredential("X", "sk-live-not-hue")).toBe(false);
     expect(stripHueControlPlaneCredentials(parent)).toEqual({
@@ -491,22 +520,26 @@ describe("world creation on a deployment whose gateway is off", () => {
       return Promise.resolve().then(answers.shift()!);
     };
     const one = "https://one.hue.test/api/v1";
-    // A network failure, then a refusal carrying a diagnostic: neither says the gateway is off.
+    // A network failure does not say the gateway is off.
     answers.push(() => {
       throw new TypeError("fetch failed");
     });
-    expect(await gatewayState(one, fetchStub)).toBe("unknown");
-    answers.push(
-      () =>
-        new Response(null, { status: 404, headers: { "x-hue-diagnostic": "host_not_allowed" } }),
-    );
     expect(await gatewayState(one, fetchStub)).toBe("unknown");
     // The disabled handler's empty 404 does, and is remembered for the origin.
     answers.push(() => new Response(null, { status: 404 }));
     expect(await gatewayState(one, fetchStub)).toBe("off");
     expect(await gatewayState("https://one.hue.test/elsewhere", fetchStub)).toBe("off");
-    expect(calls).toHaveLength(3);
-    expect(calls[0]).toBe("https://one.hue.test/api/sim/gmailmcp.googleapis.com/_hue/health");
+    expect(calls).toHaveLength(2);
+    // The probe names no app, so a deployment that mirrors no Gmail answers it the same way.
+    expect(calls[0]).toBe("https://one.hue.test/api/sim/_hue/health");
+    // On the application host the enabled gateway refuses the reserved segment as no app, with
+    // its diagnostic: only the enabled gateway writes that header, so this is on.
+    answers.push(
+      () =>
+        new Response(null, { status: 404, headers: { "x-hue-diagnostic": "unmirrored_provider" } }),
+    );
+    expect(await gatewayState("https://four.hue.test", fetchStub)).toBe("on");
+    expect(await gatewayState("https://four.hue.test", fetchStub)).toBe("on");
     // The gateway's health is on; a health without the gateway marker is not.
     answers.push(() => Response.json({ status: "ok", gateway: "simulation" }));
     expect(await gatewayState("https://two.hue.test", fetchStub)).toBe("on");

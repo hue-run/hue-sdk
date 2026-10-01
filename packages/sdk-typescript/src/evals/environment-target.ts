@@ -22,7 +22,7 @@ import {
   type SurfaceBindingV2,
 } from "./attempt.js";
 import type { EvaluationClient } from "./client.js";
-import { TargetCancelledError, TargetOutcomeUncertainError } from "./runner.js";
+import { TargetCancelledError, TargetOutcomeUncertainError, TargetTimeoutError } from "./runner.js";
 import type {
   ExperimentCase,
   JsonValue,
@@ -180,6 +180,9 @@ export interface RunEnvironmentTargetOptions {
 export const MAX_GRACE_WAIT_MS = 10_000;
 export const SEAL_POLL_MS = 250;
 export const SEAL_WAIT_MS = 30_000;
+/** How long past the world's `expiresAt` the target is given before it is stopped: room for a
+ * last call in flight at the deadline and for clock skew between the worker and Hue. */
+export const DEADLINE_MARGIN_MS = 5_000;
 
 /** The seal wait's bounds. Only tests shorten them; the helpers always use the defaults. */
 export interface SealTiming {
@@ -293,18 +296,22 @@ export function caseTraceparent(span: {
   return `00-${span.traceId}-${span.spanId}-${(flags & 0xff).toString(16).padStart(2, "0")}`;
 }
 
-/** What a deployment's credential-free gateway health said: `on` (200 with
- * `gateway: "simulation"`), `off` (the empty 404 the disabled handler answers, with no
- * `x-hue-diagnostic`), or `unknown` for anything else. */
+/** What a deployment's credential-free gateway probe said: `on` (the gateway answered, with its
+ * health or with a refusal carrying `x-hue-diagnostic`), `off` (the empty 404 the disabled
+ * handler answers, with no `x-hue-diagnostic`), or `unknown` for anything else. */
 export type GatewayState = "on" | "off" | "unknown";
 
 const gatewayStates = new Map<string, Promise<GatewayState>>();
 /**
- * Whether the deployment serves the simulation gateway, from its credential-free health
- * endpoint: 200 with `gateway: "simulation"` is on, the disabled handler's empty 404 (no
- * `x-hue-diagnostic`) is off, and anything else (a network failure, a timeout, a redirect, a
- * refusal carrying a diagnostic, another status or body) is unknown. Probed only after a create
- * was refused; on and off are remembered per origin, unknown is probed again next time.
+ * Whether the deployment serves the simulation gateway, from a credential-free probe of the
+ * gateway's reserved health path with no app named (`/api/sim/_hue/health`), so the answer does
+ * not depend on which apps the deployment mirrors. The gateway answers it on its own host with
+ * its health, 200 with `gateway: "simulation"`, and on the application host with a refusal that
+ * carries `x-hue-diagnostic` (`unmirrored_provider`: the reserved segment is no app); either is
+ * on, since only the enabled gateway writes that header. The disabled handler's empty 404 (no
+ * `x-hue-diagnostic`) is off, and anything else (a network failure, a timeout, a redirect, another
+ * status or body) is unknown. Probed only after a create was refused; on and off are remembered
+ * per origin, unknown is probed again next time.
  */
 export function gatewayState(
   baseUrl: string,
@@ -313,13 +320,12 @@ export function gatewayState(
   const origin = new URL(baseUrl).origin;
   const remembered = gatewayStates.get(origin);
   if (remembered) return remembered;
-  const probe: Promise<GatewayState> = fetchImpl(
-    `${origin}/api/sim/gmailmcp.googleapis.com/_hue/health`,
-    { redirect: "error", signal: AbortSignal.timeout(5_000) },
-  )
+  const probe: Promise<GatewayState> = fetchImpl(`${origin}/api/sim/_hue/health`, {
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  })
     .then(async (response): Promise<GatewayState> => {
-      if (response.status === 404)
-        return response.headers.has("x-hue-diagnostic") ? "unknown" : "off";
+      if (response.status === 404) return response.headers.has("x-hue-diagnostic") ? "on" : "off";
       if (!response.ok) return "unknown";
       const body = (await response.json()) as { gateway?: unknown };
       return body.gateway === "simulation" ? "on" : "unknown";
@@ -484,20 +490,51 @@ export async function runEnvironmentTarget(
     }
     if (options.signal?.aborted) throw new TargetCancelledError();
     await progress({ type: "target_started", environmentRunId: run.id });
-    const output = await options.target(options.inputs, {
-      config: context.config,
-      item: context.item,
-      executionId: context.executionId,
-      environmentRunId: run.id,
-      trace: { traceId: context.span.traceId, spanId: context.span.spanId },
-      tools,
-      ...(world ? { world } : {}),
-      ...(mcp ? { mcp } : {}),
-      ...(connectionBundle ? { connectionBundle } : {}),
-      files: structuredClone(context.files),
-      outputDirectory: context.outputDirectory,
-      signal: options.signal,
+    // The world's deadline bounds the target: once the world expires its mirrors refuse every
+    // call, so an agent still running can achieve nothing more. The target is told through its
+    // signal a moment after the deadline and, whether or not it listens, its case ends as a
+    // `TargetTimeout` and the world is sealed abandoned; a promise that never settles is left
+    // behind rather than holding the run open for good.
+    const expiresAt = Date.parse(run.expiresAt);
+    const deadline = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      if (!Number.isFinite(expiresAt)) return;
+      timer = setTimeout(
+        () => {
+          // The timeout is decided before the target is told: a target that rejects with its
+          // own abort error on the signal must not win the race and be saved as its own error.
+          const error = new TargetTimeoutError(run.id, run.expiresAt);
+          reject(error);
+          deadline.abort(error);
+        },
+        Math.max(0, expiresAt + DEADLINE_MARGIN_MS - Date.now()),
+      );
     });
+    let output: JsonValue | TargetResult | undefined;
+    try {
+      output = await Promise.race([
+        options.target(options.inputs, {
+          config: context.config,
+          item: context.item,
+          executionId: context.executionId,
+          environmentRunId: run.id,
+          trace: { traceId: context.span.traceId, spanId: context.span.spanId },
+          tools,
+          ...(world ? { world } : {}),
+          ...(mcp ? { mcp } : {}),
+          ...(connectionBundle ? { connectionBundle } : {}),
+          files: structuredClone(context.files),
+          outputDirectory: context.outputDirectory,
+          signal: options.signal
+            ? AbortSignal.any([options.signal, deadline.signal])
+            : deadline.signal,
+        }),
+        timedOut,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
     await seal(options.environmentClient, run.id, context.executionId, "completed", timing);
     finalized = true;
     await Promise.resolve(progress({ type: "world_sealed", environmentRunId: run.id })).catch(
