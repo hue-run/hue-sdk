@@ -8,6 +8,7 @@ import { HueExportError } from "../transport.js";
 import type { HueSpan } from "../types.js";
 import { EvaluationClient, HueApiError } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
+import { serviceFailureType } from "./failure.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { onForcedExit } from "./exit-cleanup.js";
 import {
@@ -656,14 +657,16 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     const sanitize = (message: string) =>
       message.slice(0, 4000).toWellFormed().replaceAll("\u0000", "");
     // A target stopped at its world's deadline is a `TargetTimeout`, told apart from an error the
-    // target raised itself: the agent did not finish, rather than finishing wrongly.
+    // target raised itself: the agent did not finish, rather than finishing wrongly. A service the
+    // agent called that refused, dropped the connection or timed out is named apart from the
+    // agent's own error (`failure.ts`), so Hue counts it as infrastructure, not as the agent.
     const errorPayload = (error: unknown): TypedError => ({
       type:
         error instanceof OutputTooLargeError
           ? "OutputTooLarge"
           : error instanceof TargetTimeoutError
             ? "TargetTimeout"
-            : "TargetError",
+            : (serviceFailureType(error) ?? "TargetError"),
       ...(options.persistResultContent && error instanceof Error
         ? { message: sanitize(error.message) }
         : {}),

@@ -8,6 +8,16 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+#### Added
+
+- A target's throw is completed with an error type that says what stopped the case: a service the
+  agent called that refused with a retryable status (`ServiceRefused`), whose connection failed
+  (`ConnectionFailed`) or that timed out (`TimedOut`), read from the error and its `cause`,
+  `lastError` and `errors` chains, beside the agent's own `TargetError`. Hue counts the three as
+  infrastructure and leaves them out of the agent's pass rate.
+
 ### [0.12.0] - 2026-10-01
 
 This release keeps a local worker running through transient failures: the client retries reads
@@ -1108,6 +1118,14 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- A target's exception is completed with an error type that says what stopped the case:
+  `EnvironmentSetupFailed` when `create_run` could not create the world (the new
+  `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
+  service the agent called, `ConnectionFailed` and `TimedOut`, beside the agent's own
+  `TargetError`. Hue counts the service failures as infrastructure.
 
 ### [0.6.2] - 2026-09-27
 

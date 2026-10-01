@@ -24,6 +24,7 @@ import pytest
 import hue_sdk.evals._json as json_module
 import hue_sdk.evals.runner as runner_module
 from hue_sdk import Hue
+from hue_sdk.environment import WorldCreationError
 from hue_sdk.evals import (
     MISSING,
     EvaluationClient,
@@ -1422,3 +1423,44 @@ def test_builtin_scorers_is_the_documented_name_and_builtins_stays_an_alias():
     assert evals.builtins is not stdlib_builtins
     assert {"builtin_scorers", "builtins"} <= set(evals.__all__)
     assert builtin_scorers.exact_match() == builtins.exact_match()
+
+
+class _APIStatusError(Exception):
+    """The shape of an openai or anthropic status error."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"Error code: {status_code}")
+        self.status_code = status_code
+        self.response = SimpleNamespace(status_code=status_code)
+
+
+@pytest.mark.parametrize("persist", [False, True])
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [
+        pytest.param(lambda: RuntimeError("The agent gave up"), "TargetError", id="agent"),
+        pytest.param(lambda: _APIStatusError(400), "TargetError", id="agent-refusal"),
+        pytest.param(lambda: WorldCreationError(409), "EnvironmentSetupFailed", id="world"),
+        pytest.param(lambda: _APIStatusError(429), "ServiceRefused", id="rate-limit"),
+        pytest.param(lambda: HueApiError(503), "ServiceRefused", id="hue"),
+        pytest.param(lambda: ConnectionResetError("reset"), "ConnectionFailed", id="connection"),
+        pytest.param(lambda: TimeoutError("timed out"), "TimedOut", id="timeout"),
+    ],
+)
+def test_target_failures_are_recorded_by_what_stopped_the_case(
+    evaluation_receiver, tmp_path, raised, expected, persist
+):
+    error = raised()
+
+    def target(*_args):
+        raise error
+
+    arguments = options(evaluation_receiver, tmp_path, target, persist=persist)
+    try:
+        run_experiment(**arguments)
+        body = evaluation_receiver.complete_body
+        assert body["state"] == "error"
+        # The message is sent only when result content is persisted; the type always is.
+        assert body["error"] == {"type": expected, **({"message": str(error)} if persist else {})}
+    finally:
+        arguments["hue"].shutdown()

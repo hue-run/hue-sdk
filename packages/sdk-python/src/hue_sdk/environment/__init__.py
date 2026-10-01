@@ -6,7 +6,12 @@ execution completes, and is read back as evaluator-only evidence once sealed. No
 or tool binding is required.
 """
 
-from .client import EnvironmentClient, EnvironmentSealTimeoutError, HueEnvironmentError
+from .client import (
+    EnvironmentClient,
+    EnvironmentSealTimeoutError,
+    HueEnvironmentError,
+    WorldCreationError,
+)
 from .types import (
     ActionDefinition,
     ActionParameter,
@@ -64,6 +69,7 @@ __all__ = [
     "FinishStatus",
     "HUE_CONTROL_PLANE_VARIABLES",
     "HueEnvironmentError",
+    "WorldCreationError",
     "Json",
     "LegacyMcpCapability",
     "Observation",
