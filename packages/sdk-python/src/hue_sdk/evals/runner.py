@@ -576,11 +576,15 @@ def run_experiment(
                 lambda: store.write(file, checkpoint),
             )
         client.get_execution(checkpoint["executionId"])
-        if checkpoint["exportState"] != "accepted" and checkpoint["complete"][
-            "traceEvidence"
-        ] not in ("omit", "pending"):
-            # A saved outcome still pending is decided by its receipt now; one marked failed, or
-            # one the receipt does not hold, is refused as itself, and never run again.
+        if (
+            "completion" not in checkpoint
+            and checkpoint["exportState"] != "accepted"
+            and checkpoint["complete"]["traceEvidence"] != "omit"
+        ):
+            # A saved outcome still pending is decided by its receipt now, a pending completion
+            # included: the trace may have landed since, and then Hue freezes it at completion.
+            # One marked failed, or one the receipt does not hold, is refused as itself under the
+            # required policy and completes pending under the pending policy; never run again.
             if checkpoint["exportState"] == "pending" and _trace_landed(
                 hue, checkpoint.get("trace")
             ):
