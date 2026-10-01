@@ -1107,7 +1107,12 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.6.3] - 2026-10-01
+
+This release gives the Python evaluation client the TypeScript SDK's resilience: reads and keyed
+mutations are sent again after transient failures, and an export failure is attributed to the
+case whose trace it concerned, so one case's telemetry failure no longer fails the cases beside
+it or every case that follows. Additive; no capture, default budget or wire change.
 
 #### Added
 
