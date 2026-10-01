@@ -8,7 +8,15 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.12.0] - 2026-10-01
+
+This release keeps a local worker running through transient failures: the client retries reads
+and keyed mutations, `runLocalAgent` polls on after a failed claim and resumes a failed run from
+its checkpoints before giving it up as attention, a hung target is ended at its world's expiry,
+and an export failure is attributed to the traces it concerned so one case's telemetry failure
+does not flag the cases beside it. Two **Breaking** entries under Changed need a look from
+callers that matched a single error class on a multi-case run or awaited `runLocalAgent` to
+reject on an attention run.
 
 #### Added
 
@@ -22,8 +30,6 @@ refuses to publish a version without a matching entry below.
   receipt must hold the case's root span and at least as many spans as the case ended, which the
   checkpoint records at the flush. One case's telemetry failure no longer flags the cases running
   beside it.
-
-#### Added
 
 - `EvaluationClient` sends a read, or a mutation the server deduplicates by its idempotency key
   (the local worker's register, claim, heartbeat, completion and capability routes included),
