@@ -65,7 +65,8 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Run an existing local agent callback against a fresh hosted simulated world.
 
 The published TypeScript package is [`0.12.0`](https://www.npmjs.com/package/@hue-run/sdk), with
-a local worker that retries transient failures and resumes a failed run from its checkpoints,
+a local worker that retries transient failures and, in the same process, resumes a transiently
+failed claimed run from its checkpoints before giving it up as attention,
 export failures attributed to the traces they concerned,
 `hue mcp install` sign-in with Hue (the default for Claude Code, Codex and Conductor), Conductor, project pinning, read-only and current toolset options (every tool for agents that search their own tools), live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
 `runLocalAgent()`, V2 environments and the local
