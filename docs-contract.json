@@ -103,7 +103,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.6.2"
+      "version": "0.6.3"
     },
     "typescript": {
       "bins": {
