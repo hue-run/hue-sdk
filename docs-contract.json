@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:aaf1f2ebbffa0e85813d0f664af4b7ab1ea371e21170acea6b2da958c26d9284",
+    "sha256": "sha256:28e2eb72a1f0d2dbe2c448628454207a20d7dd30f56ba396a2615f25451d11bc",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -85,6 +85,7 @@
             "builtin_scorers",
             "builtins",
             "define_local_scorer",
+            "is_transient_api_error",
             "rescore",
             "run_experiment",
             "score_locally"
@@ -102,7 +103,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.6.2"
+      "version": "0.6.3"
     },
     "typescript": {
       "bins": {
