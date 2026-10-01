@@ -115,6 +115,14 @@ variables to the agent.
   or start a new Codex session. After `--read-only`, the key steps name
   `hue login --keys coding-agent`, which accepts a **Read** key, instead of suggesting sign-in.
 
+#### Changed
+
+- `hue eval` names an inconclusive case apart from a skipped one: a case whose deciding evaluator
+  could not decide it (its result is skipped with an explanation that begins `Inconclusive:`, as
+  when a required judge could not run or answer) shows `INCONCLUSIVE` in the verdict table and is
+  counted as `inconclusive`, not `skipped`, in the summary line. Exit codes are unchanged: such a
+  case still exits `1`.
+
 #### Fixed
 
 - Security: `hue eval --command` no longer passes a world variable inherited from its own
