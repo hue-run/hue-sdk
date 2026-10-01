@@ -337,6 +337,9 @@ def run_experiment(
                     "startKey": str(uuid4()),
                     "traceExternalId": span.trace_id,
                 }
+                # The case's trace keeps its ended-span count until the case completes, so a
+                # pending completion declares every span this process ended in it.
+                hue.watch_trace(span.trace_id)
                 store.write(file, start)
                 execution = client.start_execution(
                     experiment_id,
@@ -474,6 +477,9 @@ def run_experiment(
             for score in checkpoint["scores"]:
                 score["payload"]["evaluationItemId"] = checkpoint["completion"]["evaluationItemId"]
             save()
+            trace_external_id = checkpoint.get("traceExternalId")
+            if isinstance(trace_external_id, str):
+                hue.unwatch_trace(trace_external_id)
         _upload(client, report.run_id, checkpoint["scores"], save)
         with report_lock:
             report.subject_ids.append(checkpoint["completion"]["subjectId"])

@@ -31,6 +31,8 @@ HUE_TRACER_SCOPE = "hue-run"
 LIVE_SPAN_LIMIT = 1024
 # Traces whose ended-span counts are kept for the evaluation runner.
 _ENDED_TRACES_LIMIT = 4096
+# Traces a runner may watch at once: its cases in flight, far below the table's bound.
+_WATCHED_TRACES_LIMIT = 1024
 LIVE_SPAN_INTERVAL_SECONDS = 0.5
 # Lets start-time helper input (``set_input`` just after entering) reach the placeholder.
 LIVE_SPAN_MIN_AGE_SECONDS = 0.1
@@ -73,22 +75,24 @@ class _BoundedProcessor:
         with self._condition:
             return self._dropped, self._pending_records + self._admissions, self._pending_bytes
 
-    def _enqueue(self, item: Any) -> None:
+    def _enqueue(self, item: Any) -> bool:
+        """Queue the record; True when it was accepted, False when it was dropped or refused."""
         if self._pid != os.getpid():
-            return
+            return False
         admitted = False
+        queued = False
         try:
             if instrumentation_suppressed():
-                return
+                return False
             # Reject oversized/invalid records before retaining them. The budget
             # includes in-flight records, so a stalled receiver cannot grow it.
             with self._condition:
                 if self._closed:
                     self._dropped += 1
-                    return
+                    return False
                 if self._pending_records + self._admissions >= self._max_records:
                     self._dropped += 1
-                    return
+                    return False
                 # Reserve a record slot before snapshotting outside the lock.
                 # Flush must also wait for this admission to finish or be dropped.
                 self._admissions += 1
@@ -103,7 +107,7 @@ class _BoundedProcessor:
                 self._condition.notify_all()
                 if self._closed:
                     self._dropped += 1
-                    return
+                    return False
                 if size > MAX_BATCH_BYTES:
                     self._dropped += 1
                     self._exporter.record_failure()
@@ -117,6 +121,7 @@ class _BoundedProcessor:
                     self._pending_records += 1
                     self._pending_bytes += size
                     self._condition.notify_all()
+                    queued = True
         except Exception:
             with self._condition:
                 self._dropped += 1
@@ -126,6 +131,7 @@ class _BoundedProcessor:
                 with self._condition:
                     self._admissions -= 1
                     self._condition.notify_all()
+        return queued
 
     def _advisory(self, item: Any) -> bool:
         return False
@@ -306,12 +312,29 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         # Sampled spans ended per trace, for the evaluation runner to tell Hue how many spans a
         # case's trace holds when it completes with the trace pending; bounded, oldest traces out.
         self._ended_by_trace: dict[int, int] = {}
+        # Traces a runner is completing: their counts are never evicted while watched.
+        self._watched_traces: set[int] = set()
         super().__init__(exporter, encode, max_records, max_bytes, capture_content)
 
     def spans_ended(self, trace_id: int) -> int | None:
         """How many sampled spans of ``trace_id`` have ended in this process; None when the
-        trace is unknown here (another process ended it, or it aged out of the bounded table)."""
-        return self._ended_by_trace.get(trace_id)
+        trace is unknown here (another process ended it, or it aged out of the bounded table
+        before anyone watched it)."""
+        with self._condition:
+            return self._ended_by_trace.get(trace_id)
+
+    def watch_trace(self, trace_id: int) -> None:
+        """Keep ``trace_id``'s count through evictions while a runner completes its case; at most
+        ``_WATCHED_TRACES_LIMIT`` traces are watched at once."""
+        with self._condition:
+            if len(self._watched_traces) < _WATCHED_TRACES_LIMIT:
+                self._watched_traces.add(trace_id)
+
+    def unwatch_trace(self, trace_id: int) -> None:
+        """Forget ``trace_id`` once its case completed."""
+        with self._condition:
+            self._watched_traces.discard(trace_id)
+            self._ended_by_trace.pop(trace_id, None)
 
     @property
     def _live_active(self) -> bool:
@@ -361,16 +384,23 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
                     self._live.pop(span.context.span_id, None)
             except Exception:
                 pass
-        if span.context and span.context.trace_flags.sampled:
+        if span.context and span.context.trace_flags.sampled and self._enqueue(span):
+            # Only a span the queue accepted counts: a dropped one never reaches Hue, so a
+            # declared count that included it could never be met. Under the queue's lock, so
+            # two spans of one trace ending together both count.
             try:
                 trace_id = span.context.trace_id
-                count = self._ended_by_trace.pop(trace_id, 0) + 1
-                self._ended_by_trace[trace_id] = count
-                while len(self._ended_by_trace) > _ENDED_TRACES_LIMIT:
-                    del self._ended_by_trace[next(iter(self._ended_by_trace))]
+                with self._condition:
+                    count = self._ended_by_trace.pop(trace_id, 0) + 1
+                    self._ended_by_trace[trace_id] = count
+                    if len(self._ended_by_trace) > _ENDED_TRACES_LIMIT:
+                        for old in list(self._ended_by_trace):
+                            if len(self._ended_by_trace) <= _ENDED_TRACES_LIMIT:
+                                break
+                            if old not in self._watched_traces:
+                                del self._ended_by_trace[old]
             except Exception:
                 pass
-            self._enqueue(span)
 
     def _advisory(self, item: Any) -> bool:
         return isinstance(item, PendingSpan)

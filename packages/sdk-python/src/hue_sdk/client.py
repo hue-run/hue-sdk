@@ -1058,6 +1058,20 @@ class Hue:
         except (ValueError, AttributeError):
             return None
 
+    def watch_trace(self, trace_id: str) -> None:
+        """Keep the trace's ended-span count while its case completes (``spans_ended``)."""
+        try:
+            self._span_processor.watch_trace(int(trace_id, 16))
+        except (ValueError, AttributeError):
+            pass
+
+    def unwatch_trace(self, trace_id: str) -> None:
+        """Forget the trace's count once its case completed."""
+        try:
+            self._span_processor.unwatch_trace(int(trace_id, 16))
+        except (ValueError, AttributeError):
+            pass
+
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         """Drain pending telemetry. False means a timeout or a recorded export failure.
 
