@@ -44,7 +44,9 @@ from .transport import (
     MAX_CONTENT_BYTES,
     BoundedLogExporter,
     BoundedSpanExporter,
+    ExportIssue,
     ExportStatus,
+    IssueLedger,
     SafeSession,
     normalize_base_url,
     reject_positional_api_key,
@@ -646,11 +648,12 @@ class Hue:
         )
         self.tracer_provider = sdk_tracer_provider
         self.logger_provider = sdk_logger_provider
+        self._ledger = IssueLedger()
         self._span_exporter = BoundedSpanExporter(
-            f"{self.base_url}/api/v1/otlp/v1/traces", self._headers, self._timeout
+            f"{self.base_url}/api/v1/otlp/v1/traces", self._headers, self._timeout, self._ledger
         )
         self._log_exporter = BoundedLogExporter(
-            f"{self.base_url}/api/v1/otlp/v1/logs", self._headers, self._timeout
+            f"{self.base_url}/api/v1/otlp/v1/logs", self._headers, self._timeout, self._ledger
         )
         self._span_processor = BoundedSpanProcessor(
             self._span_exporter,
@@ -997,6 +1000,23 @@ class Hue:
             return Project(data["id"], data["name"], data["slug"], data["organizationId"])
         except (requests.RequestException, ValueError):
             raise ProjectValidationError("Hue project validation request failed.") from None
+
+    def export_issues(self) -> tuple[ExportIssue, ...]:
+        """The export failures this client recorded, oldest first, each naming the traces of the
+        records it concerned; bounded to the most recent ``MAX_RETAINED_ISSUES``."""
+        return self._ledger.issues()
+
+    def export_failure_sequence(self) -> int:
+        """The sequence number of the last export failure recorded; compare two readings to
+        learn whether a failure happened between them."""
+        return self._ledger.failure_sequence
+
+    def spans_ended(self, trace_id: str) -> int | None:
+        """How many spans of the trace ended in this process, the count a trace receipt is held
+        to; ``None`` when telemetry is off or the trace has been forgotten."""
+        if not self.enabled or self._pid != os.getpid():
+            return None
+        return self._span_processor.spans_ended(trace_id)
 
     @property
     def export_status(self) -> ExportStatus:

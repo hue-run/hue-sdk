@@ -1109,6 +1109,30 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### Unreleased
 
+#### Added
+
+- `EvaluationClient` sends a read, or a mutation the server deduplicates by the `idempotencyKey`
+  in its body (`create_experiment`, `start_execution`, `complete_execution`, `finish_experiment`,
+  `submit_results`, `create_run`, `start_run_execution`, `complete_run_execution`, `finish_run`,
+  `create_scoring`, `submit_scoring_results`, `create_judge_jobs` and their keyed peers), again
+  after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up to
+  `max_attempts` (default 4, 1–10) times with a jittered backoff, as the TypeScript SDK does.
+  `is_transient_api_error` names those failures; `HueApiError` carries Hue's `X-Hue-Diagnostic`
+  code as `diagnostic`, the wait of a long `Retry-After` as `retry_after_seconds`, and
+  `reason="malformed_response"` for a body the client refused, which is not sent again. A
+  mutation without a key is still sent once.
+- Export issues name the traces of the records they concerned (`Hue.export_issues()`, each an
+  `ExportIssue` with `trace_ids` of up to 64 traces, `Hue.export_failure_sequence()` and
+  `Hue.spans_ended(trace_id)`). `run_experiment` reads them after each case's flush: a failure
+  that names the case's trace marks that case `failed` (its evidence is incomplete, and resume
+  refuses it), one that names only other traces leaves it accepted, and one that names no trace,
+  or a flush that did not succeed without a new failure, is decided by the case's trace receipt,
+  at once or on resume for a checkpoint still `pending`: the receipt must hold the case's root
+  span and at least as many spans as the case ended, which the checkpoint records at the flush.
+  One case's telemetry failure no longer fails the cases running beside it, and a client's
+  earlier failure no longer fails every later case; `Hue.force_flush()` keeps its cumulative
+  answer.
+
 ### [0.6.2] - 2026-09-27
 
 #### Added

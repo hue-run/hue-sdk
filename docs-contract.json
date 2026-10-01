@@ -85,6 +85,7 @@
             "builtin_scorers",
             "builtins",
             "define_local_scorer",
+            "is_transient_api_error",
             "rescore",
             "run_experiment",
             "score_locally"

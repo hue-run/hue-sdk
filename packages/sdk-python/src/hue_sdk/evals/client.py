@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -14,15 +15,74 @@ from ._json import MISSING, encode, json_value, uuid
 
 
 class HueApiError(RuntimeError):
-    status: int | None
+    """A failed evaluation API request; the message is fixed and never includes response text.
 
-    def __init__(self, status: int | None = None) -> None:
+    ``status`` is the HTTP status when Hue answered, ``None`` for a connection, timeout or
+    parsing failure. ``retry_after_seconds`` is the wait Hue asked for (``Retry-After`` on a 429
+    or 503) when it said. ``diagnostic`` is Hue's ``X-Hue-Diagnostic`` code, which tells refusals
+    of one status apart, when it sent one.
+    """
+
+    status: int | None
+    retry_after_seconds: int | None
+    diagnostic: str | None
+    reason: str | None
+
+    def __init__(
+        self,
+        status: int | None = None,
+        retry_after_seconds: int | None = None,
+        diagnostic: str | None = None,
+        *,
+        reason: str | None = None,
+    ) -> None:
         self.status = status
+        self.retry_after_seconds = retry_after_seconds
+        self.diagnostic = diagnostic
+        # ``malformed_response``: Hue answered, but with a body the client refused (oversized or
+        # not the JSON it expected); sending the request again would not change it.
+        self.reason = reason
         super().__init__(
-            f"Hue API request failed (HTTP {status})."
+            f"Hue API request failed (HTTP {status}{f', {diagnostic}' if diagnostic else ''})."
             if status
             else "Hue API connection or response failed."
         )
+
+
+_TRANSIENT_STATUSES = frozenset((408, 429, 500, 502, 503, 504))
+
+
+def is_transient_api_error(error: object) -> bool:
+    """Whether the same request, sent again, can succeed.
+
+    A connection failure, a timeout, or a status Hue answers while it cannot act yet (408, 429,
+    500, 502, 503, 504) is transient. A refusal Hue decided on, any other 4xx, is not, and no
+    number of attempts changes it.
+    """
+    return (
+        isinstance(error, HueApiError)
+        and error.reason is None
+        and (error.status is None or error.status in _TRANSIENT_STATUSES)
+    )
+
+
+_DIAGNOSTIC = re.compile(r"[a-z_]{1,64}")
+
+
+def _diagnostic_of(response: requests.Response) -> str | None:
+    value = response.headers.get("X-Hue-Diagnostic")
+    return value if value is not None and _DIAGNOSTIC.fullmatch(value) else None
+
+
+def _retryable(method: str, body: Any) -> bool:
+    """Whether a request may be sent again after a transient failure.
+
+    Every read, and a mutation the server deduplicates by the ``idempotencyKey`` in its body. A
+    mutation without a key is sent once; its caller resolves the outcome before asking again.
+    """
+    if method == "GET":
+        return True
+    return isinstance(body, dict) and isinstance(body.get("idempotencyKey"), str)
 
 
 _REGISTRY_FIELD_ALIASES = (
@@ -101,6 +161,16 @@ _REFUSAL_RETRIES = 4
 _MAX_REFUSAL_RETRY_AFTER_SECONDS = 5
 
 
+def _retry_after_seconds(response: requests.Response) -> int | None:
+    """The whole-second ``Retry-After`` of a 429 or 503, whatever its length, when Hue sent one."""
+    if response.status_code not in (429, 503):
+        return None
+    header = (response.headers.get("Retry-After") or "").strip()
+    if not (header.isascii() and header.isdigit()) or len(header) > 6:
+        return None
+    return int(header)
+
+
 def _refusal_retry_after(response: requests.Response) -> int | None:
     """The whole-second ``Retry-After`` of a 429 or 503 asking for at most 5 seconds.
 
@@ -118,10 +188,15 @@ def _refusal_retry_after(response: requests.Response) -> int | None:
 
 
 class EvaluationClient:
-    """Project-key v1 client. Mutations never retry implicitly; retain their idempotency keys.
+    """Project-key v1 client. A mutation without an idempotency key is sent once.
 
-    The one exception is a request Hue refused before acting on it with a short ``Retry-After``
-    (HTTP 429 or 503, at most 5 seconds): it is sent again after that wait, up to four times.
+    A request Hue refused before acting on it with a short ``Retry-After`` (HTTP 429 or 503, at
+    most 5 seconds) is sent again after that wait, up to four times, whatever its method. A read,
+    or a mutation the server deduplicates by the ``idempotencyKey`` in its body, is also sent
+    again after a connection failure, a timeout or a 408 or 5xx that carried no ``Retry-After``,
+    up to ``max_attempts`` (default 4) times with a jittered backoff; ``is_transient_api_error``
+    names those failures. A mutation without a key is never sent again implicitly; its caller
+    retains the key it would send and resolves the outcome first.
 
     ``EvaluationClient(api_key=...)`` uses Hue Cloud. ``base_url`` overrides the origin;
     existing ``EvaluationClient(base_url, api_key)`` calls remain supported, and a bare key
@@ -138,6 +213,7 @@ class EvaluationClient:
         api_key: str | None = None,
         *,
         timeout_seconds: float = 10,
+        max_attempts: int = 4,
     ) -> None:
         reject_positional_api_key(base_url)
         self.base_url = normalize_base_url(base_url)
@@ -149,14 +225,42 @@ class EvaluationClient:
             or timeout_seconds <= 0
         ):
             raise ValueError("timeout_seconds must be positive and finite.")
+        if (
+            isinstance(max_attempts, bool)
+            or type(max_attempts) is not int
+            or not 1 <= max_attempts <= 10
+        ):
+            raise ValueError("max_attempts must be 1–10.")
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._timeout = timeout_seconds
+        self._max_attempts = max_attempts
 
     def __repr__(self) -> str:
         return "EvaluationClient()"
 
     def _request(self, method: str, path: str, body: Any = MISSING) -> Any:
         payload = None if body is MISSING else encode(json_value(body, 1024 * 1024))
+        attempts = self._max_attempts if _retryable(method, body) else 1
+        attempt = 1
+        while True:
+            try:
+                return self._request_once(method, path, payload)
+            except HueApiError as error:
+                # A refusal that carried ``Retry-After`` was decided in ``_request_once``: sent
+                # again while the wait was short, the caller's error when it was long. This loop
+                # covers the failures Hue did not time: a lost connection, a timeout, a 5xx or
+                # 408 without the header.
+                if (
+                    not is_transient_api_error(error)
+                    or error.retry_after_seconds is not None
+                    or attempt >= attempts
+                ):
+                    raise
+            backoff = min(0.1 * 2 ** (attempt - 1), 2.0)
+            time.sleep(backoff + random.random() * backoff)
+            attempt += 1
+
+    def _request_once(self, method: str, path: str, payload: bytes | None) -> Any:
         try:
             attempt = 0
             while True:
@@ -175,13 +279,17 @@ class EvaluationClient:
                     delay = _refusal_retry_after(response) if attempt < _REFUSAL_RETRIES else None
                     if delay is None:
                         if not 200 <= response.status_code < 300:
-                            raise HueApiError(response.status_code)
+                            raise HueApiError(
+                                response.status_code,
+                                _retry_after_seconds(response),
+                                _diagnostic_of(response),
+                            )
                         chunks: list[bytes] = []
                         size = 0
                         for chunk in response.iter_content(chunk_size=8192):
                             size += len(chunk)
                             if size > 4 * 1024 * 1024:
-                                raise HueApiError()
+                                raise HueApiError(reason="malformed_response")
                             chunks.append(chunk)
                         return json.loads(
                             b"".join(chunks).decode("utf-8"), parse_constant=_invalid_constant
@@ -191,8 +299,10 @@ class EvaluationClient:
                 attempt += 1
         except HueApiError:
             raise
-        except (requests.RequestException, ValueError, UnicodeError, RecursionError):
+        except requests.RequestException:
             raise HueApiError() from None
+        except (ValueError, UnicodeError, RecursionError):
+            raise HueApiError(reason="malformed_response") from None
 
     @staticmethod
     def _page(after: str | None, limit: int) -> str:
