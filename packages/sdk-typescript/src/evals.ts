@@ -23,6 +23,7 @@ export type {
   RunnerReport,
   TelemetryIssueCount,
   TelemetryNotAccepted,
+  TracePending,
 } from "./evals/runner.js";
 export { TargetResult, withFiles } from "./evals/types.js";
 export {
