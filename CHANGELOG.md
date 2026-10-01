@@ -18,12 +18,13 @@ refuses to publish a version without a matching entry below.
   `lastError` and `errors` chains, beside the agent's own `TargetError`. Hue counts the three as
   infrastructure and leaves them out of the agent's pass rate.
 - A status Hue's own clients (`HueApiError`, `HueEnvironmentError`, `HueConnectionError`) were
-  refused with that is neither a success nor retryable, a 3xx or 4xx such as a key, a project, an
-  environment version or a world Hue refused, or an endpoint that redirected, completes the case
-  as `ConfigurationRejected` instead of `TargetError`: Hue counts it as configuration and leaves
-  it out of the agent's pass rate, so an error from Hue's own clients is never filed as the
-  agent's. `TypedError.class` lets a runner of your own that
-  completes an execution with a `type` of its own say which class Hue files it under.
+  refused with that is neither a success nor retryable, a 4xx such as a key, a project, an
+  environment version or a world Hue refused, completes the case as `ConfigurationRejected`
+  instead of `TargetError`: Hue counts it as configuration and leaves it out of the agent's pass
+  rate, so an error from Hue's own clients is never filed as the agent's. The clients fetch with
+  `redirect: "error"`, so a redirect from the configured endpoint surfaces without a status, as
+  `ConnectionFailed`. `TypedError.class` lets a runner of your own that completes an execution
+  with a `type` of its own say which class Hue files it under.
 - `traceNotAccepted: "pending"` on `runExperiment` and `runSimulation`, and `hue eval
   --trace-not-accepted pending`: a case whose telemetry Hue did not accept in time completes in
   its true state with `traceEvidence: "pending"` and the count of spans the case ended
