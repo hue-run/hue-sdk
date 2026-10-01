@@ -371,6 +371,8 @@ files directory must be owned by the current user and closed to everyone else (m
 target again; if result content is not persisted, the JSON output cannot be reconstructed and the
 case is reported as uncertain.
 
+A target that throws completes its execution as `error` with a type that says what stopped the case. `TargetError` is the agent's own failure. A service the agent called that refused with a retryable status (408, 429 or 5xx, such as a model provider's rate limit or outage, when the error carries the exchange: headers, a response or a URL) is `ServiceRefused`; a connection that failed (`ECONNRESET`, `ECONNREFUSED`, `fetch failed`, an `APIConnectionError`) is `ConnectionFailed`; a call that timed out (`TimeoutError`, `APITimeoutError`) is `TimedOut`. The runner reads the error's `cause`, `lastError` and `errors` chains for these signals. Hue counts the three as infrastructure and leaves them out of the agent's pass rate; a refusal the agent caused (a 400) stays `TargetError`.
+
 `rescore` downloads a subject's frozen `files` — the pinned inputs and the generated outputs, with
 `role: "output"` for the documents a run produced — so a code evaluator can grade saved documents
 without invoking an agent. Local scorers receive them as `context.files` exactly as they do during

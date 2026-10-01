@@ -19,6 +19,7 @@ from hue_sdk.environment import (
     EnvironmentClient,
     EnvironmentSealTimeoutError,
     HueEnvironmentError,
+    WorldCreationError,
     agent_environment,
     is_hue_control_plane_credential,
     legacy_mcp_capability,
@@ -452,3 +453,29 @@ def test_wait_for_seal_rejects_non_transient_read(monkeypatch):
     with pytest.raises(HueEnvironmentError) as refused:
         client.wait_for_seal(RUN_ID)
     assert refused.value.status == 404
+
+
+def test_a_world_that_cannot_be_created_raises_a_world_creation_error(receiver, backoff):
+    client = EnvironmentClient(receiver.url, KEY, max_attempts=2)
+    reply(
+        receiver,
+        {"error": "refused"},
+        status=409,
+        **{"X-Hue-Diagnostic": "simulation_gateway_required"},
+    )
+    with pytest.raises(WorldCreationError) as refused:
+        client.create_run(idempotency_key="k", environment_version_id=VERSION_ID)
+    # Still a HueEnvironmentError, with the refusal's status, diagnostic and message.
+    assert isinstance(refused.value, HueEnvironmentError)
+    assert refused.value.status == 409
+    assert refused.value.diagnostic == "simulation_gateway_required"
+    for _ in range(2):
+        reply(receiver, {"error": "busy"}, status=503, **{"Retry-After": "1"})
+    with pytest.raises(WorldCreationError) as unavailable:
+        client.create_run(idempotency_key="k", environment_version_id=VERSION_ID)
+    assert unavailable.value.status == 503 and unavailable.value.retry_after == 1.0
+    # Other requests keep their own class.
+    reply(receiver, {"error": "sealed"}, status=409)
+    with pytest.raises(HueEnvironmentError) as other:
+        client.finish_run(RUN_ID, idempotency_key="f", status="completed")
+    assert type(other.value) is HueEnvironmentError

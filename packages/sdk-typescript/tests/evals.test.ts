@@ -833,6 +833,64 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("a service the agent called that refused, dropped the connection or timed out is recorded by what failed", async () => {
+    // Each pair of throws runs as one experiment of the fixture's two cases.
+    const runs: [unknown, unknown, string[]][] = [
+      [
+        // A model provider's rate limit, as the OpenAI and Anthropic SDKs throw it.
+        Object.assign(new Error("429 Too Many Requests"), {
+          status: 429,
+          headers: { "retry-after": "1" },
+        }),
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
+            code: "ECONNREFUSED",
+          }),
+        }),
+        ["ServiceRefused", "ConnectionFailed"],
+      ],
+      [
+        new Error("The model call failed", {
+          cause: new DOMException("The operation timed out", "TimeoutError"),
+        }),
+        // A refusal the agent caused is its own failure.
+        Object.assign(new Error("400 Bad Request"), { status: 400, headers: {} }),
+        ["TimedOut", "TargetError"],
+      ],
+    ];
+    for (const [first, second, expected] of runs) {
+      const f = fixture();
+      const exp = f.create();
+      const hue = createHue({
+        apiKey: key,
+        baseUrl: f.baseUrl,
+        serviceName: "service-failures",
+        captureContent: false,
+      });
+      let calls = 0;
+      try {
+        await runExperiment({
+          client: f.client,
+          hue,
+          experimentId: exp.id,
+          checkpointDirectory: await directory(),
+          persistResultContent: false,
+          traceEvidence: { mode: "omit" as const, reason: "Synthetic service failures" },
+          target: async () => {
+            calls++;
+            throw calls === 1 ? first : second;
+          },
+        });
+        const types = f.requests
+          .filter((request) => request.path.endsWith("/complete"))
+          .map((request) => (request.body.error as { type: string } | undefined)?.type);
+        expect(types).toEqual(expected);
+      } finally {
+        await hue.shutdown();
+        f.server.stop(true);
+      }
+    }
+  });
   test("under traceNotAccepted pending a case whose own root-span batch was refused completes with its trace pending, beside the case that landed", async () => {
     const f = fixture();
     const exp = f.create();

@@ -12,6 +12,11 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- A target's throw is completed with an error type that says what stopped the case: a service the
+  agent called that refused with a retryable status (`ServiceRefused`), whose connection failed
+  (`ConnectionFailed`) or that timed out (`TimedOut`), read from the error and its `cause`,
+  `lastError` and `errors` chains, beside the agent's own `TargetError`. Hue counts the three as
+  infrastructure and leaves them out of the agent's pass rate.
 - `traceNotAccepted: "pending"` on `runExperiment` and `runSimulation`, and `hue eval
   --trace-not-accepted pending`: a case whose telemetry Hue did not accept in time completes in
   its true state with `traceEvidence: "pending"` and the count of spans the case ended
@@ -1158,6 +1163,14 @@ it or every case that follows. Additive; no capture, default budget or wire chan
   checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
   every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
   completes the same way. Only `omit` carries a reason.
+
+#### Added
+
+- A target's exception is completed with an error type that says what stopped the case:
+  `EnvironmentSetupFailed` when `create_run` could not create the world (the new
+  `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
+  service the agent called, `ConnectionFailed` and `TimedOut`, beside the agent's own
+  `TargetError`. Hue counts the service failures as infrastructure.
 
 ### [0.6.2] - 2026-09-27
 

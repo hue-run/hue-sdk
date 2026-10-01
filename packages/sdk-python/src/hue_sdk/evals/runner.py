@@ -15,6 +15,7 @@ from opentelemetry.context import Context
 
 from ..client import Hue
 from ._checkpoint import CheckpointStore
+from ._failure import error_type
 from ._json import (
     MISSING,
     VALUE_BYTES,
@@ -525,10 +526,12 @@ def run_experiment(
                     **(
                         {
                             "error": {
+                                # Why the case stopped: an output past its bound, the agent, a
+                                # world never created, or a service it called (`_failure.py`).
                                 "type": (
                                     "OutputTooLarge"
                                     if isinstance(target_error, OutputTooLargeError)
-                                    else "TargetError"
+                                    else error_type(target_error)
                                 ),
                                 **(
                                     {"message": _error_message(target_error)}

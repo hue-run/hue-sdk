@@ -62,6 +62,12 @@ class HueEnvironmentError(RuntimeError):
         )
 
 
+class WorldCreationError(HueEnvironmentError):
+    """``create_run`` could not create the world, so no agent acted in it. Raised out of an
+    experiment target, the runner records it as ``EnvironmentSetupFailed``, an infrastructure
+    error, not as the agent failing."""
+
+
 _DIAGNOSTIC = re.compile(r"^[a-z_]{1,64}$")
 
 
@@ -324,20 +330,23 @@ class EnvironmentClient:
             isinstance(agent_revision, str) and 1 <= len(agent_revision) <= 256
         ):
             raise ValueError("agent_revision must be 1–256 characters.")
-        return self._request(
-            "POST",
-            "/environment-runs",
-            {
-                "idempotencyKey": idempotency_key,
-                "environmentVersionId": uuid(environment_version_id),
-                **({"executionId": uuid(execution_id)} if execution_id is not None else {}),
-                **({"seed": seed} if seed is not None else {}),
-                **({"maxSteps": max_steps} if max_steps is not None else {}),
-                **({"ttlSeconds": ttl_seconds} if ttl_seconds is not None else {}),
-                **({"traceparent": traceparent} if traceparent is not None else {}),
-                **({"agentRevision": agent_revision} if agent_revision is not None else {}),
-            },
-        )
+        try:
+            return self._request(
+                "POST",
+                "/environment-runs",
+                {
+                    "idempotencyKey": idempotency_key,
+                    "environmentVersionId": uuid(environment_version_id),
+                    **({"executionId": uuid(execution_id)} if execution_id is not None else {}),
+                    **({"seed": seed} if seed is not None else {}),
+                    **({"maxSteps": max_steps} if max_steps is not None else {}),
+                    **({"ttlSeconds": ttl_seconds} if ttl_seconds is not None else {}),
+                    **({"traceparent": traceparent} if traceparent is not None else {}),
+                    **({"agentRevision": agent_revision} if agent_revision is not None else {}),
+                },
+            )
+        except HueEnvironmentError as error:
+            raise WorldCreationError(error.status, error.retry_after, error.diagnostic) from None
 
     def get_run(self, run_id: str) -> RunState:
         run = self._request("GET", f"/environment-runs/{uuid(run_id)}")
