@@ -5,9 +5,10 @@
 it: ``ServiceRefused`` for a retryable HTTP status (408, 429 or 5xx) from a model provider, Hue or
 another service, such as a rate limit or an outage; ``ConnectionFailed`` for a connection that
 failed; ``TimedOut`` for a call that timed out. Hue classes all four as infrastructure.
-``ConfigurationRejected`` for any other status Hue's own clients answered with (a 4xx: a key, a
-project, an environment version or a world Hue refused), the caller's configuration, which Hue
-classes as configuration; an error from Hue's own clients is never the agent's. ``TargetError``
+``ConfigurationRejected`` for any other status Hue's own clients answered with (a 3xx or 4xx: a
+key, a project, an environment version or a world Hue refused, an endpoint that redirected), the
+caller's configuration, which Hue classes as configuration; an error from Hue's own clients is
+never the agent's. ``TargetError``
 is the agent's own failure. Errors of optional dependencies (httpx, requests, openai, anthropic)
 are recognized by class name, never imported.
 """
@@ -133,13 +134,19 @@ def _refused(error: BaseException) -> bool:
 
 
 def _rejected(error: BaseException) -> bool:
-    """A status Hue's own client answered with that is not retryable: Hue refused the caller's
-    key, project, environment version or world, so the case could not run as configured. Only
-    Hue's clients show it; another service's 4xx stays the agent's."""
+    """A status Hue's own client answered with that is neither a success nor retryable, a 3xx or
+    a 4xx: Hue refused the caller's key, project, environment version or world, or the
+    configured endpoint redirected (the clients follow none), so the case could not run as
+    configured. Only Hue's clients show it; another service's 4xx stays the agent's."""
     if not _hue_error(error):
         return False
     status = getattr(error, "status", None)
-    return isinstance(status, int) and not isinstance(status, bool) and not _retryable(status)
+    return (
+        isinstance(status, int)
+        and not isinstance(status, bool)
+        and 300 <= status < 500
+        and not _retryable(status)
+    )
 
 
 def _any(errors: list[BaseException], signal: Callable[[BaseException], bool]) -> bool:

@@ -7,8 +7,9 @@ import { HueApiError } from "./client.js";
  * agent's own code stopped it: `ServiceRefused` for a retryable HTTP status (408, 429 or 5xx) a
  * model provider, Hue or another service answered with, such as a rate limit or an outage;
  * `ConnectionFailed` for a connection that failed; `TimedOut` for a call that timed out; and
- * `ConfigurationRejected` for any other status Hue's own clients answered with (a 4xx: a key, a
- * project, an environment version or a world Hue refused), which is the caller's configuration.
+ * `ConfigurationRejected` for any other status Hue's own clients answered with (a 3xx or 4xx: a
+ * key, a project, an environment version or a world Hue refused, an endpoint that redirected),
+ * which is the caller's configuration.
  * The runner records the type on the execution in place of `TargetError`; Hue classes the first
  * three as infrastructure and the last as configuration, so an error from Hue's own clients is
  * never filed as the agent's. Anything else is the agent's own error.
@@ -147,11 +148,19 @@ function refused(error: object) {
       retryable(answered.statusCode))
   );
 }
-/** A status Hue's own client answered with that is not retryable: Hue refused the caller's key,
- * project, environment version or world, so the case could not run as configured. Only Hue's
- * clients show it; another service's 4xx stays the agent's. */
+/** A status Hue's own client answered with that is neither a success nor retryable, a 3xx or a
+ * 4xx: Hue refused the caller's key, project, environment version or world, or the configured
+ * endpoint redirected, so the case could not run as configured. Only Hue's clients show it;
+ * another service's 4xx stays the agent's. */
 function rejected(error: object) {
-  return hueClientError(error) && typeof error.status === "number" && !retryable(error.status);
+  const { status } = error as { status?: unknown };
+  return (
+    hueClientError(error) &&
+    typeof status === "number" &&
+    status >= 300 &&
+    status < 500 &&
+    !retryable(status)
+  );
 }
 /** Whether any error shows the signal; one whose properties throw when read shows none. */
 const any = (errors: object[], signal: (error: object) => boolean) =>

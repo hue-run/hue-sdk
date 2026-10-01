@@ -68,6 +68,10 @@ describe("service failures a target's throw shows", () => {
       new HueConnectionError("Hue rejected the project connection", 403),
     ])
       expect(serviceFailureType(error)).toBe("ConfigurationRejected");
+    // A redirect the configured endpoint answered is the endpoint's configuration too; the
+    // TypeScript clients fetch with `redirect: "error"`, so one surfaces without a status, as a
+    // failed connection, but the rule holds for a status that does arrive.
+    expect(serviceFailureType(new HueApiError(302))).toBe("ConfigurationRejected");
     // Through a chain, and only from Hue's clients: another service's 4xx stays the agent's.
     expect(serviceFailureType(wrapped(new HueApiError(404), 3))).toBe("ConfigurationRejected");
     expect(serviceFailureType(new APIError(404))).toBeNull();

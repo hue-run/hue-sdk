@@ -103,6 +103,9 @@ def test_hue_clients_without_a_response_failed_to_connect_and_retryable_statuses
     ):
         assert error_type(error) == "ConfigurationRejected"
     assert error_type(caused(HueApiError(404), 3)) == "ConfigurationRejected"
+    # The clients follow no redirect and raise the 3xx they got: the configured endpoint's doing.
+    assert error_type(HueApiError(302)) == "ConfigurationRejected"
+    assert error_type(HueEnvironmentError(308)) == "ConfigurationRejected"
     # Only from Hue's clients: another service's 4xx stays the agent's.
     assert error_type(APIStatusError(404)) == "TargetError"
     assert error_type(APIStatusError(401)) == "TargetError"
