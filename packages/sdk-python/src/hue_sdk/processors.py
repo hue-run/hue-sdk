@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from collections import deque
 from collections.abc import Callable
-from threading import Condition, Thread
+from threading import Condition, Lock, Thread
 from time import monotonic
 from typing import Any
 
@@ -36,6 +36,10 @@ LIVE_SPAN_MIN_AGE_SECONDS = 0.1
 # placeholder whose real span is filtered later would read as running until Hue marks it
 # stalled.
 _AI_ATTRIBUTE_PREFIXES = ("gen_ai.", "ai.", "llm.", "traceloop.")
+
+
+# Traces whose ended spans a processor remembers for their receipts.
+MAX_REMEMBERED_TRACES = 10_000
 
 
 class _BoundedProcessor:
@@ -104,7 +108,7 @@ class _BoundedProcessor:
                     return
                 if size > MAX_BATCH_BYTES:
                     self._dropped += 1
-                    self._exporter.record_failure()
+                    self._exporter.record_failure((item,))
                 elif (
                     self._pending_records >= self._max_records
                     or self._pending_bytes + size > self._max_bytes
@@ -118,7 +122,7 @@ class _BoundedProcessor:
         except Exception:
             with self._condition:
                 self._dropped += 1
-            self._exporter.record_failure()
+            self._exporter.record_failure((item,))
         finally:
             if admitted:
                 with self._condition:
@@ -301,7 +305,26 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         self._live_spans = live_spans
         self._live: dict[int, _LiveSpan] = {}
         self._next_tick = 0.0
+        # Spans ended per trace, the count a case's trace receipt is held to; bounded, oldest
+        # traces forgotten first.
+        self._ended: dict[str, int] = {}
+        self._ended_lock = Lock()
         super().__init__(exporter, encode, max_records, max_bytes, capture_content)
+
+    def spans_ended(self, trace_id: str) -> int | None:
+        """How many spans of the trace ended in this process, or ``None`` once forgotten."""
+        with self._ended_lock:
+            return self._ended.get(trace_id)
+
+    def _count_ended(self, span: Any) -> None:
+        try:
+            trace_id = format(span.context.trace_id, "032x")
+        except Exception:
+            return
+        with self._ended_lock:
+            if trace_id not in self._ended and len(self._ended) >= MAX_REMEMBERED_TRACES:
+                del self._ended[next(iter(self._ended))]
+            self._ended[trace_id] = self._ended.get(trace_id, 0) + 1
 
     @property
     def _live_active(self) -> bool:
@@ -352,6 +375,7 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
             except Exception:
                 pass
         if span.context and span.context.trace_flags.sampled:
+            self._count_ended(span)
             self._enqueue(span)
 
     def _advisory(self, item: Any) -> bool:

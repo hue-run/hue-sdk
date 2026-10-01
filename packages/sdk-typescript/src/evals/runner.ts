@@ -252,9 +252,13 @@ export interface RunExperimentOptions extends RunnerOptions {
    * rejects. `"fail_case"` completes the execution as failed instead, with the evidence omitted
    * under the reason `telemetry_not_accepted` and without its output or generated files, so no
    * scorer can pass it; reports it in {@link RunnerReport.telemetryNotAccepted} and goes on with
-   * the other cases.
+   * the other cases. `"pending"` completes the execution in its true state with
+   * `traceEvidence: "pending"` and the count of spans the case ended: Hue scores the sealed world
+   * at once and attaches the trace once it holds every span, or records the evidence omitted a
+   * day later; reports it in {@link RunnerReport.tracePending} and goes on. A saved outcome whose
+   * export the receipt does not accept on resume completes the same way.
    */
-  traceNotAccepted?: "stop" | "fail_case";
+  traceNotAccepted?: "stop" | "fail_case" | "pending";
   /** Called when this call completes a case as failed under `traceNotAccepted: "fail_case"`,
    * before the run goes on, so the failure is known even if a later case stops the run. A call
    * that resumes an already completed case lists it in the report without calling again. */
@@ -284,6 +288,22 @@ export interface RunnerReport {
   /** Cases completed as failed because their telemetry was not accepted, under
    * `traceNotAccepted: "fail_case"`; absent when there were none. */
   telemetryNotAccepted?: TelemetryNotAccepted[];
+  /** Cases completed with their trace evidence pending, under `traceNotAccepted: "pending"`;
+   * absent when there were none. */
+  tracePending?: TracePending[];
+}
+
+/** A case completed with its trace still to arrive. */
+export interface TracePending {
+  /** Frozen case ID. */
+  caseId: string;
+  /** The case's external key. */
+  caseKey: string;
+  /** Execution completed pending. */
+  executionId: string;
+  /** How many spans the case ended, which Hue holds the arriving trace to; absent when the
+   * checkpoint recorded no count. */
+  spanCount?: number;
 }
 
 /** Export issue counts, never content: which signal, what happened, the HTTP status when Hue
@@ -474,6 +494,19 @@ async function pool<T>(
 /** Whether Hue holds the case's telemetry, read from the trace receipt: its root span and at
  * least as many spans as the case ended; false when they are not there by the wait's end or the
  * receipt cannot be read, and for a checkpoint an older runner saved without the span. */
+/** Turn a prepared completion into a pending one: the trace is declared but still to arrive,
+ * and the span count the checkpoint recorded at the flush goes with it, so Hue freezes the trace
+ * only once it holds every span the case ended, never a root span alone. */
+function pendingCompletion(prepared: Prepared) {
+  prepared.complete.traceEvidence = "pending";
+  delete prepared.complete.omissionReason;
+  if (prepared.trace?.spans !== undefined) prepared.complete.traceSpanCount = prepared.trace.spans;
+}
+/** The reverse, once the receipt accepted the trace after all: required evidence, no count. */
+function acceptedCompletion(prepared: Prepared) {
+  prepared.complete.traceEvidence = "required";
+  delete prepared.complete.traceSpanCount;
+}
 async function traceLanded(
   hue: HueClient,
   trace: { traceId: string; spanId: string; spans?: number } | undefined,
@@ -975,7 +1008,16 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
           // The explicitly chosen omission policy can complete without acknowledged telemetry.
           if (options.traceEvidence.mode !== "omit") throw error;
         }
-        if (exportError !== undefined && options.traceEvidence.mode !== "omit") {
+        if (
+          exportError !== undefined &&
+          options.traceEvidence.mode !== "omit" &&
+          options.traceNotAccepted === "pending"
+        ) {
+          // The outcome stands as the target gave it; Hue attaches the trace once it holds
+          // every span the case ended, which the checkpoint's count tells it.
+          pendingCompletion(checkpoint as Prepared);
+          await store.write(file, checkpoint);
+        } else if (exportError !== undefined && options.traceEvidence.mode !== "omit") {
           if (options.traceNotAccepted !== "fail_case") throw exportError;
           // Required evidence that Hue did not accept fails the case rather than leaving its
           // execution started: the outcome is kept, the evidence is declared omitted. Only an
@@ -1021,9 +1063,29 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         (await traceLanded(options.hue, prepared.trace))
       ) {
         prepared.exportState = "accepted";
+        // A completion made pending by an earlier receipt read is required again: the trace
+        // landed, so Hue freezes it at completion as for any accepted case.
+        if (prepared.complete.traceEvidence === "pending") acceptedCompletion(prepared);
         await store.write(file, prepared);
       }
-      if (prepared.exportState !== "accepted" && prepared.complete.traceEvidence !== "omit")
+      // Under the pending policy a saved outcome the receipt does not accept, whether no flush
+      // decided it or an export failure named its trace, completes with the trace pending rather
+      // than being refused: Hue attaches the trace when it arrives in full.
+      if (
+        options.traceNotAccepted === "pending" &&
+        prepared.exportState !== "accepted" &&
+        prepared.exportState !== "not_accepted" &&
+        prepared.complete.traceEvidence !== "omit" &&
+        prepared.complete.traceEvidence !== "pending"
+      ) {
+        pendingCompletion(prepared);
+        await store.write(file, prepared);
+      }
+      if (
+        prepared.exportState !== "accepted" &&
+        prepared.complete.traceEvidence !== "omit" &&
+        prepared.complete.traceEvidence !== "pending"
+      )
         throw new TraceExportUnacknowledgedError(prepared.executionId);
       const save = () => store.write(file, prepared);
       const notAccepted: TelemetryNotAccepted | undefined =
@@ -1047,6 +1109,15 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         if (notAccepted) await options.onTelemetryNotAccepted?.(notAccepted);
       }
       if (notAccepted) (report.telemetryNotAccepted ??= []).push(notAccepted);
+      if (prepared.complete.traceEvidence === "pending")
+        (report.tracePending ??= []).push({
+          caseId: item.id,
+          caseKey: item.externalKey,
+          executionId: prepared.executionId,
+          ...(prepared.complete.traceSpanCount !== undefined
+            ? { spanCount: prepared.complete.traceSpanCount }
+            : {}),
+        });
       const results = await uploadScores(
         options,
         experiment.evaluation.id,

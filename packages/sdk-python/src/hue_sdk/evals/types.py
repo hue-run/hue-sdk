@@ -45,7 +45,11 @@ class TargetContext:
 
 @dataclass(frozen=True)
 class TraceEvidence:
-    mode: Literal["required", "omit"]
+    """``required`` completes only with an acknowledged export; ``omit`` completes without one,
+    with the reason; ``pending`` completes with the trace still to arrive when the export was
+    not acknowledged in time, and Hue attaches the trace once it is complete."""
+
+    mode: Literal["required", "omit", "pending"]
     reason: str | None = None
 
 

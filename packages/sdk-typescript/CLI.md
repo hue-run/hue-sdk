@@ -618,6 +618,11 @@ for example, needs a reviewed `attemptBaselineV2` (see
 registers none, so put `"attemptBaselineV2"` in the run's configuration JSON when you launch the
 run from Hue.
 
+`--trace-not-accepted pending` completes a case whose telemetry Hue did not accept in time in its
+true state with the trace still to arrive, carrying the count of spans the case ended; Hue scores
+the sealed world at once and attaches the trace once its export is complete. The default,
+`fail_case`, completes such a case as failed with its evidence omitted.
+
 A Scenario or eval set whose dataset version is not saved cannot back an experiment: the command
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`

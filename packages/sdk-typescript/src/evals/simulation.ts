@@ -201,7 +201,7 @@ export interface RunSimulationOptions {
       };
   /** What a case does when required telemetry is not accepted; see
    * `traceNotAccepted` of {@link runExperiment}. Defaults to `"stop"`. */
-  traceNotAccepted?: "stop" | "fail_case";
+  traceNotAccepted?: "stop" | "fail_case" | "pending";
   /** Called as each case is failed for its telemetry; see `onTelemetryNotAccepted` of
    * {@link runExperiment}. */
   onTelemetryNotAccepted?(entry: TelemetryNotAccepted): void | Promise<void>;

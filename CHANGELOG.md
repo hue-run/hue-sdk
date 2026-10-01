@@ -17,6 +17,14 @@ refuses to publish a version without a matching entry below.
   (`ConnectionFailed`) or that timed out (`TimedOut`), read from the error and its `cause`,
   `lastError` and `errors` chains, beside the agent's own `TargetError`. Hue counts the three as
   infrastructure and leaves them out of the agent's pass rate.
+- `traceNotAccepted: "pending"` on `runExperiment` and `runSimulation`, and `hue eval
+  --trace-not-accepted pending`: a case whose telemetry Hue did not accept in time completes in
+  its true state with `traceEvidence: "pending"` and the count of spans the case ended
+  (`traceSpanCount`), so Hue scores the sealed world at once and attaches the trace once it holds
+  every span, or records the evidence omitted a day later. Such cases are listed in
+  `RunnerReport.tracePending`. A saved outcome whose export the trace receipt does not accept on
+  resume completes the same way instead of being refused. Needs a Hue that knows pending
+  evidence; an older platform refuses the completion with 400.
 
 ### [0.12.0] - 2026-10-01
 
@@ -1117,7 +1125,44 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.6.3] - 2026-10-01
+
+This release gives the Python evaluation client the TypeScript SDK's resilience: reads and keyed
+mutations are sent again after transient failures, and an export failure is attributed to the
+case whose trace it concerned, so one case's telemetry failure no longer fails the cases beside
+it or every case that follows. Additive; no capture, default budget or wire change.
+
+#### Added
+
+- `EvaluationClient` sends a read, or a mutation the server deduplicates by the `idempotencyKey`
+  in its body (`create_experiment`, `start_execution`, `complete_execution`, `finish_experiment`,
+  `submit_results`, `create_run`, `start_run_execution`, `complete_run_execution`, `finish_run`,
+  `create_scoring`, `submit_scoring_results`, `create_judge_jobs` and their keyed peers), again
+  after a connection failure, a timeout or a 408 or 5xx that carried no `Retry-After`, up to
+  `max_attempts` (default 4, 1–10) times with a jittered backoff, as the TypeScript SDK does.
+  `is_transient_api_error` names those failures; `HueApiError` carries Hue's `X-Hue-Diagnostic`
+  code as `diagnostic`, the wait of a long `Retry-After` as `retry_after_seconds`, and
+  `reason="malformed_response"` for a body the client refused, which is not sent again. A
+  mutation without a key is still sent once.
+- Export issues name the traces of the records they concerned (`Hue.export_issues()`, each an
+  `ExportIssue` with `trace_ids` of up to 64 traces, `Hue.export_failure_sequence()` and
+  `Hue.spans_ended(trace_id)`). `run_experiment` reads them after each case's flush: a failure
+  that names the case's trace marks that case `failed` (its evidence is incomplete, and resume
+  refuses it), one that names only other traces leaves it accepted, and one that names no trace,
+  or a flush that did not succeed without a new failure, is decided by the case's trace receipt,
+  at once or on resume for a checkpoint still `pending`: the receipt must hold the case's root
+  span and at least as many spans as the case ended, which the checkpoint records at the flush.
+  One case's telemetry failure no longer fails the cases running beside it, and a client's
+  earlier failure no longer fails every later case; `Hue.force_flush()` keeps its cumulative
+  answer.
+
+#### Added
+
+- `TraceEvidence("pending")`: a case whose export `force_flush` did not acknowledge completes in
+  its true state with `traceEvidence: "pending"` and the count of spans the case ended, as the
+  checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
+  every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
+  completes the same way. Only `omit` carries a reason.
 
 #### Added
 

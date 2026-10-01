@@ -6,8 +6,10 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Lock
+from time import monotonic, sleep
 from typing import Any, cast
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 from opentelemetry.context import Context
 
@@ -61,6 +63,119 @@ class TelemetryExportError(RuntimeError):
             "Restore/export the trace or explicitly complete with omitted evidence; "
             "never rerun the target."
         )
+
+
+# How long a receipt is polled for the root span after a flush reported a failure: ingestion of
+# an accepted batch is not instant, and a span that is not there by then was not delivered.
+_RECEIPT_WAIT_SECONDS = 5.0
+# How often the receipt is read again while the root is there but spans are still arriving.
+_RECEIPT_POLL_SECONDS = 0.5
+
+
+# One case per client reads its receipt at a time: the client runs one verification worker, and
+# a case waiting behind another must not spend its own wait in the queue. Runs on different
+# clients do not wait for one another.
+_receipt_turns: WeakKeyDictionary[Hue, Lock] = WeakKeyDictionary()
+_receipt_turns_lock = Lock()
+
+
+def _receipt_turn(hue: Hue) -> Lock:
+    with _receipt_turns_lock:
+        turn = _receipt_turns.get(hue)
+        if turn is None:
+            turn = _receipt_turns[hue] = Lock()
+        return turn
+
+
+def _trace_landed(hue: Hue, trace: dict[str, Any] | None) -> bool:
+    """Whether Hue holds the case's root span and every span the case ended, from the receipt.
+
+    False when the span is not there by the wait's end, when the receipt cannot be read, and for
+    a checkpoint saved without the count of spans the case ended: without it the receipt cannot
+    tell a lost child span from a landed trace, and does not accept. Cases in flight take turns,
+    each with the whole wait from the moment its turn starts.
+    """
+    if not trace or trace.get("spans") is None:
+        return False
+    with _receipt_turn(hue):
+        return _trace_landed_now(hue, trace)
+
+
+def _trace_landed_now(hue: Hue, trace: dict[str, Any]) -> bool:
+    deadline = monotonic() + _RECEIPT_WAIT_SECONDS
+    try:
+        while True:
+            # The receipt answers as soon as the root is there, so spans still arriving behind
+            # it are polled for until the wait ends.
+            result = hue.verify_trace(
+                trace["traceId"],
+                expected_span_ids=[trace["spanId"]],
+                timeout_millis=max(250, int((deadline - monotonic()) * 1000)),
+            )
+            held = result.receipt.span_count if result.receipt is not None else 0
+            if result.verified and held >= trace["spans"]:
+                return True
+            if not result.verified or monotonic() + _RECEIPT_POLL_SECONDS >= deadline:
+                return False
+            sleep(_RECEIPT_POLL_SECONDS)
+    except Exception:
+        return False
+
+
+def _decide_export(
+    hue: Hue,
+    checkpoint: dict[str, Any],
+    sequence_before: int,
+    flushed: bool,
+    trace_evidence: TraceEvidence,
+    save: Callable[[], None],
+) -> None:
+    """Settle ``exportState`` after the case's flush, from the issues the flush left.
+
+    The client is shared by every case in flight, so a failure the flush reports may be another
+    case's. Each issue names the traces of the records it concerned: one that names this trace is
+    this case's failure, final because its evidence is incomplete; one that names only others is
+    not this case's; one that names no trace, one the bounded history has rolled past, and a
+    flush that did not succeed without a new issue (it timed out, or it still reports an older
+    case's failure) may be anyone's, and this case's trace receipt decides: its root span landed,
+    or the case stays ``pending`` for the receipt to decide again on resume.
+    """
+    trace = checkpoint.get("trace") or {}
+    retained = hue.export_issues()
+    issues = [issue for issue in retained if issue.sequence > sequence_before]
+    named = [
+        issue
+        for issue in issues
+        if issue.trace_ids is not None and trace.get("traceId") in issue.trace_ids
+    ]
+    unattributed = [issue for issue in issues if issue.trace_ids is None]
+    changed = hue.export_failure_sequence() != sequence_before
+    evicted = changed and (
+        not issues or (bool(retained) and retained[0].sequence > sequence_before + 1)
+    )
+    if named:
+        checkpoint["exportState"] = "failed"
+        if trace_evidence.mode == "pending":
+            # The outcome stands as the target gave it: the trace is declared and still to
+            # arrive, with the count of spans the case ended, and Hue attaches it once it holds
+            # every one of them.
+            _pending_completion(checkpoint)
+        save()
+        if trace_evidence.mode == "required":
+            raise TelemetryExportError(checkpoint["executionId"])
+        return
+    if unattributed or evicted or not flushed:
+        if _trace_landed(hue, trace):
+            checkpoint["exportState"] = "accepted"
+            save()
+        elif trace_evidence.mode == "pending":
+            _pending_completion(checkpoint)
+            save()
+        elif trace_evidence.mode != "omit":
+            raise TelemetryExportError(checkpoint["executionId"])
+        return
+    checkpoint["exportState"] = "accepted"
+    save()
 
 
 def _settings(persist: bool, concurrency: int, timeout: int) -> None:
@@ -205,6 +320,26 @@ class OutputTooLargeError(ValueError):
         )
 
 
+def _pending_completion(checkpoint: dict[str, Any]) -> None:
+    """Complete with the trace pending: declared and still to arrive, with how many spans the case
+    ended, as the checkpoint recorded at its flush, so a root span alone is never taken for the
+    trace. A checkpoint saved without the count sends none."""
+    complete = checkpoint["complete"]
+    complete["traceEvidence"] = "pending"
+    complete.pop("omissionReason", None)
+    spans = (checkpoint.get("trace") or {}).get("spans")
+    if isinstance(spans, int) and spans > 0:
+        complete["traceSpanCount"] = spans
+    else:
+        complete.pop("traceSpanCount", None)
+
+
+def _accepted_completion(checkpoint: dict[str, Any]) -> None:
+    """The reverse, once the receipt accepted the trace after all: required evidence, no count."""
+    checkpoint["complete"]["traceEvidence"] = "required"
+    checkpoint["complete"].pop("traceSpanCount", None)
+
+
 def _error_message(error: Exception) -> str:
     # The caller opted into storing result content; the API still rejects NUL and lone surrogates.
     return "".join(
@@ -234,6 +369,7 @@ def run_experiment(
     if not isinstance(trace_evidence, TraceEvidence) or trace_evidence.mode not in (
         "required",
         "omit",
+        "pending",
     ):
         raise TypeError("Choose a trace evidence policy explicitly.")
     if trace_evidence.mode == "omit" and (
@@ -242,8 +378,8 @@ def run_experiment(
         or len(trace_evidence.reason) > 4000
     ):
         raise ValueError("Omitting trace evidence requires a bounded reason.")
-    if trace_evidence.mode == "required" and trace_evidence.reason is not None:
-        raise ValueError("Required evidence cannot include an omission reason.")
+    if trace_evidence.mode != "omit" and trace_evidence.reason is not None:
+        raise ValueError("Only omitted evidence carries an omission reason.")
     if hue.base_url != client.base_url:
         raise ValueError("Telemetry and evaluations must use the same Hue origin.")
     project, telemetry_project = client.check_connection(), hue.validate_project()
@@ -312,6 +448,7 @@ def run_experiment(
             target_inputs = copy.deepcopy(json_value(case["inputs"]))
             target_config = copy.deepcopy(configuration)
             target_case = copy.deepcopy(case)
+            sequence_before = hue.export_failure_sequence()
             with hue.span(
                 "hue.experiment.case",
                 parent_context=Context(),
@@ -406,7 +543,11 @@ def run_experiment(
                         if target_error is not None
                         else {}
                     ),
-                    "traceEvidence": trace_evidence.mode,
+                    # A pending policy asks for the trace as required until the export's
+                    # outcome is known.
+                    "traceEvidence": (
+                        "required" if trace_evidence.mode == "pending" else trace_evidence.mode
+                    ),
                     **(
                         {"omissionReason": trace_evidence.reason}
                         if trace_evidence.mode == "omit"
@@ -419,19 +560,51 @@ def run_experiment(
                     "complete": complete,
                     "scores": scores,
                     "exportState": "pending",
+                    "trace": {"traceId": span.trace_id, "spanId": span.span_id},
                 }
                 store.write(file, checkpoint)
-            if hue.force_flush():
-                checkpoint["exportState"] = "accepted"
+            # The root has ended: the count of spans this case ended is what its receipt is held
+            # to, saved before the flush so a resume can hold the receipt to it too.
+            ended = hue.spans_ended(span.trace_id)
+            if ended is not None:
+                checkpoint["trace"]["spans"] = ended
                 store.write(file, checkpoint)
-            elif trace_evidence.mode != "omit":
-                raise TelemetryExportError(execution["id"])
+            flushed = hue.force_flush()
+            _decide_export(
+                hue,
+                checkpoint,
+                sequence_before,
+                flushed,
+                trace_evidence,
+                lambda: store.write(file, checkpoint),
+            )
         client.get_execution(checkpoint["executionId"])
         if (
-            checkpoint["exportState"] != "accepted"
+            "completion" not in checkpoint
+            and checkpoint["exportState"] != "accepted"
             and checkpoint["complete"]["traceEvidence"] != "omit"
         ):
-            raise TelemetryExportError(checkpoint["executionId"])
+            # A saved outcome still pending is decided by its receipt now, a pending completion
+            # included: the trace may have landed since, and then Hue freezes it at completion.
+            # One marked failed, or one the receipt does not hold, is refused as itself under the
+            # required policy and completes pending under the pending policy; never run again.
+            if checkpoint["exportState"] == "pending" and _trace_landed(
+                hue, checkpoint.get("trace")
+            ):
+                checkpoint["exportState"] = "accepted"
+                # A completion made pending by an earlier read is required again: the trace
+                # landed, so Hue freezes it at completion as for any accepted case.
+                if checkpoint["complete"].get("traceEvidence") == "pending":
+                    _accepted_completion(checkpoint)
+                store.write(file, checkpoint)
+            elif trace_evidence.mode == "pending":
+                # Under the pending policy a saved outcome the receipt does not accept completes
+                # with the trace pending rather than being refused.
+                if checkpoint["complete"].get("traceEvidence") != "pending":
+                    _pending_completion(checkpoint)
+                    store.write(file, checkpoint)
+            else:
+                raise TelemetryExportError(checkpoint["executionId"])
 
         def save() -> None:
             store.write(file, checkpoint)

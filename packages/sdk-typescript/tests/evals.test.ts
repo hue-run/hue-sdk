@@ -361,14 +361,19 @@ function fixture() {
         const execution = executions.get(executionMatch[1])!;
         if (!executionMatch[2]) return send(execution);
         if (completeFailures-- > 0) return new Response(null, { status: 503 });
-        if (body.traceEvidence !== "omit" && !traceIds.has(execution.traceExternalId!))
+        if (
+          body.traceEvidence !== "omit" &&
+          body.traceEvidence !== "pending" &&
+          !traceIds.has(execution.traceExternalId!)
+        )
           return new Response(null, { status: 409 });
         const item = cases.find((item) => item.id === execution.caseId)!;
         const subjectId = randomUUID();
         const evaluationItemId = randomUUID();
         const exp = experiments.get(execution.experimentId)!;
         const hasOutput = Object.hasOwn(body, "output");
-        const snapshot = body.traceEvidence === "omit" ? null : randomUUID();
+        const snapshot =
+          body.traceEvidence === "omit" || body.traceEvidence === "pending" ? null : randomUUID();
         const subject = {
           ...item,
           id: subjectId,
@@ -383,7 +388,11 @@ function fixture() {
           traceSnapshotId: snapshot,
           experimentId: exp.id,
           attempt: 1,
-          traceEvidence: snapshot ? "captured" : "omitted",
+          traceEvidence: snapshot
+            ? "captured"
+            : body.traceEvidence === "pending"
+              ? "pending"
+              : "omitted",
           traceExternalId: execution.traceExternalId,
           omissionReason: body.omissionReason ?? null,
         } as Subject;
@@ -880,6 +889,61 @@ describe("installed evaluation API and runner contract", () => {
         await hue.shutdown();
         f.server.stop(true);
       }
+    }
+  });
+  test("under traceNotAccepted pending a case whose own root-span batch was refused completes with its trace pending, beside the case that landed", async () => {
+    const f = fixture();
+    const exp = f.create();
+    const [first] = f.cases;
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "pending-attributed",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    const calls: string[] = [];
+    f.rejectCase(first!.id);
+    try {
+      const report = await runExperiment({
+        client: f.client,
+        hue,
+        experimentId: exp.id,
+        checkpointDirectory,
+        persistResultContent: true,
+        concurrency: 2,
+        traceEvidence: { mode: "required" as const },
+        traceNotAccepted: "pending",
+        target: async (_inputs: JsonValue, context: { item: { id: string } }) => {
+          calls.push(context.item.id);
+          if (context.item.id !== first!.id)
+            await new Promise((resolve) => setTimeout(resolve, 400));
+          return "reply";
+        },
+      });
+      expect(report.subjectIds).toHaveLength(f.cases.length);
+      expect(calls).toHaveLength(f.cases.length);
+      expect(report.tracePending).toEqual([
+        {
+          caseId: first!.id,
+          caseKey: first!.externalKey,
+          executionId: expect.any(String),
+          spanCount: 1,
+        },
+      ]);
+      const completions = f.requests
+        .filter((request) => request.path.endsWith("/complete"))
+        .map((request) => request.body as { traceEvidence: string; traceSpanCount?: number });
+      expect(completions.map((body) => body.traceEvidence).sort()).toEqual(
+        ["pending", ...Array.from({ length: f.cases.length - 1 }, () => "required")].sort(),
+      );
+      expect(completions.find((body) => body.traceEvidence === "pending")!.traceSpanCount).toBe(1);
+      const states = [...f.subjects.values()].map((subject) => subject.traceEvidence);
+      expect(states.filter((state) => state === "pending")).toHaveLength(1);
+      expect(states.filter((state) => state === "captured")).toHaveLength(f.cases.length - 1);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
     }
   });
   test("an export failure is attributed to the traces it concerned: the case beside it completes, and the failed case alone is refused on resume", async () => {
