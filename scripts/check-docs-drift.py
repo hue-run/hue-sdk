@@ -115,12 +115,32 @@ def normalize(text: str) -> list[str]:
     return lines
 
 
+def skill_body_changed_without_version_bump(ours_text: str, hosted_text: str) -> bool:
+    """True when the skill's prose differs from the hosted copy under the same metadata.version.
+
+    The hosted route is cached under `skill.md?v=<version>`, so a body change that keeps its
+    version would keep serving the old body under the key the docs link. Only the body counts:
+    the frontmatter is compared by `skill_metadata`.
+    """
+    ours_meta, hosted_meta = skill_metadata(ours_text), skill_metadata(hosted_text)
+    if ours_meta["version"] != hosted_meta["version"]:
+        return False
+    return normalize(ours_text) != normalize(hosted_text)
+
+
 def compare(name: str, ours_text: str, ours_label: str, url: str) -> bool:
     hosted_text = fetch(url)
     if name == "skill" and skill_metadata(ours_text) != skill_metadata(hosted_text):
         print(
             f"skill: hosted metadata {skill_metadata(hosted_text)} differs from "
             f"repository metadata {skill_metadata(ours_text)}"
+        )
+        return False
+    if name == "skill" and skill_body_changed_without_version_bump(ours_text, hosted_text):
+        print(
+            f"skill: the body differs from {url} but metadata.version is still "
+            f"{skill_metadata(ours_text)['version']}; bump the version so skill.md?v=<version> "
+            "serves the new body"
         )
         return False
     titles = {title for title in (frontmatter_title(ours_text), frontmatter_title(hosted_text)) if title}

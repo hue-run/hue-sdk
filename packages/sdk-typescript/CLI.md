@@ -512,12 +512,38 @@ the sealed world. Hue never executes the agent. `HUE_API_KEY` must be a **Read a
 write** project key (a **Read** or **Tracing only** key cannot read cases or create runs);
 the CLI never prints it. The optional `zod` peer of `@hue-run/sdk/evals` must be installed.
 
-Write an adapter module that hands the case inputs and the world's tools or MCP connection to
-the real agent. The module exports `default` or `runMyAgent`; `context` is the SDK's
-`SimulationTargetContext` (`world`, `mcp`, `tools`, `config`, `item`, `executionId`,
-`environmentRunId`, `files`, `outputDirectory`, `signal`; `world` carries the provider mirror URLs,
-the world token, `env` and `mcpConfig` where Hue's simulation gateway serves the world). When the
-case also pins input files, `files` holds verified copies of its agent-visible ones (see
+Run the agent's own start command with `--command`. `hue eval` spawns it once per case with the
+world's environment (below) and `{"inputs", "config"}` on stdin, and stores its stdout as the
+answer. The agent reaches each app through Hue's mirror with its own production client: the one
+committed helper described in [Make your agent eval-ready](https://docs.hue.run/evaluations/eval-ready-agent)
+reads `HUE_SIM_<SURFACE ID>_URL` and `HUE_WORLD_TOKEN` when `HUE_WORLD_TOKEN` is set, fails
+closed when a needed variable is missing, and returns the production URL and credential
+otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`) or a tool its
+production agent lacks. Pin the SDK and bring its `zod` peer along, so the agent's repository
+gains no dependency:
+
+```sh
+npx --yes --package @hue-run/sdk@0.13.0 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.13.0 --package "zod@^4.6.5" hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
+npx --yes --package @hue-run/sdk@0.13.0 --package "zod@^4.6.5" hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx --yes --package @hue-run/sdk@0.13.0 --package "zod@^4.6.5" hue eval --worker --command "node agent.js" --agent-key support-agent --env-file .env.hue
+```
+
+Without the second `--package`, `hue eval` exits with `hue eval needs zod`, even for `--help`;
+installing zod in the project does not help when the SDK itself is not installed there. An
+unpinned `--package @hue-run/sdk` runs a local, possibly older, copy in a project that already
+depends on it.
+
+An adapter module is the in-process alternative for a TypeScript agent. It exports `default` or
+`runMyAgent`; `context` is the SDK's `SimulationTargetContext` (`world`, `mcp`, `tools`, `config`,
+`item`, `executionId`, `environmentRunId`, `files`, `outputDirectory`, `signal`; `world` carries
+the provider mirror URLs, the world token, `env` and `mcpConfig` where Hue's simulation gateway
+serves the world). An adapter runs inside `hue eval`'s own process, where `HUE_WORLD_TOKEN` and
+`HUE_EXECUTION_ID` are not set, so a helper that reads the process environment would return
+production values: throw when `context.world` is missing, then pass `context.world.env` as the
+helper's environment argument or spawn the agent with `agentEnvironment(context.world)`. Never
+set `process.env` yourself; with `--concurrency` above 1 that leaks one case's world into another.
+When the case also pins input files, `files` holds verified copies of its agent-visible ones (see
 [Evaluate a document eval set](#evaluate-a-document-eval-set)); return
 `withFiles(output, files)` from `@hue-run/sdk/evals` to upload documents the agent produced:
 
@@ -527,19 +553,16 @@ import type { JsonValue, SimulationTargetContext } from "@hue-run/sdk/evals";
 import { runAgent } from "./src/agent.js"; // The application's existing entry point.
 
 export default function runMyAgent(inputs: JsonValue, context: SimulationTargetContext) {
-  // Hand context.tools or context.mcp to the agent's real tool boundary; configuration alone
-  // does not redirect provider calls. Pass context.signal for cooperative cancellation.
-  const { config, tools, mcp, signal } = context;
-  return runAgent({ inputs, config, tools, mcp, signal });
+  if (!context.world) throw new Error("This case has no world handoff; refusing to run against the real app");
+  // The agent's own app clients read the mirrors through the committed helper, given the
+  // world's environment; never hand it context.tools or context.mcp. Pass context.signal for
+  // cooperative cancellation.
+  return runAgent({ inputs, config: context.config, env: context.world.env, signal: context.signal });
 }
 ```
 
 ```sh
-hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
-hue eval --case https://app.hue.run/projects/demo/scenarios/<id> ./hue-agent.ts --content --baseline <run id>
-hue eval --set "Billing regressions" --scorer-version <id> ./hue-agent.ts --content --save-version
-hue eval --case "Refund an eligible charge" --command "python agent.py" --timeout 120 --content
-hue eval --worker ./hue-agent.ts --agent-key support-agent --content --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.13.0 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -576,8 +599,8 @@ Hue-owned `world_outcome` checks are graded after the world seals. An experiment
 every case of the saved version; there is no case subset.
 
 `--command "<shell command>"` spawns the command once per case with the world's environment
-(`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339: read
-today's date from it, never from the wall clock), one `HUE_SIM_<SURFACE ID>_URL` per provider
+(`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it, and the wall
+clock otherwise), one `HUE_SIM_<SURFACE ID>_URL` per provider
 mirror,
 `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the case, and
 `HUE_MCP_URL`, `HUE_MCP_TOKEN`, `HUE_MCP_EXPIRES_AT` for the first MCP mirror; these name the

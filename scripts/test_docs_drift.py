@@ -88,5 +88,25 @@ This matrix describes the current releases.
         )
 
 
+    def test_skill_body_change_without_version_bump_is_flagged(self):
+        hosted = """---
+name: hue
+description: Canonical description.
+metadata:
+  author: hue-run
+  version: "0.6.0"
+---
+
+# Hue
+
+Old sentence.
+"""
+        same_version = hosted.replace("Old sentence.", "New sentence.")
+        bumped = same_version.replace('version: "0.6.0"', 'version: "0.6.1"')
+        self.assertTrue(drift.skill_body_changed_without_version_bump(same_version, hosted))
+        self.assertFalse(drift.skill_body_changed_without_version_bump(bumped, hosted))
+        self.assertFalse(drift.skill_body_changed_without_version_bump(hosted, hosted))
+
+
 if __name__ == "__main__":
     unittest.main()
