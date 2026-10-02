@@ -49,6 +49,7 @@ from .world import (
     legacy_mcp_capability,
     mcp_config_file,
     strip_hue_control_plane_credentials,
+    without_world_variables,
     world_handoff,
     world_now,
 )
@@ -92,6 +93,7 @@ __all__ = [
     "legacy_mcp_capability",
     "mcp_config_file",
     "strip_hue_control_plane_credentials",
+    "without_world_variables",
     "world_handoff",
     "world_now",
 ]

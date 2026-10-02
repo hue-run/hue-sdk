@@ -24,6 +24,7 @@ from hue_sdk.environment import (
     is_hue_control_plane_credential,
     legacy_mcp_capability,
     mcp_config_file,
+    without_world_variables,
     world_handoff,
     world_now,
 )
@@ -145,6 +146,21 @@ def test_handoff_carries_the_worlds_now_and_world_now_reads_it_where_an_agent_re
     assert world_now(world_handoff(older)) is None
     assert world_now({"PATH": "/usr/bin"}) is None
     assert world_now({"HUE_WORLD_NOW": "not a date"}) is None
+    # A runner started inside an earlier case inherits that world's date and mirrors; a world
+    # that names no date leaves the agent none, never the earlier world's.
+    stale = {
+        "PATH": "/usr/bin",
+        "HUE_WORLD_NOW": "2025-01-01T00:00:00.000Z",
+        "HUE_SIM_NOTION_MCP_URL": "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+        "HUE_WORLD_TOKEN_KEY": "server-signing-key",
+    }
+    inherited = agent_environment(world_handoff(older), parent=stale)
+    assert "HUE_WORLD_NOW" not in inherited
+    assert "HUE_SIM_NOTION_MCP_URL" not in inherited
+    assert "HUE_WORLD_TOKEN_KEY" not in inherited
+    assert inherited["PATH"] == "/usr/bin"
+    assert world_now(inherited) is None
+    assert without_world_variables(stale) == {"PATH": "/usr/bin"}
 
 
 def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in():

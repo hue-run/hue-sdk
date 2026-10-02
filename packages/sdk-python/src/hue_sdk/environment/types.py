@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from typing_extensions import NotRequired
-
 Json = None | bool | int | float | str | list[Any] | dict[str, Any]
 RunStatus = Literal["open", "completed", "abandoned", "expired"]
 FinishStatus = Literal["completed", "abandoned"]
@@ -126,13 +124,18 @@ class _WorldFields(TypedDict, total=False):
     connection: None
 
 
-class EnvironmentRun(_WorldFields):
+class _RunOptionalFields(TypedDict, total=False):
+    """Fields of any run a Hue may not send yet."""
+
+    # The world's clock at creation as an RFC 3339 timestamp (``clockNs`` as a date): a
+    # trace-built world's recorded start. Absent from a Hue that predates it.
+    now: str
+
+
+class EnvironmentRun(_WorldFields, _RunOptionalFields):
     id: str
     environmentVersionId: str
     clockNs: str
-    # The world's clock at creation as an RFC 3339 timestamp (``clockNs`` as a date): a
-    # trace-built world's recorded start. Absent from a Hue that predates it.
-    now: NotRequired[str]
     stateDigest: str
     maxSteps: int
     expiresAt: str

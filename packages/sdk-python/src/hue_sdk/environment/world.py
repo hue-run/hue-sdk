@@ -53,6 +53,20 @@ def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
     }
 
 
+# Variables a world or its server owns: a parent's value belongs to another world (a runner
+# started inside a case, a shell left from an earlier run) or to the server (a signing key), and
+# would send this world's token to a mirror this world does not have, or date an agent by an
+# earlier world's clock. The whole ``HUE_WORLD_`` prefix is the world's.
+_WORLD_SCOPED = re.compile(
+    r"^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS))$"
+)
+
+
+def without_world_variables(environment: Mapping[str, str]) -> dict[str, str]:
+    """``environment`` without any variable a world or its server owns."""
+    return {name: value for name, value in environment.items() if not _WORLD_SCOPED.match(name)}
+
+
 def world_now(source: WorldHandoff | Mapping[str, str] | None = None) -> datetime | None:
     """The world's clock: what an agent reads for today's date in place of the wall clock, so a
     date-relative request (tomorrow, ``newer_than:7d``, this month) lands on the dates the world
@@ -108,12 +122,13 @@ def agent_environment(
     legacy_mcp_variables: bool = True,
 ) -> dict[str, str]:
     """The environment for an agent child process running one case: the parent's variables
-    minus Hue control-plane credentials (unless ``include_hue_credentials``), then the world's
-    carriers, which win. ``legacy_mcp_variables`` also sets ``HUE_MCP_URL``, ``HUE_MCP_TOKEN``
-    and ``HUE_MCP_EXPIRES_AT`` from the first MCP mirror, the names the ``hue_sim_`` bridge
-    used. Nothing here is logged."""
+    minus Hue control-plane credentials (unless ``include_hue_credentials``) and any
+    world-scoped variable (an earlier world's carriers or date, a server's signing key), then
+    the world's carriers, which win. ``legacy_mcp_variables`` also sets ``HUE_MCP_URL``,
+    ``HUE_MCP_TOKEN`` and ``HUE_MCP_EXPIRES_AT`` from the first MCP mirror, the names the
+    ``hue_sim_`` bridge used. Nothing here is logged."""
     source = os.environ if parent is None else parent
-    child = (
+    child = without_world_variables(
         {name: value for name, value in source.items() if isinstance(value, str)}
         if include_hue_credentials
         else strip_hue_control_plane_credentials(source)
