@@ -103,7 +103,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.6.3"
+      "version": "0.6.4"
     },
     "typescript": {
       "bins": {
@@ -500,7 +500,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.12.0"
+      "version": "0.12.1"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",

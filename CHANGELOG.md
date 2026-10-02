@@ -8,7 +8,14 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### [Unreleased]
+### [0.12.1] - 2026-10-02
+
+This release says what stopped a case: a service the agent called that refused, dropped the
+connection or timed out is completed as infrastructure, a status Hue's own clients were refused
+with is completed as configuration, and neither is filed as the agent's `TargetError`. A case
+whose telemetry Hue did not accept in time can complete with its trace evidence pending, and
+`hue eval` names an inconclusive case apart from a skipped one. Additive; no capture, default
+budget or wire change.
 
 #### Added
 
@@ -33,6 +40,14 @@ refuses to publish a version without a matching entry below.
   `RunnerReport.tracePending`. A saved outcome whose export the trace receipt does not accept on
   resume completes the same way instead of being refused. Needs a Hue that knows pending
   evidence; an older platform refuses the completion with 400.
+
+#### Changed
+
+- `hue eval` names an inconclusive case apart from a skipped one: a case whose deciding evaluator
+  could not decide it (its result is skipped with an explanation that begins `Inconclusive:`, as
+  when a required judge could not run or answer) shows `INCONCLUSIVE` in the verdict table and is
+  counted as `inconclusive`, not `skipped`, in the summary line. Exit codes are unchanged: such a
+  case still exits `1`.
 
 ### [0.12.0] - 2026-10-01
 
@@ -122,14 +137,6 @@ variables to the agent.
   organization, since Hue's consent page has no organization picker, and say to restart Claude Code
   or start a new Codex session. After `--read-only`, the key steps name
   `hue login --keys coding-agent`, which accepts a **Read** key, instead of suggesting sign-in.
-
-#### Changed
-
-- `hue eval` names an inconclusive case apart from a skipped one: a case whose deciding evaluator
-  could not decide it (its result is skipped with an explanation that begins `Inconclusive:`, as
-  when a required judge could not run or answer) shows `INCONCLUSIVE` in the verdict table and is
-  counted as `inconclusive`, not `skipped`, in the summary line. Exit codes are unchanged: such a
-  case still exits `1`.
 
 #### Fixed
 
@@ -1141,7 +1148,13 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### [Unreleased]
+### [0.6.4] - 2026-10-02
+
+This release says what stopped a case: a world `create_run` could not create, a service the
+agent called that refused, dropped the connection or timed out, or a status Hue's own clients
+were refused with is completed as setup, infrastructure or configuration, and none is filed as
+the agent's `TargetError`. A case whose export was not acknowledged in time can complete with
+its trace evidence pending. Additive; no capture, default budget or wire change.
 
 #### Added
 
@@ -1156,7 +1169,6 @@ No registry release is claimed until publication and registry acceptance complet
   checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
   every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
   completes the same way. Only `omit` carries a reason.
-
 - A target's exception is completed with an error type that says what stopped the case:
   `EnvironmentSetupFailed` when `create_run` could not create the world (the new
   `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
