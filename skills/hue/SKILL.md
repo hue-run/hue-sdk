@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.11"
+  version: "0.5.12"
 ---
 
 # Hue tracing
@@ -177,9 +177,21 @@ recorded separate from your conclusions.
 
 ## Evaluate a published case
 
-When the user asks to evaluate or regression-test their agent against a published Hue case, use this loop with `@hue-run/sdk` 0.9.0 or later (`--case`).
-Hue never executes the agent: it runs in the user's process, and Hue only hosts the isolated
-simulated world and grades the sealed outcome. Review and publish cases in the Hue UI or through the project-write case-conversion MCP tools when authorized.
+When the user asks to evaluate or regression-test their agent against a published Hue case, or to
+make their agent eval-ready, follow this procedure end to end. It needs `@hue-run/sdk` 0.13.0 or
+later (`hue eval --case` and `--command`); a Python agent is started by the same command and
+needs no Hue package. Hue never executes the agent: it runs in the user's process, and Hue only
+hosts the isolated simulated world and grades the sealed outcome. Review and publish cases in the
+Hue UI or through the project-write case-conversion MCP tools when authorized.
+
+A case's world is served through mirrors. Each app the agent uses has a stable Hue URL
+(`https://app.hue.run/api/sim/<real host>/<real path>`) that answers in the real app's format
+from that run's private world and records every call; a per-run world token goes where the real
+credential went. The agent reaches a mirror with its own production client, so it sees what
+production sees. Never give the agent Hue-native tools or any tool its production agent lacks:
+not the deprecated `context.tools` or `context.mcp` of a world without a handoff, not the Hue MCP
+server, not a tool added for the eval. The snippets per framework are in
+[Make your agent eval-ready](https://docs.hue.run/evaluations/eval-ready-agent).
 
 1. Find the published case with the Hue MCP tools `list_cases` and `get_case`, or use
    the case URL the user pastes. With an organization connection, pass the case's project as
@@ -188,35 +200,94 @@ simulated world and grades the sealed outcome. Review and publish cases in the H
    `get_run_execution` and `get_trace`. When one is not in your tool list, find it with
    `search_hue_tools` and call it through the executor its `call` field names, as under
    [Investigate production](#investigate-production-with-the-hue-mcp).
-2. Check `list_local_agents`. If no agent is online, run the evaluation from the shell:
+2. Detect how the codebase reaches each app, in whatever language it is written. Search for an
+   `mcpServers` configuration file (Claude Code `--mcp-config` and frameworks that load one), an
+   MCP client in code (`MCPServerStreamableHttp`, `createMCPClient`, `MultiServerMCPClient`, the
+   MCP SDK's own client), a hosted connector (an OpenAI Responses tool of `type: "mcp"`, Anthropic
+   `mcp_servers`), a REST SDK constructed with a base URL, and raw `fetch`, `requests` or `httpx`
+   calls to the app's host. Write down one row per app: how it is reached and where its URL and
+   credential come from today. Every row is a call site to route in step 4.
+3. Add the one-time helper in the codebase's language, modeled on the guide's TypeScript or
+   Python version; it needs no Hue SDK. `hue eval` sets `HUE_WORLD_TOKEN` only in the process it
+   starts, so its presence means an eval. During an eval the helper reads the app's mirror URL
+   from its `HUE_SIM_<SURFACE>_URL` variable (such as `HUE_SIM_GOOGLE_GMAIL_MCP_URL` or
+   `HUE_SIM_GOOGLE_GMAIL_REST_URL`) and sends `HUE_WORLD_TOKEN` as the bearer. For a framework
+   that loads an `mcpServers` file, it keeps the production file's server names and replaces
+   each server's connection settings with the mirror's complete HTTP entry (`type`, `url` and
+   `headers`, dropping any `command` and `args`), written to a private file it removes when the
+   agent exits, so tool names stay what production has; the ready-made file at `HUE_MCP_CONFIG` is keyed by Hue's provider
+   instance (such as `gmail-primary`) and fits only when those keys are the production names.
+   It fails closed: inside an eval, a missing variable for an app or server the agent needs
+   throws before any request, and never falls back to the real app. It also refuses a case
+   without a world: `hue eval --command` always sets `HUE_EXECUTION_ID`, so that variable
+   without `HUE_WORLD_TOKEN` (a world the simulation gateway does not serve, which offers only
+   the deprecated Hue-native capability) throws instead of running the agent against the real
+   app. Without either variable it returns the production URL and credential unchanged, read
+   exactly as before, so production behavior is identical. Variable names follow the surface id; to learn a case's exact names,
+   have the agent log the `HUE_SIM_` variable names, never their values, to stderr once.
+4. Route every call site from step 2 through the helper and change nothing else: keep the
+   agent's prompts, model, tools and dependencies as they are, add no tool, remove none, and
+   never write `HUE_WORLD_TOKEN`, `HUE_SIM_*` or `HUE_MCP_*` into production configuration,
+   secrets or a committed file. The diff is the helper plus its call sites.
+5. Check the command contract: `hue eval --command` runs the command once per case, writes
+   `{"inputs","config"}` as JSON on its stdin and stores its stdout as the answer, so the command
+   must deliver the case to the unchanged production agent, print the answer and exit. When the
+   production entry point is a server or takes another input shape, add a thin entry point that
+   reads stdin, calls the unchanged agent once and prints its answer; that file is part of the
+   one-time change. Then check `list_local_agents`. If no agent is online, run the evaluation
+   from the shell with that command:
 
    ```sh
-   hue eval --case "<name>" ./hue-agent.ts --env-file .env.hue
+   hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
    ```
 
-   `hue-agent.ts` exports `runMyAgent(inputs, context)` and hands `context.mcp` or `context.tools`
-   to the real agent's tool boundary. The **Read and write** key comes from `hue login`
-   into an ignored env file such as `.env.hue`; never print it, paste it into chat or commit it.
-3. Read the printed run URL and the per-case PASS/FAIL checks. Investigate with `get_run`
-   (`include_failing_cases`), `get_run_item` and `get_trace`, change the agent, and rerun with
-   `--baseline <previous experimentId>` to see improvements and regressions. Use the
-   `experimentId` from `--json` or the printed run URL; `runId` is a different identifier.
-4. To let the Run button and `launch_local_run` use this agent, start a worker instead:
+   Each case starts the command in a fresh world with `HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, one
+   `HUE_SIM_<SURFACE>_URL` per mirror, `HUE_MCP_CONFIG`, and `HUE_MCP_URL`, `HUE_MCP_TOKEN` and
+   `HUE_MCP_EXPIRES_AT` for the first MCP mirror; the command reads `{"inputs","config"}` on
+   stdin and its stdout is the answer. Nothing is edited per run. A TypeScript adapter file
+   (`hue-agent.ts` exporting `runMyAgent(inputs, context)`) receives the same handoff as
+   `context.world` (`surfaces`, `token`, `env`, `mcpConfig`) and passes it to the agent the same
+   way; it must not hand `context.tools` or `context.mcp` to a gateway world's agent. The
+   **Read and write** key comes from `hue login` into an ignored env file such as `.env.hue`;
+   `hue eval` removes it from the agent's environment; never print it, paste it into chat or
+   commit it.
+6. Read the printed run URL and the per-case PASS/FAIL checks. Investigate with `get_run`
+   (`include_failing_cases`), `get_run_item`, `get_run_execution` and `get_trace`, change the
+   agent, and rerun with `--baseline <previous experimentId>` to see improvements and
+   regressions. Use the `experimentId` from `--json` or the printed run URL; `runId` is a
+   different identifier. `no_calls` is advisory: on a case that needed app calls, a world
+   flagged `no_calls` while the agent's answer claims it acted has two possible causes, a call
+   site that still reaches the real app or an agent that made no request and invented the
+   answer. Check where the agent's requests went, from its own logs, before changing a call site.
+7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   hue eval --worker ./hue-agent.ts --env-file .env.hue
+   hue eval --worker --command "<the agent's start command>" --env-file .env.hue
    ```
+
+Before finishing, verify and report each of these:
+
+- Production unchanged: with `HUE_WORLD_TOKEN` unset, the helper returns the production URL and
+  credential for every call site and the application's existing tests pass.
+- Fail closed: with `HUE_WORLD_TOKEN` set and one `HUE_SIM_<SURFACE>_URL` unset, and with
+  `HUE_EXECUTION_ID` set but `HUE_WORLD_TOKEN` unset, the helper throws before any request is
+  sent.
+- Same tools: the agent's tool list is the one production has; no tool was added or removed and
+  nothing Hue-native was handed to the agent.
+- Clean diff: the change is the helper plus its call sites, and no Hue variable or value is in
+  production configuration, secrets or a committed file.
+- A real run: the run URL, the printed verdicts, the world's recorded calls on the cases that
+  needed them, and stdout that carried no credential.
 
 Exit code 0 means every case passed; 1 means a case failed, errored or Hue's checks were still
-pending; 2 is a usage error. Since `@hue-run/sdk` 0.10.0, an evaluator that does not apply to a
-case shows `n/a` and neither passes nor fails it, and a case no pinned evaluator applies to is an
-error. Telemetry content capture stays off unless `--content` is passed.
-Since `@hue-run/sdk` 0.10.0, one-shot mode stores case outputs, error messages and explanations in
-Hue by default, as `--worker` always does: the command's stdout is its stored answer, with the credentials `hue eval`
-handed it redacted, so the agent must not print credentials or debug logs there, and `--no-output`
-opts a one-shot run out. Earlier versions store one-shot outputs only with `--content`. Files the
-agent writes to `output/` are uploaded either way and are not fully redacted, so never write
-credentials there. Report the run URL and the printed verdicts; do not claim a pass without them.
+pending; 2 is a usage error. An evaluator that does not apply to a case shows `n/a` and neither
+passes nor fails it, and a case no pinned evaluator applies to is an error. Telemetry content
+capture stays off unless `--content` is passed. One-shot mode stores case outputs, error messages
+and explanations in Hue by default, as `--worker` always does: the command's stdout is its stored
+answer, with the credentials `hue eval` handed it redacted, so the agent must not print
+credentials or debug logs there, and `--no-output` opts a one-shot run out. Files the agent writes
+to `output/` are uploaded either way and are not fully redacted, so never write credentials
+there. Report the run URL and the printed verdicts; do not claim a pass without them.
 
 ## Evaluate a document eval set
 

@@ -510,10 +510,10 @@
     "description": "Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.5.11"
+      "version": "0.5.12"
     },
     "name": "hue",
-    "sha256": "sha256:03ecf373f3d5ff256a2bf82e19450af339326c8d0b09b5c836379c6c4f0647cd",
+    "sha256": "sha256:19b92281a57afa27930aa021963e117378995b434ad101dd46203a15429747d7",
     "source": "skills/hue/SKILL.md"
   }
 }
