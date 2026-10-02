@@ -527,7 +527,7 @@ short span may send none and appear in Hue only when it finishes.
   placeholder, and a rejected request of placeholders is a warning. A Hue server that accepts
   placeholders sends `Hue-Pending-Spans: 1` on every trace acknowledgement. The first trace
   acknowledgement without it, whatever its request carried, shows the receiver predates them: the
-  transport records one warning (counting the placeholders that request held, if any) and stops
+  transport records one warning (counting the placeholders the receiver rejected in that request, if any) and stops
   sending placeholders for that client, so a receiver that acknowledged completed spans first
   never receives one.
 - Opt out with `liveSpans: false`. Setup credentials never send placeholders.

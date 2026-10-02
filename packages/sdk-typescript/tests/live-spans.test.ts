@@ -425,6 +425,38 @@ describe("Live spans", () => {
   test(
     "completed spans and placeholders travel in separate requests, completed spans first",
     async () => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-split",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await queued(hue.transport, 1);
+          await hue.withSpan("quick", () => {});
+          const mid = await hue.flush();
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([
+            [false],
+            [true],
+          ]);
+          expect(mid.acceptedSpans).toBe(1);
+        });
+        const report = await hue.flush();
+        expect(report.acceptedSpans).toBe(2);
+        expect(hue.transport.getIssues()).toEqual([]);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "no request of placeholders follows a failed request of completed spans",
+    async () => {
       let requests = 0;
       const endpoint = receiver(() => (++requests === 1 ? { status: 401 } : {}));
       const hue = createHue({
@@ -439,14 +471,15 @@ describe("Live spans", () => {
           await hue.withSpan("quick", () => {});
           const error = await hue.flush().catch((reason: unknown) => reason);
           expect(error).toBeInstanceOf(HueExportError);
-          // The failed request held only the completed span; the placeholder followed in its own.
+          // The failed request held only the completed span; the receiver that refused it gets
+          // no second request for the placeholder.
           expect((error as HueExportError).issues.filter((issue) => issue.count > 0)).toEqual([
             expect.objectContaining({ kind: "failed", count: 1, status: 401 }),
           ]);
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[false]]);
         });
         const report = await hue.flush();
-        expect(endpoint.requests[0]!.map(isPlaceholder)).toEqual([false]);
-        expect(endpoint.requests[1]!.map(isPlaceholder)).toEqual([true]);
+        expect(endpoint.placeholders()).toEqual([]);
         expect(report.failedSpans).toBe(1);
         expect(report.acceptedSpans).toBe(1);
       } finally {
@@ -758,6 +791,74 @@ describe("Live spans", () => {
         ]);
       } finally {
         await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test.each([
+    ["setup credentials", { apiKey: `hue_setup_test_setup-${"0".repeat(24)}_${"a".repeat(43)}` }],
+    ["liveSpans: false", { apiKey, liveSpans: false }],
+  ] as const)(
+    "a client with %s records no warning from a header-less receiver",
+    async (_name, options) => {
+      const endpoint = receiver(() => ({}), { legacy: true });
+      const hue = createHue({
+        ...options,
+        serviceName: "live-off-legacy",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await Bun.sleep(pastTicks);
+          await hue.withSpan("quick", () => {});
+          await hue.flush();
+        });
+        const report = await hue.flush();
+        expect(endpoint.placeholders()).toEqual([]);
+        expect(report.acceptedSpans).toBe(2);
+        expect(hue.transport.getIssues()).toEqual([]);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "a header-less acknowledgement during an attached provider's final flush still turns live spans off",
+    async () => {
+      const endpoint = receiver(() => ({}), { legacy: true });
+      const transport = createHueTransport({
+        apiKey,
+        serviceName: "live-attached-shutdown",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      const provider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+      try {
+        const span = provider.getTracer("attached").startSpan("work", {
+          attributes: { "gen_ai.request.model": "synthetic" },
+        });
+        await queued(transport, 1);
+        span.end();
+        // Shutdown stops announcing before the final flush; the completed span's header-less
+        // acknowledgement must still drop the queued placeholder and record the warning.
+        await provider.shutdown();
+        await transport.shutdown();
+        expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[false]]);
+        expect(transport.getIssues()).toEqual([
+          expect.objectContaining({
+            kind: "warning",
+            count: 0,
+            message: expect.stringContaining("live spans are disabled"),
+          }),
+        ]);
+      } finally {
+        await provider.shutdown().catch(() => {});
         await endpoint.server.stop(true);
       }
     },

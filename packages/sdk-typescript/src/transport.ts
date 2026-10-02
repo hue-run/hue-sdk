@@ -151,6 +151,8 @@ export class HueTransport {
   private live = new Set<ReadableSpan>();
   private liveTimer?: ReturnType<typeof setInterval>;
   private liveSpans: boolean;
+  // Whether this client announces live spans at all; `liveSpans` also goes off at shutdown.
+  private readonly announcesLiveSpans: boolean;
   private placeholdersRejected = false;
   // Admitted placeholder snapshots and the marker attributes added after redaction.
   private placeholders = new WeakMap<RecordValue, Attributes>();
@@ -162,6 +164,7 @@ export class HueTransport {
     this.options = validateOptions(options);
     Object.defineProperty(this, "options", { enumerable: false });
     this.liveSpans = this.options.enabled !== false && this.options.liveSpans;
+    this.announcesLiveSpans = this.liveSpans;
     this.traceExporter = new ReportingExporter(
       this,
       "traces",
@@ -389,9 +392,10 @@ export class HueTransport {
    * this transport and records one warning.
    */
   rejectPlaceholders(count: number): void {
-    // Live spans already off, by option, by setup credential or by an earlier acknowledgement:
-    // a client that announces nothing records no warning about placeholders.
-    if (!this.liveSpans) return;
+    // A client that never announces live spans (by option or setup credential) records no
+    // warning about placeholders; one that does records it once, even when the acknowledgement
+    // arrives during its final flush, after shutdown has already stopped announcing.
+    if (!this.announcesLiveSpans || this.placeholdersRejected) return;
     this.stopLiveSpans();
     this.placeholdersRejected = true;
     this.issue(
@@ -779,8 +783,10 @@ class ReportingExporter<T extends RecordValue> {
     };
     await pack(real, false);
     // None is sent once a receiver answered without placeholder support, which the completed
-    // records' acknowledgements may have just shown.
-    if (pending.length && this.transport.sendsPlaceholders()) await pack(pending, true);
+    // records' acknowledgements may have just shown, nor after this export's completed records
+    // failed: placeholders are advisory, and a receiver that just refused or timed out gets no
+    // second request with its own retries.
+    if (pending.length && !failed && this.transport.sendsPlaceholders()) await pack(pending, true);
     if (failed) throw new Error("Hue telemetry export failed");
   }
 

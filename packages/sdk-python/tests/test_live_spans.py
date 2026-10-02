@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from contextlib import ExitStack
 import os
 import signal
 import sys
 import time
 import warnings
+from contextlib import ExitStack
 from threading import Event, Lock, Thread
 
 import pytest
@@ -311,6 +311,23 @@ def test_no_request_of_placeholders_follows_the_acknowledgement_that_turned_live
             assert 0 < len(pending) < 20
         assert hue.force_flush()
         assert hue.export_status.ok
+
+
+@pytest.mark.parametrize("key,options", [(SETUP_KEY, {}), (KEY, {"live_spans": False})])
+def test_client_that_announces_nothing_is_not_flagged_by_a_header_less_receiver(
+    receiver, key, options
+):
+    receiver.legacy = True
+    with Hue(receiver.url, key, capture_content=False, **options) as hue:
+        with hue.span("agent.run"):
+            time.sleep(0.8)
+            with hue.span("finished-step"):
+                pass
+            assert hue.force_flush()
+        assert hue.force_flush()
+        status = hue.export_status
+        assert status.ok and not status.live_spans_rejected
+    assert all(span.end_time_unix_nano > 0 for span in receiver.spans())
 
 
 def test_current_receiver_rejecting_only_a_request_of_placeholders_is_ok(receiver):

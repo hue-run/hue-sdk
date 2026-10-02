@@ -156,6 +156,9 @@ class SafeSession(requests.Session):
         self.placeholders = 0
         self.live_spans = live_spans
         self.live_spans_rejected = False
+        # Why the last trace request failed, read by the exporter once the request returned:
+        # ``"rejected"`` for a partial success from a healthy receiver, else ``None``.
+        self.last_failure: str | None = None
 
     @property
     def ready(self) -> bool:
@@ -238,6 +241,7 @@ class SafeSession(requests.Session):
         kwargs["allow_redirects"] = False
         if self.signal:
             kwargs["stream"] = True
+            self.last_failure = None
         try:
             response = super().request(method, url, **kwargs)
             if self.signal:
@@ -281,6 +285,7 @@ class SafeSession(requests.Session):
                 # Placeholders travel alone, so a rejection is theirs: advisory, never a failure.
                 return response
             if rejected:
+                self.last_failure = "rejected"
                 raise requests.RequestException("Hue OTLP receiver rejected records.")
         return response
 
@@ -466,6 +471,9 @@ class BoundedSpanExporter(SpanExporter):
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         failed = False
+        # A request the receiver refused or did not answer, as opposed to one it acknowledged with
+        # rejections: placeholders are advisory, so such a receiver gets no second request.
+        refused = False
         # Finished spans and placeholders travel in separate requests, finished spans first, so
         # a rejection count is always one kind of record's.
         real = [span for span in spans if not isinstance(span, PendingSpan)]
@@ -474,6 +482,8 @@ class BoundedSpanExporter(SpanExporter):
             for batch in _split_batches(real, encode_spans):
                 if not self._send(batch, placeholders=0):
                     failed = True
+                    if self._session.last_failure != "rejected":
+                        refused = True
                     # The batch Hue refused or did not acknowledge names the traces in it.
                     self._ledger.record(
                         "traces",
@@ -496,7 +506,8 @@ class BoundedSpanExporter(SpanExporter):
         # Placeholders are advisory: a request of them never fails the export, and none is sent
         # once a receiver answered without placeholder support, which the finished spans'
         # acknowledgements may have just shown.
-        if pending and not self._session.live_spans_rejected:
+        # Nor after a request of this export's finished spans was refused or unanswered.
+        if pending and not refused and not self._session.live_spans_rejected:
             try:
                 for batch in _split_batches(pending, encode_spans):
                     # None follows the acknowledgement that turned live spans off.
