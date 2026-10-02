@@ -340,7 +340,7 @@ def _accepted_completion(checkpoint: dict[str, Any]) -> None:
     checkpoint["complete"].pop("traceSpanCount", None)
 
 
-def _typed_error(target_error: BaseException, persist_result_content: bool) -> dict[str, object]:
+def _typed_error(target_error: Exception, persist_result_content: bool) -> dict[str, object]:
     """Why the case stopped: an output past its bound, the agent, a world never created, or a
     service it called (``_failure.py``), with the service's own word for what failed as the
     error's ``cause`` when its answer names one (Hue's gateway diagnostic)."""
