@@ -35,6 +35,16 @@ refuses to publish a version without a matching entry below.
 
 #### Changed
 
+- **Breaking:** `captureContent: false` also removes Langfuse's content attributes before export:
+  `langfuse.observation.input`, `langfuse.observation.output`,
+  `langfuse.observation.status_message`, `langfuse.observation.model.parameters`,
+  `langfuse.trace.input` and `langfuse.trace.output`, with their dotted children, from every
+  record Hue exports, beside the GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content it
+  already removed. Langfuse's model name, usage and cost details, observation type, session and
+  user identifiers, trace name, release, environment and `metadata.*` keys are metadata and stay;
+  `contentPrefixes` lists the six. **Wire** Migration: an application that set
+  `captureContent: false` and relied on Langfuse inputs and outputs reaching Hue sets
+  `captureContent: true`; Langfuse's own export is unaffected.
 - **Wire** A content value over Hue's 256 KiB value cap is no longer a reason to lose the record.
   Text is cut to a UTF-8 prefix and bytes or a structured log body are replaced by the receiver's
   own marker (`{ "hue.truncated": true, "hue.truncated_bytes": <size> }`), and the value's key is
@@ -53,6 +63,21 @@ refuses to publish a version without a matching entry below.
 - **Wire** A structured helper value cut at the cap (`hue.tool`, `setInput`, `setOutput`) is cut
   to a UTF-8 prefix of its JSON text at exactly the cap, inside whichever member the cap fell in,
   never to a shorter document of its first members that would read as the whole value.
+
+#### Fixed
+
+- Live-span placeholders travel in their own requests, after an export's completed spans, so a
+  rejection count is always one kind of record's: a completed span's rejection is never credited
+  to a placeholder (a receiver without `Hue-Pending-Spans: 1` that rejected a completed span could
+  hide it behind a placeholder before), and a rejected request of placeholders is a warning. The
+  first trace acknowledgement without the header, whatever its request carried, turns live spans
+  off with one warning, so a generic collector that acknowledged completed spans first never
+  receives a placeholder. An export whose spans are still running makes one more request than
+  before, for the placeholders alone; the export cadence is unchanged. **Wire**
+- The README quickstart no longer calls `recordMessages` outside a model call: `span.setOutput`
+  already records the output, and a message record without `gen_ai.operation.name`,
+  `gen_ai.provider.name` and `gen_ai.request.model` describes no inference. The reference
+  chatbot's records name their operation, provider and model.
 
 ### [0.12.1] - 2026-10-02
 
@@ -1215,6 +1240,16 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Changed
 
+- **Breaking:** `capture_content=False` also removes Langfuse's content attributes before export:
+  `langfuse.observation.input`, `langfuse.observation.output`,
+  `langfuse.observation.status_message`, `langfuse.observation.model.parameters`,
+  `langfuse.trace.input` and `langfuse.trace.output`, with their dotted children, from every
+  record Hue exports, beside the GenAI, OpenInference, OpenLLMetry and Vercel AI SDK content it
+  already removed. Langfuse's model name, usage and cost details, observation type, session and
+  user identifiers, trace name, release, environment and `metadata.*` keys are metadata and stay;
+  `CONTENT_PREFIXES` lists the six, identical to TypeScript's `contentPrefixes`. **Wire**
+  Migration: an application that set `capture_content=False` and relied on Langfuse inputs and
+  outputs reaching Hue sets `capture_content=True`; Langfuse's own export is unaffected.
 - **Wire** Helper content over Hue's 256 KiB value cap (`set_input`, `set_output`, a tool call's
   arguments or result) is cut to a UTF-8 prefix of its JSON text and the key listed in the span's
   `hue.truncated` attribute, where Hue's receiver lists the values it cuts itself, instead of
@@ -1222,6 +1257,18 @@ No registry release is claimed until publication and registry acceptance complet
   unmarks its key, and the list is kept under a lock per span so two threads cutting on one span
   at once both stay listed. An inference log's body over the cap is still omitted and counted,
   since its prefix is no JSON.
+
+#### Fixed
+
+- Live-span placeholders travel in their own requests, after an export's finished spans, so a
+  rejection count is always one kind of record's: a finished span's rejection is never credited
+  to a placeholder (a receiver without `Hue-Pending-Spans: 1` that rejected a finished span could
+  hide it behind a placeholder before), and a rejected request of placeholders never fails the
+  export status. The first trace acknowledgement without the header, whatever its request
+  carried, sets `export_status.live_spans_rejected` and stops announcing spans, so a generic
+  collector that acknowledged finished spans first never receives a placeholder. An export whose
+  spans are still running makes one more request than before, for the placeholders alone; the
+  export cadence is unchanged. **Wire**
 
 ### [0.6.4] - 2026-10-02
 

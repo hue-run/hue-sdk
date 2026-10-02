@@ -166,6 +166,8 @@ export class HueTransport {
   private live = new Set<ReadableSpan>();
   private liveTimer?: ReturnType<typeof setInterval>;
   private liveSpans: boolean;
+  // Whether this client announces live spans at all; `liveSpans` also goes off at shutdown.
+  private readonly announcesLiveSpans: boolean;
   private placeholdersRejected = false;
   // Admitted placeholder snapshots and the marker attributes added after redaction.
   private placeholders = new WeakMap<RecordValue, Attributes>();
@@ -177,6 +179,7 @@ export class HueTransport {
     this.options = validateOptions(options);
     Object.defineProperty(this, "options", { enumerable: false });
     this.liveSpans = this.options.enabled !== false && this.options.liveSpans;
+    this.announcesLiveSpans = this.liveSpans;
     this.traceExporter = new ReportingExporter(
       this,
       "traces",
@@ -398,12 +401,17 @@ export class HueTransport {
   }
 
   /**
-   * @internal Exporter callback: a receiver without placeholder support rejects each by its zero
-   * end time. Stops announcing for this transport and records one warning.
+   * @internal Exporter callback: a trace acknowledgement lacked the placeholder-support header,
+   * so the receiver predates placeholders and rejects each by its zero end time; `count` is how
+   * many it rejected in that request, zero when the request carried none. Stops announcing for
+   * this transport and records one warning.
    */
   rejectPlaceholders(count: number): void {
+    // A client that never announces live spans (by option or setup credential) records no
+    // warning about placeholders; one that does records it once, even when the acknowledgement
+    // arrives during its final flush, after shutdown has already stopped announcing.
+    if (!this.announcesLiveSpans || this.placeholdersRejected) return;
     this.stopLiveSpans();
-    if (this.placeholdersRejected) return;
     this.placeholdersRejected = true;
     this.issue(
       "traces",
@@ -799,11 +807,17 @@ class ReportingExporter<T extends RecordValue> {
   }
 
   private async exportRecords(records: T[]): Promise<void> {
-    const accepted: T[] = [];
-    // Placeholders are advisory: losing one is a warning, never an export failure.
-    const placeholders = new Set<T>();
+    // Completed records and placeholders travel in separate requests, completed records first,
+    // so a rejection count is always one kind of record's. Placeholders are advisory: losing one
+    // is a warning, never an export failure.
+    const real: T[] = [];
+    const pending: T[] = [];
     const cache: ResourceCache = new WeakMap();
     let failed = false;
+    // A request of completed records the receiver refused or did not answer, as opposed to a
+    // record this side could not redact or encode: placeholders are advisory, so such a receiver
+    // gets no second request.
+    let refused = false;
     let redactedBytes = 0;
     const invalid = (placeholder: boolean, message: string, record?: T) => {
       if (placeholder)
@@ -824,12 +838,6 @@ class ReportingExporter<T extends RecordValue> {
           record ? traceIdsOf([record]) : undefined,
         );
       }
-    };
-    const send = async (batch: T[]): Promise<boolean> => {
-      const count = batch.filter((record) => placeholders.has(record)).length;
-      const ok = await this.send(batch, count);
-      if (!ok) failed = true;
-      return ok;
     };
     const resourceDeadline = Date.now() + this.transport.options.timeoutMillis;
     for (const { record, markers } of this.ordered(records)) {
@@ -872,8 +880,7 @@ class ReportingExporter<T extends RecordValue> {
         if (redactedBytes + bytes > this.transport.options.maxQueueBytes)
           throw new RangeError("Redacted batch exceeds byte budget");
         redactedBytes += bytes;
-        accepted.push(redacted);
-        if (markers) placeholders.add(redacted);
+        (markers ? pending : real).push(redacted);
       } catch {
         invalid(
           markers !== undefined,
@@ -887,22 +894,11 @@ class ReportingExporter<T extends RecordValue> {
     // encodings plus a fixed framing margin bounds the request size. Room is left for gzip
     // headers/blocks when otherwise incompressible data is near the wire cap.
     const limit = MAX_BODY_BYTES - 1024;
-    let batch: T[] = [];
-    let batchBytes = 0;
-    // The traces whose root in the batch carries its dropped-record count, consumed once the
-    // request that carries it is acknowledged; a failed request keeps the count.
-    let counted: string[] = [];
-    const sendBatch = async (records: T[]) => {
-      if (await send(records)) this.transport.consumeDroppedRecords(counted);
-      counted = [];
-    };
     const measure = (record: T) =>
       this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
-    // Every record of the batch is measured, shed and, where it cannot be sent, counted lost
-    // before any root is written, so a root carries the losses of children that ended after it.
     /** The record, shed until it fits the request limit, and its size; undefined when no content
-     * is left to shed. A placeholder stays one through its copies. */
-    const fit = (record: T, placeholder: boolean): { record: T; bytes: number } | undefined => {
+     * is left to shed. */
+    const fit = (record: T): { record: T; bytes: number } | undefined => {
       let bytes = measure(record);
       // A record over the request limit sheds its content values, largest first, each
       // replaced by the receiver's marker and listed under `hue.truncated`, until it fits:
@@ -912,71 +908,101 @@ class ReportingExporter<T extends RecordValue> {
         const shed = shedLargestContent(record, this.signal);
         if (!shed) return undefined;
         record = shed as T;
-        if (placeholder) placeholders.add(record);
         bytes = measure(record);
       }
       return { record, bytes };
     };
-    const prepared: { record: T; bytes: number; placeholder: boolean }[] = [];
-    for (const record of accepted) {
-      const placeholder = placeholders.has(record);
-      let fitted: { record: T; bytes: number } | undefined;
-      try {
-        fitted = fit(record, placeholder);
-      } catch {
-        invalid(placeholder, "Telemetry record could not be serialized", record);
-        continue;
-      }
-      if (!fitted) {
-        invalid(placeholder, "Telemetry record exceeds the 1 MiB request limit", record);
-        continue;
-      }
-      prepared.push({ ...fitted, placeholder });
-    }
-    for (const entry of prepared) {
-      let { record, bytes: recordBytes } = entry;
-      let carriesCount = false;
-      if (this.signal === "traces" && !entry.placeholder) {
-        const withCount = this.transport.withDroppedRecords(record as ReadableSpan) as T;
-        if (withCount !== record) {
-          carriesCount = true;
-          // The count may put a root shed to just under the limit over it again: shed on.
-          let fitted: { record: T; bytes: number } | undefined;
-          try {
-            fitted = fit(withCount, false);
-          } catch {
-            invalid(false, "Telemetry record could not be serialized", withCount);
-            continue;
-          }
-          if (!fitted) {
-            invalid(false, "Telemetry record exceeds the 1 MiB request limit", withCount);
-            continue;
-          }
-          ({ record, bytes: recordBytes } = fitted);
-        }
-      }
-      const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
-      if (batch.length && batchBytes + framedBytes > limit) {
-        await sendBatch(batch);
+    /** Sends one kind of record in requests up to the limit: completed records, whose roots carry
+     * their traces' dropped-record counts, or placeholders alone (`advisory`). */
+    const pack = async (accepted: T[], advisory: boolean) => {
+      let batch: T[] = [];
+      let batchBytes = 0;
+      // The traces whose root in the batch carries its dropped-record count, consumed once the
+      // request that carries it is acknowledged; a failed request keeps the count.
+      let counted: string[] = [];
+      const send = async () => {
+        const records = batch;
+        const traces = counted;
         batch = [];
         batchBytes = 0;
+        counted = [];
+        // A request of placeholders never fails the export, and none follows an acknowledgement
+        // that turned live spans off.
+        if (advisory && !this.transport.sendsPlaceholders()) return;
+        if (await this.send(records, advisory ? records.length : 0)) {
+          this.transport.consumeDroppedRecords(traces);
+        } else if (!advisory) {
+          failed = true;
+          refused = true;
+        }
+      };
+      // Every record is measured, shed and, where it cannot be sent, counted lost before any root
+      // is written, so a root carries the losses of children that ended after it.
+      const prepared: { record: T; bytes: number }[] = [];
+      for (const record of accepted) {
+        let fitted: { record: T; bytes: number } | undefined;
+        try {
+          fitted = fit(record);
+        } catch {
+          invalid(advisory, "Telemetry record could not be serialized", record);
+          continue;
+        }
+        if (!fitted) {
+          invalid(advisory, "Telemetry record exceeds the 1 MiB request limit", record);
+          continue;
+        }
+        prepared.push(fitted);
       }
-      batch.push(record);
-      batchBytes += framedBytes;
-      if (carriesCount) counted.push((record as ReadableSpan).spanContext().traceId);
-    }
-    if (batch.length) await sendBatch(batch);
+      for (const entry of prepared) {
+        let { record, bytes: recordBytes } = entry;
+        let carriesCount = false;
+        if (this.signal === "traces" && !advisory) {
+          const withCount = this.transport.withDroppedRecords(record as ReadableSpan) as T;
+          if (withCount !== record) {
+            carriesCount = true;
+            // The count may put a root shed to just under the limit over it again: shed on.
+            let fitted: { record: T; bytes: number } | undefined;
+            try {
+              fitted = fit(withCount);
+            } catch {
+              invalid(false, "Telemetry record could not be serialized", withCount);
+              continue;
+            }
+            if (!fitted) {
+              invalid(false, "Telemetry record exceeds the 1 MiB request limit", withCount);
+              continue;
+            }
+            ({ record, bytes: recordBytes } = fitted);
+          }
+        }
+        const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
+        if (batch.length && batchBytes + framedBytes > limit) await send();
+        batch.push(record);
+        batchBytes += framedBytes;
+        if (carriesCount) counted.push((record as ReadableSpan).spanContext().traceId);
+      }
+      if (batch.length) await send();
+    };
+    await pack(real, false);
+    // None is sent once a receiver answered without placeholder support, which the completed
+    // records' acknowledgements may have just shown, nor after this export's completed records were
+    // refused or unanswered: a receiver that just refused or timed out gets no second request with
+    // its own retries. A record this side could not send keeps the placeholders going out.
+    if (pending.length && !refused && this.transport.sendsPlaceholders()) await pack(pending, true);
     if (failed) throw new Error("Hue telemetry export failed");
   }
 
-  /** Sends one request; `placeholders` of `records` are advisory and never count as lost. */
+  /**
+   * Sends one request: of completed records, or of placeholders alone when `placeholders` is
+   * `records.length`. Placeholders are advisory and never count as lost.
+   */
   private async send(records: T[], placeholders = 0): Promise<boolean> {
     const options = this.transport.options;
     const real = records.length - placeholders;
     // The traces this batch carries, spans or the log records emitted in their spans, so a loss
     // or rejection names whose telemetry it was.
     const traceIds = traceIdsOf(records);
-    // A loss involving only placeholders is a warning. Mixed losses count only real records.
+    // Losing a request of placeholders is a warning; losing one of completed records counts them.
     const lose = (message: string, status?: number): boolean => {
       this.transport.issue(
         this.signal,
@@ -1008,30 +1034,42 @@ class ReportingExporter<T extends RecordValue> {
           );
           if (!Number.isSafeInteger(count) || count < 0 || count > records.length)
             throw new Error("Invalid rejection count");
-          // A receiver that accepts placeholders never rejects them for being placeholders, so its
-          // rejections count as before. One without the header predates them and rejects each.
-          const downgrade = placeholders > 0 && !acceptsPlaceholders;
-          const placeholderRejections = downgrade ? Math.min(count, placeholders) : 0;
-          if (downgrade) this.transport.rejectPlaceholders(placeholderRejections);
-          const remaining = count - placeholderRejections;
-          // Rejections are not matched to records. Attribute them to real records first. A
-          // rejection of spans in a batch of one trace is that trace's; in a batch of several it
-          // names none, since the innocent traces' spans may have been accepted, and each case's
-          // receipt decides. A rejection of log records names every trace in the batch: the
-          // receipt counts spans, not logs, so it could not tell whose logs were lost.
-          rejected = Math.min(remaining, real);
-          const rejectedTraceIds =
-            this.signal === "logs" || (traceIds && traceIds.length === 1) ? traceIds : undefined;
-          if (remaining || (partial?.errorMessage && !downgrade))
-            this.transport.issue(
-              this.signal,
-              rejected ? "rejected" : "warning",
-              rejected || remaining,
-              rejected
-                ? "Hue rejected telemetry records; inspect the project ingestion settings and supported limits"
-                : remaining
+          // A trace acknowledgement without the header comes from a receiver that predates
+          // placeholders, whatever the request carried: live spans stop, before any placeholder
+          // reaches a receiver that acknowledged completed spans first.
+          if (this.signal === "traces" && !acceptsPlaceholders)
+            this.transport.rejectPlaceholders(placeholders ? count : 0);
+          if (placeholders) {
+            // Placeholders travel alone, so the count is theirs: a warning, never a loss. A
+            // receiver with the header never rejects a placeholder for being one.
+            if (acceptsPlaceholders && (count || partial?.errorMessage))
+              this.transport.issue(
+                this.signal,
+                "warning",
+                count,
+                count
                   ? "Hue rejected in-progress span placeholders"
                   : "Hue returned an ingestion warning",
+              );
+            return {};
+          }
+          // Completed records travel alone too, so the count is theirs in full. Rejections are
+          // not matched to records: a rejection of spans in a batch of one trace is that trace's;
+          // in a batch of several it names none, since the innocent traces' spans may have been
+          // accepted, and each case's receipt decides. A rejection of log records names every
+          // trace in the batch: the receipt counts spans, not logs, so it could not tell whose
+          // logs were lost.
+          rejected = count;
+          const rejectedTraceIds =
+            this.signal === "logs" || (traceIds && traceIds.length === 1) ? traceIds : undefined;
+          if (count || partial?.errorMessage)
+            this.transport.issue(
+              this.signal,
+              count ? "rejected" : "warning",
+              count,
+              count
+                ? "Hue rejected telemetry records; inspect the project ingestion settings and supported limits"
+                : "Hue returned an ingestion warning",
               undefined,
               rejectedTraceIds,
             );
