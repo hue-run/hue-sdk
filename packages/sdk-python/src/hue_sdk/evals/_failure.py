@@ -204,8 +204,15 @@ def _body_diagnostic(body: object) -> str | None:
         except ValueError:
             return None
     if isinstance(body, dict):
+        # Hue's REST refusal names it at the top; its MCP refusal, a JSON-RPC error, in
+        # ``error.data``.
         diagnostic = body.get("diagnostic")
-        return diagnostic if isinstance(diagnostic, str) else None
+        if isinstance(diagnostic, str):
+            return diagnostic
+        error = body.get("error")
+        data = error.get("data") if isinstance(error, dict) else None
+        named = data.get("diagnostic") if isinstance(data, dict) else None
+        return named if isinstance(named, str) else None
     return None
 
 

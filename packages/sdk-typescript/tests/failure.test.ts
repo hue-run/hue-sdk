@@ -247,10 +247,19 @@ describe("the service's own word for what failed", () => {
         }),
       ),
     ).toBe("authorization_unavailable");
-    // The MCP SDK's transport quotes the body in its message.
+    // The MCP SDK's transport quotes the body in its message: Hue's REST refusal names the
+    // diagnostic at the top, its MCP refusal (a JSON-RPC error) in `error.data`.
     expect(serviceFailureCause(gatewayPost(503, "authorization_unavailable"))).toBe(
       "authorization_unavailable",
     );
+    expect(
+      serviceFailureCause(
+        new StreamableHTTPError(
+          503,
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error","data":{"diagnostic":"authorization_unavailable"}}}',
+        ),
+      ),
+    ).toBe("authorization_unavailable");
     // Hue's own clients read the header into `diagnostic`.
     expect(
       serviceFailureCause(new HueEnvironmentError(409, undefined, "simulation_gateway_required")),

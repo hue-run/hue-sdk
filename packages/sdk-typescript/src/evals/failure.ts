@@ -232,8 +232,9 @@ function headerValue(headers: unknown, name: string): string | undefined {
   return undefined;
 }
 
-/** The `diagnostic` a JSON body names: an object's, or the object a string carries from its
- * first brace (an MCP transport error's message quotes the body it was answered). */
+/** The `diagnostic` a JSON body names: an object's, at the top or in a JSON-RPC error's `data`,
+ * or the object a string carries from its first brace (an MCP transport error's message quotes
+ * the body it was answered). */
 function bodyDiagnostic(body: unknown): string | undefined {
   if (typeof body === "string") {
     const start = body.indexOf("{");
@@ -245,8 +246,16 @@ function bodyDiagnostic(body: unknown): string | undefined {
     }
   }
   if (body === null || typeof body !== "object") return undefined;
-  const { diagnostic } = body as { diagnostic?: unknown };
-  return typeof diagnostic === "string" ? diagnostic : undefined;
+  // Hue's REST refusal names it at the top; its MCP refusal, a JSON-RPC error, in `error.data`.
+  const { diagnostic, error } = body as { diagnostic?: unknown; error?: unknown };
+  if (typeof diagnostic === "string") return diagnostic;
+  const data =
+    error !== null && typeof error === "object" ? (error as { data?: unknown }).data : undefined;
+  const named =
+    data !== null && typeof data === "object"
+      ? (data as { diagnostic?: unknown }).diagnostic
+      : undefined;
+  return typeof named === "string" ? named : undefined;
 }
 
 /** The diagnostic one error carries: the one it names itself (Hue's own clients read the header

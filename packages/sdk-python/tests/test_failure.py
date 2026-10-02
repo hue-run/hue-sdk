@@ -328,6 +328,25 @@ def test_the_cause_is_read_from_a_header_a_body_or_hues_own_client():
         )
     )
     assert error_cause(text_only) == "authorization_unavailable"
+    # Hue's MCP refusal, a JSON-RPC error, names the diagnostic in ``error.data``.
+    rpc = GatewayStatusError(
+        SimpleNamespace(
+            status_code=503,
+            headers={},
+            text=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": {"diagnostic": "authorization_unavailable"},
+                    },
+                }
+            ),
+        )
+    )
+    assert error_cause(rpc) == "authorization_unavailable"
     # Hue's own clients read the header into ``diagnostic``.
     assert error_cause(HueApiError(503, None, "store_unavailable")) == "store_unavailable"
     assert error_cause(HueEnvironmentError(409, None, "simulation_gateway_required")) == (
