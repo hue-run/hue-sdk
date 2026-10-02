@@ -674,6 +674,10 @@ class ReportingExporter<T extends RecordValue> {
     const pending: T[] = [];
     const cache: ResourceCache = new WeakMap();
     let failed = false;
+    // A request of completed records the receiver refused or did not answer, as opposed to a
+    // record this side could not redact or encode: placeholders are advisory, so such a receiver
+    // gets no second request.
+    let refused = false;
     let redactedBytes = 0;
     const invalid = (placeholder: boolean, message: string, record?: T) => {
       if (placeholder)
@@ -760,7 +764,10 @@ class ReportingExporter<T extends RecordValue> {
         // A request of placeholders never fails the export, and none follows an acknowledgement
         // that turned live spans off.
         if (advisory && !this.transport.sendsPlaceholders()) return;
-        if (!(await this.send(records, advisory ? records.length : 0)) && !advisory) failed = true;
+        if (!(await this.send(records, advisory ? records.length : 0)) && !advisory) {
+          failed = true;
+          refused = true;
+        }
       };
       for (const record of accepted) {
         let recordBytes: number;
@@ -783,10 +790,10 @@ class ReportingExporter<T extends RecordValue> {
     };
     await pack(real, false);
     // None is sent once a receiver answered without placeholder support, which the completed
-    // records' acknowledgements may have just shown, nor after this export's completed records
-    // failed: placeholders are advisory, and a receiver that just refused or timed out gets no
-    // second request with its own retries.
-    if (pending.length && !failed && this.transport.sendsPlaceholders()) await pack(pending, true);
+    // records' acknowledgements may have just shown, nor after this export's completed records were
+    // refused or unanswered: a receiver that just refused or timed out gets no second request with
+    // its own retries. A record this side could not send keeps the placeholders going out.
+    if (pending.length && !refused && this.transport.sendsPlaceholders()) await pack(pending, true);
     if (failed) throw new Error("Hue telemetry export failed");
   }
 

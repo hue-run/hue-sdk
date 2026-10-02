@@ -866,6 +866,42 @@ describe("Live spans", () => {
   );
 
   test(
+    "a record this side could not send does not hold back the request of placeholders",
+    async () => {
+      const endpoint = receiver();
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-invalid-record",
+        captureContent: false,
+        baseUrl: endpoint.url,
+        maxQueueBytes: 32 * 1024 * 1024,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await queued(hue.transport, 1);
+          // Over the 1 MiB request limit: invalid on this side, never sent, no receiver failure.
+          hue.tracer
+            .startSpan("too large", {
+              attributes: { "gen_ai.request.model": "x".repeat(1_100_000) },
+            })
+            .end();
+          const error = await hue.flush().catch((reason: unknown) => reason);
+          expect(error).toBeInstanceOf(HueExportError);
+          expect((error as HueExportError).issues).toEqual([
+            expect.objectContaining({ kind: "invalid", count: 1 }),
+          ]);
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[true]]);
+        });
+        await hue.flush();
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
     "placeholders use at most a quarter of the export queue's records",
     async () => {
       let release!: () => void;
