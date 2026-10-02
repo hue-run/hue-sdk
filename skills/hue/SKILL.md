@@ -3,7 +3,7 @@ name: hue
 description: Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.
 metadata:
   author: hue-run
-  version: "0.5.10"
+  version: "0.5.11"
 ---
 
 # Hue tracing
@@ -81,7 +81,7 @@ Recommend content capture: `captureContent: true` / `capture_content=True`. Trac
 
 For redaction, read the [redaction recipe](https://docs.hue.run/guides/redaction) and identify the provider and exporter that actually send the records. TypeScript's `redact(value, path)` belongs on `createHue`, or on `createHueTransport` when reusing a provider. Python's `redactor(field, value)` covers Hue helper content, not arbitrary external spans; scrub those at their producer or collector. Configure each exporter separately, including Langfuse when present. Use the recipe's email example as a starting point, adapt it to the application's fields, and verify synthetic exported content plus unchanged application results. Do not promise automatic PII detection or coverage of every field.
 
-Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry and Vercel content attributes at export when capture is disabled (Python requires 0.2.0); still configure the chosen instrumentor's own input/output capture controls to match the chosen policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
+Both SDKs strip recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel content attributes at export when capture is disabled (Python requires 0.2.0; Langfuse filtering requires TypeScript `0.13.0` or Python `0.7.0`). Configure the chosen instrumentor's own input/output capture controls to match the chosen policy, because unrecognized custom keys pass through. Direct OTLP requires explicit instrumentor capture settings. Both SDKs' helpers record the exception type (`error.type`) and span status but omit exception messages and stacks even with content capture enabled. Report unsupported or unavailable fields rather than bypassing SDK limits or inventing data.
 
 Initialize one client or exporter per server lifecycle. For TypeScript helpers use `withSpan()`, `model()` (requires 0.2.0) and `tool()`; for Python use the `span()`, `model()`, and `tool()` context managers. Instrument every request path that calls a model or tool, not only one: add model/tool child spans, preserve propagated parent context, and reuse the application's session identifier when available. Then verify at least one real request as described under Verify delivery, and report which instrumented paths you did not exercise. These helpers do not proxy or automatically observe uninstrumented model calls. Record provider-reported usage; leave unknown token counts and costs absent. When wrapping MCP tools, pass `mcp: client.getServerVersion()` to TypeScript `hue.tool` (requires 0.4.1) or `mcp=` to Python `hue.tool` (requires 0.2.3) so the span records `mcp.server.name` from `initialize`; do not infer the server from a generic tool name.
 
