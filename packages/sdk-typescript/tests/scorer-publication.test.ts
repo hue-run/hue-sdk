@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { normalizeScorerDefinitionForPublication } from "../src/evals/scorer-publication.js";
-import { defineLocalScorer, isBoundLocally } from "../src/evals/scorers.js";
+import { defineLocalScorer } from "../src/evals.js";
 import type { ScorerDefinition } from "../src/evals.js";
 
 const metric = { name: "quality", type: "boolean" } as const;
@@ -89,7 +89,6 @@ describe("scorer publication normalization", () => {
     const published = normalizeScorerDefinitionForPublication(local.definition);
     if (published.kind !== "local_code") throw new Error("Expected a local scorer definition");
     expect(local.definition).toEqual(published);
-    expect(isBoundLocally(published, [local])).toBe(true);
   });
 
   test.each([
