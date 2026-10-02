@@ -13,6 +13,16 @@ class SafeSpan implements Span {
     private failed: () => void,
   ) {}
 
+  /** The SDK span's attributes as they stand (the API alone shows none); undefined for a span
+   * that carries none, such as a non-recording span. */
+  get attributes(): Record<string, unknown> | undefined {
+    try {
+      return (this.source as { attributes?: Record<string, unknown> }).attributes;
+    } catch {
+      return undefined;
+    }
+  }
+
   private write(work: () => unknown): void {
     try {
       const result = work();
@@ -101,25 +111,57 @@ const contentLimits: EncodeLimits = { bytes: MAX_CONTENT_BYTES, nodes: 16384, de
 
 /** Validate a bounded data tree without invoking toJSON or property getters. */
 export function encodeContent(value: unknown, limits: EncodeLimits = contentLimits): string {
+  const { text, truncated } = encodeBoundedContent(value, limits, false);
+  if (truncated) throw new RangeError("Content limit exceeded");
+  return text;
+}
+
+/**
+ * The value as JSON text within `limits.bytes`, and whether it was cut to fit. A value over the
+ * cap is cut to a UTF-8 prefix of its JSON text at the cap, as Hue's receiver cuts a value over
+ * its own cap and as it recognizes a cut (a text at one of its limits), so a span still carries
+ * the call, the recorded part of its result and the rest of its evidence; the caller lists the
+ * key under `hue.truncated`. The text is written as the value is walked and the walk stops once
+ * it is past the budget, so no more than the budget and one value is ever held, and a value cut
+ * among its members is never a shorter document that reads whole: the prefix ends at the cap,
+ * inside whatever member the cap fell in.
+ */
+export function encodeBoundedContent(
+  value: unknown,
+  limits: EncodeLimits = contentLimits,
+  cut = true,
+): { text: string; truncated: boolean } {
   let nodes = 0;
   let bytes = 0;
+  let truncated = false;
+  const parts: string[] = [];
   const ancestors = new Set<object>();
-  const charge = (amount: number) => {
-    bytes += amount;
-    if (bytes > limits.bytes) throw new RangeError("Content limit exceeded");
+  const write = (text: string) => {
+    parts.push(text);
+    bytes += Buffer.byteLength(text);
+    if (bytes > limits.bytes) {
+      if (!cut) throw new RangeError("Content limit exceeded");
+      truncated = true;
+    }
   };
-  const visit = (item: unknown, depth: number): unknown => {
+  const visit = (item: unknown, depth: number): void => {
     if (++nodes > limits.nodes || depth > limits.depth)
       throw new RangeError("Content complexity limit exceeded");
     if (typeof item === "string") {
-      if (item.length > limits.bytes) throw new RangeError("Content limit exceeded");
-      charge(Buffer.byteLength(JSON.stringify(item)));
-      return item;
+      let text = item;
+      if (text.length > limits.bytes || Buffer.byteLength(text) > limits.bytes) {
+        if (!cut) throw new RangeError("Content limit exceeded");
+        // The copy itself is bounded in bytes: a longer string is cut before it is escaped.
+        truncated = true;
+        text = truncateUtf8(text.slice(0, limits.bytes), limits.bytes);
+      }
+      write(JSON.stringify(text));
+      return;
     }
     if (item === null || typeof item === "boolean" || typeof item === "number") {
       if (typeof item === "number" && !Number.isFinite(item)) throw new TypeError("Invalid number");
-      charge(JSON.stringify(item).length);
-      return item;
+      write(JSON.stringify(item));
+      return;
     }
     if (!item || typeof item !== "object" || ancestors.has(item))
       throw new TypeError("Invalid JSON");
@@ -130,28 +172,43 @@ export function encodeContent(value: unknown, limits: EncodeLimits = contentLimi
     if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(item)))
       throw new TypeError("Expected JSON data");
     ancestors.add(item);
-    charge(2);
-    const result: unknown[] | Record<string, unknown> = array ? [] : Object.create(null);
+    write(array ? "[" : "{");
     // Own descriptors avoid executing application accessors during capture.
     const keys = array
       ? Array.from({ length: Math.min(item.length, limits.nodes + 1) }, (_, i) => String(i))
       : Object.keys(item);
     if (keys.length > limits.nodes) throw new RangeError("Content complexity limit exceeded");
+    let first = true;
     for (const key of keys) {
+      // Past the budget, the rest is cut anyway: nothing more is copied.
+      if (truncated) break;
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       if (!descriptor || !("value" in descriptor))
         throw new TypeError("Expected JSON data property");
-      charge(1 + (array ? 0 : Buffer.byteLength(JSON.stringify(key)) + 1));
-      const child = visit(descriptor.value, depth + 1);
-      if (array) (result as unknown[]).push(child);
-      else (result as Record<string, unknown>)[key] = child;
+      write(`${first ? "" : ","}${array ? "" : `${JSON.stringify(key)}:`}`);
+      first = false;
+      visit(descriptor.value, depth + 1);
     }
+    write(array ? "]" : "}");
     ancestors.delete(item);
-    return result;
   };
-  const encoded = JSON.stringify(visit(value, 0));
-  if (Buffer.byteLength(encoded) > limits.bytes) throw new RangeError("Content limit exceeded");
-  return encoded;
+  visit(value, 0);
+  const encoded = parts.join("");
+  if (!truncated) return { text: encoded, truncated: false };
+  // A cut value is past the cap as written (a cut text alone, with its quotes, is over it), so
+  // the prefix ends at the cap, where the receiver recognizes Hue's cut.
+  return { text: truncateUtf8(encoded, limits.bytes), truncated: true };
+}
+
+/** `value` cut to at most `max` UTF-8 bytes, ending on a character boundary. The copy is bounded
+ * before the cut: `max` code units hold at least `max` bytes, so a gigabyte of text is never
+ * encoded whole to be cut to a quarter megabyte. */
+export function truncateUtf8(value: string, max: number): string {
+  if (Buffer.byteLength(value, "utf8") <= max) return value;
+  const bytes = Buffer.from(value.slice(0, max), "utf8");
+  let end = Math.min(max, bytes.byteLength);
+  while (end > 0 && end < bytes.byteLength && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.toString("utf8", 0, end);
 }
 
 /** Bounded conservative accounting for the record data retained by our queue, not total process RSS. */
