@@ -194,12 +194,14 @@ export function encodeBoundedContent(
   return { text: truncateUtf8(encoded, limits.bytes), truncated: true };
 }
 
-/** `value` cut to at most `max` UTF-8 bytes, ending on a character boundary. */
+/** `value` cut to at most `max` UTF-8 bytes, ending on a character boundary. The copy is bounded
+ * before the cut: `max` code units hold at least `max` bytes, so a gigabyte of text is never
+ * encoded whole to be cut to a quarter megabyte. */
 export function truncateUtf8(value: string, max: number): string {
-  const bytes = Buffer.from(value, "utf8");
-  if (bytes.byteLength <= max) return value;
-  let end = max;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  if (Buffer.byteLength(value, "utf8") <= max) return value;
+  const bytes = Buffer.from(value.slice(0, max), "utf8");
+  let end = Math.min(max, bytes.byteLength);
+  while (end > 0 && end < bytes.byteLength && (bytes[end]! & 0xc0) === 0x80) end--;
   return bytes.toString("utf8", 0, end);
 }
 
