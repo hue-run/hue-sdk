@@ -290,7 +290,7 @@ describe("the service's own word for what failed", () => {
     expect(
       serviceFailureCause(new Error(`refused: ${gatewayBody("authorization_unavailable")}`)),
     ).toBeUndefined();
-    for (const diagnostic of ["Not A Token", "a".repeat(65), "", "x-y"])
+    for (const diagnostic of ["Not A Token", "a".repeat(65), "", "x-y", "gateway_failure\n"])
       expect(
         serviceFailureCause(
           Object.assign(new Error("503"), { headers: { "x-hue-diagnostic": diagnostic } }),

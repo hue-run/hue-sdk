@@ -247,7 +247,7 @@ def error_cause(error: BaseException) -> str | None:
             diagnostic = _diagnostic_of(item)
         except Exception:
             continue
-        if diagnostic is not None and _DIAGNOSTIC.match(diagnostic):
+        if diagnostic is not None and _DIAGNOSTIC.fullmatch(diagnostic):
             return diagnostic
     return None
 

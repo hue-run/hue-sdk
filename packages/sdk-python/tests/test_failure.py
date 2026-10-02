@@ -361,7 +361,7 @@ def test_an_answer_naming_no_diagnostic_or_no_token_has_no_cause():
     )
     assert error_cause(HueApiError(502)) is None
     assert error_cause(RuntimeError('{"diagnostic": "authorization_unavailable"}')) is None
-    for diagnostic in ["Not A Token", "a" * 65, "", "x-y"]:
+    for diagnostic in ["Not A Token", "a" * 65, "", "x-y", "gateway_failure\n"]:
         assert error_cause(GatewayStatusError(_gateway_response(503, diagnostic))) is None
     text_raises = GatewayStatusError(SimpleNamespace(status_code=503, headers={}))
 
