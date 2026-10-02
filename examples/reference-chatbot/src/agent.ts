@@ -77,10 +77,10 @@ function syntheticModel(messages: ModelMessage[]): LanguageModel {
 }
 
 /**
- * The provider and model the agent's model spans record (`gen_ai.provider.name` and
- * `gen_ai.request.model`), for the message records the server emits beside them. In live mode
- * the AI SDK resolves `HUE_CHAT_MODEL` through the gateway provider, which records itself as
- * `gateway` and the `provider/model` string as the model.
+ * The provider and model of the agent's model spans, for the message records the server emits
+ * beside them: the AI SDK records them as `ai.model.provider` and `ai.model.id`, which Hue reads
+ * as the span's provider and model. In live mode the AI SDK resolves `HUE_CHAT_MODEL` through the
+ * gateway provider, which records itself as `gateway` and the `provider/model` string as the model.
  */
 export function chatModelIdentity(
   mode: "synthetic" | "live",
