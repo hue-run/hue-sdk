@@ -688,36 +688,57 @@ function shedLargestContent(record: RecordValue, signal: Signal): RecordValue | 
   // The record's own content values, and a span's events' (listed as the receiver lists an
   // event's cut: `event:<name>:<key>`).
   const events = signal === "traces" ? (record as ReadableSpan).events : [];
-  let largest: { event?: number; key: string; bytes: number } | undefined;
-  const consider = (key: string, value: unknown, event?: number) => {
+  const links = signal === "traces" ? (record as ReadableSpan).links : [];
+  type Found = { where: "own" | "event" | "link"; index: number; key: string; bytes: number };
+  let largest: Found | undefined;
+  const consider = (where: Found["where"], index: number, key: string, value: unknown) => {
     if (!isContentKey(key) || isTruncatedMarker(value)) return;
     const bytes = valueBytes(value);
-    if (!largest || bytes > largest.bytes)
-      largest = { ...(event === undefined ? {} : { event }), key, bytes };
+    if (!largest || bytes > largest.bytes) largest = { where, index, key, bytes };
   };
-  for (const [key, value] of Object.entries(attributes)) consider(key, value);
+  for (const [key, value] of Object.entries(attributes)) consider("own", 0, key, value);
   events.forEach((event, index) => {
-    for (const [key, value] of Object.entries(event.attributes ?? {})) consider(key, value, index);
+    for (const [key, value] of Object.entries(event.attributes ?? {}))
+      consider("event", index, key, value);
+  });
+  links.forEach((link, index) => {
+    for (const [key, value] of Object.entries(link.attributes ?? {}))
+      consider("link", index, key, value);
   });
   if (!largest) return undefined;
-  const found = largest as { event?: number; key: string; bytes: number };
+  const found: Found = largest;
+  // Listed as the receiver lists a cut of the same place: the key alone, `event:<name>:<key>`,
+  // or `link:<key>`.
   const listed =
-    found.event === undefined ? found.key : `event:${events[found.event]!.name}:${found.key}`;
+    found.where === "own"
+      ? found.key
+      : found.where === "event"
+        ? `event:${events[found.index]!.name}:${found.key}`
+        : `link:${found.key}`;
   const shed: Record<string, unknown> = {
     ...attributes,
-    ...(found.event === undefined ? { [found.key]: truncatedMarker(found.bytes) } : {}),
+    ...(found.where === "own" ? { [found.key]: truncatedMarker(found.bytes) } : {}),
     [TRUNCATED_KEY]: withTruncatedKeys(attributes[TRUNCATED_KEY], [listed]),
   };
-  if (found.event === undefined) return { ...record, attributes: shed } as RecordValue;
-  const shedEvents = events.map((event, index) =>
-    index === found.event
-      ? {
-          ...event,
-          attributes: { ...event.attributes, [found.key]: truncatedMarker(found.bytes) },
-        }
-      : event,
-  );
-  return { ...record, attributes: shed, events: shedEvents } as RecordValue;
+  const marker = { [found.key]: truncatedMarker(found.bytes) };
+  if (found.where === "own") return { ...record, attributes: shed } as RecordValue;
+  if (found.where === "event")
+    return {
+      ...record,
+      attributes: shed,
+      events: events.map((event, index) =>
+        index === found.index
+          ? { ...event, attributes: { ...event.attributes, ...marker } }
+          : event,
+      ),
+    } as RecordValue;
+  return {
+    ...record,
+    attributes: shed,
+    links: links.map((link, index) =>
+      index === found.index ? { ...link, attributes: { ...link.attributes, ...marker } } : link,
+    ),
+  } as RecordValue;
 }
 
 class ReportingExporter<T extends RecordValue> {
@@ -862,10 +883,11 @@ class ReportingExporter<T extends RecordValue> {
     let batchBytes = 0;
     const measure = (record: T) =>
       this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
+    // Every record of the batch is measured, shed and, where it cannot be sent, counted lost
+    // before any root is written, so a root carries the losses of children that ended after it.
+    const prepared: { record: T; bytes: number }[] = [];
     for (let record of accepted) {
       const placeholder = placeholders.has(record);
-      if (this.signal === "traces" && !placeholder)
-        record = this.transport.withDroppedRecords(record as ReadableSpan) as T;
       let recordBytes: number;
       try {
         recordBytes = measure(record);
@@ -883,15 +905,30 @@ class ReportingExporter<T extends RecordValue> {
         invalid(placeholder, "Telemetry record could not be serialized", record);
         continue;
       }
+      if (recordBytes > limit) {
+        invalid(placeholder, "Telemetry record exceeds the 1 MiB request limit", record);
+        continue;
+      }
+      prepared.push({ record, bytes: recordBytes });
+    }
+    for (let { record, bytes: recordBytes } of prepared) {
+      if (this.signal === "traces" && !placeholders.has(record)) {
+        const counted = this.transport.withDroppedRecords(record as ReadableSpan) as T;
+        if (counted !== record) {
+          record = counted;
+          try {
+            recordBytes = measure(record);
+          } catch {
+            invalid(false, "Telemetry record could not be serialized", record);
+            continue;
+          }
+        }
+      }
       const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
       if (batch.length && batchBytes + framedBytes > limit) {
         await send(batch);
         batch = [];
         batchBytes = 0;
-      }
-      if (recordBytes > limit) {
-        invalid(placeholder, "Telemetry record exceeds the 1 MiB request limit", record);
-        continue;
       }
       batch.push(record);
       batchBytes += framedBytes;
