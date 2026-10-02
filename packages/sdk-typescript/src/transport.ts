@@ -667,22 +667,19 @@ function isTruncatedMarker(value: unknown): boolean {
  * the receiver's marker and listed under `hue.truncated`; undefined when no content value is
  * left to shed. Metadata is never shed: a record too large without its content is lost whole.
  */
-function shedLargestContent<T extends RecordValue>(record: T, signal: Signal): T | undefined {
+function shedLargestContent(record: RecordValue, signal: Signal): RecordValue | undefined {
   if (signal === "logs") {
     const log = record as ReadableLogRecord;
     if (log.body !== undefined && !isTruncatedMarker(log.body)) {
       const bytes = valueBytes(log.body);
-      return {
-        ...log,
-        body: truncatedMarker(bytes) as ReadableLogRecord["body"],
-        attributes: {
-          ...log.attributes,
-          [TRUNCATED_KEY]: withTruncatedKeys(log.attributes[TRUNCATED_KEY], ["body"]),
-        },
-      } as unknown as T;
+      const attributes: Record<string, unknown> = {
+        ...log.attributes,
+        [TRUNCATED_KEY]: withTruncatedKeys(log.attributes[TRUNCATED_KEY], ["body"]),
+      };
+      return { ...log, body: truncatedMarker(bytes), attributes } as ReadableLogRecord;
     }
   }
-  const attributes = (record as ReadableSpan | ReadableLogRecord).attributes;
+  const { attributes } = record;
   let largest: { key: string; bytes: number } | undefined;
   for (const [key, value] of Object.entries(attributes)) {
     if (!isContentKey(key) || isTruncatedMarker(value)) continue;
@@ -690,14 +687,12 @@ function shedLargestContent<T extends RecordValue>(record: T, signal: Signal): T
     if (!largest || bytes > largest.bytes) largest = { key, bytes };
   }
   if (!largest) return undefined;
-  return {
-    ...record,
-    attributes: {
-      ...attributes,
-      [largest.key]: truncatedMarker(largest.bytes),
-      [TRUNCATED_KEY]: withTruncatedKeys(attributes[TRUNCATED_KEY], [largest.key]),
-    },
-  } as T;
+  const shed: Record<string, unknown> = {
+    ...attributes,
+    [largest.key]: truncatedMarker(largest.bytes),
+    [TRUNCATED_KEY]: withTruncatedKeys(attributes[TRUNCATED_KEY], [largest.key]),
+  };
+  return { ...record, attributes: shed } as RecordValue;
 }
 
 class ReportingExporter<T extends RecordValue> {
@@ -856,7 +851,7 @@ class ReportingExporter<T extends RecordValue> {
         while (recordBytes > limit) {
           const shed = shedLargestContent(record, this.signal);
           if (!shed) break;
-          record = shed;
+          record = shed as T;
           recordBytes = measure(record);
         }
       } catch {
