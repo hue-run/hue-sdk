@@ -10,6 +10,16 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- `EnvironmentRun.now` and `WorldHandoff.now`: the world's clock at creation as an RFC 3339
+  timestamp (a trace-built world's recorded start), read from the World API's `now` or from
+  `HUE_WORLD_NOW` in its `env`, which `agentEnvironment` and `hue eval --command` pass to the
+  agent with the world's other carriers. `worldNow()` reads it as a `Date` from a handoff or from
+  an environment, so an agent computes "today", "tomorrow" or `newer_than:7d` from the world's date
+  and lands on the recorded dates however long after the recording the run starts. Null or absent
+  from a Hue that predates it.
+
 #### Changed
 
 - **Wire** A content value over Hue's 256 KiB value cap is no longer a reason to lose the record.
@@ -1172,6 +1182,16 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- `EnvironmentRun["now"]` and `WorldHandoff["now"]`: the world's clock at creation as an RFC 3339
+  timestamp (a trace-built world's recorded start), read from the World API's `now` or from
+  `HUE_WORLD_NOW` in its `env`, which `agent_environment` passes to the agent with the world's other
+  carriers. `world_now()` reads it as an aware `datetime` from a handoff or from an environment, so
+  an agent computes "today", "tomorrow" or `newer_than:7d` from the world's date and lands on the
+  recorded dates however long after the recording the run starts. `None` or absent from a Hue that
+  predates it.
 
 #### Changed
 

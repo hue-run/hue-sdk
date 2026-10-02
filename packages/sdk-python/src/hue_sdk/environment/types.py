@@ -124,7 +124,15 @@ class _WorldFields(TypedDict, total=False):
     connection: None
 
 
-class EnvironmentRun(_WorldFields):
+class _RunOptionalFields(TypedDict, total=False):
+    """Fields of any run a Hue may not send yet."""
+
+    # The world's clock at creation as an RFC 3339 timestamp (``clockNs`` as a date): a
+    # trace-built world's recorded start. Absent from a Hue that predates it.
+    now: str
+
+
+class EnvironmentRun(_WorldFields, _RunOptionalFields):
     id: str
     environmentVersionId: str
     clockNs: str
@@ -135,7 +143,12 @@ class EnvironmentRun(_WorldFields):
 
 
 class WorldHandoff(TypedDict):
-    """What the World API hands an agent for one world; carries the world token, never log it."""
+    """What the World API hands an agent for one world; carries the world token, never log it.
+
+    ``now`` is the world's clock at creation (RFC 3339): the date an agent computes its dates
+    from in place of the wall clock, a trace-built world's recorded start. Also
+    ``env["HUE_WORLD_NOW"]``; ``None`` for a Hue that names neither.
+    """
 
     id: str
     token: str
@@ -144,6 +157,7 @@ class WorldHandoff(TypedDict):
     completingUntil: str | None
     traceparent: str | None
     baggage: str
+    now: str | None
     surfaces: list[WorldSurface]
     env: dict[str, str]
     mcpConfig: WorldMcpConfig

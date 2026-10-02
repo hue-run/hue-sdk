@@ -19,6 +19,7 @@ export function worldHandoff(run: EnvironmentRun): WorldHandoff | null {
     completingUntil: run.completingUntil ?? null,
     traceparent: run.traceparent ?? null,
     baggage: run.baggage ?? `hue-world=${id}`,
+    now: run.now ?? run.env.HUE_WORLD_NOW ?? null,
     surfaces: run.surfaces.map((surface) => ({ ...surface })),
     env: { ...run.env },
     mcpConfig: {
@@ -30,6 +31,25 @@ export function worldHandoff(run: EnvironmentRun): WorldHandoff | null {
       ),
     },
   };
+}
+
+/**
+ * The world's clock: what an agent reads for today's date in place of the wall clock, so a
+ * date-relative request (tomorrow, `newer_than:7d`, this month) lands on the dates the world
+ * holds however long after the recording the run starts. From the handoff's `now`, else from
+ * `HUE_WORLD_NOW` in the given environment (this process's by default, where `hue eval
+ * --command` and `agentEnvironment` set it). Null when neither names it.
+ */
+export function worldNow(
+  source: WorldHandoff | Record<string, string | undefined> = process.env,
+): Date | null {
+  const text =
+    "env" in source && typeof source.env === "object" && source.env !== null
+      ? ((source as WorldHandoff).now ?? (source as WorldHandoff).env.HUE_WORLD_NOW)
+      : (source as Record<string, string | undefined>).HUE_WORLD_NOW;
+  if (!text) return null;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 /** Variables that authenticate against Hue's control plane rather than a simulated provider. */

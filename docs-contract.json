@@ -224,6 +224,7 @@
             "legacyMcpCapability",
             "stripHueControlPlaneCredentials",
             "worldHandoff",
+            "worldNow",
             "writeMcpConfig"
           ]
         },

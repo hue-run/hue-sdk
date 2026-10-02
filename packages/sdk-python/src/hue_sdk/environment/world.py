@@ -16,6 +16,8 @@ import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
+from typing import cast
 
 from .types import EnvironmentRun, LegacyMcpCapability, WorldHandoff
 
@@ -44,10 +46,47 @@ def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
         "completingUntil": run.get("completingUntil"),
         "traceparent": run.get("traceparent"),
         "baggage": run.get("baggage") or f"hue-world={world_id}",
+        "now": run.get("now") or run["env"].get("HUE_WORLD_NOW") or None,
         "surfaces": deepcopy(run["surfaces"]),
         "env": dict(run["env"]),
         "mcpConfig": deepcopy(run["mcpConfig"]),
     }
+
+
+# Variables a world or its server owns: a parent's value belongs to another world (a runner
+# started inside a case, a shell left from an earlier run) or to the server (a signing key), and
+# would send this world's token to a mirror this world does not have, or date an agent by an
+# earlier world's clock. The whole ``HUE_WORLD_`` prefix is the world's.
+_WORLD_SCOPED = re.compile(
+    r"^(?:HUE_WORLD_[A-Z0-9_]+|HUE_MCP_(?:CONFIG|URL|TOKEN|EXPIRES_AT)|HUE_SIM_[A-Z0-9_]+_(?:URL|ALIAS))$"
+)
+
+
+def without_world_variables(environment: Mapping[str, str]) -> dict[str, str]:
+    """``environment`` without any variable a world or its server owns."""
+    return {name: value for name, value in environment.items() if not _WORLD_SCOPED.match(name)}
+
+
+def world_now(source: WorldHandoff | Mapping[str, str] | None = None) -> datetime | None:
+    """The world's clock: what an agent reads for today's date in place of the wall clock, so a
+    date-relative request (tomorrow, ``newer_than:7d``, this month) lands on the dates the world
+    holds however long after the recording the run starts. From the handoff's ``now``, else from
+    ``HUE_WORLD_NOW`` in the given environment (this process's by default, where ``hue eval
+    --command`` and ``agent_environment`` set it). ``None`` when neither names it."""
+    environment = os.environ if source is None else source
+    text: object
+    if "env" in environment and isinstance(environment["env"], Mapping):
+        handoff = cast("WorldHandoff", environment)
+        text = handoff.get("now") or handoff["env"].get("HUE_WORLD_NOW")
+    else:
+        text = environment.get("HUE_WORLD_NOW")
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def is_hue_control_plane_credential(name: str, value: str | None) -> bool:
@@ -83,12 +122,13 @@ def agent_environment(
     legacy_mcp_variables: bool = True,
 ) -> dict[str, str]:
     """The environment for an agent child process running one case: the parent's variables
-    minus Hue control-plane credentials (unless ``include_hue_credentials``), then the world's
-    carriers, which win. ``legacy_mcp_variables`` also sets ``HUE_MCP_URL``, ``HUE_MCP_TOKEN``
-    and ``HUE_MCP_EXPIRES_AT`` from the first MCP mirror, the names the ``hue_sim_`` bridge
-    used. Nothing here is logged."""
+    minus Hue control-plane credentials (unless ``include_hue_credentials``) and any
+    world-scoped variable (an earlier world's carriers or date, a server's signing key), then
+    the world's carriers, which win. ``legacy_mcp_variables`` also sets ``HUE_MCP_URL``,
+    ``HUE_MCP_TOKEN`` and ``HUE_MCP_EXPIRES_AT`` from the first MCP mirror, the names the
+    ``hue_sim_`` bridge used. Nothing here is logged."""
     source = os.environ if parent is None else parent
-    child = (
+    child = without_world_variables(
         {name: value for name, value in source.items() if isinstance(value, str)}
         if include_hue_credentials
         else strip_hue_control_plane_credentials(source)

@@ -24,7 +24,9 @@ from hue_sdk.environment import (
     is_hue_control_plane_credential,
     legacy_mcp_capability,
     mcp_config_file,
+    without_world_variables,
     world_handoff,
+    world_now,
 )
 
 KEY = "hue_sk_test_kkkkkkkkkkkk_" + "s" * 43
@@ -32,6 +34,8 @@ RUN_ID = str(uuid4())
 VERSION_ID = str(uuid4())
 TOKEN = "hue_world_" + "c" * 64 + "." + "s" * 43
 MIRROR = "https://app.hue.test/api/sim/gmailmcp.googleapis.com/mcp/v1"
+# The world's clock at creation: a recorded start, months from any wall clock.
+WORLD_NOW = "2026-03-02T15:00:00.000Z"
 REST = "https://app.hue.test/api/sim/gmail.googleapis.com/gmail/v1"
 
 
@@ -44,6 +48,7 @@ def gateway_run(**overrides):
         "maxSteps": 500,
         "expiresAt": "2026-09-24T12:00:00.000Z",
         "actions": [],
+        "now": WORLD_NOW,
         "worldId": RUN_ID,
         "token": TOKEN,
         "lifecycle": "live",
@@ -69,6 +74,7 @@ def gateway_run(**overrides):
         "env": {
             "HUE_WORLD_ID": RUN_ID,
             "HUE_WORLD_TOKEN": TOKEN,
+            "HUE_WORLD_NOW": WORLD_NOW,
             "BAGGAGE": f"hue-world={RUN_ID}",
             "HUE_SIM_GOOGLE_GMAIL_MCP_URL": MIRROR,
             "HUE_SIM_GOOGLE_GMAIL_REST_URL": REST,
@@ -118,6 +124,43 @@ def test_handoff_copies_the_gateway_fields_and_is_absent_for_legacy_worlds():
     for field in ("token", "env", "mcpConfig", "surfaces"):
         legacy.pop(field)
     assert world_handoff(legacy) is None
+
+
+def test_handoff_carries_the_worlds_now_and_world_now_reads_it_where_an_agent_reads_the_clock():
+    world = world_handoff(gateway_run())
+    assert world is not None
+    assert world["now"] == WORLD_NOW
+    assert world_now(world) == datetime(2026, 3, 2, 15, 0, tzinfo=timezone.utc)
+    # The agent child reads the same instant from its environment, never the wall clock.
+    child = agent_environment(world, parent={"PATH": "/usr/bin"})
+    assert child["HUE_WORLD_NOW"] == WORLD_NOW
+    assert world_now(child) == world_now(world)
+    assert abs(world_now(child) - datetime.now(timezone.utc)) > timedelta(days=1)
+    # A Hue that predates ``now`` still names it in the environment, and the handoff reads it
+    # there; one that names neither leaves the agent with no world time, said as None.
+    older = gateway_run()
+    del older["now"]
+    assert world_handoff(older)["now"] == WORLD_NOW
+    del older["env"]["HUE_WORLD_NOW"]
+    assert world_handoff(older)["now"] is None
+    assert world_now(world_handoff(older)) is None
+    assert world_now({"PATH": "/usr/bin"}) is None
+    assert world_now({"HUE_WORLD_NOW": "not a date"}) is None
+    # A runner started inside an earlier case inherits that world's date and mirrors; a world
+    # that names no date leaves the agent none, never the earlier world's.
+    stale = {
+        "PATH": "/usr/bin",
+        "HUE_WORLD_NOW": "2025-01-01T00:00:00.000Z",
+        "HUE_SIM_NOTION_MCP_URL": "https://elsewhere.test/api/sim/mcp.notion.com/mcp",
+        "HUE_WORLD_TOKEN_KEY": "server-signing-key",
+    }
+    inherited = agent_environment(world_handoff(older), parent=stale)
+    assert "HUE_WORLD_NOW" not in inherited
+    assert "HUE_SIM_NOTION_MCP_URL" not in inherited
+    assert "HUE_WORLD_TOKEN_KEY" not in inherited
+    assert inherited["PATH"] == "/usr/bin"
+    assert world_now(inherited) is None
+    assert without_world_variables(stale) == {"PATH": "/usr/bin"}
 
 
 def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in():
