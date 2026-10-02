@@ -8,7 +8,7 @@ import { HueExportError } from "../transport.js";
 import type { HueSpan } from "../types.js";
 import { EvaluationClient, HueApiError } from "./client.js";
 import { loadEnvironmentEvidence } from "./environment-evidence.js";
-import { serviceFailureType } from "./failure.js";
+import { serviceFailureCause, serviceFailureType } from "./failure.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { onForcedExit } from "./exit-cleanup.js";
 import {
@@ -692,18 +692,28 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     // A target stopped at its world's deadline is a `TargetTimeout`, told apart from an error the
     // target raised itself: the agent did not finish, rather than finishing wrongly. A service the
     // agent called that refused, dropped the connection or timed out is named apart from the
-    // agent's own error (`failure.ts`), so Hue counts it as infrastructure, not as the agent.
-    const errorPayload = (error: unknown): TypedError => ({
-      type:
-        error instanceof OutputTooLargeError
-          ? "OutputTooLarge"
-          : error instanceof TargetTimeoutError
-            ? "TargetTimeout"
-            : (serviceFailureType(error) ?? "TargetError"),
-      ...(options.persistResultContent && error instanceof Error
-        ? { message: sanitize(error.message) }
-        : {}),
-    });
+    // agent's own error (`failure.ts`), so Hue counts it as infrastructure, not as the agent, with
+    // the service's own word for what failed as the error's `cause` when its answer names one
+    // (Hue's gateway diagnostic).
+    const errorPayload = (error: unknown): TypedError => {
+      const service =
+        error instanceof OutputTooLargeError || error instanceof TargetTimeoutError
+          ? null
+          : serviceFailureType(error);
+      const cause = service ? serviceFailureCause(error) : undefined;
+      return {
+        type:
+          error instanceof OutputTooLargeError
+            ? "OutputTooLarge"
+            : error instanceof TargetTimeoutError
+              ? "TargetTimeout"
+              : (service ?? "TargetError"),
+        ...(cause === undefined ? {} : { cause }),
+        ...(options.persistResultContent && error instanceof Error
+          ? { message: sanitize(error.message) }
+          : {}),
+      };
+    };
     /** Publish staged files, score with every verified file on disk and save the completion. */
     async function prepare(
       file: string,

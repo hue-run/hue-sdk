@@ -1661,17 +1661,45 @@ class _APIStatusError(Exception):
         self.response = SimpleNamespace(status_code=status_code)
 
 
+class _GatewayRefusal(Exception):
+    """The shape of httpx's status error as the agent's MCP or REST client raises it on Hue's
+    simulation gateway refusing a call: the response, with Hue's diagnostic header."""
+
+    def __init__(self, status_code: int, diagnostic: str) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.response = SimpleNamespace(
+            status_code=status_code, headers={"x-hue-diagnostic": diagnostic}, text=""
+        )
+
+
 @pytest.mark.parametrize("persist", [False, True])
 @pytest.mark.parametrize(
     ("raised", "expected"),
     [
-        pytest.param(lambda: RuntimeError("The agent gave up"), "TargetError", id="agent"),
-        pytest.param(lambda: _APIStatusError(400), "TargetError", id="agent-refusal"),
-        pytest.param(lambda: WorldCreationError(409), "EnvironmentSetupFailed", id="world"),
-        pytest.param(lambda: _APIStatusError(429), "ServiceRefused", id="rate-limit"),
-        pytest.param(lambda: HueApiError(503), "ServiceRefused", id="hue"),
-        pytest.param(lambda: ConnectionResetError("reset"), "ConnectionFailed", id="connection"),
-        pytest.param(lambda: TimeoutError("timed out"), "TimedOut", id="timeout"),
+        pytest.param(
+            lambda: RuntimeError("The agent gave up"), {"type": "TargetError"}, id="agent"
+        ),
+        pytest.param(lambda: _APIStatusError(400), {"type": "TargetError"}, id="agent-refusal"),
+        pytest.param(
+            lambda: WorldCreationError(409), {"type": "EnvironmentSetupFailed"}, id="world"
+        ),
+        pytest.param(lambda: _APIStatusError(429), {"type": "ServiceRefused"}, id="rate-limit"),
+        pytest.param(lambda: HueApiError(503), {"type": "ServiceRefused"}, id="hue"),
+        # Hue's simulation gateway could not authorize the world token on the agent's first
+        # call, through the agent's own client: the service's refusal, with Hue's diagnostic as
+        # its cause; a bad token is the agent's own error, with no cause.
+        pytest.param(
+            lambda: _GatewayRefusal(503, "authorization_unavailable"),
+            {"type": "ServiceRefused", "cause": "authorization_unavailable"},
+            id="gateway-unavailable",
+        ),
+        pytest.param(
+            lambda: _GatewayRefusal(401, "invalid_token"), {"type": "TargetError"}, id="bad-token"
+        ),
+        pytest.param(
+            lambda: ConnectionResetError("reset"), {"type": "ConnectionFailed"}, id="connection"
+        ),
+        pytest.param(lambda: TimeoutError("timed out"), {"type": "TimedOut"}, id="timeout"),
     ],
 )
 def test_target_failures_are_recorded_by_what_stopped_the_case(
@@ -1688,7 +1716,7 @@ def test_target_failures_are_recorded_by_what_stopped_the_case(
         body = evaluation_receiver.complete_body
         assert body["state"] == "error"
         # The message is sent only when result content is persisted; the type always is.
-        assert body["error"] == {"type": expected, **({"message": str(error)} if persist else {})}
+        assert body["error"] == {**expected, **({"message": str(error)} if persist else {})}
     finally:
         arguments["hue"].shutdown()
 

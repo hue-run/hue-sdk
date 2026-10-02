@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import sys
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ import requests
 
 from hue_sdk.environment import HueEnvironmentError, WorldCreationError
 from hue_sdk.evals import HueApiError
-from hue_sdk.evals._failure import error_type
+from hue_sdk.evals._failure import error_cause, error_type
 
 
 # The shapes of httpx, openai and anthropic errors, recognized by class name as the runner does.
@@ -271,3 +272,107 @@ def test_a_socket_timeout_errno_is_a_timeout_and_a_response_status_alone_refuses
     assert error_type(_Answered(429)) == "ServiceRefused"
     assert error_type(_Answered(503)) == "ServiceRefused"
     assert error_type(_Answered(400)) == "TargetError"
+
+
+# What Hue's gateway answers a refused call: the diagnostic in the body and the header.
+def _gateway_response(status: int, diagnostic: str) -> SimpleNamespace:
+    body = {"error": "Simulation gateway request failed", "diagnostic": diagnostic}
+    return SimpleNamespace(
+        status_code=status, headers={"x-hue-diagnostic": diagnostic}, text=json.dumps(body)
+    )
+
+
+class GatewayStatusError(HTTPError):
+    """httpx's status error, as the MCP client raises it: the response on the error."""
+
+    def __init__(self, response: object) -> None:
+        super().__init__(f"HTTP {getattr(response, 'status_code', '?')}")
+        self.response = response
+
+
+class _CaseInsensitive(dict):
+    def get(self, key, default=None):  # noqa: ANN001
+        for name, value in self.items():
+            if name.lower() == str(key).lower():
+                return value
+        return default
+
+
+def test_a_gateway_refusal_through_the_agents_client_is_the_services_with_its_diagnostic_as_cause():
+    refused = GatewayStatusError(_gateway_response(503, "authorization_unavailable"))
+    assert error_type(refused) == "ServiceRefused"
+    assert error_cause(refused) == "authorization_unavailable"
+    # Through a chain, nearest first.
+    chained = RuntimeError("tool failed")
+    chained.__cause__ = refused
+    assert error_cause(chained) == "authorization_unavailable"
+    # A bad token, an unknown route or a refused operation is the agent's own error.
+    assert error_type(GatewayStatusError(_gateway_response(401, "invalid_token"))) == "TargetError"
+
+
+def test_the_cause_is_read_from_a_header_a_body_or_hues_own_client():
+    # A case-insensitive header mapping, as httpx and requests spell theirs.
+    headers = _CaseInsensitive({"X-Hue-Diagnostic": "gateway_failure"})
+    on_error = Exception("503")
+    on_error.headers = headers  # type: ignore[attr-defined]
+    on_error.response = SimpleNamespace(status_code=503)  # type: ignore[attr-defined]
+    assert error_cause(on_error) == "gateway_failure"
+    # The OpenAI SDK's ``body``.
+    with_body = Exception("503")
+    with_body.body = {"error": "unavailable", "diagnostic": "authorization_unavailable"}  # type: ignore[attr-defined]
+    assert error_cause(with_body) == "authorization_unavailable"
+    # A response whose text quotes the body, with no header.
+    text_only = GatewayStatusError(
+        SimpleNamespace(
+            status_code=503, headers={}, text='{"diagnostic": "authorization_unavailable"}'
+        )
+    )
+    assert error_cause(text_only) == "authorization_unavailable"
+    # Hue's MCP refusal, a JSON-RPC error, names the diagnostic in ``error.data``.
+    rpc = GatewayStatusError(
+        SimpleNamespace(
+            status_code=503,
+            headers={},
+            text=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": {"diagnostic": "authorization_unavailable"},
+                    },
+                }
+            ),
+        )
+    )
+    assert error_cause(rpc) == "authorization_unavailable"
+    # Hue's own clients read the header into ``diagnostic``.
+    assert error_cause(HueApiError(503, None, "store_unavailable")) == "store_unavailable"
+    assert error_cause(HueEnvironmentError(409, None, "simulation_gateway_required")) == (
+        "simulation_gateway_required"
+    )
+
+
+def test_an_answer_naming_no_diagnostic_or_no_token_has_no_cause():
+    assert (
+        error_cause(GatewayStatusError(SimpleNamespace(status_code=503, headers={}, text="")))
+        is None
+    )
+    assert error_cause(HueApiError(502)) is None
+    assert error_cause(RuntimeError('{"diagnostic": "authorization_unavailable"}')) is None
+    for diagnostic in ["Not A Token", "a" * 65, "", "x-y", "gateway_failure\n"]:
+        assert error_cause(GatewayStatusError(_gateway_response(503, diagnostic))) is None
+    text_raises = GatewayStatusError(SimpleNamespace(status_code=503, headers={}))
+
+    class _Unread:
+        @property
+        def text(self) -> str:
+            raise RuntimeError("not read")
+
+        headers: dict[str, str] = {}
+        status_code = 503
+
+    assert error_cause(GatewayStatusError(_Unread())) is None
+    assert error_cause(text_raises) is None
+    assert error_cause(ConnectionResetError("reset")) is None

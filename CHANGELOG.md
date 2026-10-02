@@ -12,6 +12,19 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- A target's throw on a service that refused it is completed with the service's own word for what
+  failed as the error's `cause`, when its answer names one: Hue's simulation gateway's diagnostic
+  (`authorization_unavailable` when Hue could not authorize the world token because its database
+  could not answer, `gateway_failure`), read from the answer's `x-hue-diagnostic` header or its
+  JSON body's `diagnostic` through the error's `cause`, `lastError` and `errors` chains, and from
+  Hue's own clients' `diagnostic`. `TypedError.cause` carries it; Hue shows it beside the
+  infrastructure or configuration label, so a run refused on its first call reads as what refused
+  it. `serviceFailureCause` exposes the reading beside `serviceFailureType`.
+- The MCP SDK's transport errors (`StreamableHTTPError`, `SseError`), which carry the HTTP status
+  as `code` and no response, are read as the exchange they are: a simulated server that answered a
+  5xx through an agent's MCP client completes the case as `ServiceRefused`, counted as
+  infrastructure, where before it was the agent's `TargetError`; a 4xx (a bad world token, an
+  unknown route) stays the agent's.
 - `EnvironmentRun.now` and `WorldHandoff.now`: the world's clock at creation as an RFC 3339
   timestamp (a trace-built world's recorded start), read from the World API's `now` or from
   `HUE_WORLD_NOW` in its `env`, which `agentEnvironment` and `hue eval --command` pass to the
@@ -1210,6 +1223,13 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Added
 
+- A target's raise on a service that refused it is completed with the service's own word for what
+  failed as the error's `cause`, when its answer names one: Hue's simulation gateway's diagnostic
+  (`authorization_unavailable`, `gateway_failure`), read from the answer's `X-Hue-Diagnostic`
+  header or its JSON body's `diagnostic` on the error's `response` (httpx, requests, the MCP
+  client), its `headers` or `body` (openai, anthropic) through the `__cause__` chain, and from
+  Hue's own clients' `diagnostic`. `hue_sdk.evals._failure.error_cause` is the reading beside
+  `error_type`; Hue shows the cause beside the infrastructure or configuration label.
 - `EnvironmentRun["now"]` and `WorldHandoff["now"]`: the world's clock at creation as an RFC 3339
   timestamp (a trace-built world's recorded start), read from the World API's `now` or from
   `HUE_WORLD_NOW` in its `env`, which `agent_environment` passes to the agent with the world's other

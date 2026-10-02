@@ -566,6 +566,12 @@ export interface TypedError {
    * (`agent`, `infrastructure`, `configuration`, `telemetry` or `unsupported`), which Hue reads
    * only for a name it does not know. The SDK's own types need none. */
   class?: "agent" | "infrastructure" | "configuration" | "telemetry" | "unsupported";
+  /** For a service failure (`ServiceRefused`, `ConnectionFailed`, `TimedOut`,
+   * `ConfigurationRejected`): the service's own word for what failed, when its answer names one,
+   * such as Hue's gateway diagnostic (`authorization_unavailable`) from the answer's
+   * `x-hue-diagnostic` header or its JSON body's `diagnostic`. A short lower-case token; absent
+   * when the answer names none. */
+  cause?: string;
 }
 /** Input for {@link EvaluationClient.startExecution}. */
 export interface StartExecution {

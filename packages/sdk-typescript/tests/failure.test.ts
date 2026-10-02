@@ -3,7 +3,7 @@ import { APICallError, RetryError } from "ai";
 import { HueConnectionError } from "../src/client.js";
 import { HueEnvironmentError } from "../src/environment/client.js";
 import { HueApiError } from "../src/evals/client.js";
-import { serviceFailureType } from "../src/evals/failure.js";
+import { serviceFailureCause, serviceFailureType } from "../src/evals/failure.js";
 import { OutputFileError } from "../src/evals/files.js";
 
 // The shapes of the OpenAI and Anthropic SDK errors: classes that never set `name`, with the
@@ -24,6 +24,29 @@ class OverloadedError extends APIError {
 }
 
 const withCode = (message: string, code: string) => Object.assign(new Error(message), { code });
+// The shape of the MCP TypeScript SDK's transport errors: the HTTP status as `code`, the body
+// the server answered quoted in the message, and no response.
+class StreamableHTTPError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+  ) {
+    super(`Streamable HTTP error: ${message}`);
+  }
+}
+class SseError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+  ) {
+    super(`SSE error: ${message}`);
+  }
+}
+/** What Hue's gateway answers a refused call: the diagnostic in the body and the header. */
+const gatewayBody = (diagnostic: string, error = "Simulation gateway request failed") =>
+  JSON.stringify({ error, diagnostic });
+const gatewayPost = (status: number, diagnostic: string) =>
+  new StreamableHTTPError(status, `Error POSTing to endpoint: ${gatewayBody(diagnostic)}`);
 const refused = () => withCode("connect ECONNREFUSED 127.0.0.1:443", "ECONNREFUSED");
 const callError = (statusCode?: number) =>
   new APICallError({
@@ -152,6 +175,24 @@ describe("service failures a target's throw shows", () => {
     ).toBeNull();
   });
 
+  test("an MCP transport error carries the status the simulated server answered: a 5xx is ServiceRefused, a 4xx the agent's", () => {
+    // The MCP SDK throws the status as `code` with no response; the transport is the exchange.
+    expect(serviceFailureType(gatewayPost(503, "authorization_unavailable"))).toBe(
+      "ServiceRefused",
+    );
+    expect(serviceFailureType(gatewayPost(503, "gateway_failure"))).toBe("ServiceRefused");
+    expect(serviceFailureType(new SseError(503, "Failed to open SSE stream"))).toBe(
+      "ServiceRefused",
+    );
+    expect(serviceFailureType(wrapped(gatewayPost(429, "rate_limited"), 2))).toBe("ServiceRefused");
+    // A bad world token, an unknown route or a refused operation is the agent's own error.
+    for (const status of [400, 401, 403, 404, 409])
+      expect(serviceFailureType(gatewayPost(status, "invalid_token"))).toBeNull();
+    // A `code` that is no status, or on an error that is no transport's, names nothing.
+    expect(serviceFailureType(new StreamableHTTPError(NaN, "no status"))).toBeNull();
+    expect(serviceFailureType(Object.assign(new Error("HTTP 503"), { code: 503 }))).toBeNull();
+  });
+
   test("everything else is the agent's own error", () => {
     for (const error of [
       new Error("The agent could not draft a reply"),
@@ -164,6 +205,107 @@ describe("service failures a target's throw shows", () => {
       { status: 400 },
     ])
       expect(serviceFailureType(error)).toBeNull();
+  });
+});
+
+describe("the service's own word for what failed", () => {
+  test("Hue's gateway diagnostic is read from the header, the body, an MCP transport error's message or Hue's own client", () => {
+    // A fetch `Response`, with the header Hue's gateway sets.
+    const response = new Response(gatewayBody("authorization_unavailable"), {
+      status: 503,
+      headers: { "x-hue-diagnostic": "authorization_unavailable" },
+    });
+    expect(serviceFailureCause(Object.assign(new Error("503"), { response }))).toBe(
+      "authorization_unavailable",
+    );
+    // The OpenAI and Anthropic SDKs' `headers`, a record; the AI SDK's `responseHeaders` and
+    // `responseBody`.
+    expect(
+      serviceFailureCause(
+        Object.assign(new APIError(503), { headers: { "X-Hue-Diagnostic": "gateway_failure" } }),
+      ),
+    ).toBe("gateway_failure");
+    expect(
+      serviceFailureCause(
+        new APICallError({
+          message: "HTTP 503",
+          url: "https://sim.hue.test/api/sim/slack.com/api/chat.postMessage",
+          requestBodyValues: {},
+          statusCode: 503,
+          responseHeaders: { "x-hue-diagnostic": "authorization_unavailable" },
+        }),
+      ),
+    ).toBe("authorization_unavailable");
+    expect(
+      serviceFailureCause(
+        new APICallError({
+          message: "HTTP 503",
+          url: "https://sim.hue.test/api/sim/slack.com/api/chat.postMessage",
+          requestBodyValues: {},
+          statusCode: 503,
+          responseBody: gatewayBody("authorization_unavailable"),
+        }),
+      ),
+    ).toBe("authorization_unavailable");
+    // The MCP SDK's transport quotes the body in its message: Hue's REST refusal names the
+    // diagnostic at the top, its MCP refusal (a JSON-RPC error) in `error.data`.
+    expect(serviceFailureCause(gatewayPost(503, "authorization_unavailable"))).toBe(
+      "authorization_unavailable",
+    );
+    expect(
+      serviceFailureCause(
+        new StreamableHTTPError(
+          503,
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error","data":{"diagnostic":"authorization_unavailable"}}}',
+        ),
+      ),
+    ).toBe("authorization_unavailable");
+    // Hue's own clients read the header into `diagnostic`.
+    expect(
+      serviceFailureCause(new HueEnvironmentError(409, undefined, "simulation_gateway_required")),
+    ).toBe("simulation_gateway_required");
+    expect(serviceFailureCause(new HueApiError(503, 2, "store_unavailable"))).toBe(
+      "store_unavailable",
+    );
+    // Through a chain, nearest first.
+    expect(serviceFailureCause(wrapped(gatewayPost(503, "authorization_unavailable"), 3))).toBe(
+      "authorization_unavailable",
+    );
+  });
+
+  test("an answer that names no diagnostic, or names one that is no token, has no cause", () => {
+    expect(serviceFailureCause(new APIError(503))).toBeUndefined();
+    expect(serviceFailureCause(callError(503))).toBeUndefined();
+    expect(serviceFailureCause(new HueApiError(502))).toBeUndefined();
+    expect(
+      serviceFailureCause(
+        new StreamableHTTPError(503, "Error POSTing to endpoint: Service Unavailable"),
+      ),
+    ).toBeUndefined();
+    expect(
+      serviceFailureCause(new StreamableHTTPError(503, "Error POSTing to endpoint: {not json")),
+    ).toBeUndefined();
+    // Only an MCP transport error's message is read as a body: an agent's own error quoting one
+    // names nothing.
+    expect(
+      serviceFailureCause(new Error(`refused: ${gatewayBody("authorization_unavailable")}`)),
+    ).toBeUndefined();
+    for (const diagnostic of ["Not A Token", "a".repeat(65), "", "x-y", "gateway_failure\n"])
+      expect(
+        serviceFailureCause(
+          Object.assign(new Error("503"), { headers: { "x-hue-diagnostic": diagnostic } }),
+        ),
+      ).toBeUndefined();
+    expect(serviceFailureCause(withCode("connect ECONNREFUSED", "ECONNREFUSED"))).toBeUndefined();
+    expect(serviceFailureCause(undefined)).toBeUndefined();
+    // A property that throws when read names nothing.
+    const hostile = new Error("hostile");
+    Object.defineProperty(hostile, "headers", {
+      get() {
+        throw new Error("no");
+      },
+    });
+    expect(serviceFailureCause(hostile)).toBeUndefined();
   });
 });
 
