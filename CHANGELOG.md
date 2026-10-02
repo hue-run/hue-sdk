@@ -8,6 +8,25 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### Unreleased
+
+#### Changed
+
+- **Wire** A content value over Hue's 256 KiB value cap is no longer a reason to lose the record.
+  Text is cut to a UTF-8 prefix and bytes or a structured log body are replaced by the receiver's
+  own marker (`{ "hue.truncated": true, "hue.truncated_bytes": <size> }`), and the value's key is
+  listed in the record's `hue.truncated` attribute, where Hue's receiver lists the values it cuts
+  itself. This holds for a helper's own content (`hue.tool`, `setInput`, `setOutput`) and for any
+  attribute a third-party instrumentation set on a span exported through Hue's processors, such
+  as an AI SDK tool result. Before, the helper omitted the value and counted a failure, and the
+  exporter rejected the whole span as invalid, so a 300 KB tool result lost the tool call, the
+  model call that followed and the turn's root span.
+- **Wire** A record over the 1 MiB request limit on its own sheds its content values, largest
+  first, each replaced by the receiver's marker and listed under `hue.truncated`, until it fits.
+  Only a record too large without any content value is still lost; it is counted on its trace's
+  root span as `hue.sdk.dropped_records` when the root is exported, so Hue reads the trace as
+  incomplete by that many records rather than as whole.
+
 ### [0.12.1] - 2026-10-02
 
 This release says what stopped a case: a service the agent called that refused, dropped the
@@ -1147,6 +1166,16 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### Unreleased
+
+#### Changed
+
+- **Wire** Helper content over Hue's 256 KiB value cap (`set_input`, `set_output`, a tool call's
+  arguments or result) is cut to a UTF-8 prefix of its JSON text and the key listed in the span's
+  `hue.truncated` attribute, where Hue's receiver lists the values it cuts itself, instead of
+  being omitted and counted as an instrumentation failure. An inference log's body over the cap
+  is still omitted and counted, since its prefix is no JSON.
 
 ### [0.6.4] - 2026-10-02
 

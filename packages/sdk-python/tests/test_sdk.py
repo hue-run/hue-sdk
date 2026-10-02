@@ -30,6 +30,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from hue_sdk import Hue, ProjectValidationError
+from hue_sdk.transport import MAX_CONTENT_BYTES, TRUNCATED_KEY
 
 KEY = "synthetic-local-project-key"
 
@@ -134,6 +135,29 @@ def test_model_records_system_instructions_and_tool_definitions(receiver, captur
         "type": "text",
         "content": "Answer in one sentence.",
     }
+
+
+def test_tool_result_over_the_cap_is_cut_and_listed_not_omitted(receiver):
+    # 160 Ki two-byte characters: 320 KiB of UTF-8, over the 256 KiB value cap. The result's
+    # recorded prefix reaches Hue with the call, instead of the whole value being omitted.
+    large = {"body": "\u00e9" * (160 * 1024), "pages": 3}
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        with hue.tool("read_document") as call:
+            call.set_input({"id": "doc_1"})
+            call.set_output(large)
+        assert hue.export_status.instrumentation_failures == 0
+        hue.force_flush()
+    (span,) = [span for span in receiver.spans() if span.name == "execute_tool read_document"]
+    attributes = attrs(span)
+    result = attributes["gen_ai.tool.call.result"].string_value
+    encoded = result.encode("utf-8")
+    assert MAX_CONTENT_BYTES - 4 < len(encoded) <= MAX_CONTENT_BYTES
+    assert result.startswith('{"body":"\u00e9\u00e9')
+    assert [item.string_value for item in attributes[TRUNCATED_KEY].array_value.values] == [
+        "gen_ai.tool.call.result"
+    ]
+    # Arguments within the cap are whole, and listed nowhere.
+    assert json.loads(attributes["gen_ai.tool.call.arguments"].string_value) == {"id": "doc_1"}
 
 
 def test_tool_records_the_mcp_server_that_handled_the_call(receiver):
@@ -865,8 +889,11 @@ def test_capture_choice_and_valid_json_are_required(receiver):
             span.set_usage(input_tokens=-1)
             span.set_usage(output_tokens=True)
         assert not hue.force_flush()
-        assert hue.export_status.instrumentation_failures == 4
-    assert not attrs(receiver.spans()[0])
+        # The NaN input and the two usages are failures; the output over the cap is cut.
+        assert hue.export_status.instrumentation_failures == 3
+    stored = attrs(receiver.spans()[0])
+    assert set(stored) == {"output.value", TRUNCATED_KEY}
+    assert len(stored["output.value"].string_value.encode("utf-8")) == MAX_CONTENT_BYTES
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 429, 500])

@@ -42,6 +42,7 @@ from .snapshots import snapshot_content
 from .transport import (
     DEFAULT_BASE_URL,
     MAX_CONTENT_BYTES,
+    TRUNCATED_KEY,
     BoundedLogExporter,
     BoundedSpanExporter,
     ExportIssue,
@@ -195,9 +196,20 @@ class HueSpan:
     def _set_content(self, key: str, value: Any) -> None:
         if not self._client._active or not self._client.capture_content:
             return
-        self._client._instrument(
-            lambda: self.otel_span.set_attribute(key, self._client._content(key, value))
-        )
+
+        def record() -> None:
+            content, truncated = self._client._bounded_content(key, value)
+            self.otel_span.set_attribute(key, content)
+            if truncated:
+                # The key is listed under ``hue.truncated``, where Hue's receiver lists the
+                # values it cuts itself, so a reader learns of the partial value from one place.
+                listed = (getattr(self.otel_span, "attributes", None) or {}).get(TRUNCATED_KEY)
+                keys = [item for item in listed if isinstance(item, str)] if listed else []
+                if key not in keys:
+                    keys.append(key)
+                self.otel_span.set_attribute(TRUNCATED_KEY, keys)
+
+        self._client._instrument(record)
 
     def set_usage(
         self, *, input_tokens: int | None = None, output_tokens: int | None = None
@@ -729,6 +741,21 @@ class Hue:
             return None
 
     def _content(self, key: str, value: Any) -> str:
+        """The value as JSON text within the cap, for a caller that parses it back (an inference
+        log's body): a value the cap would cut is omitted instead, since its prefix is no JSON."""
+        content, truncated = self._bounded_content(key, value)
+        if truncated:
+            raise ValueError("Captured content exceeds Hue's 256 KiB field limit.")
+        return content
+
+    def _bounded_content(self, key: str, value: Any) -> tuple[str, bool]:
+        """The value as JSON text within Hue's 256 KiB value cap, and whether it was cut to fit.
+
+        A value over the cap is cut to a UTF-8 prefix, as Hue's receiver cuts a value over its own
+        cap, rather than omitted: the span still carries the call, the result's recorded part and
+        the rest of its evidence, and the caller lists the key under ``hue.truncated`` so a
+        reader knows the value is partial. Only a value that cannot be serialized is omitted.
+        """
         # Redact before serialization, before queues and before any exporter receives content.
         try:
             # A redactor may mutate its argument before returning or raising.
@@ -738,27 +765,29 @@ class Hue:
                 # Bound the returned tree too, before JSONEncoder can allocate
                 # an arbitrarily large nested string or invoke custom hooks.
                 value = snapshot_content(self._redactor(key, value))
-            # Stop accumulation once the field exceeds its budget. Large direct
-            # strings can be rejected before JSON creates an escaped copy.
+            # A direct string past the cap is cut before JSON creates an escaped copy: its text
+            # is cut again below to the cap, so the prefix kept is the same.
             if isinstance(value, str) and len(value) > MAX_CONTENT_BYTES:
-                raise ValueError("Content limit exceeded.")
+                value = value[:MAX_CONTENT_BYTES]
+            # Stop accumulating once the text passes the cap; what follows is cut anyway.
             parts: list[str] = []
             size = 0
             for part in json.JSONEncoder(
                 ensure_ascii=False, allow_nan=False, separators=(",", ":")
             ).iterencode(value):
+                parts.append(part)
                 size += len(part.encode("utf-8"))
                 if size > MAX_CONTENT_BYTES:
-                    raise ValueError("Content limit exceeded.")
-                parts.append(part)
+                    break
             serialized = "".join(parts)
         except Exception:
             raise ValueError(
                 "Content redaction or JSON serialization failed; content was omitted."
             ) from None
-        if len(serialized.encode("utf-8")) > MAX_CONTENT_BYTES:
-            raise ValueError("Captured content exceeds Hue's 256 KiB field limit.")
-        return serialized
+        encoded = serialized.encode("utf-8")
+        if len(encoded) <= MAX_CONTENT_BYTES:
+            return serialized, False
+        return encoded[:MAX_CONTENT_BYTES].decode("utf-8", errors="ignore"), True
 
     @contextmanager
     def context(

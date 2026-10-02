@@ -101,20 +101,47 @@ const contentLimits: EncodeLimits = { bytes: MAX_CONTENT_BYTES, nodes: 16384, de
 
 /** Validate a bounded data tree without invoking toJSON or property getters. */
 export function encodeContent(value: unknown, limits: EncodeLimits = contentLimits): string {
+  const { text, truncated } = encodeBoundedContent(value, limits, false);
+  if (truncated) throw new RangeError("Content limit exceeded");
+  return text;
+}
+
+/**
+ * The value as JSON text within `limits.bytes`, and whether it was cut to fit. A value over the
+ * cap is cut to a UTF-8 prefix of its JSON text, as Hue's receiver cuts a value over its own cap,
+ * so a span still carries the call, the recorded part of its result and the rest of its
+ * evidence; the caller lists the key under `hue.truncated`. Text past the budget is cut as it is
+ * copied and the keys past it are left out, so no more than the budget is ever held.
+ */
+export function encodeBoundedContent(
+  value: unknown,
+  limits: EncodeLimits = contentLimits,
+  cut = true,
+): { text: string; truncated: boolean } {
   let nodes = 0;
   let bytes = 0;
+  let truncated = false;
   const ancestors = new Set<object>();
   const charge = (amount: number) => {
     bytes += amount;
-    if (bytes > limits.bytes) throw new RangeError("Content limit exceeded");
+    if (bytes > limits.bytes) {
+      if (!cut) throw new RangeError("Content limit exceeded");
+      truncated = true;
+    }
   };
   const visit = (item: unknown, depth: number): unknown => {
     if (++nodes > limits.nodes || depth > limits.depth)
       throw new RangeError("Content complexity limit exceeded");
     if (typeof item === "string") {
-      if (item.length > limits.bytes) throw new RangeError("Content limit exceeded");
-      charge(Buffer.byteLength(JSON.stringify(item)));
-      return item;
+      let text = item;
+      if (text.length > limits.bytes) {
+        if (!cut) throw new RangeError("Content limit exceeded");
+        // The copy itself is bounded: a longer string is cut before it is escaped.
+        truncated = true;
+        text = text.slice(0, limits.bytes);
+      }
+      charge(Buffer.byteLength(JSON.stringify(text)));
+      return text;
     }
     if (item === null || typeof item === "boolean" || typeof item === "number") {
       if (typeof item === "number" && !Number.isFinite(item)) throw new TypeError("Invalid number");
@@ -138,6 +165,8 @@ export function encodeContent(value: unknown, limits: EncodeLimits = contentLimi
       : Object.keys(item);
     if (keys.length > limits.nodes) throw new RangeError("Content complexity limit exceeded");
     for (const key of keys) {
+      // Past the budget, the rest is cut anyway: nothing more is copied.
+      if (truncated) break;
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       if (!descriptor || !("value" in descriptor))
         throw new TypeError("Expected JSON data property");
@@ -150,8 +179,18 @@ export function encodeContent(value: unknown, limits: EncodeLimits = contentLimi
     return result;
   };
   const encoded = JSON.stringify(visit(value, 0));
-  if (Buffer.byteLength(encoded) > limits.bytes) throw new RangeError("Content limit exceeded");
-  return encoded;
+  if (Buffer.byteLength(encoded) <= limits.bytes) return { text: encoded, truncated };
+  if (!cut) throw new RangeError("Content limit exceeded");
+  return { text: truncateUtf8(encoded, limits.bytes), truncated: true };
+}
+
+/** `value` cut to at most `max` UTF-8 bytes, ending on a character boundary. */
+export function truncateUtf8(value: string, max: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= max) return value;
+  let end = max;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.toString("utf8", 0, end);
 }
 
 /** Bounded conservative accounting for the record data retained by our queue, not total process RSS. */

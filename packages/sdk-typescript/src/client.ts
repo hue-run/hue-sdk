@@ -27,7 +27,14 @@ import {
   providerErrorDescription,
 } from "./provider-tools.js";
 import { toolCatalogSummary } from "./tool-definitions.js";
-import { encodeContent, noopSpan, safeSpan, type EncodeLimits } from "./safety.js";
+import {
+  encodeBoundedContent,
+  encodeContent,
+  noopSpan,
+  safeSpan,
+  type EncodeLimits,
+} from "./safety.js";
+import { TRUNCATED_KEY } from "./privacy.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
@@ -852,10 +859,26 @@ export class HueClient {
     }
   }
 
+  /** The keys of each span's content values that were cut to Hue's value cap, for `hue.truncated`. */
+  private truncatedKeys = new WeakMap<Span, string[]>();
+
+  /**
+   * A content value as a JSON attribute within Hue's 256 KiB value cap. A larger value is cut to
+   * a UTF-8 prefix and its key listed under `hue.truncated`, where Hue's receiver lists the
+   * values it cuts itself: the span carries the call and the recorded part of its value instead
+   * of losing the value whole. Only a value that cannot be encoded is omitted and counted.
+   */
   private setContent(span: Span, key: string, value: unknown): void {
     if (!this.enabled || this.closed || !this.captureContent) return;
     try {
-      span.setAttribute(key, encodeContent(value));
+      const { text, truncated } = encodeBoundedContent(value);
+      span.setAttribute(key, text);
+      if (truncated) {
+        const keys = this.truncatedKeys.get(span) ?? [];
+        if (!keys.includes(key)) keys.push(key);
+        this.truncatedKeys.set(span, keys);
+        span.setAttribute(TRUNCATED_KEY, [...keys]);
+      }
     } catch {
       this.instrumentationFailed();
     }
