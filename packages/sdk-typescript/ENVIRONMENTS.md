@@ -220,10 +220,24 @@ automatically because identity creation and publication have no request key.
 Where a Hue deployment has the simulation gateway on, `createRun` returns the World API handoff
 beside the run: `token` (a `hue_world_…` credential that lives exactly as long as the world),
 `surfaces[]` (one mirror URL per pinned provider surface, such as the Gmail MCP and REST mirrors),
-`env` (`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `BAGGAGE`, `TRACEPARENT` and one
-`HUE_SIM_<SURFACE ID>_URL` per surface) and `mcpConfig` (the common `mcpServers` shape with the
-token in the `Authorization` header). The agent is pointed at the mirrors by configuration only:
-its own Gmail MCP or REST client, the mirror URL, the world token where the Google credential went.
+`now` (the world's clock at creation as an RFC 3339 timestamp), `env` (`HUE_WORLD_ID`,
+`HUE_WORLD_TOKEN`, `HUE_WORLD_NOW`, `BAGGAGE`, `TRACEPARENT` and one `HUE_SIM_<SURFACE ID>_URL`
+per surface) and `mcpConfig` (the common `mcpServers` shape with the token in the `Authorization`
+header). The agent is pointed at the mirrors by configuration only: its own Gmail MCP or REST
+client, the mirror URL, the world token where the Google credential went.
+
+The world has its own date. A trace-built world's clock is frozen at the recorded start, so a
+run that begins days or months after the recording still finds the recorded emails, events and
+records at their recorded times. An agent that reads the wall clock for "today", "tomorrow" or
+`newer_than:7d` asks the world about dates it holds nothing for; one that reads the world's date
+lands on the recorded ones. Read it with `worldNow`: from the handoff, or from the environment of
+an agent child, where `agentEnvironment` and `hue eval --command` set `HUE_WORLD_NOW`.
+
+```ts
+import { worldNow } from "@hue-run/sdk/environment";
+
+const today = worldNow() ?? new Date(); // HUE_WORLD_NOW in this process, else the wall clock
+```
 
 ```ts
 import {
