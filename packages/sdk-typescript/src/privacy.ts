@@ -125,17 +125,33 @@ function redactValue(
   if (++budget.nodes > 16384 || depth > 32)
     throw new Error("Telemetry value exceeds the supported nesting limit");
   if (typeof value === "string") {
-    const result = options.redact ? options.redact(value, path) : value;
+    // The recorded text is cut to the cap before the redactor sees it, so the redactor's work
+    // is bounded too and its answer is the recorded part's.
+    let source = value;
+    if (source.length > MAX_CONTENT_BYTES || Buffer.byteLength(source) > MAX_CONTENT_BYTES) {
+      if (!budget.truncated.includes(listAs)) budget.truncated.push(listAs);
+      source = truncateUtf8(source, MAX_CONTENT_BYTES);
+    }
+    const result = options.redact ? options.redact(source, path) : source;
     // JavaScript can supply an async redactor despite the synchronous contract.
     // Observe its rejection before dropping the invalid record.
     if (result && typeof result === "object") void Promise.resolve(result).catch(() => {});
-    if (typeof result !== "string" || !result.isWellFormed() || result.includes("\u0000"))
+    // A redactor's answer is refused by its length before anything scans it: one longer than
+    // the cap is the redactor's own, not recorded content to cut, and scanning it would
+    // materialize text the record never held.
+    if (
+      typeof result !== "string" ||
+      result.length > MAX_CONTENT_BYTES ||
+      !result.isWellFormed() ||
+      result.includes("\u0000")
+    )
       throw new Error("Redaction produced unsupported text");
     const bytes = Buffer.byteLength(result);
     if (bytes <= MAX_CONTENT_BYTES) {
       budget.bytes += bytes;
       return result;
     }
+    // Within the cap's code units but over its bytes (multibyte text): cut to the bytes.
     if (!budget.truncated.includes(listAs)) budget.truncated.push(listAs);
     budget.bytes += MAX_CONTENT_BYTES;
     return truncateUtf8(result, MAX_CONTENT_BYTES);

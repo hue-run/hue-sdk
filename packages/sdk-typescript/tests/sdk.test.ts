@@ -1032,6 +1032,47 @@ describe("Hue SDK contract", () => {
     }
   });
 
+  test("a redactor's answer over the cap is refused by its length, never scanned or cut", async () => {
+    // The recorded text is cut before the redactor sees it, so a redactor that keeps its input
+    // within the cap passes; one that answers with more than the cap's worth of text is the
+    // redactor's own fault, and the record is refused before anything reads that text.
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "oversized-redactor",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      redact: (text) => (text.startsWith("expand") ? "x".repeat(300_000) : text),
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    try {
+      const tracer = tracerProvider.getTracer("third-party");
+      const kept = tracer.startSpan("kept");
+      kept.setAttribute("gen_ai.tool.call.result", "y".repeat(300_000));
+      kept.end();
+      const refused = tracer.startSpan("refused");
+      refused.setAttribute("gen_ai.tool.call.result", "expand me");
+      refused.end();
+      await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+      const records = endpoint.requests.flatMap((request) => request.records);
+      expect(records.map((record) => record.name)).toEqual(["kept"]);
+      expect(Buffer.byteLength(attr(records[0]!, "gen_ai.tool.call.result")!.stringValue!)).toBe(
+        256 * 1024,
+      );
+      expect(transport.getIssues()).toContainEqual(
+        expect.objectContaining({ kind: "invalid", count: 1 }),
+      );
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("a record over the request limit sheds its largest content values to the receiver's marker and is exported", async () => {
     const endpoint = receiver();
     const exporter = exporting(endpoint, "shed-content");
