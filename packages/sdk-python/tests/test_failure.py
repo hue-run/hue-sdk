@@ -92,13 +92,23 @@ def test_hue_clients_without_a_response_failed_to_connect_and_retryable_statuses
         HueApiError(408),
     ):
         assert error_type(error) == "ServiceRefused"
-    # A refusal the caller caused (configuration, a missing gateway, a bad key) is its own.
+    # Any other status Hue answered (a missing gateway, a bad key, a world or version it refused)
+    # is the caller's configuration: Hue's own clients never show the agent's error.
     for error in (
         HueEnvironmentError(409, None, "simulation_gateway_required"),
+        HueEnvironmentError(400),
         HueApiError(401),
         HueApiError(404),
+        HueApiError(422),
     ):
-        assert error_type(error) == "TargetError"
+        assert error_type(error) == "ConfigurationRejected"
+    assert error_type(caused(HueApiError(404), 3)) == "ConfigurationRejected"
+    # The clients follow no redirect and raise the 3xx they got: the configured endpoint's doing.
+    assert error_type(HueApiError(302)) == "ConfigurationRejected"
+    assert error_type(HueEnvironmentError(308)) == "ConfigurationRejected"
+    # Only from Hue's clients: another service's 4xx stays the agent's.
+    assert error_type(APIStatusError(404)) == "TargetError"
+    assert error_type(APIStatusError(401)) == "TargetError"
 
 
 def test_a_world_that_could_not_be_created_is_a_setup_failure_whatever_its_status():
@@ -206,6 +216,7 @@ def test_the_most_specific_signal_wins():
         "TimedOut": lambda: TimeoutError("timed out"),
         "ConnectionFailed": lambda: ConnectionResetError("reset"),
         "ServiceRefused": lambda: APIStatusError(503),
+        "ConfigurationRejected": lambda: HueEnvironmentError(409, None, "world_not_live"),
     }
     order = list(signals)
     for index, expected in enumerate(order):

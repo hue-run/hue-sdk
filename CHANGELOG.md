@@ -17,6 +17,14 @@ refuses to publish a version without a matching entry below.
   (`ConnectionFailed`) or that timed out (`TimedOut`), read from the error and its `cause`,
   `lastError` and `errors` chains, beside the agent's own `TargetError`. Hue counts the three as
   infrastructure and leaves them out of the agent's pass rate.
+- A status Hue's own clients (`HueApiError`, `HueEnvironmentError`, `HueConnectionError`) were
+  refused with that is neither a success nor retryable, a 4xx such as a key, a project, an
+  environment version or a world Hue refused, completes the case as `ConfigurationRejected`
+  instead of `TargetError`: Hue counts it as configuration and leaves it out of the agent's pass
+  rate, so an error from Hue's own clients is never filed as the agent's. The clients fetch with
+  `redirect: "error"`, so a redirect from the configured endpoint surfaces without a status, as
+  `ConnectionFailed`. `TypedError.class` lets a runner of your own that completes an execution
+  with a `type` of its own say which class Hue files it under.
 - `traceNotAccepted: "pending"` on `runExperiment` and `runSimulation`, and `hue eval
   --trace-not-accepted pending`: a case whose telemetry Hue did not accept in time completes in
   its true state with `traceEvidence: "pending"` and the count of spans the case ended
@@ -1133,6 +1141,28 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [Unreleased]
+
+#### Added
+
+- A status Hue's own clients (`HueApiError`, `HueEnvironmentError`) were refused with that is
+  neither a success nor retryable, a 3xx or 4xx such as a key, a project, an environment version
+  or a world Hue refused, or an endpoint that redirected (the clients follow none), completes the
+  case as `ConfigurationRejected` instead of `TargetError`: Hue counts it as
+  configuration and leaves it out of the agent's pass rate, so an error from Hue's own clients is
+  never filed as the agent's.
+- `TraceEvidence("pending")`: a case whose export `force_flush` did not acknowledge completes in
+  its true state with `traceEvidence: "pending"` and the count of spans the case ended, as the
+  checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
+  every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
+  completes the same way. Only `omit` carries a reason.
+
+- A target's exception is completed with an error type that says what stopped the case:
+  `EnvironmentSetupFailed` when `create_run` could not create the world (the new
+  `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
+  service the agent called, `ConnectionFailed` and `TimedOut`, beside the agent's own
+  `TargetError`. Hue counts the service failures as infrastructure.
+
 ### [0.6.3] - 2026-10-01
 
 This release gives the Python evaluation client the TypeScript SDK's resilience: reads and keyed
@@ -1163,22 +1193,6 @@ it or every case that follows. Additive; no capture, default budget or wire chan
   One case's telemetry failure no longer fails the cases running beside it, and a client's
   earlier failure no longer fails every later case; `Hue.force_flush()` keeps its cumulative
   answer.
-
-#### Added
-
-- `TraceEvidence("pending")`: a case whose export `force_flush` did not acknowledge completes in
-  its true state with `traceEvidence: "pending"` and the count of spans the case ended, as the
-  checkpoint recorded at its flush (`traceSpanCount`), so Hue attaches the trace once it holds
-  every span, or records it omitted a day later; a resumed checkpoint the receipt does not accept
-  completes the same way. Only `omit` carries a reason.
-
-#### Added
-
-- A target's exception is completed with an error type that says what stopped the case:
-  `EnvironmentSetupFailed` when `create_run` could not create the world (the new
-  `WorldCreationError`, a `HueEnvironmentError`), `ServiceRefused` for a retryable status from a
-  service the agent called, `ConnectionFailed` and `TimedOut`, beside the agent's own
-  `TargetError`. Hue counts the service failures as infrastructure.
 
 ### [0.6.2] - 2026-09-27
 
