@@ -233,7 +233,9 @@ try {
   assert.equal((await hue.flushSafe()).ok, false);
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(diagnostics, 1);
-  assert.equal(hue.transport.getReport().instrumentationFailures, 2);
+  // The 256 KiB input and result are cut to the cap and listed under `hue.truncated`, never
+  // omitted or counted as failures; the side effect ran once all the same.
+  assert.equal(hue.transport.getReport().instrumentationFailures, 0);
   const original = new Error("original application exception");
   await assert.rejects(
     (async () => {
