@@ -295,12 +295,16 @@ describe("Live spans", () => {
             "ai.prompt": "private prompt",
             "gen_ai.input.messages": '[{"role":"user","content":"private message"}]',
             "input.value": "private input",
+            "langfuse.observation.input": "private-langfuse-input",
+            "langfuse.observation.output": "private-langfuse-output",
+            "langfuse.observation.model.name": "synthetic-model",
           },
         });
         await queued(transport, 1);
         await transport.flush();
         const [pending] = endpoint.placeholders();
         expect(attr(pending!, "ai.model.id")).toBe("synthetic-model");
+        expect(attr(pending!, "langfuse.observation.model.name")).toBe("synthetic-model");
         expect(JSON.stringify(endpoint.spans())).not.toContain("private");
         span.end();
         await transport.flush();

@@ -166,11 +166,17 @@ def test_placeholders_apply_the_content_policy_to_third_party_attributes(receive
         "llm.input_messages.0.message.content": "private-message",
         "ai.prompt": "private-prompt",
         "traceloop.entity.input": "private-entity",
+        "langfuse.observation.input": "private-observation-input",
+        "langfuse.observation.output": "private-observation-output",
     }
     with Hue(receiver.url, KEY, capture_content=capture_content) as hue:
         span = hue.tracer_provider.get_tracer("third-party").start_span(
             "chat synthetic-model",
-            attributes={"gen_ai.operation.name": "chat", "gen_ai.request.model": "synthetic"},
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": "synthetic",
+                "langfuse.observation.model.name": "synthetic",
+            },
         )
         try:
             # An instrumentor records the request on the open span, outside Hue's helpers.
@@ -185,6 +191,7 @@ def test_placeholders_apply_the_content_policy_to_third_party_attributes(receive
     assert placeholder.end_time_unix_nano == 0
     assert keys["hue.span_type"].string_value == "pending_span"
     assert keys["gen_ai.request.model"].string_value == "synthetic"
+    assert keys["langfuse.observation.model.name"].string_value == "synthetic"
     assert {key for key in content if key in keys} == (set(content) if capture_content else set())
     placeholder_request = receiver.requests[0][2]
     assert (b"private-" in placeholder_request) is capture_content

@@ -45,7 +45,6 @@ await hue.withSpan(
   async (span) => {
     const output = await hue.tool("uppercase", "hello", () => "hello".toUpperCase());
     span.setOutput(output);
-    hue.recordMessages({ output: [{ role: "assistant", content: output }] });
   },
   { sessionId: "session-123", userId: "user-123", input: "hello" },
 );
@@ -313,7 +312,7 @@ policy forbids sending that content to another service. `redact` and the credent
 described below apply in both modes.
 
 `captureContent: false` disables manual input/output/messages/tool content and
-removes recognized GenAI, Vercel, OpenInference and OpenLLMetry content attributes,
+removes recognized GenAI, Vercel, OpenInference, OpenLLMetry and Langfuse content attributes,
 legacy GenAI content events, log bodies, status messages and exception text before
 export. The exported `contentPrefixes` array lists the attribute keys (and their dotted
 children) that are removed. Model/provider/token metadata remains available. Generic custom attribute

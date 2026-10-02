@@ -55,6 +55,13 @@ export const contentPrefixes = [
   "ai.embeddings",
   "traceloop.entity.input",
   "traceloop.entity.output",
+  // Langfuse content; its model name, usage, cost, type, session, user and metadata keys stay.
+  "langfuse.observation.input",
+  "langfuse.observation.output",
+  "langfuse.observation.status_message",
+  "langfuse.observation.model.parameters",
+  "langfuse.trace.input",
+  "langfuse.trace.output",
   "tool.parameters",
   "exception.message",
   "exception.stacktrace",

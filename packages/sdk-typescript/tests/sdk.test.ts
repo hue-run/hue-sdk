@@ -1715,11 +1715,33 @@ describe("Hue SDK contract", () => {
       "ai.embeddings",
       "traceloop.entity.input",
       "traceloop.entity.output",
+      "langfuse.observation.input",
+      "langfuse.observation.output",
+      "langfuse.observation.status_message",
+      "langfuse.observation.model.parameters",
+      "langfuse.trace.input",
+      "langfuse.trace.output",
       "tool.parameters",
       "exception.message",
       "exception.stacktrace",
     ]);
   });
+  const langfuseContent = [
+    "langfuse.observation.input",
+    "langfuse.observation.output",
+    "langfuse.observation.status_message",
+    "langfuse.observation.model.parameters",
+    "langfuse.trace.input",
+    "langfuse.trace.output",
+  ];
+  const langfuseMetadata = {
+    "langfuse.observation.model.name": "synthetic-model",
+    "langfuse.observation.usage_details": '{"input":3,"output":5}',
+    "langfuse.session.id": "session-123",
+    "langfuse.user.id": "user-123",
+    "langfuse.observation.type": "generation",
+    "langfuse.observation.metadata.customer": "acme",
+  };
   test.each([true, false])(
     "export strips every recognized content prefix from borrowed-provider spans (captureContent=%p)",
     async (captureContent) => {
@@ -1750,6 +1772,13 @@ describe("Hue SDK contract", () => {
         retriever.setAttribute("ai.response.reasoning", "private-value");
         retriever.setAttribute("ai.response.finishReason", "stop");
         retriever.end();
+        // A Langfuse span: inputs, outputs, the status message and model parameters are
+        // content; the model name, usage, type, session, user and metadata keys stay.
+        const langfuse = tracerProvider.getTracer("third-party").startSpan("langfuse");
+        for (const key of langfuseContent) langfuse.setAttribute(key, "private-value");
+        for (const [key, value] of Object.entries(langfuseMetadata))
+          langfuse.setAttribute(key, value);
+        langfuse.end();
         await hue.flush();
         const records = endpoint.requests.flatMap((request) => request.records);
         const record = records.find((candidate) => candidate.name === "external")!;
@@ -1762,6 +1791,10 @@ describe("Hue SDK contract", () => {
         );
         expect(retrievedKeys.includes("retrieval.documents.0.document.score")).toBe(captureContent);
         expect(retrievedKeys.includes("ai.response.reasoning")).toBe(captureContent);
+        const langfuseRecord = records.find((candidate) => candidate.name === "langfuse")!;
+        const langfuseKeys = (langfuseRecord.attributes ?? []).map((attribute) => attribute.key);
+        for (const key of langfuseContent) expect(langfuseKeys.includes(key)).toBe(captureContent);
+        for (const key of Object.keys(langfuseMetadata)) expect(langfuseKeys).toContain(key);
         const keys = (record.attributes ?? []).map((attribute) => attribute.key);
         const content = keys.filter((key) =>
           contentPrefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}.`)),

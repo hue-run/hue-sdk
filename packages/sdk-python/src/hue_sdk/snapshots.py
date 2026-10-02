@@ -119,8 +119,8 @@ def snapshot_content(value: Any) -> Any:
 
 
 # Attribute keys (and their dotted children) removed in metadata-only mode. Mirrors the
-# TypeScript SDK so both export paths strip the same GenAI, OpenInference, OpenLLMetry
-# and Vercel AI SDK content fields regardless of which instrumentor produced them.
+# TypeScript SDK so both export paths strip the same GenAI, OpenInference, OpenLLMetry,
+# Langfuse and Vercel AI SDK content fields regardless of which instrumentor produced them.
 CONTENT_PREFIXES: tuple[str, ...] = (
     "gen_ai.input.messages",
     "gen_ai.output.messages",
@@ -165,6 +165,13 @@ CONTENT_PREFIXES: tuple[str, ...] = (
     "ai.embeddings",
     "traceloop.entity.input",
     "traceloop.entity.output",
+    # Langfuse content; its model name, usage, cost, type, session, user and metadata keys stay.
+    "langfuse.observation.input",
+    "langfuse.observation.output",
+    "langfuse.observation.status_message",
+    "langfuse.observation.model.parameters",
+    "langfuse.trace.input",
+    "langfuse.trace.output",
     "tool.parameters",
     "exception.message",
     "exception.stacktrace",
