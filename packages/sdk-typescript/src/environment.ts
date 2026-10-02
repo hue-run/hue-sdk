@@ -15,6 +15,7 @@ export {
   legacyMcpCapability,
   stripHueControlPlaneCredentials,
   worldHandoff,
+  worldNow,
   writeMcpConfig,
 } from "./environment/world.js";
 export type { AgentEnvironmentOptions, McpConfigFile } from "./environment/world.js";

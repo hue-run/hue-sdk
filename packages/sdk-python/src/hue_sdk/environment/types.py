@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from typing_extensions import NotRequired
+
 Json = None | bool | int | float | str | list[Any] | dict[str, Any]
 RunStatus = Literal["open", "completed", "abandoned", "expired"]
 FinishStatus = Literal["completed", "abandoned"]
@@ -128,6 +130,9 @@ class EnvironmentRun(_WorldFields):
     id: str
     environmentVersionId: str
     clockNs: str
+    # The world's clock at creation as an RFC 3339 timestamp (``clockNs`` as a date): a
+    # trace-built world's recorded start. Absent from a Hue that predates it.
+    now: NotRequired[str]
     stateDigest: str
     maxSteps: int
     expiresAt: str
@@ -135,7 +140,12 @@ class EnvironmentRun(_WorldFields):
 
 
 class WorldHandoff(TypedDict):
-    """What the World API hands an agent for one world; carries the world token, never log it."""
+    """What the World API hands an agent for one world; carries the world token, never log it.
+
+    ``now`` is the world's clock at creation (RFC 3339): the date an agent computes its dates
+    from in place of the wall clock, a trace-built world's recorded start. Also
+    ``env["HUE_WORLD_NOW"]``; ``None`` for a Hue that names neither.
+    """
 
     id: str
     token: str
@@ -144,6 +154,7 @@ class WorldHandoff(TypedDict):
     completingUntil: str | None
     traceparent: str | None
     baggage: str
+    now: str | None
     surfaces: list[WorldSurface]
     env: dict[str, str]
     mcpConfig: WorldMcpConfig

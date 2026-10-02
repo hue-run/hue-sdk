@@ -389,7 +389,11 @@ export interface WorldHandoff {
   baggage: string;
   /** Mirror surfaces of every provider instance the environment version binds. */
   surfaces: WorldSurface[];
-  /** `HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `BAGGAGE`, `TRACEPARENT` and one
+  /** The world's clock at creation (RFC 3339): the date an agent computes its dates from in
+   * place of the wall clock, a trace-built world's recorded start. Also `env.HUE_WORLD_NOW`;
+   * null for a Hue that names neither. */
+  now: string | null;
+  /** `HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW`, `BAGGAGE`, `TRACEPARENT` and one
    * `HUE_SIM_<SURFACE ID>_URL` per surface. */
   env: Record<string, string>;
   /** The `mcpServers` configuration for the MCP surfaces. */
@@ -403,6 +407,9 @@ export interface EnvironmentRun {
   environmentVersionId: string;
   /** Current virtual nanoseconds as a decimal string. */
   clockNs: string;
+  /** The world's clock at creation as an RFC 3339 timestamp (`clockNs` as a date): a
+   * trace-built world's recorded start. Absent from a Hue that predates it. */
+  now?: string;
   /** Digest of current world state. */
   stateDigest: string;
   /** Maximum recorded actions. */

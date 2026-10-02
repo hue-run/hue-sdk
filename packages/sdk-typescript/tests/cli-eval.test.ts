@@ -18,6 +18,8 @@ const cli = join(import.meta.dir, "../src/setup/cli.ts");
 const key = "synthetic-eval-key-canary";
 const mcpToken = "hue_sim_synthetic_token_canary";
 const worldToken = `hue_world_${"c".repeat(64)}.${"s".repeat(43)}`;
+/** The world's clock at creation: a recorded start, months from any wall clock. */
+const worldNowText = "2026-03-02T15:00:00.000Z";
 const digest = "d".repeat(64);
 const SPAWN_TIMEOUT = 90_000;
 
@@ -329,6 +331,7 @@ function hueStandIn(
               env: {
                 HUE_WORLD_ID: world.id,
                 HUE_WORLD_TOKEN: worldToken,
+                HUE_WORLD_NOW: worldNowText,
                 BAGGAGE: `hue-world=${world.id}`,
                 HUE_SIM_GOOGLE_GMAIL_MCP_URL: mirror,
               },
@@ -692,6 +695,7 @@ process.stdout.write(JSON.stringify({
     worldId: process.env.HUE_ENVIRONMENT_RUN_ID,
     hasApiKey: "HUE_API_KEY" in process.env,
     worldToken: process.env.HUE_WORLD_TOKEN,
+    worldNow: process.env.HUE_WORLD_NOW ?? null,
     gmailMirror: process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL,
     staleMirror: process.env.HUE_SIM_NOTION_MCP_URL ?? null,
     signingKey: process.env.HUE_WORLD_TOKEN_KEY ?? null,
@@ -997,6 +1001,8 @@ describe("hue eval", () => {
             caseId: f.scenario.publication.caseId,
             executionId: world!.executionId,
             worldId: world!.id,
+            // A world the gateway does not serve names no date.
+            worldNow: null,
             // The project key never reaches the agent unless the caller opts in.
             hasApiKey: false,
             staleMirror: null,
@@ -1086,6 +1092,8 @@ describe("hue eval", () => {
           hasToken: false,
           url: mirror,
           worldToken: "[redacted]",
+          // The world's date reaches the agent with the world's other carriers.
+          worldNow: worldNowText,
           gmailMirror: mirror,
           staleMirror: null,
           signingKey: null,

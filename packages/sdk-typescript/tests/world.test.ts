@@ -19,6 +19,7 @@ import {
   legacyMcpCapability,
   stripHueControlPlaneCredentials,
   worldHandoff,
+  worldNow,
   writeMcpConfig,
   type EnvironmentRun,
   type WorldHandoff,
@@ -29,6 +30,8 @@ const runId = randomUUID();
 const versionId = randomUUID();
 const executionId = randomUUID();
 const token = `hue_world_${"c".repeat(64)}.${"s".repeat(43)}`;
+/** The world's clock at creation: a recorded start, months from any wall clock. */
+const worldNowText = "2026-03-02T15:00:00.000Z";
 const mirror = "https://app.hue.test/api/sim/gmailmcp.googleapis.com/mcp/v1";
 const rest = "https://app.hue.test/api/sim/gmail.googleapis.com/gmail/v1";
 
@@ -38,7 +41,8 @@ function gatewayRun(overrides: Partial<EnvironmentRun> = {}): EnvironmentRun {
   return {
     id: runId,
     environmentVersionId: versionId,
-    clockNs: "0",
+    clockNs: "1772463600000000000",
+    now: worldNowText,
     stateDigest: "a".repeat(64),
     maxSteps: 500,
     expiresAt,
@@ -68,6 +72,7 @@ function gatewayRun(overrides: Partial<EnvironmentRun> = {}): EnvironmentRun {
     env: {
       HUE_WORLD_ID: runId,
       HUE_WORLD_TOKEN: token,
+      HUE_WORLD_NOW: worldNowText,
       BAGGAGE: `hue-world=${runId}`,
       HUE_SIM_GOOGLE_GMAIL_MCP_URL: mirror,
       HUE_SIM_GOOGLE_GMAIL_REST_URL: rest,
@@ -201,6 +206,27 @@ function worldApi(
 }
 
 describe("world handoff helpers", () => {
+  test("the handoff carries the world's now, and worldNow reads it where an agent reads the clock", () => {
+    const world = worldHandoff(gatewayRun())!;
+    expect(world.now).toBe(worldNowText);
+    expect(worldNow(world)?.toISOString()).toBe(worldNowText);
+    // The agent child reads the same instant from its environment, never the wall clock.
+    const child = agentEnvironment(world, { parent: { PATH: "/usr/bin" } });
+    expect(child.HUE_WORLD_NOW).toBe(worldNowText);
+    expect(worldNow(child)?.toISOString()).toBe(worldNowText);
+    expect(Math.abs(worldNow(child)!.getTime() - Date.now())).toBeGreaterThan(24 * 3_600_000);
+    // A Hue that predates `now` still names it in the environment, and the handoff reads it there;
+    // one that names neither leaves the agent with no world time, said as null.
+    const older = gatewayRun();
+    delete older.now;
+    expect(worldHandoff(older)!.now).toBe(worldNowText);
+    delete older.env!.HUE_WORLD_NOW;
+    expect(worldHandoff(older)!.now).toBeNull();
+    expect(worldNow(worldHandoff(older)!)).toBeNull();
+    expect(worldNow({ PATH: "/usr/bin" })).toBeNull();
+    expect(worldNow({ HUE_WORLD_NOW: "not a date" })).toBeNull();
+  });
+
   test("a gateway response becomes a handoff; a legacy response does not", () => {
     const world = worldHandoff(gatewayRun());
     expect(world).toMatchObject({ id: runId, token, lifecycle: "live", surfaces: [{}, {}] });

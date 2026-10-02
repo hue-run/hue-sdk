@@ -50,6 +50,7 @@ from .world import (
     mcp_config_file,
     strip_hue_control_plane_credentials,
     world_handoff,
+    world_now,
 )
 
 __all__ = [
@@ -92,4 +93,5 @@ __all__ = [
     "mcp_config_file",
     "strip_hue_control_plane_credentials",
     "world_handoff",
+    "world_now",
 ]

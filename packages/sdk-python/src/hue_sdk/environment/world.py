@@ -16,6 +16,8 @@ import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
+from typing import cast
 
 from .types import EnvironmentRun, LegacyMcpCapability, WorldHandoff
 
@@ -44,10 +46,33 @@ def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
         "completingUntil": run.get("completingUntil"),
         "traceparent": run.get("traceparent"),
         "baggage": run.get("baggage") or f"hue-world={world_id}",
+        "now": run.get("now") or run["env"].get("HUE_WORLD_NOW") or None,
         "surfaces": deepcopy(run["surfaces"]),
         "env": dict(run["env"]),
         "mcpConfig": deepcopy(run["mcpConfig"]),
     }
+
+
+def world_now(source: WorldHandoff | Mapping[str, str] | None = None) -> datetime | None:
+    """The world's clock: what an agent reads for today's date in place of the wall clock, so a
+    date-relative request (tomorrow, ``newer_than:7d``, this month) lands on the dates the world
+    holds however long after the recording the run starts. From the handoff's ``now``, else from
+    ``HUE_WORLD_NOW`` in the given environment (this process's by default, where ``hue eval
+    --command`` and ``agent_environment`` set it). ``None`` when neither names it."""
+    environment = os.environ if source is None else source
+    text: object
+    if "env" in environment and isinstance(environment["env"], Mapping):
+        handoff = cast("WorldHandoff", environment)
+        text = handoff.get("now") or handoff["env"].get("HUE_WORLD_NOW")
+    else:
+        text = environment.get("HUE_WORLD_NOW")
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def is_hue_control_plane_credential(name: str, value: str | None) -> bool:
