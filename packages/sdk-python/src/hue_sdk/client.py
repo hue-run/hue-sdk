@@ -141,6 +141,9 @@ class HueSpan:
         record_attributes: Mapping[str, str] | None = None,
     ) -> None:
         self._client = client
+        # Guards the read, change and write of the span's ``hue.truncated`` list: two threads
+        # recording content on one span at once would otherwise each write the list they read.
+        self._truncated_lock = Lock()
         self.otel_span = span
         self._category = category
         # Request metadata and session copied onto inference-log records; see ``Hue.span``.
@@ -199,15 +202,20 @@ class HueSpan:
 
         def record() -> None:
             content, truncated = self._client._bounded_content(key, value)
-            self.otel_span.set_attribute(key, content)
-            if truncated:
+            with self._truncated_lock:
+                self.otel_span.set_attribute(key, content)
                 # The key is listed under ``hue.truncated``, where Hue's receiver lists the
-                # values it cuts itself, so a reader learns of the partial value from one place.
+                # values it cuts itself, so a reader learns of the partial value from one place;
+                # a whole value replacing a cut one unmarks its key, and a list that would not
+                # change is left alone.
                 listed = (getattr(self.otel_span, "attributes", None) or {}).get(TRUNCATED_KEY)
                 keys = [item for item in listed if isinstance(item, str)] if listed else []
-                if key not in keys:
-                    keys.append(key)
-                self.otel_span.set_attribute(TRUNCATED_KEY, keys)
+                if truncated and key not in keys:
+                    self.otel_span.set_attribute(TRUNCATED_KEY, [*keys, key])
+                elif not truncated and key in keys:
+                    self.otel_span.set_attribute(
+                        TRUNCATED_KEY, [item for item in keys if item != key]
+                    )
 
         self._client._instrument(record)
 

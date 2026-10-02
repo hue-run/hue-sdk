@@ -1178,8 +1178,10 @@ No registry release is claimed until publication and registry acceptance complet
 - **Wire** Helper content over Hue's 256 KiB value cap (`set_input`, `set_output`, a tool call's
   arguments or result) is cut to a UTF-8 prefix of its JSON text and the key listed in the span's
   `hue.truncated` attribute, where Hue's receiver lists the values it cuts itself, instead of
-  being omitted and counted as an instrumentation failure. An inference log's body over the cap
-  is still omitted and counted, since its prefix is no JSON.
+  being omitted and counted as an instrumentation failure. A whole value replacing a cut one
+  unmarks its key, and the list is kept under a lock per span so two threads cutting on one span
+  at once both stay listed. An inference log's body over the cap is still omitted and counted,
+  since its prefix is no JSON.
 
 ### [0.6.4] - 2026-10-02
 

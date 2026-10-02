@@ -877,6 +877,44 @@ def test_unsafe_base_urls_rejected_without_echoing_values(url):
     assert "password" not in str(error.value)
 
 
+def test_a_whole_value_unmarks_its_cut_key_and_concurrent_cuts_list_both(receiver):
+    from concurrent.futures import ThreadPoolExecutor
+
+    large = "\u00e9" * (160 * 1024)
+    with Hue(receiver.url, KEY, capture_content=True) as hue:
+        # A whole value set after a cut one unmarks its key; another listed key stays.
+        with hue.span("replaced") as span:
+            span.set_input(large)
+            span.set_output(large)
+            span.set_output("short")
+        # Two threads cutting on one span at once: each key is listed, neither write is lost.
+        with hue.span("concurrent") as span:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pool.submit(span.set_input, large).result()
+                for _ in range(20):
+                    first = pool.submit(span.set_output, large)
+                    second = pool.submit(span.set_attribute, "custom", "x")
+                    first.result()
+                    second.result()
+                a = pool.submit(span.set_input, large)
+                b = pool.submit(span.set_output, large)
+                a.result()
+                b.result()
+        assert hue.export_status.instrumentation_failures == 0
+        hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    replaced = spans["replaced"]
+    assert replaced["output.value"].string_value == '"short"'
+    assert [item.string_value for item in replaced[TRUNCATED_KEY].array_value.values] == [
+        "input.value"
+    ]
+    concurrent = spans["concurrent"]
+    assert sorted(item.string_value for item in concurrent[TRUNCATED_KEY].array_value.values) == [
+        "input.value",
+        "output.value",
+    ]
+
+
 def test_capture_choice_and_valid_json_are_required(receiver):
     with pytest.raises(TypeError):
         Hue(receiver.url, KEY)
