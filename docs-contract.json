@@ -32,7 +32,7 @@
         "verifiedSupport": "OTLP HTTP protobuf/JSON traces and correlated logs, including gzip"
       },
       {
-        "boundary": "Requires a Hue deployment that answers trace exports with `Hue-Pending-Spans: 1` (app.hue.run does). A receiver without that header, an older Hue or a generic collector, gets placeholders only in the first export that carries them: the SDK then records one warning and switches live spans off for that client. Turn `liveSpans` / `live_spans` off to send none at all.",
+        "boundary": "Placeholders travel in their own requests, after an export's completed spans, so a completed span's rejection is never credited to a placeholder. Requires a Hue deployment that answers trace exports with `Hue-Pending-Spans: 1` (app.hue.run does). A receiver without that header, an older Hue or a generic collector, gets at most one request of placeholders: its first trace acknowledgement, whatever the request carried, makes the SDK record one warning and switch live spans off for that client. Turn `liveSpans` / `live_spans` off to send none at all.",
         "path": "Live spans",
         "verifiedSupport": "Placeholders for running Hue and AI spans, sent by the Hue transports from TypeScript `0.7.0` and Python `0.4.0`"
       }
@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:1e18ba83b6f65bd09cf9ead88d84a3a1ed6ceed2f5a7ec5e5d128ef2e8a1d571",
+    "sha256": "sha256:35d75baaae167157abf970ab8fd6c0593558ed5b7c1921ba5113a818478abcb2",
     "source": "COMPATIBILITY.md"
   },
   "packages": {

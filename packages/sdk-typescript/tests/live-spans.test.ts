@@ -423,7 +423,7 @@ describe("Live spans", () => {
   );
 
   test(
-    "a failed request mixing real spans and placeholders counts only the real spans",
+    "completed spans and placeholders travel in separate requests, completed spans first",
     async () => {
       let requests = 0;
       const endpoint = receiver(() => (++requests === 1 ? { status: 401 } : {}));
@@ -439,13 +439,14 @@ describe("Live spans", () => {
           await hue.withSpan("quick", () => {});
           const error = await hue.flush().catch((reason: unknown) => reason);
           expect(error).toBeInstanceOf(HueExportError);
-          // The placeholder in the failed request is not counted as a lost record.
+          // The failed request held only the completed span; the placeholder followed in its own.
           expect((error as HueExportError).issues.filter((issue) => issue.count > 0)).toEqual([
             expect.objectContaining({ kind: "failed", count: 1, status: 401 }),
           ]);
         });
         const report = await hue.flush();
-        expect(endpoint.requests[0]!.map(isPlaceholder)).toEqual([false, true]);
+        expect(endpoint.requests[0]!.map(isPlaceholder)).toEqual([false]);
+        expect(endpoint.requests[1]!.map(isPlaceholder)).toEqual([true]);
         expect(report.failedSpans).toBe(1);
         expect(report.acceptedSpans).toBe(1);
       } finally {
@@ -457,7 +458,7 @@ describe("Live spans", () => {
   );
 
   test(
-    "an older Hue rejecting placeholders turns live spans off with one warning",
+    "an older Hue acknowledging completed spans without the header turns live spans off before any placeholder is sent",
     async () => {
       // Mirrors a receiver from before placeholders: a zero end time is rejected per record.
       const endpoint = receiver(
@@ -480,7 +481,9 @@ describe("Live spans", () => {
           await queued(hue.transport, 1);
           await hue.withSpan("quick", () => {});
           const mid = await hue.flush();
-          expect(endpoint.requests[0]!.map(isPlaceholder)).toEqual([false, true]);
+          // The completed span's acknowledgement showed the receiver predates placeholders, so
+          // the queued placeholder was dropped instead of sent.
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[false]]);
           expect(mid.acceptedSpans).toBe(1);
           expect(mid.rejectedSpans).toBe(0);
           await hue.withSpan("later", async () => {
@@ -489,8 +492,59 @@ describe("Live spans", () => {
           });
         });
         const report = await hue.flush();
-        expect(endpoint.placeholders()).toHaveLength(1);
+        expect(endpoint.placeholders()).toHaveLength(0);
         expect(report.acceptedSpans).toBe(3);
+        expect(report.rejectedSpans + report.failedSpans).toBe(0);
+        expect(hue.transport.getFailureSequence()).toBe(0);
+        expect(hue.transport.getIssues()).toEqual([
+          expect.objectContaining({
+            kind: "warning",
+            count: 0,
+            message: expect.stringContaining("live spans are disabled"),
+          }),
+        ]);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "an older Hue rejecting a request of placeholders turns live spans off with one warning",
+    async () => {
+      // Mirrors a receiver from before placeholders: a zero end time is rejected per record.
+      const endpoint = receiver(
+        (spans) => {
+          const rejected = spans.filter((span) => span.endTimeUnixNano === "0").length;
+          return rejected
+            ? { rejectedSpans: rejected, errorMessage: "Invalid span start or end timestamp" }
+            : {};
+        },
+        { legacy: true },
+      );
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-downgrade-placeholders",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await queued(hue.transport, 1);
+          // No completed span is queued yet, so the export carries only the placeholder.
+          const mid = await hue.flush();
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[true]]);
+          expect(mid.acceptedSpans + mid.rejectedSpans + mid.failedSpans).toBe(0);
+          await hue.withSpan("later", async () => {
+            await Bun.sleep(pastTicks);
+            expect(hue.transport.getReport().pendingSpans).toBe(0);
+          });
+        });
+        const report = await hue.flush();
+        expect(endpoint.placeholders()).toHaveLength(1);
+        expect(report.acceptedSpans).toBe(2);
         expect(report.rejectedSpans + report.failedSpans).toBe(0);
         expect(hue.transport.getFailureSequence()).toBe(0);
         expect(hue.transport.getIssues()).toEqual([
@@ -509,16 +563,14 @@ describe("Live spans", () => {
   );
 
   test(
-    "an older Hue's mixed rejection counts only the real rejections and turns live spans off",
+    "a header-less receiver's rejection of a completed span fails the flush and turns live spans off",
     async () => {
-      // One placeholder rejected by timestamp plus one real span rejected for another reason.
+      // A generic collector that would accept placeholders but rejects one completed span: the
+      // rejection is the completed span's, never credited to a placeholder.
       const endpoint = receiver(
         (spans) =>
-          spans.some(isPlaceholder)
-            ? {
-                rejectedSpans: spans.filter(isPlaceholder).length + 1,
-                errorMessage: "Invalid span start or end timestamp Attribute limit exceeded",
-              }
+          spans.some((span) => span.name === "second")
+            ? { rejectedSpans: 1, errorMessage: "Attribute limit exceeded" }
             : {},
         { legacy: true },
       );
@@ -534,7 +586,9 @@ describe("Live spans", () => {
           await hue.withSpan("first", () => {});
           await hue.withSpan("second", () => {});
           const error = await hue.flush().catch((reason: unknown) => reason);
-          expect(endpoint.requests[0]!.map(isPlaceholder)).toEqual([false, false, true]);
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([
+            [false, false],
+          ]);
           expect(error).toBeInstanceOf(HueExportError);
           expect((error as HueExportError).issues).toEqual([
             expect.objectContaining({ kind: "rejected", count: 1 }),
@@ -549,14 +603,63 @@ describe("Live spans", () => {
           });
         });
         const report = await hue.flush();
-        expect(endpoint.placeholders()).toHaveLength(1);
+        expect(endpoint.placeholders()).toHaveLength(0);
         expect(report).toMatchObject({ acceptedSpans: 3, rejectedSpans: 1, failedSpans: 0 });
         expect(hue.transport.getIssues().filter((issue) => issue.kind === "warning")).toEqual([
           expect.objectContaining({
-            count: 1,
+            count: 0,
             message: expect.stringContaining("live spans are disabled"),
           }),
         ]);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
+    "a current Hue rejecting only a request of placeholders beside completed spans is a warning",
+    async () => {
+      const endpoint = receiver((spans) =>
+        spans.every(isPlaceholder)
+          ? { rejectedSpans: 1, errorMessage: "Invalid pending span placeholder" }
+          : {},
+      );
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-placeholder-rejected",
+        captureContent: false,
+        baseUrl: endpoint.url,
+      });
+      try {
+        await hue.withSpan("chat.request", async () => {
+          await queued(hue.transport, 1);
+          await hue.withSpan("quick", () => {});
+          const mid = await hue.flush();
+          expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([
+            [false],
+            [true],
+          ]);
+          // The placeholder's rejection is never the completed span's.
+          expect(mid.acceptedSpans).toBe(1);
+          expect(mid.rejectedSpans + mid.failedSpans).toBe(0);
+          // The header keeps live spans on: the next span is announced.
+          await hue.withSpan("later", async () => {
+            await queued(hue.transport, 1);
+            await hue.flush();
+          });
+        });
+        await hue.flush();
+        expect(endpoint.placeholders().map((span) => span.name)).toEqual(["chat.request", "later"]);
+        expect(hue.transport.getFailureSequence()).toBe(0);
+        const issues = hue.transport.getIssues();
+        expect(issues).toEqual([
+          expect.objectContaining({ kind: "warning", count: 1 }),
+          expect.objectContaining({ kind: "warning", count: 1 }),
+        ]);
+        expect(JSON.stringify(issues)).not.toContain("live spans are disabled");
       } finally {
         await hue.shutdown();
         await endpoint.server.stop(true);
@@ -586,7 +689,10 @@ describe("Live spans", () => {
             await queued(hue.transport, 2);
             await hue.withSpan("bad timestamp", () => {});
             const error = await hue.flush().catch((reason: unknown) => reason);
-            expect(endpoint.requests[0]!.map(isPlaceholder)).toEqual([false, true, true]);
+            expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([
+              [false],
+              [true, true],
+            ]);
             expect(error).toBeInstanceOf(HueExportError);
             expect((error as HueExportError).issues).toEqual([
               expect.objectContaining({ kind: "rejected", count: 1 }),

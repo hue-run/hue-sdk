@@ -20,6 +20,17 @@ refuses to publish a version without a matching entry below.
   and lands on the recorded dates however long after the recording the run starts. Null or absent
   from a Hue that predates it.
 
+#### Fixed
+
+- Live-span placeholders travel in their own requests, after an export's completed spans, so a
+  rejection count is always one kind of record's: a completed span's rejection is never credited
+  to a placeholder (a receiver without `Hue-Pending-Spans: 1` that rejected a completed span could
+  hide it behind a placeholder before), and a rejected request of placeholders is a warning. The
+  first trace acknowledgement without the header, whatever its request carried, turns live spans
+  off with one warning, so a generic collector that acknowledged completed spans first never
+  receives a placeholder. An export whose spans are still running makes one more request than
+  before, for the placeholders alone; the export cadence is unchanged. **Wire**
+
 ### [0.12.1] - 2026-10-02
 
 This release says what stopped a case: a service the agent called that refused, dropped the
@@ -1171,6 +1182,18 @@ No registry release is claimed until publication and registry acceptance complet
   an agent computes "today", "tomorrow" or `newer_than:7d` from the world's date and lands on the
   recorded dates however long after the recording the run starts. `None` or absent from a Hue that
   predates it.
+
+#### Fixed
+
+- Live-span placeholders travel in their own requests, after an export's finished spans, so a
+  rejection count is always one kind of record's: a finished span's rejection is never credited
+  to a placeholder (a receiver without `Hue-Pending-Spans: 1` that rejected a finished span could
+  hide it behind a placeholder before), and a rejected request of placeholders never fails the
+  export status. The first trace acknowledgement without the header, whatever its request
+  carried, sets `export_status.live_spans_rejected` and stops announcing spans, so a generic
+  collector that acknowledged finished spans first never receives a placeholder. An export whose
+  spans are still running makes one more request than before, for the placeholders alone; the
+  export cadence is unchanged. **Wire**
 
 ### [0.6.4] - 2026-10-02
 

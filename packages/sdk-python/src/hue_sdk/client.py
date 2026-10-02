@@ -650,7 +650,11 @@ class Hue:
         self.logger_provider = sdk_logger_provider
         self._ledger = IssueLedger()
         self._span_exporter = BoundedSpanExporter(
-            f"{self.base_url}/api/v1/otlp/v1/traces", self._headers, self._timeout, self._ledger
+            f"{self.base_url}/api/v1/otlp/v1/traces",
+            self._headers,
+            self._timeout,
+            self._ledger,
+            live_spans=live_spans,
         )
         self._log_exporter = BoundedLogExporter(
             f"{self.base_url}/api/v1/otlp/v1/logs", self._headers, self._timeout, self._ledger

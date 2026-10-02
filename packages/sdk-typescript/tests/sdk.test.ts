@@ -136,7 +136,13 @@ function receiver(
           : {};
       return new Response(
         new Uint8Array(responseType.encode(responseType.fromObject(response)).finish()),
-        { headers: { "content-type": "application/x-protobuf" } },
+        {
+          headers: {
+            "content-type": "application/x-protobuf",
+            // A current Hue marks every trace acknowledgement as accepting placeholders.
+            ...(signal === "traces" ? { "hue-pending-spans": "1" } : {}),
+          },
+        },
       );
     },
   });

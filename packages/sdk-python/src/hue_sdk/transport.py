@@ -108,9 +108,8 @@ class ExportStatus:
     """Cumulative failed export batches; contains no telemetry or credentials.
 
     ``live_spans_rejected`` is a warning, not a failure, and does not affect ``ok``: a
-    trace acknowledgement for a request carrying live-span placeholders lacked the
-    ``Hue-Pending-Spans`` header, so the receiver predates placeholders and this client
-    stopped sending them.
+    trace acknowledgement lacked the ``Hue-Pending-Spans`` header, so the receiver predates
+    live-span placeholders and this client stopped sending them.
     """
 
     failed_trace_batches: int
@@ -142,15 +141,20 @@ class SafeSession(requests.Session):
     partial_success themselves. A rejection is permanent: accepted records must
     not be retried as a whole batch.
 
-    The trace exporter sets ``placeholders`` before each export; a request reads it once
-    it holds the per-signal request lock, so a timed-out worker keeps its own count.
+    The trace exporter sends finished spans and live-span placeholders in separate requests
+    and sets ``placeholders`` before each; a request reads it once it holds the per-signal
+    request lock, so a timed-out worker keeps its own count. A request of placeholders is
+    advisory: its rejections never fail it. ``live_spans`` says whether the client announces
+    spans at all; only then does a trace acknowledgement without the ``Hue-Pending-Spans``
+    header set ``live_spans_rejected``.
     """
 
-    def __init__(self, signal: str | None = None) -> None:
+    def __init__(self, signal: str | None = None, *, live_spans: bool = True) -> None:
         super().__init__()
         self.signal = signal
         self._request_lock = Lock()
         self.placeholders = 0
+        self.live_spans = live_spans
         self.live_spans_rejected = False
 
     @property
@@ -264,13 +268,18 @@ class SafeSession(requests.Session):
             if response.status_code != 200:
                 raise requests.RequestException("Hue OTLP response must use HTTP 200.")
             rejected = _rejected_records(self.signal, response.content)
-            if placeholders and response.headers.get(PLACEHOLDERS_HEADER) != "1":
-                # The receiver predates live spans and rejects each placeholder by timestamp.
-                # Stop sending them; only rejections beyond the placeholders are real. A
-                # receiver with the header never rejects a placeholder for being one, so its
-                # rejections count as they always have.
+            if (
+                self.signal == "traces"
+                and self.live_spans
+                and response.headers.get(PLACEHOLDERS_HEADER) != "1"
+            ):
+                # A trace acknowledgement without the header comes from a receiver that predates
+                # live spans, whatever the request carried: stop announcing them, before any
+                # placeholder reaches a receiver that acknowledged finished spans first.
                 self.live_spans_rejected = True
-                rejected = max(0, rejected - placeholders)
+            if placeholders:
+                # Placeholders travel alone, so a rejection is theirs: advisory, never a failure.
+                return response
             if rejected:
                 raise requests.RequestException("Hue OTLP receiver rejected records.")
         return response
@@ -413,9 +422,11 @@ class BoundedSpanExporter(SpanExporter):
         headers: dict[str, str],
         timeout: float,
         ledger: IssueLedger | None = None,
+        *,
+        live_spans: bool = True,
     ) -> None:
         self._ledger = ledger or IssueLedger()
-        self._session = SafeSession("traces")
+        self._session = SafeSession("traces", live_spans=live_spans)
         self._delegate = OTLPSpanExporter(
             endpoint=endpoint,
             headers={**headers, "User-Agent": USER_AGENT},
@@ -455,31 +466,24 @@ class BoundedSpanExporter(SpanExporter):
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         failed = False
+        # Finished spans and placeholders travel in separate requests, finished spans first, so
+        # a rejection count is always one kind of record's.
+        real = [span for span in spans if not isinstance(span, PendingSpan)]
+        pending = [span for span in spans if isinstance(span, PendingSpan)]
         try:
-            for batch in _split_batches(spans, encode_spans):
-                placeholders = sum(isinstance(span, PendingSpan) for span in batch)
-                try:
-                    if encode_spans(batch).ByteSize() > MAX_BATCH_BYTES:
-                        exported = False
-                    else:
-                        self._session.placeholders = placeholders
-                        exported = self._delegate.export(batch) is SpanExportResult.SUCCESS
-                except Exception:
-                    exported = False
-                # Placeholders are advisory: a batch holding only placeholders never fails.
-                if not exported and placeholders < len(batch):
+            for batch in _split_batches(real, encode_spans):
+                if not self._send(batch, placeholders=0):
                     failed = True
                     # The batch Hue refused or did not acknowledge names the traces in it.
                     self._ledger.record(
                         "traces",
                         "failed",
-                        len(batch) - placeholders,
+                        len(batch),
                         "Hue did not accept a batch of trace records",
                         trace_ids_of(batch),
                     )
         except Exception:
             # Never surface record serialization errors containing customer values.
-            real = [span for span in spans if not isinstance(span, PendingSpan)]
             if real and not failed:
                 self._ledger.record(
                     "traces",
@@ -489,11 +493,30 @@ class BoundedSpanExporter(SpanExporter):
                     trace_ids_of(real),
                 )
             failed = failed or bool(real)
+        # Placeholders are advisory: a request of them never fails the export, and none is sent
+        # once a receiver answered without placeholder support, which the finished spans'
+        # acknowledgements may have just shown.
+        if pending and not self._session.live_spans_rejected:
+            try:
+                for batch in _split_batches(pending, encode_spans):
+                    self._send(batch, placeholders=len(batch))
+            except Exception:
+                pass
         if failed:
             with self._lock:
                 self._failures += 1
             return SpanExportResult.FAILURE
         return SpanExportResult.SUCCESS
+
+    def _send(self, batch: Sequence[ReadableSpan], *, placeholders: int) -> bool:
+        """One request; ``placeholders`` is ``len(batch)`` for a request of placeholders."""
+        try:
+            if encode_spans(batch).ByteSize() > MAX_BATCH_BYTES:
+                return False
+            self._session.placeholders = placeholders
+            return self._delegate.export(batch) is SpanExportResult.SUCCESS
+        except Exception:
+            return False
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         return self._delegate.force_flush(timeout_millis)
