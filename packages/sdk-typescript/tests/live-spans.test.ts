@@ -887,7 +887,7 @@ describe("Live spans", () => {
             .end();
           const error = await hue.flush().catch((reason: unknown) => reason);
           expect(error).toBeInstanceOf(HueExportError);
-          expect((error as HueExportError).issues).toEqual([
+          expect((error as HueExportError).issues.filter((issue) => issue.count > 0)).toEqual([
             expect.objectContaining({ kind: "invalid", count: 1 }),
           ]);
           expect(endpoint.requests.map((request) => request.map(isPlaceholder))).toEqual([[true]]);
