@@ -1032,10 +1032,10 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("a redactor's answer over the cap is refused by its length, never scanned or cut", async () => {
-    // The recorded text is cut before the redactor sees it, so a redactor that keeps its input
-    // within the cap passes; one that answers with more than the cap's worth of text is the
-    // redactor's own fault, and the record is refused before anything reads that text.
+  test("a redactor's answer that grows past the cap is refused by its length, never scanned or cut", async () => {
+    // The redactor sees the whole recorded text, and an answer no longer than it is cut to the
+    // cap as the text would be; an answer longer than both the cap and its input is the
+    // redactor's own, and the record is refused before anything reads that text.
     const endpoint = receiver();
     const transport = createHueTransport({
       apiKey,
