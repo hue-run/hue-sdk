@@ -144,11 +144,11 @@ export function encodeBoundedContent(
       throw new RangeError("Content complexity limit exceeded");
     if (typeof item === "string") {
       let text = item;
-      if (text.length > limits.bytes) {
+      if (text.length > limits.bytes || Buffer.byteLength(text) > limits.bytes) {
         if (!cut) throw new RangeError("Content limit exceeded");
-        // The copy itself is bounded: a longer string is cut before it is escaped.
+        // The copy itself is bounded in bytes: a longer string is cut before it is escaped.
         truncated = true;
-        text = text.slice(0, limits.bytes);
+        text = truncateUtf8(text.slice(0, limits.bytes), limits.bytes);
       }
       charge(Buffer.byteLength(JSON.stringify(text)));
       return text;
