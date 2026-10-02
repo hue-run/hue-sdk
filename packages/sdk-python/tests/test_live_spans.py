@@ -6,6 +6,7 @@ import signal
 import sys
 import time
 import warnings
+from contextlib import ExitStack
 from threading import Event, Lock, Thread
 
 import pytest
@@ -218,16 +219,16 @@ def test_failed_batch_with_finished_spans_still_fails(receiver):
             assert hue.export_status.failed_trace_batches == 1
 
 
-def test_receiver_without_live_spans_turns_them_off_without_failing(receiver):
-    receiver.reply(200, rejection(1, "Invalid span start or end timestamp"))
+def test_receiver_without_the_header_turns_live_spans_off_before_any_placeholder(receiver):
+    # An older Hue or a generic collector answers the finished span without the header: live
+    # spans stop at that acknowledgement, and the queued placeholder is dropped instead of sent.
+    receiver.legacy = True
     assert ExportStatus(0, 0).live_spans_rejected is False
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.span("agent.run"):
             wait_for(queued(hue, 1))
             with hue.span("finished-step"):
                 pass
-            # One request carries the placeholder and a finished span; only the placeholder
-            # is rejected, so the stored span is not reported as a failure.
             assert hue.force_flush()
             status = hue.export_status
             assert status.live_spans_rejected and status.ok
@@ -236,15 +237,17 @@ def test_receiver_without_live_spans_turns_them_off_without_failing(receiver):
                 time.sleep(0.8)
                 assert hue.export_status.queued_trace_records == 0
         assert hue.force_flush()
-    assert request_ends(receiver.requests[0][2]) == [False, True]
+    assert request_ends(receiver.requests[0][2]) == [False]
     pending, real = split_placeholders(receiver)
-    assert list(pending) == ["agent.run"]
+    assert pending == {}
     assert sorted(real) == ["after-rejection", "agent.run", "finished-step"]
 
 
-def test_mixed_rejection_by_older_receiver_fails_and_turns_live_spans_off(receiver):
-    # One placeholder rejected by timestamp plus one finished span rejected for another reason.
-    receiver.reply(200, rejection(2, "Invalid span start or end timestamp Other reason"))
+def test_header_less_receiver_rejecting_a_finished_span_fails_and_turns_live_spans_off(receiver):
+    # A generic collector that would accept placeholders but rejects one finished span: the
+    # rejection is the finished span's, never credited to a placeholder.
+    receiver.legacy = True
+    receiver.reply(200, rejection(1, "Attribute limit exceeded"))
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.span("agent.run"):
             wait_for(queued(hue, 1))
@@ -259,17 +262,22 @@ def test_mixed_rejection_by_older_receiver_fails_and_turns_live_spans_off(receiv
                 time.sleep(0.8)
                 assert hue.export_status.queued_trace_records == 0
         hue.force_flush()
-    assert request_ends(receiver.requests[0][2]) == [False, False, True]
+    assert request_ends(receiver.requests[0][2]) == [False, False]
     pending, _ = split_placeholders(receiver)
-    assert list(pending) == ["agent.run"]
+    assert pending == {}
 
 
-def test_receiver_without_the_header_gets_placeholders_in_one_export_only(receiver):
-    # A generic collector accepts everything but never sends the header.
+@pytest.mark.parametrize("answer", ["accepted", "rejected"])
+def test_receiver_without_the_header_gets_one_request_of_placeholders_at_most(receiver, answer):
+    # A generic collector accepts everything but never sends the header; an older Hue rejects
+    # each placeholder by its zero end time. Either answer turns live spans off without failing.
     receiver.legacy = True
+    if answer == "rejected":
+        receiver.reply(200, rejection(1, "Invalid span start or end timestamp"))
     with Hue(receiver.url, KEY, capture_content=False) as hue:
         with hue.span("agent.run"):
             wait_for(queued(hue, 1))
+            # No finished span is queued yet, so the export carries only the placeholder.
             assert hue.force_flush()
             status = hue.export_status
             assert status.live_spans_rejected and status.ok
@@ -277,9 +285,72 @@ def test_receiver_without_the_header_gets_placeholders_in_one_export_only(receiv
                 time.sleep(0.8)
                 assert hue.export_status.queued_trace_records == 0
         assert hue.force_flush()
+    assert request_ends(receiver.requests[0][2]) == [True]
     pending, real = split_placeholders(receiver)
     assert list(pending) == ["agent.run"]
     assert sorted(real) == ["after-downgrade", "agent.run"]
+
+
+def test_no_request_of_placeholders_follows_the_acknowledgement_that_turned_live_spans_off(
+    receiver,
+):
+    # Enough placeholder bytes for two requests; the first acknowledgement lacks the header.
+    receiver.legacy = True
+    large = "x" * 60_000
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with ExitStack() as stack:
+            for index in range(20):
+                stack.enter_context(
+                    hue.span(f"burst-{index}", attributes={"gen_ai.request.model": large})
+                )
+            wait_for(queued(hue, 20))
+            assert hue.force_flush()
+            assert hue.export_status.live_spans_rejected
+            assert len([r for r in receiver.requests if r[0].endswith("/traces")]) == 1
+            pending, _ = split_placeholders(receiver)
+            assert 0 < len(pending) < 20
+        assert hue.force_flush()
+        assert hue.export_status.ok
+
+
+@pytest.mark.parametrize("key,options", [(SETUP_KEY, {}), (KEY, {"live_spans": False})])
+def test_client_that_announces_nothing_is_not_flagged_by_a_header_less_receiver(
+    receiver, key, options
+):
+    receiver.legacy = True
+    with Hue(receiver.url, key, capture_content=False, **options) as hue:
+        with hue.span("agent.run"):
+            time.sleep(0.8)
+            with hue.span("finished-step"):
+                pass
+            assert hue.force_flush()
+        assert hue.force_flush()
+        status = hue.export_status
+        assert status.ok and not status.live_spans_rejected
+    assert all(span.end_time_unix_nano > 0 for span in receiver.spans())
+
+
+def test_current_receiver_rejecting_only_a_request_of_placeholders_is_ok(receiver):
+    # The finished span's request is acknowledged; the request of placeholders is rejected.
+    receiver.reply(200, b"", **CURRENT)
+    receiver.reply(200, rejection(1, "Invalid pending span placeholder"), **CURRENT)
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with hue.span("agent.run"):
+            wait_for(queued(hue, 1))
+            with hue.span("finished-step"):
+                pass
+            assert hue.force_flush()
+            status = hue.export_status
+            assert status.ok and not status.live_spans_rejected
+            # The header keeps live spans on: the next span is announced.
+            with hue.span("later"):
+                wait_for(queued(hue, 1))
+                assert hue.force_flush()
+        assert hue.force_flush()
+    assert request_ends(receiver.requests[0][2]) == [False]
+    assert request_ends(receiver.requests[1][2]) == [True]
+    pending, _ = split_placeholders(receiver)
+    assert sorted(pending) == ["agent.run", "later"]
 
 
 def test_current_receiver_timestamp_rejection_fails_and_keeps_live_spans(receiver):
@@ -299,7 +370,8 @@ def test_current_receiver_timestamp_rejection_fails_and_keeps_live_spans(receive
                     wait_for(queued(hue, 1))
                     hue.force_flush()
         hue.force_flush()
-    assert request_ends(receiver.requests[0][2]) == [False, True, True]
+    assert request_ends(receiver.requests[0][2]) == [False]
+    assert request_ends(receiver.requests[1][2]) == [True, True]
     pending, _ = split_placeholders(receiver)
     assert sorted(pending) == ["agent.run", "agent.step", "later"]
 

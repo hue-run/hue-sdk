@@ -532,10 +532,14 @@ short span may send none and appear in Hue only when it finishes.
   record and byte budgets, and skipped silently otherwise. While queued they count in
   `pendingSpans` and `pendingBytes`, but never as accepted, rejected, failed or dropped records.
   Losing only placeholders records a warning and does not make `flush()` throw.
-- A Hue server that accepts placeholders sends `Hue-Pending-Spans: 1` on trace acknowledgements.
-  When a response to a request carrying placeholders lacks it, the receiver predates them: the
-  transport attributes up to one rejection per placeholder to them, records one warning and stops
-  sending placeholders for that client. Other rejections count against real spans as usual.
+- Placeholders travel in their own requests, after an export's completed spans, so a rejection
+  count is always one kind of record's: a completed span's rejection is never credited to a
+  placeholder, and a rejected request of placeholders is a warning. A Hue server that accepts
+  placeholders sends `Hue-Pending-Spans: 1` on every trace acknowledgement. The first trace
+  acknowledgement without it, whatever its request carried, shows the receiver predates them: the
+  transport records one warning (counting the placeholders the receiver rejected in that request, if any) and stops
+  sending placeholders for that client, so a receiver that acknowledged completed spans first
+  never receives one.
 - Opt out with `liveSpans: false`. Setup credentials never send placeholders.
 - With an existing provider, announcements start in `spanProcessor.onStart`. A wrapping processor
   that forwards `onStart` should forward `onEnd` for the same spans: a span that ends without

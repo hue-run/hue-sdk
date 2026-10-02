@@ -52,7 +52,11 @@ def test_openinference_official_openai_stream_exports_to_hue(
     body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
     receiver.reply(200, body.encode(), **{"Content-Type": "text/event-stream"})
     instrumentor = adapter.OpenAIInstrumentor()
-    with Hue(receiver.url, "synthetic-hue-key", capture_content=capture_content) as hue:
+    # The receiver also plays the model provider with one queued reply; live spans are not under
+    # test here, so no placeholder export may consume that reply first.
+    with Hue(
+        receiver.url, "synthetic-hue-key", capture_content=capture_content, live_spans=False
+    ) as hue:
         # External instrumentation owns its privacy settings; when it does not hide content,
         # Hue's export path still strips the recognized content attributes in metadata-only mode.
         hide = instrumentor_hides and not capture_content
@@ -134,7 +138,11 @@ def test_openinference_responses_hosted_mcp_tool_exports_without_credentials(
     }
     receiver.reply(200, json.dumps(response).encode(), **{"Content-Type": "application/json"})
     instrumentor = adapter.OpenAIInstrumentor()
-    with Hue(receiver.url, "synthetic-hue-key", capture_content=capture_content) as hue:
+    # The receiver also plays the model provider with one queued reply; live spans are not under
+    # test here, so no placeholder export may consume that reply first.
+    with Hue(
+        receiver.url, "synthetic-hue-key", capture_content=capture_content, live_spans=False
+    ) as hue:
         instrumentor.instrument(
             tracer_provider=hue.tracer_provider,
             config=instrumentation.TraceConfig(enable_genai_semconv=True),
