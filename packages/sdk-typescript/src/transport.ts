@@ -80,6 +80,7 @@ interface ExportSink {
   placeholderSettled(record: RecordValue): boolean;
   sendsPlaceholders(): boolean;
   withDroppedRecords(span: ReadableSpan): ReadableSpan;
+  consumeDroppedRecords(traceIds: Iterable<string>): void;
   rejectPlaceholders(count: number): void;
 }
 
@@ -428,15 +429,20 @@ export class HueTransport {
 
   /** @internal Exporter callback: a trace's root span carries the count of its records the SDK
    * never sent, read when the root is exported (a record lost after that is not counted: the
-   * root has left). The count is kept, so a root exported again under retry says the same. */
+   * root has left). The count stays until the request carrying the root is acknowledged
+   * (`consumeDroppedRecords`): a root written again under retry says the same, and a root whose
+   * request failed has not told Hue, so its count is not forgotten with it. */
   withDroppedRecords(span: ReadableSpan): ReadableSpan {
     if (span.parentSpanContext) return span;
-    const traceId = span.spanContext().traceId;
-    const count = this.droppedByTrace.get(traceId);
+    const count = this.droppedByTrace.get(span.spanContext().traceId);
     if (!count) return span;
-    // Consumed: the root carries it, and the map holds nothing for a trace that has ended.
-    this.droppedByTrace.delete(traceId);
     return { ...span, attributes: { ...span.attributes, [DROPPED_RECORDS_KEY]: count } };
+  }
+
+  /** @internal Exporter callback: these traces' counts reached Hue on their roots, so the map
+   * holds nothing for a trace that has ended and told its losses. */
+  consumeDroppedRecords(traceIds: Iterable<string>): void {
+    for (const traceId of traceIds) this.droppedByTrace.delete(traceId);
   }
 
   /** @internal Records a sanitized issue, updates counters and rate-limits the diagnostic callback. */
@@ -819,9 +825,11 @@ class ReportingExporter<T extends RecordValue> {
         );
       }
     };
-    const send = async (batch: T[]) => {
+    const send = async (batch: T[]): Promise<boolean> => {
       const count = batch.filter((record) => placeholders.has(record)).length;
-      if (!(await this.send(batch, count))) failed = true;
+      const ok = await this.send(batch, count);
+      if (!ok) failed = true;
+      return ok;
     };
     const resourceDeadline = Date.now() + this.transport.options.timeoutMillis;
     for (const { record, markers } of this.ordered(records)) {
@@ -881,6 +889,13 @@ class ReportingExporter<T extends RecordValue> {
     const limit = MAX_BODY_BYTES - 1024;
     let batch: T[] = [];
     let batchBytes = 0;
+    // The traces whose root in the batch carries its dropped-record count, consumed once the
+    // request that carries it is acknowledged; a failed request keeps the count.
+    let counted: string[] = [];
+    const sendBatch = async (records: T[]) => {
+      if (await send(records)) this.transport.consumeDroppedRecords(counted);
+      counted = [];
+    };
     const measure = (record: T) =>
       this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
     // Every record of the batch is measured, shed and, where it cannot be sent, counted lost
@@ -920,19 +935,21 @@ class ReportingExporter<T extends RecordValue> {
     }
     for (const entry of prepared) {
       let { record, bytes: recordBytes } = entry;
+      let carriesCount = false;
       if (this.signal === "traces" && !entry.placeholder) {
-        const counted = this.transport.withDroppedRecords(record as ReadableSpan) as T;
-        if (counted !== record) {
+        const withCount = this.transport.withDroppedRecords(record as ReadableSpan) as T;
+        if (withCount !== record) {
+          carriesCount = true;
           // The count may put a root shed to just under the limit over it again: shed on.
           let fitted: { record: T; bytes: number } | undefined;
           try {
-            fitted = fit(counted, false);
+            fitted = fit(withCount, false);
           } catch {
-            invalid(false, "Telemetry record could not be serialized", counted);
+            invalid(false, "Telemetry record could not be serialized", withCount);
             continue;
           }
           if (!fitted) {
-            invalid(false, "Telemetry record exceeds the 1 MiB request limit", counted);
+            invalid(false, "Telemetry record exceeds the 1 MiB request limit", withCount);
             continue;
           }
           ({ record, bytes: recordBytes } = fitted);
@@ -940,14 +957,15 @@ class ReportingExporter<T extends RecordValue> {
       }
       const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
       if (batch.length && batchBytes + framedBytes > limit) {
-        await send(batch);
+        await sendBatch(batch);
         batch = [];
         batchBytes = 0;
       }
       batch.push(record);
       batchBytes += framedBytes;
+      if (carriesCount) counted.push((record as ReadableSpan).spanContext().traceId);
     }
-    if (batch.length) await send(batch);
+    if (batch.length) await sendBatch(batch);
     if (failed) throw new Error("Hue telemetry export failed");
   }
 

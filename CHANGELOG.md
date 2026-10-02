@@ -25,7 +25,11 @@ refuses to publish a version without a matching entry below.
   first, each replaced by the receiver's marker and listed under `hue.truncated`, until it fits.
   Only a record too large without any content value is still lost; it is counted on its trace's
   root span as `hue.sdk.dropped_records` when the root is exported, so Hue reads the trace as
-  incomplete by that many records rather than as whole.
+  incomplete by that many records rather than as whole. The count is forgotten only once the
+  request carrying the root is acknowledged, so a root written again says the same.
+- **Wire** A structured helper value cut at the cap (`hue.tool`, `setInput`, `setOutput`) is cut
+  to a UTF-8 prefix of its JSON text at exactly the cap, inside whichever member the cap fell in,
+  never to a shorter document of its first members that would read as the whole value.
 
 ### [0.12.1] - 2026-10-02
 

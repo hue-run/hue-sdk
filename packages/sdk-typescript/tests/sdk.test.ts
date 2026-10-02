@@ -6,7 +6,7 @@ import { context, trace, type TraceState } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { ProtobufTraceSerializer } from "@opentelemetry/otlp-transformer";
 import { detectResources, resourceFromAttributes } from "@opentelemetry/resources";
-import { TracerProvider } from "@opentelemetry/sdk-trace";
+import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import {
   createHue,
@@ -1032,6 +1032,37 @@ describe("Hue SDK contract", () => {
     }
   });
 
+  test("a structured value over 256 KiB is cut to a UTF-8 prefix of its JSON text at the cap, never a shorter whole document", async () => {
+    const endpoint = receiver();
+    const exporter = exporting(endpoint, "structured-values");
+    const { hue, transport } = exporter;
+    // 6,000 small rows, 300 KiB of JSON together with no one value over the cap: the receiver
+    // recognizes Hue's cut by its size at the cap, so a prefix of the rows that stopped early as
+    // a shorter valid document would read as the whole result.
+    const rows = Array.from({ length: 6_000 }, (_, index) => ({
+      id: index,
+      name: `row-${String(index).padStart(5, "0")}`,
+      note: "n".repeat(24),
+    }));
+    const whole = JSON.stringify(rows);
+    expect(Buffer.byteLength(whole)).toBeGreaterThan(256 * 1024);
+    try {
+      await hue.tool("list_rows", { page: 1 }, () => rows);
+      await hue.flush();
+      const helper = exporter.records().find((record) => record.name === "execute_tool list_rows")!;
+      const result = attr(helper, "gen_ai.tool.call.result")!.stringValue!;
+      expect(Buffer.byteLength(result)).toBeLessThanOrEqual(256 * 1024);
+      expect(Buffer.byteLength(result)).toBeGreaterThan(256 * 1024 - 4);
+      expect(whole.startsWith(result)).toBe(true);
+      expect(() => JSON.parse(result)).toThrow();
+      expect(strings(attr(helper, "hue.truncated"))).toEqual(["gen_ai.tool.call.result"]);
+      expect(transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
+      expect(transport.getReport().instrumentationFailures).toBe(0);
+    } finally {
+      await exporter.stop();
+    }
+  });
+
   test("a redactor's answer that grows past the cap is refused by its length, never scanned or cut", async () => {
     // The redactor sees the whole recorded text, and an answer no longer than it is cut to the
     // cap as the text would be; an answer longer than both the cap and its input is the
@@ -1141,6 +1172,34 @@ describe("Hue SDK contract", () => {
     } finally {
       await exporter.stop();
     }
+  });
+
+  test("a root's dropped-record count is consumed when its request is acknowledged, not when the root is written", () => {
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "counted-roots",
+      captureContent: false,
+    });
+    const traceId = "0af7651916cd43dd8448eb211c80319c";
+    const span = (fields: Partial<ReadableSpan>): ReadableSpan => fields as ReadableSpan;
+    const root = span({
+      spanContext: () => ({ traceId, spanId: "b7ad6b7169203331", traceFlags: 1 }),
+      attributes: { "hue.kind": "agent" },
+    });
+    transport.issue("traces", "dropped", 2, "Telemetry queue is full", undefined, [traceId]);
+    // Written on the root as often as the root is written: a request that fails, or is retried,
+    // has not told Hue, so the count is still there for the root's next write.
+    expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(2);
+    expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(2);
+    // Acknowledged: the count has reached Hue, and the map holds nothing for the ended trace.
+    transport.consumeDroppedRecords([traceId]);
+    expect(transport.withDroppedRecords(root)).toBe(root);
+    // A child never carries it, and another trace's count is another trace's.
+    transport.issue("traces", "dropped", 1, "Telemetry queue is full", undefined, [traceId]);
+    const child = span({ ...root, parentSpanContext: root.spanContext() });
+    expect(transport.withDroppedRecords(child)).toBe(child);
+    transport.consumeDroppedRecords(["00000000000000000000000000000001"]);
+    expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(1);
   });
 
   test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
