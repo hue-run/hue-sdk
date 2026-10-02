@@ -125,7 +125,12 @@ def skill_body_changed_without_version_bump(ours_text: str, hosted_text: str) ->
     ours_meta, hosted_meta = skill_metadata(ours_text), skill_metadata(hosted_text)
     if ours_meta["version"] != hosted_meta["version"]:
         return False
-    return normalize(ours_text) != normalize(hosted_text)
+    titles = {
+        title for title in (frontmatter_title(ours_text), frontmatter_title(hosted_text)) if title
+    }
+    ours = drop_page_title(normalize(ours_text), titles)
+    theirs = drop_page_title(normalize(hosted_text), titles)
+    return ours != theirs
 
 
 def compare(name: str, ours_text: str, ours_label: str, url: str) -> bool:

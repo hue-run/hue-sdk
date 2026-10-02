@@ -599,8 +599,8 @@ Hue-owned `world_outcome` checks are graded after the world seals. An experiment
 every case of the saved version; there is no case subset.
 
 `--command "<shell command>"` spawns the command once per case with the world's environment
-(`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it, and the wall
-clock otherwise), one `HUE_SIM_<SURFACE ID>_URL` per provider
+(`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it and returns
+`null` without it, so fall back explicitly with `worldNow() ?? new Date()`), one `HUE_SIM_<SURFACE ID>_URL` per provider
 mirror,
 `HUE_MCP_CONFIG` naming an owner-only `mcpServers` file that is removed after the case, and
 `HUE_MCP_URL`, `HUE_MCP_TOKEN`, `HUE_MCP_EXPIRES_AT` for the first MCP mirror; these name the

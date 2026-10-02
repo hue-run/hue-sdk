@@ -106,6 +106,9 @@ Old sentence.
         self.assertTrue(drift.skill_body_changed_without_version_bump(same_version, hosted))
         self.assertFalse(drift.skill_body_changed_without_version_bump(bumped, hosted))
         self.assertFalse(drift.skill_body_changed_without_version_bump(hosted, hosted))
+        # The site adds a title heading that matches its frontmatter title; that is not a change.
+        titled = hosted.replace("---\n\n# Hue", 'title: "skill.md"\n---\n\n# skill.md\n\n# Hue')
+        self.assertFalse(drift.skill_body_changed_without_version_bump(hosted, titled))
 
 
 if __name__ == "__main__":
