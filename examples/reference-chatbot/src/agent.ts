@@ -14,13 +14,15 @@ export function textStatistics(text: string) {
 
 // This provider is deliberately synthetic. It exercises the AI SDK's actual tool loop and
 // stream events without pretending that a lab model generated or billed this response.
+const syntheticProvider = "hue.synthetic-test";
+const syntheticModelId = "synthetic-tool-loop";
 function syntheticModel(messages: ModelMessage[]): LanguageModel {
   const latest = [...messages].reverse().find((message) => message.role === "user");
   const input = typeof latest?.content === "string" ? latest.content : "";
   let step = 0;
   return new MockLanguageModelV4({
-    provider: "hue.synthetic-test",
-    modelId: "synthetic-tool-loop",
+    provider: syntheticProvider,
+    modelId: syntheticModelId,
     doStream: async ({ prompt }) => {
       const toolStep = step++ === 0;
       return {
@@ -72,6 +74,21 @@ function syntheticModel(messages: ModelMessage[]): LanguageModel {
       };
     },
   });
+}
+
+/**
+ * The provider and model of the agent's model spans, for the message records the server emits
+ * beside them: the AI SDK records them as `ai.model.provider` and `ai.model.id`, which Hue reads
+ * as the span's provider and model. In live mode the AI SDK resolves `HUE_CHAT_MODEL` through the
+ * gateway provider, which records itself as `gateway` and the `provider/model` string as the model.
+ */
+export function chatModelIdentity(
+  mode: "synthetic" | "live",
+  modelId?: string,
+): { provider: string; model: string } {
+  if (mode === "synthetic") return { provider: syntheticProvider, model: syntheticModelId };
+  if (!modelId) throw new Error("Live mode requires HUE_CHAT_MODEL");
+  return { provider: "gateway", model: modelId };
 }
 
 export function createChatAgent(

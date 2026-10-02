@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { createHue, HueExportError } from "@hue-run/sdk";
-import { createChatAgent } from "./agent.js";
+import { chatModelIdentity, createChatAgent } from "./agent.js";
 
 const mode = process.env.HUE_CHAT_MODE;
 const capture = process.env.HUE_CAPTURE_CONTENT;
@@ -13,6 +13,8 @@ if (capture !== "true" && capture !== "false")
 if (!process.env.HUE_API_KEY) throw new Error("Set HUE_API_KEY to a project service key");
 if (mode === "live" && (!process.env.AI_GATEWAY_API_KEY || !process.env.HUE_CHAT_MODEL))
   throw new Error("Live mode requires AI_GATEWAY_API_KEY and HUE_CHAT_MODEL (provider/model)");
+// Message records name the inference they belong to, as the agent's model spans do.
+const chatModel = chatModelIdentity(mode, process.env.HUE_CHAT_MODEL);
 const hue = createHue({
   apiKey: process.env.HUE_API_KEY,
   baseUrl: process.env.HUE_BASE_URL,
@@ -102,13 +104,14 @@ const server = createServer(async (request, response) => {
       async (span) => {
         traceId = span.traceId;
         event(response, "trace", { traceId, sessionId: input.sessionId });
-        hue.recordMessages({ input: input.messages });
         if (input.mode === "controlled-error") {
+          // No model call on this path, so no message record names an inference.
           await hue.tool("controlledFailure", null, () => {
             throw new Error("Intentional reference-chatbot failure");
           });
           return;
         }
+        hue.recordMessages({ ...chatModel, operation: "chat", input: input.messages });
         const agent = createChatAgent(hue, input.messages, mode, process.env.HUE_CHAT_MODEL);
         const result = await agent.stream({ messages: input.messages, abortSignal: abort.signal });
         let text = "";
@@ -124,7 +127,11 @@ const server = createServer(async (request, response) => {
         }
         await result.text;
         span.setOutput(text);
-        hue.recordMessages({ output: [{ role: "assistant", content: text }] });
+        hue.recordMessages({
+          ...chatModel,
+          operation: "chat",
+          output: [{ role: "assistant", content: text }],
+        });
       },
       {
         sessionId: input.sessionId,

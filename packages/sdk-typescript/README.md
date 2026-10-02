@@ -45,7 +45,6 @@ await hue.withSpan(
   async (span) => {
     const output = await hue.tool("uppercase", "hello", () => "hello".toUpperCase());
     span.setOutput(output);
-    hue.recordMessages({ output: [{ role: "assistant", content: output }] });
   },
   { sessionId: "session-123", userId: "user-123", input: "hello" },
 );
@@ -107,7 +106,8 @@ by the semantic conventions'
 [input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json)
 and
 [output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json)
-JSON schemas, so any semantic-convention-aware backend can read them. Convert provider-native
+JSON schemas. GenAI conventions are in Development; Hue supports the fields described here
+and accepts caller-supplied JSON without validating the full draft. Convert provider-native
 messages before recording them:
 
 ```ts
@@ -313,7 +313,7 @@ policy forbids sending that content to another service. `redact` and the credent
 described below apply in both modes.
 
 `captureContent: false` disables manual input/output/messages/tool content and
-removes recognized GenAI, Vercel, OpenInference and OpenLLMetry content attributes,
+removes recognized GenAI, Vercel, OpenInference, OpenLLMetry and Langfuse content attributes,
 legacy GenAI content events, log bodies, status messages and exception text before
 export. The exported `contentPrefixes` array lists the attribute keys (and their dotted
 children) that are removed. Model/provider/token metadata remains available. Generic custom attribute
@@ -385,8 +385,8 @@ span in `finally`.
 the active span, with the messages in its body. The record also carries `gen_ai.operation.name`,
 `gen_ai.provider.name` and `gen_ai.request.model` as attributes, copied from the enclosing
 `hue.model()` span or passed as `operation`, `provider` and `model`, and `gen_ai.conversation.id`
-from the active session, so a collector fan-out to another GenAI-aware backend keeps the request
-context.
+from the active session, when those values are known. Use `recordMessages` inside `hue.model()` or
+supply `operation` and `provider` explicitly to include the required inference context.
 
 ## Existing OpenTelemetry providers
 
@@ -453,7 +453,8 @@ that accepts `/api/v1/otlp/v1/traces` and `/api/v1/otlp/v1/logs` (for example an
 Collector `otlp` receiver with `http.traces_url_path` and `logs_url_path` set to those paths,
 forwarding to Jaeger or the debug exporter) and pass any placeholder `apiKey`; HTTP is allowed
 for loopback origins. `checkConnection()` and `verifyTrace()` are Hue-only diagnostics and are
-not available against a generic collector.
+not available against a generic collector. Set `liveSpans: false` so Hue-specific placeholders
+do not reach the collector's other destinations.
 
 A collector on a private network is not loopback: a docker-compose sibling such as
 `http://otel-collector:4318` or an in-cluster service requires the explicit opt-in
@@ -467,6 +468,7 @@ const hue = createHue({
   serviceName: "my-agent",
   captureContent: true,
   baseUrl: "http://otel-collector:4318",
+  liveSpans: false,
   allowInsecureHttp: true,
 });
 ```

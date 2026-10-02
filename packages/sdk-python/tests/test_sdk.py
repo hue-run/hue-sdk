@@ -1069,6 +1069,12 @@ def test_content_prefixes_list_every_recognized_key_identically_to_typescript():
         "ai.embeddings",
         "traceloop.entity.input",
         "traceloop.entity.output",
+        "langfuse.observation.input",
+        "langfuse.observation.output",
+        "langfuse.observation.status_message",
+        "langfuse.observation.model.parameters",
+        "langfuse.trace.input",
+        "langfuse.trace.output",
         "tool.parameters",
         "exception.message",
         "exception.stacktrace",
@@ -1420,6 +1426,24 @@ def test_metadata_only_export_summarizes_the_tool_definitions_it_removes(
     assert b"Fetch a page" not in telemetry
 
 
+LANGFUSE_CONTENT = (
+    "langfuse.observation.input",
+    "langfuse.observation.output",
+    "langfuse.observation.status_message",
+    "langfuse.observation.model.parameters",
+    "langfuse.trace.input",
+    "langfuse.trace.output",
+)
+LANGFUSE_METADATA = {
+    "langfuse.observation.model.name": "synthetic-model",
+    "langfuse.observation.usage_details": '{"input":3,"output":5}',
+    "langfuse.session.id": "session-123",
+    "langfuse.user.id": "user-123",
+    "langfuse.observation.type": "generation",
+    "langfuse.observation.metadata.customer": "acme",
+}
+
+
 @pytest.mark.parametrize("capture_content", [True, False])
 def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver, capture_content):
     from hue_sdk.snapshots import CONTENT_PREFIXES
@@ -1442,6 +1466,12 @@ def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver,
         retriever.set_attribute("ai.response.reasoning", "private-value")
         retriever.set_attribute("ai.response.finishReason", "stop")
         retriever.end()
+        # A Langfuse span: inputs, outputs, the status message and model parameters are
+        # content; the model name, usage, type, session, user and metadata keys stay.
+        langfuse = provider.get_tracer("third-party").start_span("langfuse")
+        langfuse.set_attributes({key: "private-value" for key in LANGFUSE_CONTENT})
+        langfuse.set_attributes(LANGFUSE_METADATA)
+        langfuse.end()
         assert hue.force_flush()
     spans = {span.name: span for span in receiver.spans()}
     exported, retrieved = spans["external"], spans["retrieve"]
@@ -1450,6 +1480,11 @@ def test_export_strips_recognized_content_from_borrowed_provider_spans(receiver,
     assert ("retrieval.documents.0.document.content" in retrieved_keys) is capture_content
     assert ("retrieval.documents.0.document.score" in retrieved_keys) is capture_content
     assert ("ai.response.reasoning" in retrieved_keys) is capture_content
+    langfuse_keys = {attribute.key for attribute in spans["langfuse"].attributes}
+    assert langfuse_keys & set(LANGFUSE_CONTENT) == (
+        set(LANGFUSE_CONTENT) if capture_content else set()
+    )
+    assert set(LANGFUSE_METADATA) <= langfuse_keys
     keys = {attribute.key for attribute in exported.attributes}
     content = {
         key
