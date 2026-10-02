@@ -955,13 +955,29 @@ describe("Hue SDK contract", () => {
     const text = "é".repeat(160 * 1024);
     const large = `{"body":"${text}"}`;
     try {
-      // A third-party instrumentation's attribute (what an AI SDK tool span records).
-      const span = tracerProvider.getTracer("third-party").startSpan("execute_tool read_document");
+      // A third-party instrumentation's attribute (what an AI SDK tool span records), and a
+      // link's attribute over the cap, listed under the link prefix with the record's own cut.
+      const tracer = tracerProvider.getTracer("third-party");
+      const linked = tracer.startSpan("linked");
+      linked.end();
+      const span = tracer.startSpan("execute_tool read_document", {
+        links: [{ context: linked.spanContext(), attributes: { "ai.prompt": large } }],
+      });
       span.setAttribute("gen_ai.tool.call.result", large);
       span.setAttribute("gen_ai.tool.name", "read_document");
       span.end();
-      // The Hue helper's own result, encoded by the client before it reaches the span.
+      // The Hue helper's own result, encoded by the client before it reaches the span; a whole
+      // value set after a cut one unmarks its key, and the application's own entry is kept.
       await hue.tool("read_page", { id: "p1" }, () => ({ text, pages: 3 }));
+      await hue.withSpan(
+        "replaced",
+        (context) => {
+          context.span.setAttribute("hue.truncated", ["custom.blob"]);
+          context.setOutput(text);
+          context.setOutput("short");
+        },
+        { input: text },
+      );
       // A structured log body over the cap: the receiver's marker, as the receiver itself
       // answers a structured value over its cap, and the body listed.
       loggerProvider.getLogger("third-party").emit({ body: { text, kind: "page" } as never });
@@ -974,7 +990,14 @@ describe("Hue SDK contract", () => {
       expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(256 * 1024);
       expect(Buffer.byteLength(stored)).toBeGreaterThan(256 * 1024 - 4);
       expect(large.startsWith(stored)).toBe(true);
-      expect(strings(attr(external, "hue.truncated"))).toEqual(["gen_ai.tool.call.result"]);
+      // Listed in redaction order: the links are redacted before the record's own attributes.
+      expect(strings(attr(external, "hue.truncated"))).toEqual([
+        "link:ai.prompt",
+        "gen_ai.tool.call.result",
+      ]);
+      const replaced = records.find((record) => record.name === "replaced")!;
+      expect(attr(replaced, "output.value")!.stringValue).toBe('"short"');
+      expect(strings(attr(replaced, "hue.truncated"))).toEqual(["custom.blob", "input.value"]);
       expect(attr(external, "gen_ai.tool.name")!.stringValue).toBe("read_document");
       const helper = records.find((record) => record.name === "execute_tool read_page")!;
       const result = attr(helper, "gen_ai.tool.call.result")!.stringValue!;
@@ -990,11 +1013,11 @@ describe("Hue SDK contract", () => {
         .flatMap((request) => request.records);
       expect(logs).toHaveLength(2);
       const [structured, plain] = logs as [WireRecord, WireRecord];
+      // The marker names the body's size as recorded, not what was left after its text was cut.
       expect(kvlist(structured.body)).toEqual({
         "hue.truncated": true,
-        "hue.truncated_bytes": expect.stringMatching(/^\d+$/),
+        "hue.truncated_bytes": String(Buffer.byteLength(JSON.stringify({ text, kind: "page" }))),
       });
-      expect(Number(kvlist(structured.body)["hue.truncated_bytes"])).toBeGreaterThan(256 * 1024);
       expect(strings(attr(structured, "hue.truncated"))).toEqual(["body"]);
       const cut = plain.body!.stringValue!;
       expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(256 * 1024);
@@ -1015,9 +1038,9 @@ describe("Hue SDK contract", () => {
     const { hue, tracerProvider, transport } = exporter;
     try {
       const span = tracerProvider.getTracer("third-party").startSpan("chat gpt");
-      // Five content values under the cap each, 1,150 KiB together: over the 1 MiB request.
+      // Four content values under the cap each and an event's content value, 1,150 KiB
+      // together: over the 1 MiB request.
       const sizes: Record<string, number> = {
-        "gen_ai.input.messages": 250,
         "gen_ai.output.messages": 240,
         "ai.prompt": 230,
         "ai.response.text": 220,
@@ -1025,18 +1048,22 @@ describe("Hue SDK contract", () => {
       };
       for (const [key, kib] of Object.entries(sizes))
         span.setAttribute(key, "x".repeat(kib * 1024));
+      span.addEvent("gen_ai.content.prompt", { "gen_ai.prompt": "x".repeat(250 * 1024) });
       span.setAttribute("gen_ai.request.model", "gpt-5.6-terra");
       span.end();
       await hue.flush();
       const [record] = exporter.records();
-      // The largest value alone is shed, as the receiver's marker; the other four reach Hue whole.
-      expect(kvlist(attr(record!, "gen_ai.input.messages"))).toEqual({
-        "hue.truncated": true,
-        "hue.truncated_bytes": String(250 * 1024),
-      });
+      // The largest value alone is shed, the event's, as the receiver's marker and under the
+      // receiver's event prefix; the other four reach Hue whole.
+      const [event] = record!.events!;
+      expect(
+        kvlist(event!.attributes!.find((item) => item.key === "gen_ai.prompt")!.value),
+      ).toEqual({ "hue.truncated": true, "hue.truncated_bytes": String(250 * 1024) });
       expect(attr(record!, "gen_ai.output.messages")!.stringValue).toHaveLength(240 * 1024);
       expect(attr(record!, "gen_ai.tool.call.result")!.stringValue).toHaveLength(210 * 1024);
-      expect(strings(attr(record!, "hue.truncated"))).toEqual(["gen_ai.input.messages"]);
+      expect(strings(attr(record!, "hue.truncated"))).toEqual([
+        "event:gen_ai.content.prompt:gen_ai.prompt",
+      ]);
       expect(attr(record!, "gen_ai.request.model")!.stringValue).toBe("gpt-5.6-terra");
       expect(endpoint.requests).toHaveLength(1);
       expect(transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);

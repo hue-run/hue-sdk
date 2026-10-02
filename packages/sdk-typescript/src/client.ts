@@ -34,7 +34,7 @@ import {
   safeSpan,
   type EncodeLimits,
 } from "./safety.js";
-import { TRUNCATED_KEY } from "./privacy.js";
+import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
 import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
@@ -873,11 +873,19 @@ export class HueClient {
     try {
       const { text, truncated } = encodeBoundedContent(value);
       span.setAttribute(key, text);
-      if (truncated) {
-        const keys = this.truncatedKeys.get(span) ?? [];
-        if (!keys.includes(key)) keys.push(key);
+      // The span's list as it stands: the application's own entries (read from the SDK span,
+      // which carries its attributes; the API alone shows none) and this helper's earlier ones.
+      const listed = withTruncatedKeys(
+        (span as { attributes?: Record<string, unknown> }).attributes?.[TRUNCATED_KEY],
+        this.truncatedKeys.get(span) ?? [],
+      );
+      const keys = truncated
+        ? withTruncatedKeys(listed, [key])
+        : listed.filter((entry) => entry !== key);
+      if (truncated || listed.includes(key)) {
+        // A whole value replacing a cut one unmarks its key; an untouched list is left alone.
         this.truncatedKeys.set(span, keys);
-        span.setAttribute(TRUNCATED_KEY, [...keys]);
+        span.setAttribute(TRUNCATED_KEY, keys);
       }
     } catch {
       this.instrumentationFailed();

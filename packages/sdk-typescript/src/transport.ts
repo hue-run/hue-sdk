@@ -431,8 +431,11 @@ export class HueTransport {
    * root has left). The count is kept, so a root exported again under retry says the same. */
   withDroppedRecords(span: ReadableSpan): ReadableSpan {
     if (span.parentSpanContext) return span;
-    const count = this.droppedByTrace.get(span.spanContext().traceId);
+    const traceId = span.spanContext().traceId;
+    const count = this.droppedByTrace.get(traceId);
     if (!count) return span;
+    // Consumed: the root carries it, and the map holds nothing for a trace that has ended.
+    this.droppedByTrace.delete(traceId);
     return { ...span, attributes: { ...span.attributes, [DROPPED_RECORDS_KEY]: count } };
   }
 
@@ -452,8 +455,10 @@ export class HueTransport {
     // reported as delivery, not counted here.
     if ((kind === "dropped" || kind === "invalid") && count > 0 && traceIds?.length === 1) {
       const [traceId] = traceIds as [string];
-      if (this.droppedByTrace.size < 1024 || this.droppedByTrace.has(traceId))
-        this.droppedByTrace.set(traceId, (this.droppedByTrace.get(traceId) ?? 0) + count);
+      // Bounded: a trace whose root never arrives (an abandoned run) gives way to newer ones.
+      if (this.droppedByTrace.size >= 1024 && !this.droppedByTrace.has(traceId))
+        this.droppedByTrace.delete(this.droppedByTrace.keys().next().value!);
+      this.droppedByTrace.set(traceId, (this.droppedByTrace.get(traceId) ?? 0) + count);
     }
     const issue: ExportIssue = {
       sequence: ++this.sequence,
@@ -680,19 +685,39 @@ function shedLargestContent(record: RecordValue, signal: Signal): RecordValue | 
     }
   }
   const { attributes } = record;
-  let largest: { key: string; bytes: number } | undefined;
-  for (const [key, value] of Object.entries(attributes)) {
-    if (!isContentKey(key) || isTruncatedMarker(value)) continue;
+  // The record's own content values, and a span's events' (listed as the receiver lists an
+  // event's cut: `event:<name>:<key>`).
+  const events = signal === "traces" ? (record as ReadableSpan).events : [];
+  let largest: { event?: number; key: string; bytes: number } | undefined;
+  const consider = (key: string, value: unknown, event?: number) => {
+    if (!isContentKey(key) || isTruncatedMarker(value)) return;
     const bytes = valueBytes(value);
-    if (!largest || bytes > largest.bytes) largest = { key, bytes };
-  }
+    if (!largest || bytes > largest.bytes)
+      largest = { ...(event === undefined ? {} : { event }), key, bytes };
+  };
+  for (const [key, value] of Object.entries(attributes)) consider(key, value);
+  events.forEach((event, index) => {
+    for (const [key, value] of Object.entries(event.attributes ?? {})) consider(key, value, index);
+  });
   if (!largest) return undefined;
+  const found = largest as { event?: number; key: string; bytes: number };
+  const listed =
+    found.event === undefined ? found.key : `event:${events[found.event]!.name}:${found.key}`;
   const shed: Record<string, unknown> = {
     ...attributes,
-    [largest.key]: truncatedMarker(largest.bytes),
-    [TRUNCATED_KEY]: withTruncatedKeys(attributes[TRUNCATED_KEY], [largest.key]),
+    ...(found.event === undefined ? { [found.key]: truncatedMarker(found.bytes) } : {}),
+    [TRUNCATED_KEY]: withTruncatedKeys(attributes[TRUNCATED_KEY], [listed]),
   };
-  return { ...record, attributes: shed } as RecordValue;
+  if (found.event === undefined) return { ...record, attributes: shed } as RecordValue;
+  const shedEvents = events.map((event, index) =>
+    index === found.event
+      ? {
+          ...event,
+          attributes: { ...event.attributes, [found.key]: truncatedMarker(found.bytes) },
+        }
+      : event,
+  );
+  return { ...record, attributes: shed, events: shedEvents } as RecordValue;
 }
 
 class ReportingExporter<T extends RecordValue> {

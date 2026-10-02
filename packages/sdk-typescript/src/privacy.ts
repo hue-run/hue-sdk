@@ -76,6 +76,15 @@ export const TRUNCATED_BYTES_KEY = "hue.truncated_bytes";
  * room for): what Hue stores of the trace is incomplete by that many records. */
 export const DROPPED_RECORDS_KEY = "hue.sdk.dropped_records";
 
+/** The serialized size of a structured value as recorded, 0 for one JSON cannot serialize. */
+function structuredBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "");
+  } catch {
+    return 0;
+  }
+}
+
 /** Hue's receiver's own marker for a structured value it replaced: nothing of the value, its
  * size, and the flag a reader tests. */
 export function truncatedMarker(bytes: number): Record<string, unknown> {
@@ -208,11 +217,13 @@ function redactResource(
 ): Resource {
   let result = cache.get(resource);
   if (!result) {
+    const cutsBefore = budget.truncated.length;
     result = resourceFromAttributes(
       attributes(resource.attributes, options, "resource.attributes", budget, "resource."),
       { schemaUrl: resource.schemaUrl },
     );
-    cache.set(resource, result);
+    // A resource whose value was cut is redacted for every record, so each lists the cut.
+    if (budget.truncated.length === cutsBefore) cache.set(resource, result);
   }
   return result;
 }
@@ -289,6 +300,12 @@ export function redactSpan(
         `event:${event.name}:`,
       ),
     }));
+  const links = span.links.map((link) => ({
+    ...link,
+    attributes: attributes(link.attributes ?? {}, options, "links.attributes", budget, "link:"),
+  }));
+  const resource = redactResource(span.resource, options, cache, budget);
+  // Last, so every cut of the record, its events', links' and resource's included, is listed.
   const redactedAttributes = withTruncated(
     attributes(source, options, "attributes", budget),
     budget,
@@ -305,11 +322,8 @@ export function redactSpan(
     status,
     attributes: redactedAttributes,
     events,
-    links: span.links.map((link) => ({
-      ...link,
-      attributes: attributes(link.attributes ?? {}, options, "links.attributes", budget, "link:"),
-    })),
-    resource: redactResource(span.resource, options, cache, budget),
+    links,
+    resource,
     instrumentationScope: span.instrumentationScope,
     droppedAttributesCount: span.droppedAttributesCount,
     droppedEventsCount: span.droppedEventsCount,
@@ -326,14 +340,17 @@ export function redactLog(
   let body = options.captureContent ? redactValue(log.body, "body", options, budget) : undefined;
   if (body !== undefined && typeof body !== "string") {
     // A structured body over the cap is replaced by the receiver's marker, as the receiver would
-    // replace it; its text parts were already cut to the cap one by one.
-    const bytes = Buffer.byteLength(JSON.stringify(body));
-    if (bytes > MAX_CONTENT_BYTES) {
-      body = truncatedMarker(bytes);
+    // replace it; the marker names the body's size as recorded, before any text part was cut.
+    if (Buffer.byteLength(JSON.stringify(body)) > MAX_CONTENT_BYTES) {
+      body = truncatedMarker(structuredBytes(log.body));
       if (!budget.truncated.includes("body")) budget.truncated.push("body");
     }
   }
   const redactedAttributes = attributes(log.attributes, options, "attributes", budget);
+  const resource = redactResource(log.resource, options, cache, budget);
+  const scopeAttributes = log.instrumentationScope.attributes
+    ? attributes(log.instrumentationScope.attributes, options, "scope.attributes", budget, "scope.")
+    : undefined;
   return {
     hrTime: log.hrTime,
     hrTimeObserved: log.hrTimeObserved,
@@ -343,20 +360,10 @@ export function redactLog(
     eventName: log.eventName,
     body: body as ReadableLogRecord["body"],
     attributes: withTruncated(redactedAttributes, budget),
-    resource: redactResource(log.resource, options, cache, budget),
+    resource,
     instrumentationScope: {
       ...log.instrumentationScope,
-      ...(log.instrumentationScope.attributes
-        ? {
-            attributes: attributes(
-              log.instrumentationScope.attributes,
-              options,
-              "scope.attributes",
-              budget,
-              "scope.",
-            ),
-          }
-        : {}),
+      ...(scopeAttributes ? { attributes: scopeAttributes } : {}),
     },
     droppedAttributesCount: log.droppedAttributesCount,
   };

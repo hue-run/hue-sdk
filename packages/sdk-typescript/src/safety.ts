@@ -13,6 +13,16 @@ class SafeSpan implements Span {
     private failed: () => void,
   ) {}
 
+  /** The SDK span's attributes as they stand (the API alone shows none); undefined for a span
+   * that carries none, such as a non-recording span. */
+  get attributes(): Record<string, unknown> | undefined {
+    try {
+      return (this.source as { attributes?: Record<string, unknown> }).attributes;
+    } catch {
+      return undefined;
+    }
+  }
+
   private write(work: () => unknown): void {
     try {
       const result = work();
