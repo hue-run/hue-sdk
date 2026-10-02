@@ -2822,7 +2822,9 @@ describe("Application failure isolation", () => {
       }
       expect(executions).toBe(invalid.length);
       expect(getterCalls).toBe(0);
-      expect(hue.transport.getReport().instrumentationFailures).toBe(25);
+      // Five captures of each value; the 256 KiB string is cut to the cap, not a failure, except
+      // as an inference log's body, which is parsed back and so still omitted.
+      expect(hue.transport.getReport().instrumentationFailures).toBe(21);
       await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
       expect(hue.transport.getReport().acceptedSpans).toBe(10);
       expect(JSON.stringify(hue.transport.getIssues())).not.toContain(apiKey);
@@ -3076,7 +3078,8 @@ describe("Application failure isolation", () => {
     await hue.flushSafe();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(calls).toBe(1);
-    expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+    // The 300,000-character input is cut to the cap and listed, never a failure.
+    expect(hue.transport.getReport().instrumentationFailures).toBe(0);
     await hue.shutdownSafe();
     endpoint.server.stop(true);
   });

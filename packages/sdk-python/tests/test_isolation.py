@@ -254,9 +254,8 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
             stored = attributes["output.value"].string_value
             assert 262_144 - 4 < len(stored.encode("utf-8")) <= 262_144
             assert stored.startswith('{"nested":"xxx')
-            assert [item.string_value for item in attributes["hue.truncated"].array_value.values] == [
-                "output.value"
-            ]
+            listed = attributes["hue.truncated"].array_value.values
+            assert [item.string_value for item in listed] == ["output.value"]
             return
         assert hue.export_status.instrumentation_failures == 1
         assert not hue.force_flush()
@@ -337,9 +336,7 @@ def test_invalid_content_and_redactor_preserve_result_and_run_once(receiver):
     assert b"sensitive-redactor-value" not in bodies
     assert len(receiver.spans()) == 4
     business_spans = [span for span in receiver.spans() if span.name == "business"]
-    stored = {
-        attribute.key: attribute.value for attribute in business_spans[0].attributes
-    }
+    stored = {attribute.key: attribute.value for attribute in business_spans[0].attributes}
     assert len(stored["input.value"].string_value.encode("utf-8")) <= 262_144
     assert [item.string_value for item in stored["hue.truncated"].array_value.values] == [
         "input.value"
