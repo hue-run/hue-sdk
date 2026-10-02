@@ -104,13 +104,14 @@ const server = createServer(async (request, response) => {
       async (span) => {
         traceId = span.traceId;
         event(response, "trace", { traceId, sessionId: input.sessionId });
-        hue.recordMessages({ ...chatModel, operation: "chat", input: input.messages });
         if (input.mode === "controlled-error") {
+          // No model call on this path, so no message record names an inference.
           await hue.tool("controlledFailure", null, () => {
             throw new Error("Intentional reference-chatbot failure");
           });
           return;
         }
+        hue.recordMessages({ ...chatModel, operation: "chat", input: input.messages });
         const agent = createChatAgent(hue, input.messages, mode, process.env.HUE_CHAT_MODEL);
         const result = await agent.stream({ messages: input.messages, abortSignal: abort.signal });
         let text = "";
