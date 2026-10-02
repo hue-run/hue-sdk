@@ -12,6 +12,7 @@ import {
   createHue,
   createHueSafe,
   createHueTransport,
+  type HueTransport,
   HueConnectionError,
   HueExportError,
   contentPrefixes,
@@ -1175,11 +1176,23 @@ describe("Hue SDK contract", () => {
   });
 
   test("a root's dropped-record count is consumed when its request is acknowledged, not when the root is written", () => {
+    // The exporter's callbacks, internal to the package: the installed declarations omit them.
     const transport = createHueTransport({
       apiKey,
       serviceName: "counted-roots",
       captureContent: false,
-    });
+    }) as HueTransport & {
+      issue(
+        signal: "traces" | "logs",
+        kind: "dropped",
+        count: number,
+        message: string,
+        status?: number,
+        traceIds?: string[],
+      ): void;
+      withDroppedRecords(span: ReadableSpan): ReadableSpan;
+      consumeDroppedRecords(traceIds: Iterable<string>): void;
+    };
     const traceId = "0af7651916cd43dd8448eb211c80319c";
     const span = (fields: Partial<ReadableSpan>): ReadableSpan => fields as ReadableSpan;
     const root = span({
