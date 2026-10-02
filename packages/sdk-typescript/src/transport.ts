@@ -750,10 +750,13 @@ class ReportingExporter<T extends RecordValue> {
       let batch: T[] = [];
       let batchBytes = 0;
       const send = async () => {
-        // A request of placeholders never fails the export.
-        if (!(await this.send(batch, advisory ? batch.length : 0)) && !advisory) failed = true;
+        const records = batch;
         batch = [];
         batchBytes = 0;
+        // A request of placeholders never fails the export, and none follows an acknowledgement
+        // that turned live spans off.
+        if (advisory && !this.transport.sendsPlaceholders()) return;
+        if (!(await this.send(records, advisory ? records.length : 0)) && !advisory) failed = true;
       };
       for (const record of accepted) {
         let recordBytes: number;

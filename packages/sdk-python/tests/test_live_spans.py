@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 import os
 import signal
 import sys
@@ -288,6 +289,28 @@ def test_receiver_without_the_header_gets_one_request_of_placeholders_at_most(re
     pending, real = split_placeholders(receiver)
     assert list(pending) == ["agent.run"]
     assert sorted(real) == ["after-downgrade", "agent.run"]
+
+
+def test_no_request_of_placeholders_follows_the_acknowledgement_that_turned_live_spans_off(
+    receiver,
+):
+    # Enough placeholder bytes for two requests; the first acknowledgement lacks the header.
+    receiver.legacy = True
+    large = "x" * 60_000
+    with Hue(receiver.url, KEY, capture_content=False) as hue:
+        with ExitStack() as stack:
+            for index in range(20):
+                stack.enter_context(
+                    hue.span(f"burst-{index}", attributes={"gen_ai.request.model": large})
+                )
+            wait_for(queued(hue, 20))
+            assert hue.force_flush()
+            assert hue.export_status.live_spans_rejected
+            assert len([r for r in receiver.requests if r[0].endswith("/traces")]) == 1
+            pending, _ = split_placeholders(receiver)
+            assert 0 < len(pending) < 20
+        assert hue.force_flush()
+        assert hue.export_status.ok
 
 
 def test_current_receiver_rejecting_only_a_request_of_placeholders_is_ok(receiver):

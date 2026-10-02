@@ -723,6 +723,48 @@ describe("Live spans", () => {
   );
 
   test(
+    "no request of placeholders follows the acknowledgement that turned live spans off",
+    async () => {
+      // Enough placeholder bytes for two requests; the first acknowledgement lacks the header.
+      const endpoint = receiver(() => ({}), { legacy: true });
+      const hue = createHue({
+        apiKey,
+        serviceName: "live-downgrade-split",
+        captureContent: false,
+        baseUrl: endpoint.url,
+        // Placeholders may use a quarter of the queue's bytes; keep that above the two requests.
+        maxQueueBytes: 32 * 1024 * 1024,
+      });
+      try {
+        const large = "x".repeat(60_000);
+        const spans = Array.from({ length: 20 }, (_, index) =>
+          hue.tracer.startSpan(`burst ${index}`, { attributes: { "gen_ai.request.model": large } }),
+        );
+        await queued(hue.transport, 20);
+        const mid = await hue.flush();
+        expect(endpoint.requests).toHaveLength(1);
+        expect(endpoint.placeholders().length).toBeGreaterThan(0);
+        expect(endpoint.placeholders().length).toBeLessThan(20);
+        expect(mid.failedSpans + mid.rejectedSpans + mid.droppedSpans).toBe(0);
+        for (const span of spans) span.end();
+        const report = await hue.flush();
+        expect(report.acceptedSpans).toBe(20);
+        expect(hue.transport.getIssues()).toEqual([
+          expect.objectContaining({
+            kind: "warning",
+            count: 0,
+            message: expect.stringContaining("live spans are disabled"),
+          }),
+        ]);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    timeout,
+  );
+
+  test(
     "placeholders use at most a quarter of the export queue's records",
     async () => {
       let release!: () => void;

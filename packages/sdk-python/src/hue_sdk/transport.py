@@ -499,6 +499,9 @@ class BoundedSpanExporter(SpanExporter):
         if pending and not self._session.live_spans_rejected:
             try:
                 for batch in _split_batches(pending, encode_spans):
+                    # None follows the acknowledgement that turned live spans off.
+                    if self._session.live_spans_rejected:
+                        break
                     self._send(batch, placeholders=len(batch))
             except Exception:
                 pass
