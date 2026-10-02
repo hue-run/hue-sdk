@@ -61,6 +61,23 @@ const outcomeAssertionsV3 = {
 } satisfies ScorerDefinition;
 
 describe("scorer publication normalization", () => {
+  test("preserves metric descriptions and rejects blank descriptions", () => {
+    const definition = {
+      kind: "manual",
+      metrics: [{ name: "quality", type: "boolean", description: "  Checks quality.  " }],
+    } satisfies ScorerDefinition;
+    expect(normalizeScorerDefinitionForPublication(definition)).toEqual({
+      kind: "manual",
+      metrics: [{ name: "quality", type: "boolean", description: "Checks quality." }],
+    });
+    expect(() =>
+      normalizeScorerDefinitionForPublication({
+        kind: "manual",
+        metrics: [{ name: "quality", type: "boolean", description: "  " }],
+      }),
+    ).toThrow(TypeError);
+  });
+
   test.each([
     [
       "conversion outcome v2 metrics",

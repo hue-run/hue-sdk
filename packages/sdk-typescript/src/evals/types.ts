@@ -147,12 +147,16 @@ export type MetricDefinition =
       name: string;
       /** Boolean or free-text metric. */
       type: "boolean" | "text";
+      /** What the metric checks, shown with its check in Hue's run view (1–500 characters). */
+      description?: string;
     }
   | {
       /** Metric name. */
       name: string;
       /** Numeric metric. */
       type: "number";
+      /** What the metric checks, shown with its check in Hue's run view (1–500 characters). */
+      description?: string;
       /** Inclusive lower bound. */
       min?: number;
       /** Inclusive upper bound. */
@@ -163,6 +167,8 @@ export type MetricDefinition =
       name: string;
       /** Categorical metric. */
       type: "category";
+      /** What the metric checks, shown with its check in Hue's run view (1–500 characters). */
+      description?: string;
       /** Allowed values. */
       categories: string[];
     };

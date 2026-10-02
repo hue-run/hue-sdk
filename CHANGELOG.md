@@ -10,6 +10,11 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+#### Added
+
+- Optional per-metric descriptions in TypeScript scorer declarations; publishing them requires a
+  Hue server that accepts metric descriptions.
+
 ### [0.13.0] - 2026-10-02
 
 #### Added
@@ -1222,6 +1227,11 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+#### Added
+
+- Optional per-metric descriptions in Python scorer declarations; publishing them requires a Hue
+  server that accepts metric descriptions.
 
 ### [0.7.0] - 2026-10-02
 

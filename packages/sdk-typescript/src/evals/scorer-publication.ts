@@ -7,18 +7,25 @@ const metricName = z
   .min(1)
   .max(64)
   .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/);
+const metricDescription = z.string().trim().min(1).max(500).optional();
 const metric = z.discriminatedUnion("type", [
-  z.strictObject({ name: metricName, type: z.literal("boolean") }),
-  z.strictObject({ name: metricName, type: z.literal("text") }),
+  z.strictObject({
+    name: metricName,
+    type: z.literal("boolean"),
+    description: metricDescription,
+  }),
+  z.strictObject({ name: metricName, type: z.literal("text"), description: metricDescription }),
   z.strictObject({
     name: metricName,
     type: z.literal("number"),
+    description: metricDescription,
     min: z.number().finite().optional(),
     max: z.number().finite().optional(),
   }),
   z.strictObject({
     name: metricName,
     type: z.literal("category"),
+    description: metricDescription,
     categories: z.array(z.string()).min(1),
   }),
 ]);
