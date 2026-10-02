@@ -104,6 +104,8 @@ const server = createServer(async (request, response) => {
           );
     requests.push({ signal, records, data });
     response.setHeader("Content-Type", "application/x-protobuf");
+    // A current Hue marks every trace acknowledgement as accepting placeholders.
+    if (signal === "traces") response.setHeader("Hue-Pending-Spans", "1");
     const responseType = root.lookupType(`${namespace}Response`);
     response.end(responseType.encode(responseType.create({})).finish());
   } catch {

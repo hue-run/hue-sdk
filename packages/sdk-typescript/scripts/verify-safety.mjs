@@ -199,7 +199,13 @@ const server = createServer(async (request, response) => {
     response.on("close", () => clearInterval(timer));
     return;
   }
-  response.writeHead(200, { "Content-Type": "application/x-protobuf" }).end();
+  response
+    .writeHead(200, {
+      "Content-Type": "application/x-protobuf",
+      // A current Hue marks every trace acknowledgement as accepting placeholders.
+      ...(request.url?.endsWith("/traces") ? { "Hue-Pending-Spans": "1" } : {}),
+    })
+    .end();
 });
 server.listen(0, "127.0.0.1");
 await once(server, "listening");

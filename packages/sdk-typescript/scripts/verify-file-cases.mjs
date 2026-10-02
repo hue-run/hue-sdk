@@ -208,6 +208,8 @@ async function fixture(scorers, options = {}) {
         await body(request);
         response.statusCode = 200;
         response.setHeader("content-type", "application/x-protobuf");
+        // A current Hue marks every trace acknowledgement as accepting placeholders.
+        if (path.endsWith("/traces")) response.setHeader("hue-pending-spans", "1");
         return response.end();
       }
       const download = /^\/artifacts\/([^/]+)\/download$/.exec(path);
