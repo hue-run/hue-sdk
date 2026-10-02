@@ -15,7 +15,7 @@ from opentelemetry.context import Context
 
 from ..client import Hue
 from ._checkpoint import CheckpointStore
-from ._failure import error_type
+from ._failure import error_cause, error_type
 from ._json import (
     MISSING,
     VALUE_BYTES,
@@ -340,6 +340,23 @@ def _accepted_completion(checkpoint: dict[str, Any]) -> None:
     checkpoint["complete"].pop("traceSpanCount", None)
 
 
+def _typed_error(target_error: BaseException, persist_result_content: bool) -> dict[str, object]:
+    """Why the case stopped: an output past its bound, the agent, a world never created, or a
+    service it called (``_failure.py``), with the service's own word for what failed as the
+    error's ``cause`` when its answer names one (Hue's gateway diagnostic)."""
+    if isinstance(target_error, OutputTooLargeError):
+        kind: str = "OutputTooLarge"
+        cause = None
+    else:
+        kind = error_type(target_error)
+        cause = error_cause(target_error) if kind != "TargetError" else None
+    return {
+        "type": kind,
+        **({"cause": cause} if cause else {}),
+        **({"message": _error_message(target_error)} if persist_result_content else {}),
+    }
+
+
 def _error_message(error: Exception) -> str:
     # The caller opted into storing result content; the API still rejects NUL and lone surrogates.
     return "".join(
@@ -524,22 +541,7 @@ def run_experiment(
                         else {}
                     ),
                     **(
-                        {
-                            "error": {
-                                # Why the case stopped: an output past its bound, the agent, a
-                                # world never created, or a service it called (`_failure.py`).
-                                "type": (
-                                    "OutputTooLarge"
-                                    if isinstance(target_error, OutputTooLargeError)
-                                    else error_type(target_error)
-                                ),
-                                **(
-                                    {"message": _error_message(target_error)}
-                                    if persist_result_content
-                                    else {}
-                                ),
-                            }
-                        }
+                        {"error": _typed_error(target_error, persist_result_content)}
                         if target_error is not None
                         else {}
                     ),

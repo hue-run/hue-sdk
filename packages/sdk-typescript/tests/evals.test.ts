@@ -835,7 +835,7 @@ describe("installed evaluation API and runner contract", () => {
   });
   test("a service the agent called that refused, dropped the connection or timed out is recorded by what failed", async () => {
     // Each pair of throws runs as one experiment of the fixture's two cases.
-    const runs: [unknown, unknown, string[]][] = [
+    const runs: [unknown, unknown, { type: string; cause?: string }[]][] = [
       [
         // A model provider's rate limit, as the OpenAI and Anthropic SDKs throw it.
         Object.assign(new Error("429 Too Many Requests"), {
@@ -847,7 +847,7 @@ describe("installed evaluation API and runner contract", () => {
             code: "ECONNREFUSED",
           }),
         }),
-        ["ServiceRefused", "ConnectionFailed"],
+        [{ type: "ServiceRefused" }, { type: "ConnectionFailed" }],
       ],
       [
         new Error("The model call failed", {
@@ -855,7 +855,29 @@ describe("installed evaluation API and runner contract", () => {
         }),
         // A refusal the agent caused is its own failure.
         Object.assign(new Error("400 Bad Request"), { status: 400, headers: {} }),
-        ["TimedOut", "TargetError"],
+        [{ type: "TimedOut" }, { type: "TargetError" }],
+      ],
+      [
+        // Hue's simulation gateway could not authorize the world token on the agent's first
+        // call, through the agent's own MCP client (the MCP SDK's transport error: the status
+        // as `code`, the body quoted in the message) and through a fetch whose response the
+        // agent's error carries: the service's refusal, with Hue's diagnostic as its cause.
+        Object.assign(
+          new Error(
+            'Streamable HTTP error: Error POSTing to endpoint: {"error":"World authorization is unavailable; retry","diagnostic":"authorization_unavailable"}',
+          ),
+          { name: "StreamableHTTPError", code: 503 },
+        ),
+        Object.assign(new Error("Simulated Slack answered 503"), {
+          response: new Response('{"error":"gateway failed","diagnostic":"gateway_failure"}', {
+            status: 503,
+            headers: { "x-hue-diagnostic": "gateway_failure" },
+          }),
+        }),
+        [
+          { type: "ServiceRefused", cause: "authorization_unavailable" },
+          { type: "ServiceRefused", cause: "gateway_failure" },
+        ],
       ],
     ];
     for (const [first, second, expected] of runs) {
@@ -881,10 +903,13 @@ describe("installed evaluation API and runner contract", () => {
             throw calls === 1 ? first : second;
           },
         });
-        const types = f.requests
+        const errors = f.requests
           .filter((request) => request.path.endsWith("/complete"))
-          .map((request) => (request.body.error as { type: string } | undefined)?.type);
-        expect(types).toEqual(expected);
+          .map((request) => {
+            const { type, cause } = request.body.error as { type: string; cause?: string };
+            return { type, ...(cause === undefined ? {} : { cause }) };
+          });
+        expect(errors).toEqual(expected);
       } finally {
         await hue.shutdown();
         f.server.stop(true);
