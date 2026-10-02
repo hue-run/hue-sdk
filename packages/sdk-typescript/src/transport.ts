@@ -885,43 +885,57 @@ class ReportingExporter<T extends RecordValue> {
       this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
     // Every record of the batch is measured, shed and, where it cannot be sent, counted lost
     // before any root is written, so a root carries the losses of children that ended after it.
-    const prepared: { record: T; bytes: number }[] = [];
-    for (let record of accepted) {
+    /** The record, shed until it fits the request limit, and its size; undefined when no content
+     * is left to shed. A placeholder stays one through its copies. */
+    const fit = (record: T, placeholder: boolean): { record: T; bytes: number } | undefined => {
+      let bytes = measure(record);
+      // A record over the request limit sheds its content values, largest first, each
+      // replaced by the receiver's marker and listed under `hue.truncated`, until it fits:
+      // the span and what it still holds reach Hue, and a reader sees what was shed. Only a
+      // record too large without any content value is lost, and counted on its root.
+      while (bytes > limit) {
+        const shed = shedLargestContent(record, this.signal);
+        if (!shed) return undefined;
+        record = shed as T;
+        if (placeholder) placeholders.add(record);
+        bytes = measure(record);
+      }
+      return { record, bytes };
+    };
+    const prepared: { record: T; bytes: number; placeholder: boolean }[] = [];
+    for (const record of accepted) {
       const placeholder = placeholders.has(record);
-      let recordBytes: number;
+      let fitted: { record: T; bytes: number } | undefined;
       try {
-        recordBytes = measure(record);
-        // A record over the request limit sheds its content values, largest first, each
-        // replaced by the receiver's marker and listed under `hue.truncated`, until it fits:
-        // the span and what it still holds reach Hue, and a reader sees what was shed. Only a
-        // record too large without any content value is lost, and counted on its root.
-        while (recordBytes > limit) {
-          const shed = shedLargestContent(record, this.signal);
-          if (!shed) break;
-          record = shed as T;
-          recordBytes = measure(record);
-        }
+        fitted = fit(record, placeholder);
       } catch {
         invalid(placeholder, "Telemetry record could not be serialized", record);
         continue;
       }
-      if (recordBytes > limit) {
+      if (!fitted) {
         invalid(placeholder, "Telemetry record exceeds the 1 MiB request limit", record);
         continue;
       }
-      prepared.push({ record, bytes: recordBytes });
+      prepared.push({ ...fitted, placeholder });
     }
-    for (let { record, bytes: recordBytes } of prepared) {
-      if (this.signal === "traces" && !placeholders.has(record)) {
+    for (const entry of prepared) {
+      let { record, bytes: recordBytes } = entry;
+      if (this.signal === "traces" && !entry.placeholder) {
         const counted = this.transport.withDroppedRecords(record as ReadableSpan) as T;
         if (counted !== record) {
-          record = counted;
+          // The count may put a root shed to just under the limit over it again: shed on.
+          let fitted: { record: T; bytes: number } | undefined;
           try {
-            recordBytes = measure(record);
+            fitted = fit(counted, false);
           } catch {
-            invalid(false, "Telemetry record could not be serialized", record);
+            invalid(false, "Telemetry record could not be serialized", counted);
             continue;
           }
+          if (!fitted) {
+            invalid(false, "Telemetry record exceeds the 1 MiB request limit", counted);
+            continue;
+          }
+          ({ record, bytes: recordBytes } = fitted);
         }
       }
       const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
