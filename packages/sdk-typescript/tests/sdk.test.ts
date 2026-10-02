@@ -6,12 +6,13 @@ import { context, trace, type TraceState } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { ProtobufTraceSerializer } from "@opentelemetry/otlp-transformer";
 import { detectResources, resourceFromAttributes } from "@opentelemetry/resources";
-import { TracerProvider } from "@opentelemetry/sdk-trace";
+import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import {
   createHue,
   createHueSafe,
   createHueTransport,
+  type HueTransport,
   HueConnectionError,
   HueExportError,
   contentPrefixes,
@@ -910,6 +911,314 @@ describe("Hue SDK contract", () => {
       await hue.shutdown();
       await endpoint.server.stop(true);
     }
+  });
+
+  /** The strings of a wire array value. */
+  const strings = (value: Value | undefined) =>
+    (
+      value as { arrayValue?: { values: { stringValue?: string }[] } } | undefined
+    )?.arrayValue?.values.map((item) => item.stringValue);
+  /** A wire key-value list as an object. */
+  const kvlist = (value: Value | undefined) =>
+    Object.fromEntries(
+      (
+        value as { kvlistValue?: { values: { key: string; value: Record<string, unknown> }[] } }
+      ).kvlistValue!.values.map((item) => [item.key, Object.values(item.value)[0]]),
+    );
+  /** A transport, its providers and a client over `endpoint`, and the records it exported. */
+  function exporting(endpoint: ReturnType<typeof receiver>, serviceName: string) {
+    const transport = createHueTransport({
+      apiKey,
+      serviceName,
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    return {
+      transport,
+      tracerProvider,
+      loggerProvider,
+      hue,
+      records: () => endpoint.requests.flatMap((request) => request.records),
+      async stop() {
+        await hue.shutdown();
+        await tracerProvider.shutdown();
+        await loggerProvider.shutdown();
+        await transport.shutdown();
+        endpoint.server.stop(true);
+      },
+    };
+  }
+
+  test("a content value over 256 KiB is cut to a UTF-8 prefix and listed under hue.truncated; the record is exported", async () => {
+    const endpoint = receiver();
+    const exporter = exporting(endpoint, "large-values");
+    const { hue, tracerProvider, loggerProvider, transport } = exporter;
+    // 160 Ki two-byte characters: 320 KiB of UTF-8, over the value cap. Dropping the span for it
+    // lost the call, its arguments and the rest of the turn; the receiver's own answer to a
+    // value over its cap is a cut to a UTF-8 prefix, listed under `hue.truncated`.
+    const text = "é".repeat(160 * 1024);
+    const large = `{"body":"${text}"}`;
+    try {
+      // A third-party instrumentation's attribute (what an AI SDK tool span records), and a
+      // link's attribute over the cap, listed under the link prefix with the record's own cut.
+      const tracer = tracerProvider.getTracer("third-party");
+      const linked = tracer.startSpan("linked");
+      linked.end();
+      const span = tracer.startSpan("execute_tool read_document", {
+        links: [{ context: linked.spanContext(), attributes: { "ai.prompt": large } }],
+      });
+      span.setAttribute("gen_ai.tool.call.result", large);
+      span.setAttribute("gen_ai.tool.name", "read_document");
+      span.end();
+      // The Hue helper's own result, encoded by the client before it reaches the span; a whole
+      // value set after a cut one unmarks its key, and the application's own entry is kept.
+      await hue.tool("read_page", { id: "p1" }, () => ({ text, pages: 3 }));
+      await hue.withSpan(
+        "replaced",
+        (context) => {
+          context.span.setAttribute("hue.truncated", ["custom.blob"]);
+          context.setOutput(text);
+          context.setOutput("short");
+        },
+        { input: text },
+      );
+      // A structured log body over the cap: the receiver's marker, as the receiver itself
+      // answers a structured value over its cap, and the body listed.
+      loggerProvider.getLogger("third-party").emit({ body: { text, kind: "page" } as never });
+      // A log whose body text alone is over the cap: cut to the prefix.
+      loggerProvider.getLogger("third-party").emit({ body: text });
+      await hue.flush();
+      const records = exporter.records();
+      const external = records.find((record) => record.name === "execute_tool read_document")!;
+      const stored = attr(external, "gen_ai.tool.call.result")!.stringValue!;
+      expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(256 * 1024);
+      expect(Buffer.byteLength(stored)).toBeGreaterThan(256 * 1024 - 4);
+      expect(large.startsWith(stored)).toBe(true);
+      // Listed in redaction order: the links are redacted before the record's own attributes.
+      expect(strings(attr(external, "hue.truncated"))).toEqual([
+        "link:ai.prompt",
+        "gen_ai.tool.call.result",
+      ]);
+      const replaced = records.find((record) => record.name === "replaced")!;
+      expect(attr(replaced, "output.value")!.stringValue).toBe('"short"');
+      expect(strings(attr(replaced, "hue.truncated"))).toEqual(["custom.blob", "input.value"]);
+      expect(attr(external, "gen_ai.tool.name")!.stringValue).toBe("read_document");
+      const helper = records.find((record) => record.name === "execute_tool read_page")!;
+      const result = attr(helper, "gen_ai.tool.call.result")!.stringValue!;
+      expect(Buffer.byteLength(result)).toBeLessThanOrEqual(256 * 1024);
+      expect(Buffer.byteLength(result)).toBeGreaterThan(256 * 1024 - 4);
+      expect(result.startsWith('{"text":"éé')).toBe(true);
+      expect(strings(attr(helper, "hue.truncated"))).toEqual(["gen_ai.tool.call.result"]);
+      expect(JSON.parse(attr(helper, "gen_ai.tool.call.arguments")!.stringValue!)).toEqual({
+        id: "p1",
+      });
+      const logs = endpoint.requests
+        .filter((request) => request.signal === "logs")
+        .flatMap((request) => request.records);
+      expect(logs).toHaveLength(2);
+      const [structured, plain] = logs as [WireRecord, WireRecord];
+      // The marker names the body's size as recorded, not what was left after its text was cut.
+      expect(kvlist(structured.body)).toEqual({
+        "hue.truncated": true,
+        "hue.truncated_bytes": String(Buffer.byteLength(JSON.stringify({ text, kind: "page" }))),
+      });
+      expect(strings(attr(structured, "hue.truncated"))).toEqual(["body"]);
+      const cut = plain.body!.stringValue!;
+      expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(256 * 1024);
+      expect(Buffer.byteLength(cut)).toBeGreaterThan(256 * 1024 - 4);
+      expect(text.startsWith(cut)).toBe(true);
+      expect(strings(attr(plain, "hue.truncated"))).toEqual(["body"]);
+      // Nothing was omitted, dropped or counted as a failure.
+      expect(transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
+      expect(transport.getReport().instrumentationFailures).toBe(0);
+    } finally {
+      await exporter.stop();
+    }
+  });
+
+  test("a structured value over 256 KiB is cut to a UTF-8 prefix of its JSON text at the cap, never a shorter whole document", async () => {
+    const endpoint = receiver();
+    const exporter = exporting(endpoint, "structured-values");
+    const { hue, transport } = exporter;
+    // 6,000 small rows, 300 KiB of JSON together with no one value over the cap: the receiver
+    // recognizes Hue's cut by its size at the cap, so a prefix of the rows that stopped early as
+    // a shorter valid document would read as the whole result.
+    const rows = Array.from({ length: 6_000 }, (_, index) => ({
+      id: index,
+      name: `row-${String(index).padStart(5, "0")}`,
+      note: "n".repeat(24),
+    }));
+    const whole = JSON.stringify(rows);
+    expect(Buffer.byteLength(whole)).toBeGreaterThan(256 * 1024);
+    try {
+      await hue.tool("list_rows", { page: 1 }, () => rows);
+      await hue.flush();
+      const helper = exporter.records().find((record) => record.name === "execute_tool list_rows")!;
+      const result = attr(helper, "gen_ai.tool.call.result")!.stringValue!;
+      expect(Buffer.byteLength(result)).toBeLessThanOrEqual(256 * 1024);
+      expect(Buffer.byteLength(result)).toBeGreaterThan(256 * 1024 - 4);
+      expect(whole.startsWith(result)).toBe(true);
+      expect(() => JSON.parse(result)).toThrow();
+      expect(strings(attr(helper, "hue.truncated"))).toEqual(["gen_ai.tool.call.result"]);
+      expect(transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
+      expect(transport.getReport().instrumentationFailures).toBe(0);
+    } finally {
+      await exporter.stop();
+    }
+  });
+
+  test("a redactor's answer that grows past the cap is refused by its length, never scanned or cut", async () => {
+    // The redactor sees the whole recorded text, and an answer no longer than it is cut to the
+    // cap as the text would be; an answer longer than both the cap and its input is the
+    // redactor's own, and the record is refused before anything reads that text.
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "oversized-redactor",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      redact: (text) => (text.startsWith("expand") ? "x".repeat(300_000) : text),
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const hue = createHue({ transport, tracerProvider, loggerProvider });
+    try {
+      const tracer = tracerProvider.getTracer("third-party");
+      const kept = tracer.startSpan("kept");
+      kept.setAttribute("gen_ai.tool.call.result", "y".repeat(300_000));
+      kept.end();
+      const refused = tracer.startSpan("refused");
+      refused.setAttribute("gen_ai.tool.call.result", "expand me");
+      refused.end();
+      await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+      const records = endpoint.requests.flatMap((request) => request.records);
+      expect(records.map((record) => record.name)).toEqual(["kept"]);
+      expect(Buffer.byteLength(attr(records[0]!, "gen_ai.tool.call.result")!.stringValue!)).toBe(
+        256 * 1024,
+      );
+      expect(transport.getIssues()).toContainEqual(
+        expect.objectContaining({ kind: "invalid", count: 1 }),
+      );
+    } finally {
+      await hue.shutdown();
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("a record over the request limit sheds its largest content values to the receiver's marker and is exported", async () => {
+    const endpoint = receiver();
+    const exporter = exporting(endpoint, "shed-content");
+    const { hue, tracerProvider, transport } = exporter;
+    try {
+      const span = tracerProvider.getTracer("third-party").startSpan("chat gpt");
+      // Four content values under the cap each and an event's content value, 1,150 KiB
+      // together: over the 1 MiB request.
+      const sizes: Record<string, number> = {
+        "gen_ai.output.messages": 240,
+        "ai.prompt": 230,
+        "ai.response.text": 220,
+        "gen_ai.tool.call.result": 210,
+      };
+      for (const [key, kib] of Object.entries(sizes))
+        span.setAttribute(key, "x".repeat(kib * 1024));
+      span.addEvent("gen_ai.content.prompt", { "gen_ai.prompt": "x".repeat(250 * 1024) });
+      span.setAttribute("gen_ai.request.model", "gpt-5.6-terra");
+      span.end();
+      await hue.flush();
+      const [record] = exporter.records();
+      // The largest value alone is shed, the event's, as the receiver's marker and under the
+      // receiver's event prefix; the other four reach Hue whole.
+      const [event] = record!.events!;
+      expect(
+        kvlist(event!.attributes!.find((item) => item.key === "gen_ai.prompt")!.value),
+      ).toEqual({ "hue.truncated": true, "hue.truncated_bytes": String(250 * 1024) });
+      expect(attr(record!, "gen_ai.output.messages")!.stringValue).toHaveLength(240 * 1024);
+      expect(attr(record!, "gen_ai.tool.call.result")!.stringValue).toHaveLength(210 * 1024);
+      expect(strings(attr(record!, "hue.truncated"))).toEqual([
+        "event:gen_ai.content.prompt:gen_ai.prompt",
+      ]);
+      expect(attr(record!, "gen_ai.request.model")!.stringValue).toBe("gpt-5.6-terra");
+      expect(endpoint.requests).toHaveLength(1);
+      expect(transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
+    } finally {
+      await exporter.stop();
+    }
+  });
+
+  test("a record too large without its content is lost, and its trace's root counts it", async () => {
+    const endpoint = receiver();
+    const exporter = exporting(endpoint, "dropped-records");
+    const { hue, tracerProvider, transport } = exporter;
+    try {
+      const tracer = tracerProvider.getTracer("third-party");
+      const root = tracer.startSpan("agent turn");
+      const child = tracer.startSpan("custom step", {}, trace.setSpan(context.active(), root));
+      // 1,250 KiB of metadata, which is never shed: the record cannot be sent.
+      for (let index = 0; index < 5; index++)
+        child.setAttribute(`custom.blob.${index}`, "x".repeat(250 * 1024));
+      child.end();
+      root.end();
+      await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
+      const records = exporter.records();
+      expect(records.map((record) => record.name)).toEqual(["agent turn"]);
+      // The root says how many of the trace's records Hue never received.
+      expect(attr(records[0]!, "hue.sdk.dropped_records")).toEqual({ intValue: "1" });
+      expect(transport.getIssues()).toContainEqual(
+        expect.objectContaining({
+          kind: "invalid",
+          count: 1,
+          message: "Telemetry record exceeds the 1 MiB request limit",
+        }),
+      );
+    } finally {
+      await exporter.stop();
+    }
+  });
+
+  test("a root's dropped-record count is consumed when its request is acknowledged, not when the root is written", () => {
+    // The exporter's callbacks, internal to the package: the installed declarations omit them.
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "counted-roots",
+      captureContent: false,
+    }) as HueTransport & {
+      issue(
+        signal: "traces" | "logs",
+        kind: "dropped",
+        count: number,
+        message: string,
+        status?: number,
+        traceIds?: string[],
+      ): void;
+      withDroppedRecords(span: ReadableSpan): ReadableSpan;
+      consumeDroppedRecords(traceIds: Iterable<string>): void;
+    };
+    const traceId = "0af7651916cd43dd8448eb211c80319c";
+    const span = (fields: Partial<ReadableSpan>): ReadableSpan => fields as ReadableSpan;
+    const root = span({
+      spanContext: () => ({ traceId, spanId: "b7ad6b7169203331", traceFlags: 1 }),
+      attributes: { "hue.kind": "agent" },
+    });
+    transport.issue("traces", "dropped", 2, "Telemetry queue is full", undefined, [traceId]);
+    // Written on the root as often as the root is written: a request that fails, or is retried,
+    // has not told Hue, so the count is still there for the root's next write.
+    expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(2);
+    expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(2);
+    // Acknowledged: the count has reached Hue, and the map holds nothing for the ended trace.
+    transport.consumeDroppedRecords([traceId]);
+    expect(transport.withDroppedRecords(root)).toBe(root);
+    // A child never carries it, and another trace's count is another trace's.
+    transport.issue("traces", "dropped", 1, "Telemetry queue is full", undefined, [traceId]);
+    const child = span({ ...root, parentSpanContext: root.spanContext() });
+    expect(transport.withDroppedRecords(child)).toBe(child);
+    transport.consumeDroppedRecords(["00000000000000000000000000000001"]);
+    expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(1);
   });
 
   test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
@@ -2659,7 +2968,9 @@ describe("Application failure isolation", () => {
       }
       expect(executions).toBe(invalid.length);
       expect(getterCalls).toBe(0);
-      expect(hue.transport.getReport().instrumentationFailures).toBe(25);
+      // Five captures of each value; the 256 KiB string is cut to the cap, not a failure, except
+      // as an inference log's body, which is parsed back and so still omitted.
+      expect(hue.transport.getReport().instrumentationFailures).toBe(21);
       await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
       expect(hue.transport.getReport().acceptedSpans).toBe(10);
       expect(JSON.stringify(hue.transport.getIssues())).not.toContain(apiKey);
@@ -2913,7 +3224,8 @@ describe("Application failure isolation", () => {
     await hue.flushSafe();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(calls).toBe(1);
-    expect(hue.transport.getReport().instrumentationFailures).toBe(1);
+    // The 300,000-character input is cut to the cap and listed, never a failure.
+    expect(hue.transport.getReport().instrumentationFailures).toBe(0);
     await hue.shutdownSafe();
     endpoint.server.stop(true);
   });

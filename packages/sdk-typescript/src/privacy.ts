@@ -3,9 +3,12 @@ import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord } from "@opentelemetry/sdk-logs";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import type { HueOptions } from "./types.js";
-import { MAX_BODY_BYTES, MAX_CONTENT_BYTES } from "./config.js";
+import { MAX_CONTENT_BYTES } from "./config.js";
 import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions.js";
 import { hashInlineFiles } from "./inline-files.js";
+import { truncateUtf8 } from "./safety.js";
+
+export { truncateUtf8 };
 
 /** Attribute keys (and their dotted children) removed in metadata-only mode. */
 export const contentPrefixes = [
@@ -58,71 +61,132 @@ export const contentPrefixes = [
 ];
 
 // Kept as a function so metadata-only filtering is applied consistently to every exporter location.
-function isContentKey(key: string): boolean {
+export function isContentKey(key: string): boolean {
   return contentPrefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}.`));
+}
+
+/** The record attribute listing the keys whose values were cut to fit Hue's 256 KiB value cap:
+ * Hue's receiver writes it for the values it cuts, and the SDK writes it for the values it cuts
+ * before export, under the same name, so a reader learns of a cut value from one place. */
+export const TRUNCATED_KEY = "hue.truncated";
+/** The size of a structured value the marker replaced. */
+export const TRUNCATED_BYTES_KEY = "hue.truncated_bytes";
+/** The root span attribute counting this trace's records the SDK could not export at all (a
+ * record over the request limit even with every content value shed, or one its queue had no
+ * room for): what Hue stores of the trace is incomplete by that many records. */
+export const DROPPED_RECORDS_KEY = "hue.sdk.dropped_records";
+
+/** The serialized size of a structured value as recorded, 0 for one JSON cannot serialize. */
+function structuredBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "");
+  } catch {
+    return 0;
+  }
+}
+
+/** Hue's receiver's own marker for a structured value it replaced: nothing of the value, its
+ * size, and the flag a reader tests. */
+export function truncatedMarker(bytes: number): Record<string, unknown> {
+  return { [TRUNCATED_KEY]: true, [TRUNCATED_BYTES_KEY]: bytes };
+}
+
+/** `listed` with `keys` added, each once, in order. */
+export function withTruncatedKeys(listed: unknown, keys: readonly string[]): string[] {
+  const result = Array.isArray(listed)
+    ? listed.filter((item): item is string => typeof item === "string")
+    : [];
+  for (const key of keys) if (!result.includes(key)) result.push(key);
+  return result;
 }
 
 interface RedactionBudget {
   bytes: number;
   nodes: number;
+  /** The keys whose values were cut or replaced, as `hue.truncated` lists them. */
+  truncated: string[];
 }
 
+/**
+ * One value through the redactor and Hue's value cap. Text over 256 KiB is cut to a UTF-8 prefix
+ * and bytes over it are replaced by the receiver's marker, as the receiver itself does to a
+ * value over its cap, and the value's key (`listAs`) is listed under `hue.truncated`: the span
+ * is exported whole with the rest of its evidence, and a reader knows the one value is partial.
+ * Dropping the record for a large value lost every call, result and reply it recorded.
+ */
 function redactValue(
   value: unknown,
   path: string,
   options: HueOptions,
   budget: RedactionBudget,
   depth = 0,
+  listAs = path,
 ): unknown {
   if (++budget.nodes > 16384 || depth > 32)
     throw new Error("Telemetry value exceeds the supported nesting limit");
   if (typeof value === "string") {
+    // The redactor sees the whole recorded text, so a secret that crosses the cap is still its
+    // to recognize; what it returns is cut to the cap afterwards.
     const result = options.redact ? options.redact(value, path) : value;
     // JavaScript can supply an async redactor despite the synchronous contract.
     // Observe its rejection before dropping the invalid record.
     if (result && typeof result === "object") void Promise.resolve(result).catch(() => {});
+    // A redactor may shorten or keep its text, never grow it past the cap: an answer longer than
+    // both the cap and the text it was given is the redactor's own, refused by its length before
+    // anything scans it, since scanning would materialize text the record never held.
     if (
       typeof result !== "string" ||
-      result.length > MAX_CONTENT_BYTES ||
+      result.length > Math.max(MAX_CONTENT_BYTES, value.length) ||
       !result.isWellFormed() ||
       result.includes("\u0000")
     )
       throw new Error("Redaction produced unsupported text");
-    if (Buffer.byteLength(result) > MAX_CONTENT_BYTES)
-      throw new Error("Telemetry text exceeds 256 KiB");
-    budget.bytes += Buffer.byteLength(result);
-    if (budget.bytes > MAX_BODY_BYTES)
-      throw new Error("Redacted record exceeds the content budget");
-    return result;
+    const bytes = Buffer.byteLength(result);
+    if (bytes <= MAX_CONTENT_BYTES) {
+      budget.bytes += bytes;
+      return result;
+    }
+    // Within the cap's code units but over its bytes (multibyte text): cut to the bytes.
+    if (!budget.truncated.includes(listAs)) budget.truncated.push(listAs);
+    budget.bytes += MAX_CONTENT_BYTES;
+    return truncateUtf8(result, MAX_CONTENT_BYTES);
   }
   if (Array.isArray(value)) {
     if (value.length > 16384) throw new Error("Telemetry array exceeds the complexity limit");
     return value.map((item, index) =>
-      redactValue(item, `${path}.${index}`, options, budget, depth + 1),
+      redactValue(item, `${path}.${index}`, options, budget, depth + 1, listAs),
     );
   }
   if (value instanceof Uint8Array) {
-    if (value.byteLength > MAX_CONTENT_BYTES) throw new Error("Telemetry bytes exceed 256 KiB");
-    budget.bytes += value.byteLength;
-    if (budget.bytes > MAX_BODY_BYTES)
-      throw new Error("Redacted record exceeds the content budget");
-    return value;
+    if (value.byteLength <= MAX_CONTENT_BYTES) {
+      budget.bytes += value.byteLength;
+      return value;
+    }
+    // Bytes are never cut: a shortened encoding is a different value.
+    if (!budget.truncated.includes(listAs)) budget.truncated.push(listAs);
+    return truncatedMarker(value.byteLength);
   }
   if (value !== null && typeof value === "object")
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        redactValue(item, `${path}.${key}`, options, budget, depth + 1),
+        redactValue(item, `${path}.${key}`, options, budget, depth + 1, listAs),
       ]),
     );
   return value;
 }
 
+/**
+ * A record's attributes through the redactor. `listPrefix` is how a cut value of these
+ * attributes is listed under the record's `hue.truncated`: the key alone for the record's own
+ * attributes, `event:<name>:<key>` for an event's, as Hue's receiver lists the values it cuts.
+ */
 function attributes<T extends Record<string, unknown>>(
   source: T,
   options: HueOptions,
   path: string,
   budget: RedactionBudget,
+  listPrefix = "",
 ): T {
   // Metadata-only export summarizes the tool definitions it removes by name and digest.
   const summarized = options.captureContent ? source : withToolCatalogSummary(source);
@@ -138,11 +202,20 @@ function attributes<T extends Record<string, unknown>>(
                 `${path}.${key}`,
                 options,
                 budget,
+                0,
+                `${listPrefix}${key}`,
               ),
             ],
           ],
     ),
   ) as T;
+}
+
+/** The record's attributes with the keys the redaction cut listed under `hue.truncated`, merged
+ * with any the application listed itself; unchanged when nothing was cut. */
+function withTruncated<T extends Record<string, unknown>>(source: T, budget: RedactionBudget): T {
+  if (!budget.truncated.length) return source;
+  return { ...source, [TRUNCATED_KEY]: withTruncatedKeys(source[TRUNCATED_KEY], budget.truncated) };
 }
 
 export type ResourceCache = WeakMap<Resource, Resource>;
@@ -155,11 +228,13 @@ function redactResource(
 ): Resource {
   let result = cache.get(resource);
   if (!result) {
+    const cutsBefore = budget.truncated.length;
     result = resourceFromAttributes(
-      attributes(resource.attributes, options, "resource.attributes", budget),
+      attributes(resource.attributes, options, "resource.attributes", budget, "resource."),
       { schemaUrl: resource.schemaUrl },
     );
-    cache.set(resource, result);
+    // A resource whose value was cut is redacted for every record, so each lists the cut.
+    if (budget.truncated.length === cutsBefore) cache.set(resource, result);
   }
   return result;
 }
@@ -201,7 +276,7 @@ export function redactSpan(
   options: HueOptions,
   cache: ResourceCache,
 ): ReadableSpan {
-  const budget = { bytes: 0, nodes: 0 };
+  const budget: RedactionBudget = { bytes: 0, nodes: 0, truncated: [] };
   // Derived before metadata-only stripping so the identity survives without the result itself.
   const hosted = hostedMcpCall(span.attributes);
   const source: Attributes = {
@@ -209,6 +284,43 @@ export function redactSpan(
     ...(hosted.failed ? { "error.type": "mcp_error" } : {}),
     ...span.attributes,
   };
+  const status = {
+    code:
+      hosted.failed && span.status.code === SpanStatusCode.UNSET
+        ? SpanStatusCode.ERROR
+        : span.status.code,
+    ...(options.captureContent &&
+    span.status.message !== undefined &&
+    !(hosted.failed && span.status.code === SpanStatusCode.UNSET)
+      ? { message: String(redactValue(span.status.message, "status.message", options, budget)) }
+      : {}),
+  };
+  const events = span.events
+    .filter(
+      (event) =>
+        options.captureContent ||
+        !/^gen_ai\.(?:system|user|assistant|tool|choice)/.test(event.name),
+    )
+    .map((event) => ({
+      ...event,
+      attributes: attributes(
+        event.attributes ?? {},
+        options,
+        `events.${event.name}`,
+        budget,
+        `event:${event.name}:`,
+      ),
+    }));
+  const links = span.links.map((link) => ({
+    ...link,
+    attributes: attributes(link.attributes ?? {}, options, "links.attributes", budget, "link:"),
+  }));
+  const resource = redactResource(span.resource, options, cache, budget);
+  // Last, so every cut of the record, its events', links' and resource's included, is listed.
+  const redactedAttributes = withTruncated(
+    attributes(source, options, "attributes", budget),
+    budget,
+  );
   return {
     name: span.name,
     kind: span.kind,
@@ -218,33 +330,11 @@ export function redactSpan(
     endTime: span.endTime,
     duration: span.duration,
     ended: span.ended,
-    status: {
-      code:
-        hosted.failed && span.status.code === SpanStatusCode.UNSET
-          ? SpanStatusCode.ERROR
-          : span.status.code,
-      ...(options.captureContent &&
-      span.status.message !== undefined &&
-      !(hosted.failed && span.status.code === SpanStatusCode.UNSET)
-        ? { message: String(redactValue(span.status.message, "status.message", options, budget)) }
-        : {}),
-    },
-    attributes: attributes(source, options, "attributes", budget),
-    events: span.events
-      .filter(
-        (event) =>
-          options.captureContent ||
-          !/^gen_ai\.(?:system|user|assistant|tool|choice)/.test(event.name),
-      )
-      .map((event) => ({
-        ...event,
-        attributes: attributes(event.attributes ?? {}, options, `events.${event.name}`, budget),
-      })),
-    links: span.links.map((link) => ({
-      ...link,
-      attributes: attributes(link.attributes ?? {}, options, "links.attributes", budget),
-    })),
-    resource: redactResource(span.resource, options, cache, budget),
+    status,
+    attributes: redactedAttributes,
+    events,
+    links,
+    resource,
     instrumentationScope: span.instrumentationScope,
     droppedAttributesCount: span.droppedAttributesCount,
     droppedEventsCount: span.droppedEventsCount,
@@ -257,10 +347,21 @@ export function redactLog(
   options: HueOptions,
   cache: ResourceCache,
 ): ReadableLogRecord {
-  const budget = { bytes: 0, nodes: 0 };
-  const body = options.captureContent ? redactValue(log.body, "body", options, budget) : undefined;
-  if (body !== undefined && Buffer.byteLength(JSON.stringify(body)) > MAX_CONTENT_BYTES)
-    throw new Error("Telemetry log body exceeds 256 KiB");
+  const budget: RedactionBudget = { bytes: 0, nodes: 0, truncated: [] };
+  let body = options.captureContent ? redactValue(log.body, "body", options, budget) : undefined;
+  if (body !== undefined && typeof body !== "string") {
+    // A structured body over the cap is replaced by the receiver's marker, as the receiver would
+    // replace it; the marker names the body's size as recorded, before any text part was cut.
+    if (Buffer.byteLength(JSON.stringify(body)) > MAX_CONTENT_BYTES) {
+      body = truncatedMarker(structuredBytes(log.body));
+      if (!budget.truncated.includes("body")) budget.truncated.push("body");
+    }
+  }
+  const redactedAttributes = attributes(log.attributes, options, "attributes", budget);
+  const resource = redactResource(log.resource, options, cache, budget);
+  const scopeAttributes = log.instrumentationScope.attributes
+    ? attributes(log.instrumentationScope.attributes, options, "scope.attributes", budget, "scope.")
+    : undefined;
   return {
     hrTime: log.hrTime,
     hrTimeObserved: log.hrTimeObserved,
@@ -269,20 +370,11 @@ export function redactLog(
     severityNumber: log.severityNumber,
     eventName: log.eventName,
     body: body as ReadableLogRecord["body"],
-    attributes: attributes(log.attributes, options, "attributes", budget),
-    resource: redactResource(log.resource, options, cache, budget),
+    attributes: withTruncated(redactedAttributes, budget),
+    resource,
     instrumentationScope: {
       ...log.instrumentationScope,
-      ...(log.instrumentationScope.attributes
-        ? {
-            attributes: attributes(
-              log.instrumentationScope.attributes,
-              options,
-              "scope.attributes",
-              budget,
-            ),
-          }
-        : {}),
+      ...(scopeAttributes ? { attributes: scopeAttributes } : {}),
     },
     droppedAttributesCount: log.droppedAttributesCount,
   };

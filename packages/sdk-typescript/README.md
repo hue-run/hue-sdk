@@ -323,7 +323,13 @@ names cannot be classified automatically; use them deliberately.
 there is no SDK retention timer or automatic content expiry. To redact strings
 before export, supply `redact(value, path)`; it applies to supported strings in
 attributes, resources, event/link attributes and log bodies. Return a string.
-Invalid/oversized helper content is omitted with an instrumentation failure; the span can still be delivered. Export-time redactor failures reject the affected record and are reported by flush. Shared resources are redacted once per
+Invalid helper content is omitted with an instrumentation failure; the span can still be delivered.
+A content value over Hue's 256 KiB value cap is not omitted: text is cut to a UTF-8 prefix and
+bytes or a structured log body are replaced by the receiver's own marker
+(`{ "hue.truncated": true, "hue.truncated_bytes": <size> }`), and the value's key is listed in
+the record's `hue.truncated` attribute, where Hue's receiver lists the values it cuts itself,
+so the span still carries the call, the recorded part of its value and the rest of its evidence.
+Export-time redactor failures reject the affected record and are reported by flush. Shared resources are redacted once per
 export batch. Do not put user content or secrets in span names or scope names.
 
 Hosted tools carry credentials in their definitions, such as the `authorization` and `headers` of
@@ -355,7 +361,7 @@ rotates. Only definitions another integration recorded can be summarized: `hueTe
 inputs and exports through Hue's attached processors gets the summary.
 Recorded messages can inline files: GenAI `blob` parts in `gen_ai.input.messages` /
 `gen_ai.output.messages` (what the AI SDK 7 adapter records for a file part) and AI SDK 6 `file`
-parts in `ai.prompt.messages`. A span whose messages exceed 256 KiB would be rejected, so when a
+parts in `ai.prompt.messages`. A span whose messages exceed 256 KiB would be cut, so when a
 record is queued Hue replaces the `content`/`data` of any such part longer than 64 KiB with the
 file's `sha256` and `size`, both of the file's own bytes whatever its media type (base64 content
 and `;base64` `data:` URLs decoded, other `data:` URLs percent-decoded, anything else as UTF-8 text), keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
@@ -470,7 +476,11 @@ const hue = createHue({
 Exports retry temporary HTTP/network failures (429, 502, 503, 504 and connection errors,
 honoring `Retry-After`) within the export timeout, by OpenTelemetry's OTLP/HTTP exporter rules. Each
 request is limited to 1 MiB before gzip (with space reserved for gzip overhead) and each content value to 256 KiB. Batches
-split at record boundaries. Each signal queues at most 2,048 records, including
+split at record boundaries. A record over the request limit on its own sheds its content values,
+largest first, each replaced by the receiver's marker and listed under `hue.truncated`, until it
+fits; only a record too large without any content value is lost, reported as an `invalid` issue,
+and counted on its trace's root span as `hue.sdk.dropped_records` when the root is exported, so
+Hue reads the trace as incomplete by that many records. Each signal queues at most 2,048 records, including
 exports in flight; overflow is reported through the callback, counters and next
 flush. This is an in-memory queue, not durable storage.
 

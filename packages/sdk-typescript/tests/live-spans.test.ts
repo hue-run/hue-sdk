@@ -879,10 +879,16 @@ describe("Live spans", () => {
       try {
         await hue.withSpan("chat.request", async () => {
           await queued(hue.transport, 1);
-          // Over the 1 MiB request limit: invalid on this side, never sent, no receiver failure.
+          // Over the 1 MiB request limit in metadata alone, which is never shed: invalid on this
+          // side, never sent, no receiver failure.
           hue.tracer
             .startSpan("too large", {
-              attributes: { "gen_ai.request.model": "x".repeat(1_100_000) },
+              attributes: Object.fromEntries(
+                Array.from({ length: 20 }, (_, index) => [
+                  `gen_ai.request.option.${index}`,
+                  "x".repeat(60_000),
+                ]),
+              ),
             })
             .end();
           const error = await hue.flush().catch((reason: unknown) => reason);

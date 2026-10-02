@@ -243,6 +243,20 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
             span.set_output(output)
         assert calls == [1] and not hooks
         assert output == {"nested": ["original"]}
+        if invalid == "final-json-limit":
+            # A redactor's answer over the 256 KiB value cap is cut to the cap and listed, as
+            # any content is; it is bounded, not invalid.
+            assert hue.export_status.instrumentation_failures == 0
+            assert hue.force_flush()
+            attributes = {
+                attribute.key: attribute.value for attribute in receiver.spans()[0].attributes
+            }
+            stored = attributes["output.value"].string_value
+            assert 262_144 - 4 < len(stored.encode("utf-8")) <= 262_144
+            assert stored.startswith('{"nested":"xxx')
+            listed = attributes["hue.truncated"].array_value.values
+            assert [item.string_value for item in listed] == ["output.value"]
+            return
         assert hue.export_status.instrumentation_failures == 1
         assert not hue.force_flush()
         assert all(attribute.key != "output.value" for attribute in receiver.spans()[0].attributes)
@@ -314,11 +328,19 @@ def test_invalid_content_and_redactor_preserve_result_and_run_once(receiver):
         assert business() is result
         assert executed == ["once"]
         assert not hue.force_flush()
-        assert hue.export_status.instrumentation_failures == 3
+        # The input over the cap is cut and listed, not a failure; the object output and the
+        # NaN log body are failures (and, under the failing redactor, the input is too).
+        assert hue.export_status.instrumentation_failures == (3 if redactor else 2)
         hue.shutdown()
     bodies = b"".join(body for _, _, body in receiver.requests)
     assert b"sensitive-redactor-value" not in bodies
     assert len(receiver.spans()) == 4
+    business_spans = [span for span in receiver.spans() if span.name == "business"]
+    stored = {attribute.key: attribute.value for attribute in business_spans[0].attributes}
+    assert len(stored["input.value"].string_value.encode("utf-8")) <= 262_144
+    assert [item.string_value for item in stored["hue.truncated"].array_value.values] == [
+        "input.value"
+    ]
 
 
 @pytest.mark.parametrize("error", [RuntimeError("business-failure"), asyncio.CancelledError()])

@@ -40,7 +40,16 @@ import {
 } from "./live-spans.js";
 import { estimateRecordBytes } from "./safety.js";
 import { snapshotLog, snapshotSpan } from "./snapshot.js";
-import { redactLog, redactSpan, type ResourceCache } from "./privacy.js";
+import {
+  DROPPED_RECORDS_KEY,
+  isContentKey,
+  redactLog,
+  redactSpan,
+  TRUNCATED_KEY,
+  truncatedMarker,
+  withTruncatedKeys,
+  type ResourceCache,
+} from "./privacy.js";
 import { sdkVersion } from "./version.js";
 import type { ExportIssue, ExportReport, HueOptions, Signal } from "./types.js";
 
@@ -70,6 +79,8 @@ interface ExportSink {
   placeholderMarkers(record: RecordValue): Attributes | undefined;
   placeholderSettled(record: RecordValue): boolean;
   sendsPlaceholders(): boolean;
+  withDroppedRecords(span: ReadableSpan): ReadableSpan;
+  consumeDroppedRecords(traceIds: Iterable<string>): void;
   rejectPlaceholders(count: number): void;
 }
 
@@ -139,6 +150,10 @@ export class HueTransport {
   private logs = new Map<ReadableLogRecord, number>();
   private pendingBytes = 0;
   private dropped = { traces: 0, logs: 0 };
+  /** Records of each trace the SDK never sent (dropped from the queue, refused as invalid or
+   * over the request limit), reported on the trace's root span as `hue.sdk.dropped_records` when
+   * the root is exported, so Hue reads the trace as incomplete by that many records. */
+  private droppedByTrace = new Map<string, number>();
   private instrumentationFailures = 0;
   private diagnosticPending = false;
   private lastDiagnosticAt = -Infinity;
@@ -420,6 +435,24 @@ export class HueTransport {
     this.accepted[signal] += count;
   }
 
+  /** @internal Exporter callback: a trace's root span carries the count of its records the SDK
+   * never sent, read when the root is exported (a record lost after that is not counted: the
+   * root has left). The count stays until the request carrying the root is acknowledged
+   * (`consumeDroppedRecords`): a root written again under retry says the same, and a root whose
+   * request failed has not told Hue, so its count is not forgotten with it. */
+  withDroppedRecords(span: ReadableSpan): ReadableSpan {
+    if (span.parentSpanContext) return span;
+    const count = this.droppedByTrace.get(span.spanContext().traceId);
+    if (!count) return span;
+    return { ...span, attributes: { ...span.attributes, [DROPPED_RECORDS_KEY]: count } };
+  }
+
+  /** @internal Exporter callback: these traces' counts reached Hue on their roots, so the map
+   * holds nothing for a trace that has ended and told its losses. */
+  consumeDroppedRecords(traceIds: Iterable<string>): void {
+    for (const traceId of traceIds) this.droppedByTrace.delete(traceId);
+  }
+
   /** @internal Records a sanitized issue, updates counters and rate-limits the diagnostic callback. */
   issue(
     signal: Signal,
@@ -432,6 +465,15 @@ export class HueTransport {
     if (kind === "dropped") this.dropped[signal] += count;
     if (kind === "rejected") this.rejected[signal] += count;
     else if (kind !== "warning") this.failed[signal] += count;
+    // A record lost before any request names its one trace; a failed batch is retried or
+    // reported as delivery, not counted here.
+    if ((kind === "dropped" || kind === "invalid") && count > 0 && traceIds?.length === 1) {
+      const [traceId] = traceIds as [string];
+      // Bounded: a trace whose root never arrives (an abandoned run) gives way to newer ones.
+      if (this.droppedByTrace.size >= 1024 && !this.droppedByTrace.has(traceId))
+        this.droppedByTrace.delete(this.droppedByTrace.keys().next().value!);
+      this.droppedByTrace.set(traceId, (this.droppedByTrace.get(traceId) ?? 0) + count);
+    }
     const issue: ExportIssue = {
       sequence: ++this.sequence,
       signal,
@@ -615,6 +657,104 @@ function traceIdsOf(records: readonly RecordValue[]): string[] | undefined {
   return ids.size ? [...ids] : undefined;
 }
 
+/** The serialized size of one attribute value, for choosing what to shed first. */
+function valueBytes(value: unknown): number {
+  if (typeof value === "string") return Buffer.byteLength(value);
+  if (value instanceof Uint8Array) return value.byteLength;
+  if (value !== null && typeof value === "object") {
+    try {
+      return Buffer.byteLength(JSON.stringify(value));
+    } catch {
+      return 0;
+    }
+  }
+  return 8;
+}
+
+/** Whether a value is already the receiver's marker for a value that was shed. */
+function isTruncatedMarker(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>)[TRUNCATED_KEY] === true
+  );
+}
+
+/**
+ * The record with its largest content value (a log's body before its attributes) replaced by
+ * the receiver's marker and listed under `hue.truncated`; undefined when no content value is
+ * left to shed. Metadata is never shed: a record too large without its content is lost whole.
+ */
+function shedLargestContent(record: RecordValue, signal: Signal): RecordValue | undefined {
+  if (signal === "logs") {
+    const log = record as ReadableLogRecord;
+    if (log.body !== undefined && !isTruncatedMarker(log.body)) {
+      const bytes = valueBytes(log.body);
+      const attributes: Record<string, unknown> = {
+        ...log.attributes,
+        [TRUNCATED_KEY]: withTruncatedKeys(log.attributes[TRUNCATED_KEY], ["body"]),
+      };
+      return { ...log, body: truncatedMarker(bytes), attributes } as ReadableLogRecord;
+    }
+  }
+  const { attributes } = record;
+  // The record's own content values, and a span's events' (listed as the receiver lists an
+  // event's cut: `event:<name>:<key>`).
+  const events = signal === "traces" ? (record as ReadableSpan).events : [];
+  const links = signal === "traces" ? (record as ReadableSpan).links : [];
+  type Found = { where: "own" | "event" | "link"; index: number; key: string; bytes: number };
+  let largest: Found | undefined;
+  const consider = (where: Found["where"], index: number, key: string, value: unknown) => {
+    if (!isContentKey(key) || isTruncatedMarker(value)) return;
+    const bytes = valueBytes(value);
+    if (!largest || bytes > largest.bytes) largest = { where, index, key, bytes };
+  };
+  for (const [key, value] of Object.entries(attributes)) consider("own", 0, key, value);
+  events.forEach((event, index) => {
+    for (const [key, value] of Object.entries(event.attributes ?? {}))
+      consider("event", index, key, value);
+  });
+  links.forEach((link, index) => {
+    for (const [key, value] of Object.entries(link.attributes ?? {}))
+      consider("link", index, key, value);
+  });
+  if (!largest) return undefined;
+  const found: Found = largest;
+  // Listed as the receiver lists a cut of the same place: the key alone, `event:<name>:<key>`,
+  // or `link:<key>`.
+  const listed =
+    found.where === "own"
+      ? found.key
+      : found.where === "event"
+        ? `event:${events[found.index]!.name}:${found.key}`
+        : `link:${found.key}`;
+  const shed: Record<string, unknown> = {
+    ...attributes,
+    ...(found.where === "own" ? { [found.key]: truncatedMarker(found.bytes) } : {}),
+    [TRUNCATED_KEY]: withTruncatedKeys(attributes[TRUNCATED_KEY], [listed]),
+  };
+  const marker = { [found.key]: truncatedMarker(found.bytes) };
+  if (found.where === "own") return { ...record, attributes: shed } as RecordValue;
+  if (found.where === "event")
+    return {
+      ...record,
+      attributes: shed,
+      events: events.map((event, index) =>
+        index === found.index
+          ? { ...event, attributes: { ...event.attributes, ...marker } }
+          : event,
+      ),
+    } as RecordValue;
+  return {
+    ...record,
+    attributes: shed,
+    links: links.map((link, index) =>
+      index === found.index ? { ...link, attributes: { ...link.attributes, ...marker } } : link,
+    ),
+  } as RecordValue;
+}
+
 class ReportingExporter<T extends RecordValue> {
   private pending = new Set<Promise<void>>();
   constructor(
@@ -754,37 +894,92 @@ class ReportingExporter<T extends RecordValue> {
     // encodings plus a fixed framing margin bounds the request size. Room is left for gzip
     // headers/blocks when otherwise incompressible data is near the wire cap.
     const limit = MAX_BODY_BYTES - 1024;
+    const measure = (record: T) =>
+      this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
+    /** The record, shed until it fits the request limit, and its size; undefined when no content
+     * is left to shed. */
+    const fit = (record: T): { record: T; bytes: number } | undefined => {
+      let bytes = measure(record);
+      // A record over the request limit sheds its content values, largest first, each
+      // replaced by the receiver's marker and listed under `hue.truncated`, until it fits:
+      // the span and what it still holds reach Hue, and a reader sees what was shed. Only a
+      // record too large without any content value is lost, and counted on its root.
+      while (bytes > limit) {
+        const shed = shedLargestContent(record, this.signal);
+        if (!shed) return undefined;
+        record = shed as T;
+        bytes = measure(record);
+      }
+      return { record, bytes };
+    };
+    /** Sends one kind of record in requests up to the limit: completed records, whose roots carry
+     * their traces' dropped-record counts, or placeholders alone (`advisory`). */
     const pack = async (accepted: T[], advisory: boolean) => {
       let batch: T[] = [];
       let batchBytes = 0;
+      // The traces whose root in the batch carries its dropped-record count, consumed once the
+      // request that carries it is acknowledged; a failed request keeps the count.
+      let counted: string[] = [];
       const send = async () => {
         const records = batch;
+        const traces = counted;
         batch = [];
         batchBytes = 0;
+        counted = [];
         // A request of placeholders never fails the export, and none follows an acknowledgement
         // that turned live spans off.
         if (advisory && !this.transport.sendsPlaceholders()) return;
-        if (!(await this.send(records, advisory ? records.length : 0)) && !advisory) {
+        if (await this.send(records, advisory ? records.length : 0)) {
+          this.transport.consumeDroppedRecords(traces);
+        } else if (!advisory) {
           failed = true;
           refused = true;
         }
       };
+      // Every record is measured, shed and, where it cannot be sent, counted lost before any root
+      // is written, so a root carries the losses of children that ended after it.
+      const prepared: { record: T; bytes: number }[] = [];
       for (const record of accepted) {
-        let recordBytes: number;
+        let fitted: { record: T; bytes: number } | undefined;
         try {
-          recordBytes = this.serializer.serializeRequest([record])?.byteLength ?? Infinity;
+          fitted = fit(record);
         } catch {
           invalid(advisory, "Telemetry record could not be serialized", record);
           continue;
         }
-        const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
-        if (batch.length && batchBytes + framedBytes > limit) await send();
-        if (recordBytes > limit) {
+        if (!fitted) {
           invalid(advisory, "Telemetry record exceeds the 1 MiB request limit", record);
           continue;
         }
+        prepared.push(fitted);
+      }
+      for (const entry of prepared) {
+        let { record, bytes: recordBytes } = entry;
+        let carriesCount = false;
+        if (this.signal === "traces" && !advisory) {
+          const withCount = this.transport.withDroppedRecords(record as ReadableSpan) as T;
+          if (withCount !== record) {
+            carriesCount = true;
+            // The count may put a root shed to just under the limit over it again: shed on.
+            let fitted: { record: T; bytes: number } | undefined;
+            try {
+              fitted = fit(withCount);
+            } catch {
+              invalid(false, "Telemetry record could not be serialized", withCount);
+              continue;
+            }
+            if (!fitted) {
+              invalid(false, "Telemetry record exceeds the 1 MiB request limit", withCount);
+              continue;
+            }
+            ({ record, bytes: recordBytes } = fitted);
+          }
+        }
+        const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
+        if (batch.length && batchBytes + framedBytes > limit) await send();
         batch.push(record);
         batchBytes += framedBytes;
+        if (carriesCount) counted.push((record as ReadableSpan).spanContext().traceId);
       }
       if (batch.length) await send();
     };

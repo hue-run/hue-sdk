@@ -38,6 +38,9 @@ MAX_REQUEST_BYTES = 1_048_576
 # matching the TypeScript transport.
 MAX_BATCH_BYTES = MAX_REQUEST_BYTES - 1024
 MAX_CONTENT_BYTES = 262_144
+# The record attribute listing the keys whose values were cut to the cap: Hue's receiver writes
+# it for the values it cuts, and the SDK writes it for the values it cuts before export.
+TRUNCATED_KEY = "hue.truncated"
 DEFAULT_BASE_URL = "https://app.hue.run"
 # The OTLP exporter lets caller headers override its own User-Agent; keep its token after
 # Hue's, as the TypeScript transport does.
