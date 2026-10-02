@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:2d7b1b279792d6a2a75e9195790ef54d0f57e6f2ee3eb3e9616030dd8feb245f",
+    "sha256": "sha256:79db2fde5338be57b970cd4e34ee4fde23b275351047c9d9abcc3316444e98c3",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -103,7 +103,7 @@
         }
       },
       "name": "hue-run",
-      "version": "0.6.4"
+      "version": "0.7.0"
     },
     "typescript": {
       "bins": {
@@ -501,7 +501,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.12.1"
+      "version": "0.13.0"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -510,10 +510,10 @@
     "description": "Set up or troubleshoot Hue tracing in an existing application, preserving its provider, framework, and OpenTelemetry setup, and read production traces over the Hue MCP. Use when a developer asks to set up or integrate Hue, verify that requests reach Hue, or find out what needs attention, fails or is slow in production.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.5.10"
+      "version": "0.5.11"
     },
     "name": "hue",
-    "sha256": "sha256:e0317f5856c4b3d49467a7741ffa2f76e43abbc13ce9ed6ac6b7b431340f57d5",
+    "sha256": "sha256:03ecf373f3d5ff256a2bf82e19450af339326c8d0b09b5c836379c6c4f0647cd",
     "source": "skills/hue/SKILL.md"
   }
 }

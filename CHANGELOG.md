@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.13.0] - 2026-10-02
+
 #### Added
 
 - A target's throw on a service that refused it is completed with the service's own word for what
@@ -1220,6 +1222,8 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+### [0.7.0] - 2026-10-02
 
 #### Added
 
