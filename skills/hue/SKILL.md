@@ -192,13 +192,17 @@ organization connection as under Verify delivery):
 
 1. `get_trace` for the trace's current revision.
 2. `add_case_conversion` with `trace_id`, `expected_trace_revision` and an `idempotency_key`.
-3. Poll `get_case_conversion` until the build finishes.
+3. Poll `get_case_conversion` until the build finishes, then call it with
+   `include_content: true` to read the task, the starting world and the criteria you are about
+   to accept. Every write below takes the `revision` of your latest read as
+   `expected_revision`; read the draft again after each write before the next one.
 4. If the draft asks "Was this run correct?", answer with `update_case_conversion` and
    `run_was_correct`.
 5. Review the criteria and accept them: `update_case_conversion` with `reviewed_criteria`
    (`accepted_criteria_digest`), `reviewed_task` and `authored_closed_world`.
 6. Publish only when `get_case_conversion` reports `ready: true` (trust checks 1 and 2 pass,
-   and check 3's empty run fails): `publish_case_conversion` with `name`.
+   and check 3's empty run fails): `publish_case_conversion` with `name` and the current
+   `expected_revision`.
 
 The `case_from_trace` MCP prompt runs this sequence. Publishing saves the eval-set version when
 Hue may; otherwise use **Save eval-set version**, `freeze_eval_set_version` or
