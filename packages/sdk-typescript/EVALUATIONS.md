@@ -146,7 +146,7 @@ A callback receives `{inputs,hasOutput,output?,hasExpected,expected?,metadata,ex
 - `{state:"error",error:{type,message?}}`.
 - `{state:"skipped",explanation:"reason"}`.
 
-All declared metrics must appear exactly once and satisfy pinned types, bounds and categories. The binding must match language, entrypoint, SHA-256 source digest and metric definitions. The digest is an authenticated caller declaration; it does not attest closures, dependency versions or actual execution. Callback source is never downloaded or evaluated. Callbacks are trusted local code; they have **no execution timeout or side-effect cancellation**. Concurrency limits active cases to 1–16 (default 1), with scorers evaluated sequentially within each case.
+All declared metrics must appear exactly once and satisfy pinned types, bounds and categories. Each metric may include an optional `description` (1–500 characters) shown with its check in Hue's run view. The binding must match language, entrypoint, SHA-256 source digest and metric definitions. The digest is an authenticated caller declaration; it does not attest closures, dependency versions or actual execution. Callback source is never downloaded or evaluated. Callbacks are trusted local code; they have **no execution timeout or side-effect cancellation**. Concurrency limits active cases to 1–16 (default 1), with scorers evaluated sequentially within each case.
 
 `files` is present only when the runner handled files for that execution: every pinned input file
 (all roles, including the evaluator-only `org_template`) and every generated output, each with its

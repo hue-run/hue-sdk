@@ -50,7 +50,11 @@ export function defineLocalScorer(options: {
       language: "typescript",
       entrypoint: options.entrypoint,
       sourceDigest: sourceDigest(options.source),
-      metrics: options.metrics,
+      metrics: options.metrics.map((metric) =>
+        metric.description === undefined
+          ? metric
+          : { ...metric, description: metric.description.trim() },
+      ),
     },
     score: options.score,
   };

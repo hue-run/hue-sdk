@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { normalizeScorerDefinitionForPublication } from "../src/evals/scorer-publication.js";
+import { defineLocalScorer } from "../src/evals.js";
 import type { ScorerDefinition } from "../src/evals.js";
 
 const metric = { name: "quality", type: "boolean" } as const;
@@ -61,6 +62,35 @@ const outcomeAssertionsV3 = {
 } satisfies ScorerDefinition;
 
 describe("scorer publication normalization", () => {
+  test("preserves metric descriptions and rejects blank descriptions", () => {
+    const definition = {
+      kind: "manual",
+      metrics: [{ name: "quality", type: "boolean", description: "  Checks quality.  " }],
+    } satisfies ScorerDefinition;
+    expect(normalizeScorerDefinitionForPublication(definition)).toEqual({
+      kind: "manual",
+      metrics: [{ name: "quality", type: "boolean", description: "Checks quality." }],
+    });
+    expect(() =>
+      normalizeScorerDefinitionForPublication({
+        kind: "manual",
+        metrics: [{ name: "quality", type: "boolean", description: "  " }],
+      }),
+    ).toThrow(TypeError);
+  });
+
+  test("local scorer bindings use normalized metric descriptions", () => {
+    const local = defineLocalScorer({
+      source: "score-v1",
+      entrypoint: "score",
+      metrics: [{ name: "quality", type: "boolean", description: "  Checks quality.  " }],
+      score: () => ({ state: "skipped", explanation: "Not run" }),
+    });
+    const published = normalizeScorerDefinitionForPublication(local.definition);
+    if (published.kind !== "local_code") throw new Error("Expected a local scorer definition");
+    expect(local.definition).toEqual(published);
+  });
+
   test.each([
     [
       "conversion outcome v2 metrics",
