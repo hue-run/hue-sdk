@@ -312,7 +312,9 @@ in the codebase's language and trim the functions no call site uses.
    clock reads with `worldNow() ?? new Date()` from `@hue-run/sdk/environment` or
    `world_now() or datetime.now(timezone.utc)` from `hue_sdk.environment` (both return `null` or
    `None` without `HUE_WORLD_NOW`), or a copy that reads `HUE_WORLD_NOW` during an eval and the wall
-   clock otherwise, gated on `inHueEval()` so a stray value can't change production; if production
+   clock otherwise, gated on `inHueEval()` so a stray value can't change production, and in an
+   in-process adapter read the supplied world (`worldNow(context.world) ?? new Date()`, or the
+   copied helper given `context.world.env`), since the process environment holds no world there; if production
    already puts today's date in the prompt, take it from the same function, and if the model
    infers dates and the agent never reads the clock, change nothing. `hue eval` runs the agent
    where you start it: to evaluate a deployed agent, run its code locally with `--command`, or
