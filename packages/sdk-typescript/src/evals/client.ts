@@ -61,8 +61,10 @@ import type {
   Subject,
   StoredResult,
   StoredScoringResult,
+  IdentityUpdate,
   Tag,
   TaggedIdentity,
+  UpdatedRun,
 } from "./types.js";
 
 /** Connection options for {@link createEvaluationClient}. */
@@ -165,8 +167,6 @@ function productRegistryFields<T>(value: unknown): T {
   return result as T;
 }
 
-/** A dataset's or scorer's identity fields and tags to change; omitted fields stay. */
-type IdentityUpdate = { name?: string; description?: string; tags?: string[] };
 /** Tag names travel as given; anything but a list of strings is a caller error. */
 function tagNames(tags: unknown): string[] {
   if (!Array.isArray(tags) || !tags.every((tag) => typeof tag === "string"))
@@ -691,16 +691,14 @@ export class EvaluationClient {
   }
   /** Renames an experiment or replaces its own tags by name. */
   updateExperiment(id: string, input: { name?: string; tags?: string[] }) {
-    return this.request<{
-      /** Experiment ID. */
-      id: string;
-      /** Display name. */
-      name: string;
-      /** The experiment's own tags. */
-      tags: Tag[];
-      /** Its dataset's tags. */
-      evalSetTags: Tag[];
-    }>("PATCH", `/experiments/${uuid(id)}`, withTagNames(input), undefined, undefined, true);
+    return this.request<UpdatedRun>(
+      "PATCH",
+      `/experiments/${uuid(id)}`,
+      withTagNames(input),
+      undefined,
+      undefined,
+      true,
+    );
   }
   /** Lists an experiment's cases with their latest executions. */
   listExperimentItems(id: string, page?: PageOptions) {
@@ -946,10 +944,7 @@ export class EvaluationClient {
     return productRunFields(await this.getExperiment(id), "run");
   }
   /** Renames a run or replaces its own tags by name; its eval set's tags are not its own. */
-  async updateRun(
-    id: string,
-    input: { name?: string; tags?: string[] },
-  ): Promise<{ id: string; name: string; tags: Tag[]; evalSetTags: Tag[] }> {
+  async updateRun(id: string, input: { name?: string; tags?: string[] }): Promise<UpdatedRun> {
     return this.updateExperiment(id, input);
   }
   /** Lists a run's cases with their latest executions. */

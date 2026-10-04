@@ -37,6 +37,26 @@ export interface TaggedIdentity extends Identity {
   /** Tag names; a name the project has no tag for creates one. */
   tags?: string[];
 }
+/** Identity fields and tags to change on a dataset or scorer; omitted fields stay. */
+export interface IdentityUpdate {
+  /** New display name. */
+  name?: string;
+  /** New description. */
+  description?: string;
+  /** Every tag name the item should carry; replaces its tags. */
+  tags?: string[];
+}
+/** An experiment's (run's) name and tags after an update. */
+export interface UpdatedRun {
+  /** Experiment (run) ID. */
+  id: string;
+  /** Display name. */
+  name: string;
+  /** The experiment's own tags. */
+  tags: Tag[];
+  /** Its dataset's (eval set's) tags. */
+  evalSetTags: Tag[];
+}
 /** The colors a tag can take. */
 export type TagColor =
   | "default"
