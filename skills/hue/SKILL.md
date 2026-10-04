@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.6.0"
+  version: "0.6.1"
 ---
 
 # Hue
@@ -140,6 +140,10 @@ MCP arguments and results name ids after their product objects: `eval_set_id`,
 `scoring_run_id`, `scoring_item_id`, `managed_run_id`, `local_run_id`, `case_id`,
 `environment_version_id` and `trace_check_version_id`. List results use `eval_sets`, `evaluators`,
 `runs`, `scoring_runs` and `cases`; a row's own id stays `id`.
+To group eval sets, evaluators or runs, for example by the area of the agent they test, call
+`set_tags` with the item's id or link as `item_id` and every tag name it should carry: a new name
+creates a tag and `[]` clears them. `list_eval_sets`, `list_evaluators` and `list_runs` take a
+`tags` filter and return each item's tags; a run also matches its eval set's tags.
 
 1. Select the project. When the Hue tools take a `project_id` argument, the connection covers an
    organization: call `list_projects`, confirm with the user which project to read when more than
@@ -215,7 +219,7 @@ needs a person (T5) is never published. Run results report per tier, and judges 
 ## Evaluate a published case
 
 When the user asks to evaluate or regression-test their agent against a published Hue case, or to
-make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.13.0
+make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.13.1
 (`HUE_WORLD_NOW` needs 0.13.0; `--case` and `--command` are available since 0.12.1). `hue eval`
 runs on Node.js 22 or 24, also for a Python agent, and the agent itself needs no Hue package.
 Hue never executes the agent: it runs in the user's process, and Hue only hosts the isolated
@@ -337,7 +341,7 @@ in the codebase's language and trim the functions no call site uses.
    shell:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.13.0 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
    ```
 
    The two `--package` flags put the CLI and its `zod` peer in npx's cache, so the agent's
@@ -386,7 +390,7 @@ in the codebase's language and trim the functions no call site uses.
 7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.13.0 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --env-file .env.hue
    ```
 
 Before finishing, verify and report each of these:

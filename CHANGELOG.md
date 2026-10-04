@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### Unreleased
 
+### [0.13.1] - 2026-10-04
+
 #### Added
 
 - Optional per-metric descriptions in TypeScript scorer declarations; publishing them requires a
@@ -1238,6 +1240,8 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### Unreleased
+
+### [0.7.1] - 2026-10-04
 
 #### Added
 
