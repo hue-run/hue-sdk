@@ -233,10 +233,12 @@ finally:
 evidence = client.get_evidence(run["id"], section="ledger")
 ```
 
-`agent_environment` removes `HUE_API_KEY`, `HUE_MCP_KEY` and any `hue_sk_`, `hue_mcp_` or
-`hue_attempt_` value unless `include_hue_credentials=True`, and for one compatibility release also
-sets `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` from the first MCP mirror. Nothing
-here logs the token. The world has its own date: `world["now"]` (also `HUE_WORLD_NOW` in the child's
+`agent_environment` removes `HUE_API_KEY`, `HUE_MCP_KEY` and any value carrying a Hue control-plane
+credential (`hue_sk_`, `hue_setup_`, `hue_attempt_`, `hue_mcp_`, `hue_inv_`, `hue_install_`,
+`hue_at_`, `hue_rt_`, `hue_oauth_`) anywhere in it, including wrapped or percent-encoded, unless
+`include_hue_credentials=True`; world tokens and `hue_sim_` capabilities pass. For one compatibility
+release it also sets `HUE_MCP_URL`, `HUE_MCP_TOKEN` and `HUE_MCP_EXPIRES_AT` from the first MCP
+mirror. Nothing here logs the token. The world has its own date: `world["now"]` (also `HUE_WORLD_NOW` in the child's
 environment) is the world's clock at creation, a trace-built world's recorded start, and
 `world_now()` reads it as an aware `datetime` from a handoff or from the environment. An agent
 that computes "today", "tomorrow" or `newer_than:7d` from it lands on the recorded dates however

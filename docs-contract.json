@@ -193,6 +193,7 @@
             "GmailMailboxConfigurationV1",
             "GmailMailboxConfigurationV2",
             "GmailProviderInstance",
+            "HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES",
             "HUE_CONTROL_PLANE_VARIABLES",
             "HueEnvironmentError",
             "JsonValue",

@@ -16,6 +16,7 @@ import pytest
 
 import hue_sdk.environment.client as environment_module
 from hue_sdk.environment import (
+    HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES,
     EnvironmentClient,
     EnvironmentSealTimeoutError,
     HueEnvironmentError,
@@ -24,6 +25,7 @@ from hue_sdk.environment import (
     is_hue_control_plane_credential,
     legacy_mcp_capability,
     mcp_config_file,
+    strip_hue_control_plane_credentials,
     without_world_variables,
     world_handoff,
     world_now,
@@ -166,6 +168,17 @@ def test_handoff_carries_the_worlds_now_and_world_now_reads_it_where_an_agent_re
 def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in():
     world = world_handoff(gateway_run())
     assert world is not None
+    assert HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES == (
+        "hue_sk_",
+        "hue_attempt_",
+        "hue_mcp_",
+        "hue_setup_",
+        "hue_inv_",
+        "hue_install_",
+        "hue_at_",
+        "hue_rt_",
+        "hue_oauth_",
+    )
     parent = {
         "PATH": "/usr/bin",
         "OPENAI_API_KEY": "customer-model-key",
@@ -173,11 +186,51 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
         "HUE_MCP_KEY": "hue_mcp_project",
         "ANOTHER_KEY": "hue_sk_live_aaaaaaaaaaaa_secret",
         "GRANT": "hue_attempt_" + "a" * 20 + "." + "b" * 43,
+        "SETUP_CREDENTIAL": "hue_setup_test_setup-" + "a" * 24 + "_" + "s" * 43,
+        "ACCESS_TOKEN": "hue_at_" + "a" * 43,
+        "REFRESH_TOKEN": "hue_rt_" + "a" * 43,
+        "INSTALL_TOKEN": "hue_install_" + "a" * 43,
+        "INVOCATION_TOKEN": "hue_inv_" + "a" * 43,
+        "OAUTH_SECRET": "hue_oauth_secret_" + "a" * 43,
+        "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer " + KEY,
+        "JSON_CREDENTIAL": '{"key":"' + KEY + '"}',
+        "URL_CREDENTIAL": "https://x.test/?key=" + KEY,
+        "PERCENT_ENCODED_CREDENTIAL": (
+            "https://x.test/?key=%68ue_sk_test_" + "a" * 12 + "_" + "s" * 43
+        ),
+        "DOUBLE_PERCENT_ENCODED_CREDENTIAL": (
+            "https://x.test/?key=%2568ue_sk_test_" + "a" * 12 + "_" + "s" * 43
+        ),
+        "OVERENCODED_CREDENTIAL": (
+            "https://x.test/?key=%2525252568ue_sk_test_" + "a" * 12 + "_" + "s" * 43
+        ),
         "HUE_BASE_URL": "https://app.hue.test",
+        "GUIDE_PATH": "guides/hue_setup.md",
+        "LOOKALIKE": "my_hue_sk_notes",
+        "WORLD_TOKEN_COPY": "hue_world_" + "w" * 64,
+        "SIM_CAPABILITY": "hue_sim_x",
+        "VARIABLE_REFERENCE": "Bearer ${HUE_MCP_KEY}",
         "HUE_WORLD_TOKEN": "stale",
     }
     child = agent_environment(world, parent=parent)
-    for name in ("HUE_API_KEY", "HUE_MCP_KEY", "ANOTHER_KEY", "GRANT"):
+    for name in (
+        "HUE_API_KEY",
+        "HUE_MCP_KEY",
+        "ANOTHER_KEY",
+        "GRANT",
+        "SETUP_CREDENTIAL",
+        "ACCESS_TOKEN",
+        "REFRESH_TOKEN",
+        "INSTALL_TOKEN",
+        "INVOCATION_TOKEN",
+        "OAUTH_SECRET",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "JSON_CREDENTIAL",
+        "URL_CREDENTIAL",
+        "PERCENT_ENCODED_CREDENTIAL",
+        "DOUBLE_PERCENT_ENCODED_CREDENTIAL",
+        "OVERENCODED_CREDENTIAL",
+    ):
         assert name not in child
     assert child["PATH"] == "/usr/bin"
     assert child["OPENAI_API_KEY"] == "customer-model-key"
@@ -194,6 +247,17 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
     assert "HUE_MCP_URL" not in agent_environment(world, parent=parent, legacy_mcp_variables=False)
     assert is_hue_control_plane_credential("X", "hue_sk_test_abc_def")
     assert not is_hue_control_plane_credential("X", "sk-live-not-hue")
+    assert strip_hue_control_plane_credentials(parent) == {
+        "PATH": "/usr/bin",
+        "OPENAI_API_KEY": "customer-model-key",
+        "HUE_BASE_URL": "https://app.hue.test",
+        "GUIDE_PATH": "guides/hue_setup.md",
+        "LOOKALIKE": "my_hue_sk_notes",
+        "WORLD_TOKEN_COPY": "hue_world_" + "w" * 64,
+        "SIM_CAPABILITY": "hue_sim_x",
+        "VARIABLE_REFERENCE": "Bearer ${HUE_MCP_KEY}",
+        "HUE_WORLD_TOKEN": "stale",
+    }
 
 
 def test_legacy_projection_uses_the_first_mcp_mirror():

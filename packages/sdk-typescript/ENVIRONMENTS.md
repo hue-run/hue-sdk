@@ -328,8 +328,10 @@ type; see [EVALUATIONS.md](EVALUATIONS.md#direct-cases-and-files).
 A refusal such as 409 `simulation_gateway_required` exposes its validated server code as `HueEnvironmentError.diagnostic`.
 
 `agentEnvironment` removes Hue control-plane credentials from the child by default: `HUE_API_KEY`,
-`HUE_MCP_KEY` and any variable whose value is a `hue_sk_`, `hue_mcp_` or `hue_attempt_`
-credential. Pass `includeHueCredentials: true` only for an agent that must call Hue's own API.
+`HUE_MCP_KEY`, and any value carrying a Hue control-plane credential (`hue_sk_`, `hue_setup_`,
+`hue_attempt_`, `hue_mcp_`, `hue_inv_`, `hue_install_`, `hue_at_`, `hue_rt_`, `hue_oauth_`)
+anywhere in it, including wrapped or percent-encoded. World tokens and `hue_sim_` capabilities
+pass. Pass `includeHueCredentials: true` only for an agent that must call Hue's own API.
 Nothing in these helpers logs the token; keep it out of your own logs and checkpoints.
 
 Finish answers `lifecycle: "completing"` with `sealedAt: null` for a gateway world: the seal

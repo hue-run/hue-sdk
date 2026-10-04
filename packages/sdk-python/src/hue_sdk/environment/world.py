@@ -28,8 +28,40 @@ HUE_CONTROL_PLANE_VARIABLES: tuple[str, ...] = (
     "HUE_PROJECT_KEY",
     "HUE_SERVICE_KEY",
 )
-# Hue's own credential shapes: project keys, attempt grants and the project MCP key.
-_HUE_CREDENTIAL_SHAPE = re.compile(r"^hue_(sk|attempt|mcp)_")
+HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: tuple[str, ...] = (
+    "hue_sk_",
+    "hue_attempt_",
+    "hue_mcp_",
+    "hue_setup_",
+    "hue_inv_",
+    "hue_install_",
+    "hue_at_",
+    "hue_rt_",
+    "hue_oauth_",
+)
+_HUE_CREDENTIAL_PREFIX_PATTERN = "|".join(
+    re.escape(prefix) for prefix in HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES
+)
+_HUE_CREDENTIAL_SHAPE = re.compile(rf"(?:^|[^A-Za-z0-9_])(?:{_HUE_CREDENTIAL_PREFIX_PATTERN})")
+_ASCII_PERCENT_ESCAPE = re.compile(r"%[0-7][0-9a-f]", re.IGNORECASE)
+
+
+def _has_hue_control_plane_credential(value: str) -> bool:
+    decoded = value
+    for layer in range(5):
+        if _HUE_CREDENTIAL_SHAPE.search(decoded):
+            return True
+        if not _ASCII_PERCENT_ESCAPE.search(decoded):
+            return False
+        if layer == 4:
+            return True
+        decoded = re.sub(
+            r"%([0-7][0-9a-f])",
+            lambda match: chr(int(match.group(1), 16)),
+            decoded,
+            flags=re.IGNORECASE,
+        )
+    return False
 
 
 def world_handoff(run: EnvironmentRun) -> WorldHandoff | None:
@@ -90,10 +122,11 @@ def world_now(source: WorldHandoff | Mapping[str, str] | None = None) -> datetim
 
 
 def is_hue_control_plane_credential(name: str, value: str | None) -> bool:
-    """True for a control-plane variable by name, or for any variable holding a Hue credential."""
+    """True for a control-plane variable by name, or for a value carrying a Hue control-plane
+    credential anywhere in it, including wrapped or percent-encoded values."""
     if name in HUE_CONTROL_PLANE_VARIABLES:
         return True
-    return isinstance(value, str) and _HUE_CREDENTIAL_SHAPE.match(value.strip()) is not None
+    return isinstance(value, str) and _has_hue_control_plane_credential(value)
 
 
 def strip_hue_control_plane_credentials(parent: Mapping[str, str]) -> dict[str, str]:

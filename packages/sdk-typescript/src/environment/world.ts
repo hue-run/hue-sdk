@@ -59,13 +59,44 @@ export const HUE_CONTROL_PLANE_VARIABLES: readonly string[] = [
   "HUE_PROJECT_KEY",
   "HUE_SERVICE_KEY",
 ];
-/** Hue's own credential shapes: project keys, attempt grants and the project MCP key. */
-const HUE_CREDENTIAL_SHAPE = /^hue_(sk|attempt|mcp)_/;
+/** Prefixes of the Hue control-plane credentials the server issues: project and setup keys,
+ * attempt grants, the project MCP key, invocation and installation tokens, and OAuth tokens and
+ * secrets. World tokens (`hue_world_`) and MCP capabilities (`hue_sim_`) are what the agent holds. */
+export const HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: readonly string[] = [
+  "hue_sk_",
+  "hue_attempt_",
+  "hue_mcp_",
+  "hue_setup_",
+  "hue_inv_",
+  "hue_install_",
+  "hue_at_",
+  "hue_rt_",
+  "hue_oauth_",
+];
+/** A Hue credential anywhere in a value (`Bearer hue_sk_…`, a URL, a JSON blob), not inside a longer word. */
+const HUE_CREDENTIAL_SHAPE = new RegExp(
+  `(?:^|[^A-Za-z0-9_])(?:${HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES.join("|")})`,
+);
+const ASCII_PERCENT_ESCAPE = /%[0-7][0-9a-f]/i;
 
-/** True for a control-plane variable by name, or for any variable holding a Hue credential. */
+function hasHueControlPlaneCredential(value: string): boolean {
+  let decoded = value;
+  for (let layer = 0; layer <= 4; layer++) {
+    if (HUE_CREDENTIAL_SHAPE.test(decoded)) return true;
+    if (!ASCII_PERCENT_ESCAPE.test(decoded)) return false;
+    if (layer === 4) return true;
+    decoded = decoded.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    );
+  }
+  return false;
+}
+
+/** True for a control-plane variable by name, or for a value carrying a Hue control-plane
+ * credential anywhere in it, including wrapped or percent-encoded values. */
 export function isHueControlPlaneCredential(name: string, value: string | undefined): boolean {
   if (HUE_CONTROL_PLANE_VARIABLES.includes(name)) return true;
-  return typeof value === "string" && HUE_CREDENTIAL_SHAPE.test(value.trim());
+  return typeof value === "string" && hasHueControlPlaneCredential(value);
 }
 
 /** The parent's variables without Hue control-plane credentials; `undefined` values are dropped. */

@@ -15,6 +15,11 @@ refuses to publish a version without a matching entry below.
 - Optional per-metric descriptions in TypeScript scorer declarations; publishing them requires a
   Hue server that accepts metric descriptions.
 
+#### Fixed
+
+- `agentEnvironment` strips every Hue control-plane credential from inherited values, including
+  wrapped and percent-encoded forms, while preserving world tokens and `hue_sim_` capabilities.
+
 ### [0.13.0] - 2026-10-02
 
 #### Added
@@ -1232,6 +1237,11 @@ No registry release is claimed until publication and registry acceptance complet
 
 - Optional per-metric descriptions in Python scorer declarations; publishing them requires a Hue
   server that accepts metric descriptions.
+
+#### Fixed
+
+- `agent_environment` strips every Hue control-plane credential from inherited values, including
+  wrapped and percent-encoded forms, while preserving world tokens and `hue_sim_` capabilities.
 
 ### [0.7.0] - 2026-10-02
 

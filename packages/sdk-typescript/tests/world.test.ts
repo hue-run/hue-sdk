@@ -14,6 +14,7 @@ import {
 import {
   agentEnvironment,
   createEnvironmentClient,
+  HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES,
   HueEnvironmentError,
   isHueControlPlaneCredential,
   legacyMcpCapability,
@@ -253,7 +254,24 @@ describe("world handoff helpers", () => {
       HUE_MCP_KEY: "hue_mcp_project",
       ANOTHER_KEY: `hue_sk_live_${"a".repeat(12)}_secret`,
       GRANT: `hue_attempt_${"a".repeat(20)}.${"b".repeat(43)}`,
+      SETUP_CREDENTIAL: `hue_setup_test_setup-${"a".repeat(24)}_${"s".repeat(43)}`,
+      ACCESS_TOKEN: `hue_at_${"a".repeat(43)}`,
+      REFRESH_TOKEN: `hue_rt_${"a".repeat(43)}`,
+      INSTALL_TOKEN: `hue_install_${"a".repeat(43)}`,
+      INVOCATION_TOKEN: `hue_inv_${"a".repeat(43)}`,
+      OAUTH_SECRET: `hue_oauth_secret_${"a".repeat(43)}`,
+      OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${key}`,
+      JSON_CREDENTIAL: `{"key":"${key}"}`,
+      URL_CREDENTIAL: `https://x.test/?key=${key}`,
+      PERCENT_ENCODED_CREDENTIAL: `https://x.test/?key=%68ue_sk_test_${"a".repeat(12)}_${"s".repeat(43)}`,
+      DOUBLE_PERCENT_ENCODED_CREDENTIAL: `https://x.test/?key=%2568ue_sk_test_${"a".repeat(12)}_${"s".repeat(43)}`,
+      OVERENCODED_CREDENTIAL: `https://x.test/?key=%2525252568ue_sk_test_${"a".repeat(12)}_${"s".repeat(43)}`,
       HUE_BASE_URL: "https://app.hue.test",
+      GUIDE_PATH: "guides/hue_setup.md",
+      LOOKALIKE: "my_hue_sk_notes",
+      WORLD_TOKEN_COPY: `hue_world_${"w".repeat(64)}`,
+      SIM_CAPABILITY: "hue_sim_x",
+      VARIABLE_REFERENCE: "Bearer ${HUE_MCP_KEY}",
       EMPTY: undefined,
     };
     const child = agentEnvironment(world, { parent });
@@ -261,6 +279,18 @@ describe("world handoff helpers", () => {
     expect(child).not.toHaveProperty("HUE_MCP_KEY");
     expect(child).not.toHaveProperty("ANOTHER_KEY");
     expect(child).not.toHaveProperty("GRANT");
+    expect(child).not.toHaveProperty("SETUP_CREDENTIAL");
+    expect(child).not.toHaveProperty("ACCESS_TOKEN");
+    expect(child).not.toHaveProperty("REFRESH_TOKEN");
+    expect(child).not.toHaveProperty("INSTALL_TOKEN");
+    expect(child).not.toHaveProperty("INVOCATION_TOKEN");
+    expect(child).not.toHaveProperty("OAUTH_SECRET");
+    expect(child).not.toHaveProperty("OTEL_EXPORTER_OTLP_HEADERS");
+    expect(child).not.toHaveProperty("JSON_CREDENTIAL");
+    expect(child).not.toHaveProperty("URL_CREDENTIAL");
+    expect(child).not.toHaveProperty("PERCENT_ENCODED_CREDENTIAL");
+    expect(child).not.toHaveProperty("DOUBLE_PERCENT_ENCODED_CREDENTIAL");
+    expect(child).not.toHaveProperty("OVERENCODED_CREDENTIAL");
     expect(child).not.toHaveProperty("EMPTY");
     expect(child).toMatchObject({
       PATH: "/usr/bin",
@@ -313,10 +343,26 @@ describe("world handoff helpers", () => {
     });
     expect(isHueControlPlaneCredential("X", "hue_sk_test_abc_def")).toBe(true);
     expect(isHueControlPlaneCredential("X", "sk-live-not-hue")).toBe(false);
+    expect(HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES).toEqual([
+      "hue_sk_",
+      "hue_attempt_",
+      "hue_mcp_",
+      "hue_setup_",
+      "hue_inv_",
+      "hue_install_",
+      "hue_at_",
+      "hue_rt_",
+      "hue_oauth_",
+    ]);
     expect(stripHueControlPlaneCredentials(parent)).toEqual({
       PATH: "/usr/bin",
       OPENAI_API_KEY: "customer-model-key",
       HUE_BASE_URL: "https://app.hue.test",
+      GUIDE_PATH: "guides/hue_setup.md",
+      LOOKALIKE: "my_hue_sk_notes",
+      WORLD_TOKEN_COPY: `hue_world_${"w".repeat(64)}`,
+      SIM_CAPABILITY: "hue_sim_x",
+      VARIABLE_REFERENCE: "Bearer ${HUE_MCP_KEY}",
     });
   });
 
