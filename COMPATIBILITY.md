@@ -1,6 +1,6 @@
 # Compatibility
 
-These compatibility notes cover TypeScript `0.13.1` and Python `0.7.1`. Check [npm](https://www.npmjs.com/package/@hue-run/sdk) and [PyPI](https://pypi.org/project/hue-run/) for published availability. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+The published releases are TypeScript `0.13.1` and Python `0.7.1`. See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |

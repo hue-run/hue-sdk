@@ -64,7 +64,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The TypeScript package in this checkout is [`0.13.1`](https://www.npmjs.com/package/@hue-run/sdk), with
+The published TypeScript package is [`0.13.1`](https://www.npmjs.com/package/@hue-run/sdk), with
 case errors that say what stopped the case (a service that refused, dropped the connection or
 timed out, or a status Hue's own clients were refused with, never filed as the agent's),
 trace evidence that can complete pending, `hue eval` naming an inconclusive case,
@@ -73,7 +73,7 @@ failed claimed run from its checkpoints before giving it up as attention,
 export failures attributed to the traces they concerned,
 `hue mcp install` sign-in with Hue (the default for Claude Code, Codex and Conductor), Conductor, project pinning, read-only and current toolset options (every tool for agents that search their own tools), live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
 `runLocalAgent()`, V2 environments and the local
-[setup CLI core](./packages/sdk-typescript/CLI.md). The Python package in this checkout is [`0.7.1`](https://pypi.org/project/hue-run/), with case errors that say what stopped the case, trace evidence that can complete pending, an evaluation client that retries transient failures and export failures attributed to their own case, live spans, the same
+[setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.7.1`](https://pypi.org/project/hue-run/), with case errors that say what stopped the case, trace evidence that can complete pending, an evaluation client that retries transient failures and export failures attributed to their own case, live spans, the same
 product-named evaluation client methods and the MCP `mcp=` option. Existing low-level
 methods remain callable. Setup's Python path still installs its separately tested
 package pin. Both packages include Langfuse metadata-only filtering, content truncation and isolated live-span acknowledgements; see [Changelog](./CHANGELOG.md) for the capture-policy migration. Package checks use synthetic local services.
