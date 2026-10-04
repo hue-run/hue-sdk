@@ -107,6 +107,24 @@ evidence and scoring while retaining this runner's checkpoint guarantees. See
 Cases whose inputs are a task plus pinned documents, and rescoring over documents a run already
 saved, use the same runner without a world. See [Direct cases and files](#direct-cases-and-files).
 
+## Tags
+
+Tags group datasets, scorers and experiments, for example by the area of the agent they test.
+Methods take tag names: a name the project has no tag for creates one, and names match without
+case. `createDataset`, `createScorer` and `createExperiment` accept `tags`; `updateDataset`,
+`updateScorer` and `updateExperiment` replace an item's tags; `listDatasets` and `listScorers`
+filter by `tags`, matching any of them; and `listTags()` returns the project's tags. An experiment
+also shows its dataset's tags, which experiment filters match as well. The product-named methods
+(`createEvalSet`, `updateEvalSet`, `listEvalSets`, `createEvaluator`, `updateEvaluator`,
+`listEvaluators`, `createRun`, `updateRun`) take the same `tags`. Tags require a Hue server that
+supports them.
+
+```ts
+await client.createEvalSet({ name: "Refunds", slug: "refunds", tags: ["billing"] });
+await client.updateEvaluator(evaluatorId, { tags: ["billing", "regression"] });
+const billing = await client.listEvalSets({ tags: ["billing"] });
+```
+
 ## Content and result states
 
 Both choices are required and independent:

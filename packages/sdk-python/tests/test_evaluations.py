@@ -446,7 +446,7 @@ def options(receiver, tmp_path, target, *, persist=True, evidence=None):
     )
 
 
-def test_transient_failures_are_sent_again_for_reads_and_keyed_mutations_only():
+def test_transient_failures_are_sent_again_for_reads_updates_and_keyed_mutations_only():
     seen: list[tuple[str, str]] = []
     replies: list[tuple[int, dict[str, str]]] = []
 
@@ -455,6 +455,9 @@ def test_transient_failures_are_sent_again_for_reads_and_keyed_mutations_only():
             self.answer()
 
         def do_POST(self):
+            self.answer()
+
+        def do_PATCH(self):
             self.answer()
 
         def answer(self):
@@ -505,6 +508,16 @@ def test_transient_failures_are_sent_again_for_reads_and_keyed_mutations_only():
 
         value, error, sends = exchange([(502, {})], launch)
         assert value == {"id": "synthetic"} and error is None and sends == 2
+
+        # So is an update, which sets the same values however often it lands.
+        item_id = str(uuid4())
+        for update in (
+            lambda: client.update_dataset(item_id, tags=["Billing"]),
+            lambda: client.update_scorer(item_id, name="Exact"),
+            lambda: client.update_experiment(item_id, tags=[]),
+        ):
+            value, error, sends = exchange([(503, {}), (502, {})], update)
+            assert value == {"id": "synthetic"} and error is None and sends == 3
 
         # A mutation without a key is sent once; its caller resolves the outcome first.
         def create():
@@ -1743,3 +1756,95 @@ def test_pending_evidence_completes_in_the_true_state_when_the_export_fails(
                 receiver, tmp_path, lambda *_: "reply", evidence=TraceEvidence("pending", "why")
             )
         )
+
+
+def test_tags_travel_by_name_on_creates_list_filters_updates_and_the_tag_list():
+    seen: list[tuple[str, str, object]] = []
+    tag = {"id": str(uuid4()), "name": "Billing", "color": "blue"}
+    item_id = str(uuid4())
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.respond("GET")
+
+        def do_POST(self):
+            self.respond("POST")
+
+        def do_PATCH(self):
+            self.respond("PATCH")
+
+        def respond(self, method):
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            seen.append((method, self.path, json.loads(raw) if raw else None))
+            path = urlsplit(self.path).path
+            if path == "/api/v1/tags":
+                value: dict[str, object] = {"items": [tag]}
+            elif method == "GET":
+                value = {"items": [], "nextCursor": None}
+            else:
+                value = {"id": item_id, "name": "Nightly", "tags": [tag], "evalSetTags": []}
+            payload = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = EvaluationClient(f"http://127.0.0.1:{server.server_port}", "synthetic-key")
+        client.create_eval_set(name="Refunds", slug="refunds", tags=["Billing"])
+        client.list_eval_sets(limit=5, tags=["Billing", "Voice"])
+        client.list_scorers(tags=["Billing"])
+        client.update_eval_set(item_id, tags=[])
+        client.update_evaluator(item_id, name="Exact match", tags=["Billing"])
+        client.create_run(
+            idempotency_key="key",
+            name="Nightly",
+            eval_set_version_id=item_id,
+            evaluator_version_ids=[item_id],
+            config={},
+            tags=["Nightly"],
+        )
+        assert client.update_run(item_id, tags=["Billing"])["tags"] == [tag]
+        assert client.list_tags()["items"] == [tag]
+        with pytest.raises(ValueError, match="tag names"):
+            client.update_dataset(item_id, tags="Billing")  # type: ignore[arg-type]
+        # A filter that is not a list is refused, not read as no filter.
+        for invalid in ("", False, 0):
+            with pytest.raises(ValueError, match="tag names"):
+                client.list_datasets(tags=invalid)  # type: ignore[arg-type]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+    assert seen == [
+        (
+            "POST",
+            "/api/v1/datasets",
+            {"name": "Refunds", "slug": "refunds", "description": "", "tags": ["Billing"]},
+        ),
+        ("GET", "/api/v1/datasets?limit=5&tag=Billing&tag=Voice", None),
+        ("GET", "/api/v1/scorers?limit=100&tag=Billing", None),
+        ("PATCH", f"/api/v1/datasets/{item_id}", {"tags": []}),
+        ("PATCH", f"/api/v1/scorers/{item_id}", {"name": "Exact match", "tags": ["Billing"]}),
+        (
+            "POST",
+            "/api/v1/experiments",
+            {
+                "idempotencyKey": "key",
+                "name": "Nightly",
+                "evalSetVersionId": item_id,
+                "evaluatorVersionIds": [item_id],
+                "config": {},
+                "tags": ["Nightly"],
+            },
+        ),
+        ("PATCH", f"/api/v1/experiments/{item_id}", {"tags": ["Billing"]}),
+        ("GET", "/api/v1/tags", None),
+    ]

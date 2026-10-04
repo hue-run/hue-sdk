@@ -20,6 +20,8 @@ export interface PageOptions {
 export interface RegistryPageOptions extends PageOptions {
   /** Include archived identities so callers can diagnose slug conflicts explicitly. */
   includeArchived?: boolean;
+  /** Only identities carrying any of these tag names, matched without case. */
+  tags?: string[];
 }
 /** Human-readable identity of a dataset or scorer. */
 export interface Identity {
@@ -30,12 +32,60 @@ export interface Identity {
   /** Optional description. */
   description?: string;
 }
+/** A dataset or scorer to create, with the names of the tags it starts with. */
+export interface TaggedIdentity extends Identity {
+  /** Tag names; a name the project has no tag for creates one. */
+  tags?: string[];
+}
+/** Identity fields and tags to change on a dataset or scorer; omitted fields stay. */
+export interface IdentityUpdate {
+  /** New display name. */
+  name?: string;
+  /** New description. */
+  description?: string;
+  /** Every tag name the item should carry; replaces its tags. */
+  tags?: string[];
+}
+/** An experiment's (run's) name and tags after an update. */
+export interface UpdatedRun {
+  /** Experiment (run) ID. */
+  id: string;
+  /** Display name. */
+  name: string;
+  /** The experiment's own tags. */
+  tags: Tag[];
+  /** Its dataset's (eval set's) tags. */
+  evalSetTags: Tag[];
+}
+/** The colors a tag can take. */
+export type TagColor =
+  | "default"
+  | "gray"
+  | "brown"
+  | "orange"
+  | "yellow"
+  | "green"
+  | "blue"
+  | "purple"
+  | "pink"
+  | "red";
+/** A project's tag: a named, colored label that groups datasets, scorers and experiments. */
+export interface Tag {
+  /** Tag ID. */
+  id: string;
+  /** Name, unique in the project without case. */
+  name: string;
+  /** Display color. */
+  color: TagColor;
+}
 /** A dataset and its versions. */
 export interface Dataset extends Identity {
   /** Dataset ID. */
   id: string;
   /** Archive timestamp on current servers; absent on older compatible responses. */
   archivedAt?: string | null;
+  /** The dataset's tags on servers that support tags; absent on older responses. */
+  tags?: Tag[];
   /** Versions of this dataset. */
   versions: DatasetVersion[];
 }
@@ -423,6 +473,8 @@ export interface Scorer extends Identity {
   id: string;
   /** Archive timestamp on current servers; absent on older compatible responses. */
   archivedAt?: string | null;
+  /** The scorer's tags on servers that support tags; absent on older responses. */
+  tags?: Tag[];
   /** Published versions, when included in the response. */
   versions?: ScorerVersion[];
 }
@@ -512,6 +564,10 @@ export interface Experiment {
   name: string;
   /** Frozen dataset version under test. */
   datasetVersionId: string;
+  /** The experiment's own tags on servers that support tags; absent on older responses. */
+  tags?: Tag[];
+  /** Its dataset's tags, which tag filters match as well; absent on older responses. */
+  evalSetTags?: Tag[];
   /** Configuration handed to the target. */
   config: JsonValue;
   /** Digest of `config`. */

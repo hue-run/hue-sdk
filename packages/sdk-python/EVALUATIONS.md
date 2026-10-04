@@ -31,7 +31,7 @@ The [evaluation guide](https://docs.hue.run/evaluations/first-evaluation) covers
 
 ## Client and definitions
 
-`EvaluationClient(api_key=..., timeout_seconds=10, max_attempts=4)` uses the same project service key as telemetry and defaults to `https://app.hue.run`. Set `base_url` to override the origin for another Hue deployment; `EvaluationClient(base_url, api_key)` remains supported. Its methods cover dataset creation/versioning/cases/freezing, scorer creation/publication, experiment creation/start/completion/finish, evaluation runs/subjects/results, and hosted judge job submission/list/get/cancel/budget reads. Python method arguments use snake_case; response dictionaries and `complete_execution` payloads retain the documented HTTP camelCase fields. Reads are paged with `after`/`limit`. A read, or a mutation the server deduplicates by the `idempotencyKey` in its body (experiment creation, start, completion and finish, result and judge-job writes), is sent again after a connection failure, a timeout or a 408 or 5xx without `Retry-After`, up to `max_attempts` (default 4) times with a jittered backoff, so one lost acknowledgement does not surface; `is_transient_api_error` names those failures. A mutation without a key is sent once: retain the `idempotency_key` you would send when retrying an experiment or result write yourself. Whatever the method, a request Hue refused before acting on it with HTTP 429 or 503 and a `Retry-After` of at most 5 seconds is sent again after that wait, up to four times; a longer wait is the caller's error at once, with `retry_after_seconds`. HTTP failures expose only status and Hue's `X-Hue-Diagnostic` code (`diagnostic`), with no server body, key or content in the error.
+`EvaluationClient(api_key=..., timeout_seconds=10, max_attempts=4)` uses the same project service key as telemetry and defaults to `https://app.hue.run`. Set `base_url` to override the origin for another Hue deployment; `EvaluationClient(base_url, api_key)` remains supported. Its methods cover dataset creation/versioning/cases/freezing, scorer creation/publication, experiment creation/start/completion/finish, evaluation runs/subjects/results, and hosted judge job submission/list/get/cancel/budget reads. Python method arguments use snake_case; response dictionaries and `complete_execution` payloads retain the documented HTTP camelCase fields. Reads are paged with `after`/`limit`. A read, an update that sets given fields (`update_dataset`, `update_scorer`, `update_experiment` and their product-named forms) or a mutation the server deduplicates by the `idempotencyKey` in its body (experiment creation, start, completion and finish, result and judge-job writes) is sent again after a connection failure, a timeout or a 408 or 5xx without `Retry-After`, up to `max_attempts` (default 4) times with a jittered backoff, so one lost acknowledgement does not surface; `is_transient_api_error` names those failures. Any other mutation is sent once: retain the `idempotency_key` you would send when retrying an experiment or result write yourself. Whatever the method, a request Hue refused before acting on it with HTTP 429 or 503 and a `Retry-After` of at most 5 seconds is sent again after that wait, up to four times; a longer wait is the caller's error at once, with `retry_after_seconds`. HTTP failures expose only status and Hue's `X-Hue-Diagnostic` code (`diagnostic`), with no server body, key or content in the error.
 
 For new registry code, use `create_eval_set`, `get_eval_set`, `list_eval_sets`,
 `create_eval_set_version`, `get_eval_set_version`, `list_eval_set_cases`,
@@ -52,6 +52,20 @@ score saved subjects. `create_run` accepts `eval_set_version_id` and
 `evaluator_version_ids`; scoring writes use evaluator version IDs. A run ID and
 a scoring ID identify different records. These methods use the existing v1
 paths and leave existing runner entry points callable.
+
+Tags group eval sets, evaluators and runs, for example by the area of the agent they test. Methods
+take tag names: a name the project has no tag for creates one, and names match without case.
+`create_eval_set`, `create_evaluator` and `create_run` (and their v1 counterparts) accept `tags`;
+`update_eval_set`, `update_evaluator` and `update_run` replace an item's tags; `list_eval_sets`,
+`list_evaluators` and their v1 counterparts filter by `tags`, matching any of them; and
+`list_tags()` returns the project's tags. A run also shows its eval set's tags, which run filters
+match as well. Tags require a Hue server that supports them.
+
+```python
+client.create_eval_set(name="Refunds", slug="refunds", tags=["billing"])
+client.update_evaluator(evaluator_id, tags=["billing", "regression"])
+billing = client.list_eval_sets(tags=["billing"])
+```
 
 `builtin_scorers.exact_match()`, `builtin_scorers.includes(case_sensitive=True)` and `builtin_scorers.json_schema(schema)` return publishable declarations. Exact match preserves JSON types (`False` differs from `0`), object key order is irrelevant, and equivalent JSON numbers compare equally. Missing output/reference produces a skipped score, never zero. `None` is present JSON null; the exported `MISSING` sentinel represents intentional absence.
 

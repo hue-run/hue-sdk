@@ -35,7 +35,6 @@ import type {
   ExperimentItem,
   Evaluator,
   EvaluatorVersion,
-  Identity,
   JsonValue,
   LocalAgentClaim,
   LocalAgentRegistration,
@@ -62,6 +61,10 @@ import type {
   Subject,
   StoredResult,
   StoredScoringResult,
+  IdentityUpdate,
+  Tag,
+  TaggedIdentity,
+  UpdatedRun,
 } from "./types.js";
 
 /** Connection options for {@link createEvaluationClient}. */
@@ -162,6 +165,16 @@ function productRegistryFields<T>(value: unknown): T {
     }
   }
   return result as T;
+}
+
+/** Tag names travel as given; anything but a list of strings is a caller error. */
+function tagNames(tags: unknown): string[] {
+  if (!Array.isArray(tags) || !tags.every((tag) => typeof tag === "string"))
+    throw new TypeError("tags must be a list of tag names");
+  return tags;
+}
+function withTagNames<T extends { tags?: string[] }>(input: T): T {
+  return input.tags === undefined ? input : { ...input, tags: tagNames(input.tags) };
 }
 
 const runResponseAliases = [
@@ -477,15 +490,27 @@ export class EvaluationClient {
     const query = new URLSearchParams(this.page(options).slice(1));
     if (options.includeArchived !== undefined)
       query.set("includeArchived", String(options.includeArchived));
+    for (const tag of tagNames(options.tags ?? [])) query.append("tag", tag);
     return query.size ? `?${query}` : "";
   }
   /** Reads the current project to confirm the key and origin. */
   checkConnection() {
     return this.request<ProjectConnection>("GET", "/projects/current");
   }
-  /** Creates a dataset with an initial draft version. */
-  createDataset(input: Identity) {
-    return this.request<Dataset>("POST", "/datasets", input);
+  /** Creates a dataset with an initial draft version; `tags` names the tags it starts with. */
+  createDataset(input: TaggedIdentity) {
+    return this.request<Dataset>("POST", "/datasets", withTagNames(input));
+  }
+  /** Renames a dataset or replaces its tags by name; the same values again change nothing. */
+  updateDataset(id: string, input: IdentityUpdate & { slug?: string }) {
+    return this.request<Omit<Dataset, "versions">>(
+      "PATCH",
+      `/datasets/${uuid(id)}`,
+      withTagNames(input),
+      undefined,
+      undefined,
+      true,
+    );
   }
   /** Reads a dataset and its versions. */
   getDataset(id: string) {
@@ -529,8 +554,26 @@ export class EvaluationClient {
     });
   }
   /** Creates a scorer identity; publish definitions with {@link publishScorerVersion}. */
-  createScorer(input: Identity) {
-    return this.request<Scorer>("POST", "/scorers", input);
+  createScorer(input: TaggedIdentity) {
+    return this.request<Scorer>("POST", "/scorers", withTagNames(input));
+  }
+  /** Renames a scorer or replaces its tags by name; the same values again change nothing. */
+  updateScorer(id: string, input: IdentityUpdate) {
+    return this.request<Scorer>(
+      "PATCH",
+      `/scorers/${uuid(id)}`,
+      withTagNames(input),
+      undefined,
+      undefined,
+      true,
+    );
+  }
+  /** Lists the project's tags in the order they were created. */
+  listTags() {
+    return this.request<{
+      /** The project's tags. */
+      items: Tag[];
+    }>("GET", "/tags");
   }
   /** Reads a scorer and its published versions. */
   getScorer(id: string) {
@@ -549,8 +592,15 @@ export class EvaluationClient {
     return this.request<ScorerVersion>("GET", `/scorer-versions/${uuid(id)}`);
   }
   /** Creates an eval set using the existing v1 registry path. */
-  async createEvalSet(input: Identity): Promise<EvalSet> {
+  async createEvalSet(input: TaggedIdentity): Promise<EvalSet> {
     return productRegistryFields(await this.createDataset(input));
+  }
+  /** Renames an eval set or replaces its tags by name. */
+  async updateEvalSet(
+    id: string,
+    input: IdentityUpdate & { slug?: string },
+  ): Promise<Omit<EvalSet, "versions">> {
+    return productRegistryFields(await this.updateDataset(id, input));
   }
   /** Reads an eval set and its versions. */
   async getEvalSet(id: string): Promise<EvalSet> {
@@ -592,8 +642,12 @@ export class EvaluationClient {
     return productRegistryFields(await this.freezeDatasetVersion(id, expectedRevision));
   }
   /** Creates an evaluator identity. */
-  async createEvaluator(input: Identity): Promise<Evaluator> {
+  async createEvaluator(input: TaggedIdentity): Promise<Evaluator> {
     return productRegistryFields(await this.createScorer(input));
+  }
+  /** Renames an evaluator or replaces its tags by name. */
+  async updateEvaluator(id: string, input: IdentityUpdate): Promise<Evaluator> {
+    return productRegistryFields(await this.updateScorer(id, input));
   }
   /** Reads an evaluator and its published versions. */
   async getEvaluator(id: string): Promise<Evaluator> {
@@ -621,17 +675,30 @@ export class EvaluationClient {
     datasetVersionId: string;
     scorerVersionIds: string[];
     config: JsonValue;
+    /** The experiment's own tag names; it also shows its dataset's tags. */
+    tags?: string[];
   }) {
     return this.request<{
       /** Experiment ID. */
       id: string;
       /** ID of the experiment's evaluation run. */
       evaluationRunId: string;
-    }>("POST", "/experiments", input);
+    }>("POST", "/experiments", withTagNames(input));
   }
   /** Reads an experiment with its evaluation run and execution counts. */
   getExperiment(id: string) {
     return this.request<Experiment>("GET", `/experiments/${uuid(id)}`);
+  }
+  /** Renames an experiment or replaces its own tags by name. */
+  updateExperiment(id: string, input: { name?: string; tags?: string[] }) {
+    return this.request<UpdatedRun>(
+      "PATCH",
+      `/experiments/${uuid(id)}`,
+      withTagNames(input),
+      undefined,
+      undefined,
+      true,
+    );
   }
   /** Lists an experiment's cases with their latest executions. */
   listExperimentItems(id: string, page?: PageOptions) {
@@ -860,6 +927,8 @@ export class EvaluationClient {
     evalSetVersionId: string;
     evaluatorVersionIds: string[];
     config: JsonValue;
+    /** The run's own tag names; it also shows its eval set's tags. */
+    tags?: string[];
   }): Promise<{
     /** Run ID. */
     id: string;
@@ -868,11 +937,15 @@ export class EvaluationClient {
     /** Existing v1 field for the scoring pass ID. */
     evaluationRunId: string;
   }> {
-    return productRunFields(await this.request("POST", "/experiments", input), "run");
+    return productRunFields(await this.request("POST", "/experiments", withTagNames(input)), "run");
   }
   /** Reads a run with its scoring progress. */
   async getRun(id: string): Promise<Run> {
     return productRunFields(await this.getExperiment(id), "run");
+  }
+  /** Renames a run or replaces its own tags by name; its eval set's tags are not its own. */
+  async updateRun(id: string, input: { name?: string; tags?: string[] }): Promise<UpdatedRun> {
+    return this.updateExperiment(id, input);
   }
   /** Lists a run's cases with their latest executions. */
   async listRunItems(id: string, page?: PageOptions): Promise<Page<ExperimentItem>> {

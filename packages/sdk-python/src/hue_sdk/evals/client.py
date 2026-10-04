@@ -14,6 +14,16 @@ from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_
 from ._json import MISSING, encode, json_value, uuid
 
 
+def _tag_names(tags: list[str]) -> list[str]:
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        raise ValueError("tags must be a list of tag names.")
+    return tags
+
+
+def _tagged(tags: list[str] | None) -> dict[str, Any]:
+    return {} if tags is None else {"tags": _tag_names(tags)}
+
+
 class HueApiError(RuntimeError):
     """A failed evaluation API request; the message is fixed and never includes response text.
 
@@ -74,13 +84,14 @@ def _diagnostic_of(response: requests.Response) -> str | None:
     return value if value is not None and _DIAGNOSTIC.fullmatch(value) else None
 
 
-def _retryable(method: str, body: Any) -> bool:
+def _retryable(method: str, body: Any, idempotent: bool) -> bool:
     """Whether a request may be sent again after a transient failure.
 
-    Every read, and a mutation the server deduplicates by the ``idempotencyKey`` in its body. A
-    mutation without a key is sent once; its caller resolves the outcome before asking again.
+    Every read, an update that sets fields to given values (sent twice, it changes nothing more)
+    and a mutation the server deduplicates by the ``idempotencyKey`` in its body. Any other
+    mutation is sent once; its caller resolves the outcome before asking again.
     """
-    if method == "GET":
+    if method == "GET" or idempotent:
         return True
     return isinstance(body, dict) and isinstance(body.get("idempotencyKey"), str)
 
@@ -238,9 +249,11 @@ class EvaluationClient:
     def __repr__(self) -> str:
         return "EvaluationClient()"
 
-    def _request(self, method: str, path: str, body: Any = MISSING) -> Any:
+    def _request(
+        self, method: str, path: str, body: Any = MISSING, *, idempotent: bool = False
+    ) -> Any:
         payload = None if body is MISSING else encode(json_value(body, 1024 * 1024))
-        attempts = self._max_attempts if _retryable(method, body) else 1
+        attempts = self._max_attempts if _retryable(method, body, idempotent) else 1
         attempt = 1
         while True:
             try:
@@ -305,26 +318,58 @@ class EvaluationClient:
             raise HueApiError(reason="malformed_response") from None
 
     @staticmethod
-    def _page(after: str | None, limit: int) -> str:
+    def _page(after: str | None, limit: int, tags: list[str] | None = None) -> str:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Page limit must be 1–100.")
-        return "?" + urlencode(
-            {"limit": limit, **({"after": uuid(after)} if after is not None else {})}
-        )
+        query: list[tuple[str, str | int]] = [("limit", limit)]
+        if after is not None:
+            query.append(("after", uuid(after)))
+        # Items carrying any of the named tags.
+        query.extend(("tag", tag) for tag in ([] if tags is None else _tag_names(tags)))
+        return "?" + urlencode(query)
 
     def check_connection(self) -> dict[str, Any]:
         return self._request("GET", "/projects/current")
 
-    def create_dataset(self, *, name: str, slug: str, description: str = "") -> dict[str, Any]:
+    def create_dataset(
+        self, *, name: str, slug: str, description: str = "", tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Creates a dataset; `tags` names its first tags, creating any the project lacks."""
         return self._request(
-            "POST", "/datasets", {"name": name, "slug": slug, "description": description}
+            "POST",
+            "/datasets",
+            {"name": name, "slug": slug, "description": description, **_tagged(tags)},
+        )
+
+    def update_dataset(
+        self,
+        dataset_id: str,
+        *,
+        name: str | None = None,
+        slug: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Renames a dataset or replaces its tags by name; omitted fields stay."""
+        return self._request(
+            "PATCH",
+            f"/datasets/{uuid(dataset_id)}",
+            {
+                **({"name": name} if name is not None else {}),
+                **({"slug": slug} if slug is not None else {}),
+                **({"description": description} if description is not None else {}),
+                **_tagged(tags),
+            },
+            idempotent=True,
         )
 
     def get_dataset(self, dataset_id: str) -> dict[str, Any]:
         return self._request("GET", f"/datasets/{uuid(dataset_id)}")
 
-    def list_datasets(self, *, after: str | None = None, limit: int = 100) -> dict[str, Any]:
-        return self._request("GET", f"/datasets{self._page(after, limit)}")
+    def list_datasets(
+        self, *, after: str | None = None, limit: int = 100, tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        return self._request("GET", f"/datasets{self._page(after, limit, tags)}")
 
     def create_dataset_version(
         self, dataset_id: str, *, from_version_id: str | None = None
@@ -374,16 +419,47 @@ class EvaluationClient:
             {"expectedRevision": expected_revision},
         )
 
-    def create_scorer(self, *, name: str, slug: str, description: str = "") -> dict[str, Any]:
+    def create_scorer(
+        self, *, name: str, slug: str, description: str = "", tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Creates a scorer; `tags` names its first tags, creating any the project lacks."""
         return self._request(
-            "POST", "/scorers", {"name": name, "slug": slug, "description": description}
+            "POST",
+            "/scorers",
+            {"name": name, "slug": slug, "description": description, **_tagged(tags)},
         )
+
+    def update_scorer(
+        self,
+        scorer_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Renames a scorer or replaces its tags by name; omitted fields stay."""
+        return self._request(
+            "PATCH",
+            f"/scorers/{uuid(scorer_id)}",
+            {
+                **({"name": name} if name is not None else {}),
+                **({"description": description} if description is not None else {}),
+                **_tagged(tags),
+            },
+            idempotent=True,
+        )
+
+    def list_tags(self) -> dict[str, Any]:
+        """The project's tags, in the order they were created."""
+        return self._request("GET", "/tags")
 
     def get_scorer(self, scorer_id: str) -> dict[str, Any]:
         return self._request("GET", f"/scorers/{uuid(scorer_id)}")
 
-    def list_scorers(self, *, after: str | None = None, limit: int = 100) -> dict[str, Any]:
-        return self._request("GET", f"/scorers{self._page(after, limit)}")
+    def list_scorers(
+        self, *, after: str | None = None, limit: int = 100, tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        return self._request("GET", f"/scorers{self._page(after, limit, tags)}")
 
     def publish_scorer_version(self, scorer_id: str, definition: dict[str, Any]) -> dict[str, Any]:
         return self._request(
@@ -393,16 +469,35 @@ class EvaluationClient:
     def get_scorer_version(self, version_id: str) -> dict[str, Any]:
         return self._request("GET", f"/scorer-versions/{uuid(version_id)}")
 
-    def create_eval_set(self, *, name: str, slug: str, description: str = "") -> dict[str, Any]:
+    def create_eval_set(
+        self, *, name: str, slug: str, description: str = "", tags: list[str] | None = None
+    ) -> dict[str, Any]:
         return _product_registry_fields(
-            self.create_dataset(name=name, slug=slug, description=description)
+            self.create_dataset(name=name, slug=slug, description=description, tags=tags)
+        )
+
+    def update_eval_set(
+        self,
+        eval_set_id: str,
+        *,
+        name: str | None = None,
+        slug: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return _product_registry_fields(
+            self.update_dataset(
+                eval_set_id, name=name, slug=slug, description=description, tags=tags
+            )
         )
 
     def get_eval_set(self, eval_set_id: str) -> dict[str, Any]:
         return _product_registry_fields(self.get_dataset(eval_set_id))
 
-    def list_eval_sets(self, *, after: str | None = None, limit: int = 100) -> dict[str, Any]:
-        return _product_registry_fields(self.list_datasets(after=after, limit=limit))
+    def list_eval_sets(
+        self, *, after: str | None = None, limit: int = 100, tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        return _product_registry_fields(self.list_datasets(after=after, limit=limit, tags=tags))
 
     def create_eval_set_version(
         self, eval_set_id: str, *, from_version_id: str | None = None
@@ -443,16 +538,32 @@ class EvaluationClient:
     def freeze_eval_set_version(self, version_id: str, expected_revision: int) -> dict[str, Any]:
         return _product_registry_fields(self.freeze_dataset_version(version_id, expected_revision))
 
-    def create_evaluator(self, *, name: str, slug: str, description: str = "") -> dict[str, Any]:
+    def create_evaluator(
+        self, *, name: str, slug: str, description: str = "", tags: list[str] | None = None
+    ) -> dict[str, Any]:
         return _product_registry_fields(
-            self.create_scorer(name=name, slug=slug, description=description)
+            self.create_scorer(name=name, slug=slug, description=description, tags=tags)
+        )
+
+    def update_evaluator(
+        self,
+        evaluator_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return _product_registry_fields(
+            self.update_scorer(evaluator_id, name=name, description=description, tags=tags)
         )
 
     def get_evaluator(self, evaluator_id: str) -> dict[str, Any]:
         return _product_registry_fields(self.get_scorer(evaluator_id))
 
-    def list_evaluators(self, *, after: str | None = None, limit: int = 100) -> dict[str, Any]:
-        return _product_registry_fields(self.list_scorers(after=after, limit=limit))
+    def list_evaluators(
+        self, *, after: str | None = None, limit: int = 100, tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        return _product_registry_fields(self.list_scorers(after=after, limit=limit, tags=tags))
 
     def publish_evaluator_version(
         self, evaluator_id: str, definition: dict[str, Any]
@@ -470,6 +581,7 @@ class EvaluationClient:
         dataset_version_id: str,
         scorer_version_ids: list[str],
         config: Any,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -480,11 +592,23 @@ class EvaluationClient:
                 "datasetVersionId": uuid(dataset_version_id),
                 "scorerVersionIds": [uuid(i) for i in scorer_version_ids],
                 "config": config,
+                **_tagged(tags),
             },
         )
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any]:
         return self._request("GET", f"/experiments/{uuid(experiment_id)}")
+
+    def update_experiment(
+        self, experiment_id: str, *, name: str | None = None, tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Renames an experiment or replaces its own tags by name; it also shows its dataset's."""
+        return self._request(
+            "PATCH",
+            f"/experiments/{uuid(experiment_id)}",
+            {**({"name": name} if name is not None else {}), **_tagged(tags)},
+            idempotent=True,
+        )
 
     def list_experiment_items(
         self, experiment_id: str, *, after: str | None = None, limit: int = 100
@@ -598,6 +722,7 @@ class EvaluationClient:
         eval_set_version_id: str,
         evaluator_version_ids: list[str],
         config: Any,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         return _product_run_fields(
             self._request(
@@ -609,6 +734,7 @@ class EvaluationClient:
                     "evalSetVersionId": uuid(eval_set_version_id),
                     "evaluatorVersionIds": [uuid(i) for i in evaluator_version_ids],
                     "config": config,
+                    **_tagged(tags),
                 },
             ),
             "run",
@@ -616,6 +742,12 @@ class EvaluationClient:
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         return _product_run_fields(self.get_experiment(run_id), "run")
+
+    def update_run(
+        self, run_id: str, *, name: str | None = None, tags: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Renames a run or replaces its own tags by name; its eval set's tags are not its own."""
+        return self.update_experiment(run_id, name=name, tags=tags)
 
     def list_run_items(
         self, run_id: str, *, after: str | None = None, limit: int = 100
