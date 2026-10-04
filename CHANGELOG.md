@@ -14,6 +14,11 @@ refuses to publish a version without a matching entry below.
 
 - Optional per-metric descriptions in TypeScript scorer declarations; publishing them requires a
   Hue server that accepts metric descriptions.
+- Tags on datasets, scorers and experiments, by name: `tags` on `createDataset`, `createScorer`
+  and `createExperiment` (and `createEvalSet`, `createEvaluator`, `createRun`), a `tags` filter on
+  the registry lists, `updateDataset`, `updateScorer` and `updateExperiment` (and `updateEvalSet`,
+  `updateEvaluator`, `updateRun`) to replace them, and `listTags`. They require a Hue server that
+  supports tags.
 
 #### Fixed
 
@@ -1238,6 +1243,11 @@ No registry release is claimed until publication and registry acceptance complet
 
 - Optional per-metric descriptions in Python scorer declarations; publishing them requires a Hue
   server that accepts metric descriptions.
+- Tags on datasets, scorers and experiments, by name: `tags` on `create_dataset`, `create_scorer`
+  and `create_experiment` (and `create_eval_set`, `create_evaluator`, `create_run`), a `tags`
+  filter on the registry lists, `update_dataset`, `update_scorer` and `update_experiment` (and
+  `update_eval_set`, `update_evaluator`, `update_run`) to replace them, and `list_tags`. They
+  require a Hue server that supports tags.
 
 #### Fixed
 

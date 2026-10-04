@@ -53,6 +53,20 @@ score saved subjects. `create_run` accepts `eval_set_version_id` and
 a scoring ID identify different records. These methods use the existing v1
 paths and leave existing runner entry points callable.
 
+Tags group eval sets, evaluators and runs, for example by the area of the agent they test. Methods
+take tag names: a name the project has no tag for creates one, and names match without case.
+`create_eval_set`, `create_evaluator` and `create_run` (and their v1 counterparts) accept `tags`;
+`update_eval_set`, `update_evaluator` and `update_run` replace an item's tags; `list_eval_sets`,
+`list_evaluators` and their v1 counterparts filter by `tags`, matching any of them; and
+`list_tags()` returns the project's tags. A run also shows its eval set's tags, which run filters
+match as well. Tags require a Hue server that supports them.
+
+```python
+client.create_eval_set(name="Refunds", slug="refunds", tags=["billing"])
+client.update_evaluator(evaluator_id, tags=["billing", "regression"])
+billing = client.list_eval_sets(tags=["billing"])
+```
+
 `builtin_scorers.exact_match()`, `builtin_scorers.includes(case_sensitive=True)` and `builtin_scorers.json_schema(schema)` return publishable declarations. Exact match preserves JSON types (`False` differs from `0`), object key order is irrelevant, and equivalent JSON numbers compare equally. Missing output/reference produces a skipped score, never zero. `None` is present JSON null; the exported `MISSING` sentinel represents intentional absence.
 
 `define_local_scorer(source=..., entrypoint=..., metrics=..., score=...)` hashes explicitly supplied source text or bytes. The binding must match the pinned language, source digest, entry point and complete metric definition. Each metric may include an optional `description` (1–500 characters) shown with its check in Hue's run view. This is a caller declaration, not independent attestation of closures or installed dependencies. Callbacks receive a private `ScoreContext` copy with `inputs`, optional `output`/`expected`, `has_output`/`has_expected`, `metadata`, and `execution_state`. They return `state` (`scored`, `error`, `skipped`), typed `metrics` and meaningful explanation/evidence. A false quality verdict remains a scored result; invalid callback results and exceptions become typed scorer errors.

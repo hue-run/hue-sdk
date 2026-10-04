@@ -1851,6 +1851,96 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("tags travel by name on creates, list filters, updates and the tag list", async () => {
+    const requests: { method: string; path: string; body?: unknown }[] = [];
+    const id = randomUUID();
+    const tag = { id: randomUUID(), name: "Billing", color: "blue" as const };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
+        const url = new URL(request.url);
+        const body = request.method === "GET" ? undefined : await request.json();
+        requests.push({
+          method: request.method,
+          path: `${url.pathname.replace("/api/v1", "")}${url.search}`,
+          body,
+        });
+        if (url.pathname === "/api/v1/tags") return Response.json({ items: [tag] });
+        if (request.method === "GET") return Response.json({ items: [], nextCursor: null });
+        return Response.json({
+          id,
+          evaluationRunId: randomUUID(),
+          name: "Nightly",
+          tags: [tag],
+          evalSetTags: [],
+          versions: [],
+        });
+      },
+    });
+    const client = createEvaluationClient({
+      apiKey: key,
+      baseUrl: `http://127.0.0.1:${server.port}`,
+    });
+    try {
+      await client.createDataset({ name: "Refunds", slug: "refunds", tags: ["Billing"] });
+      await client.createEvaluator({ name: "Exact", slug: "exact", tags: ["Billing"] });
+      await client.listEvalSets({ tags: ["Billing", "Voice"] });
+      await client.listScorers({ limit: 5, tags: ["Billing"] });
+      await client.updateEvalSet(id, { tags: [] });
+      await client.updateScorer(id, { name: "Exact match", tags: ["Billing"] });
+      await client.createRun({
+        idempotencyKey: "key",
+        name: "Nightly",
+        evalSetVersionId: id,
+        evaluatorVersionIds: [id],
+        config: {},
+        tags: ["Nightly"],
+      });
+      expect((await client.updateRun(id, { tags: ["Billing"] })).tags).toEqual([tag]);
+      expect((await client.listTags()).items).toEqual([tag]);
+      expect(() => client.updateDataset(id, { tags: "Billing" as unknown as string[] })).toThrow(
+        "tags must be a list of tag names",
+      );
+      expect(requests).toEqual([
+        {
+          method: "POST",
+          path: "/datasets",
+          body: { name: "Refunds", slug: "refunds", tags: ["Billing"] },
+        },
+        {
+          method: "POST",
+          path: "/scorers",
+          body: { name: "Exact", slug: "exact", tags: ["Billing"] },
+        },
+        { method: "GET", path: "/datasets?tag=Billing&tag=Voice", body: undefined },
+        { method: "GET", path: "/scorers?limit=5&tag=Billing", body: undefined },
+        { method: "PATCH", path: `/datasets/${id}`, body: { tags: [] } },
+        {
+          method: "PATCH",
+          path: `/scorers/${id}`,
+          body: { name: "Exact match", tags: ["Billing"] },
+        },
+        {
+          method: "POST",
+          path: "/experiments",
+          body: {
+            idempotencyKey: "key",
+            name: "Nightly",
+            evalSetVersionId: id,
+            evaluatorVersionIds: [id],
+            config: {},
+            tags: ["Nightly"],
+          },
+        },
+        { method: "PATCH", path: `/experiments/${id}`, body: { tags: ["Billing"] } },
+        { method: "GET", path: "/tags", body: undefined },
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
   test("product registry methods keep v1 paths and leave customer fields untouched", async () => {
     const setId = randomUUID();
     const setVersionId = randomUUID();
