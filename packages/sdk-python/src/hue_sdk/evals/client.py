@@ -84,13 +84,14 @@ def _diagnostic_of(response: requests.Response) -> str | None:
     return value if value is not None and _DIAGNOSTIC.fullmatch(value) else None
 
 
-def _retryable(method: str, body: Any) -> bool:
+def _retryable(method: str, body: Any, idempotent: bool) -> bool:
     """Whether a request may be sent again after a transient failure.
 
-    Every read, and a mutation the server deduplicates by the ``idempotencyKey`` in its body. A
-    mutation without a key is sent once; its caller resolves the outcome before asking again.
+    Every read, an update that sets fields to given values (sent twice, it changes nothing more)
+    and a mutation the server deduplicates by the ``idempotencyKey`` in its body. Any other
+    mutation is sent once; its caller resolves the outcome before asking again.
     """
-    if method == "GET":
+    if method == "GET" or idempotent:
         return True
     return isinstance(body, dict) and isinstance(body.get("idempotencyKey"), str)
 
@@ -248,9 +249,11 @@ class EvaluationClient:
     def __repr__(self) -> str:
         return "EvaluationClient()"
 
-    def _request(self, method: str, path: str, body: Any = MISSING) -> Any:
+    def _request(
+        self, method: str, path: str, body: Any = MISSING, *, idempotent: bool = False
+    ) -> Any:
         payload = None if body is MISSING else encode(json_value(body, 1024 * 1024))
-        attempts = self._max_attempts if _retryable(method, body) else 1
+        attempts = self._max_attempts if _retryable(method, body, idempotent) else 1
         attempt = 1
         while True:
             try:
@@ -322,7 +325,7 @@ class EvaluationClient:
         if after is not None:
             query.append(("after", uuid(after)))
         # Items carrying any of the named tags.
-        query.extend(("tag", tag) for tag in _tag_names(tags or []))
+        query.extend(("tag", tag) for tag in ([] if tags is None else _tag_names(tags)))
         return "?" + urlencode(query)
 
     def check_connection(self) -> dict[str, Any]:
@@ -357,6 +360,7 @@ class EvaluationClient:
                 **({"description": description} if description is not None else {}),
                 **_tagged(tags),
             },
+            idempotent=True,
         )
 
     def get_dataset(self, dataset_id: str) -> dict[str, Any]:
@@ -442,6 +446,7 @@ class EvaluationClient:
                 **({"description": description} if description is not None else {}),
                 **_tagged(tags),
             },
+            idempotent=True,
         )
 
     def list_tags(self) -> dict[str, Any]:
@@ -602,6 +607,7 @@ class EvaluationClient:
             "PATCH",
             f"/experiments/{uuid(experiment_id)}",
             {**({"name": name} if name is not None else {}), **_tagged(tags)},
+            idempotent=True,
         )
 
     def list_experiment_items(
