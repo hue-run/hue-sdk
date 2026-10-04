@@ -43,6 +43,7 @@ from .types import (
     WorldSurface,
 )
 from .world import (
+    HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES,
     HUE_CONTROL_PLANE_VARIABLES,
     agent_environment,
     is_hue_control_plane_credential,
@@ -69,6 +70,7 @@ __all__ = [
     "EnvironmentRun",
     "ErrorObservation",
     "FinishStatus",
+    "HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES",
     "HUE_CONTROL_PLANE_VARIABLES",
     "HueEnvironmentError",
     "WorldCreationError",

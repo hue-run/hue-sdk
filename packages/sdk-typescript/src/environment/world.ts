@@ -59,13 +59,64 @@ export const HUE_CONTROL_PLANE_VARIABLES: readonly string[] = [
   "HUE_PROJECT_KEY",
   "HUE_SERVICE_KEY",
 ];
-/** Hue's own credential shapes: project keys, attempt grants and the project MCP key. */
-const HUE_CREDENTIAL_SHAPE = /^hue_(sk|attempt|mcp)_/;
+/** Prefixes of the Hue control-plane credentials the server issues: project and setup keys,
+ * attempt grants, the project MCP key, invocation and installation tokens, and OAuth tokens and
+ * secrets. World tokens (`hue_world_`) and MCP capabilities (`hue_sim_`) are what the agent holds. */
+export const HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: readonly string[] = [
+  "hue_sk_",
+  "hue_attempt_",
+  "hue_mcp_",
+  "hue_setup_",
+  "hue_inv_",
+  "hue_install_",
+  "hue_at_",
+  "hue_rt_",
+  "hue_oauth_",
+];
+/** A Hue credential anywhere in a value, including JSON Unicode escapes, not inside a longer word. */
+const HUE_CREDENTIAL_SHAPE = new RegExp(
+  `(?:^|[^A-Za-z0-9_])(?:${HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES.join("|")})`,
+);
+const ASCII_PERCENT_ESCAPE = /%[0-7][0-9a-f]/i;
+const ASCII_JSON_UNICODE_ESCAPE = /\\u00([0-7][0-9a-fA-F])/g;
 
-/** True for a control-plane variable by name, or for any variable holding a Hue credential. */
+function decodeAsciiJsonUnicodeEscapes(value: string): string {
+  return value.replace(ASCII_JSON_UNICODE_ESCAPE, (_, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
+
+function hasHueControlPlaneCredential(value: string): boolean {
+  let candidates = new Set([value]);
+  for (let layer = 0; layer <= 4; layer++) {
+    const jsonDecodedCandidates = new Set<string>();
+    for (const candidate of candidates) {
+      jsonDecodedCandidates.add(candidate);
+      jsonDecodedCandidates.add(decodeAsciiJsonUnicodeEscapes(candidate));
+    }
+    if ([...jsonDecodedCandidates].some((candidate) => HUE_CREDENTIAL_SHAPE.test(candidate)))
+      return true;
+    if (layer === 4)
+      return [...jsonDecodedCandidates].some((candidate) => ASCII_PERCENT_ESCAPE.test(candidate));
+    candidates = new Set(
+      [...jsonDecodedCandidates]
+        .filter((candidate) => ASCII_PERCENT_ESCAPE.test(candidate))
+        .map((candidate) =>
+          candidate.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) =>
+            String.fromCharCode(Number.parseInt(hex, 16)),
+          ),
+        ),
+    );
+    if (candidates.size === 0) return false;
+  }
+  return false;
+}
+
+/** True for a control-plane variable by name, or for a value carrying a Hue control-plane
+ * credential anywhere in it, including wrapped, percent-encoded or JSON-Unicode-escaped values. */
 export function isHueControlPlaneCredential(name: string, value: string | undefined): boolean {
   if (HUE_CONTROL_PLANE_VARIABLES.includes(name)) return true;
-  return typeof value === "string" && HUE_CREDENTIAL_SHAPE.test(value.trim());
+  return typeof value === "string" && hasHueControlPlaneCredential(value);
 }
 
 /** The parent's variables without Hue control-plane credentials; `undefined` values are dropped. */

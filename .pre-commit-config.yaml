@@ -14,7 +14,7 @@ repos:
         types: [python]
       - id: mypy
         name: mypy (hue_sdk)
-        entry: uv run --frozen --all-groups --project packages/sdk-python mypy
+        entry: uv run --frozen --all-groups --project packages/sdk-python mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src/hue_sdk
         language: system
         pass_filenames: false
         files: ^packages/sdk-python/src/

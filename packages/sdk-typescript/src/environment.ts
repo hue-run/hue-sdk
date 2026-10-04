@@ -10,6 +10,7 @@ export type { BindEnvironmentToolsOptions, EnvironmentTool } from "./environment
 export type * from "./environment/types.js";
 export {
   agentEnvironment,
+  HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES,
   HUE_CONTROL_PLANE_VARIABLES,
   isHueControlPlaneCredential,
   legacyMcpCapability,
