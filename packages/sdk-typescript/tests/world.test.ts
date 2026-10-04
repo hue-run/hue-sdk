@@ -262,6 +262,7 @@ describe("world handoff helpers", () => {
       OAUTH_SECRET: `hue_oauth_secret_${"a".repeat(43)}`,
       OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${key}`,
       JSON_CREDENTIAL: `{"key":"${key}"}`,
+      JSON_ESCAPED_CREDENTIAL: String.raw`{"key":"\u0068ue_sk_test_aaaaaaaaaaaa_secret"}`,
       URL_CREDENTIAL: `https://x.test/?key=${key}`,
       PERCENT_ENCODED_CREDENTIAL: `https://x.test/?key=%68ue_sk_test_${"a".repeat(12)}_${"s".repeat(43)}`,
       DOUBLE_PERCENT_ENCODED_CREDENTIAL: `https://x.test/?key=%2568ue_sk_test_${"a".repeat(12)}_${"s".repeat(43)}`,
@@ -287,6 +288,7 @@ describe("world handoff helpers", () => {
     expect(child).not.toHaveProperty("OAUTH_SECRET");
     expect(child).not.toHaveProperty("OTEL_EXPORTER_OTLP_HEADERS");
     expect(child).not.toHaveProperty("JSON_CREDENTIAL");
+    expect(child).not.toHaveProperty("JSON_ESCAPED_CREDENTIAL");
     expect(child).not.toHaveProperty("URL_CREDENTIAL");
     expect(child).not.toHaveProperty("PERCENT_ENCODED_CREDENTIAL");
     expect(child).not.toHaveProperty("DOUBLE_PERCENT_ENCODED_CREDENTIAL");

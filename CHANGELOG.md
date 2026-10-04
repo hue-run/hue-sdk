@@ -18,7 +18,8 @@ refuses to publish a version without a matching entry below.
 #### Fixed
 
 - `agentEnvironment` strips every Hue control-plane credential from inherited values, including
-  wrapped and percent-encoded forms, while preserving world tokens and `hue_sim_` capabilities.
+  wrapped, percent-encoded and JSON-Unicode-escaped forms, while preserving world tokens and
+  `hue_sim_` capabilities.
 
 ### [0.13.0] - 2026-10-02
 
@@ -1241,7 +1242,8 @@ No registry release is claimed until publication and registry acceptance complet
 #### Fixed
 
 - `agent_environment` strips every Hue control-plane credential from inherited values, including
-  wrapped and percent-encoded forms, while preserving world tokens and `hue_sim_` capabilities.
+  wrapped, percent-encoded and JSON-Unicode-escaped forms, while preserving world tokens and
+  `hue_sim_` capabilities.
 
 ### [0.7.0] - 2026-10-02
 

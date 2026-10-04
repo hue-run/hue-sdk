@@ -44,23 +44,41 @@ _HUE_CREDENTIAL_PREFIX_PATTERN = "|".join(
 )
 _HUE_CREDENTIAL_SHAPE = re.compile(rf"(?:^|[^A-Za-z0-9_])(?:{_HUE_CREDENTIAL_PREFIX_PATTERN})")
 _ASCII_PERCENT_ESCAPE = re.compile(r"%[0-7][0-9a-f]", re.IGNORECASE)
+_ASCII_JSON_UNICODE_ESCAPE = re.compile(r"\\u00([0-7][0-9a-fA-F])")
+
+
+def _decode_ascii_json_unicode_escapes(value: str) -> str:
+    return _ASCII_JSON_UNICODE_ESCAPE.sub(
+        lambda match: chr(int(match.group(1), 16)),
+        value,
+    )
 
 
 def _has_hue_control_plane_credential(value: str) -> bool:
-    decoded = value
+    candidates = {value}
     for layer in range(5):
-        if _HUE_CREDENTIAL_SHAPE.search(decoded):
+        json_decoded_candidates = {
+            decoded
+            for candidate in candidates
+            for decoded in (candidate, _decode_ascii_json_unicode_escapes(candidate))
+        }
+        if any(_HUE_CREDENTIAL_SHAPE.search(candidate) for candidate in json_decoded_candidates):
             return True
-        if not _ASCII_PERCENT_ESCAPE.search(decoded):
-            return False
-        if layer == 4:
-            return True
-        decoded = re.sub(
-            r"%([0-7][0-9a-f])",
-            lambda match: chr(int(match.group(1), 16)),
-            decoded,
-            flags=re.IGNORECASE,
+        has_unresolved_percent_escape = any(
+            _ASCII_PERCENT_ESCAPE.search(candidate) for candidate in json_decoded_candidates
         )
+        if layer == 4:
+            return has_unresolved_percent_escape
+        candidates = {
+            _ASCII_PERCENT_ESCAPE.sub(
+                lambda match: chr(int(match.group(0)[1:], 16)),
+                candidate,
+            )
+            for candidate in json_decoded_candidates
+            if _ASCII_PERCENT_ESCAPE.search(candidate)
+        }
+        if not candidates:
+            return False
     return False
 
 
@@ -123,7 +141,7 @@ def world_now(source: WorldHandoff | Mapping[str, str] | None = None) -> datetim
 
 def is_hue_control_plane_credential(name: str, value: str | None) -> bool:
     """True for a control-plane variable by name, or for a value carrying a Hue control-plane
-    credential anywhere in it, including wrapped or percent-encoded values."""
+    credential anywhere in it, including wrapped, percent-encoded or JSON-Unicode-escaped values."""
     if name in HUE_CONTROL_PLANE_VARIABLES:
         return True
     return isinstance(value, str) and _has_hue_control_plane_credential(value)

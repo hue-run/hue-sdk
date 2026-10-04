@@ -194,6 +194,7 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
         "OAUTH_SECRET": "hue_oauth_secret_" + "a" * 43,
         "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer " + KEY,
         "JSON_CREDENTIAL": '{"key":"' + KEY + '"}',
+        "JSON_ESCAPED_CREDENTIAL": '{"key":"\\u0068ue_sk_test_aaaaaaaaaaaa_secret"}',
         "URL_CREDENTIAL": "https://x.test/?key=" + KEY,
         "PERCENT_ENCODED_CREDENTIAL": (
             "https://x.test/?key=%68ue_sk_test_" + "a" * 12 + "_" + "s" * 43
@@ -226,6 +227,7 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
         "OAUTH_SECRET",
         "OTEL_EXPORTER_OTLP_HEADERS",
         "JSON_CREDENTIAL",
+        "JSON_ESCAPED_CREDENTIAL",
         "URL_CREDENTIAL",
         "PERCENT_ENCODED_CREDENTIAL",
         "DOUBLE_PERCENT_ENCODED_CREDENTIAL",

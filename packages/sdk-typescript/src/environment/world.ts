@@ -73,27 +73,47 @@ export const HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: readonly string[] = [
   "hue_rt_",
   "hue_oauth_",
 ];
-/** A Hue credential anywhere in a value (`Bearer hue_sk_…`, a URL, a JSON blob), not inside a longer word. */
+/** A Hue credential anywhere in a value, including JSON Unicode escapes, not inside a longer word. */
 const HUE_CREDENTIAL_SHAPE = new RegExp(
   `(?:^|[^A-Za-z0-9_])(?:${HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES.join("|")})`,
 );
 const ASCII_PERCENT_ESCAPE = /%[0-7][0-9a-f]/i;
+const ASCII_JSON_UNICODE_ESCAPE = /\\u00([0-7][0-9a-fA-F])/g;
+
+function decodeAsciiJsonUnicodeEscapes(value: string): string {
+  return value.replace(ASCII_JSON_UNICODE_ESCAPE, (_, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
 
 function hasHueControlPlaneCredential(value: string): boolean {
-  let decoded = value;
+  let candidates = new Set([value]);
   for (let layer = 0; layer <= 4; layer++) {
-    if (HUE_CREDENTIAL_SHAPE.test(decoded)) return true;
-    if (!ASCII_PERCENT_ESCAPE.test(decoded)) return false;
-    if (layer === 4) return true;
-    decoded = decoded.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) =>
-      String.fromCharCode(Number.parseInt(hex, 16)),
+    const jsonDecodedCandidates = new Set<string>();
+    for (const candidate of candidates) {
+      jsonDecodedCandidates.add(candidate);
+      jsonDecodedCandidates.add(decodeAsciiJsonUnicodeEscapes(candidate));
+    }
+    if ([...jsonDecodedCandidates].some((candidate) => HUE_CREDENTIAL_SHAPE.test(candidate)))
+      return true;
+    if (layer === 4)
+      return [...jsonDecodedCandidates].some((candidate) => ASCII_PERCENT_ESCAPE.test(candidate));
+    candidates = new Set(
+      [...jsonDecodedCandidates]
+        .filter((candidate) => ASCII_PERCENT_ESCAPE.test(candidate))
+        .map((candidate) =>
+          candidate.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) =>
+            String.fromCharCode(Number.parseInt(hex, 16)),
+          ),
+        ),
     );
+    if (candidates.size === 0) return false;
   }
   return false;
 }
 
 /** True for a control-plane variable by name, or for a value carrying a Hue control-plane
- * credential anywhere in it, including wrapped or percent-encoded values. */
+ * credential anywhere in it, including wrapped, percent-encoded or JSON-Unicode-escaped values. */
 export function isHueControlPlaneCredential(name: string, value: string | undefined): boolean {
   if (HUE_CONTROL_PLANE_VARIABLES.includes(name)) return true;
   return typeof value === "string" && hasHueControlPlaneCredential(value);
