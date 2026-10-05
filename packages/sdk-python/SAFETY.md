@@ -2,7 +2,7 @@
 
 `set_input`, `set_output` and inference-log content helpers detach application content before passing it to a redactor. Dictionaries and lists remain dictionaries and lists; nested mutable values are copied too. Built-in tuples retain their shape. A redactor can change this private copy in place and return it, or raise, without changing the caller's arguments, result or original application exception.
 
-In the next minor release, supplied content is captured by default; pass `capture_content=False` for metadata-only export. Published releases require an explicit capture choice. Disabled clients and metadata-only capture do not run content snapshots or redactors; metadata-only capture emits no inference-log record and additionally strips recognized content attribute families, legacy message events, log bodies and status descriptions from every exported record. Arbitrary attribute names and other exporters have separate policies.
+Starting with Python 0.8.0, supplied content is captured by default; pass `capture_content=False` for metadata-only export. Earlier releases require an explicit capture choice. Disabled clients and metadata-only capture do not run content snapshots or redactors; metadata-only capture emits no inference-log record and additionally strips recognized content attribute families, legacy message events, log bodies and status descriptions from every exported record. Arbitrary attribute names and other exporters have separate policies.
 
 ## Supported values and budgets
 

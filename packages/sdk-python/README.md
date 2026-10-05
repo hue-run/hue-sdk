@@ -52,7 +52,7 @@ The SDK uses `https://app.hue.run` by default. Set `base_url` only for a differe
 
 ## Content and semantic fields
 
-In the next minor release, `capture_content` defaults to `True`. Published releases require an explicit choice. Set it to `True` for full traces: prompts and messages, responses and tool inputs/outputs, alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that content, and your redactor and the credential filtering below apply to it. Choose `False`, metadata-only mode, when your users decline or an application or data policy forbids sending that content to another service.
+Starting with Python 0.8.0, `capture_content` defaults to `True`. Earlier releases require an explicit choice. Set it to `True` for full traces: prompts and messages, responses and tool inputs/outputs, alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that content, and your redactor and the credential filtering below apply to it. Choose `False`, metadata-only mode, when your users decline or an application or data policy forbids sending that content to another service.
 
 `False` makes `set_input` and `set_output` omit content before it reaches an OTel queue and makes `log_inference` emit no record. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 

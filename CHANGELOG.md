@@ -8,11 +8,11 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### Unreleased
+### [0.14.0] - 2026-10-05
 
-#### Changed
+#### Breaking
 
-- **Breaking (next minor release):** enabled clients and transports capture supplied content by default when `captureContent` is omitted. Pass `captureContent: false` for metadata-only export; existing explicit choices and redaction continue to apply. `hue eval` now captures telemetry content by default; use `--no-content` to opt out. To resume an older metadata-only run, repeat its output policy and add `--no-content`.
+- Enabled clients and transports capture supplied content by default when `captureContent` is omitted. Pass `captureContent: false` for metadata-only export; existing explicit choices and redaction continue to apply. `hue eval` now captures telemetry content by default; use `--no-content` to opt out. To resume an older metadata-only run, repeat its output policy and add `--no-content`.
 
 ### [0.13.2] - 2026-10-05
 
@@ -1257,11 +1257,11 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### Unreleased
+### [0.8.0] - 2026-10-05
 
-#### Changed
+#### Breaking
 
-- **Breaking (next minor release):** `Hue` and `create_hue_safe` capture supplied content by default when `capture_content` is omitted. Pass `capture_content=False` for metadata-only export; existing explicit choices and redaction continue to apply.
+- `Hue` and `create_hue_safe` capture supplied content by default when `capture_content` is omitted. Pass `capture_content=False` for metadata-only export; existing explicit choices and redaction continue to apply.
 
 ### [0.7.1] - 2026-10-04
 

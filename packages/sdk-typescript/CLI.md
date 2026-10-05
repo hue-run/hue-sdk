@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.13.2`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.14.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -469,7 +469,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.13.2.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.14.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -480,7 +480,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.13.2.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.14.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -523,10 +523,10 @@ production agent lacks. Pin the SDK and bring its `zod` peer along, so the agent
 gains no dependency:
 
 ```sh
-npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
-npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
-npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision> --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.14.0 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.14.0 --package "zod@^4.6.5" hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
+npx --yes --package @hue-run/sdk@0.14.0 --package "zod@^4.6.5" hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx --yes --package @hue-run/sdk@0.14.0 --package "zod@^4.6.5" hue eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision> --env-file .env.hue
 ```
 
 Without the second `--package`, `hue eval` exits with `hue eval needs zod`, even for `--help`;
@@ -562,7 +562,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.14.0 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -667,8 +667,8 @@ A Scenario or eval set whose dataset version is not saved cannot back an experim
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
 (default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given; `--origin`
-overrides the origin. In the next minor release, telemetry content capture defaults on; `--no-content` opts out.
-Published releases require `--content`; the examples include it for compatibility. Model and tool spans inside the agent come
+overrides the origin. Starting with TypeScript 0.14.0, telemetry content capture defaults on; `--no-content` opts out.
+Earlier releases require `--content`; the examples include it for compatibility. Model and tool spans inside the agent come
 only from the agent's own instrumentation. Case outputs, error messages and explanations are
 stored in Hue whether or not `--content` is passed, so a case's answer can be graded and read on
 its run page. A `--command`'s stdout is its answer unless it writes a result file, and is stored,
@@ -677,7 +677,7 @@ credentials it handed the case (the world token and MCP headers, a legacy MCP to
 bearers) and every Hue control-plane credential in its environment with `[redacted]`, in the
 answer, an adapter's thrown message and name, generated file names and the local checkpoint.
 `--no-output` keeps outputs, error messages and explanations out of a one-shot run's stored
-results; captured telemetry still carries the output. In the next minor release, pass `--no-output --no-content` to omit both. `--worker` always stores them, because a run launched from Hue is read
+results; captured telemetry still carries the output. Pass `--no-output --no-content` to omit both. `--worker` always stores them, because a run launched from Hue is read
 on its run page (that is `runLocalAgent()`'s contract), and refuses `--no-output`. An interrupted
 one-shot run keeps the choice it started with, so one run never mixes stored and unstored outputs:
 rerunning it with another output or telemetry capture policy is refused with the flags that resume it.

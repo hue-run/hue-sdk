@@ -57,7 +57,7 @@ try {
 await hue.shutdown(); // flushes and releases providers owned by this client
 ```
 
-In the next minor release, `captureContent` defaults to `true`. Published releases require an explicit choice. The example sets `true`: trace inspection,
+Starting with TypeScript 0.14.0, `captureContent` defaults to `true`. Earlier releases require an explicit choice. The example sets `true`: trace inspection,
 evaluations and judges read the prompts, responses and tool inputs/outputs it records. Choose
 `false` for metadata only when a policy forbids sending that content; see
 [Privacy and content](#privacy-and-content).
@@ -649,7 +649,7 @@ before), wraps `runSimulation()` and `runLocalAgent()` for an adapter file or a 
 `hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run from a published case's
 immutable pins, runs the agent with an isolated world when the case pins one, waits
 for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
-`--worker` registers the same adapter for runs launched from Hue. In TypeScript 0.13.2, a
+`--worker` registers the same adapter for runs launched from Hue. Since TypeScript 0.13.2, a
 command worker handles both world and answer-only cases; adapter workers opt into direct cases
 with `--capability direct:v1`. Upgrade an existing command registration under a new `--revision`.
 It needs a Read and write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is

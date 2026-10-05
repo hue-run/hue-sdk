@@ -21,7 +21,7 @@ Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue
 ## Why Hue
 
 - **Standard OpenTelemetry, nothing proprietary.** Traces and correlated logs travel as OTLP/HTTP to documented endpoints. Any OpenTelemetry-emitting language or instrumentor works without a Hue package, and Hue never replaces your global providers.
-- **Full traces, metadata-only opt-out.** In the next minor release, `captureContent` / `capture_content` defaults to `true`. Currently published releases require an explicit choice. Set it to `true` to record the prompts, responses and tool inputs/outputs that trace inspection, evaluations and judges read; your redaction hook and built-in credential filtering still apply. Metadata-only mode (`false`) is the opt-out when a policy forbids sending that content; it strips recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel AI SDK content fields at export time in both SDKs.
+- **Full traces, metadata-only opt-out.** Starting with TypeScript 0.14.0 and Python 0.8.0, `captureContent` / `capture_content` defaults to `true`. Earlier releases require an explicit choice. Set it to `true` to record the prompts, responses and tool inputs/outputs that trace inspection, evaluations and judges read; your redaction hook and built-in credential filtering still apply. Metadata-only mode (`false`) is the opt-out when a policy forbids sending that content; it strips recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel AI SDK content fields at export time in both SDKs.
 - **Fail-open by contract.** Safe constructors, byte- and record-bounded queues, cumulative loss counters and bounded lifecycle deadlines are written down in [RELIABILITY.md](./RELIABILITY.md) and tested against the installed packages.
 - **Provable delivery.** `verifyTrace()` / `verify_trace()` confirm that a real request's spans and fields were stored, without exposing content.
 - **Small, auditable footprint.** The tracing core depends only on official OpenTelemetry packages (plus `requests` in Python), and the JSON Schema validator used by the evaluation scorers is an opt-in extra. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
@@ -64,7 +64,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is [`0.13.2`](https://www.npmjs.com/package/@hue-run/sdk), with
+The TypeScript package is published on [npm](https://www.npmjs.com/package/@hue-run/sdk), with
 command workers that run answer-only and world cases from the same application directory,
 case errors that say what stopped the case (a service that refused, dropped the connection or
 timed out, or a status Hue's own clients were refused with, never filed as the agent's),
@@ -74,7 +74,7 @@ failed claimed run from its checkpoints before giving it up as attention,
 export failures attributed to the traces they concerned,
 `hue mcp install` sign-in with Hue (the default for Claude Code, Codex and Conductor), Conductor, project pinning, read-only and current toolset options (every tool for agents that search their own tools), live spans (placeholders that let Hue show running spans), product-named eval set, evaluator, run and scoring client methods, `hue eval --case`,
 `runLocalAgent()`, V2 environments and the local
-[setup CLI core](./packages/sdk-typescript/CLI.md). The published Python package is [`0.7.1`](https://pypi.org/project/hue-run/), with case errors that say what stopped the case, trace evidence that can complete pending, an evaluation client that retries transient failures and export failures attributed to their own case, live spans, the same
+[setup CLI core](./packages/sdk-typescript/CLI.md). The Python package is published on [PyPI](https://pypi.org/project/hue-run/), with case errors that say what stopped the case, trace evidence that can complete pending, an evaluation client that retries transient failures and export failures attributed to their own case, live spans, the same
 product-named evaluation client methods and the MCP `mcp=` option. Existing low-level
 methods remain callable. Setup's Python path still installs its separately tested
 package pin. Both packages include Langfuse metadata-only filtering, content truncation and isolated live-span acknowledgements; see [Changelog](./CHANGELOG.md) for the capture-policy migration. Package checks use synthetic local services.
