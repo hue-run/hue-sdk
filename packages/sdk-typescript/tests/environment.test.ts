@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { inspect } from "node:util";
 import {
   bindEnvironmentTools,
   createEnvironmentClient,
@@ -72,6 +73,21 @@ const mailbox: EnvironmentDefinitionV2 = {
 };
 
 describe("environment HTTP client", () => {
+  test("client serialization and inspection never expose the project key", () => {
+    const client = createEnvironmentClient({ apiKey: key });
+    expect(Object.keys(client)).not.toContain("apiKey");
+    expect(Object.getOwnPropertyNames(client)).not.toContain("apiKey");
+    for (const serialized of [
+      JSON.stringify(client),
+      JSON.stringify({ ...client }),
+      inspect(client),
+      inspect(client, { showHidden: true }),
+      JSON.stringify(Object.getOwnPropertyDescriptors(client)),
+    ]) {
+      expect(serialized).not.toContain(key);
+    }
+  });
+
   test("authors an immutable environment version", async () => {
     const environmentId = randomUUID();
     const versionIds: string[] = [randomUUID(), randomUUID(), randomUUID()];
