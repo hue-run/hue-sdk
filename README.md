@@ -64,7 +64,8 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 - Resume result uploads and rescore stored outputs without rerunning the target.
 - Run an existing local agent callback against a fresh hosted simulated world.
 
-The published TypeScript package is [`0.13.1`](https://www.npmjs.com/package/@hue-run/sdk), with
+The published TypeScript package is [`0.13.2`](https://www.npmjs.com/package/@hue-run/sdk), with
+command workers that run answer-only and world cases from the same application directory,
 case errors that say what stopped the case (a service that refused, dropped the connection or
 timed out, or a status Hue's own clients were refused with, never filed as the agent's),
 trace evidence that can complete pending, `hue eval` naming an inconclusive case,
