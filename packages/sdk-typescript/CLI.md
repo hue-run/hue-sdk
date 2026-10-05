@@ -670,7 +670,7 @@ version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_
 overrides the origin. Starting with TypeScript 0.14.0, telemetry content capture defaults on; `--no-content` opts out.
 Earlier releases require `--content`; the examples include it for compatibility. Model and tool spans inside the agent come
 only from the agent's own instrumentation. Case outputs, error messages and explanations are
-stored in Hue whether or not `--content` is passed, so a case's answer can be graded and read on
+stored in Hue independently of the telemetry capture setting, so a case's answer can be graded and read on
 its run page. A `--command`'s stdout is its answer unless it writes a result file, and is stored,
 so it must not print credentials or debug logs there; before storing, `hue eval` replaces the
 credentials it handed the case (the world token and MCP headers, a legacy MCP token, attempt

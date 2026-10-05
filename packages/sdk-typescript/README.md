@@ -652,8 +652,8 @@ for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts 
 `--worker` registers the same adapter for runs launched from Hue. Since TypeScript 0.13.2, a
 command worker handles both world and answer-only cases; adapter workers opt into direct cases
 with `--capability direct:v1`. Upgrade an existing command registration under a new `--revision`.
-It needs a Read and write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is
-passed; the example passes it so case spans carry content. Case outputs, error messages and
+It needs a Read and write key in `HUE_API_KEY` (never printed). Content capture defaults on; `--no-content` opts out. The example passes `--content` explicitly
+for compatibility with older releases. Case outputs, error messages and
 explanations are stored in Hue either way (`--no-output` keeps them out of a one-shot run's
 results); a command's stdout is its stored answer, with the credentials `hue eval` handed the case
 replaced by `[redacted]`.
