@@ -568,7 +568,7 @@ export class EvaluationClient {
       true,
     );
   }
-  /** Lists the project's tags in the order they were created. */
+  /** Lists the project's tags in its order: as people arranged them in Hue, then newer tags. */
   listTags() {
     return this.request<{
       /** The project's tags. */

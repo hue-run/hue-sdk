@@ -450,7 +450,7 @@ class EvaluationClient:
         )
 
     def list_tags(self) -> dict[str, Any]:
-        """The project's tags, in the order they were created."""
+        """The project's tags in its order: as people arranged them in Hue, then newer tags."""
         return self._request("GET", "/tags")
 
     def get_scorer(self, scorer_id: str) -> dict[str, Any]:
