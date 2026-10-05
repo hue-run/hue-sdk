@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.13.1`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.13.2`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -469,7 +469,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.13.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.13.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -480,7 +480,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.13.1.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.13.2.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -523,10 +523,10 @@ production agent lacks. Pin the SDK and bring its `zod` peer along, so the agent
 gains no dependency:
 
 ```sh
-npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
-npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
-npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --worker --command "node agent.js" --agent-key support-agent --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
+npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision> --env-file .env.hue
 ```
 
 Without the second `--package`, `hue eval` exits with `hue eval needs zod`, even for `--help`;
@@ -562,7 +562,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -581,9 +581,11 @@ Failing cases print the scorer explanation. An evaluator Hue records as not appl
 that case's columns and neither passes nor fails it, so in a mixed eval set a case is decided by
 the evaluators that apply to it; the pass line counts the not-applicable results. A case that no
 pinned evaluator applies to is an error that names what they need. A result of a pinned Hue judge
-(an evaluator of kind `world_judge`) that Hue marks advisory, as it does every judge's today, is
+(an evaluator of kind `world_judge`) that Hue marks advisory is
 shown in its column, marked `(advisory)`, but never decides a case or the exit code; the pass line
-counts advisory failures as not counted, and a case only advisory results ran for is an error. Any
+counts advisory failures as not counted, and a case only advisory results ran for is an error.
+The Answer outcome evaluator uses its required judge to decide answer-only cases; if that judge
+cannot run, the case is inconclusive. Any
 other evaluator's result, an error, or a metric that carries `passed` is never advisory, whatever
 its evidence says. A metric name that
 several evaluators report, such as two judges' `verdict`, gets a column per evaluator, labelled
@@ -629,8 +631,21 @@ script name; `--revision` is sent to Hue as the agent revision of every world.
 
 `--worker` registers the adapter through `runLocalAgent()` with key `--agent-key` (default: the
 adapter filename slug), name `--agent-name` (default: the key), revision `--revision` (default:
-`AGENT_REVISION`, then the Git `HEAD` short hash, then `dev`) and capability `environment:v1`
-plus any repeated `--capability <value>`, prints the registration and each claimed run with its
+`AGENT_REVISION`, then the Git `HEAD` short hash, then `dev`). Command workers register both
+`environment:v1` and `direct:v1`, plus any repeated `--capability <value>`: the same worker runs
+world cases, answer-only cases and mixed eval sets launched from Hue. Commands keep the launch
+directory for both case kinds, so relative application entry points and configuration work.
+Direct cases receive the task/config on stdin and private files/output through `HUE_CASE_*`,
+without a world token, MCP connection or `HUE_ENVIRONMENT_RUN_ID`. App calls that require a world
+must stay disabled for this handoff; never fall back to live app credentials.
+
+Adapter-file workers register `environment:v1` by default. Add `--capability direct:v1` only when
+the adapter also handles `context.mode === "direct"`; its direct context carries `config`, case
+identity, `executionId`, `files`, `outputDirectory` and `signal`, with no world or tools. These
+worker behaviors are added in TypeScript 0.13.2. Upgrading an existing command worker requires a
+new `--revision`, because adding a capability to a previously registered revision is refused.
+
+The worker prints the registration and each claimed run with its
 URL, executes runs launched from Hue until Ctrl+C or `--max-runs <n>`, and prints the verdict table
 after each run. Selection flags do not apply; Hue chooses the pinned experiment. The worker exits 0
 when it stops normally. Hue offers a case whose world comes with agent-visible files only to a

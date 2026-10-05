@@ -195,6 +195,48 @@ describe("scorer publication normalization", () => {
       expect(() => normalizeScorerDefinitionForPublication(invalid)).toThrow(TypeError);
   });
 
+  test("current world and answer pins retain their distinct metrics and judge requirements", () => {
+    for (const entry of [
+      "hue.outcome_assertions.v4",
+      "hue.outcome_assertions.v5",
+      "hue.outcome_assertions.v6",
+    ] as const) {
+      const definition = {
+        kind: "world_outcome",
+        entry,
+        metrics: assertionMetrics,
+      } satisfies ScorerDefinition;
+      expect(normalizeScorerDefinitionForPublication({ kind: definition.kind, entry })).toEqual(
+        definition,
+      );
+      expect(() =>
+        normalizeScorerDefinitionForPublication({ ...definition, config: { judge } }),
+      ).toThrow(TypeError);
+      expect(() =>
+        normalizeScorerDefinitionForPublication({
+          ...definition,
+          metrics: [...assertionMetrics, ...judgeMetrics],
+        }),
+      ).toThrow(TypeError);
+    }
+    for (const entry of ["hue.answer_outcome.v1", "hue.answer_outcome.v2"] as const) {
+      const definition = { ...outcomeAssertionsV3, entry } satisfies ScorerDefinition;
+      expect(
+        normalizeScorerDefinitionForPublication({
+          kind: definition.kind,
+          entry,
+          config: { judge },
+        }),
+      ).toEqual(definition);
+      expect(() =>
+        normalizeScorerDefinitionForPublication({ ...definition, config: undefined }),
+      ).toThrow(TypeError);
+      expect(() =>
+        normalizeScorerDefinitionForPublication({ ...definition, metrics: assertionMetrics }),
+      ).toThrow(TypeError);
+    }
+  });
+
   test("rejects server-only scorer kinds instead of guessing their contract", () => {
     expect(() =>
       normalizeScorerDefinitionForPublication({

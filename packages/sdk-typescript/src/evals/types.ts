@@ -305,6 +305,30 @@ export type ScorerDefinition =
       };
     }
   | {
+      /** A case's reviewed assertions, scored inside Hue from gateway evidence. */
+      kind: "world_outcome";
+      /** Versioned gateway-ledger assertion semantics. */
+      entry:
+        | "hue.outcome_assertions.v4"
+        | "hue.outcome_assertions.v5"
+        | "hue.outcome_assertions.v6";
+      /** `task_success` and the fixed assertion counts defined by the entry. */
+      metrics: MetricDefinition[];
+    }
+  | {
+      /** An answer-only case, scored inside Hue without world evidence. */
+      kind: "world_outcome";
+      /** Versioned answer semantics; the pinned judge is required to decide the case. */
+      entry: "hue.answer_outcome.v1" | "hue.answer_outcome.v2";
+      /** The assertion and judge counts defined by the entry. */
+      metrics: MetricDefinition[];
+      /** The judge pin used to score the answer. */
+      config: {
+        /** The required judge every case scored by this version uses. */
+        judge: OutcomeJudgeConfig;
+      };
+    }
+  | {
       /** Scored by a person in Hue; the local runner defers it. */
       kind: "manual";
       /** Metrics the reviewer records. */

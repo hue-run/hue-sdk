@@ -647,10 +647,12 @@ their agents with `runLocalAgent()`; setup does not register workers or launch s
 The `hue eval` command, shipped in TypeScript `0.5.0` (`--case` since `0.6.0`, `--scenario`
 before), wraps `runSimulation()` and `runLocalAgent()` for an adapter file or a shell command:
 `hue eval --case "<name>" ./hue-agent.ts --content` creates a fresh run from a published case's
-immutable pins, runs the agent in one isolated world per case, waits
+immutable pins, runs the agent with an isolated world when the case pins one, waits
 for Hue's outcome checks and prints the run URL and per-case PASS/FAIL verdicts with an exit code;
-`--worker` registers the same adapter for runs launched from Hue. It needs a Read and
-write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is
+`--worker` registers the same adapter for runs launched from Hue. In TypeScript 0.13.2, a
+command worker handles both world and answer-only cases; adapter workers opt into direct cases
+with `--capability direct:v1`. Upgrade an existing command registration under a new `--revision`.
+It needs a Read and write key in `HUE_API_KEY` (never printed). Content capture stays off unless `--content` is
 passed; the example passes it so case spans carry content. Case outputs, error messages and
 explanations are stored in Hue either way (`--no-output` keeps them out of a one-shot run's
 results); a command's stdout is its stored answer, with the credentials `hue eval` handed the case
