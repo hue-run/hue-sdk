@@ -32,7 +32,7 @@ from hue_sdk import Hue
 
 with Hue(
     api_key=os.environ["HUE_API_KEY"],
-    capture_content=True,  # Required: True records content; False sends metadata only.
+    capture_content=True,  # Also works with older releases; False sends metadata only.
 ) as hue:
     project = hue.validate_project()
     with hue.context(session_id="conversation-42", user_id="observed-user-7"):
@@ -52,7 +52,7 @@ The SDK uses `https://app.hue.run` by default. Set `base_url` only for a differe
 
 ## Content and semantic fields
 
-`capture_content` has no default. Set it to `True` for full traces: prompts and messages, responses and tool inputs/outputs, alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that content, and your redactor and the credential filtering below apply to it. Choose `False`, metadata-only mode, when your users decline or an application or data policy forbids sending that content to another service.
+In the next minor release, `capture_content` defaults to `True`. Published releases require an explicit choice. Set it to `True` for full traces: prompts and messages, responses and tool inputs/outputs, alongside model, usage, timing and errors. Trace inspection, evaluations and judges read that content, and your redactor and the credential filtering below apply to it. Choose `False`, metadata-only mode, when your users decline or an application or data policy forbids sending that content to another service.
 
 `False` makes `set_input` and `set_output` omit content before it reaches an OTel queue and makes `log_inference` emit no record. Explicit JSON null, empty strings and absent content stay distinct when capture is enabled. Exception recording includes the exception type and ERROR status; exception messages and stacks are always excluded by these helpers.
 

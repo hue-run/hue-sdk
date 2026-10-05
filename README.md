@@ -21,7 +21,7 @@ Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue
 ## Why Hue
 
 - **Standard OpenTelemetry, nothing proprietary.** Traces and correlated logs travel as OTLP/HTTP to documented endpoints. Any OpenTelemetry-emitting language or instrumentor works without a Hue package, and Hue never replaces your global providers.
-- **Full traces, explicit content policy.** `captureContent` / `capture_content` is a required choice. Set it to `true` to record the prompts, responses and tool inputs/outputs that trace inspection, evaluations and judges read; your redaction hook and built-in credential filtering still apply. Metadata-only mode (`false`) is the opt-out when a policy forbids sending that content; it strips recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel AI SDK content fields at export time in both SDKs.
+- **Full traces, metadata-only opt-out.** In the next minor release, `captureContent` / `capture_content` defaults to `true`. Currently published releases require an explicit choice. Set it to `true` to record the prompts, responses and tool inputs/outputs that trace inspection, evaluations and judges read; your redaction hook and built-in credential filtering still apply. Metadata-only mode (`false`) is the opt-out when a policy forbids sending that content; it strips recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel AI SDK content fields at export time in both SDKs.
 - **Fail-open by contract.** Safe constructors, byte- and record-bounded queues, cumulative loss counters and bounded lifecycle deadlines are written down in [RELIABILITY.md](./RELIABILITY.md) and tested against the installed packages.
 - **Provable delivery.** `verifyTrace()` / `verify_trace()` confirm that a real request's spans and fields were stored, without exposing content.
 - **Small, auditable footprint.** The tracing core depends only on official OpenTelemetry packages (plus `requests` in Python), and the JSON Schema validator used by the evaluation scorers is an opt-in extra. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
@@ -83,7 +83,7 @@ Your application runs the model or agent. Instrumentation must emit telemetry; t
 
 ## Send a trace
 
-After installing the TypeScript SDK above, set `HUE_API_KEY` to a project service key in your server environment. Save the following as `first-trace.mjs` and run `node first-trace.mjs`; the [quickstart](https://docs.hue.run/quickstart) walks through the same steps in more detail. `captureContent` is required; the example records content, the recommended setting:
+After installing the TypeScript SDK above, set `HUE_API_KEY` to a project service key in your server environment. Save the following as `first-trace.mjs` and run `node first-trace.mjs`; the [quickstart](https://docs.hue.run/quickstart) walks through the same steps in more detail. The example explicitly enables content, including on published releases that require a capture choice:
 
 ```js
 import { createHue } from "@hue-run/sdk";

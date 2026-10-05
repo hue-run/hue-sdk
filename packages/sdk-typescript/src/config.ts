@@ -53,8 +53,8 @@ export function validateOptions(options: HueOptions): HueOptions &
       liveSpans: false,
     };
   }
-  if (typeof options.captureContent !== "boolean")
-    throw new TypeError("Choose captureContent explicitly: true or false");
+  if (options.captureContent !== undefined && typeof options.captureContent !== "boolean")
+    throw new TypeError("captureContent must be a boolean");
   if (
     typeof options.apiKey !== "string" ||
     !options.apiKey ||
@@ -112,5 +112,12 @@ export function validateOptions(options: HueOptions): HueOptions &
     throw new TypeError("liveSpans must be a boolean");
   // Setup credentials send installer telemetry only, never in-progress placeholders.
   const liveSpans = options.liveSpans !== false && !options.apiKey.startsWith("hue_setup_");
-  return { ...options, baseUrl: url.origin, timeoutMillis, maxQueueBytes, liveSpans };
+  return {
+    ...options,
+    captureContent: options.captureContent ?? true,
+    baseUrl: url.origin,
+    timeoutMillis,
+    maxQueueBytes,
+    liveSpans,
+  };
 }

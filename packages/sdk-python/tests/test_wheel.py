@@ -65,14 +65,13 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
         text=True,
     )
     assert str(consumer) in imported.stdout
-    for capture in ("yes", "no"):
+    for capture in (None, "yes", "no"):
         offset = len(receiver.requests)
         completed = subprocess.run(
             [
                 str(python),
                 str(repository / "examples/python-agent/main.py"),
-                "--capture-content",
-                capture,
+                *(["--capture-content", capture] if capture is not None else []),
             ],
             env=environment,
             cwd=tmp_path,
@@ -88,9 +87,9 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
             assert b"The synthetic " not in payload
             assert not any(path.endswith("/logs") for path, _, _ in receiver.requests[offset:])
     spans = receiver.spans()
-    assert len(spans) == 8  # Four spans for each capture mode.
+    assert len(spans) == 12  # Four spans for each explicit mode and the default.
     logs = receiver.logs()
-    assert len(logs) == 1  # Only the content-capturing run emits the inference record.
+    assert len(logs) == 2  # The default and explicit yes emit the inference record.
     log = logs[0]
     assert any(
         span.name == "chat synthetic-stream-v1" and span.span_id == log.span_id for span in spans
@@ -105,9 +104,9 @@ def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):
     assert field.key == "gen_ai.output.messages"
     role = field.value.array_value.values[0].kvlist_value.values[0]
     assert role.key == "role" and role.value.string_value == "assistant"
-    assert len([span for span in spans if span.status.code == 2]) == 2
+    assert len([span for span in spans if span.status.code == 2]) == 3
     assert (
-        len([event for span in spans for event in span.events if event.name == "stream.chunk"]) == 6
+        len([event for span in spans for event in span.events if event.name == "stream.chunk"]) == 9
     )
     assert all(span.trace_id for span in spans)
 
@@ -169,6 +168,26 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
         shutil.copyfile(package / "tests" / name, receipt_tests / name)
     subprocess.run(
         [str(python), "-m", "pytest", "-q", str(receipt_tests)],
+        env=environment,
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    # Run the constructor-default regression against this wheel, outside the checkout.
+    default_tests = receipt_tests / "test_sdk.py"
+    shutil.copyfile(package / "tests/test_sdk.py", default_tests)
+    subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pytest",
+            "-q",
+            str(default_tests),
+            "-k",
+            "content_is_captured_by_default_and_redacted",
+        ],
         env=environment,
         cwd=tmp_path,
         check=True,

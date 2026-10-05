@@ -34,7 +34,7 @@ def has_value(context: ScoreContext):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--capture-content", choices=("yes", "no"), required=True)
+    parser.add_argument("--capture-content", choices=("yes", "no"), default="yes")
     parser.add_argument("--persist-result-content", choices=("yes", "no"), required=True)
     parser.add_argument("--checkpoint-directory", type=Path, required=True)
     parser.add_argument("--name-prefix", default="Python evaluation")

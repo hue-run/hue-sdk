@@ -667,8 +667,8 @@ A Scenario or eval set whose dataset version is not saved cannot back an experim
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
 (default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given; `--origin`
-overrides the origin. Telemetry content capture stays off unless `--content` is passed; the
-examples pass it so the run's case spans carry content. Model and tool spans inside the agent come
+overrides the origin. In the next minor release, telemetry content capture defaults on; `--no-content` opts out.
+Published releases require `--content`; the examples include it for compatibility. Model and tool spans inside the agent come
 only from the agent's own instrumentation. Case outputs, error messages and explanations are
 stored in Hue whether or not `--content` is passed, so a case's answer can be graded and read on
 its run page. A `--command`'s stdout is its answer unless it writes a result file, and is stored,
@@ -677,11 +677,11 @@ credentials it handed the case (the world token and MCP headers, a legacy MCP to
 bearers) and every Hue control-plane credential in its environment with `[redacted]`, in the
 answer, an adapter's thrown message and name, generated file names and the local checkpoint.
 `--no-output` keeps outputs, error messages and explanations out of a one-shot run's stored
-results; with `--content` the case span still carries the output. `--worker` always stores them, because a run launched from Hue is read
+results; captured telemetry still carries the output. In the next minor release, pass `--no-output --no-content` to omit both. `--worker` always stores them, because a run launched from Hue is read
 on its run page (that is `runLocalAgent()`'s contract), and refuses `--no-output`. An interrupted
 one-shot run keeps the choice it started with, so one run never mixes stored and unstored outputs:
-rerunning it with other `--no-output` or `--content` flags is refused with the flags it started
-with. Resume a run that an earlier SDK started without `--content` by passing `--no-output`.
+rerunning it with another output or telemetry capture policy is refused with the flags that resume it.
+To resume a metadata-only trace from an earlier release, add `--no-content` and keep its original `--no-output` choice.
 
 Files the agent writes to `output/` are uploaded as generated documents with or without
 `--no-output`, and they are not redacted the way the answer is: `hue eval` replaces the same

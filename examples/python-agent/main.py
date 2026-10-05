@@ -81,7 +81,7 @@ def run_openai(hue: Hue) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("synthetic", "openai"), default="synthetic")
-    parser.add_argument("--capture-content", choices=("yes", "no"), required=True)
+    parser.add_argument("--capture-content", choices=("yes", "no"), default="yes")
     args = parser.parse_args()
     with Hue(
         os.environ["HUE_BASE_URL"],

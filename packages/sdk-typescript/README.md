@@ -35,7 +35,7 @@ import { createHue, HueExportError } from "@hue-run/sdk";
 const hue = createHue({
   apiKey: process.env.HUE_API_KEY!, // a project service key, on the server only
   serviceName: "my-agent",
-  captureContent: true, // required: true records content; false sends metadata only
+  captureContent: true, // Also works with older releases; false sends metadata only
   onExportIssue: (issue) => console.error(issue), // sanitized counts, never server bodies
 });
 
@@ -57,7 +57,7 @@ try {
 await hue.shutdown(); // flushes and releases providers owned by this client
 ```
 
-`captureContent` is required. The example sets `true`, the recommended choice: trace inspection,
+In the next minor release, `captureContent` defaults to `true`. Published releases require an explicit choice. The example sets `true`: trace inspection,
 evaluations and judges read the prompts, responses and tool inputs/outputs it records. Choose
 `false` for metadata only when a policy forbids sending that content; see
 [Privacy and content](#privacy-and-content).

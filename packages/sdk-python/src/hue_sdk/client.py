@@ -529,7 +529,8 @@ class Hue:
     Use ``Hue(api_key=..., capture_content=...)`` for Hue Cloud. ``base_url``
     overrides the default origin; existing ``Hue(base_url, api_key, ...)`` calls work,
     and a bare key in the first position raises ``TypeError`` naming ``api_key=``.
-    ``capture_content`` is required. It governs Hue's content helpers and, at export time,
+    ``capture_content`` defaults to True; pass False explicitly for metadata-only export.
+    It governs Hue's content helpers and, at export time,
     recognized third-party content attributes; unrecognized custom attributes, span names
     and other exporters remain caller-owned.
     ``tracer_provider`` and ``logger_provider`` attach Hue's processors to existing SDK
@@ -552,7 +553,7 @@ class Hue:
         base_url: str = DEFAULT_BASE_URL,
         api_key: str | None = None,
         *,
-        capture_content: bool,
+        capture_content: bool = True,
         service_name: str = "hue-python-agent",
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,

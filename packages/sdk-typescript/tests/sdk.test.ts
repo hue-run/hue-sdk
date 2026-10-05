@@ -2039,7 +2039,7 @@ describe("Hue SDK contract", () => {
       }
     },
   );
-  test("requires explicit capture policy and secure endpoints without credentials in errors", () => {
+  test("rejects invalid capture options and insecure endpoints without credentials in errors", () => {
     for (const baseUrl of [
       "http://example.test",
       "https://user:password@example.test",
@@ -2052,10 +2052,13 @@ describe("Hue SDK contract", () => {
       expect(() =>
         createHue({ apiKey, serviceName: "test", captureContent: true, baseUrl }),
       ).toThrow(TypeError);
-    // Runtime JS users receive the same explicit-policy requirement as TypeScript callers.
-    expect(() =>
-      createHue({ apiKey, serviceName: "test" } as Parameters<typeof createHue>[0]),
-    ).toThrow("Choose captureContent explicitly");
+    // Invalid supplied values must not coerce to either capture mode.
+    for (const captureContent of [null, "false", 0])
+      expect(() =>
+        createHue({ apiKey, serviceName: "test", captureContent } as unknown as Parameters<
+          typeof createHue
+        >[0]),
+      ).toThrow("captureContent must be a boolean");
   });
 
   test("normalizes origin-only base URLs before project and export requests", async () => {
@@ -2076,6 +2079,64 @@ describe("Hue SDK contract", () => {
       await endpoint.server.stop(true);
     }
   });
+
+  test.each([createHue, createHueSafe])(
+    "captures supplied content by default through %p",
+    async (create) => {
+      const endpoint = receiver();
+      const hue = create({
+        apiKey,
+        serviceName: "default-capture",
+        baseUrl: endpoint.url,
+        redact: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
+      });
+      try {
+        await hue.withSpan(
+          "root",
+          async (root) => {
+            await hue.model(
+              "synthetic-model",
+              async (model) => {
+                model.setInput([
+                  { role: "user", parts: [{ type: "text", content: "synthetic-secret" }] },
+                ]);
+                model.setOutput([
+                  { role: "assistant", parts: [{ type: "text", content: "reply" }] },
+                ]);
+              },
+              { provider: "synthetic" },
+            );
+            await hue.tool("lookup", { query: "synthetic-secret" }, () => ({ answer: "result" }));
+            root.setOutput("reply");
+            hue.recordMessages({ output: "reply" });
+          },
+          { input: "synthetic-secret" },
+        );
+        await hue.flush();
+        const spans = endpoint.requests
+          .filter((request) => request.signal === "traces")
+          .flatMap((request) => request.records);
+        const root = spans.find((span) => span.name === "root")!;
+        const model = spans.find((span) => span.name === "chat synthetic-model")!;
+        const tool = spans.find((span) => span.name === "execute_tool lookup")!;
+        expect(attr(root, "input.value")?.stringValue).toBe('"[redacted]"');
+        expect(attr(root, "output.value")?.stringValue).toBe('"reply"');
+        expect(attr(model, "gen_ai.input.messages")).toBeDefined();
+        expect(attr(model, "gen_ai.output.messages")).toBeDefined();
+        expect(attr(tool, "gen_ai.tool.call.arguments")?.stringValue).toBe(
+          '{"query":"[redacted]"}',
+        );
+        expect(attr(tool, "gen_ai.tool.call.result")?.stringValue).toBe('{"answer":"result"}');
+        expect(endpoint.requests.some((request) => request.signal === "logs")).toBe(true);
+        expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain(
+          "synthetic-secret",
+        );
+      } finally {
+        await hue.shutdown();
+        endpoint.server.stop(true);
+      }
+    },
+  );
 
   test("nests spans, propagates session/user IDs, preserves null and exports correlated logs", async () => {
     const endpoint = receiver();

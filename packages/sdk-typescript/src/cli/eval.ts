@@ -153,7 +153,8 @@ Output and limits:
   --name <run name>               Run name (default: <agent key> @ <revision>, hashes shortened)
   --baseline <experiment id|url>  Compare verdicts with a previous experiment
   --json                          Print one JSON document on stdout; progress goes to stderr
-  --content                       Capture telemetry content (span inputs, outputs and messages)
+  --content                       Capture telemetry content (the default)
+  --no-content                    Omit telemetry inputs, outputs and messages
   --no-output                     One-shot: do not store case outputs, error messages and
                                   explanations (stored by default; --worker always stores); with
                                   --content the case span still carries the output
@@ -223,7 +224,8 @@ function parse(argv: string[]) {
         name: { type: "string" },
         baseline: { type: "string" },
         json: { type: "boolean", default: false },
-        content: { type: "boolean", default: false },
+        content: { type: "boolean" },
+        "no-content": { type: "boolean", default: false },
         "no-output": { type: "boolean", default: false },
         "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
@@ -972,9 +974,9 @@ export function explain(error: unknown): string {
   if (error instanceof CheckpointIdentityError && error.startedWith) {
     const flags = [
       error.startedWith.persistResultContent === false ? "--no-output" : "",
-      error.startedWith.captureContent === true ? "--content" : "",
+      error.startedWith.captureContent === false ? "--no-content" : "",
     ].filter(Boolean);
-    return `This unfinished run was started ${flags.length ? `with ${flags.join(" and ")}` : "without --no-output or --content"}; rerun with the same flags to resume it, or remove its checkpoint directory to start over`;
+    return `This unfinished run was started ${flags.length ? `with ${flags.join(" and ")}` : "without --no-output or --no-content"}; rerun with the same flags to resume it, or remove its checkpoint directory to start over`;
   }
   // The error's own message points at an in-memory report the user cannot reach.
   if (error instanceof HueExportError)
@@ -1749,6 +1751,8 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
   let json = false;
   try {
     const { values, positionals } = parse(argv);
+    if (values.content && values["no-content"])
+      throw new UsageError("Choose either --content or --no-content");
     // A usage error before anything is prepared or created: no run is left to recover from it.
     traceNotAcceptedPolicy(values["trace-not-accepted"]);
     json = values.json;
@@ -1834,7 +1838,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       apiKey,
       baseUrl,
       serviceName: key,
-      captureContent: values.content,
+      captureContent: values.content ?? !values["no-content"],
       timeoutMillis: CASE_TRACE_EXPORT_MILLIS,
     });
     return values.worker

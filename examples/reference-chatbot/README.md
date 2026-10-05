@@ -31,10 +31,10 @@ HUE_CHAT_MODE=synthetic
 PORT=3401
 ```
 
-`HUE_CAPTURE_CONTENT` and `HUE_CHAT_MODE` are required explicit decisions.
-`HUE_CAPTURE_CONTENT=true`, the recommended setting, records prompts, responses and tool
-inputs/outputs so you can inspect full traces in Hue; `false` sends metadata only, for when a
-policy forbids sending that content. Set
+`HUE_CHAT_MODE` is required. Content capture defaults on when `HUE_CAPTURE_CONTENT` is unset.
+`HUE_CAPTURE_CONTENT=true` records prompts, responses and tool inputs/outputs so you can inspect
+full traces in Hue; explicit `false` sends metadata only, for when a policy forbids sending that
+content. Set
 `HUE_BASE_URL` only for a different Hue deployment; omitting it uses
 `https://app.hue.run`. Start with `node --env-file=.env dist/server.js` or provide the
 variables in your process environment and run `node dist/server.js`. Open the
