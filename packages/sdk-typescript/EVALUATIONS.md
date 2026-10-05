@@ -303,7 +303,7 @@ and require a Hue deployment that serves case `inputFiles` on experiment
 items, subject `files`, and the artifact reservation, upload, completion and download APIs. The
 Python SDK has no equivalent.
 
-The TypeScript 0.13.2 `hue eval --worker --command "…"` wrapper supplies both callbacks, so one
+Since TypeScript 0.13.2, the `hue eval --worker --command "…"` wrapper supplies both callbacks, so one
 command worker accepts direct and world cases, including mixed eval sets. It keeps the launch
 directory for relative application entry points; private case inputs/output still use
 `HUE_CASE_*`. An adapter-file worker opts into the direct callback with `--capability direct:v1`

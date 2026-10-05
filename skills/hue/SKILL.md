@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.6.4"
+  version: "0.6.5"
 ---
 
 # Hue
@@ -223,8 +223,8 @@ evaluator, so a missing judge leaves its result inconclusive.
 ## Evaluate a published case
 
 When the user asks to evaluate or regression-test their agent against a published Hue case, or to
-make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.13.2
-(`HUE_WORLD_NOW` needs 0.13.0; `--case` and `--command` are available since 0.12.1). `hue eval`
+make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.14.0
+(`HUE_WORLD_NOW` needs 0.13.0; `--case` and `--command` are available since 0.12.1). Confirm registry availability before running version-pinned install commands; a source commit is not a release. `hue eval`
 runs on Node.js 22 or 24, also for a Python agent, and the agent itself needs no Hue package.
 Hue never executes the agent: it runs in the user's process. Hue hosts a simulated world when
 the case pins one and grades the execution's output and any sealed world.
@@ -235,7 +235,7 @@ the case pins one and grades the execution's output and any sealed world.
 
 For an answer-only case, use the application's answer path with app tools disabled. No mirror
 helper or starting world is needed. A command worker accepts these cases and world cases under
-one registration in TypeScript 0.13.2: it keeps the application's working directory and the
+one registration since TypeScript 0.13.2: it keeps the application's working directory and the
 same `{inputs, config}` stdin contract. A direct case sets `HUE_EXECUTION_ID` and `HUE_CASE_*`
 but no `HUE_ENVIRONMENT_RUN_ID`, world token or MCP connection. If the application initializes
 app clients before choosing its answer path, skip that initialization for this direct handoff;
@@ -356,7 +356,7 @@ in the codebase's language and trim the functions no call site uses.
    the evaluation from the shell:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.14.0 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
    ```
 
    The two `--package` flags put the CLI and its `zod` peer in npx's cache, so the agent's
@@ -412,7 +412,7 @@ in the codebase's language and trim the functions no call site uses.
 7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.14.0 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
    ```
 
 A worker upgrade from an environment-only registration needs a new `--revision`, because Hue
@@ -445,7 +445,7 @@ For a one-shot run, exit code 0 means every case passed; 1 means a case failed, 
 inconclusive or is incomplete; 2 is a usage error; 130 is an interrupt. A worker's normal stop
 does not report a run verdict. An evaluator that does not apply to a case
 shows `n/a` and neither passes nor fails it, and a case no pinned evaluator applies to is an
-error. In currently published releases, pass `--content` to capture telemetry content. The next minor release enables it by default and adds `--no-content` as the explicit opt-out. One-shot mode stores
+error. Starting with TypeScript 0.14.0, telemetry content capture defaults on; `--no-content` opts out. Earlier releases require `--content`. One-shot mode stores
 case outputs, error messages and explanations in Hue by default, as `--worker` always does: the
 command's stdout is its stored answer, with the credentials `hue eval` handed it redacted, so the
 agent must not print credentials or debug logs there, and `--no-output` opts a one-shot run out.
