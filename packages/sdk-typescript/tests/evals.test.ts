@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
@@ -632,6 +633,49 @@ describe("checkpoint identity", () => {
 });
 
 describe("installed evaluation API and runner contract", () => {
+  test("client serialization and inspection never expose the project key", () => {
+    const client = createEvaluationClient({ apiKey: key });
+    expect(Object.keys(client)).not.toContain("apiKey");
+    expect(Object.getOwnPropertyNames(client)).not.toContain("apiKey");
+    for (const serialized of [
+      JSON.stringify(client),
+      JSON.stringify({ ...client }),
+      inspect(client),
+      inspect(client, { showHidden: true }),
+      JSON.stringify(Object.getOwnPropertyDescriptors(client)),
+    ]) {
+      expect(serialized).not.toContain(key);
+    }
+  });
+
+  test("the private project key still authenticates API requests and artifact downloads", async () => {
+    const artifactId = randomUUID();
+    const requests: { path: string; authorization: string | null }[] = [];
+    const bytes = new Uint8Array([1, 2, 3]);
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        requests.push({ path, authorization: request.headers.get("authorization") });
+        return path === "/api/v1/projects/current"
+          ? Response.json({ id: randomUUID(), name: "p", slug: "p", organizationId: "o" })
+          : new Response(bytes);
+      },
+    });
+    try {
+      const client = createEvaluationClient({ apiKey: key, baseUrl: server.url.origin });
+      await client.checkConnection();
+      expect(await client.downloadArtifact(artifactId)).toEqual(bytes);
+      expect(requests).toEqual([
+        { path: "/api/v1/projects/current", authorization: `Bearer ${key}` },
+        { path: `/api/v1/artifacts/${artifactId}/download`, authorization: `Bearer ${key}` },
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("runs up to 64 cases at once and refuses more", async () => {
     const options = (concurrency: number) =>
       ({ persistResultContent: false, concurrency }) as never;

@@ -98,7 +98,7 @@ const ENVIRONMENT_PUBLICATION_BOUNDS = aggregateBounds(240_000 + 32);
 export class EnvironmentClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;
-  private readonly apiKey: string;
+  readonly #apiKey: string;
   private readonly timeoutMillis: number;
   private readonly maxAttempts: number;
   constructor(options: EnvironmentClientOptions) {
@@ -108,7 +108,7 @@ export class EnvironmentClient {
       captureContent: false,
     });
     this.baseUrl = validated.baseUrl;
-    this.apiKey = validated.apiKey;
+    this.#apiKey = validated.apiKey;
     this.timeoutMillis = validated.timeoutMillis;
     const attempts = options.maxAttempts ?? 4;
     if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10)
@@ -128,7 +128,7 @@ export class EnvironmentClient {
       response = await fetch(`${this.baseUrl}/api/v1${path}`, {
         method,
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${this.#apiKey}`,
           ...(payload ? { "Content-Type": "application/json" } : {}),
         },
         body: payload,

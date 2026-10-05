@@ -261,7 +261,7 @@ function refusalRetryAfter(response: Response): number | undefined {
 export class EvaluationClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;
-  private readonly apiKey: string;
+  readonly #apiKey: string;
   private readonly timeoutMillis: number;
   private readonly maxAttempts: number;
   constructor(options: EvaluationClientOptions) {
@@ -271,7 +271,7 @@ export class EvaluationClient {
       captureContent: false,
     });
     this.baseUrl = validated.baseUrl;
-    this.apiKey = validated.apiKey;
+    this.#apiKey = validated.apiKey;
     this.timeoutMillis = validated.timeoutMillis;
     const attempts = options.maxAttempts ?? 4;
     if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10)
@@ -376,7 +376,7 @@ export class EvaluationClient {
       () => ({
         method,
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${this.#apiKey}`,
           ...(payload ? { "Content-Type": "application/json" } : {}),
         },
         body: payload,
@@ -420,7 +420,7 @@ export class EvaluationClient {
       `${this.baseUrl}/api/v1/artifacts/${uuid(id)}/download`,
       () => ({
         method: "GET",
-        headers: { Authorization: `Bearer ${this.apiKey}` },
+        headers: { Authorization: `Bearer ${this.#apiKey}` },
         redirect: "error",
         signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
       }),

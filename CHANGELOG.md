@@ -8,6 +8,13 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [Unreleased]
+
+#### Fixed
+
+- `EvaluationClient` and `EnvironmentClient` keep the project API key in a runtime-private field, so
+  `JSON.stringify`, object spread, `Object.keys` and `util.inspect` no longer reveal it.
+
 ### [0.14.0] - 2026-10-05
 
 #### Breaking
