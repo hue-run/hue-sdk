@@ -229,9 +229,11 @@ for a case with a world. Publish with `publish_case_conversion`, `name` and the 
 the displayed task, including a task read from a generic trace. Manual answer cases retain their
 required answer judge.
 
-The `case_from_trace` MCP prompt follows the automatic route. Publication saves the version for
-a new eval set or a draft version Hue opened. If the destination already has an open draft, use
-**Save eval-set version**, `freeze_eval_set_version` or `hue eval --save-version` before running it.
+The `case_from_trace` MCP prompt follows the automatic route. Automatic publication and the
+UI's quick **Publish** save the version for a new eval set or a draft version Hue opened.
+After manual MCP publication, or when the destination already had an open draft, use
+**Save eval-set version**, `freeze_eval_set_version` or `hue eval --save-version` before running
+it. Manual MCP publication leaves the version open even for a newly created eval set.
 
 A case publishes at a tier that says what is verified: T1 World verified, T2
 Some reads answered from the recording, T3 Partial, advisory, T4 Answer-only. A trace that still
