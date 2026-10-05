@@ -29,7 +29,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from hue_sdk import Hue, ProjectValidationError
+from hue_sdk import Hue, ProjectValidationError, create_hue_safe
 from hue_sdk.transport import MAX_CONTENT_BYTES, TRUNCATED_KEY
 
 KEY = "synthetic-local-project-key"
@@ -41,6 +41,35 @@ def attrs(span):
 
 def body_of(log):
     return {entry.key: entry.value for entry in log.body.kvlist_value.values}
+
+
+@pytest.mark.parametrize("create", [Hue, create_hue_safe])
+def test_content_is_captured_by_default_and_redacted(receiver, create):
+    with create(
+        receiver.url,
+        KEY,
+        redactor=lambda field, value: "[redacted]" if value == "synthetic-secret" else value,
+    ) as hue:
+        with hue.span("root") as root:
+            root.set_input("synthetic-secret")
+            root.set_output("reply")
+            with hue.model("synthetic-model", provider="synthetic") as model:
+                model.set_input([{"role": "user", "content": "task"}])
+                model.set_output([{"role": "assistant", "content": "reply"}])
+                model.log_inference(output="reply")
+            with hue.tool("lookup") as tool:
+                tool.set_input({"query": "task"})
+                tool.set_output({"answer": "result"})
+        assert hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    assert spans["root"]["input.value"].string_value == '"[redacted]"'
+    assert spans["root"]["output.value"].string_value == '"reply"'
+    assert "gen_ai.input.messages" in spans["chat synthetic-model"]
+    assert "gen_ai.output.messages" in spans["chat synthetic-model"]
+    assert "gen_ai.tool.call.arguments" in spans["execute_tool lookup"]
+    assert "gen_ai.tool.call.result" in spans["execute_tool lookup"]
+    assert receiver.logs()
+    assert all(b"synthetic-secret" not in body for _, _, body in receiver.requests)
 
 
 def test_actual_trace_log_correlation_and_content(receiver):
@@ -915,9 +944,7 @@ def test_a_whole_value_unmarks_its_cut_key_and_concurrent_cuts_list_both(receive
     ]
 
 
-def test_capture_choice_and_valid_json_are_required(receiver):
-    with pytest.raises(TypeError):
-        Hue(receiver.url, KEY)
+def test_invalid_capture_choice_and_json_are_rejected(receiver):
     with pytest.raises(TypeError):
         Hue(receiver.url, KEY, capture_content="yes")
     with Hue(receiver.url, KEY, capture_content=True) as hue:

@@ -8,7 +8,7 @@ Install the published package into a virtual environment (`pip install -r exampl
 python examples/python-agent/main.py --capture-content yes
 ```
 
-Choose `--capture-content no` for metadata only. The application validates its project first and exits unsuccessfully if export fails. Its output labels the mode and trace ID; it never prints a key or model content. Synthetic mode reports no token usage because it has no provider-reported usage.
+Content capture defaults to `yes`; choose `--capture-content no` for metadata only. The application validates its project first and exits unsuccessfully if export fails. Its output labels the mode and trace ID; it never prints a key or model content. Synthetic mode reports no token usage because it has no provider-reported usage.
 
 ## Optional real-provider smoke
 

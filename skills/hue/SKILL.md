@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.6.3"
+  version: "0.6.4"
 ---
 
 # Hue
@@ -77,7 +77,7 @@ SDK constructors do not automatically read environment variables. For another Hu
 
 ## Capture and instrument full traces
 
-Recommend content capture: `captureContent: true` / `capture_content=True`. Trace inspection, evaluations and judges in Hue read the recorded content. The value is required; always pass it explicitly. In the plan you show the user, state what content capture sends to Hue: supported prompts/messages, responses and tool inputs/outputs, alongside available model/provider identifiers, usage, timing, errors and existing correlation. The user's approval of that plan authorizes content capture. Choose metadata-only (`false`) only if the user declines or an existing application policy forbids sending that content to another service. Preserve redaction and credential filtering in both modes. Do not invent missing fields.
+Use full content capture for setup: `captureContent: true` / `capture_content=True`. Trace inspection, evaluations and judges in Hue read the recorded content. Pass `true` explicitly in generated configuration so it also works with older SDK releases that require the option. If the application reads `HUE_CAPTURE_CONTENT`, an unset variable enables capture; only an explicit `false` disables it. Explain that content capture sends supported prompts/messages, responses and tool inputs/outputs to Hue, alongside available model/provider identifiers, usage, timing, errors and existing correlation. Honor an explicit metadata-only choice or an existing application policy that forbids sending that content to another service. Preserve redaction and credential filtering in both modes. Do not invent missing fields.
 
 For redaction, read the [redaction recipe](https://docs.hue.run/guides/redaction) and identify the provider and exporter that actually send the records. TypeScript's `redact(value, path)` belongs on `createHue`, or on `createHueTransport` when reusing a provider. Python's `redactor(field, value)` covers Hue helper content, not arbitrary external spans; scrub those at their producer or collector. Configure each exporter separately, including Langfuse when present. Use the recipe's email example as a starting point, adapt it to the application's fields, and verify synthetic exported content plus unchanged application results. Do not promise automatic PII detection or coverage of every field.
 
@@ -107,7 +107,7 @@ Run the application's relevant checks and exercise the changed request path, inc
 
 Keep ownership of borrowed providers with the application. A TypeScript borrowed-provider client flushes but does not shut down those providers; at application shutdown, stop the providers and then its Hue transport. Do not repeatedly attach new Hue processors to a long-lived provider.
 
-Record the actual application's OpenTelemetry trace ID and known request/model/tool span IDs. After their owning providers flush, use `hue.verifyTrace(traceId, { expectedSpanIds, requiredFields })` or Python `hue.verify_trace(trace_id, expected_span_ids=..., required_fields=...)` when available. Require only fields this request should emit; do not require usage the provider omits or content an explicit policy disables. The helper polls for stored evidence within 10 seconds by default (maximum 60 seconds), without implicitly flushing or generating substitute telemetry. A false result is incomplete verification; report missing spans/fields. Authentication, unavailable endpoint, and transport errors require fixing their cause, not claiming arrival. Existing direct-OTLP apps can use the same project-authenticated `GET /api/v1/traces/{otelTraceId}/receipt` with repeated `expectedSpanId` query parameters; do not install conflicting SDK dependencies for this check.
+Record the actual application's OpenTelemetry trace ID and known request/model/tool span IDs. After their owning providers flush, use `hue.verifyTrace(traceId, { expectedSpanIds, requiredFields })` or Python `hue.verify_trace(trace_id, expected_span_ids=..., required_fields=...)` when available. Require `input` and `output` for a request that receives a task and produces a reply with content capture enabled, and inspect its model messages and tool arguments/results. Missing expected content means setup is incomplete. Do not require usage the provider omits or content an explicit policy disables. The helper polls for stored evidence within 10 seconds by default (maximum 60 seconds), without implicitly flushing or generating substitute telemetry. A false result is incomplete verification; report missing spans/fields. Authentication, unavailable endpoint, and transport errors require fixing their cause, not claiming arrival. Existing direct-OTLP apps can use the same project-authenticated `GET /api/v1/traces/{otelTraceId}/receipt` with repeated `expectedSpanId` query parameters; do not install conflicting SDK dependencies for this check.
 
 A receipt confirms stored field presence and the requested span IDs, not payload correctness or universal trace completeness. Inspect captured prompts/responses, tool inputs/outputs, redaction, timing and errors under **Traces** using the receipt's `traceUrl` when authorized. The receipt endpoint does not provide general trace browsing; use the Hue UI or an authorized MCP connection to inspect content. If neither is available, report receipt evidence and leave content inspection to the user. Older SDKs or deployments require explicit UI verification; do not invent unsupported helper methods or call a connection check proof of ingestion.
 
@@ -445,7 +445,7 @@ For a one-shot run, exit code 0 means every case passed; 1 means a case failed, 
 inconclusive or is incomplete; 2 is a usage error; 130 is an interrupt. A worker's normal stop
 does not report a run verdict. An evaluator that does not apply to a case
 shows `n/a` and neither passes nor fails it, and a case no pinned evaluator applies to is an
-error. Telemetry content capture stays off unless `--content` is passed. One-shot mode stores
+error. In currently published releases, pass `--content` to capture telemetry content. The next minor release enables it by default and adds `--no-content` as the explicit opt-out. One-shot mode stores
 case outputs, error messages and explanations in Hue by default, as `--worker` always does: the
 command's stdout is its stored answer, with the credentials `hue eval` handed it redacted, so the
 agent must not print credentials or debug logs there, and `--no-output` opts a one-shot run out.
@@ -493,7 +493,7 @@ grading executor scores the uploaded documents after the run.
 | --- | --- | --- |
 | `flush()` throws `HueExportError` with `rejected` issues or HTTP 401/403 | Invalid/revoked key, a Read key, or a `baseUrl` that includes a path | Use **Read and write** for development and evaluation, **Tracing only** on a production server; `baseUrl` is an origin only |
 | Receipt reports missing expected spans | The owning provider was not flushed, or the stream had not finished | Await stream completion, flush the borrowed provider, then verify |
-| Receipt `fields.input` / `fields.output` are false | `captureContent` / `capture_content` is `false` | Expected in metadata-only mode; do not require those fields |
+| Receipt `fields.input` / `fields.output` are false | Metadata-only capture or the application did not record content | Expected only for an explicit metadata-only policy; otherwise record the request's input/output and verify delivery again |
 | `hueTelemetry` throws "requires ai@" | AI SDK 6 in the application | Pass `hueExperimentalTelemetry(hue)` as `experimental_telemetry` (0.2.0+), or attach Hue's transport to the app's provider |
 | `droppedSpans` / dropped-record counters grow | Queue budget reached during a collector outage | Expected loss under the bounded-queue contract; check reachability and the queue budget |
 

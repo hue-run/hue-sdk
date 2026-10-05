@@ -5,7 +5,7 @@ import { createHue, HueExportError } from "@hue-run/sdk";
 import { chatModelIdentity, createChatAgent } from "./agent.js";
 
 const mode = process.env.HUE_CHAT_MODE;
-const capture = process.env.HUE_CAPTURE_CONTENT;
+const capture = process.env.HUE_CAPTURE_CONTENT ?? "true";
 if (mode !== "synthetic" && mode !== "live")
   throw new Error("Choose HUE_CHAT_MODE=synthetic or live");
 if (capture !== "true" && capture !== "false")

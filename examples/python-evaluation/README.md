@@ -12,6 +12,6 @@ python examples/python-evaluation/main.py \
   --checkpoint-directory .local/python-evaluation-checkpoints
 ```
 
-Choose both content settings explicitly. `capture-content` controls telemetry helper content; `yes` records full traces, and `no` sends metadata only when a policy forbids sending that content. `persist-result-content` independently controls evaluation output and evidence storage, including checkpoint files. With result storage disabled, historical evaluators report unavailable output. Identifiers and typed metrics remain stored. The example prints only created IDs and counts and calls no model provider.
+`capture-content` defaults to `yes` for full traces; choose `no` for metadata only when a policy forbids sending that content. Choose `persist-result-content` explicitly: it independently controls evaluation output and evidence storage, including checkpoint files. With result storage disabled, historical evaluators report unavailable output. Identifiers and typed metrics remain stored. The example prints only created IDs and counts and calls no model provider.
 
 Checkpoint directories use private POSIX permissions. A crashed owner leaves `.lock`; confirm that it stopped before removing that lock. See the [runner contract](../../packages/sdk-python/EVALUATIONS.md) for retry and recovery semantics.

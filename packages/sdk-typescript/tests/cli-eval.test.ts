@@ -836,15 +836,32 @@ test("an agent command's key skips its interpreter, a Windows executable name in
 });
 
 describe("hue eval", () => {
-  test(
-    "runs a published case by name with an adapter file and prints Hue's verdicts",
-    async () => {
+  test("rejects conflicting content flags before running an agent", async () => {
+    const result = await hue(["--content", "--no-content"], { cwd: process.cwd() });
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Choose either --content or --no-content");
+  });
+
+  test.each([true, false])(
+    "runs a published case with capture flags %p and prints Hue's verdicts",
+    async (captureContent) => {
+      const captureFlags = captureContent ? [] : ["--no-content"];
       const f = hueStandIn({ deferredPolls: 1 });
       const cwd = await workspace();
       try {
         await writeFile(join(cwd, ".env.hue"), `HUE_API_KEY=${key}\nHUE_BASE_URL=${f.baseUrl}\n`);
         const result = await hue(
-          ["--case", "refund FLOW", "./hue-agent.ts", "--env-file", ".env.hue", "--revision", "v1"],
+          [
+            "--case",
+            "refund FLOW",
+            "./hue-agent.ts",
+            "--env-file",
+            ".env.hue",
+            "--revision",
+            "v1",
+            ...captureFlags,
+          ],
           { cwd, dropKey: true },
         );
         expect(result.stderr).toBe("");
@@ -876,7 +893,7 @@ describe("hue eval", () => {
         expect([...f.worlds.values()].map((world) => [world.status, world.steps])).toEqual([
           ["completed", [{ action: "save", args: { note: "refund charge ch_2" } }]],
         ]);
-        // The output is stored by default, while span content stays off without --content.
+        // Outputs and telemetry content are stored by default.
         expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
         expect(f.calls.evidence).toEqual([{ traceEvidence: "required" }]);
         expect(f.calls.completions[0]).toMatchObject({
@@ -885,8 +902,13 @@ describe("hue eval", () => {
         expect(f.calls.otlp).toBeGreaterThan(0);
         const caseSpan = f.calls.spans.find((span) => span.name === "hue.experiment.case")!;
         expect(caseSpan).toBeDefined();
-        expect(caseSpan.attributes).not.toContain("input.value");
-        expect(caseSpan.attributes).not.toContain("output.value");
+        if (captureFlags.includes("--no-content")) {
+          expect(caseSpan.attributes).not.toContain("input.value");
+          expect(caseSpan.attributes).not.toContain("output.value");
+        } else {
+          expect(caseSpan.attributes).toContain("input.value");
+          expect(caseSpan.attributes).toContain("output.value");
+        }
         expect(await readFile(join(cwd, ".hue", "eval", ".gitignore"), "utf8")).toBe("*\n");
         expect(f.calls.requests.filter((line) => line === "GET /case-conversions")).toHaveLength(1);
       } finally {
@@ -1633,14 +1655,10 @@ describe("hue eval", () => {
     const message = (persistResultContent: boolean, captureContent: boolean) =>
       explain(new CheckpointIdentityError({ persistResultContent, captureContent }));
     expect(message(false, false)).toBe(
-      "This unfinished run was started with --no-output; rerun with the same flags to resume it, or remove its checkpoint directory to start over",
+      "This unfinished run was started with --no-output and --no-content; rerun with the same flags to resume it, or remove its checkpoint directory to start over",
     );
-    expect(message(false, true)).toStartWith(
-      "This unfinished run was started with --no-output and --content;",
-    );
-    expect(message(true, false)).toStartWith(
-      "This unfinished run was started without --no-output or --content;",
-    );
+    expect(message(false, true)).toStartWith("This unfinished run was started with --no-output;");
+    expect(message(true, false)).toStartWith("This unfinished run was started with --no-content;");
     expect(explain(new CheckpointIdentityError())).toBe(
       "Checkpoint identity differs from this project, run, pins or content policy",
     );

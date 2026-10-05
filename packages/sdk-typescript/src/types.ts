@@ -26,10 +26,11 @@ export type Signal = "traces" | "logs";
 /** Options accepted by every Hue client and transport, whether enabled or disabled. */
 export interface SharedHueOptions {
   /**
-   * Whether helpers record prompts, responses, tool arguments and results. Required for an enabled
-   * client, with no default; a disabled client (`enabled: false`) defaults it to `false`.
+   * Whether helpers record prompts, responses, tool arguments and results. Defaults to `true`
+   * for an enabled client; set `false` explicitly for metadata-only export. A disabled client
+   * (`enabled: false`) exports nothing and defaults it to `false`.
    */
-  captureContent: boolean;
+  captureContent?: boolean;
   /** Hue origin, `https://app.hue.run` by default. An origin only: no path, query, fragment or credentials. */
   baseUrl?: string;
   /** Recorded as the `service.version` resource attribute of an owned client. */
@@ -66,7 +67,8 @@ export interface SharedHueOptions {
 
 /**
  * Options for a client that owns its OpenTelemetry providers. An enabled client needs a project
- * key, a service name and an explicit `captureContent` choice. The kill switch (`enabled: false`)
+ * key and a service name. Content capture defaults to `true`; `captureContent: false` opts out.
+ * The kill switch (`enabled: false`)
  * exports nothing while helpers keep running application code, so it needs no key and
  * `captureContent` defaults to `false`.
  */
