@@ -152,12 +152,17 @@ const sdkScorerPublication = z.union([
   }),
   z.strictObject({
     kind: z.literal("world_outcome"),
-    entry: z.literal("hue.outcome_assertions.v2"),
+    entry: z.enum([
+      "hue.outcome_assertions.v2",
+      "hue.outcome_assertions.v4",
+      "hue.outcome_assertions.v5",
+      "hue.outcome_assertions.v6",
+    ]),
     metrics: fixedMetrics(outcomeAssertionMetrics),
   }),
   z.strictObject({
     kind: z.literal("world_outcome"),
-    entry: z.literal("hue.outcome_assertions.v3"),
+    entry: z.enum(["hue.outcome_assertions.v3", "hue.answer_outcome.v1", "hue.answer_outcome.v2"]),
     metrics: fixedMetrics(outcomeAssertionV3Metrics),
     config: z.strictObject({ judge: outcomeJudgeConfig }),
   }),

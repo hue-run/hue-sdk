@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   Completion,
   Execution,
   Experiment,
+  JsonValue,
   ScorerVersion,
   StoredResult,
   Subject,
@@ -40,6 +42,10 @@ type Stored = {
 function documentStandIn(
   options: {
     gradedAfterPolls?: number;
+    /** Queued CLI worker cases; ordinary document tests use their original single file case. */
+    workerKinds?: ("direct" | "world")[];
+    /** Complete replies fail transiently this often before the worker resumes uploads. */
+    failWorkerCompletions?: number;
     verdict?: "pass" | "fail";
     failCompletions?: number;
     /** Refuse trace exports with 400. */
@@ -130,8 +136,8 @@ function documentStandIn(
         requiredCapabilities: ["input:docx", "input:pdf", "output:docx"],
         outputFamily: "docx",
       },
-    },
-    environmentVersionId: null,
+    } as Record<string, JsonValue>,
+    environmentVersionId: null as string | null,
     artifactManifestId: randomUUID(),
     inputFiles: [
       file(inputs.template, "attached_template"),
@@ -142,6 +148,20 @@ function documentStandIn(
   const cases = new Map<string, ReturnType<typeof caseOf>>(
     dataset.versions.map((version) => [version.id, caseOf(version.id)]),
   );
+  const environmentVersionId = randomUUID();
+  const workerCases = options.workerKinds?.map((kind, index) => ({
+    ...caseOf(dataset.versions[0]!.id),
+    externalKey: `${kind}-${index}`,
+    inputs: { query: "Answer the user", tipo_diligencia: "Virtual" },
+    metadata: { private: "evaluator-only canary" },
+    environmentVersionId: kind === "world" ? environmentVersionId : null,
+    inputFiles: [],
+  }));
+  const casesFor = (versionId: string) => workerCases ?? [cases.get(versionId)!];
+  const worlds = new Map<string, { id: string; executionId: string; status: string }>();
+  const worldToken = "hue_world_synthetic_worker_canary";
+  let queued: { runId: string; experimentId: string; state: string; workerId?: string } | undefined;
+  let failWorkerCompletions = options.failWorkerCompletions ?? 0;
   const scorer = {
     id: randomUUID(),
     name: "GIA D1 citation grader",
@@ -164,6 +184,34 @@ function documentStandIn(
     },
   });
   const scorerVersions = [versionOf(2), versionOf(1)]; // newest first, as the server orders them
+  if (options.workerKinds)
+    scorerVersions[0]!.definition = {
+      kind: "world_outcome",
+      entry: "hue.answer_outcome.v2",
+      metrics: [
+        { name: "task_success", type: "boolean" },
+        ...[
+          "assertions_passed",
+          "assertions_failed",
+          "advisory_failed",
+          "agent_mistakes",
+          "judges_passed",
+          "judges_failed",
+          "judges_advisory",
+        ].map((name) => ({ name, type: "number" as const, min: 0 })),
+      ],
+      config: {
+        judge: {
+          model: "synthetic/judge",
+          provider: "synthetic",
+          template: "a".repeat(64),
+          samples: 3,
+          temperature: 0,
+          maxOutputTokens: 1024,
+          timeoutMs: 60000,
+        },
+      },
+    };
   const judgeKind = options.judge?.kind ?? "world_judge";
   for (const index of options.judge?.versions ?? [])
     if (judgeKind !== "local_code")
@@ -195,6 +243,10 @@ function documentStandIn(
     completions: [] as Record<string, unknown>[],
     downloads: [] as string[],
     uploads: 0,
+    register: [] as Record<string, unknown>[],
+    starts: 0,
+    completionAttempts: 0,
+    localRuns: [] as Record<string, unknown>[],
   };
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -239,7 +291,7 @@ function documentStandIn(
         const version = dataset.versions.find((item) => item.id === versionMatch[1]);
         if (!version) return new Response(null, { status: 404 });
         if (versionMatch[2])
-          return Response.json({ items: [cases.get(version.id)], nextCursor: null });
+          return Response.json({ items: casesFor(version.id), nextCursor: null });
         return Response.json(version);
       }
       if (path === "/scorers")
@@ -266,13 +318,13 @@ function documentStandIn(
             scorerVersions: scorerVersions.filter((item) =>
               (body.scorerVersionIds as string[]).includes(item.id),
             ),
-            itemCount: 1,
-            scores: { scored: 0, error: 0, skipped: 0, pending: 1 },
+            itemCount: casesFor(version.id).length,
+            scores: { scored: 0, error: 0, skipped: 0, pending: casesFor(version.id).length },
           },
-          caseCount: 1,
+          caseCount: casesFor(version.id).length,
           finishedAt: null,
           execution: {
-            unstarted: 1,
+            unstarted: casesFor(version.id).length,
             started: 0,
             uncertain: 0,
             succeeded: 0,
@@ -290,12 +342,15 @@ function documentStandIn(
       if (experimentMatch) {
         const experiment = experiments.get(experimentMatch[1]!);
         if (!experiment) return new Response(null, { status: 404 });
-        const frozenCase = cases.get(experiment.versionId)!;
+        const frozenCases = casesFor(experiment.versionId);
+        const frozenCase =
+          frozenCases.find((item) => item.id === experimentMatch[2]) ?? frozenCases[0]!;
         if (experimentMatch[4]) {
           experiment.finishedAt = new Date().toISOString();
           return Response.json({ id: experiment.id, finishedAt: experiment.finishedAt });
         }
         if (experimentMatch[3]) {
+          calls.starts++;
           const execution = {
             id: randomUUID(),
             attempt: 1,
@@ -313,17 +368,16 @@ function documentStandIn(
             : new Response(null, { status: 404 });
         if (path.endsWith("/items"))
           return Response.json({
-            items: [
-              {
-                id: frozenCase.id,
-                externalKey: frozenCase.externalKey,
-                hasExpected: false,
-                execution:
-                  [...executions.values()].find(
-                    (execution) => execution.experimentId === experiment.id,
-                  ) ?? null,
-              },
-            ],
+            items: frozenCases.map((frozenCase) => ({
+              id: frozenCase.id,
+              externalKey: frozenCase.externalKey,
+              hasExpected: false,
+              execution:
+                [...executions.values()].find(
+                  (execution) =>
+                    execution.experimentId === experiment.id && execution.caseId === frozenCase.id,
+                ) ?? null,
+            })),
             nextCursor: null,
           });
         const { versionId: _versionId, ...publicExperiment } = experiment;
@@ -401,6 +455,109 @@ function documentStandIn(
           failureCode: null,
         });
       }
+      if (path === "/local-agent-worker/register") {
+        calls.register.push(body);
+        const { key: agentKey, ...registration } = body;
+        return Response.json({
+          id: projectId,
+          agentKey,
+          ...registration,
+          enabled: true,
+          lastSeenAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        });
+      }
+      if (path === "/local-agent-worker/claim") {
+        if (!queued) {
+          const response = await fetch(`${url.origin}/api/v1/experiments`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+            body: JSON.stringify({
+              name: "Launched from Hue",
+              datasetVersionId: dataset.versions[0]!.id,
+              scorerVersionIds: [scorerVersions[0]!.id],
+              config: { configured: true },
+            }),
+          });
+          const created = (await response.json()) as { id: string };
+          queued = { runId: randomUUID(), experimentId: created.id, state: "queued" };
+        }
+        if (
+          queued.state === "completed" ||
+          queued.state === "attention" ||
+          (queued.workerId && queued.workerId !== body.workerId)
+        )
+          return Response.json(null);
+        queued.state = "claimed";
+        queued.workerId = String(body.workerId);
+        return Response.json({ runId: queued.runId, experimentId: queued.experimentId });
+      }
+      if (path === "/local-agent-worker/runs/heartbeat")
+        return Response.json({ runId: body.runId, active: true });
+      if (path === "/local-agent-worker/runs/complete") {
+        calls.localRuns.push(body);
+        if (failWorkerCompletions > 0) {
+          failWorkerCompletions--;
+          return new Response(null, { status: 503 });
+        }
+        queued!.state = String(body.state);
+        return Response.json({ runId: body.runId, state: body.state });
+      }
+      if (path === "/environment-runs") {
+        const id = randomUUID();
+        const expiresAt = new Date(Date.now() + 600_000).toISOString();
+        worlds.set(id, { id, executionId: String(body.executionId), status: "open" });
+        const mirror = `${url.origin}/api/sim/gmailmcp.googleapis.com/mcp/v1`;
+        return Response.json({
+          id,
+          worldId: id,
+          environmentVersionId,
+          clockNs: "0",
+          stateDigest: digest,
+          maxSteps: 50,
+          expiresAt,
+          actions: [],
+          token: worldToken,
+          lifecycle: "live",
+          completingUntil: null,
+          surfaces: [],
+          env: {
+            HUE_WORLD_ID: id,
+            HUE_WORLD_TOKEN: worldToken,
+            HUE_SIM_GOOGLE_GMAIL_MCP_URL: mirror,
+          },
+          mcpConfig: {
+            mcpServers: {
+              gmail: {
+                type: "http",
+                url: mirror,
+                headers: { Authorization: `Bearer ${worldToken}` },
+              },
+            },
+          },
+        });
+      }
+      const worldMatch = /^\/environment-runs\/([^/]+)(\/finish)?$/.exec(path);
+      if (worldMatch) {
+        const world = worlds.get(worldMatch[1]!);
+        if (!world) return new Response(null, { status: 404 });
+        if (worldMatch[2]) world.status = String(body.status);
+        return Response.json({
+          ...world,
+          environmentVersionId,
+          seed: "e".repeat(32),
+          stepCount: 0,
+          maxSteps: 50,
+          clockNs: "0",
+          stateDigest: digest,
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          createdAt: new Date().toISOString(),
+          sealedAt: world.status === "open" ? null : new Date().toISOString(),
+          finalState: { collections: {} },
+          validity: "not_assessed",
+          coverageGap: null,
+        });
+      }
       const executionMatch = /^\/experiment-executions\/([^/]+)(\/complete|\/environment)?$/.exec(
         path,
       );
@@ -409,18 +566,22 @@ function documentStandIn(
         if (!execution) return new Response(null, { status: 404 });
         if (executionMatch[2] === "/environment") return new Response(null, { status: 404 });
         if (!executionMatch[2]) return Response.json(execution);
+        calls.completionAttempts++;
         if (failCompletions > 0) {
           failCompletions--;
           return new Response(null, { status: 500 });
         }
         const experiment = experiments.get(execution.experimentId)!;
-        const frozenCase = cases.get(experiment.versionId)!;
+        const frozenCase = casesFor(experiment.versionId).find(
+          (item) => item.id === execution.caseId,
+        )!;
         const ids = (body.artifactIds as string[] | undefined) ?? [];
         if (ids.some((id) => artifacts.get(id)?.state !== "ready"))
           return new Response(null, { status: 409 });
         execution.state = body.state as Execution["state"];
         calls.completions.push({
           ...body,
+          executionId: execution.id,
           filenames: ids.map((id) => artifacts.get(id)!.filename),
         });
         const subjectId = randomUUID();
@@ -529,10 +690,16 @@ function documentStandIn(
             itemId: evaluationItemId,
             scorerVersionId: version.id,
             state: "scored",
-            metrics: [
-              { name: "passed", value: !failed },
-              { name: "errors", value: failed ? 2 : 0 },
-            ],
+            metrics:
+              options.workerKinds && version.definition.kind === "world_outcome"
+                ? version.definition.metrics.map((metric) => ({
+                    name: metric.name,
+                    value: metric.type === "boolean" ? !failed : 0,
+                  }))
+                : [
+                    { name: "passed", value: !failed },
+                    { name: "errors", value: failed ? 2 : 0 },
+                  ],
             explanation: failed ? "2 error(s)" : "0 error(s), gates 8/8",
             evidence: null,
             error: null,
@@ -582,6 +749,7 @@ function documentStandIn(
     dataset,
     scorerVersions,
     artifacts,
+    worlds,
     stop: () => server.stop(true),
   };
 }
@@ -590,11 +758,17 @@ function hue(args: string[], options: { cwd: string; env?: Record<string, string
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
   return new Promise<{ status: number | null; stdout: string; stderr: string }>(
     (resolve, reject) => {
-      const child = spawn(process.execPath, [cli, "eval", ...args], {
-        cwd: options.cwd,
-        env: { ...inherited, NO_COLOR: "1", HUE_API_KEY: key, ...options.env },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      // Installed worker checks exercise the published Node executable.
+      const installed = cli.endsWith(".js") && args.includes("--worker");
+      const child = spawn(
+        installed ? cli : process.execPath,
+        [...(installed ? [] : [cli]), "eval", ...args],
+        {
+          cwd: options.cwd,
+          env: { ...inherited, NO_COLOR: "1", HUE_API_KEY: key, ...options.env },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
       let stdout = "";
       let stderr = "";
       child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
@@ -633,6 +807,268 @@ const adapterSource = `export default async function (_inputs, context) {
   return { itemKeys: Object.keys(context.item).sort() };
 }
 `;
+
+/** One relative entry point for a command worker's direct and world cases. */
+const workerSource = `import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+let text = "";
+for await (const chunk of process.stdin) text += chunk;
+const { inputs, config } = JSON.parse(text);
+appendFileSync(process.env.WORKER_INVOCATIONS, process.env.HUE_CASE_KEY + "\\n");
+if (process.env.FAIL_WORKER) process.exit(3);
+if (process.env.HANG_WORKER) await new Promise(() => setInterval(() => {}, 1000));
+const descriptor = JSON.parse(readFileSync(join(process.env.HUE_CASE_DIR, "case.json"), "utf8"));
+process.stdout.write(JSON.stringify({ inputs, config, cwd: process.cwd(),
+  relativeDependency: readFileSync("./application-config.txt", "utf8"),
+  descriptorKeys: Object.keys(descriptor).sort(),
+  caseDirectory: process.env.HUE_CASE_DIR,
+  outputDirectory: process.env.HUE_CASE_OUTPUT_DIR,
+  hasWorld: Boolean(process.env.HUE_WORLD_TOKEN),
+  hasMcp: Boolean(process.env.HUE_MCP_CONFIG && existsSync(process.env.HUE_MCP_CONFIG)),
+  hasMirror: Boolean(process.env.HUE_SIM_GOOGLE_GMAIL_MCP_URL),
+  staleMirror: process.env.HUE_SIM_NOTION_MCP_URL ?? null,
+  environmentRunId: process.env.HUE_ENVIRONMENT_RUN_ID ?? null,
+  hueKey: process.env.HUE_API_KEY ?? null,
+  mcpKey: process.env.HUE_MCP_KEY ?? null }));
+`;
+
+async function workerWorkspace() {
+  const cwd = await mkdtemp(join(tmpdir(), "hue-command-worker-"));
+  await writeFile(join(cwd, "worker-agent.mjs"), workerSource);
+  await writeFile(join(cwd, "application-config.txt"), "application settings");
+  await writeFile(join(cwd, ".env.hue"), `HUE_API_KEY=${key}\n`);
+  return cwd;
+}
+
+function workerArgs(cwd: string, adapter?: string) {
+  return [
+    "--worker",
+    ...(adapter ? [adapter] : ["--command", "node ./worker-agent.mjs"]),
+    "--max-runs",
+    "1",
+    "--revision",
+    "dual-cases-v1",
+    "--checkpoint-dir",
+    join(cwd, "checkpoints"),
+    "--wait",
+    "30",
+  ];
+}
+
+const inheritedWorld = {
+  HUE_WORLD_TOKEN: "another-world-token",
+  HUE_WORLD_ID: "another-world-id",
+  HUE_MCP_CONFIG: "/stale/config.json",
+  HUE_MCP_TOKEN: "another-mcp-token",
+  HUE_SIM_NOTION_MCP_URL: "https://another-world.test/mcp",
+  HUE_ENVIRONMENT_RUN_ID: "another-environment-run",
+  HUE_MCP_KEY: key,
+};
+
+describe("hue eval command workers", () => {
+  for (const kinds of [["direct"], ["world"], ["direct", "world"]] as const)
+    test(
+      `one relative command executes ${kinds.join(" and ")} cases with only their own handoff`,
+      async () => {
+        const standIn = documentStandIn({ workerKinds: [...kinds] });
+        const cwd = await workerWorkspace();
+        try {
+          const result = await hue([...workerArgs(cwd), "--env-file", ".env.hue"], {
+            cwd,
+            env: {
+              ...inheritedWorld,
+              HUE_BASE_URL: standIn.baseUrl,
+              WORKER_INVOCATIONS: join(cwd, "calls.txt"),
+            },
+          });
+          expect(result.status).toBe(0);
+          expect(result.stderr).toBe("");
+          expect(standIn.calls.register[0]).toMatchObject({
+            capabilities: ["environment:v1", "direct:v1"],
+          });
+          expect(standIn.calls.localRuns.at(-1)).toMatchObject({ state: "completed" });
+          expect(standIn.calls.starts).toBe(kinds.length);
+          expect(standIn.calls.completions).toHaveLength(kinds.length);
+          expect(standIn.worlds.size).toBe(kinds.filter((kind) => kind === "world").length);
+          for (const [index, completion] of standIn.calls.completions.entries()) {
+            const answer = completion.output as Record<string, unknown>;
+            expect(completion.state).toBe("succeeded");
+            expect(answer).toMatchObject({
+              inputs: { query: "Answer the user", tipo_diligencia: "Virtual" },
+              config: { configured: true },
+              cwd,
+              relativeDependency: "application settings",
+              hasWorld: kinds[index] === "world",
+              hasMcp: kinds[index] === "world",
+              hasMirror: kinds[index] === "world",
+              staleMirror: null,
+              hueKey: null,
+              mcpKey: null,
+              descriptorKeys: [
+                "config",
+                "executionId",
+                "externalKey",
+                "files",
+                "id",
+                "outputDirectory",
+              ],
+            });
+            if (kinds[index] === "direct") expect(answer.environmentRunId).toBeNull();
+            expect(existsSync(String(answer.caseDirectory))).toBe(kinds[index] === "direct");
+          }
+          expect([...standIn.worlds.values()].every((world) => world.status === "completed")).toBe(
+            true,
+          );
+          expect(standIn.calls.requests).not.toContain("POST /local-agent-worker/mcp-capability");
+          expect(JSON.stringify(standIn.calls.completions)).not.toContain("evaluator-only canary");
+          expect(result.stdout).not.toContain(key);
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  for (const failure of ["completion", "queue acknowledgement"] as const)
+    test(
+      `a transient ${failure} outage resumes the direct case without rerunning the command`,
+      async () => {
+        const standIn = documentStandIn({
+          workerKinds: ["direct"],
+          ...(failure === "completion" ? { failCompletions: 4 } : { failWorkerCompletions: 4 }),
+        });
+        const cwd = await workerWorkspace();
+        try {
+          const marker = join(cwd, "calls.txt");
+          const result = await hue(workerArgs(cwd), {
+            cwd,
+            env: {
+              HUE_BASE_URL: standIn.baseUrl,
+              WORKER_INVOCATIONS: marker,
+            },
+          });
+          expect(result.status).toBe(0);
+          expect(result.stderr).toContain("resuming");
+          expect((await readFile(marker, "utf8")).trim().split("\n")).toEqual(["direct-0"]);
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.completions).toHaveLength(1);
+          expect(standIn.calls.localRuns.at(-1)).toMatchObject({ state: "completed" });
+          expect(standIn.worlds.size).toBe(0);
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  for (const failure of ["exit", "timeout"] as const)
+    test(
+      `a direct command ${failure} is recorded as a failed case without creating a world`,
+      async () => {
+        const standIn = documentStandIn({ workerKinds: ["direct"] });
+        const cwd = await workerWorkspace();
+        try {
+          const result = await hue([...workerArgs(cwd), "--timeout", "1"], {
+            cwd,
+            env: {
+              HUE_BASE_URL: standIn.baseUrl,
+              WORKER_INVOCATIONS: join(cwd, "calls.txt"),
+              ...(failure === "exit" ? { FAIL_WORKER: "1" } : { HANG_WORKER: "1" }),
+            },
+          });
+          // A worker continues after a case error and exits normally after its claimed run settles.
+          expect(result.status).toBe(0);
+          expect(standIn.calls.completions[0]).toMatchObject({
+            state: "error",
+            error: {
+              type: "TargetError",
+              message:
+                failure === "exit"
+                  ? "The agent command exited with code 3"
+                  : "The agent command timed out after 1 seconds",
+            },
+          });
+          expect(standIn.worlds.size).toBe(0);
+          expect(standIn.calls.localRuns.at(-1)).toMatchObject({ state: "completed" });
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  test(
+    "a legacy adapter worker remains environment-only",
+    async () => {
+      const standIn = documentStandIn({ workerKinds: ["world"] });
+      const cwd = await workerWorkspace();
+      await writeFile(
+        join(cwd, "adapter.mjs"),
+        `export default function (_inputs, context) { return { hasWorld: Boolean(context.world), hasTools: Boolean(context.tools) }; }`,
+      );
+      try {
+        const result = await hue(workerArgs(cwd, "./adapter.mjs"), {
+          cwd,
+          env: { HUE_BASE_URL: standIn.baseUrl },
+        });
+        expect(result.status).toBe(0);
+        expect(standIn.calls.register[0]).toMatchObject({ capabilities: ["environment:v1"] });
+        expect(standIn.calls.completions[0]).toMatchObject({
+          state: "succeeded",
+          output: { hasWorld: true, hasTools: true },
+        });
+        expect(standIn.worlds.size).toBe(1);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  test(
+    "an adapter opts into direct cases and receives only their allowlisted context",
+    async () => {
+      const standIn = documentStandIn({ workerKinds: ["direct"] });
+      const cwd = await workerWorkspace();
+      await writeFile(
+        join(cwd, "adapter.mjs"),
+        `export default function (inputs, context) {
+      return { inputs, mode: context.mode, keys: Object.keys(context).sort(), itemKeys: Object.keys(context.item).sort() };
+    }`,
+      );
+      try {
+        const result = await hue(
+          [...workerArgs(cwd, "./adapter.mjs"), "--capability", "direct:v1"],
+          {
+            cwd,
+            env: { HUE_BASE_URL: standIn.baseUrl },
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(standIn.calls.register[0]).toMatchObject({
+          capabilities: ["environment:v1", "direct:v1"],
+        });
+        expect(standIn.calls.completions[0]).toMatchObject({
+          state: "succeeded",
+          output: {
+            mode: "direct",
+            itemKeys: ["externalKey", "id"],
+            keys: ["config", "executionId", "files", "item", "mode", "outputDirectory", "signal"],
+          },
+        });
+        expect(standIn.worlds.size).toBe(0);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+});
 
 describe("hue eval on a document eval set", () => {
   test("file adapters receive case identity but not grader metadata", async () => {

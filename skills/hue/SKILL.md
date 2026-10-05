@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.6.1"
+  version: "0.6.2"
 ---
 
 # Hue
@@ -183,8 +183,10 @@ recorded separate from your conclusions.
 
 ## Create a case from a trace
 
-A published case is a reviewed task, a frozen starting world and a Hue-owned outcome check,
-built from one production trace. When the user asks to turn a trace into a case or an eval set,
+A published case is a reviewed task and a Hue-owned outcome evaluator built from one
+production trace. A case with app calls pins a starting world; a trace with a task and an
+answer but no tool calls becomes an answer-only case with no world. When the user asks to turn
+a trace into a case or an eval set,
 use the UI or the MCP tools; both end in **Publish case**.
 
 **UI:** **Traces** → open the trace → **Create case** → answer "Did the agent complete the task
@@ -203,7 +205,8 @@ organization connection as under Verify delivery):
 4. If the draft asks "Was this run correct?", answer with `update_case_conversion` and
    `run_was_correct`.
 5. Review the criteria and accept them: `update_case_conversion` with `reviewed_criteria`
-   (`accepted_criteria_digest`), `reviewed_task` and `authored_closed_world`.
+   (`accepted_criteria_digest`) and `reviewed_task`; accept `authored_closed_world` only when
+   the case has a starting world.
 6. Publish only when `get_case_conversion` reports `ready: true` (trust checks 1 and 2 pass,
    and check 3's empty run fails): `publish_case_conversion` with `name` and the current
    `expected_revision`.
@@ -212,22 +215,33 @@ The `case_from_trace` MCP prompt runs this sequence. Publishing saves the eval-s
 Hue may; otherwise use **Save eval-set version**, `freeze_eval_set_version` or
 `hue eval --save-version`.
 
-A case publishes at a tier that says how much of the world is verified: T1 World verified, T2
+A case publishes at a tier that says what is verified: T1 World verified, T2
 Some reads answered from the recording, T3 Partial, advisory, T4 Answer-only. A trace that still
-needs a person (T5) is never published. Run results report per tier, and judges are advisory.
+needs a person (T5) is never published. Run results report per tier. World-case judges are
+advisory; an answer-only case requires its Answer outcome judge, so a missing judge leaves its
+result inconclusive.
 
 ## Evaluate a published case
 
 When the user asks to evaluate or regression-test their agent against a published Hue case, or to
-make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.13.1
+make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.13.2
 (`HUE_WORLD_NOW` needs 0.13.0; `--case` and `--command` are available since 0.12.1). `hue eval`
 runs on Node.js 22 or 24, also for a Python agent, and the agent itself needs no Hue package.
-Hue never executes the agent: it runs in the user's process, and Hue only hosts the isolated
-simulated world and grades the sealed outcome.
+Hue never executes the agent: it runs in the user's process. Hue hosts a simulated world when
+the case pins one and grades the execution's output and any sealed world.
 
 > Preview: Hue's mirrors answer at `https://app.hue.run/api/sim/…`, but the simulation gateway is
 > not yet a released Hue Cloud capability. Gmail (MCP, REST) and Slack (Web API, MCP) are its
 > established mirrors; other apps' mirrors are experimental and certify no fidelity.
+
+For an answer-only case, use the application's answer path with app tools disabled. No mirror
+helper or starting world is needed. A command worker accepts these cases and world cases under
+one registration in TypeScript 0.13.2: it keeps the application's working directory and the
+same `{inputs, config}` stdin contract. A direct case sets `HUE_EXECUTION_ID` and `HUE_CASE_*`
+but no `HUE_ENVIRONMENT_RUN_ID`, world token or MCP connection. If the application initializes
+app clients before choosing its answer path, skip that initialization for this direct handoff;
+keep the helper's refusal for any app call that needs a missing world. Never fall back to live
+app credentials during an eval. Go to steps 5 and 7 below to run or connect the command.
 
 A case's world is served through mirrors. Each app the agent uses has a stable Hue URL
 (`https://app.hue.run/api/sim/<real host>/<real path>`) that answers in the real app's format
@@ -341,7 +355,7 @@ in the codebase's language and trim the functions no call site uses.
    shell:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
    ```
 
    The two `--package` flags put the CLI and its `zod` peer in npx's cache, so the agent's
@@ -390,23 +404,30 @@ in the codebase's language and trim the functions no call site uses.
 7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.13.1 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.13.2 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
    ```
+
+A worker upgrade from an environment-only registration needs a new `--revision`, because Hue
+keeps capabilities fixed per agent revision. Adapter-file workers stay environment-only unless
+`--capability direct:v1` is supplied; the adapter must handle `context.mode === "direct"` without
+requesting a world or app tools.
 
 Before finishing, verify and report each of these:
 
-- Production unchanged: with `HUE_WORLD_TOKEN` unset, the helper returns the production URL and
+- Production unchanged, when adding world routing: with `HUE_WORLD_TOKEN` unset, the helper returns the production URL and
   credential for every call site and the application's existing tests pass.
-- Fail closed: with `HUE_WORLD_TOKEN` set and one `HUE_SIM_<SURFACE>_URL` unset, and with
+- World routing fails closed: with `HUE_WORLD_TOKEN` set and one `HUE_SIM_<SURFACE>_URL` unset, and with
   `HUE_EXECUTION_ID` set but `HUE_WORLD_TOKEN` unset, the helper throws before any request is
   sent; code the model writes cannot reach the real host.
-- Same tools: every app the world includes exposes the tools production has; no tool was added
+- World cases keep the same tools: every app the world includes exposes the tools production has; no tool was added
   or removed and nothing Hue-native was handed to the agent.
-- Adapter, when one is used: with no world variables in `process.env` and `context.world` set,
+- A world adapter, when one is used: with no world variables in `process.env` and `context.world` set,
   every call site resolves to the mirror; with `context.world` absent, the adapter throws.
 - Clean diff: the change is the helper, its call sites, an optional entry point and an optional
   test, and no Hue variable or value is in production configuration, secrets or a committed
   file.
+- Answer-only cases: with `HUE_EXECUTION_ID` set and no world, the answer path runs without
+  initializing app clients; any attempted app call still fails before reaching a live app.
 - A real run: the run URL, the printed verdicts, `get_case_divergence` on a failing case, and
   stdout that carried no credential.
 

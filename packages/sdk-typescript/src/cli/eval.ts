@@ -32,7 +32,7 @@ import { CheckpointIdentityError, CheckpointStore, checkpointPath } from "../eva
 import { onForcedExit, runForcedExitCleanups } from "../evals/exit-cleanup.js";
 import { safeFilename } from "../evals/files.js";
 import { digest } from "../evals/json.js";
-import { runLocalAgent } from "../evals/local-worker.js";
+import { runLocalAgent, type LocalAgentDirectContext } from "../evals/local-worker.js";
 import {
   describeTelemetryIssues,
   runExperiment,
@@ -135,6 +135,8 @@ Agent (exactly one):
 
 Modes:
   --worker                        Register the agent and poll for runs launched from Hue
+                                  Commands support cases with or without a world; adapter files
+                                  opt into direct cases with --capability direct:v1
   --max-runs <n>                  Stop the worker after n completed runs
   --agent-key <key>               Agent key (default: slug of the adapter filename)
   --agent-name <name>             Agent display name (default: the key)
@@ -719,7 +721,7 @@ function redacting<Context, Answer>(
 function parentEnvironment(allowHueCredentials: boolean): Record<string, string> {
   // A world variable left in this process's environment belongs to another world: only the
   // current case's world sets them, whether or not the case has one.
-  return withoutWorldVariables(
+  const parent = withoutWorldVariables(
     allowHueCredentials
       ? Object.fromEntries(
           Object.entries(process.env).filter(
@@ -728,6 +730,8 @@ function parentEnvironment(allowHueCredentials: boolean): Record<string, string>
         )
       : stripHueControlPlaneCredentials(process.env),
   );
+  delete parent.HUE_ENVIRONMENT_RUN_ID;
+  return parent;
 }
 
 function commandAdapter(
@@ -805,7 +809,7 @@ function commandAdapter(
 function directCommandAdapter(
   command: string,
   timeoutSeconds: number,
-  options: { allowHueCredentials: boolean },
+  options: { allowHueCredentials: boolean; workingDirectory?: string },
 ): DirectEvalAdapter {
   return async (inputs, context) => {
     const layout = await stageDirectCase(context.outputDirectory, {
@@ -816,7 +820,7 @@ function directCommandAdapter(
       files: context.files,
     });
     const stdout = await spawnAgentCommand(command, {
-      cwd: layout.caseDirectory,
+      cwd: options.workingDirectory ?? layout.caseDirectory,
       env: {
         ...parentEnvironment(options.allowHueCredentials),
         HUE_CASE_DIR: layout.caseDirectory,
@@ -1568,7 +1572,7 @@ async function runDirect(
 async function runWorker(
   values: ReturnType<typeof parse>["values"],
   connection: Connection,
-  adapter: EvalAdapter,
+  agents: Agents,
   agent: { key: string; name: string; revision: string },
   hue: HueClient,
   output: Output,
@@ -1603,6 +1607,9 @@ async function runWorker(
     );
   };
   const telemetry = telemetryReporter(output);
+  // A command can use the same stdin contract for both case kinds. Existing adapter files
+  // may require a world, so their direct context remains an explicit capability opt-in.
+  const direct = values.command !== undefined || values.capability?.includes("direct:v1");
   await runLocalAgent({
     client,
     environmentClient,
@@ -1640,7 +1647,7 @@ async function runWorker(
     },
     target(inputs, tools: Record<string, EnvironmentTool>, context) {
       output.log(`[${context.item.externalKey}] agent started`);
-      return adapter(inputs, {
+      return agents.simulation(inputs, {
         config: context.config,
         item: context.item,
         executionId: context.executionId,
@@ -1656,6 +1663,22 @@ async function runWorker(
         signal: context.signal ?? signal,
       });
     },
+    ...(direct
+      ? {
+          directTarget(inputs: JsonValue, context: LocalAgentDirectContext) {
+            output.log(`[${context.item.externalKey}] agent started`);
+            return agents.direct(inputs, {
+              mode: "direct",
+              config: context.config,
+              item: context.item,
+              executionId: context.executionId,
+              files: context.files,
+              outputDirectory: context.outputDirectory,
+              signal: context.signal ?? signal,
+            });
+          },
+        }
+      : {}),
     async onCompleted(report) {
       output.log(
         `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
@@ -1801,6 +1824,9 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
         loaded ??
           directCommandAdapter(values.command!, timeout, {
             allowHueCredentials: values["allow-hue-credentials"],
+            // A worker's single command must resolve relative entry points the same way for
+            // direct and world cases. One-shot direct runs keep their private-directory cwd.
+            ...(values.worker ? { workingDirectory: process.cwd() } : {}),
           }),
       ),
     };
@@ -1812,15 +1838,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       timeoutMillis: CASE_TRACE_EXPORT_MILLIS,
     });
     return values.worker
-      ? await runWorker(
-          values,
-          connection,
-          agents.simulation,
-          agent,
-          hue,
-          output,
-          controller.signal,
-        )
+      ? await runWorker(values, connection, agents, agent, hue, output, controller.signal)
       : await runOnce(values, connection, agents, agent, hue, output, controller.signal);
   } catch (error) {
     if (controller.signal.aborted || error instanceof TargetCancelledError) {

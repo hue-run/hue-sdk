@@ -297,11 +297,18 @@ acceptance remains a post-publication Fern gate.
 
 ## Direct cases and files
 
-Cases without a simulated world — document workflows whose inputs are a task plus pinned files —
+Cases without a simulated world — answer-only tasks, or document workflows with pinned files —
 run on the same runner under the same checkpoint rules. They shipped in `@hue-run/sdk` `0.5.0`
 and require a Hue deployment that serves case `inputFiles` on experiment
 items, subject `files`, and the artifact reservation, upload, completion and download APIs. The
 Python SDK has no equivalent.
+
+The TypeScript 0.13.2 `hue eval --worker --command "…"` wrapper supplies both callbacks, so one
+command worker accepts direct and world cases, including mixed eval sets. It keeps the launch
+directory for relative application entry points; private case inputs/output still use
+`HUE_CASE_*`. An adapter-file worker opts into the direct callback with `--capability direct:v1`
+and must handle `context.mode === "direct"`. Restart an existing environment-only command
+registration with a new `--revision` when upgrading.
 
 On the outbound worker, supply `directTarget` beside or instead of `target`. Supplying
 `directTarget` registers the `direct:v1` capability and supplying `target` registers
