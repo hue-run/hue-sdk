@@ -1,9 +1,9 @@
 ---
 name: hue
-description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
+description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into eval cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.6.5"
+  version: "0.6.6"
 ---
 
 # Hue
@@ -183,41 +183,60 @@ recorded separate from your conclusions.
 
 ## Create a case from a trace
 
-A published case is a reviewed task and a Hue-owned outcome evaluator built from one
-production trace. A case with app calls pins a starting world; a trace with a task and an
-answer but no tool calls becomes an answer-only case with no world. When the user asks to turn
-a trace into a case or an eval set,
-use the UI or the MCP tools; both end in **Publish case**.
+A published case contains a task and pinned evaluators built from one trace. A case with app
+calls pins a starting world; a recorded task and reply without tool calls can become an
+answer-only case with no world. Use the UI or MCP tools when the user asks to turn a trace into
+a case or an eval set. If the user wants a draft or inspection before publication, choose
+`publish_when_ready: false` explicitly.
 
 **UI:** **Traces** → open the trace → **Create case** → answer "Did the agent complete the task
-correctly?" → **Build case** → review the draft at `/case-conversions/<id>/quick` →
-**Publish case**.
+correctly?" → choose the **Eval set** → **Build case**. A verified build publishes automatically;
+**View case** opens its task, evaluators, tier and limitations. A stopped build keeps a draft
+with a correction or retry action.
 
 **MCP** (**Read and write** access; ask the user before each write, and pass `project_id` on an
 organization connection as under Verify delivery):
 
 1. `get_trace` for the trace's current revision.
-2. `add_case_conversion` with `trace_id`, `expected_trace_revision` and an `idempotency_key`.
-3. Poll `get_case_conversion` until the build finishes, then call it with
-   `include_content: true` to read the task, the starting world and the criteria you are about
-   to accept. Every write below takes the `revision` of your latest read as
-   `expected_revision`; read the draft again after each write before the next one.
-4. If the draft asks "Was this run correct?", answer with `update_case_conversion` and
-   `run_was_correct`.
-5. Review the criteria and accept them: `update_case_conversion` with `reviewed_criteria`
-   (`accepted_criteria_digest`) and `reviewed_task`; accept `authored_closed_world` only when
-   the case has a starting world.
-6. Publish only when `get_case_conversion` reports `ready: true`: `publish_case_conversion` with
-   `name` and the current `expected_revision`.
+2. Ask whether the recorded run was correct. For Yes, use `run_was_correct: true` and an optional
+   reason in `outcome_intent`; for No, use `run_was_correct: false` and describe what should have
+   happened in `outcome_intent`. The reason supplies outcome constraints. An unmarked request
+   waits until it has usable outcome evidence.
+3. `add_case_conversion` with `trace_id`, `expected_trace_revision`, an `idempotency_key` and
+   that marking. An optional `eval_set_id` selects the destination; omitted, Hue creates a set.
+   New creates default to `publish_when_ready: true`. Retrying the same request with the same
+   key returns the original conversion.
+4. Poll `get_case_conversion` for `status: "published"` or a correction reason. Automatic
+   publication uses machine verification without human acknowledgements or a separate
+   `publish_case_conversion` call. Do not manufacture a review confirmation or bypass a failed
+   check. Read `include_content: true` only when inspection or correction needs the task,
+   criteria or any starting world. Every correction uses the latest `revision` as
+   `expected_revision`; read the draft again after each write.
 
-The `case_from_trace` MCP prompt runs this sequence. Publishing saves the eval-set version when
-Hue may; otherwise use **Save eval-set version**, `freeze_eval_set_version` or
-`hue eval --save-version`.
+Automatic publication requires deterministic checks sufficient to assess the requested outcome;
+an unaligned judge alone cannot establish it. Missing essential evidence or a cut build input
+blocks publication; optional background omissions remain visible limitations. The original reply
+is evaluator-only evidence, never the agent's case input. Read the connection's tool schema
+before using these arguments; the [trace-to-case guide](https://docs.hue.run/evaluations/case-from-trace)
+describes supported evidence and correction actions.
+
+**Manual publication:** create with `publish_when_ready: false`; historical drafts without the
+flag remain manual. Read the task, criteria and any starting world with `include_content: true`.
+Accept `reviewed_task` and `reviewed_criteria` in `accepted_assumptions`, with
+`accepted_criteria_digest`, using `update_case_conversion`; accept `authored_closed_world` only
+for a case with a world. Publish with `publish_case_conversion`, `name` and the latest
+`expected_revision` only when `ready: true`. In the UI, the explicit **Publish** action confirms
+the displayed task, including a task read from a generic trace. Manual answer cases retain their
+required answer judge.
+
+The `case_from_trace` MCP prompt follows the automatic route. Publication saves the version for
+a new eval set or a draft version Hue opened. If the destination already has an open draft, use
+**Save eval-set version**, `freeze_eval_set_version` or `hue eval --save-version` before running it.
 
 A case publishes at a tier that says what is verified: T1 World verified, T2
 Some reads answered from the recording, T3 Partial, advisory, T4 Answer-only. A trace that still
-needs a person (T5) is never published. Run results report per tier. World-case judges are
-advisory; an answer-only case requires the **Answers the task** judge in its **Answer outcome**
+needs correction (T5) is never published. Run results report per tier. World-case judges are
+advisory until aligned; an answer-only case requires the **Answers the task** judge in its **Answer outcome**
 evaluator, so a missing judge leaves its result inconclusive.
 
 ## Evaluate a published case
