@@ -362,12 +362,13 @@ in the codebase's language and trim the functions no call site uses.
 5. Check the command contract: `hue eval --command` runs the command once per case, writes
    `{"inputs","config"}` as JSON on its stdin and stores its stdout as the answer (parsed as JSON
    when it is valid JSON, otherwise text, at most 4 MiB); a non-zero exit or a timeout (default
-   600 s, `--timeout`) errors the case. `inputs` is the input the agent's root span recorded in
+   600 s, `--timeout`) errors the case. `inputs` is the selected task-bearing span's recorded input in
    the source trace (a string, an object such as `{task}`, `{query}` or `{prompt}`, or a messages
    array) or what the reviewer authored; when earlier turns were included it is
    `{"task": <that input>, "priorContext": [<earlier inputs>]}`. `get_case` with
    `include_content` shows it; map it to the production entry argument and pass `priorContext`
-   through as earlier turns. When the production entry point is a server or takes another input
+   through as earlier turns. Evaluator criteria and the original source reply stay out of the
+   agent's inputs. When the production entry point is a server or takes another input
    shape, add a thin entry point that reads stdin, calls the unchanged agent once and prints its
    answer. Use an absolute path to that entry point for a one-shot run: a direct case starts in
    its private case directory. A command worker keeps the directory where you started the CLI
