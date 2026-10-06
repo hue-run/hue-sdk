@@ -17,7 +17,7 @@ from itertools import accumulate
 from typing import Any
 from urllib.parse import parse_qsl, unquote_to_bytes, urlencode, urlsplit, urlunsplit
 
-from .transport import MAX_REQUEST_BYTES
+from ._limits import MAX_REQUEST_BYTES
 
 REDACTED = "[redacted]"
 

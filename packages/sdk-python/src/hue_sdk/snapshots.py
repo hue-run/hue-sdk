@@ -23,7 +23,8 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
-from ._inline_files import hash_inline_files
+from ._blobs import MAX_BLOB_BYTES, Held, HeldValues, attach_held, held_size
+from ._inline_files import hash_inline_files, hash_inline_files_counted
 from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY, cut_utf8, over_utf8
 from ._records import CONTENT_PREFIXES as CONTENT_PREFIXES
 from ._records import is_content_key as is_content_key
@@ -46,6 +47,9 @@ from .transport import (
 MAX_CONTENT_SNAPSHOT_BYTES = 4 * MAX_CONTENT_BYTES
 MAX_CONTENT_SNAPSHOT_DEPTH = 64
 MAX_CONTENT_SNAPSHOT_NODES = 65_536
+# Helper content encoded whole for upload: up to Hue's 1 GB upload limit, and as many values as
+# the TypeScript SDK's queued record may hold.
+MAX_WHOLE_CONTENT_NODES = 1_048_576
 MAX_CONTENT_INTEGER_BITS = 14_000
 MAX_PLACEHOLDER_VALUE_BYTES = 65_536
 # Reserved for placeholders: a finished span must never read as one.
@@ -63,9 +67,13 @@ _span_ids = RandomIdGenerator()
 class _ContentBudget:
     """Copy only built-in JSON values; never invoke application copy/iteration hooks."""
 
-    def __init__(self) -> None:
-        self.remaining_bytes = MAX_CONTENT_SNAPSHOT_BYTES
-        self.remaining_nodes = MAX_CONTENT_SNAPSHOT_NODES
+    def __init__(
+        self,
+        max_bytes: int = MAX_CONTENT_SNAPSHOT_BYTES,
+        max_nodes: int = MAX_CONTENT_SNAPSHOT_NODES,
+    ) -> None:
+        self.remaining_bytes = max_bytes
+        self.remaining_nodes = max_nodes
         self.active: set[int] = set()
 
     def consume(self, size: int) -> None:
@@ -84,7 +92,8 @@ class _ContentBudget:
         if kind is str:
             if len(value) > self.remaining_bytes:
                 raise ValueError("Content snapshot exceeds its value budget.")
-            self.consume(len(value.encode("utf-8")))
+            # ASCII text is its own UTF-8 length; other text is encoded to count it.
+            self.consume(len(value) if value.isascii() else len(value.encode("utf-8")))
             return value
         if kind is int:
             # Decimal conversion can be superlinear even when it fits the byte
@@ -123,8 +132,11 @@ class _ContentBudget:
             self.active.remove(identity)
 
 
-def snapshot_content(value: Any) -> Any:
-    """Detach nested mutable content before exposing it to a user redactor."""
+def snapshot_content(value: Any, *, whole: bool = False) -> Any:
+    """Detach nested mutable content before exposing it to a user redactor. ``whole`` bounds it
+    by Hue's upload limit instead of four value caps, for content export may upload."""
+    if whole:
+        return _ContentBudget(MAX_BLOB_BYTES, MAX_WHOLE_CONTENT_NODES).value(value)
     return _ContentBudget().value(value)
 
 
@@ -145,6 +157,19 @@ def _is_legacy_content_event(name: str) -> bool:
 _ITEM_FRAMING_BYTES = 64
 
 
+class Hold:
+    """How a span's own values over the value cap are held whole for export to upload: the
+    held-value budget, the cap, and whether values are held now (``active``): a client whose
+    receiver lacks the upload route cuts them when they are queued, and export counts the cuts."""
+
+    __slots__ = ("budget", "value_bytes", "active")
+
+    def __init__(self, budget: HeldValues, value_bytes: int, active: bool = True) -> None:
+        self.budget = budget
+        self.value_bytes = value_bytes
+        self.active = active
+
+
 class _BudgetExceeded(ValueError):
     """The record's copy outgrew its budget: a span's events and links past it are left out and
     counted as dropped, where anything else loses the record."""
@@ -163,6 +188,7 @@ class _ValueBudget:
         *,
         record_bytes: int = MAX_REQUEST_BYTES,
         value_bytes: int | None = None,
+        hold: Hold | None = None,
     ) -> None:
         self.remaining = record_bytes
         self.capture_content = capture_content
@@ -170,6 +196,9 @@ class _ValueBudget:
         # The keys whose values this copy cut, as the record's ``hue.truncated`` lists them.
         self.truncated: list[str] = []
         self._cut = False
+        self.hold = hold
+        # The span's own values held whole for upload, charged to the held-value budget.
+        self.held = Held(budget=hold.budget if hold else None)
 
     def consume(self, size: int) -> None:
         self.remaining -= size
@@ -269,8 +298,9 @@ class _ValueBudget:
             return truncated_marker(sum(len(text) for text in long))
         return scrub_tool_credentials(key, value)
 
-    def permitted(self, values: Any) -> Any:
-        """Apply the content policy: metadata-only mode drops recognized content keys."""
+    def permitted(self, values: Any, files: bool = True) -> Any:
+        """Apply the content policy: metadata-only mode drops recognized content keys. With
+        ``files`` false, large inline files are left for export to upload."""
         source = values or {}
         if not self.capture_content and isinstance(source, Mapping):
             # Summarize the tool definitions metadata-only export removes by name and digest.
@@ -278,15 +308,56 @@ class _ValueBudget:
         if isinstance(source, Mapping):
             # Large inline files shrink to their digest before the budget, so the span survives.
             source = {
-                key: hash_inline_files(key, item) if isinstance(key, str) else item
+                key: hash_inline_files(key, item) if files and isinstance(key, str) else item
                 for key, item in source.items()
                 if self.capture_content or not (isinstance(key, str) and is_content_key(key))
             }
         return source
 
-    def copied_attributes(self, values: Any, prefix: str = "") -> Any:
-        """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key."""
-        source = self.permitted(values)
+    def _held_value(self, key: str, item: Any) -> tuple[bool, Any]:
+        """One of the span's own attribute values held whole for export to upload, when it may
+        be, within the held-value budget: text or bytes over the cap, replaced in the copy by the
+        receiver's marker until export places it, or a recorded message within the cap holding a
+        large inline file, whose copy carries the files as their digest (what the queue is
+        charged, as before). ``(True, copy)`` for a held value, ``(False, value)`` for one copied
+        as before, its large inline files already shrunk to their digest. A value not held only
+        for the budget or a receiver without the upload route is listed in ``held.cut`` (once per
+        file for a message), so export counts it as not uploaded."""
+        hold = self.hold
+        assert hold is not None
+        digested, files = hash_inline_files_counted(key, item)
+        if isinstance(item, str):
+            try:
+                over = over_utf8(item, hold.value_bytes)
+            except UnicodeEncodeError:
+                return False, digested
+            if not over and not files:
+                return False, item
+            value: str | bytes = str.__str__(item)
+            # What is not uploaded if the value is not held: each file, and the value itself
+            # when it is still over the cap with its files as their digest.
+            lost = files + (1 if over and over_utf8(digested, hold.value_bytes) else 0)
+        elif isinstance(item, bytes) and len(item) > hold.value_bytes:
+            value = item if type(item) is bytes else memoryview(item).tobytes()
+            over, lost = True, 1
+        else:
+            return False, digested
+        size = held_size(value)
+        if not hold.active or not hold.budget.reserve(size, self.held.size):
+            # Cut, or its files digested, when queued, as before uploads existed.
+            self.held.cut.extend([key] * lost)
+            return False, digested
+        self.held.size += size
+        self.held.values[key] = value
+        # The copy carries what the queue is charged: the receiver's marker for a value over the
+        # cap, a message within it with its files as their digest.
+        return True, self.value(truncated_marker(len(value)) if over else digested)
+
+    def copied_attributes(self, values: Any, prefix: str = "", own: bool = False) -> Any:
+        """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key. A
+        span's ``own`` values over the cap are held whole for upload when they may be."""
+        holding = own and self.hold is not None
+        source = self.permitted(values, files=not holding)
         if not isinstance(source, Mapping):
             return self.value(source)
         copied: dict[str, Any] = {}
@@ -294,6 +365,12 @@ class _ValueBudget:
             if not isinstance(key, str):
                 raise ValueError("Telemetry mapping keys must be strings.")
             listed = f"{prefix}{key}"
+            if holding:
+                # Not held, a value's large inline files shrink to their digest, as before.
+                kept, item = self._held_value(key, item)
+                if kept:
+                    copied[self.value(key, 1)] = item
+                    continue
             scrubbed = self._scrubbed_before_cut(key, item)
             copied[self.value(key, 1)] = self.content(scrubbed, listed)
             if scrubbed is not item and is_truncated_marker(scrubbed):
@@ -301,12 +378,18 @@ class _ValueBudget:
                     self.truncated.append(listed)
         return copied
 
-    def attributes(self, values: Any, dropped: int = 0, prefix: str = "") -> BoundedAttributes:
+    def attributes(
+        self, values: Any, dropped: int = 0, prefix: str = "", own: bool = False
+    ) -> BoundedAttributes:
         # Scrub the copy admission already bounded, so the application thread never parses
-        # more than one record's budget of tool-definition JSON.
-        copied = self.copied_attributes(values, prefix)
+        # more than one record's budget of tool-definition JSON. A value held for upload is
+        # scrubbed whole on export instead.
+        copied = self.copied_attributes(values, prefix, own)
         if isinstance(copied, dict):
-            copied = {key: scrub_tool_credentials(key, item) for key, item in copied.items()}
+            copied = {
+                key: item if own and key in self.held.values else scrub_tool_credentials(key, item)
+                for key, item in copied.items()
+            }
         result = BoundedAttributes(attributes=copied, immutable=True, extended_attributes=True)
         result.dropped += dropped
         return result
@@ -354,15 +437,28 @@ class _SpanSnapshot(ReadableSpan):
         *,
         record_bytes: int = MAX_REQUEST_BYTES,
         value_bytes: int | None = None,
+        hold: Hold | None = None,
     ) -> None:
-        budget = _ValueBudget(capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
+        budget = _ValueBudget(
+            capture_content, record_bytes=record_bytes, value_bytes=value_bytes, hold=hold
+        )
+        try:
+            self._copy(span, budget, capture_content)
+        except BaseException:
+            # The values held for a copy that failed are no one's.
+            budget.held.release()
+            raise
+        if budget.held.values or budget.held.cut:
+            attach_held(self, budget.held)
+
+    def _copy(self, span: ReadableSpan, budget: _ValueBudget, capture_content: bool) -> None:
         attributes: Any = span.attributes
         if attributes and any(key in attributes for key in _PENDING_MARKERS):
             # Placeholder markers are reserved: a finished span must never read as one.
             attributes = {k: v for k, v in attributes.items() if k not in _PENDING_MARKERS}
         name = budget.value(span.name)
         scope = budget.scope(span.instrumentation_scope)
-        own = budget.attributes(attributes, span.dropped_attributes)
+        own = budget.attributes(attributes, span.dropped_attributes, own=True)
         own_cuts = budget.take_truncated()
         resource = budget.resource(span.resource)
         status = Status(
@@ -427,8 +523,11 @@ def snapshot_span(
     *,
     record_bytes: int = MAX_REQUEST_BYTES,
     value_bytes: int | None = None,
+    hold: Hold | None = None,
 ) -> ReadableSpan:
-    return _SpanSnapshot(span, capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
+    return _SpanSnapshot(
+        span, capture_content, record_bytes=record_bytes, value_bytes=value_bytes, hold=hold
+    )
 
 
 # The export worker holds an application span's lock while it copies attributes. A fork waits
@@ -546,7 +645,10 @@ def snapshot_log(
     *,
     record_bytes: int = MAX_REQUEST_BYTES,
     value_bytes: int | None = None,
+    hold: Hold | None = None,
 ) -> ReadableLogRecord:
+    # Log records are never uploaded: Hue reads no log record's uploaded values yet.
+    del hold
     budget = _ValueBudget(capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
     record = copy(log_record.log_record)
     record.context = Context()

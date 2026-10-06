@@ -5,8 +5,9 @@ import { resourceFromAttributes, type Resource } from "@opentelemetry/resources"
 import type { HueOptions } from "./types.js";
 import { MAX_CONTENT_BYTES, MAX_RECORD_NODES, REDACTION_CONTEXT_UNITS } from "./config.js";
 import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions.js";
-import { hashInlineFiles } from "./inline-files.js";
+import { hashInlineFiles, INLINE_FILE_LIMIT, isMessageKey } from "./inline-files.js";
 import { truncateUtf8 } from "./safety.js";
+import type { OffloadCollector } from "./blobs.js";
 
 export { truncateUtf8 };
 
@@ -127,6 +128,10 @@ interface RedactionBudget {
   valueBytes: number;
   /** The record's value strings its queue cut when it was admitted. */
   cut?: ReadonlySet<string>;
+  /** The span's own messages whose large inline files its queue shrank to their digest. */
+  digested?: ReadonlyMap<string, number>;
+  /** Where a span's own values over the cap are left whole for upload, when they may be. */
+  offload?: OffloadCollector;
 }
 
 /** How one record is redacted: the receiver's value cap, and the value strings the queue cut. */
@@ -135,6 +140,16 @@ export interface RedactionLimits {
   valueBytes?: number;
   /** The record's value strings cut when it was queued. */
   cut?: ReadonlySet<string>;
+  /** The span's own messages whose large inline files were shrunk to their digest when it was
+   * queued, with how many files each: reported as not uploaded when values may be. */
+  digested?: ReadonlyMap<string, number> | undefined;
+  /**
+   * Set when a span's values over the cap may be uploaded: each of its own string or byte
+   * attribute values still over the cap after the redactor, and each recorded message that may
+   * inline a large file, is left whole (uncut, unlisted) and collected here for the upload step
+   * to place; a value the queue cut when it was admitted is named in `cut`.
+   */
+  offload?: OffloadCollector;
 }
 
 function budgetOf(limits: RedactionLimits): RedactionBudget {
@@ -144,6 +159,8 @@ function budgetOf(limits: RedactionLimits): RedactionBudget {
     truncated: [],
     valueBytes: limits.valueBytes ?? MAX_CONTENT_BYTES,
     ...(limits.cut?.size ? { cut: limits.cut } : {}),
+    ...(limits.digested?.size ? { digested: limits.digested } : {}),
+    ...(limits.offload ? { offload: limits.offload } : {}),
   };
 }
 
@@ -152,6 +169,80 @@ function withoutTail(text: string, units: number): string {
   let end = Math.max(0, text.length - units);
   if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
   return text.slice(0, end);
+}
+
+/** Text through the redactor, whole: the answer validated, not yet cut to the cap. */
+function redactedText(value: string, path: string, options: HueOptions, cap: number): string {
+  const result = options.redact ? options.redact(value, path) : value;
+  // JavaScript can supply an async redactor despite the synchronous contract.
+  // Observe its rejection before dropping the invalid record.
+  if (result && typeof result === "object") void Promise.resolve(result).catch(() => {});
+  // A redactor may shorten or keep its text, never grow it past the cap: an answer longer than
+  // both the cap and the text it was given is the redactor's own, refused by its length before
+  // anything scans it, since scanning would materialize text the record never held.
+  if (
+    typeof result !== "string" ||
+    result.length > Math.max(cap, value.length) ||
+    !result.isWellFormed() ||
+    result.includes("\u0000")
+  )
+    throw new Error("Redaction produced unsupported text");
+  return result;
+}
+
+/** Whether a recorded message's text may inline a file over the inline file limit. */
+function mayInlineFiles(key: string, text: string): boolean {
+  return (
+    isMessageKey(key) &&
+    text.length * 3 > INLINE_FILE_LIMIT &&
+    (text.includes('"blob"') || text.includes('"file"'))
+  );
+}
+
+/** Marks a value the upload step does not place. */
+const NOT_HELD: unique symbol = Symbol("not held");
+
+/**
+ * One of a span's own attribute values, when its values may be uploaded: text through the
+ * credential scrub and the redactor, whole, and collected when it is over the cap or may inline
+ * a large file; bytes over the cap collected as they are. {@link NOT_HELD} for any other value,
+ * and for text the queue cut when the record was admitted, which is never the whole value.
+ */
+function offloadValue(
+  key: string,
+  value: unknown,
+  path: string,
+  options: HueOptions,
+  budget: RedactionBudget,
+): unknown {
+  const collector = budget.offload!;
+  if (value instanceof Uint8Array) {
+    if (value.byteLength <= budget.valueBytes) return NOT_HELD;
+    if (++budget.nodes > MAX_RECORD_NODES)
+      throw new Error("Telemetry value exceeds the supported nesting limit");
+    collector.candidates.push({ key, value });
+    return value;
+  }
+  if (typeof value !== "string") return NOT_HELD;
+  // Each large inline file the queue shrank to its digest is reported as not uploaded; what is
+  // left of the message is placed like any other value, and reported too if it is cut.
+  const files = budget.digested?.get(value) ?? 0;
+  for (let file = 0; file < files; file++) collector.cut.push(key);
+  if (budget.cut?.has(value)) {
+    collector.cut.push(key);
+    return NOT_HELD;
+  }
+  const scrubbed = scrubToolCredentials(key, value);
+  if (typeof scrubbed !== "string") return NOT_HELD;
+  if (++budget.nodes > MAX_RECORD_NODES)
+    throw new Error("Telemetry value exceeds the supported nesting limit");
+  const result = redactedText(scrubbed, path, options, budget.valueBytes);
+  if (
+    mayInlineFiles(key, result) ||
+    (result.length * 3 > budget.valueBytes && Buffer.byteLength(result) > budget.valueBytes)
+  )
+    collector.candidates.push({ key, value: result });
+  return result;
 }
 
 /**
@@ -179,20 +270,7 @@ function redactValue(
     // the end of the answer, which may hold the start of a secret it could not recognize, is
     // never exported.
     const cutWhenQueued = budget.cut?.has(value) === true;
-    let result = options.redact ? options.redact(value, path) : value;
-    // JavaScript can supply an async redactor despite the synchronous contract.
-    // Observe its rejection before dropping the invalid record.
-    if (result && typeof result === "object") void Promise.resolve(result).catch(() => {});
-    // A redactor may shorten or keep its text, never grow it past the cap: an answer longer than
-    // both the cap and the text it was given is the redactor's own, refused by its length before
-    // anything scans it, since scanning would materialize text the record never held.
-    if (
-      typeof result !== "string" ||
-      result.length > Math.max(cap, value.length) ||
-      !result.isWellFormed() ||
-      result.includes("\u0000")
-    )
-      throw new Error("Redaction produced unsupported text");
+    let result = redactedText(value, path, options, cap);
     if (cutWhenQueued && options.redact) result = withoutTail(result, REDACTION_CONTEXT_UNITS);
     const bytes = Buffer.byteLength(result);
     if (bytes <= cap && !cutWhenQueued) {
@@ -248,27 +326,32 @@ function attributes<T extends Record<string, unknown>>(
   path: string,
   budget: RedactionBudget,
   listPrefix = "",
+  own = false,
 ): T {
   // Metadata-only export summarizes the tool definitions it removes by name and digest.
   const summarized = options.captureContent ? source : withToolCatalogSummary(source);
   return Object.fromEntries(
-    Object.entries(summarized).flatMap(([key, value]) =>
-      !options.captureContent && isContentKey(key)
-        ? []
-        : [
-            [
-              key,
-              redactValue(
-                scrubToolCredentials(key, hashInlineFiles(key, value)),
-                `${path}.${key}`,
-                options,
-                budget,
-                0,
-                `${listPrefix}${key}`,
-              ),
-            ],
-          ],
-    ),
+    Object.entries(summarized).flatMap(([key, value]) => {
+      if (!options.captureContent && isContentKey(key)) return [];
+      // A span's own value that may be uploaded is placed by the upload step.
+      if (own && budget.offload) {
+        const held = offloadValue(key, value, `${path}.${key}`, options, budget);
+        if (held !== NOT_HELD) return [[key, held]];
+      }
+      return [
+        [
+          key,
+          redactValue(
+            scrubToolCredentials(key, hashInlineFiles(key, value)),
+            `${path}.${key}`,
+            options,
+            budget,
+            0,
+            `${listPrefix}${key}`,
+          ),
+        ],
+      ];
+    }),
   ) as T;
 }
 
@@ -380,7 +463,7 @@ export function redactSpan(
   const resource = redactResource(span.resource, options, cache, budget);
   // Last, so every cut of the record, its events', links' and resource's included, is listed.
   const redactedAttributes = withTruncated(
-    attributes(source, options, "attributes", budget),
+    attributes(source, options, "attributes", budget, "", true),
     budget,
   );
   return {

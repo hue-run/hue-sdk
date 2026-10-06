@@ -95,6 +95,10 @@ if (!values.archive && !values["registry-version"]) {
     "releaseRateLimitHolds",
     "receiverLimits",
     "adoptLimits",
+    "offloadsValues",
+    "holdsValues",
+    "offloadSpan",
+    "reportOffload",
   ]) {
     if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
       throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);
@@ -869,6 +873,8 @@ const installedPackageTests = [
   "provider-tools.test.ts",
   "provider-tool-spans.test.ts",
   "inline-files.test.ts",
+  // Values over the inline limit uploaded to a loopback Hue implementing the upload routes.
+  "blobs.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -974,6 +980,7 @@ void [transition, event, options, backend];
           '"../src/inline-files.js"',
           '"../node_modules/@hue-run/sdk/dist/inline-files.js"',
         )
+        .replaceAll('"../src/blobs.js"', '"../node_modules/@hue-run/sdk/dist/blobs.js"')
         .replaceAll(
           '"../src/evals/exit-cleanup.js"',
           '"../node_modules/@hue-run/sdk/dist/evals/exit-cleanup.js"',

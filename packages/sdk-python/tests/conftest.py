@@ -25,6 +25,8 @@ class Receiver:
     # Headers every default OTLP acknowledgement carries, such as advertised limits.
     advertise: dict[str, str] = field(default_factory=dict)
     requests: list[tuple[str, dict[str, str], bytes]] = field(default_factory=list)
+    # Requests to the upload route, which this receiver lacks.
+    blob_requests: int = 0
     replies: deque[tuple[int, bytes, dict[str, str]]] = field(default_factory=deque)
     lock: Lock = field(default_factory=Lock)
 
@@ -72,6 +74,16 @@ def receiver():
 
         def respond(self):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if self.path.startswith("/api/v1/otlp/blobs"):
+                # A receiver without the large-value upload route answers its framework's
+                # not-found; the upload tests use their own receiver.
+                with state.lock:
+                    state.blob_requests += 1
+                self.send_response(404)
+                self.send_header("Content-Length", "9")
+                self.end_headers()
+                self.wfile.write(b"Not Found")
+                return
             # Store decoded bytes so content assertions inspect what the wire carried, and the
             # raw wire length so cap assertions check what was actually sent.
             headers = dict(self.headers)

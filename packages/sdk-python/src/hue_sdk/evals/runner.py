@@ -142,7 +142,10 @@ def _decide_export(
     """
     trace = checkpoint.get("trace") or {}
     retained = hue.export_issues()
-    issues = [issue for issue in retained if issue.sequence > sequence_before]
+    # A warning (a value exported cut because it could not be uploaded) is not a failure.
+    issues = [
+        issue for issue in retained if issue.sequence > sequence_before and issue.kind != "warning"
+    ]
     named = [
         issue
         for issue in issues

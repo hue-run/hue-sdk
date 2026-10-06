@@ -1348,6 +1348,12 @@ def test_tool_request_too_large_to_parse_within_the_record_budget_is_marked_not_
         max_queue_bytes=2 * 1024 * 1024,
     ) as hue:
         tracer = provider.get_tracer("third-party")
+        # A client whose receiver lacks the upload route (the loopback receiver does) cuts values
+        # when they are queued, as before uploads existed.
+        learning = tracer.start_span("learns the receiver lacks uploads")
+        learning.set_attribute("custom.blob", "u" * (1024 * 1024 + 1))
+        learning.end()
+        assert hue.force_flush()
         oversized = tracer.start_span("oversized")
         # Longer than the record's budget: never parsed on the application thread, so the value
         # is replaced by the receiver's marker rather than exported unscrubbed; the span is kept.

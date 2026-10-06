@@ -22,9 +22,10 @@ from opentelemetry.context import attach, detach
 from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
+from ._blobs import Uploads
 from ._limits import AdvertisedLimits
 from ._otel_compat import export_context, instrumentation_suppressed
-from .snapshots import snapshot_log, snapshot_pending_span, snapshot_span
+from .snapshots import Hold, snapshot_log, snapshot_pending_span, snapshot_span
 from .transport import BATCH_TARGET_BYTES, MAX_BATCH_BYTES, DroppedRecords, PendingSpan
 
 # The instrumentation scope of ``Hue.tracer``; its spans are always announced while open.
@@ -86,13 +87,20 @@ class _BoundedProcessor:
 
     def _snapshot(self, item: Any, capture_content: bool) -> Any:
         """The record copied for the queue: a value over the receiver's value cap is cut to it, and
-        the record may take the whole queue budget, so one large value cannot lose it."""
+        the record may take the whole queue budget, so one large value cannot lose it. A span's
+        own value over the cap that export may upload is held whole instead."""
+        value_bytes = self._limits.current.value_bytes
         return type(self)._copy(
             item,
             capture_content,
             record_bytes=self._max_bytes,
-            value_bytes=self._limits.current.value_bytes,
+            value_bytes=value_bytes,
+            hold=self._hold(value_bytes),
         )
+
+    def _hold(self, value_bytes: int) -> Hold | None:
+        """How a record's values over the cap are held for upload; log records never are."""
+        return None
 
     def _lost(self, *items: Any) -> None:
         """Counts records dropped before export, also on their traces' root spans. Called under
@@ -333,9 +341,11 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         live_spans: bool = False,
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
     ) -> None:
         # Set before the worker starts; it reads these on every loop.
         self._live_spans = live_spans
+        self._uploads = uploads
         self._live: dict[int, _LiveSpan] = {}
         self._next_tick = 0.0
         # Spans ended per trace, the count a case's trace receipt is held to; bounded, oldest
@@ -351,6 +361,12 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
             limits=limits,
             dropped_records=dropped_records,
         )
+
+    def _hold(self, value_bytes: int) -> Hold | None:
+        uploads = self._uploads
+        if uploads is None:
+            return None
+        return Hold(uploads.held, value_bytes, uploads.holds())
 
     def spans_ended(self, trace_id: str) -> int | None:
         """How many spans of the trace ended in this process, or ``None`` once forgotten."""

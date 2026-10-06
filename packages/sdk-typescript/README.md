@@ -325,16 +325,20 @@ before export, supply `redact(value, path)`; it applies to supported strings in
 attributes, resources, event/link attributes and log bodies. Return a string.
 Invalid helper content is omitted with an instrumentation failure; the span can still be delivered.
 A content value over Hue's 1 MiB value cap (or the value limit Hue's receiver advertises) is not
-omitted: text is cut to a UTF-8 prefix and
+omitted. A span's own string attribute over the cap is uploaded to Hue whole and replaced by its
+first 16 KiB (see [Values over the inline limit](#values-over-the-inline-limit)); `redact` sees
+the whole value first, and its answer is what is uploaded. Any other value over the cap, and one
+that could not be uploaded, is cut: text to a UTF-8 prefix, and
 bytes or a structured log body are replaced by the receiver's own marker
 (`{ "hue.truncated": true, "hue.truncated_bytes": <size> }`), and the value's key is listed in
 the record's `hue.truncated` attribute, where Hue's receiver lists the values it cuts itself,
 so the span still carries the call, the recorded part of its value and the rest of its evidence.
 `redact` sees text past the cap, so it can recognize a secret that crosses it. A string longer
-than the cap and 64 Ki code units is cut to that length when its record is queued, so a value of
-millions of characters cannot drop its record for the queue budget; for such a text the last
-64 Ki code units of the redactor's answer are never exported, and tool definitions and recorded
-requests have their credentials removed from the whole value before that cut.
+than the cap and 64 Ki code units that is not held whole for upload is cut to that length when
+its record is queued, so a value of millions of characters cannot drop its record for the queue
+budget; for such a text the last 64 Ki code units of the redactor's answer are never exported,
+and tool definitions and recorded requests have their credentials removed from the whole value
+before that cut.
 Export-time redactor failures reject the affected record and are reported by flush. Shared resources are redacted once per
 export batch. Do not put user content or secrets in span names or scope names.
 
@@ -367,18 +371,24 @@ rotates. Only definitions another integration recorded can be summarized: `hueTe
 inputs and exports through Hue's attached processors gets the summary.
 Recorded messages can inline files: GenAI `blob` parts in `gen_ai.input.messages` /
 `gen_ai.output.messages` (what the AI SDK 7 adapter records for a file part) and AI SDK 6 `file`
-parts in `ai.prompt.messages`. A span whose messages exceed 1 MiB would be cut, so when a
-record is queued Hue replaces the `content`/`data` of any such part longer than 64 KiB with the
-file's `sha256` and `size`, both of the file's own bytes whatever its media type (base64 content
-and `;base64` `data:` URLs decoded, other `data:` URLs percent-decoded, anything else as UTF-8 text), keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
-files are exported as recorded. The digest matches `hue.recordFile`'s `hue.file.sha256` for the same
-bytes, so a file can be recognized wherever it appears. The replacement happens before the record is
-charged to the queue budget, so a large file does not drop its span. It is bounded: a message
-attribute longer than 8 MiB of text is left unchanged, and then cut like any value over the cap
-when it is queued. Base64 grows a file by a third, so that ceiling is an inline file of about 6 MiB.
-The same message text is hashed once per record, and a record inspects at most 16 MiB of message
-text in all; messages past that are charged as recorded. With `captureContent: false` the messages,
-which export removes, are neither hashed nor charged.
+parts in `ai.prompt.messages`. A file is measured by its own bytes whatever its media type (base64
+content and `;base64` `data:` URLs decoded, other `data:` URLs percent-decoded, anything else as
+UTF-8 text). When a span's own message attribute inlines a file larger than 64 KiB, export uploads
+the file's bytes to Hue under the part's media type (`mime_type` or `mediaType`, else its `data:`
+URL's) and keeps the first 16 KiB of the part's `content`/`data` in place, listing the file in the
+span's `hue.blobs` as `<attribute>#<JSON pointer>`, for example
+`gen_ai.input.messages#/0/parts/1/content` (see
+[Values over the inline limit](#values-over-the-inline-limit)). A file that is not uploaded, and a
+large inline file in a log record or a span event, keeps the earlier behavior: the part's
+`content`/`data` is replaced by the file's `sha256` and `size`, keeping its other fields such as
+`type`, `mime_type` and `mediaType`, when the record is queued (or, for a span's own messages, at
+export). Smaller inline files are exported as recorded. The digest matches `hue.recordFile`'s
+`hue.file.sha256` for the same bytes, so a file can be recognized wherever it appears. It is bounded:
+a message attribute longer than 8 MiB of text is not inspected for files, and is uploaded or cut
+like any value over the cap. Base64 grows a file by a third, so that ceiling is an inline file of
+about 6 MiB. The same message text is inspected once per record, and a record inspects at most
+16 MiB of message text in all. With `captureContent: false` the messages, which export removes,
+are neither inspected nor charged.
 
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
@@ -513,6 +523,61 @@ attributes, events and links per span and 2,000 attributes per log record (OpenT
 is 128); providers an application attaches Hue to keep their own limits. A span whose events or
 links do not all fit the queue's byte budget keeps its newest ones and counts the rest in its
 dropped event and link counts, rather than being dropped whole.
+
+### Values over the inline limit
+
+Hue keeps a value inline up to its value limit (1 MiB unless the receiver advertises another in
+`Hue-Max-Value-Bytes`). A span's own string attribute larger than that (helper content such as
+`input.value`, `output.value` and tool results, or another instrumentation's attribute), and an
+inline file over 64 KiB in a span's own recorded messages, is uploaded to Hue apart from the span,
+up to Hue's upload limit of 1,000,000,000 bytes:
+
+1. Export computes the SHA-256 of the value's bytes (a string as UTF-8, a file as its own bytes)
+   and reserves it with `POST /api/v1/otlp/blobs`, authenticated with the project key. Hue answers
+   that it already stores the value under the trace, and nothing is uploaded, or with a presigned
+   URL.
+2. The bytes go straight to the project's evidence store in one `PUT` to that URL, with exactly the
+   headers Hue signed and never the project key (over HTTPS, or plain HTTP to a loopback store or
+   with `allowInsecureHttp`), and
+   the upload is confirmed with `POST /api/v1/otlp/blobs/complete`. A PUT the store answers with
+   412 (the same value uploaded at the same time by another span) counts as stored.
+3. The span keeps the value's first 16 KiB in the attribute it replaced and lists the value in its
+   `hue.blobs` attribute, one compact JSON object per value:
+   `{"key":"output.value","sha256":"<64 hex>","size":5242880,"content_type":"application/json"}`.
+   A whole value is listed under `hue.truncated` as well, since its inline text is a prefix.
+
+Hue stores the value under the trace, so the trace's retention, deletion and erasure cover it.
+Uploads run in the export, never on the application's thread: at most four at a time, each request
+within the export timeout, and all of one export's uploads within six export timeouts; a
+transient failure is retried once. A rate-limited reservation (429) waits out its `Retry-After`
+within the export's 60-second hold. `flush()` and `shutdown()` wait for uploads like any export
+work, and a `shutdownSafe()` whose budget runs out ends the uploads in flight.
+
+A value that cannot be uploaded (Hue or the store refused it or failed, the network or a deadline
+did, the receiver has no upload route, or the value is over 1 GB) is exported as before uploads
+existed: cut to the limit and listed under `hue.truncated`, an inline file as its digest. Each
+export reports such values in a `warning` issue per cause, whose `count` is the values and
+`traceIds` their traces, and counts them in `report.uploadFallbacks`; uploaded values are counted
+in `report.uploadedValues`. A warning never makes `flush()` throw. After a transient failure, or
+a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without
+the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not
+asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm.
+
+To upload a value whole, the queue holds it until export apart from `maxQueueBytes`, within a
+128 MiB budget of held values (a string charged two bytes a code unit); a recorded message holding
+an inline file over 64 KiB is held the same way. `maxQueueBytes` is still charged what the value
+would cost cut (a message, its copy with the files as their digest), so one that cannot be
+uploaded is exported exactly as it was before. A value the budget cannot hold, or one queued while
+the receiver is known to lack the upload route, is cut (its files digested) when it is queued, as
+before, and reported as not uploaded, once per file; a single value larger than the whole budget
+is held while nothing else is. While values can be uploaded, helpers encode content whole, up to the
+upload limit and 1,048,576 values, rather than cutting it to the value limit as they record it.
+
+Nothing is uploaded with `captureContent: false` or a setup credential (`hue_setup_…`), nor from
+log records (Hue does not read a log record's uploaded values yet), span events, links, resources
+or in-progress placeholders: those values are cut as before. `redact` and the credential scrub of
+tool definitions and recorded requests run on the whole value before it is hashed, so a value they
+rewrite is uploaded as rewritten.
 
 `flush()` waits for the current trace and log export work. A partial rejection,
 invalid acknowledgement, queue drop or failure throws `HueExportError`; its
@@ -730,6 +795,6 @@ existing-provider flush callbacks and recovery. Local/CI runners remain availabl
 
 Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client that keeps your `onExportIssue` hook and records the reason as an instrumentation failure. Pass `enabled: false` to disable Hue without a key or a `captureContent` choice; disabled helpers still execute the application callback, and `inject()` keeps propagating the application's own trace context. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
 
-Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production safety](https://docs.hue.run/guides/production-safety).
+Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters; `uploadedValues` and `uploadFallbacks` count the values over the inline limit uploaded apart from their spans and exported cut instead. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production safety](https://docs.hue.run/guides/production-safety).
 
 Queued records snapshot supported telemetry values when a span ends or a log is emitted; later caller mutations cannot change queued data. Resource attributes still awaiting detection are omitted with a sanitized warning. Later records include them after detection finishes; await resource detection before instrumentation when those attributes are required.

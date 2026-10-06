@@ -170,6 +170,7 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
         "test_isolation.py",
         "test_live_spans.py",
         "test_limits.py",
+        "test_blobs.py",
     ):
         shutil.copyfile(package / "tests" / name, receipt_tests / name)
     subprocess.run(
