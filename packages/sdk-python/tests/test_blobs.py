@@ -640,6 +640,50 @@ def test_a_message_cut_after_the_queue_digested_its_files_reports_the_files_and_
     assert listed(hue_store.span("long")) == ["gen_ai.input.messages", "gen_ai.output.messages"]
 
 
+def test_messages_queued_as_the_same_cut_text_report_their_own_files(hue_store):
+    hue_store.reserve = lambda _: (404, {}, False)
+
+    def message(images: int) -> str:
+        return json.dumps(
+            [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "content": "u" * (MIB + 200 * KIB)},
+                        *(
+                            {
+                                "type": "blob",
+                                "mime_type": "image/png",
+                                "content": base64.b64encode(os.urandom(100 * KIB)).decode(),
+                            }
+                            for _ in range(images)
+                        ),
+                    ],
+                }
+            ]
+        )
+
+    with client(hue_store) as hue:
+        with hue.span("learn") as span:
+            span.set_attribute("custom.document", "n" * (2 * MIB))
+        assert hue.force_flush()
+        with hue.span("shared prefix") as span:
+            span.set_attribute("gen_ai.input.messages", message(1))
+            span.set_attribute("gen_ai.output.messages", message(2))
+        assert hue.force_flush()
+        # One file and one cut, then two files and one cut.
+        warnings = [
+            issue.count
+            for issue in hue.export_issues()
+            if issue.message.startswith("This Hue server does not accept uploaded")
+        ]
+        assert warnings == [1, 5]
+    values = attrs(hue_store.span("shared prefix"))
+    assert values["gen_ai.input.messages"].string_value == (
+        values["gen_ai.output.messages"].string_value
+    )
+
+
 def test_the_fallback_for_an_unfinished_placement_reports_each_inline_file_it_digests():
     from hue_sdk._blobs import _fallback
 
