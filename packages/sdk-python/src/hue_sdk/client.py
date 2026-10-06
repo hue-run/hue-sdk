@@ -26,7 +26,8 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
-from ._limits import AdvertisedLimits
+from ._blobs import MAX_BLOB_BYTES, Uploads
+from ._limits import AdvertisedLimits, cut_utf8
 from ._otel_compat import encode_logs
 from ._provider_tools import (
     ABSENT,
@@ -223,7 +224,7 @@ class HueSpan:
             return
 
         def record() -> None:
-            content, truncated = self._client._bounded_content(key, value)
+            content, truncated = self._client._bounded_content(key, value, whole=True)
             with self._truncated_lock:
                 self.otel_span.set_attribute(key, content)
                 # The key is listed under ``hue.truncated``, where Hue's receiver lists the
@@ -641,8 +642,10 @@ class Hue:
             self.logger_provider = NoOpLoggerProvider()
             self._logger = self.logger_provider.get_logger("hue-run")
             return
-        # Setup credentials accept metadata spans only; they never announce live spans.
-        if isinstance(api_key, str) and api_key.startswith("hue_setup_"):
+        # Setup credentials accept metadata spans only; they never announce live spans nor upload
+        # values.
+        self._setup_key = isinstance(api_key, str) and api_key.startswith("hue_setup_")
+        if self._setup_key:
             live_spans = False
         try:
             self._setup(
@@ -697,6 +700,13 @@ class Hue:
         self._ledger = IssueLedger()
         # Records of a trace the SDK never sent, reported on the trace's root span.
         dropped_records = DroppedRecords()
+        # Span values over Hue's inline limit are uploaded apart from their spans while content
+        # is captured with a project key; metadata-only export and setup credentials upload none.
+        self._uploads = (
+            Uploads(self.base_url, self._headers, self._timeout)
+            if self.capture_content and not self._setup_key
+            else None
+        )
         self._span_exporter = BoundedSpanExporter(
             f"{self.base_url}/api/v1/otlp/v1/traces",
             self._headers,
@@ -705,6 +715,7 @@ class Hue:
             live_spans=live_spans,
             limits=self._limits,
             dropped_records=dropped_records,
+            uploads=self._uploads,
         )
         self._log_exporter = BoundedLogExporter(
             f"{self.base_url}/api/v1/otlp/v1/logs",
@@ -723,6 +734,7 @@ class Hue:
             live_spans=live_spans,
             limits=self._limits,
             dropped_records=dropped_records,
+            uploads=self._uploads,
         )
         self._log_processor = BoundedLogProcessor(
             self._log_exporter,
@@ -796,7 +808,7 @@ class Hue:
             raise ValueError("Captured content exceeds Hue's value cap.")
         return content
 
-    def _bounded_content(self, key: str, value: Any) -> tuple[str, bool]:
+    def _bounded_content(self, key: str, value: Any, *, whole: bool = False) -> tuple[str, bool]:
         """The value as JSON text within Hue's value cap (1 MiB unless the receiver advertises
         another), and whether it was cut to fit.
 
@@ -804,40 +816,43 @@ class Hue:
         cap, rather than omitted: the span still carries the call, the result's recorded part and
         the rest of its evidence, and the caller lists the key under ``hue.truncated`` so a
         reader knows the value is partial. Only a value that cannot be serialized is omitted.
+        With ``whole``, a span attribute's value is kept whole up to Hue's 1 GB upload limit
+        while the client uploads values over the cap: export uploads it or cuts it.
         """
         cap = self._limits.current.value_bytes
+        whole = whole and self._uploads is not None and self._uploads.holds()
+        bound = MAX_BLOB_BYTES if whole else cap
         # Redact before serialization, before queues and before any exporter receives content.
         try:
             # A redactor may mutate its argument before returning or raising.
             # It must never receive the application's live mutable values.
-            value = snapshot_content(value)
+            value = snapshot_content(value, whole=whole)
             if self._redactor is not None:
                 # Bound the returned tree too, before JSONEncoder can allocate
                 # an arbitrarily large nested string or invoke custom hooks.
-                value = snapshot_content(self._redactor(key, value))
+                value = snapshot_content(self._redactor(key, value), whole=whole)
             # A direct string past the cap is cut before JSON creates an escaped copy: its text
             # is cut again below to the cap, so the prefix kept is the same.
-            if isinstance(value, str) and len(value) > cap:
-                value = value[:cap]
-            # Stop accumulating once the text passes the cap; what follows is cut anyway.
+            if isinstance(value, str) and len(value) > bound:
+                value = value[:bound]
+            # Stop accumulating once the text passes the bound; what follows is cut anyway.
             parts: list[str] = []
             size = 0
             for part in json.JSONEncoder(
                 ensure_ascii=False, allow_nan=False, separators=(",", ":")
             ).iterencode(value):
                 parts.append(part)
-                size += len(part.encode("utf-8"))
-                if size > cap:
+                size += len(part) if part.isascii() else len(part.encode("utf-8"))
+                if size > bound:
                     break
             serialized = "".join(parts)
         except Exception:
             raise ValueError(
                 "Content redaction or JSON serialization failed; content was omitted."
             ) from None
-        encoded = serialized.encode("utf-8")
-        if len(encoded) <= cap:
+        if size <= bound:
             return serialized, False
-        return encoded[:cap].decode("utf-8", errors="ignore"), True
+        return cut_utf8(serialized, cap), True
 
     @contextmanager
     def context(
@@ -1107,6 +1122,7 @@ class Hue:
             return ExportStatus(0, 0, instrumentation_failures=issues)
         span_drops, span_count, span_bytes = self._span_processor.status
         log_drops, log_count, log_bytes = self._log_processor.status
+        uploaded, fallbacks = self._span_exporter.uploads
         return ExportStatus(
             self._span_exporter.failures,
             self._log_exporter.failures,
@@ -1118,6 +1134,8 @@ class Hue:
             queued_log_bytes=log_bytes,
             instrumentation_failures=issues,
             live_spans_rejected=self._span_exporter.live_spans_rejected,
+            uploaded_values=uploaded,
+            upload_fallbacks=fallbacks,
         )
 
     def verify_trace(

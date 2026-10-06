@@ -10,8 +10,44 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Added
+
+- **Wire** A span's own string attribute over Hue's inline value limit (helper content such as
+  `input.value`, `output.value` and tool results, or another instrumentation's attribute) is
+  uploaded to Hue apart from the span, up to 1,000,000,000 bytes: reserved with
+  `POST /api/v1/otlp/blobs` under the project key (skipped when Hue already stores the value
+  under the trace), sent straight to the project's evidence store with the presigned `PUT` Hue
+  answers, and completed. The span keeps the value's first 16 KiB and lists it in the new
+  `hue.blobs` attribute, one compact JSON object per value (`key`, `sha256`, `size`,
+  `content_type`), and under `hue.truncated`. Uploads run in the export, at most four at once,
+  within six export timeouts per export, retried once, with a 429 waited out within the export's
+  60 s hold. A value that cannot be uploaded is exported cut as before, reported as a `warning`
+  issue per cause (its `count` the values, `traceIds` their traces) and counted in the new
+  `ExportReport.uploadFallbacks`; uploads are counted in `ExportReport.uploadedValues`. A
+  transient failure, or a refusal that is not about the value alone, pauses uploads for 30 s, and
+  a receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no
+  reservation) is not asked again for 10 minutes. Nothing is uploaded with
+  `captureContent: false`, a setup credential, or from log records, events, links, resources or
+  placeholders. `redact` and the credential scrub run on the whole value first; the uploaded bytes
+  are their answer.
+
 #### Changed
 
+- **Wire** An inline file over 64 KiB in a span's own recorded messages (`gen_ai.input.messages`,
+  `gen_ai.output.messages`, `ai.prompt.messages`) is uploaded with its part's media type and keeps
+  the first 16 KiB of its `content`/`data` in place, listed in `hue.blobs` as
+  `<attribute>#<JSON pointer>` (`gen_ai.input.messages#/0/parts/1/content`), instead of being
+  replaced by its `sha256` and `size`. A file that is not uploaded, and one in a log record or a
+  span event, is still exported as its digest.
+- A span's own string over the value cap is held whole in the queue until export, within a
+  128 MiB budget of held values apart from `maxQueueBytes`, instead of being cut when queued;
+  `maxQueueBytes` is still charged what the cut would cost. A value the budget cannot hold, or one
+  queued while the receiver is known to lack the upload route, is cut when queued as before. While
+  values can be uploaded, helpers encode content whole (up to 1 GB and 1,048,576 values) instead
+  of cutting it at the cap when they record it, and `redact` sees the whole value.
+- Processors and a client's own providers wait up to six export timeouts longer for an export,
+  the uploads' budget. A `shutdownSafe()` whose budget runs out ends uploads in flight too; their
+  values are exported cut.
 - **Wire** Content values are kept whole up to 1 MiB, the value limit Hue's receiver stores,
   instead of being cut at 256 KiB. A value over it is still cut to a UTF-8 prefix (bytes and a
   structured log body replaced by the receiver's marker) and listed under `hue.truncated`.
@@ -1318,6 +1354,23 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Added
 
+- **Wire** A span's own string attribute over Hue's inline value limit (helper content such as
+  `input.value`, `output.value` and tool results, or another instrumentation's attribute) is
+  uploaded to Hue apart from the span, up to 1,000,000,000 bytes, as the TypeScript SDK uploads
+  it: reserved with `POST /api/v1/otlp/blobs` (skipped when Hue already stores the value under
+  the trace), streamed to the presigned `PUT` Hue answers, and completed. The span keeps the
+  value's first 16 KiB and lists it in the new `hue.blobs` attribute and under `hue.truncated`.
+  Uploads run on the export worker, at most four at once on daemon threads, within six export
+  timeouts per export. A value that cannot be uploaded is exported cut as before, recorded as a
+  `warning` export issue per cause and counted in the new `ExportStatus.upload_fallbacks`; uploads
+  are counted in `ExportStatus.uploaded_values`. Pauses after failures and a receiver without the
+  upload route are handled as in the TypeScript SDK, and an upload still sending past its export's
+  budget ends there. Nothing is uploaded with `capture_content=False`, a setup key, or from log
+  records, events, links or resources.
+- `ExportIssue.kind` may be `warning`: values exported cut because they could not be uploaded.
+  A warning does not affect `export_status.ok` or `force_flush()`, does not move
+  `export_failure_sequence()` (now the last failure's sequence), and evaluation runs do not count
+  it as a case's export failure.
 - **Wire** `hue.sdk.dropped_records` on a trace's root span, as the TypeScript SDK writes it: the
   records of the trace the SDK never sent (dropped from a queue, too large to send without their
   content, or refused for their rate for longer than an export holds them), so Hue reads the trace
@@ -1328,6 +1381,17 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Changed
 
+- **Wire** An inline file over 64 KiB in a span's own recorded messages is uploaded with its
+  part's media type and keeps the first 16 KiB of its `content`/`data` in place, listed in
+  `hue.blobs` as `<attribute>#<JSON pointer>`, instead of being replaced by its `sha256` and
+  `size`; a file that is not uploaded, and one in a log record or a span event, is still exported
+  as its digest.
+- A span's own value over the value cap is held whole with its queued copy until export, within a
+  128 MiB budget of held values apart from `max_queue_bytes`, instead of being cut when queued; a
+  value the budget cannot hold, or one queued while the receiver is known to lack the upload
+  route, is cut as before. While values can be uploaded, `set_input` and `set_output` content has
+  a 1 GB snapshot budget and 1,048,576 values (instead of 4 MiB and 65,536, past which it was
+  omitted) and is serialized whole; the redactor sees the whole value.
 - **Wire** A record over the request limit is no longer dropped whole. A value over the value cap
   (1 MiB) is cut when the record is queued, to a UTF-8 prefix (bytes replaced by the receiver's
   marker), and listed under `hue.truncated`; a record still over the receiver's limits sheds its

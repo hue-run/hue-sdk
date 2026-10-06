@@ -12,6 +12,7 @@ import {
 import { scrubsToolCredentials, scrubToolCredentials } from "./tool-definitions.js";
 import { MAX_RECORD_NODES } from "./config.js";
 import { truncatedMarker } from "./privacy.js";
+import { MAX_BLOB_BYTES } from "./blobs.js";
 
 // Intrinsic accessors are captured once and invoked with an explicit receiver so a
 // hostile object cannot override them; the unbound reference is the point.
@@ -39,6 +40,19 @@ function cutToUnits(value: string, units: number): string {
  * counted as dropped, where anything else loses the record. */
 class BudgetExceeded extends RangeError {}
 
+/**
+ * How a span's own values over the receiver's value cap are held whole for export to upload:
+ * the cap, the bytes the held-value budget has left, and whether nothing else is held (a single
+ * value larger than the whole budget is held then). A string is charged two bytes a code unit,
+ * bytes as themselves. The queue's byte budget is charged what the value would have cost cut
+ * when queued, so a value whose upload fails is exported cut exactly as before.
+ */
+export interface HoldLimits {
+  valueBytes: number;
+  budget: number;
+  first: boolean;
+}
+
 /** Where a copy stood before one event or link, to return to when the budget cannot hold it. */
 interface Mark {
   bytes: number;
@@ -58,6 +72,10 @@ class Snapshot {
   private copied = new Map<object, unknown>();
   private hashed = new Map<string, unknown>();
   private inspected = 0;
+  /** Bytes of values held whole for upload, charged to the held-value budget. */
+  held = 0;
+  /** Set while the span's own attributes are copied: only they may be held for upload. */
+  private own = false;
 
   /**
    * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
@@ -69,7 +87,49 @@ class Snapshot {
     private limit: number,
     private captureContent = true,
     private valueUnits = Infinity,
+    private hold?: HoldLimits,
   ) {}
+
+  /** Whether the held-value budget takes `bytes` more, charging them when it does. */
+  private holds(bytes: number): boolean {
+    const hold = this.hold!;
+    if (this.held + bytes > hold.budget && !(hold.first && this.held === 0)) return false;
+    this.held += bytes;
+    return true;
+  }
+
+  /**
+   * One of the span's own attribute values held whole for export to upload, when it may be: text
+   * longer than the queued value length or bytes over the cap, within the held-value budget, and
+   * a recorded message that may inline a large file kept as it is (export uploads the file).
+   * Undefined for a value copied as before; text over the length the budget cannot hold is then
+   * cut and its large inline files shrink to their digest, as before uploads existed.
+   */
+  private heldValue(key: string, value: unknown): { value: unknown } | undefined {
+    if (!this.hold || !this.own) return undefined;
+    if (typeof value === "string") {
+      if (value.length > this.valueUnits) {
+        // The queue must take the cut the value falls back to, as it would have taken it before.
+        const fallback = this.valueUnits * 2 + 16;
+        if (this.bytes + fallback > this.limit || !this.holds(value.length * 2)) return undefined;
+        this.charge(fallback);
+        return { value };
+      }
+      // Within the queued length: copied whole as before, its inline files left for export.
+      return isMessageKey(key) ? { value: this.copy(value, 1, "value", true) } : undefined;
+    }
+    if (!utilTypes.isUint8Array(value)) return undefined;
+    const length = typedArrayByteLength.call(value);
+    // Bytes over Hue's upload limit could only be exported cut: not copied whole for that.
+    if (length <= this.hold.valueBytes || length > MAX_BLOB_BYTES || !this.holds(length))
+      return undefined;
+    this.charge(16);
+    // Copied, so a later change by the application cannot alter what was recorded; charged to
+    // the held-value budget instead of the queue's.
+    const copy = new Uint8Array(length);
+    typedArraySet.call(copy, value);
+    return { value: copy };
+  }
 
   private charge(bytes: number): void {
     this.bytes += bytes;
@@ -125,6 +185,16 @@ class Snapshot {
    */
   attributes<T>(value: T): T {
     return this.copy(value, 1, "attributes");
+  }
+
+  /** The span's own attribute map, whose values over the cap may be held whole for upload. */
+  ownAttributes<T>(value: T): T {
+    this.own = true;
+    try {
+      return this.attributes(value);
+    } finally {
+      this.own = false;
+    }
   }
 
   /** A message attribute with its large inline files hashed. The same text is hashed once per
@@ -258,6 +328,11 @@ class Snapshot {
           throw new TypeError("Telemetry accessors are unsupported");
         if (shape === "attributes" && !this.captureContent && isMessageKey(key)) continue;
         this.charge(key.length * 2 + 16);
+        const held = shape === "attributes" ? this.heldValue(key, descriptor.value) : undefined;
+        if (held) {
+          (copy as Record<string, unknown>)[key] = held.value;
+          continue;
+        }
         (copy as Record<string, unknown>)[key] = this.copy(
           shape === "attributes"
             ? this.scrubbedBeforeCut(key, this.inlineFiles(key, descriptor.value))
@@ -318,12 +393,14 @@ function contextReader(context: SpanContext): () => SpanContext {
 }
 
 /** What admission keeps of a record: its copy, the bytes charged for it, whether resource
- * attributes were still unresolved, and the value strings it cut. */
+ * attributes were still unresolved, the value strings it cut, and the bytes of the values it
+ * held whole for upload. */
 export interface RecordSnapshot<T> {
   record: T;
   bytes: number;
   unresolvedResource: boolean;
   cut: ReadonlySet<string>;
+  held: number;
 }
 
 export function snapshotSpan(
@@ -331,8 +408,9 @@ export function snapshotSpan(
   limit: number,
   captureContent = true,
   valueUnits = Infinity,
+  hold?: HoldLimits,
 ): RecordSnapshot<ReadableSpan> {
-  const snapshot = new Snapshot(limit, captureContent, valueUnits);
+  const snapshot = new Snapshot(limit, captureContent, valueUnits, hold);
   const context = snapshot.context(source.spanContext())!;
   const fields = snapshot.copy({
     name: source.name,
@@ -347,7 +425,7 @@ export function snapshotSpan(
     droppedLinksCount: source.droppedLinksCount,
   });
   const status = snapshot.value(source.status);
-  const attributes = snapshot.attributes(source.attributes);
+  const attributes = snapshot.ownAttributes(source.attributes);
   const parentSpanContext = snapshot.context(source.parentSpanContext);
   const resource = snapshot.resource(source.resource);
   // Last, with what the budget has left: past it, events and links are counted as dropped.
@@ -379,6 +457,7 @@ export function snapshotSpan(
     bytes: snapshot.bytes,
     unresolvedResource: snapshot.unresolvedResource,
     cut: snapshot.cut,
+    held: snapshot.held,
   };
 }
 
@@ -429,5 +508,6 @@ export function snapshotLog(
     bytes: snapshot.bytes,
     unresolvedResource: snapshot.unresolvedResource,
     cut: snapshot.cut,
+    held: 0,
   };
 }

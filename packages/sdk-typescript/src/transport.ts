@@ -31,6 +31,18 @@ import {
 } from "@opentelemetry/sdk-logs";
 import { isInsecureOrigin, REDACTION_CONTEXT_UNITS, validateOptions } from "./config.js";
 import {
+  BlobUploader,
+  FALLBACK_MESSAGES,
+  fallbackAttributes,
+  MAX_HELD_BLOB_BYTES,
+  newTally,
+  offloadAttributes,
+  uploadBudgetMillis,
+  type OffloadCollector,
+  type OffloadTally,
+  type UploadContext,
+} from "./blobs.js";
+import {
   advertisedLimits,
   BATCH_TARGET_BYTES,
   DEFAULT_RECEIVER_LIMITS,
@@ -94,6 +106,14 @@ interface ExportSink {
   rejectPlaceholders(count: number): void;
   receiverLimits(): ReceiverLimits;
   adoptLimits(headers: IncomingHttpHeaders): void;
+  offloadsValues(): boolean;
+  offloadSpan(
+    span: ReadableSpan,
+    collector: OffloadCollector,
+    upload: UploadContext,
+    tally: OffloadTally,
+  ): Promise<ReadableSpan>;
+  reportOffload(tally: OffloadTally): void;
 }
 
 /**
@@ -104,10 +124,11 @@ interface ExportSink {
  */
 export const MAX_RATE_LIMIT_HOLD_MILLIS = 60_000;
 
-/** How long one export may take with requests of `timeoutMillis` each: its requests, and a hold
- * for a rate-limited receiver on top. Processors and providers wait this long for a drain. */
+/** How long one export may take with requests of `timeoutMillis` each: its uploads of values over
+ * the inline limit, its requests, and a hold for a rate-limited receiver on top. Processors and
+ * providers wait this long for a drain. */
 export function exportBudgetMillis(timeoutMillis: number): number {
-  return timeoutMillis * 16 + 1000 + MAX_RATE_LIMIT_HOLD_MILLIS;
+  return uploadBudgetMillis(timeoutMillis) + timeoutMillis * 16 + 1000 + MAX_RATE_LIMIT_HOLD_MILLIS;
 }
 
 /** Per-record allowance for protobuf length prefixes that grow when records are grouped. */
@@ -207,6 +228,13 @@ export class HueTransport {
   private holdsReleased = false;
   // The value strings each admitted record's snapshot cut, for its redaction.
   private admissionCuts = new WeakMap<RecordValue, ReadonlySet<string>>();
+  /** Uploads values over the inline limit apart from their spans; absent when disabled. */
+  private uploader?: BlobUploader;
+  /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
+  private heldBytes = 0;
+  private held = new WeakMap<RecordValue, number>();
+  private uploaded = 0;
+  private uploadFallbacks = 0;
 
   constructor(options: HueOptions) {
     this.options = validateOptions(options);
@@ -218,10 +246,11 @@ export class HueTransport {
       "traces",
       ProtobufTraceSerializer,
       TraceExporterMetricsHelper,
-      (span, cache) =>
+      (span, cache, offload) =>
         redactSpan(span, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
+          ...(offload ? { offload } : {}),
         }),
     );
     this.logExporter = new ReportingExporter(
@@ -235,6 +264,14 @@ export class HueTransport {
           cut: this.admissionCuts.get(log),
         }),
     );
+    if (this.options.enabled !== false)
+      this.uploader = new BlobUploader({
+        baseUrl: this.options.baseUrl,
+        apiKey: this.options.apiKey,
+        timeoutMillis: this.options.timeoutMillis,
+        allowInsecureHttp: this.options.allowInsecureHttp === true,
+        userAgent: `hue-sdk-typescript/${sdkVersion}`,
+      });
     if (this.options.enabled === false) {
       this.spanProcessor = { onStart() {}, onEnd() {}, async forceFlush() {}, async shutdown() {} };
       this.logRecordProcessor = { onEmit() {}, async forceFlush() {}, async shutdown() {} };
@@ -349,11 +386,26 @@ export class HueTransport {
         this.pendingBytes;
       // A value far over the receiver's value cap is cut when it is queued, to the cap and some
       // context for the redactor, rather than charged whole: export cuts it to the cap anyway,
-      // and its full size could drop the record before that cut ever ran.
+      // and its full size could drop the record before that cut ever ran. A span's own value
+      // that export may upload is held whole instead, within the held-value budget.
       const valueUnits = this.limits.valueBytes + REDACTION_CONTEXT_UNITS;
+      const hold =
+        signal === "traces" && !advisory && this.holdsValues()
+          ? {
+              valueBytes: this.limits.valueBytes,
+              budget: Math.max(0, MAX_HELD_BLOB_BYTES - this.heldBytes),
+              first: this.heldBytes === 0,
+            }
+          : undefined;
       const snapshot =
         signal === "traces"
-          ? snapshotSpan(record as ReadableSpan, remaining, this.options.captureContent, valueUnits)
+          ? snapshotSpan(
+              record as ReadableSpan,
+              remaining,
+              this.options.captureContent,
+              valueUnits,
+              hold,
+            )
           : snapshotLog(
               record as ReadableLogRecord,
               remaining,
@@ -361,6 +413,10 @@ export class HueTransport {
               valueUnits,
             );
       if (snapshot.cut.size) this.admissionCuts.set(snapshot.record, snapshot.cut);
+      if (snapshot.held) {
+        this.heldBytes += snapshot.held;
+        this.held.set(snapshot.record, snapshot.held);
+      }
       this.pendingBytes += snapshot.bytes;
       if (signal === "traces") this.spans.set(snapshot.record as ReadableSpan, snapshot.bytes);
       else this.logs.set(snapshot.record as ReadableLogRecord, snapshot.bytes);
@@ -479,6 +535,84 @@ export class HueTransport {
       const pending = signal === "traces" ? this.spans : this.logs;
       this.pendingBytes -= pending.get(record as ReadableSpan & ReadableLogRecord) ?? 0;
       pending.delete(record as ReadableSpan & ReadableLogRecord);
+      const held = this.held.get(record);
+      if (held) {
+        this.heldBytes -= held;
+        this.held.delete(record);
+      }
+    }
+  }
+
+  /** @internal Whether spans' values over the inline limit are uploaded: content is captured and
+   * the key is a project key (setup credentials send metadata only). A value that then cannot be
+   * uploaded is cut, reported and counted. */
+  offloadsValues(): boolean {
+    return (
+      this.uploader !== undefined &&
+      this.options.captureContent &&
+      !this.options.apiKey.startsWith("hue_setup_")
+    );
+  }
+
+  /** @internal Whether values over the inline limit are worth holding whole for upload now: they
+   * are uploaded, and the receiver has not shown it lacks the upload route. */
+  holdsValues(): boolean {
+    return this.offloadsValues() && this.uploader?.available() === true;
+  }
+
+  /** @internal Exporter callback: a redacted span with the values its redaction left to the
+   * upload step placed: uploaded and listed under `hue.blobs`, or cut as before. Never rejects. */
+  async offloadSpan(
+    span: ReadableSpan,
+    collector: OffloadCollector,
+    upload: UploadContext,
+    tally: OffloadTally,
+  ): Promise<ReadableSpan> {
+    let traceId = "";
+    try {
+      traceId = span.spanContext().traceId;
+    } catch {
+      // A span without a readable context cannot name its trace: its values are cut.
+    }
+    const valueBytes = this.limits.valueBytes;
+    try {
+      if (!this.uploader) throw new Error("Uploads are unavailable");
+      const attributes = await offloadAttributes(span.attributes, collector, {
+        uploader: this.uploader,
+        traceId,
+        valueBytes,
+        upload,
+        tally,
+      });
+      return { ...span, attributes: attributes as Attributes };
+    } catch {
+      return {
+        ...span,
+        attributes: fallbackAttributes(
+          span.attributes,
+          collector,
+          valueBytes,
+          tally,
+          traceId,
+        ) as Attributes,
+      };
+    }
+  }
+
+  /** @internal Exporter callback: counts an export's uploads and reports each kind of fallback
+   * once, as a warning naming its traces: the values were exported, cut as before. */
+  reportOffload(tally: OffloadTally): void {
+    this.uploaded += tally.uploaded;
+    for (const [reason, { count, traceIds }] of tally.fallbacks) {
+      this.uploadFallbacks += count;
+      this.issue(
+        "traces",
+        "warning",
+        count,
+        FALLBACK_MESSAGES[reason],
+        undefined,
+        traceIds.size && traceIds.size <= MAX_ISSUE_TRACE_IDS ? [...traceIds] : undefined,
+      );
     }
   }
 
@@ -539,10 +673,12 @@ export class HueTransport {
 
   /** @internal Ends every rate-limit hold now and refuses new ones, once a shutdown's caller has
    * stopped waiting: the held records are reported lost to the rate limit, and no timer of theirs
-   * keeps the process running for the receiver's `Retry-After`. */
+   * keeps the process running for the receiver's `Retry-After`. Uploads in flight end too, and no
+   * other starts: their values are exported cut, as before uploads existed. */
   releaseRateLimitHolds(): void {
     this.holdsReleased = true;
     for (const release of [...this.holds]) release();
+    this.uploader?.close();
   }
 
   /** @internal Exporter callback: what the receiver accepts, as it last advertised. */
@@ -644,6 +780,8 @@ export class HueTransport {
       droppedLogs: this.dropped.logs,
       pendingBytes: this.pendingBytes,
       instrumentationFailures: this.instrumentationFailures,
+      uploadedValues: this.uploaded,
+      uploadFallbacks: this.uploadFallbacks,
     };
   }
 
@@ -884,7 +1022,7 @@ class ReportingExporter<T extends RecordValue> {
     private signal: Signal,
     private serializer: ISerializer<T[], Response>,
     private metrics: IExporterMetricsHelper<T[]>,
-    private redact: (record: T, cache: ResourceCache) => T,
+    private redact: (record: T, cache: ResourceCache, offload?: OffloadCollector) => T,
   ) {}
 
   export(records: T[], callback: (result: ExportResult) => void): void {
@@ -962,6 +1100,21 @@ class ReportingExporter<T extends RecordValue> {
       }
     };
     const resourceDeadline = Date.now() + this.transport.options.timeoutMillis;
+    // How long this export has held its records for a rate-limited receiver, its value uploads'
+    // waits included.
+    const hold = { millis: 0 };
+    // A span's values over the inline limit are uploaded before it is measured, within the
+    // export's upload budget; a placeholder's never are.
+    const upload: UploadContext = {
+      deadline: Date.now() + uploadBudgetMillis(this.transport.options.timeoutMillis),
+      wait: async (millis) => {
+        if (hold.millis + millis > MAX_RATE_LIMIT_HOLD_MILLIS) return false;
+        hold.millis += millis;
+        return this.transport.holdForRateLimit(millis);
+      },
+    };
+    const tally = newTally();
+    const placed: { record: T; markers?: Attributes; redacted: T | Promise<T> }[] = [];
     for (const { record, markers } of this.ordered(records)) {
       try {
         const ready = record.resource.waitForAsyncAttributes?.();
@@ -981,7 +1134,35 @@ class ReportingExporter<T extends RecordValue> {
             clearTimeout(timer);
           }
         }
-        let redacted = this.redact(record, cache);
+        const offload: OffloadCollector | undefined =
+          !markers && this.signal === "traces" && this.transport.offloadsValues()
+            ? { candidates: [], cut: [] }
+            : undefined;
+        const redacted = this.redact(record, cache, offload);
+        placed.push({
+          record,
+          ...(markers ? { markers } : {}),
+          redacted:
+            offload && (offload.candidates.length || offload.cut.length)
+              ? (this.transport.offloadSpan(
+                  redacted as ReadableSpan,
+                  offload,
+                  upload,
+                  tally,
+                ) as Promise<T>)
+              : redacted,
+        });
+      } catch {
+        invalid(
+          markers !== undefined,
+          "Telemetry record could not be redacted or exceeds supported content limits",
+          record,
+        );
+      }
+    }
+    for (const { record, markers, redacted: placing } of placed) {
+      try {
+        let redacted = await placing;
         // Added after redaction, so a redactor cannot alter the markers or the parent identity.
         if (markers)
           redacted = {
@@ -1084,8 +1265,7 @@ class ReportingExporter<T extends RecordValue> {
       // export may have adopted lower ones meanwhile, and each attempt checks them again.
       return fitsLimits(body, this.transport.receiverLimits()) ? body : undefined;
     };
-    // How long this export has held its records for a rate-limited receiver.
-    const hold = { millis: 0 };
+    this.transport.reportOffload(tally);
     /** Sends one kind of record (completed records, or placeholders alone: `advisory`) in one
      * request, or in halves when it is over the receiver's limits. A trace's root among completed
      * records carries the trace's dropped-record count as it stands when its request is made, so

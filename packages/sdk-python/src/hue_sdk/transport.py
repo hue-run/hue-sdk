@@ -30,6 +30,14 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import get_current_span
 
+from ._blobs import (
+    FALLBACK_MESSAGES,
+    Tally,
+    Uploads,
+    held_of,
+    place_spans,
+    upload_budget_seconds,
+)
 from ._limits import BATCH_TARGET_BYTES as BATCH_TARGET_BYTES
 from ._limits import DROPPED_RECORDS_KEY as DROPPED_RECORDS_KEY
 from ._limits import MAX_CONTENT_BYTES as MAX_CONTENT_BYTES
@@ -118,6 +126,12 @@ class ExportStatus:
     ``live_spans_rejected`` is a warning, not a failure, and does not affect ``ok``: a
     trace acknowledgement lacked the ``Hue-Pending-Spans`` header, so the receiver predates
     live-span placeholders and this client stopped sending them.
+
+    ``uploaded_values`` counts span values over Hue's inline limit uploaded apart from their
+    spans (or already stored by Hue), each listed under the span's ``hue.blobs`` with its first
+    16 KiB kept inline; ``upload_fallbacks`` counts the ones that could not be uploaded and were
+    exported cut to the limit (an inline file as its digest), each reported in a warning issue.
+    Neither affects ``ok``.
     """
 
     failed_trace_batches: int
@@ -130,6 +144,8 @@ class ExportStatus:
     queued_log_bytes: int = 0
     instrumentation_failures: int = 0
     live_spans_rejected: bool = False
+    uploaded_values: int = 0
+    upload_fallbacks: int = 0
 
     @property
     def ok(self) -> bool:
@@ -383,13 +399,15 @@ MAX_RETAINED_ISSUES = 256
 
 @dataclass(frozen=True)
 class ExportIssue:
-    """One export failure, with the traces of the records it concerned.
+    """One export failure or warning, with the traces of the records it concerned.
 
-    ``kind`` is ``failed`` for a batch Hue refused or did not acknowledge and ``dropped`` for a
-    record the pipeline could not hold or encode. ``trace_ids`` names the traces whose records the
-    issue concerned, lowercase hexadecimal; ``None`` when the records named none or more than
+    ``kind`` is ``failed`` for a batch Hue refused or did not acknowledge, ``dropped`` for a
+    record the pipeline could not hold or encode, and ``warning`` for span values over Hue's
+    inline limit that could not be uploaded and were exported cut (``count`` is the values): a
+    warning is not a failure. ``trace_ids`` names the traces whose records the issue concerned,
+    lowercase hexadecimal; ``None`` when the records named none or more than
     ``MAX_ISSUE_TRACE_IDS``, so a case's trace receipt decides. ``sequence`` orders issues across
-    both signals; a client's ``export_failure_sequence()`` is the last one recorded.
+    both signals; a client's ``export_failure_sequence()`` is the last failure's.
     """
 
     signal: str
@@ -440,6 +458,7 @@ class IssueLedger:
     def __init__(self) -> None:
         self._lock = Lock()
         self._sequence = 0
+        self._failure_sequence = 0
         self._issues: deque[ExportIssue] = deque(maxlen=MAX_RETAINED_ISSUES)
 
     def record(
@@ -452,14 +471,17 @@ class IssueLedger:
     ) -> None:
         with self._lock:
             self._sequence += 1
+            if kind != "warning":
+                self._failure_sequence = self._sequence
             self._issues.append(
                 ExportIssue(signal, kind, max(1, count), message, self._sequence, trace_ids)
             )
 
     @property
     def failure_sequence(self) -> int:
+        """The sequence of the last failure recorded; warnings do not move it."""
         with self._lock:
-            return self._sequence
+            return self._failure_sequence
 
     def issues(self) -> tuple[ExportIssue, ...]:
         with self._lock:
@@ -780,8 +802,13 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         live_spans: bool = True,
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
     ) -> None:
         self._setup(ledger, limits, dropped_records)
+        # Uploads of span values over the inline limit; None when the client uploads none.
+        self._uploads = uploads
+        self._uploaded = 0
+        self._upload_fallbacks = 0
         self._session = SafeSession("traces", live_spans=live_spans, limits=self._limits)
         self._delegate = OTLPSpanExporter(
             endpoint=endpoint,
@@ -795,6 +822,63 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
     @property
     def live_spans_rejected(self) -> bool:
         return self._session.live_spans_rejected
+
+    @property
+    def uploads(self) -> tuple[int, int]:
+        """Values uploaded, and values that fell back to the inline cut, so far."""
+        with self._lock:
+            return self._uploaded, self._upload_fallbacks
+
+    def _wait_for_rate(self, seconds: float) -> bool:
+        """Waits out a rate-limited reservation within the export's hold; False when the hold
+        may not take ``seconds`` more."""
+        with self._lock:
+            if self._held + seconds > MAX_RATE_LIMIT_HOLD_SECONDS:
+                return False
+            self._held += seconds
+        Event().wait(seconds)
+        return True
+
+    def _place_held(self, spans: list[Any]) -> list[Any]:
+        """The spans with the values their copies held for upload placed: uploaded and listed
+        under ``hue.blobs``, or cut as before. Every fallback is counted and reported as a
+        warning naming its traces; the spans are exported either way."""
+        uploads = self._uploads
+        holding = [(index, span, held_of(span)) for index, span in enumerate(spans)]
+        entries = [(index, span, held) for index, span, held in holding if held is not None]
+        if uploads is None or not entries:
+            return spans
+        placed, tally = place_spans(
+            [
+                (span.attributes or {}, held, _record_trace_id(span) or "")
+                for _, span, held in entries
+            ],
+            uploader=uploads.uploader,
+            value_bytes=self._limits.current.value_bytes,
+            deadline=monotonic() + upload_budget_seconds(uploads.timeout),
+            wait=self._wait_for_rate,
+        )
+        result = list(spans)
+        for (index, span, held), attributes in zip(entries, placed, strict=True):
+            result[index] = replace_span(span, attributes=attributes)
+            held.release()
+        self._report_uploads(tally)
+        return result
+
+    def _report_uploads(self, tally: Tally) -> None:
+        fallbacks = sum(count for count, _ in tally.fallbacks.values())
+        with self._lock:
+            self._uploaded += tally.uploaded
+            self._upload_fallbacks += fallbacks
+        for reason, (count, traces) in tally.fallbacks.items():
+            named = tuple(trace for trace in traces if trace)
+            self._ledger.record(
+                "traces",
+                "warning",
+                count,
+                FALLBACK_MESSAGES[reason],
+                named if named and len(named) <= MAX_ISSUE_TRACE_IDS else None,
+            )
 
     def _delegate_export(self, batch: Sequence[Any]) -> bool:
         return self._delegate.export(batch) is SpanExportResult.SUCCESS
@@ -828,6 +912,8 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         real = [span for span in spans if not isinstance(span, PendingSpan)]
         pending = [span for span in spans if isinstance(span, PendingSpan)]
         try:
+            # Values over the inline limit are uploaded before any record is measured.
+            real = self._place_held(real)
             # Every record is measured, shed and, where it cannot be sent, counted lost before any
             # root is written, so a root carries the losses of children that ended after it.
             fitted: list[tuple[Any, int]] = []
