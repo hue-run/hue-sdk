@@ -1,6 +1,6 @@
 import { INVALID_SPAN_CONTEXT, trace, type Span } from "@opentelemetry/api";
 import { types as utilTypes } from "node:util";
-import { MAX_CONTENT_BYTES } from "./config.js";
+import { MAX_CONTENT_BYTES, MAX_RECORD_NODES } from "./config.js";
 
 export function noopSpan(): Span {
   return trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
@@ -106,8 +106,15 @@ export interface EncodeLimits {
   nodes: number;
   depth: number;
 }
-/** One content attribute's bounds. */
-const contentLimits: EncodeLimits = { bytes: MAX_CONTENT_BYTES, nodes: 16384, depth: 32 };
+/** One content attribute's bounds: the value cap, and as many values as the Python SDK's content
+ * snapshot allows, so a structured value of small members is cut at the cap rather than refused
+ * for its count before reaching it. */
+const contentLimits: EncodeLimits = { bytes: MAX_CONTENT_BYTES, nodes: 65_536, depth: 32 };
+
+/** One content attribute's bounds under a receiver's value cap of `valueBytes`. */
+export function contentLimitsOf(valueBytes: number): EncodeLimits {
+  return { ...contentLimits, bytes: valueBytes };
+}
 
 /** Validate a bounded data tree without invoking toJSON or property getters. */
 export function encodeContent(value: unknown, limits: EncodeLimits = contentLimits): string {
@@ -217,7 +224,8 @@ export function estimateRecordBytes(value: unknown, limit: number): number {
   let nodes = 0;
   const seen = new Set<object>();
   const visit = (item: unknown, depth: number) => {
-    if (++nodes > 16384 || depth > 32) throw new RangeError("Telemetry complexity limit exceeded");
+    if (++nodes > MAX_RECORD_NODES || depth > 32)
+      throw new RangeError("Telemetry complexity limit exceeded");
     bytes += 16;
     if (typeof item === "string") bytes += item.length * 2;
     else if (item instanceof Uint8Array) bytes += item.byteLength;

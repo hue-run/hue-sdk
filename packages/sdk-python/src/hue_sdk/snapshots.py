@@ -24,7 +24,15 @@ from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
 from ._inline_files import hash_inline_files
-from ._tool_definitions import scrub_tool_credentials, with_tool_catalog_summary
+from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY, cut_utf8, over_utf8
+from ._records import CONTENT_PREFIXES as CONTENT_PREFIXES
+from ._records import is_content_key as is_content_key
+from ._records import is_truncated_marker, truncated_marker, with_truncated_keys
+from ._tool_definitions import (
+    scrub_tool_credentials,
+    scrubs_tool_credentials,
+    with_tool_catalog_summary,
+)
 from .transport import (
     MAX_REQUEST_BYTES,
     PENDING_PARENT_KEY,
@@ -33,7 +41,9 @@ from .transport import (
     PendingSpan,
 )
 
-MAX_CONTENT_SNAPSHOT_BYTES = 1_048_576
+# A redactor's view of helper content: four times the value cap, so a secret that crosses the
+# cap is still the redactor's to recognize before the content is cut to the cap.
+MAX_CONTENT_SNAPSHOT_BYTES = 4 * MAX_CONTENT_BYTES
 MAX_CONTENT_SNAPSHOT_DEPTH = 64
 MAX_CONTENT_SNAPSHOT_NODES = 65_536
 MAX_CONTENT_INTEGER_BITS = 14_000
@@ -118,64 +128,6 @@ def snapshot_content(value: Any) -> Any:
     return _ContentBudget().value(value)
 
 
-# Attribute keys (and their dotted children) removed in metadata-only mode. Mirrors the
-# TypeScript SDK so both export paths strip the same GenAI, OpenInference, OpenLLMetry,
-# Langfuse and Vercel AI SDK content fields regardless of which instrumentor produced them.
-CONTENT_PREFIXES: tuple[str, ...] = (
-    "gen_ai.input.messages",
-    "gen_ai.output.messages",
-    "gen_ai.system_instructions",
-    "gen_ai.prompt",
-    "gen_ai.completion",
-    "gen_ai.tool.call.arguments",
-    "gen_ai.tool.call.result",
-    "gen_ai.tool.definitions",
-    "gen_ai.event.content",
-    "llm.input_messages",
-    "llm.output_messages",
-    "llm.prompts",
-    "llm.completions",
-    "llm.invocation_parameters",
-    "llm.prompt_template.template",
-    "llm.prompt_template.variables",
-    "llm.tools",
-    "llm.function_call",
-    "llm.choices",
-    "input.value",
-    "output.value",
-    "input.images",
-    "output.images",
-    "retrieval.documents",
-    "embedding.embeddings",
-    "reranker.query",
-    "reranker.input_documents",
-    "reranker.output_documents",
-    "ai.prompt",
-    "ai.response.text",
-    "ai.response.object",
-    "ai.response.reasoning",
-    "ai.response.files",
-    "ai.response.toolCalls",
-    "ai.response.body",
-    "ai.toolCall.args",
-    "ai.toolCall.result",
-    "ai.value",
-    "ai.values",
-    "ai.embedding",
-    "ai.embeddings",
-    "traceloop.entity.input",
-    "traceloop.entity.output",
-    # Langfuse content; its model name, usage, cost, type, session, user and metadata keys stay.
-    "langfuse.observation.input",
-    "langfuse.observation.output",
-    "langfuse.observation.status_message",
-    "langfuse.observation.model.parameters",
-    "langfuse.trace.input",
-    "langfuse.trace.output",
-    "tool.parameters",
-    "exception.message",
-    "exception.stacktrace",
-)
 _LEGACY_CONTENT_EVENTS = (
     "gen_ai.system",
     "gen_ai.user",
@@ -185,25 +137,67 @@ _LEGACY_CONTENT_EVENTS = (
 )
 
 
-def is_content_key(key: str) -> bool:
-    return any(key == prefix or key.startswith(prefix + ".") for prefix in CONTENT_PREFIXES)
-
-
 def _is_legacy_content_event(name: str) -> bool:
     return any(name == prefix or name.startswith(prefix + ".") for prefix in _LEGACY_CONTENT_EVENTS)
 
 
+# An event's or link's encoded fields the copy does not otherwise charge.
+_ITEM_FRAMING_BYTES = 64
+
+
+class _BudgetExceeded(ValueError):
+    """The record's copy outgrew its budget: a span's events and links past it are left out and
+    counted as dropped, where anything else loses the record."""
+
+
 class _ValueBudget:
-    def __init__(self, capture_content: bool = True) -> None:
-        self.remaining = MAX_REQUEST_BYTES
+    """One record's copy. ``record_bytes`` bounds the copy's work and size; a value string (an
+    attribute's, an event's or link's attribute's, a log body or a status description) over
+    ``value_bytes`` is cut to it and its key listed under ``hue.truncated``, and bytes over it
+    are replaced by the receiver's marker, as export would cut them: copying them whole could
+    exceed the record's budget and lose the record for one value."""
+
+    def __init__(
+        self,
+        capture_content: bool = True,
+        *,
+        record_bytes: int = MAX_REQUEST_BYTES,
+        value_bytes: int | None = None,
+    ) -> None:
+        self.remaining = record_bytes
         self.capture_content = capture_content
+        self.value_bytes = value_bytes
+        # The keys whose values this copy cut, as the record's ``hue.truncated`` lists them.
+        self.truncated: list[str] = []
+        self._cut = False
 
     def consume(self, size: int) -> None:
         self.remaining -= size
         if self.remaining < 0:
-            raise ValueError("Telemetry snapshot exceeds its budget.")
+            raise _BudgetExceeded("Telemetry snapshot exceeds its budget.")
 
-    def value(self, value: Any, depth: int = 0) -> Any:
+    def newest(self, items: Sequence[Any], copy_item: Any) -> tuple[tuple[Any, ...], int]:
+        """As many of a span's newest ``items`` (its events or links) as the budget still holds,
+        each copied by ``copy_item``, and how many older ones it could not hold, as OpenTelemetry
+        keeps a span's newest events and links past its own count limits. A span whose events or
+        links outgrow the budget keeps its name, timing, attributes and the rest of them, counting
+        the ones left out as dropped, instead of being lost whole."""
+        kept: list[Any] = []
+        for item in reversed(items):
+            remaining, listed = self.remaining, len(self.truncated)
+            try:
+                # What the copy does not charge of an event or link: its timestamp or identifiers
+                # and its framing, so the record kept encodes within the budget it was charged.
+                self.consume(_ITEM_FRAMING_BYTES)
+                kept.append(copy_item(item))
+            except _BudgetExceeded:
+                self.remaining = remaining
+                del self.truncated[listed:]
+                break
+        kept.reverse()
+        return tuple(kept), len(items) - len(kept)
+
+    def value(self, value: Any, depth: int = 0, *, cut: bool = False) -> Any:
         # Conservative per-value work/storage bound, separate from exact protobuf
         # admission bytes. Reject excessive nesting and cycles without retaining
         # or traversing arbitrarily large application objects.
@@ -213,16 +207,29 @@ class _ValueBudget:
         if value is None or isinstance(value, bool):
             return value
         if isinstance(value, float):
+            # Its eight bytes, as the queue charges the encoded record, so a span whose events
+            # were trimmed to this budget still fits it when encoded.
+            self.consume(8)
             return float.__float__(value)
         if isinstance(value, int):
             self.consume((int.bit_length(value) + 7) // 8)
             return int.__int__(value)
         if isinstance(value, (str, bytes)):
-            if len(value) > self.remaining:
-                raise ValueError("Telemetry snapshot exceeds its budget.")
+            limit = self.value_bytes if cut else None
             if isinstance(value, str):
+                if limit is not None and over_utf8(value, limit):
+                    value = cut_utf8(value, limit)
+                    self._cut = True
+                if len(value) > self.remaining:
+                    raise _BudgetExceeded("Telemetry snapshot exceeds its budget.")
                 self.consume(len(str.encode(value, "utf-8")))
                 return str.__str__(value)
+            if limit is not None and len(value) > limit:
+                # Bytes are never cut: a shortened encoding is a different value.
+                self._cut = True
+                return self.value(truncated_marker(len(value)), depth)
+            if len(value) > self.remaining:
+                raise _BudgetExceeded("Telemetry snapshot exceeds its budget.")
             self.consume(len(value))
             return value if type(value) is bytes else memoryview(value).tobytes()
         if isinstance(value, Mapping):
@@ -230,11 +237,37 @@ class _ValueBudget:
             for key, item in value.items():
                 if not isinstance(key, str):
                     raise ValueError("Telemetry mapping keys must be strings.")
-                result[self.value(key, depth + 1)] = self.value(item, depth + 1)
+                result[self.value(key, depth + 1)] = self.value(item, depth + 1, cut=cut)
             return result
         if isinstance(value, Sequence):
-            return tuple(self.value(item, depth + 1) for item in value)
+            return tuple(self.value(item, depth + 1, cut=cut) for item in value)
         raise ValueError("Unsupported telemetry snapshot value.")
+
+    def content(self, value: Any, listed: str) -> Any:
+        """A value cut to the value cap, its key listed as ``listed`` when it was cut."""
+        self._cut = False
+        result = self.value(value, cut=self.value_bytes is not None)
+        if self._cut and listed not in self.truncated:
+            self.truncated.append(listed)
+        return result
+
+    def _scrubbed_before_cut(self, key: str, value: Any) -> Any:
+        """A tool definition or recorded request the copy will cut, with its credentials removed
+        from the whole value first: a cut prefix no longer parses, so scrubbing the copy could
+        not find them. A value too long to parse within the record's budget is replaced by the
+        receiver's marker instead of exported unscrubbed."""
+        limit = self.value_bytes
+        if limit is None or not scrubs_tool_credentials(key):
+            return value
+        texts = (
+            [value] if isinstance(value, str) else value if isinstance(value, (list, tuple)) else []
+        )
+        long = [text for text in texts if isinstance(text, str) and over_utf8(text, limit)]
+        if not long:
+            return value
+        if sum(len(text) for text in long) > self.remaining:
+            return truncated_marker(sum(len(text) for text in long))
+        return scrub_tool_credentials(key, value)
 
     def permitted(self, values: Any) -> Any:
         """Apply the content policy: metadata-only mode drops recognized content keys."""
@@ -251,20 +284,56 @@ class _ValueBudget:
             }
         return source
 
-    def attributes(self, values: Any, dropped: int = 0) -> BoundedAttributes:
+    def copied_attributes(self, values: Any, prefix: str = "") -> Any:
+        """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key."""
+        source = self.permitted(values)
+        if not isinstance(source, Mapping):
+            return self.value(source)
+        copied: dict[str, Any] = {}
+        for key, item in source.items():
+            if not isinstance(key, str):
+                raise ValueError("Telemetry mapping keys must be strings.")
+            listed = f"{prefix}{key}"
+            scrubbed = self._scrubbed_before_cut(key, item)
+            copied[self.value(key, 1)] = self.content(scrubbed, listed)
+            if scrubbed is not item and is_truncated_marker(scrubbed):
+                if listed not in self.truncated:
+                    self.truncated.append(listed)
+        return copied
+
+    def attributes(self, values: Any, dropped: int = 0, prefix: str = "") -> BoundedAttributes:
         # Scrub the copy admission already bounded, so the application thread never parses
         # more than one record's budget of tool-definition JSON.
-        copied = self.value(self.permitted(values))
+        copied = self.copied_attributes(values, prefix)
         if isinstance(copied, dict):
             copied = {key: scrub_tool_credentials(key, item) for key, item in copied.items()}
         result = BoundedAttributes(attributes=copied, immutable=True, extended_attributes=True)
         result.dropped += dropped
         return result
 
+    def take_truncated(self) -> list[str]:
+        """The keys listed since the last call, which the record lists in its own order."""
+        taken, self.truncated = self.truncated, []
+        return taken
+
+    def listed(self, attributes: BoundedAttributes) -> BoundedAttributes:
+        """The record's own attributes with every cut of the record listed under
+        ``hue.truncated``, merged with any the application listed itself."""
+        if not self.truncated:
+            return attributes
+        values = dict(attributes)
+        values[TRUNCATED_KEY] = with_truncated_keys(values.get(TRUNCATED_KEY), self.truncated)
+        result = BoundedAttributes(attributes=values, immutable=True, extended_attributes=True)
+        result.dropped += attributes.dropped
+        return result
+
     def resource(self, resource: Resource | None) -> Resource:
         if resource is None:
             return Resource({})
-        return Resource(self.value(resource.attributes), self.value(resource.schema_url))
+        return Resource(
+            self.copied_attributes(resource.attributes, "resource."),
+            self.value(resource.schema_url),
+        )
 
     def scope(self, scope: InstrumentationScope | None) -> InstrumentationScope | None:
         if scope is None:
@@ -278,42 +347,70 @@ class _ValueBudget:
 
 
 class _SpanSnapshot(ReadableSpan):
-    def __init__(self, span: ReadableSpan, capture_content: bool = True) -> None:
-        budget = _ValueBudget(capture_content)
+    def __init__(
+        self,
+        span: ReadableSpan,
+        capture_content: bool = True,
+        *,
+        record_bytes: int = MAX_REQUEST_BYTES,
+        value_bytes: int | None = None,
+    ) -> None:
+        budget = _ValueBudget(capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
         attributes: Any = span.attributes
         if attributes and any(key in attributes for key in _PENDING_MARKERS):
             # Placeholder markers are reserved: a finished span must never read as one.
             attributes = {k: v for k, v in attributes.items() if k not in _PENDING_MARKERS}
-        super().__init__(
-            name=budget.value(span.name),
-            context=span.context,
-            parent=span.parent,
-            resource=budget.resource(span.resource),
-            attributes=budget.attributes(attributes, span.dropped_attributes),
-            events=tuple(
-                Event(
-                    budget.value(event.name),
-                    budget.attributes(event.attributes, event.dropped_attributes),
-                    event.timestamp,
-                )
+        name = budget.value(span.name)
+        scope = budget.scope(span.instrumentation_scope)
+        own = budget.attributes(attributes, span.dropped_attributes)
+        own_cuts = budget.take_truncated()
+        resource = budget.resource(span.resource)
+        status = Status(
+            span.status.status_code,
+            budget.content(span.status.description, "status.message") if capture_content else None,
+        )
+        record_cuts = budget.take_truncated()
+        # Last, with what the budget has left: past it, events and links are counted as dropped.
+        events, dropped_events = budget.newest(
+            [
+                event
                 for event in span.events
                 if capture_content or not _is_legacy_content_event(event.name)
+            ],
+            lambda event: Event(
+                budget.value(event.name),
+                budget.attributes(
+                    event.attributes, event.dropped_attributes, f"event:{event.name}:"
+                ),
+                event.timestamp,
             ),
-            links=tuple(
-                Link(link.context, budget.attributes(link.attributes, link.dropped_attributes))
-                for link in span.links
+        )
+        links, dropped_links = budget.newest(
+            span.links,
+            lambda link: Link(
+                link.context,
+                budget.attributes(link.attributes, link.dropped_attributes, "link:"),
             ),
+        )
+        # Every cut of the record, its events', links' and resource's included, is listed on its
+        # own attributes, in that order.
+        budget.truncated = budget.take_truncated() + record_cuts + own_cuts
+        super().__init__(
+            name=name,
+            context=span.context,
+            parent=span.parent,
+            resource=resource,
+            attributes=budget.listed(own),
+            events=events,
+            links=links,
             kind=span.kind,
-            status=Status(
-                span.status.status_code,
-                budget.value(span.status.description) if capture_content else None,
-            ),
+            status=status,
             start_time=span.start_time,
             end_time=span.end_time,
-            instrumentation_scope=budget.scope(span.instrumentation_scope),
+            instrumentation_scope=scope,
         )
-        self._snapshot_dropped_events = span.dropped_events
-        self._snapshot_dropped_links = span.dropped_links
+        self._snapshot_dropped_events = span.dropped_events + dropped_events
+        self._snapshot_dropped_links = span.dropped_links + dropped_links
 
     @property
     def dropped_events(self) -> int:
@@ -324,8 +421,14 @@ class _SpanSnapshot(ReadableSpan):
         return self._snapshot_dropped_links
 
 
-def snapshot_span(span: ReadableSpan, capture_content: bool = True) -> ReadableSpan:
-    return _SpanSnapshot(span, capture_content)
+def snapshot_span(
+    span: ReadableSpan,
+    capture_content: bool = True,
+    *,
+    record_bytes: int = MAX_REQUEST_BYTES,
+    value_bytes: int | None = None,
+) -> ReadableSpan:
+    return _SpanSnapshot(span, capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
 
 
 # The export worker holds an application span's lock while it copies attributes. A fork waits
@@ -437,17 +540,26 @@ def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> P
     )
 
 
-def snapshot_log(log_record: ReadWriteLogRecord, capture_content: bool = True) -> ReadableLogRecord:
-    budget = _ValueBudget(capture_content)
+def snapshot_log(
+    log_record: ReadWriteLogRecord,
+    capture_content: bool = True,
+    *,
+    record_bytes: int = MAX_REQUEST_BYTES,
+    value_bytes: int | None = None,
+) -> ReadableLogRecord:
+    budget = _ValueBudget(capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
     record = copy(log_record.log_record)
     record.context = Context()
-    record.body = budget.value(record.body) if capture_content else None
-    record.attributes = budget.attributes(record.attributes, log_record.dropped_attributes)
+    record.body = budget.content(record.body, "body") if capture_content else None
+    resource = budget.resource(log_record.resource)
+    record.attributes = budget.listed(
+        budget.attributes(record.attributes, log_record.dropped_attributes)
+    )
     record.event_name = budget.value(record.event_name)
     record.severity_text = budget.value(record.severity_text)
     return ReadableLogRecord(
         log_record=record,
-        resource=budget.resource(log_record.resource),
+        resource=resource,
         instrumentation_scope=budget.scope(log_record.instrumentation_scope),
         limits=log_record.limits,
     )

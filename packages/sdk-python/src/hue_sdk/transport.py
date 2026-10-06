@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from http import HTTPStatus
@@ -30,17 +30,22 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import get_current_span
 
+from ._limits import BATCH_TARGET_BYTES as BATCH_TARGET_BYTES
+from ._limits import DROPPED_RECORDS_KEY as DROPPED_RECORDS_KEY
+from ._limits import MAX_CONTENT_BYTES as MAX_CONTENT_BYTES
+from ._limits import MAX_DECODED_BYTES as MAX_DECODED_BYTES
+from ._limits import MAX_RATE_LIMIT_HOLD_SECONDS as MAX_RATE_LIMIT_HOLD_SECONDS
+from ._limits import MAX_REQUEST_BYTES as MAX_REQUEST_BYTES
+from ._limits import TRUNCATED_KEY as TRUNCATED_KEY
+from ._limits import AdvertisedLimits, fits_without_compression, gzip_size
 from ._otel_compat import encode_logs, export_context
+from ._records import replace_span, shed_content, sheddable_content
 from ._version import __version__
 
-MAX_REQUEST_BYTES = 1_048_576
-# Batches stop 1 KiB short of the wire cap so gzip framing of incompressible data cannot exceed it,
-# matching the TypeScript transport.
+# In-progress span placeholders, which are small, stay 1 KiB short of the default wire limit.
 MAX_BATCH_BYTES = MAX_REQUEST_BYTES - 1024
-MAX_CONTENT_BYTES = 262_144
-# The record attribute listing the keys whose values were cut to the cap: Hue's receiver writes
-# it for the values it cuts, and the SDK writes it for the values it cuts before export.
-TRUNCATED_KEY = "hue.truncated"
+# Per-record allowance for protobuf length prefixes that grow when records are grouped.
+RECORD_FRAMING_BYTES = 64
 DEFAULT_BASE_URL = "https://app.hue.run"
 # The OTLP exporter lets caller headers override its own User-Agent; keep its token after
 # Hue's, as the TypeScript transport does.
@@ -152,21 +157,42 @@ class SafeSession(requests.Session):
     header set ``live_spans_rejected``.
     """
 
-    def __init__(self, signal: str | None = None, *, live_spans: bool = True) -> None:
+    def __init__(
+        self,
+        signal: str | None = None,
+        *,
+        live_spans: bool = True,
+        limits: AdvertisedLimits | None = None,
+    ) -> None:
         super().__init__()
         self.signal = signal
         self._request_lock = Lock()
         self.placeholders = 0
         self.live_spans = live_spans
         self.live_spans_rejected = False
-        # Why the last trace request failed, read by the exporter once the request returned:
-        # ``"rejected"`` for a partial success from a healthy receiver, else ``None``.
+        # The receiver's limits, adopted from every OTLP response whatever its status.
+        self.limits = limits
+        # Why the last request failed, read by the exporter once the request returned:
+        # ``"rejected"`` for a partial success from a healthy receiver, ``"rate_limited"`` for a
+        # 429 whose Retry-After outlasts the request's deadline, else ``None``.
         self.last_failure: str | None = None
+        # With ``"rate_limited"``: how long the receiver asked to wait, in seconds.
+        self.rate_limited_for: float | None = None
+        # The size of the next request after decompression, set by its exporter.
+        self.decoded_bytes = 0
 
     @property
     def ready(self) -> bool:
         """Whether the owned HTTP worker has released the transport."""
         return not self._request_lock.locked()
+
+    def _over_limits(self, data: Any) -> bool:
+        """Whether a request body (gzip-compressed) is over the receiver's current limits on the
+        wire, or its exporter's measured size after decompression is over the decoded limit."""
+        if self.limits is None or not isinstance(data, (bytes, bytearray)):
+            return False
+        limits = self.limits.current
+        return len(data) > limits.request_bytes or self.decoded_bytes > limits.decoded_bytes
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         kwargs["allow_redirects"] = False
@@ -178,6 +204,14 @@ class SafeSession(requests.Session):
         timeout = kwargs.get("timeout", 10)
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise requests.RequestException("Hue telemetry request timed out.")
+        self.last_failure = None
+        self.rate_limited_for = None
+        data = kwargs.get("data")
+        if self._over_limits(data):
+            # The exporter measures each request first; this never sends one over the limits,
+            # including limits the receiver lowered while the request was held.
+            self.last_failure = "oversize"
+            raise requests.RequestException("Hue telemetry request exceeds the receiver's limit.")
         # ContextVars do not automatically follow work onto a new thread.
         # Preserve OTel suppression in the actual HTTP call, not only its caller.
         suppressed = export_context()
@@ -210,9 +244,25 @@ class SafeSession(requests.Session):
                         return
                     delay = _retry_delay(retry_after, attempt)
                     response.close()
+                    if (
+                        response.status_code == 429
+                        and retry_after is not None
+                        and delay >= deadline - monotonic()
+                    ):
+                        # Refused for its rate until later than this request may wait: the
+                        # exporter can hold the records for it, still queued.
+                        self.last_failure = "rate_limited"
+                        self.rate_limited_for = delay
                     if attempt == 5 or delay >= deadline - monotonic():
                         raise requests.RequestException("Hue telemetry retry budget exhausted.")
                     Event().wait(delay)
+                    if self._over_limits(data):
+                        # A response lowered the limits below this request: it goes back to its
+                        # exporter to be split and shed, not retried as it is.
+                        self.last_failure = "oversize"
+                        raise requests.RequestException(
+                            "Hue telemetry request exceeds the receiver's limit."
+                        )
                 failure = requests.RequestException("Hue telemetry retry budget exhausted.")
             except Exception as error:
                 failure = error
@@ -247,6 +297,11 @@ class SafeSession(requests.Session):
             self.last_failure = None
         try:
             response = super().request(method, url, **kwargs)
+            if self.signal and self.limits is not None:
+                try:
+                    self.limits.adopt(response.headers)
+                except Exception:
+                    pass  # Reading advertised limits never fails the request.
             if self.signal:
                 # The acknowledgement has no legitimate need for a large body.
                 # Bound decompressed bytes, including HTTP error bodies.
@@ -318,18 +373,6 @@ def _retry_delay(value: str | None, attempt: int) -> float:
             except (ValueError, TypeError, OverflowError):
                 pass
     return min(2**attempt, 5)
-
-
-def _split_batches(
-    items: Sequence[Any], encode: Callable[[Sequence[Any]], Message]
-) -> list[Sequence[Any]]:
-    """Split by actual protobuf bytes, retaining order. Oversized singles stay visible."""
-    if not items:
-        return []
-    if encode(items).ByteSize() <= MAX_BATCH_BYTES or len(items) == 1:
-        return [items]
-    middle = len(items) // 2
-    return _split_batches(items[:middle], encode) + _split_batches(items[middle:], encode)
 
 
 # An issue names at most this many traces; a batch of more names none, and the receipts decide.
@@ -423,35 +466,89 @@ class IssueLedger:
             return tuple(self._issues)
 
 
-class BoundedSpanExporter(SpanExporter):
-    def __init__(
+class DroppedRecords:
+    """Records of each trace the SDK never sent: dropped from a queue, too large to send without
+    their content, or refused for their rate for longer than an export holds them.
+
+    The span exporter writes the count on the trace's root span as ``hue.sdk.dropped_records``
+    when the root is exported, so Hue reads the trace as incomplete by that many records; the
+    count stays until the request carrying the root is acknowledged. Bounded: a trace whose root
+    never arrives (an abandoned run) gives way to newer ones.
+    """
+
+    def __init__(self, limit: int = 1024) -> None:
+        self._lock = Lock()
+        self._limit = limit
+        self._counts: dict[str, int] = {}
+
+    def count(self, records: Sequence[Any]) -> None:
+        for record in records:
+            trace_id = _record_trace_id(record)
+            if trace_id is None:
+                continue
+            with self._lock:
+                if trace_id not in self._counts and len(self._counts) >= self._limit:
+                    del self._counts[next(iter(self._counts))]
+                self._counts[trace_id] = self._counts.get(trace_id, 0) + 1
+
+    def of(self, trace_id: str) -> int:
+        with self._lock:
+            return self._counts.get(trace_id, 0)
+
+    def consume(self, counts: Mapping[str, int]) -> None:
+        """Forget the counts an acknowledged request carried on its roots, and only those: a
+        record lost while that request was in flight is still counted."""
+        with self._lock:
+            for trace_id, count in counts.items():
+                left = self._counts.get(trace_id, 0) - count
+                if left > 0:
+                    self._counts[trace_id] = left
+                else:
+                    self._counts.pop(trace_id, None)
+
+
+# A record that cannot be sent even with every content value shed.
+OVER_REQUEST_LIMIT = "Hue telemetry record exceeds the receiver's request limit without its content"
+# A request the receiver refused for its rate for longer than an export holds its records.
+RATE_LIMITED = (
+    "Hue limited the telemetry rate for longer than an export holds its records "
+    f"({MAX_RATE_LIMIT_HOLD_SECONDS:.0f} s)"
+)
+
+
+class _ReceiverExporter:
+    """What both signals' exporters share: requests measured against the receiver's limits,
+    records shed to fit them, batches split on the wire, and rate-limited requests held."""
+
+    signal: str
+    _session: SafeSession
+    _ledger: IssueLedger
+    _limits: AdvertisedLimits
+    _dropped_records: DroppedRecords
+    _encode: Callable[[Sequence[Any]], Message]
+
+    def _setup(
         self,
-        endpoint: str,
-        headers: dict[str, str],
-        timeout: float,
-        ledger: IssueLedger | None = None,
-        *,
-        live_spans: bool = True,
+        ledger: IssueLedger | None,
+        limits: AdvertisedLimits | None,
+        dropped_records: DroppedRecords | None,
     ) -> None:
         self._ledger = ledger or IssueLedger()
-        self._session = SafeSession("traces", live_spans=live_spans)
-        self._delegate = OTLPSpanExporter(
-            endpoint=endpoint,
-            headers={**headers, "User-Agent": USER_AGENT},
-            timeout=timeout,
-            compression=Compression.Gzip,
-            session=self._session,
-        )
+        self._limits = limits or AdvertisedLimits()
+        self._dropped_records = dropped_records or DroppedRecords()
         self._failures = 0
         self._lock = Lock()
+        # How long the current export has held its records for a rate-limited receiver.
+        self._held = 0.0
 
     @property
     def ready(self) -> bool:
         return self._session.ready
 
     @property
-    def live_spans_rejected(self) -> bool:
-        return self._session.live_spans_rejected
+    def failures(self) -> int:
+        with self._lock:
+            return self._failures
 
     def record_failure(
         self, records: Sequence[Any] | None = None, kind: str = "dropped", count: int = 1
@@ -460,41 +557,291 @@ class BoundedSpanExporter(SpanExporter):
         with self._lock:
             self._failures += 1
         self._ledger.record(
-            "traces",
+            self.signal,
             kind,
             count,
-            "Hue telemetry pipeline could not hold or encode trace records",
+            f"Hue telemetry pipeline could not hold or encode {_NOUNS[self.signal]}",
             trace_ids_of(records) if records else None,
         )
 
+    def _measure(self, records: Sequence[Any]) -> int | None:
+        """The encoded size of a request of ``records`` when it fits the receiver's limits (its
+        size after decompression, and after gzip on the wire, measured only when it could be
+        over), else ``None``."""
+        message = self._encode(records)
+        size = message.ByteSize()
+        limits = self._limits.current
+        if size > limits.decoded_bytes:
+            return None
+        if fits_without_compression(size, limits.request_bytes):
+            return size
+        if gzip_size(message.SerializePartialToString()) <= limits.request_bytes:
+            return size
+        return None
+
+    def _fit(self, record: Any) -> tuple[Any, int] | None:
+        """The record, shed until a request of it alone fits, and its encoded size; ``None`` when
+        no content is left to shed.
+
+        A record over a limit sheds its content values, largest first, each replaced by the
+        receiver's marker and listed under ``hue.truncated``: the record and what it still holds
+        reach Hue, and a reader sees what was shed. Placeholders are never shed.
+        """
+        size = self._measure((record,))
+        if size is not None:
+            return record, size
+        if isinstance(record, PendingSpan):
+            return None
+        sheddable = sheddable_content(record, self.signal)
+
+        def shedding(count: int) -> tuple[Any, int] | None:
+            shed = shed_content(record, self.signal, sheddable[:count])
+            measured = self._measure((shed,))
+            return None if measured is None else (shed, measured)
+
+        # The fewest values to shed are found by trying a doubling count of the largest, then
+        # halving the range between the last count that did not fit and the first that did:
+        # encodings and compressions logarithmic in the values shed, where shedding one value
+        # per encoding took time quadratic in them.
+        failed = 0
+        fits = 0
+        fitted: tuple[Any, int] | None = None
+        step = 1
+        while fitted is None:
+            if failed >= len(sheddable):
+                return None
+            fits = min(len(sheddable), failed + step)
+            fitted = shedding(fits)
+            if fitted is None:
+                failed = fits
+            step *= 2
+        while fits - failed > 1:
+            middle = (failed + fits) // 2
+            result = shedding(middle)
+            if result is None:
+                failed = middle
+            else:
+                fits, fitted = middle, result
+        return fitted
+
+    def _unsendable(self, record: Any) -> None:
+        """A completed record too large without its content: lost, and counted on its root.
+        The export that met it fails."""
+        self._dropped_records.count((record,))
+        self._ledger.record(self.signal, "dropped", 1, OVER_REQUEST_LIMIT, trace_ids_of((record,)))
+
+    def _batches(self, entries: Sequence[tuple[Any, int]]) -> list[list[Any]]:
+        """Records grouped to the ordinary target size before gzip; a record larger than it
+        travels alone, up to the receiver's limits."""
+        target = min(self._limits.current.decoded_bytes, BATCH_TARGET_BYTES)
+        batches: list[list[Any]] = []
+        batch: list[Any] = []
+        size = 0
+        for record, record_size in entries:
+            framed = record_size + RECORD_FRAMING_BYTES
+            if batch and size + framed > target:
+                batches.append(batch)
+                batch, size = [], 0
+            batch.append(record)
+            size += framed
+        if batch:
+            batches.append(batch)
+        return batches
+
+    def _requests(self, batch: list[Any], *, refitted: bool = False) -> list[tuple[list[Any], int]]:
+        """``batch`` as requests within the receiver's limits, each with its encoded size: in
+        halves while it is over them on the wire. A single record over limits the receiver lowered
+        after it was measured is shed again; one that still cannot fit is lost."""
+        size = self._measure(batch)
+        if size is not None:
+            return [(batch, size)]
+        if len(batch) > 1:
+            middle = len(batch) // 2
+            return self._requests(batch[:middle]) + self._requests(batch[middle:])
+        entry = None if refitted else self._fit(batch[0])
+        if entry is None:
+            if not isinstance(batch[0], PendingSpan):
+                self._unsendable(batch[0])
+            return []
+        return self._requests([entry[0]], refitted=True)
+
+    def _counted(self, request: list[Any]) -> tuple[list[Any], dict[str, int]]:
+        """``request`` with each trace root carrying its trace's dropped-record count as it stands
+        now, and the counts carried. Spans only; the default carries none."""
+        return request, {}
+
+    def _deliver(self, batch: list[Any], *, advisory: bool = False) -> tuple[bool, bool]:
+        """Sends ``batch`` (completed records, or placeholders alone: ``advisory``) in requests
+        within the receiver's limits. Returns whether a completed record was lost, and whether
+        a request was refused or unanswered rather than acknowledged with rejections.
+
+        Each root carries its trace's dropped-record count as it stands when its request is made,
+        so it includes losses this export's earlier requests met, and an acknowledgement consumes
+        exactly the counts its request carried. A request the receiver's lowered limits no longer
+        admit, measured again with its counts or refused while it was sent or held, is split and
+        shed again before it is sent.
+        """
+        failed = refused = False
+        pending: deque[tuple[list[Any], int]] = deque()
+
+        def split(records: list[Any]) -> None:
+            nonlocal failed
+            parts = self._requests(records)
+            if not advisory and sum(len(part) for part, _ in parts) < len(records):
+                failed = True
+            pending.extendleft(reversed(parts))
+
+        split(batch)
+        while pending:
+            request, size = pending.popleft()
+            # None follows the acknowledgement that turned live spans off.
+            if advisory and getattr(self._session, "live_spans_rejected", False):
+                break
+            carried: dict[str, int] = {}
+            if not advisory:
+                request, carried = self._counted(request)
+                if carried:
+                    measured = self._measure(request)
+                    if measured is None:
+                        split(request)
+                        continue
+                    size = measured
+            outcome = self._send(request, size, placeholders=len(request) if advisory else 0)
+            if outcome == "refit":
+                split(request)
+            elif outcome:
+                self._dropped_records.consume(carried)
+            elif not advisory:
+                failed = True
+                if self._session.last_failure != "rejected":
+                    refused = True
+                # The request Hue refused or did not acknowledge names the traces in it.
+                self._refused(request)
+        return failed, refused
+
+    def _send(self, batch: Sequence[Any], size: int, *, placeholders: int = 0) -> bool | str:
+        """One request of ``size`` bytes before gzip; ``placeholders`` is ``len(batch)`` for a
+        request of placeholders. ``"refit"`` when the receiver lowered its limits below the
+        request before accepting it.
+
+        A receiver that refuses completed records for their rate (HTTP 429) and asks to be
+        retried later than the request's deadline allows gets them again after its Retry-After,
+        while the export's hold stays within ``MAX_RATE_LIMIT_HOLD_SECONDS``; the records stay
+        queued meanwhile. Placeholders are advisory and never held.
+        """
+        while True:
+            self._session.last_failure = None
+            self._session.rate_limited_for = None
+            try:
+                self._session.placeholders = placeholders
+                self._session.decoded_bytes = size
+                if self._delegate_export(batch):
+                    return True
+            except Exception:
+                # An exporter that lets the session's refusal through is read like one that
+                # returns a failure; anything else leaves no reason and fails the request.
+                pass
+            if self._session.last_failure == "oversize":
+                return "refit"
+            wait = self._session.rate_limited_for
+            if placeholders or self._session.last_failure != "rate_limited" or wait is None:
+                return False
+            if self._held + wait > MAX_RATE_LIMIT_HOLD_SECONDS:
+                return False
+            self._held += wait
+            Event().wait(wait)
+
+    def _delegate_export(self, batch: Sequence[Any]) -> bool:
+        raise NotImplementedError
+
+    def _refused(self, batch: Sequence[Any]) -> None:
+        """Records a request of completed records Hue refused or did not acknowledge."""
+        message = f"Hue did not accept a batch of {_NOUNS[self.signal]}"
+        if self._session.last_failure == "rate_limited":
+            # Hue stored none of them: each counts on its trace's root, as a record never sent.
+            self._dropped_records.count(batch)
+            message = RATE_LIMITED
+        self._ledger.record(self.signal, "failed", len(batch), message, trace_ids_of(batch))
+
+
+_NOUNS = {"traces": "trace records", "logs": "log records"}
+
+
+class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
+    signal = "traces"
+
+    def __init__(
+        self,
+        endpoint: str,
+        headers: dict[str, str],
+        timeout: float,
+        ledger: IssueLedger | None = None,
+        *,
+        live_spans: bool = True,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
+    ) -> None:
+        self._setup(ledger, limits, dropped_records)
+        self._session = SafeSession("traces", live_spans=live_spans, limits=self._limits)
+        self._delegate = OTLPSpanExporter(
+            endpoint=endpoint,
+            headers={**headers, "User-Agent": USER_AGENT},
+            timeout=timeout,
+            compression=Compression.Gzip,
+            session=self._session,
+        )
+        self._encode = encode_spans
+
     @property
-    def failures(self) -> int:
-        with self._lock:
-            return self._failures
+    def live_spans_rejected(self) -> bool:
+        return self._session.live_spans_rejected
+
+    def _delegate_export(self, batch: Sequence[Any]) -> bool:
+        return self._delegate.export(batch) is SpanExportResult.SUCCESS
+
+    def _counted(self, request: list[Any]) -> tuple[list[Any], dict[str, int]]:
+        counted: list[Any] = []
+        carried: dict[str, int] = {}
+        for record in request:
+            trace_id = _record_trace_id(record)
+            count = (
+                self._dropped_records.of(trace_id)
+                if trace_id is not None and record.parent is None
+                else 0
+            )
+            if count:
+                record = replace_span(
+                    record, attributes={**record.attributes, DROPPED_RECORDS_KEY: count}
+                )
+                carried[trace_id] = count  # type: ignore[index]
+            counted.append(record)
+        return counted, carried
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         failed = False
         # A request the receiver refused or did not answer, as opposed to one it acknowledged with
         # rejections: placeholders are advisory, so such a receiver gets no second request.
         refused = False
+        self._held = 0.0
         # Finished spans and placeholders travel in separate requests, finished spans first, so
         # a rejection count is always one kind of record's.
         real = [span for span in spans if not isinstance(span, PendingSpan)]
         pending = [span for span in spans if isinstance(span, PendingSpan)]
         try:
-            for batch in _split_batches(real, encode_spans):
-                if not self._send(batch, placeholders=0):
+            # Every record is measured, shed and, where it cannot be sent, counted lost before any
+            # root is written, so a root carries the losses of children that ended after it.
+            fitted: list[tuple[Any, int]] = []
+            for span in real:
+                entry = self._fit(span)
+                if entry is None:
                     failed = True
-                    if self._session.last_failure != "rejected":
-                        refused = True
-                    # The batch Hue refused or did not acknowledge names the traces in it.
-                    self._ledger.record(
-                        "traces",
-                        "failed",
-                        len(batch),
-                        "Hue did not accept a batch of trace records",
-                        trace_ids_of(batch),
-                    )
+                    self._unsendable(span)
+                else:
+                    fitted.append(entry)
+            for batch in self._batches(fitted):
+                lost, unanswered = self._deliver(batch)
+                failed = failed or lost
+                refused = refused or unanswered
         except Exception:
             # Never surface record serialization errors containing customer values.
             if real and not failed:
@@ -512,11 +859,11 @@ class BoundedSpanExporter(SpanExporter):
         # Nor after a request of this export's finished spans was refused or unanswered.
         if pending and not refused and not self._session.live_spans_rejected:
             try:
-                for batch in _split_batches(pending, encode_spans):
-                    # None follows the acknowledgement that turned live spans off.
+                entries = [entry for entry in map(self._fit, pending) if entry is not None]
+                for batch in self._batches(entries):
                     if self._session.live_spans_rejected:
                         break
-                    self._send(batch, placeholders=len(batch))
+                    self._deliver(batch, advisory=True)
             except Exception:
                 pass
         if failed:
@@ -525,16 +872,6 @@ class BoundedSpanExporter(SpanExporter):
             return SpanExportResult.FAILURE
         return SpanExportResult.SUCCESS
 
-    def _send(self, batch: Sequence[ReadableSpan], *, placeholders: int) -> bool:
-        """One request; ``placeholders`` is ``len(batch)`` for a request of placeholders."""
-        try:
-            if encode_spans(batch).ByteSize() > MAX_BATCH_BYTES:
-                return False
-            self._session.placeholders = placeholders
-            return self._delegate.export(batch) is SpanExportResult.SUCCESS
-        except Exception:
-            return False
-
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         return self._delegate.force_flush(timeout_millis)
 
@@ -542,16 +879,21 @@ class BoundedSpanExporter(SpanExporter):
         self._delegate.shutdown()
 
 
-class BoundedLogExporter(LogRecordExporter):
+class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
+    signal = "logs"
+
     def __init__(
         self,
         endpoint: str,
         headers: dict[str, str],
         timeout: float,
         ledger: IssueLedger | None = None,
+        *,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
     ) -> None:
-        self._ledger = ledger or IssueLedger()
-        self._session = SafeSession("logs")
+        self._setup(ledger, limits, dropped_records)
+        self._session = SafeSession("logs", limits=self._limits)
         self._delegate = OTLPLogExporter(
             endpoint=endpoint,
             headers={**headers, "User-Agent": USER_AGENT},
@@ -559,49 +901,26 @@ class BoundedLogExporter(LogRecordExporter):
             compression=Compression.Gzip,
             session=self._session,
         )
-        self._failures = 0
-        self._lock = Lock()
+        self._encode = encode_logs
 
-    @property
-    def ready(self) -> bool:
-        return self._session.ready
-
-    def record_failure(
-        self, records: Sequence[Any] | None = None, kind: str = "dropped", count: int = 1
-    ) -> None:
-        """Count a failure the pipeline met outside an export, naming the records' traces."""
-        with self._lock:
-            self._failures += 1
-        self._ledger.record(
-            "logs",
-            kind,
-            count,
-            "Hue telemetry pipeline could not hold or encode log records",
-            trace_ids_of(records) if records else None,
-        )
-
-    @property
-    def failures(self) -> int:
-        with self._lock:
-            return self._failures
+    def _delegate_export(self, batch: Sequence[Any]) -> bool:
+        return self._delegate.export(batch) is LogRecordExportResult.SUCCESS
 
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         failed = False
+        self._held = 0.0
         try:
-            for chunk in _split_batches(batch, encode_logs):
-                if encode_logs(chunk).ByteSize() > MAX_BATCH_BYTES:
-                    accepted = False
-                else:
-                    accepted = self._delegate.export(chunk) is LogRecordExportResult.SUCCESS
-                if not accepted:
+            entries: list[tuple[Any, int]] = []
+            for record in batch:
+                entry = self._fit(record)
+                if entry is None:
                     failed = True
-                    self._ledger.record(
-                        "logs",
-                        "failed",
-                        len(chunk),
-                        "Hue did not accept a batch of log records",
-                        trace_ids_of(chunk),
-                    )
+                    self._unsendable(record)
+                else:
+                    entries.append(entry)
+            for chunk in self._batches(entries):
+                lost, _ = self._deliver(chunk)
+                failed = failed or lost
         except Exception:
             if not failed:
                 self._ledger.record(

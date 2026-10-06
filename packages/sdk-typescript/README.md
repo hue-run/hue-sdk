@@ -324,11 +324,17 @@ there is no SDK retention timer or automatic content expiry. To redact strings
 before export, supply `redact(value, path)`; it applies to supported strings in
 attributes, resources, event/link attributes and log bodies. Return a string.
 Invalid helper content is omitted with an instrumentation failure; the span can still be delivered.
-A content value over Hue's 256 KiB value cap is not omitted: text is cut to a UTF-8 prefix and
+A content value over Hue's 1 MiB value cap (or the value limit Hue's receiver advertises) is not
+omitted: text is cut to a UTF-8 prefix and
 bytes or a structured log body are replaced by the receiver's own marker
 (`{ "hue.truncated": true, "hue.truncated_bytes": <size> }`), and the value's key is listed in
 the record's `hue.truncated` attribute, where Hue's receiver lists the values it cuts itself,
 so the span still carries the call, the recorded part of its value and the rest of its evidence.
+`redact` sees text past the cap, so it can recognize a secret that crosses it. A string longer
+than the cap and 64 Ki code units is cut to that length when its record is queued, so a value of
+millions of characters cannot drop its record for the queue budget; for such a text the last
+64 Ki code units of the redactor's answer are never exported, and tool definitions and recorded
+requests have their credentials removed from the whole value before that cut.
 Export-time redactor failures reject the affected record and are reported by flush. Shared resources are redacted once per
 export batch. Do not put user content or secrets in span names or scope names.
 
@@ -361,15 +367,15 @@ rotates. Only definitions another integration recorded can be summarized: `hueTe
 inputs and exports through Hue's attached processors gets the summary.
 Recorded messages can inline files: GenAI `blob` parts in `gen_ai.input.messages` /
 `gen_ai.output.messages` (what the AI SDK 7 adapter records for a file part) and AI SDK 6 `file`
-parts in `ai.prompt.messages`. A span whose messages exceed 256 KiB would be cut, so when a
+parts in `ai.prompt.messages`. A span whose messages exceed 1 MiB would be cut, so when a
 record is queued Hue replaces the `content`/`data` of any such part longer than 64 KiB with the
 file's `sha256` and `size`, both of the file's own bytes whatever its media type (base64 content
 and `;base64` `data:` URLs decoded, other `data:` URLs percent-decoded, anything else as UTF-8 text), keeping the part's other fields such as `type`, `mime_type` and `mediaType`. Smaller inline
 files are exported as recorded. The digest matches `hue.recordFile`'s `hue.file.sha256` for the same
 bytes, so a file can be recognized wherever it appears. The replacement happens before the record is
 charged to the queue budget, so a large file does not drop its span. It is bounded: a message
-attribute longer than 8 MiB of text is left unchanged, and the default 8 MiB `maxQueueBytes` then
-drops the span. Base64 grows a file by a third, so that ceiling is an inline file of about 6 MiB.
+attribute longer than 8 MiB of text is left unchanged, and then cut like any value over the cap
+when it is queued. Base64 grows a file by a third, so that ceiling is an inline file of about 6 MiB.
 The same message text is hashed once per record, and a record inspects at most 16 MiB of message
 text in all; messages past that are charged as recorded. With `captureContent: false` the messages,
 which export removes, are neither hashed nor charged.
@@ -476,15 +482,37 @@ const hue = createHue({
 ## Delivery behavior
 
 Exports retry temporary HTTP/network failures (429, 502, 503, 504 and connection errors,
-honoring `Retry-After`) within the export timeout, by OpenTelemetry's OTLP/HTTP exporter rules. Each
-request is limited to 1 MiB before gzip (with space reserved for gzip overhead) and each content value to 256 KiB. Batches
-split at record boundaries. A record over the request limit on its own sheds its content values,
+honoring `Retry-After`) within the export timeout, by OpenTelemetry's OTLP/HTTP exporter rules. A
+429 whose `Retry-After` outlasts the export timeout keeps its records queued, within the queue's
+bounds, and sends them again once the wait has passed; an export holds its records this way for at
+most 60 seconds in all, and a longer wait loses them, reported as a `failed` issue with status 429.
+`flush()` and `shutdown()` wait for a held export, and a held export keeps the process running
+until it is sent. When `shutdownSafe()`'s budget runs out first, a client that owns its providers
+ends the hold: its records are reported lost to the rate limit and the process can exit. In attach
+mode the application's providers drain with their own timeout (OpenTelemetry's default is 30
+seconds), so a flush during a longer hold can report a provider flush failure while the held
+export continues.
+
+Requests are measured as Hue's receiver measures them: after gzip against its request limit and
+after decompression against its decoded limit. Until a response advertises its own limits
+(`Hue-Max-Request-Bytes`, `Hue-Max-Decoded-Bytes` and `Hue-Max-Value-Bytes`, on every
+acknowledgement and refusal) these are 1 MiB on the wire, 4 MiB decoded and 1 MiB per value;
+advertised limits are adopted, clamped to 1–64 MiB, 1–64 MiB and 256 KiB–16 MiB, and never
+exceeded: a request that limits lowered while it was retried or held no longer fit is split and
+shed again before it is sent. Batches are packed to 4 MiB before gzip (or the decoded limit, when lower) and split at
+record boundaries; a batch that compresses worse than the limit allows is sent in halves. A record
+over a limit on its own sheds its content values,
 largest first, each replaced by the receiver's marker and listed under `hue.truncated`, until it
 fits; only a record too large without any content value is lost, reported as an `invalid` issue,
 and counted on its trace's root span as `hue.sdk.dropped_records` when the root is exported, so
-Hue reads the trace as incomplete by that many records. Each signal queues at most 2,048 records, including
+Hue reads the trace as incomplete by that many records; so are records lost to a rate limit
+longer than the hold. Each signal queues at most 2,048 records, including
 exports in flight; overflow is reported through the callback, counters and next
-flush. This is an in-memory queue, not durable storage.
+flush. This is an in-memory queue, not durable storage. A client's own providers keep 2,000
+attributes, events and links per span and 2,000 attributes per log record (OpenTelemetry's default
+is 128); providers an application attaches Hue to keep their own limits. A span whose events or
+links do not all fit the queue's byte budget keeps its newest ones and counts the rest in its
+dropped event and link counts, rather than being dropped whole.
 
 `flush()` waits for the current trace and log export work. A partial rejection,
 invalid acknowledgement, queue drop or failure throws `HueExportError`; its
