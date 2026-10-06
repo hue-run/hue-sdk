@@ -581,11 +581,15 @@ Failing cases print the scorer explanation. An evaluator Hue records as not appl
 that case's columns and neither passes nor fails it, so in a mixed eval set a case is decided by
 the evaluators that apply to it; the pass line counts the not-applicable results. A case that no
 pinned evaluator applies to is an error that names what they need. A result of a pinned Hue judge
-(an evaluator of kind `world_judge`) that Hue marks advisory is
+(an evaluator of kind `world_judge`) whose immutable version does not set `config.required: true`
+and that Hue marks advisory is
 shown in its column, marked `(advisory)`, but never decides a case or the exit code; the pass line
 counts advisory failures as not counted, and a case only advisory results ran for is an error.
-The Answer outcome evaluator uses its required judge to decide answer-only cases; if that judge
-cannot run, the case is inconclusive. Any
+Applicable outcome evaluators and judge versions pinned with `config.required: true` need a
+decision before a case can pass. A required result skipped without a decision is inconclusive;
+missing results remain pending and evaluator errors remain errors. A recorded failure takes
+precedence over an unavailable required evaluator. The Answer outcome evaluator uses its
+required judge to decide answer-only cases. Any
 other evaluator's result, an error, or a metric that carries `passed` is never advisory, whatever
 its evidence says. A metric name that
 several evaluators report, such as two judges' `verdict`, gets a column per evaluator, labelled
@@ -696,8 +700,11 @@ case is completed as failed (error `TelemetryNotAccepted`, evidence omitted as
 `telemetry_not_accepted`, no output or generated files attached) instead of being left started,
 and the run goes on. Each export of the CLI's own telemetry may take 30 seconds, retries
 included: a slow acknowledgement is waited for, and a 429, 502, 503, 504 or network error is
-retried within that time, honouring `Retry-After`; any other response, or rejected records, fails
-the case at once. Stderr names the case as it completes, with the export
+retried within that time, honouring `Retry-After`. A 429 whose `Retry-After` is longer than that
+holds the case's records and sends them again once it has passed, for at most 60 seconds of holds
+per export, so such a case can take that much longer; a longer wait fails the case as
+`telemetry_not_accepted`. Any other response, or rejected records, fails the case at once. Stderr
+names the case as it completes, with the export
 issue counts, for example
 `[refund] telemetry not accepted, case failed: telemetry_not_accepted: traces failed 1 (HTTP 400)`;
 the case counts as an error in the table and JSON whatever its scores, and the command exits 1.

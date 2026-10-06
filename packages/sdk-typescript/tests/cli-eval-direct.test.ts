@@ -55,6 +55,8 @@ function documentStandIn(
     /** Scorer versions (by index) Hue records as not applicable to the case; `forged` answers the
      * same skipped result and evidence without Hue's `notApplicable` flag. */
     notApplicable?: { versions: number[]; forged?: boolean };
+    /** Applicable outcome versions that finished without a verdict. */
+    undecidedOutcomes?: number[];
     /** Scorer versions (by index) that answer like a Hue judge: a `verdict` metric and evidence
      * that says whether the result is advisory. `kind` is the pinned definition's kind, a Hue
      * judge (`world_judge`, the default) or an evaluator forging the same evidence; `passed` adds
@@ -66,6 +68,8 @@ function documentStandIn(
       kind?: "world_judge" | "local_code" | "hosted_code";
       passed?: boolean;
       error?: boolean;
+      skipped?: boolean;
+      required?: boolean;
     };
   } = {},
 ) {
@@ -218,9 +222,12 @@ function documentStandIn(
       scorerVersions[index]!.definition = (judgeKind === "world_judge"
         ? {
             kind: "world_judge",
-            entry: "hue.world_judge.v1",
+            entry: options.judge?.required === true ? "hue.world_judge.v2" : "hue.world_judge.v1",
             rubric: { items: [{ id: "grounded", question: "Is it grounded?" }] },
             metrics: [{ name: "verdict", type: "boolean" }],
+            ...(options.judge?.required === undefined
+              ? {}
+              : { config: { required: options.judge.required } }),
           }
         : {
             ...scorerVersions[index]!.definition,
@@ -654,8 +661,23 @@ function documentStandIn(
             });
             continue;
           }
+          if (options.undecidedOutcomes?.includes(index)) {
+            results.get(experiment.evaluation.id)!.push({
+              id: randomUUID(),
+              runId: experiment.evaluation.id,
+              itemId: evaluationItemId,
+              scorerVersionId: version.id,
+              state: "skipped",
+              metrics: [],
+              explanation: "Inconclusive: the required answer judge did not decide.",
+              evidence: { state: "inconclusive" },
+              error: null,
+              sourceDigest: null,
+            });
+            continue;
+          }
           if (options.judge?.versions.includes(index)) {
-            const { verdict, passed, error } = options.judge;
+            const { verdict, passed, error, skipped } = options.judge;
             results.get(experiment.evaluation.id)!.push({
               id: randomUUID(),
               runId: experiment.evaluation.id,
@@ -663,21 +685,25 @@ function documentStandIn(
               scorerVersionId: version.id,
               ...(error
                 ? { state: "error" as const, metrics: [], error: { type: "ScorerError" } }
-                : {
-                    state: "scored" as const,
-                    metrics: [
-                      {
-                        name: "verdict",
-                        value: verdict,
-                        ...(passed === undefined ? {} : { passed }),
-                      },
-                    ],
-                    error: null,
-                  }),
-              explanation: `The judge ${verdict ? "passed" : "failed"}.`,
+                : skipped
+                  ? { state: "skipped" as const, metrics: [], error: null }
+                  : {
+                      state: "scored" as const,
+                      metrics: [
+                        {
+                          name: "verdict",
+                          value: verdict,
+                          ...(passed === undefined ? {} : { passed }),
+                        },
+                      ],
+                      error: null,
+                    }),
+              explanation: skipped
+                ? "Inconclusive: the judge did not decide."
+                : `The judge ${verdict ? "passed" : "failed"}.`,
               evidence: {
                 entry: "hue.world_judge.v1",
-                state: "decided",
+                state: skipped ? "inconclusive" : "decided",
                 ...(options.judge.advisory ? { advisory: true } : {}),
               },
               sourceDigest: null,
@@ -806,6 +832,13 @@ const adapterSource = `export default async function (_inputs, context) {
   if ("metadata" in context.item) throw new Error("grader metadata reached the direct adapter");
   return { itemKeys: Object.keys(context.item).sort() };
 }
+`;
+
+/** A successful file-free execution for required-outcome verdict controls. */
+const answerSource = `import { readFileSync } from "node:fs";
+const inputs = JSON.parse(readFileSync(process.env.HUE_CASE_INPUTS, "utf8"));
+if (inputs.query !== "Answer the user") throw new Error("Wrong case inputs");
+process.stdout.write(JSON.stringify({ answer: "Synthetic answer" }));
 `;
 
 /** One relative entry point for a command worker's direct and world cases. */
@@ -1515,6 +1548,127 @@ process.stdout.write(key);
       });
     }
   }, 300_000);
+
+  test("undecided required pins remain inconclusive in JSON, the table and the exit code", async () => {
+    for (const undecided of ["answer", "inline"] as const) {
+      const standIn = documentStandIn({
+        workerKinds: ["direct"],
+        ...(undecided === "answer" ? { undecidedOutcomes: [0] } : {}),
+        judge: {
+          versions: [1],
+          verdict: true,
+          advisory: true,
+          required: true,
+          passed: true,
+          skipped: undecided === "inline",
+        },
+      });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-eval-required-"));
+      await writeFile(join(cwd, "agent.mjs"), answerSource);
+      const args = [
+        "--set",
+        standIn.dataset.id,
+        "--set-version",
+        "1",
+        ...standIn.scorerVersions.flatMap((version) => ["--scorer-version", version.id]),
+        "--command",
+        `${process.execPath} ${join(cwd, "agent.mjs")}`,
+        "--wait",
+        "5",
+      ];
+      try {
+        const env = { HUE_BASE_URL: standIn.baseUrl };
+        const json = await hue([...args, "--json"], { cwd, env });
+        expect(json.stdout, json.stderr).not.toBe("");
+        const report = JSON.parse(json.stdout) as {
+          complete: boolean;
+          cases: Record<string, unknown>[];
+          totals: Record<string, number>;
+        };
+        expect(json.status).toBe(1);
+        expect(report.complete).toBe(true);
+        expect(report.cases[0]).toMatchObject({
+          state: "skipped",
+          passed: false,
+          advisory: [],
+          notApplicable: [],
+          explanations: [expect.stringMatching(/^Inconclusive:/)],
+        });
+        expect(report.totals).toMatchObject({ cases: 1, passed: 0, skipped: 1 });
+        const table = await hue(args, { cwd, env });
+        expect(table.status).toBe(1);
+        expect(table.stdout).toContain("INCONCLUSIVE");
+        expect(table.stdout).toContain("Inconclusive:");
+        expect(table.stdout).not.toContain("PASSED");
+        // Both invocations execute a new direct case successfully; grading alone prevents pass.
+        expect(standIn.calls.completions).toHaveLength(2);
+        expect(
+          standIn.calls.completions.every((completion) => completion.state === "succeeded"),
+        ).toBe(true);
+        expect(standIn.worlds.size).toBe(0);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    }
+  }, 120_000);
+
+  test("required pin authority preserves true n/a, historical advisory and failure precedence", async () => {
+    for (const control of ["not_applicable", "historical", "false", "unavailable"] as const) {
+      const standIn = documentStandIn({
+        workerKinds: ["direct"],
+        ...(control === "not_applicable" ? { notApplicable: { versions: [1] } } : {}),
+        ...(control === "unavailable" ? { verdict: "fail" as const } : {}),
+        judge: {
+          versions: [1],
+          verdict: control !== "false",
+          advisory: true,
+          ...(control === "historical" ? {} : { required: true }),
+          skipped: control === "historical",
+          error: control === "unavailable",
+        },
+      });
+      const cwd = await mkdtemp(join(tmpdir(), "hue-eval-required-control-"));
+      await writeFile(join(cwd, "agent.mjs"), answerSource);
+      try {
+        const json = await hue(
+          [
+            "--set",
+            standIn.dataset.id,
+            "--set-version",
+            "1",
+            ...standIn.scorerVersions.flatMap((version) => ["--scorer-version", version.id]),
+            "--command",
+            `${process.execPath} ${join(cwd, "agent.mjs")}`,
+            "--wait",
+            "5",
+            "--json",
+          ],
+          { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+        );
+        expect(json.stdout, json.stderr).not.toBe("");
+        const report = JSON.parse(json.stdout) as {
+          complete: boolean;
+          cases: Record<string, unknown>[];
+        };
+        const passed = control === "not_applicable" || control === "historical";
+        expect(json.status).toBe(passed ? 0 : 1);
+        expect(report.complete).toBe(true);
+        expect(report.cases[0]).toMatchObject({
+          state: passed ? "passed" : "failed",
+          passed,
+          advisory: control === "historical" ? [standIn.scorerVersions[1]!.id] : [],
+          notApplicable: control === "not_applicable" ? [standIn.scorerVersions[1]!.id] : [],
+          errors: control === "unavailable" ? ["ScorerError"] : [],
+        });
+        expect(standIn.calls.completions[0]).toMatchObject({ state: "succeeded" });
+        expect(standIn.worlds.size).toBe(0);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    }
+  }, 120_000);
 
   test("evaluators that do not apply to a case neither pass nor fail it", async () => {
     const run = async (notApplicable: { versions: number[]; forged?: boolean }) => {

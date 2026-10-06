@@ -40,7 +40,7 @@ export interface HostedToolActivity {
 }
 
 type Item = Record<string, unknown>;
-const MAX_PROVIDER_ITEMS = 128;
+const MAX_PROVIDER_ITEMS = 1024;
 const MAX_PROVIDER_DEFINITIONS = 512;
 const MAX_PROVIDER_SERVERS = 512;
 

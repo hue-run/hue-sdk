@@ -9,6 +9,9 @@ import {
   INLINE_FILE_TEXT_PER_RECORD,
   isMessageKey,
 } from "./inline-files.js";
+import { scrubsToolCredentials, scrubToolCredentials } from "./tool-definitions.js";
+import { MAX_RECORD_NODES } from "./config.js";
+import { truncatedMarker } from "./privacy.js";
 
 // Intrinsic accessors are captured once and invoked with an explicit receiver so a
 // hostile object cannot override them; the unbound reference is the point.
@@ -20,29 +23,100 @@ const typedArrayByteLength = Object.getOwnPropertyDescriptor(
 // eslint-disable-next-line @typescript-eslint/unbound-method
 const typedArraySet = Uint8Array.prototype.set;
 
-/** What a copied value is: attribute maps and the attributes of span events get inline files
- * hashed before they are charged. */
-type Shape = "value" | "attributes" | "events" | "event";
+/** What a copied value is: attribute maps and the attributes of span events (an event's
+ * `attributes`) get inline files hashed before they are charged. */
+type Shape = "value" | "attributes" | "event";
+
+/** `value` cut to at most `units` UTF-16 code units, never between the halves of a pair. */
+function cutToUnits(value: string, units: number): string {
+  if (value.length <= units) return value;
+  const end = /[\uD800-\uDBFF]/.test(value[units - 1] ?? "") ? units - 1 : units;
+  // A slice can keep the whole original string alive; the copy holds only what is kept.
+  return Buffer.from(value.slice(0, end), "utf16le").toString("utf16le");
+}
+
+/** The record's byte or value budget ran out: a span's events and links past it are left out and
+ * counted as dropped, where anything else loses the record. */
+class BudgetExceeded extends RangeError {}
+
+/** Where a copy stood before one event or link, to return to when the budget cannot hold it. */
+interface Mark {
+  bytes: number;
+  nodes: number;
+  copied: number;
+}
 
 /** Copies only exported data, with the same finite budget used for admission. */
 class Snapshot {
   bytes = 512;
   unresolvedResource = false;
+  /** The value strings this snapshot cut to `valueUnits`; export recognizes them, so the
+   * redactor's answer for one loses the end the redactor saw without its continuation. */
+  readonly cut = new Set<string>();
   private nodes = 0;
   private ancestors = new Set<object>();
   private copied = new Map<object, unknown>();
   private hashed = new Map<string, unknown>();
   private inspected = 0;
 
-  /** In metadata-only mode the recorded messages, which export strips, are not copied at all. */
+  /**
+   * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
+   * value string (an attribute's, an event's or link's attribute's, a log body or a status
+   * message) longer than `valueUnits` is cut to that length: export cuts it to the value cap
+   * anyway, and charging it whole could drop the record before that cut ever ran.
+   */
   constructor(
     private limit: number,
     private captureContent = true,
+    private valueUnits = Infinity,
   ) {}
 
   private charge(bytes: number): void {
     this.bytes += bytes;
-    if (this.bytes > this.limit) throw new RangeError("Telemetry byte budget exceeded");
+    if (this.bytes > this.limit) throw new BudgetExceeded("Telemetry byte budget exceeded");
+  }
+
+  private mark(): Mark {
+    return { bytes: this.bytes, nodes: this.nodes, copied: this.copied.size };
+  }
+
+  /** Back to `mark`, forgetting the values copied since: a later copy must not reuse a partial
+   * copy of an item that was left out. */
+  private restore(mark: Mark): void {
+    this.bytes = mark.bytes;
+    this.nodes = mark.nodes;
+    this.ancestors.clear();
+    let index = 0;
+    for (const key of [...this.copied.keys()]) if (index++ >= mark.copied) this.copied.delete(key);
+  }
+
+  /**
+   * As many of a span's newest `items` (its events or links) as the record's budget still holds,
+   * each copied by `copyItem`, and how many older ones it could not hold, as OpenTelemetry keeps a
+   * span's newest events and links past its own count limits. A span whose events or links
+   * outgrow the budget keeps its name, timing, attributes and the rest of them, counting the ones
+   * left out as dropped, instead of being lost whole.
+   */
+  newest<U>(items: unknown, copyItem: (item: unknown) => U): { kept: U[]; dropped: number } {
+    if (!Array.isArray(items) || utilTypes.isProxy(items))
+      throw new TypeError("Telemetry must contain data objects");
+    const count = items.length;
+    const kept: U[] = [];
+    for (let index = count - 1; index >= 0; index--) {
+      const descriptor = Object.getOwnPropertyDescriptor(items, index);
+      if (descriptor && !("value" in descriptor))
+        throw new TypeError("Telemetry accessors are unsupported");
+      const mark = this.mark();
+      try {
+        kept.push(copyItem(descriptor?.value));
+      } catch (error) {
+        if (!(error instanceof BudgetExceeded)) throw error;
+        this.restore(mark);
+        break;
+      }
+    }
+    kept.reverse();
+    return { kept, dropped: count - kept.length };
   }
 
   /**
@@ -68,18 +142,73 @@ class Snapshot {
     return result;
   }
 
-  /** Span events, whose attributes are attribute maps. */
-  events<T>(value: T): T {
-    return this.copy(value, 1, "events");
+  /**
+   * An attribute whose value will be cut and whose credentials export removes (tool definitions
+   * and recorded requests) has them removed first, from the whole value: a cut prefix no longer
+   * parses, so export could not find them in it. A value longer than what the record's budget has
+   * left is not parsed on the application's thread at all: the receiver's marker replaces it, as
+   * in the Python SDK, rather than a cut that could hold credentials.
+   */
+  private scrubbedBeforeCut(key: string, value: unknown): unknown {
+    if (this.valueUnits === Infinity || !scrubsToolCredentials(key)) return value;
+    const scrubbed = (units: number, scrub: () => unknown, bytes: () => number) =>
+      units * 2 > this.limit - this.bytes ? truncatedMarker(bytes()) : scrub();
+    if (typeof value === "string")
+      return value.length > this.valueUnits
+        ? scrubbed(
+            value.length,
+            () => scrubToolCredentials(key, value),
+            () => Buffer.byteLength(value),
+          )
+        : value;
+    // A list of definitions (AI SDK 6 `ai.prompt.tools`), read through its own data properties;
+    // anything else is left for the copy to accept or refuse.
+    if (!Array.isArray(value) || utilTypes.isProxy(value) || value.length > MAX_RECORD_NODES)
+      return value;
+    const items: unknown[] = [];
+    let long = false;
+    let units = 0;
+    for (let index = 0; index < value.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, index);
+      if (descriptor && !("value" in descriptor)) return value;
+      const item: unknown = descriptor?.value;
+      if (typeof item === "string") {
+        units += item.length;
+        if (item.length > this.valueUnits) long = true;
+      }
+      items.push(item);
+    }
+    return long
+      ? scrubbed(
+          units,
+          () => scrubToolCredentials(key, items),
+          () =>
+            items.reduce<number>(
+              (total, item) => total + (typeof item === "string" ? Buffer.byteLength(item) : 0),
+              0,
+            ),
+        )
+      : value;
   }
 
-  copy<T>(value: T, depth = 0, shape: Shape = "value"): T {
-    if (++this.nodes > 16384 || depth > 32)
-      throw new RangeError("Telemetry complexity limit exceeded");
+  /** A value whose strings are cut to the queued value length: a log body or a status. */
+  value<T>(value: T, depth = 1): T {
+    return this.copy(value, depth, "value", true);
+  }
+
+  copy<T>(value: T, depth = 0, shape: Shape = "value", content = false): T {
+    if (++this.nodes > MAX_RECORD_NODES)
+      throw new BudgetExceeded("Telemetry complexity limit exceeded");
+    if (depth > 32) throw new RangeError("Telemetry nesting limit exceeded");
     this.charge(16);
     if (typeof value === "string") {
-      this.charge(value.length * 2);
-      return value;
+      let text: string = value;
+      if (content && text.length > this.valueUnits) {
+        text = cutToUnits(text, this.valueUnits);
+        this.cut.add(text);
+      }
+      this.charge(text.length * 2);
+      return text as T;
     }
     if (
       value === null ||
@@ -111,13 +240,14 @@ class Snapshot {
     this.copied.set(value, copy);
     this.ancestors.add(value);
     if (array) {
-      if (value.length > 16384) throw new RangeError("Telemetry complexity limit exceeded");
+      if (value.length > MAX_RECORD_NODES)
+        throw new BudgetExceeded("Telemetry complexity limit exceeded");
       for (let index = 0; index < value.length; index++) {
         const descriptor = Object.getOwnPropertyDescriptor(value, index);
         if (descriptor && !("value" in descriptor))
           throw new TypeError("Telemetry accessors are unsupported");
         (copy as unknown[]).push(
-          this.copy(descriptor?.value, depth + 1, shape === "events" ? "event" : "value"),
+          this.copy(descriptor?.value, depth + 1, "value", content || shape === "attributes"),
         );
       }
     } else {
@@ -129,9 +259,12 @@ class Snapshot {
         if (shape === "attributes" && !this.captureContent && isMessageKey(key)) continue;
         this.charge(key.length * 2 + 16);
         (copy as Record<string, unknown>)[key] = this.copy(
-          shape === "attributes" ? this.inlineFiles(key, descriptor.value) : descriptor.value,
+          shape === "attributes"
+            ? this.scrubbedBeforeCut(key, this.inlineFiles(key, descriptor.value))
+            : descriptor.value,
           depth + 1,
           shape === "event" && key === "attributes" ? "attributes" : "value",
+          content || shape === "attributes",
         );
       }
     }
@@ -169,7 +302,12 @@ class Snapshot {
       }
       if (value == null || Object.hasOwn(attributes, key)) continue;
       this.charge(key.length * 2 + 16);
-      attributes[key] = this.copy(value) as Resource["attributes"][string];
+      attributes[key] = this.copy(
+        this.scrubbedBeforeCut(key, value),
+        0,
+        "value",
+        true,
+      ) as Resource["attributes"][string];
     }
     return resourceFromAttributes(attributes, { schemaUrl: this.copy(source.schemaUrl) });
   }
@@ -179,49 +317,78 @@ function contextReader(context: SpanContext): () => SpanContext {
   return () => context;
 }
 
+/** What admission keeps of a record: its copy, the bytes charged for it, whether resource
+ * attributes were still unresolved, and the value strings it cut. */
+export interface RecordSnapshot<T> {
+  record: T;
+  bytes: number;
+  unresolvedResource: boolean;
+  cut: ReadonlySet<string>;
+}
+
 export function snapshotSpan(
   source: ReadableSpan,
   limit: number,
   captureContent = true,
-): { record: ReadableSpan; bytes: number; unresolvedResource: boolean } {
-  const snapshot = new Snapshot(limit, captureContent);
+  valueUnits = Infinity,
+): RecordSnapshot<ReadableSpan> {
+  const snapshot = new Snapshot(limit, captureContent, valueUnits);
   const context = snapshot.context(source.spanContext())!;
-  if (source.links.length > 16384) throw new RangeError("Link complexity limit exceeded");
-  const links = source.links.map((link) => ({
-    context: snapshot.context(link.context)!,
-    attributes: snapshot.attributes(link.attributes),
-    droppedAttributesCount: snapshot.copy(link.droppedAttributesCount),
-  }));
+  const fields = snapshot.copy({
+    name: source.name,
+    kind: source.kind,
+    startTime: source.startTime,
+    endTime: source.endTime,
+    duration: source.duration,
+    ended: source.ended,
+    instrumentationScope: source.instrumentationScope,
+    droppedAttributesCount: source.droppedAttributesCount,
+    droppedEventsCount: source.droppedEventsCount,
+    droppedLinksCount: source.droppedLinksCount,
+  });
+  const status = snapshot.value(source.status);
+  const attributes = snapshot.attributes(source.attributes);
+  const parentSpanContext = snapshot.context(source.parentSpanContext);
+  const resource = snapshot.resource(source.resource);
+  // Last, with what the budget has left: past it, events and links are counted as dropped.
+  const events = snapshot.newest(source.events, (event) =>
+    snapshot.copy(event as ReadableSpan["events"][number], 2, "event"),
+  );
+  const links = snapshot.newest(source.links, (item) => {
+    const link = item as ReadableSpan["links"][number];
+    return {
+      context: snapshot.context(link.context)!,
+      attributes: snapshot.attributes(link.attributes),
+      droppedAttributesCount: snapshot.copy(link.droppedAttributesCount),
+    };
+  });
   const record: ReadableSpan = {
-    ...snapshot.copy({
-      name: source.name,
-      kind: source.kind,
-      startTime: source.startTime,
-      endTime: source.endTime,
-      duration: source.duration,
-      ended: source.ended,
-      status: source.status,
-      instrumentationScope: source.instrumentationScope,
-      droppedAttributesCount: source.droppedAttributesCount,
-      droppedEventsCount: source.droppedEventsCount,
-      droppedLinksCount: source.droppedLinksCount,
-    }),
-    attributes: snapshot.attributes(source.attributes),
-    events: snapshot.events(source.events),
+    ...fields,
+    droppedEventsCount: (fields.droppedEventsCount ?? 0) + events.dropped,
+    droppedLinksCount: (fields.droppedLinksCount ?? 0) + links.dropped,
+    status,
+    attributes,
+    events: events.kept,
     spanContext: contextReader(context),
-    parentSpanContext: snapshot.context(source.parentSpanContext),
-    links,
-    resource: snapshot.resource(source.resource),
+    parentSpanContext,
+    links: links.kept,
+    resource,
   };
-  return { record, bytes: snapshot.bytes, unresolvedResource: snapshot.unresolvedResource };
+  return {
+    record,
+    bytes: snapshot.bytes,
+    unresolvedResource: snapshot.unresolvedResource,
+    cut: snapshot.cut,
+  };
 }
 
 export function snapshotLog(
   source: ReadableLogRecord,
   limit: number,
   captureContent = true,
-): { record: ReadWriteLogRecord; bytes: number; unresolvedResource: boolean } {
-  const snapshot = new Snapshot(limit, captureContent);
+  valueUnits = Infinity,
+): RecordSnapshot<ReadWriteLogRecord> {
+  const snapshot = new Snapshot(limit, captureContent, valueUnits);
   // Only our batching processor sees this copy. Its writer methods deliberately
   // cannot mutate the admitted snapshot or invalidate its charged byte count.
   const record: ReadWriteLogRecord = {
@@ -231,10 +398,10 @@ export function snapshotLog(
       severityText: source.severityText,
       severityNumber: source.severityNumber,
       eventName: source.eventName,
-      body: source.body,
       instrumentationScope: source.instrumentationScope,
       droppedAttributesCount: source.droppedAttributesCount,
     }),
+    body: snapshot.value(source.body),
     attributes: snapshot.attributes(source.attributes),
     spanContext: snapshot.context(source.spanContext),
     resource: snapshot.resource(source.resource),
@@ -257,5 +424,10 @@ export function snapshotLog(
       return this;
     },
   };
-  return { record, bytes: snapshot.bytes, unresolvedResource: snapshot.unresolvedResource };
+  return {
+    record,
+    bytes: snapshot.bytes,
+    unresolvedResource: snapshot.unresolvedResource,
+    cut: snapshot.cut,
+  };
 }

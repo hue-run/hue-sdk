@@ -22,7 +22,7 @@ from .transport import MAX_CONTENT_BYTES
 
 ABSENT: Any = object()
 """Marks arguments or a result the response did not carry, as distinct from ``None``."""
-MAX_PROVIDER_ITEMS = 128
+MAX_PROVIDER_ITEMS = 1024
 MAX_PROVIDER_DEFINITIONS = 512
 MAX_PROVIDER_SERVERS = 512
 # Underscores are kept, as the WHATWG URL parser (and so the TypeScript SDK) keeps them: they are

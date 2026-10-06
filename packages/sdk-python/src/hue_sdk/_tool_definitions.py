@@ -1497,6 +1497,13 @@ def _scrub_request_text(text: str) -> str:
     return _dump(request) if scrub.changed else text
 
 
+def scrubs_tool_credentials(key: str) -> bool:
+    """Whether ``scrub_tool_credentials`` inspects an attribute's value: its credentials must be
+    removed from the whole recorded value, before anything cuts it to a prefix that no longer
+    parses."""
+    return key in _DEFINITION_KEYS or key in _REQUEST_KEYS or bool(_OPENINFERENCE_TOOL.match(key))
+
+
 def scrub_tool_credentials(key: str, value: Any) -> Any:
     """Remove hosted-tool credentials from an exported attribute value.
 

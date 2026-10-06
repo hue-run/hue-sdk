@@ -10,6 +10,56 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Changed
+
+- **Wire** Content values are kept whole up to 1 MiB, the value limit Hue's receiver stores,
+  instead of being cut at 256 KiB. A value over it is still cut to a UTF-8 prefix (bytes and a
+  structured log body replaced by the receiver's marker) and listed under `hue.truncated`.
+- **Wire** Requests are measured as Hue's receiver measures them: after gzip against its request
+  limit (1 MiB) and after decompression against its decoded limit (4 MiB), instead of 1 MiB before
+  gzip, which was up to four times stricter. Batches are packed to 4 MiB before gzip; a batch over
+  the wire limit is sent in halves, and a single record over a limit sheds its largest content
+  values as before, finding how many with a number of encodings logarithmic in its values rather
+  than one encoding per value shed. A record that compresses well is no longer shed for its size
+  before gzip.
+- The limits a response advertises in `Hue-Max-Request-Bytes`, `Hue-Max-Decoded-Bytes` and
+  `Hue-Max-Value-Bytes`, on any status, are adopted for later requests, value cuts and helper
+  content, clamped to 1–64 MiB, 1–64 MiB and 256 KiB–16 MiB; a lower limit is adopted as readily
+  as a higher one. Batches stay at 4 MiB, or the advertised decoded limit when that is lower; only
+  a single record that needs more travels alone in a larger request. A request that limits
+  lowered while it was retried or held no longer fit is split and shed again before it is sent.
+- A string far over the value cap is cut when its record is queued, to the cap and 64 Ki code
+  units of context, rather than charged to `maxQueueBytes` whole: a span holding a value of
+  millions of characters is exported with the value cut instead of being dropped before the cut
+  ran. `redact` still sees text past the cap; for a text cut when queued, the last 64 Ki code
+  units of its answer are never exported, so a secret it saw without its continuation is not
+  sent. Tool definitions and recorded requests cut there have their credentials removed from the
+  whole value first; one too long to parse within what the record's budget has left is replaced
+  by the receiver's marker instead, as in the Python SDK.
+- A request Hue refuses with HTTP 429 and a `Retry-After` longer than the request deadline keeps
+  its records queued, within the queue's bounds, and is sent again once the wait has passed; an
+  export holds its records for at most 60 s in all. Before, the batch was lost. A longer wait loses
+  the records at once, reported as a `failed` issue with status 429 and counted on the trace's root
+  span as `hue.sdk.dropped_records`. A root reads its trace's count when its request is made, so
+  one sent later in the same export carries such losses, and its acknowledgement consumes only
+  the count it carried. `flush()` and `shutdown()` wait for a held export, and a
+  client's own providers allow for the hold when they drain. When `shutdownSafe()`'s budget runs
+  out first, a client that owns its providers ends the hold and reports its records lost the same
+  way, so the hold does not keep the process running.
+- **Wire** A client's own tracer provider keeps 2,000 attributes, events and links per span and
+  2,000 attributes per event and link, and its logger provider 2,000 attributes per log record,
+  instead of OpenTelemetry's 128, which silently dropped the rest of a long conversation's
+  flattened messages. Providers an application attaches Hue to keep their own limits. One record
+  may hold 1,048,576 values when it is queued and exported, up from 16,384, so a span with 2,000
+  events of several attributes each is exported; the queue's byte budget still bounds it. A span
+  whose events or links do not all fit that budget keeps its newest ones and counts the rest in
+  its dropped event and link counts, where before the whole span was dropped.
+- `recordProviderToolCalls` turns up to 1,024 items of a response into spans, up from 128; the
+  rest are still counted as skipped.
+- Helper content (`setInput`, `setOutput`, `hue.tool`, `recordMessages`) may hold 65,536 values,
+  up from 16,384, so a structured value of many small members is cut at the 1 MiB cap rather than
+  omitted for its count.
+
 #### Fixed
 
 - `EvaluationClient` and `EnvironmentClient` keep the project API key in a runtime-private field, so
@@ -1263,6 +1313,57 @@ No registry release is claimed until publication and registry acceptance complet
 - Documented runtime and integration matrix, including dependency-resolution and cross-language content and delivery boundaries; verified release archives and registry bytes.
 
 ## hue-run (Python)
+
+### [Unreleased]
+
+#### Added
+
+- **Wire** `hue.sdk.dropped_records` on a trace's root span, as the TypeScript SDK writes it: the
+  records of the trace the SDK never sent (dropped from a queue, too large to send without their
+  content, or refused for their rate for longer than an export holds them), so Hue reads the trace
+  as incomplete by that many records. A root reads the count when its request is made, so one sent
+  later in the same export carries the losses earlier requests met; the count stays until the
+  request carrying the root is acknowledged, which consumes only what it carried, and is
+  remembered for the newest 1,024 traces.
+
+#### Changed
+
+- **Wire** A record over the request limit is no longer dropped whole. A value over the value cap
+  (1 MiB) is cut when the record is queued, to a UTF-8 prefix (bytes replaced by the receiver's
+  marker), and listed under `hue.truncated`; a record still over the receiver's limits sheds its
+  largest content values, each replaced by the marker and listed, as the TypeScript SDK does. A
+  span with a 2 MB input is exported with the input cut instead of being lost. One record's copy
+  may take the whole queue budget (`max_queue_bytes`) rather than 1 MiB. Tool definitions and
+  recorded requests cut there have their credentials removed from the whole value first; one too
+  long to parse within the record's budget is replaced by the marker instead.
+- **Wire** Helper content is kept whole up to 1 MiB instead of 256 KiB, and a redactor sees up to
+  4 MiB of it (was 1 MiB).
+- **Wire** Requests are measured as Hue's receiver measures them: after gzip against its request
+  limit (1 MiB) and after decompression against its decoded limit (4 MiB), instead of 1 MiB before
+  gzip. Batches are packed to 4 MiB before gzip and a batch over the wire limit is sent in parts.
+  A record over a limit finds how many content values to shed with a number of encodings
+  logarithmic in its values.
+- The limits a response advertises in `Hue-Max-Request-Bytes`, `Hue-Max-Decoded-Bytes` and
+  `Hue-Max-Value-Bytes`, on any status, are adopted for later requests, value cuts and helper
+  content, clamped to 1–64 MiB, 1–64 MiB and 256 KiB–16 MiB; a lower limit is adopted as readily
+  as a higher one. Batches stay at 4 MiB, or the advertised decoded limit when that is lower. A
+  request that limits lowered while it was retried or held no longer fit is split and shed again
+  before it is sent.
+- A request Hue refuses with HTTP 429 and a `Retry-After` longer than the request deadline keeps
+  its records queued, within the queue's bounds, and is sent again once the wait has passed; an
+  export holds its records for at most 60 s in all. Before, the batch was lost. A longer wait loses
+  the records at once, recorded as a `failed` export issue and counted in
+  `hue.sdk.dropped_records`. A flush or shutdown budget shorter than the hold returns `False` while
+  the held export continues in the background.
+- **Wire** A tracer provider Hue creates keeps 2,000 attributes, events and links per span and
+  2,000 attributes per event and link, instead of OpenTelemetry's 128, unless the environment sets
+  OpenTelemetry's own limit (`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`, `OTEL_ATTRIBUTE_COUNT_LIMIT` and
+  the event and link variables), which still wins. A borrowed provider keeps its own limits. Log
+  records keep OpenTelemetry's limits: its logger provider takes none in the supported range. A
+  span whose events or links do not all fit the queue's byte budget keeps its newest ones and
+  counts the rest in its dropped event and link counts, where before the whole span was dropped.
+- `record_provider_tool_calls` turns up to 1,024 items of a response into spans, up from 128; the
+  rest are still counted as skipped.
 
 ### [0.8.0] - 2026-10-05
 

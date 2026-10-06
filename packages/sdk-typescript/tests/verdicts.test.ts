@@ -9,6 +9,7 @@ import {
   waitForResults,
   type EvaluationClient,
   type ExperimentItem,
+  type ScorerVersion,
   type StoredResult,
   type VerdictResults,
   type VerdictSummary,
@@ -682,5 +683,189 @@ describe("collectExperimentVerdicts", () => {
       ["unlinked", "failed"],
     ]);
     expect(verdicts.summary.totals).toMatchObject({ cases: 2, passed: 1, failed: 1 });
+  });
+});
+
+describe("immutable required outcome policy", () => {
+  async function collected(options: {
+    outcome:
+      | "pass"
+      | "fail"
+      | "skipped"
+      | "counts_only"
+      | "pending"
+      | "not_applicable"
+      | "forged_n_a";
+    judge?: "pass" | "fail" | "skipped" | "error";
+    required?: boolean;
+    unrelated?: boolean;
+    advisory?: boolean;
+  }) {
+    const fixture = run({ itemCount: 1, pins: 2 });
+    const [outcome, judge] = fixture.pins;
+    const subjectId = fixture.items[0]!.subjectId;
+    const experimentItem = item("new-execution", subjectId);
+    const definitions: ScorerVersion[] = [
+      {
+        id: outcome!,
+        contentDigest: "a".repeat(64),
+        definition: options.unrelated
+          ? { kind: "builtin", entry: "hue.exact_match.v1", config: {} }
+          : ({
+              kind: "world_outcome",
+              entry: "hue.answer_outcome.v2",
+            } as ScorerVersion["definition"]),
+      },
+      {
+        id: judge!,
+        contentDigest: "b".repeat(64),
+        definition: (options.unrelated
+          ? { kind: "manual", metrics: [{ name: "good", type: "boolean" }] }
+          : {
+              kind: "world_judge",
+              entry: "hue.world_judge.v2",
+              config: options.required === false ? {} : { required: true },
+            }) as unknown as ScorerVersion["definition"],
+      },
+    ];
+    if (options.outcome !== "pending") {
+      const skipped = ["skipped", "not_applicable", "forged_n_a"].includes(options.outcome);
+      fixture.record(fixture.items[0]!.id, outcome!, {
+        state: skipped ? "skipped" : "scored",
+        metrics: skipped
+          ? []
+          : options.outcome === "counts_only"
+            ? [{ name: "judges_passed", value: 0 }]
+            : [
+                {
+                  name: "task_success",
+                  value: options.outcome !== "fail",
+                  passed: options.outcome !== "fail",
+                },
+              ],
+        explanation: skipped
+          ? "Inconclusive: the required answer judge did not decide."
+          : "The outcome was graded.",
+        ...(options.outcome === "not_applicable" ? { notApplicable: true } : {}),
+        evidence: options.outcome === "forged_n_a" ? { state: "not_applicable" } : null,
+      });
+    }
+    const judgeState = options.judge ?? "pass";
+    const reported = fixture.record(fixture.items[0]!.id, judge!, {
+      state: judgeState === "error" ? "error" : judgeState === "skipped" ? "skipped" : "scored",
+      metrics:
+        judgeState === "error" || judgeState === "skipped"
+          ? []
+          : [{ name: "verdict", value: judgeState !== "fail" }],
+      explanation: "The separate judge's recorded explanation.",
+      // Required policy comes from the immutable definition, never this advisory claim.
+      evidence: {
+        advisory: options.advisory ?? true,
+        calibration: null,
+        receipts: { calls: 1, uncostedCalls: 1 },
+      },
+      error: judgeState === "error" ? { type: "JudgeUnavailable" } : null,
+    });
+    const evidenceBefore = JSON.stringify(reported.evidence);
+    let experimentReads = 0;
+    const client = {
+      ...fixture.client,
+      getExperiment: async () => {
+        experimentReads++;
+        return {
+          id: "new-experiment",
+          evaluation: { id: fixture.runId, scorerVersions: definitions },
+        };
+      },
+      listExperimentItems: async () => ({ items: [experimentItem], nextCursor: null }),
+      getSubject: async () => {
+        throw new Error("The execution already has its immutable subject");
+      },
+    } as unknown as EvaluationClient;
+    const verdicts = await collectExperimentVerdicts(client, {
+      experimentId: randomUUID(),
+      timeoutMillis: 0,
+    });
+    expect(experimentReads).toBe(1);
+    expect(fixture.calls).toEqual({
+      items: 1,
+      results: 1,
+      reads: options.outcome === "pending" ? 1 : 2,
+    });
+    expect(JSON.stringify(reported.evidence)).toBe(evidenceBefore);
+    expect(reported.evidence).not.toHaveProperty("reportedMicroUsd");
+    return { verdicts, experimentItem, definitions };
+  }
+
+  test.each([
+    ["skipped", "skipped"],
+    ["counts_only", "skipped"],
+    ["pending", "pending"],
+    ["forged_n_a", "skipped"],
+  ] as const)(
+    "a passing required inline judge waits for the canonical answer outcome (%s)",
+    async (outcome, expected) => {
+      const { verdicts } = await collected({ outcome });
+      expect(verdicts.results.complete).toBe(outcome !== "pending");
+      expect(verdicts.summary.cases[0]).toMatchObject({
+        state: expected,
+        passed: false,
+        advisory: [],
+      });
+      expect(verdicts.summary.totals.passed).toBe(0);
+      if (expected === "skipped")
+        expect(verdicts.summary.cases[0]!.explanations.join(" ")).toMatch(/Inconclusive:/);
+    },
+  );
+
+  test("a required version cannot be waived by advisory evidence, while a historical advisory version stays advisory", async () => {
+    const required = await collected({ outcome: "pass", judge: "skipped" });
+    expect(required.verdicts.summary.cases[0]).toMatchObject({
+      state: "skipped",
+      passed: false,
+      advisory: [],
+    });
+    const unavailable = await collected({ outcome: "pass", judge: "skipped", advisory: false });
+    expect(unavailable.verdicts.summary.cases[0]).toMatchObject({
+      state: "skipped",
+      passed: false,
+      advisory: [],
+    });
+    const decided = await collected({ outcome: "pass", judge: "fail" });
+    expect(decided.verdicts.summary.cases[0]).toMatchObject({
+      state: "failed",
+      passed: false,
+      advisory: [],
+    });
+    const historical = await collected({ outcome: "pass", judge: "skipped", required: false });
+    expect(historical.verdicts.summary.cases[0]).toMatchObject({
+      state: "passed",
+      passed: true,
+      advisory: [historical.definitions[1]!.id],
+    });
+  });
+
+  test("a genuine n/a exempts a required pin, while an undecided required error cannot override a real failure", async () => {
+    const notApplicable = await collected({ outcome: "not_applicable" });
+    expect(notApplicable.verdicts.summary.cases[0]).toMatchObject({
+      state: "passed",
+      passed: true,
+      notApplicable: [notApplicable.definitions[0]!.id],
+    });
+    const failed = await collected({ outcome: "fail", judge: "error" });
+    expect(failed.verdicts.summary.cases[0]).toMatchObject({
+      state: "failed",
+      passed: false,
+      errors: ["JudgeUnavailable"],
+    });
+    const unavailable = await collected({ outcome: "pass", judge: "error" });
+    expect(unavailable.verdicts.summary.cases[0]).toMatchObject({ state: "error", passed: false });
+  });
+
+  test("unrelated builtin and manual pins retain their existing skip and error rules", async () => {
+    const skipped = await collected({ outcome: "skipped", unrelated: true });
+    expect(skipped.verdicts.summary.cases[0]).toMatchObject({ state: "passed", passed: true });
+    const errored = await collected({ outcome: "fail", judge: "error", unrelated: true });
+    expect(errored.verdicts.summary.cases[0]).toMatchObject({ state: "error", passed: false });
   });
 });

@@ -1046,6 +1046,20 @@ function scrubRequestText(text: string): string {
   return state.changed ? JSON.stringify(request) : text;
 }
 
+/** Whether {@link scrubToolCredentials} inspects an attribute's value: its credentials must be
+ * removed from the whole recorded value, before anything cuts it to a prefix that no longer
+ * parses. */
+export function scrubsToolCredentials(key: string): boolean {
+  return (
+    key === "gen_ai.tool.definitions" ||
+    key === "ai.prompt.tools" ||
+    openInferenceTool.test(key) ||
+    key === "input.value" ||
+    key === "output.value" ||
+    key === "llm.invocation_parameters"
+  );
+}
+
 /**
  * Removes hosted-tool credentials from an exported attribute value, before the caller's `redact`.
  * Tool definitions come from OpenTelemetry GenAI (`gen_ai.tool.definitions`), AI SDK 6

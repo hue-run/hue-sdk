@@ -234,7 +234,7 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
             return {"nested": ["x" * MAX_CONTENT_SNAPSHOT_BYTES]}
         if invalid == "custom-container":
             return {"nested": CustomList(["unchanged"])}
-        return {"nested": "x" * 262_144}
+        return {"nested": "x" * 1_048_576}
 
     output = {"nested": ["original"]}
     hue = Hue(receiver.url, KEY, capture_content=True, redactor=redact)
@@ -244,7 +244,7 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
         assert calls == [1] and not hooks
         assert output == {"nested": ["original"]}
         if invalid == "final-json-limit":
-            # A redactor's answer over the 256 KiB value cap is cut to the cap and listed, as
+            # A redactor's answer over the 1 MiB value cap is cut to the cap and listed, as
             # any content is; it is bounded, not invalid.
             assert hue.export_status.instrumentation_failures == 0
             assert hue.force_flush()
@@ -252,7 +252,7 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
                 attribute.key: attribute.value for attribute in receiver.spans()[0].attributes
             }
             stored = attributes["output.value"].string_value
-            assert 262_144 - 4 < len(stored.encode("utf-8")) <= 262_144
+            assert 1_048_576 - 4 < len(stored.encode("utf-8")) <= 1_048_576
             assert stored.startswith('{"nested":"xxx')
             listed = attributes["hue.truncated"].array_value.values
             assert [item.string_value for item in listed] == ["output.value"]
@@ -318,7 +318,7 @@ def test_invalid_content_and_redactor_preserve_result_and_run_once(receiver):
 
         def business(hue=hue, executed=executed, result=result):
             with hue.span("business") as run:
-                run.set_input("x" * 262_144)
+                run.set_input("x" * 1_048_576)
                 with hue.tool("effect") as span:
                     executed.append("once")
                     span.set_output(object())
@@ -337,7 +337,7 @@ def test_invalid_content_and_redactor_preserve_result_and_run_once(receiver):
     assert len(receiver.spans()) == 4
     business_spans = [span for span in receiver.spans() if span.name == "business"]
     stored = {attribute.key: attribute.value for attribute in business_spans[0].attributes}
-    assert len(stored["input.value"].string_value.encode("utf-8")) <= 262_144
+    assert len(stored["input.value"].string_value.encode("utf-8")) <= 1_048_576
     assert [item.string_value for item in stored["hue.truncated"].array_value.values] == [
         "input.value"
     ]
@@ -536,7 +536,12 @@ def test_trickling_http_does_not_extend_deadline_or_spawn_unbounded_requests():
 
 
 def _emit_isolation_record(hue, signal, name, *, large=False):
-    attributes = {"content": "x" * 600_000} if large else {}
+    # Large: 2.2 MB, so two such records are over the 4 MiB batch target.
+    attributes = (
+        {"content": "x" * 1_000_000, "more": "y" * 1_000_000, "rest": "z" * 200_000}
+        if large
+        else {}
+    )
     if signal == "traces":
         with hue.span(name):
             trace.get_current_span().set_attributes(attributes)
@@ -620,7 +625,7 @@ def test_export_suppression_prevents_http_and_diagnostic_feedback(
 def test_busy_http_worker_retains_queue_until_recovery_or_accounted_shutdown(
     receiver, monkeypatch, signal, shutdown
 ):
-    from hue_sdk.transport import MAX_REQUEST_BYTES, SafeSession
+    from hue_sdk.transport import BATCH_TARGET_BYTES, MAX_REQUEST_BYTES, SafeSession
 
     started, release, completed = Event(), Event(), Event()
     calls = []
@@ -654,7 +659,7 @@ def test_busy_http_worker_retains_queue_until_recovery_or_accounted_shutdown(
         assert not hue.force_flush(timeout_millis=30)
         drops, pending, size = processor.status
         assert (drops, pending) == (1, 3)
-        assert MAX_REQUEST_BYTES < size <= 8 * 1024 * 1024
+        assert BATCH_TARGET_BYTES < size <= 8 * 1024 * 1024
         assert processor._exporter.failures == 1
         assert len(calls) == 1
 
@@ -681,7 +686,8 @@ def test_busy_http_worker_retains_queue_until_recovery_or_accounted_shutdown(
             ["ambiguous"] if shutdown else ["ambiguous", *(f"retained-{i}" for i in range(3))]
         )
         assert names == expected  # The timed-out batch is never replayed.
-        assert all(len(body) <= MAX_REQUEST_BYTES for _, _, body in receiver.requests)
+        assert all(int(h["X-Wire-Bytes"]) <= MAX_REQUEST_BYTES for _, h, _ in receiver.requests)
+        assert all(len(body) <= BATCH_TARGET_BYTES for _, _, body in receiver.requests)
     finally:
         release.set()
         hue.shutdown_safe()

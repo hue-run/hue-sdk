@@ -227,7 +227,7 @@ try {
     },
   });
   let sideEffects = 0;
-  const huge = "x".repeat(262144);
+  const huge = "x".repeat(1024 * 1024);
   assert.equal(
     await hue.tool("side-effect", huge, () => {
       sideEffects++;
@@ -239,7 +239,7 @@ try {
   assert.equal((await hue.flushSafe()).ok, false);
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(diagnostics, 1);
-  // The 256 KiB input and result are cut to the cap and listed under `hue.truncated`, never
+  // The 1 MiB input and result are cut to the cap and listed under `hue.truncated`, never
   // omitted or counted as failures; the side effect ran once all the same.
   assert.equal(hue.transport.getReport().instrumentationFailures, 0);
   const original = new Error("original application exception");

@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { context, trace, type TraceState } from "@opentelemetry/api";
@@ -28,6 +28,7 @@ import sdkPackage from "@hue-run/sdk/package.json" with { type: "json" };
 
 type Value = {
   stringValue?: string;
+  boolValue?: boolean;
   intValue?: string;
   kvlistValue?: { values: Attribute[] };
   arrayValue?: { values: Value[] };
@@ -42,6 +43,8 @@ type WireRecord = {
   body?: Value;
   status?: { code?: number; message?: string };
   events?: { name: string; attributes?: Attribute[] }[];
+  droppedEventsCount?: number;
+  droppedLinksCount?: number;
 };
 const root = protobuf.Root.fromJSON(schema);
 const apiKey = "synthetic-hue-test-key";
@@ -63,13 +66,26 @@ function receiver(
     | "warning" = "success",
   redirect?: string,
   beforeReply?: (signal: "traces" | "logs") => Promise<void>,
+  /** The status and headers of the `index`th telemetry request's reply (1-based); a status other
+   * than 200 refuses the request, which is still recorded. */
+  reply?: (
+    index: number,
+    signal: "traces" | "logs",
+  ) => { status?: number; headers?: Record<string, string> } | undefined,
 ) {
   const requests: {
     signal: "traces" | "logs";
     records: WireRecord[];
     raw: string;
+    /** The request's size after decompression. */
     bytes: number;
+    /** The request's size on the wire. */
+    wire: number;
     headers: Record<string, string>;
+    /** The reply's status. */
+    status: number;
+    /** When the request arrived. */
+    at: number;
   }[] = [];
   let hits = 0;
   const server = Bun.serve({
@@ -95,6 +111,7 @@ function receiver(
       const signal = new URL(request.url).pathname.endsWith("/logs") ? "logs" : "traces";
       const namespace = `opentelemetry.proto.collector.${signal === "traces" ? "trace" : "logs"}.v1.Export${signal === "traces" ? "Trace" : "Logs"}Service`;
       let bytes = Buffer.from(await request.arrayBuffer());
+      const wire = bytes.byteLength;
       if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
       const type = root.lookupType(`${namespace}Request`);
       const data = type.toObject(type.decode(bytes), { longs: String, bytes: String });
@@ -111,6 +128,7 @@ function receiver(
         records,
         raw: JSON.stringify(data),
         bytes: bytes.byteLength,
+        wire,
         headers: (() => {
           const headers: Record<string, string> = {};
           request.headers.forEach((value, name) => {
@@ -118,7 +136,17 @@ function receiver(
           });
           return headers;
         })(),
+        status: 200,
+        at: Date.now(),
       });
+      const custom = reply?.(requests.length, signal);
+      if (custom?.status !== undefined && custom.status !== 200) {
+        requests.at(-1)!.status = custom.status;
+        return new Response("synthetic refusal", {
+          status: custom.status,
+          headers: custom.headers,
+        });
+      }
       await beforeReply?.(signal);
       if (mode === "malformed")
         return new Response(new Uint8Array([0x0a, 0xff]), {
@@ -142,16 +170,32 @@ function receiver(
             "content-type": "application/x-protobuf",
             // A current Hue marks every trace acknowledgement as accepting placeholders.
             ...(signal === "traces" ? { "hue-pending-spans": "1" } : {}),
+            ...custom?.headers,
           },
         },
       );
     },
   });
-  return { server, requests, url: `http://127.0.0.1:${server.port}`, hits: () => hits };
+  return {
+    server,
+    requests,
+    /** The records of the requests the receiver accepted. */
+    accepted: () =>
+      requests.filter((request) => request.status === 200).flatMap((request) => request.records),
+    url: `http://127.0.0.1:${server.port}`,
+    hits: () => hits,
+  };
 }
 
 function attr(record: WireRecord, key: string): Value | undefined {
   return record.attributes?.find((item) => item.key === key)?.value;
+}
+
+/** `length` characters of random base64: text gzip cannot shrink below about three quarters. */
+function noise(length: number): string {
+  return randomBytes(Math.ceil((length * 3) / 4))
+    .toString("base64")
+    .slice(0, length);
 }
 
 describe("Hue SDK contract", () => {
@@ -867,8 +911,15 @@ describe("Hue SDK contract", () => {
       );
       many.end();
       expect(parsed.length).toBeLessThanOrEqual(Math.floor((16 * 1024 * 1024) / shared.length));
-      // The messages past the limit are charged as recorded, so this span exceeds the budget.
-      expect(hue.transport.getReport().droppedSpans).toBe(1);
+      // The messages past the limit are charged as recorded, so not every event fits the budget:
+      // the span keeps its newest events and counts the rest as dropped.
+      await hue.flush();
+      expect(hue.transport.getReport().droppedSpans).toBe(0);
+      const record = endpoint.accepted().find((span) => span.name === "distinct-messages")!;
+      const kept = record.events!.length;
+      expect(kept).toBeLessThan(distinct.length);
+      expect(record.events!.at(-1)!.name).toBe(`event-${distinct.length - 1}`);
+      expect(record.droppedEventsCount).toBe(distinct.length - kept);
     } finally {
       spy.mockRestore();
       await hue.shutdownSafe();
@@ -926,12 +977,17 @@ describe("Hue SDK contract", () => {
       ).kvlistValue!.values.map((item) => [item.key, Object.values(item.value)[0]]),
     );
   /** A transport, its providers and a client over `endpoint`, and the records it exported. */
-  function exporting(endpoint: ReturnType<typeof receiver>, serviceName: string) {
+  function exporting(
+    endpoint: ReturnType<typeof receiver>,
+    serviceName: string,
+    maxQueueBytes?: number,
+  ) {
     const transport = createHueTransport({
       apiKey,
       serviceName,
       captureContent: true,
       baseUrl: endpoint.url,
+      ...(maxQueueBytes ? { maxQueueBytes } : {}),
     });
     const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
     const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
@@ -952,14 +1008,14 @@ describe("Hue SDK contract", () => {
     };
   }
 
-  test("a content value over 256 KiB is cut to a UTF-8 prefix and listed under hue.truncated; the record is exported", async () => {
+  test("a content value over the 1 MiB value cap is cut to a UTF-8 prefix and listed under hue.truncated; the record is exported", async () => {
     const endpoint = receiver();
     const exporter = exporting(endpoint, "large-values");
     const { hue, tracerProvider, loggerProvider, transport } = exporter;
-    // 160 Ki two-byte characters: 320 KiB of UTF-8, over the value cap. Dropping the span for it
+    // 640 Ki two-byte characters: 1.25 MiB of UTF-8, over the value cap. Dropping the span for it
     // lost the call, its arguments and the rest of the turn; the receiver's own answer to a
     // value over its cap is a cut to a UTF-8 prefix, listed under `hue.truncated`.
-    const text = "é".repeat(160 * 1024);
+    const text = "é".repeat(640 * 1024);
     const large = `{"body":"${text}"}`;
     try {
       // A third-party instrumentation's attribute (what an AI SDK tool span records), and a
@@ -994,8 +1050,8 @@ describe("Hue SDK contract", () => {
       const records = exporter.records();
       const external = records.find((record) => record.name === "execute_tool read_document")!;
       const stored = attr(external, "gen_ai.tool.call.result")!.stringValue!;
-      expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(256 * 1024);
-      expect(Buffer.byteLength(stored)).toBeGreaterThan(256 * 1024 - 4);
+      expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(1024 * 1024);
+      expect(Buffer.byteLength(stored)).toBeGreaterThan(1024 * 1024 - 4);
       expect(large.startsWith(stored)).toBe(true);
       // Listed in redaction order: the links are redacted before the record's own attributes.
       expect(strings(attr(external, "hue.truncated"))).toEqual([
@@ -1008,8 +1064,8 @@ describe("Hue SDK contract", () => {
       expect(attr(external, "gen_ai.tool.name")!.stringValue).toBe("read_document");
       const helper = records.find((record) => record.name === "execute_tool read_page")!;
       const result = attr(helper, "gen_ai.tool.call.result")!.stringValue!;
-      expect(Buffer.byteLength(result)).toBeLessThanOrEqual(256 * 1024);
-      expect(Buffer.byteLength(result)).toBeGreaterThan(256 * 1024 - 4);
+      expect(Buffer.byteLength(result)).toBeLessThanOrEqual(1024 * 1024);
+      expect(Buffer.byteLength(result)).toBeGreaterThan(1024 * 1024 - 4);
       expect(result.startsWith('{"text":"éé')).toBe(true);
       expect(strings(attr(helper, "hue.truncated"))).toEqual(["gen_ai.tool.call.result"]);
       expect(JSON.parse(attr(helper, "gen_ai.tool.call.arguments")!.stringValue!)).toEqual({
@@ -1027,8 +1083,8 @@ describe("Hue SDK contract", () => {
       });
       expect(strings(attr(structured, "hue.truncated"))).toEqual(["body"]);
       const cut = plain.body!.stringValue!;
-      expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(256 * 1024);
-      expect(Buffer.byteLength(cut)).toBeGreaterThan(256 * 1024 - 4);
+      expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(1024 * 1024);
+      expect(Buffer.byteLength(cut)).toBeGreaterThan(1024 * 1024 - 4);
       expect(text.startsWith(cut)).toBe(true);
       expect(strings(attr(plain, "hue.truncated"))).toEqual(["body"]);
       // Nothing was omitted, dropped or counted as a failure.
@@ -1039,27 +1095,27 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("a structured value over 256 KiB is cut to a UTF-8 prefix of its JSON text at the cap, never a shorter whole document", async () => {
+  test("a structured value over the 1 MiB value cap is cut to a UTF-8 prefix of its JSON text at the cap, never a shorter whole document", async () => {
     const endpoint = receiver();
     const exporter = exporting(endpoint, "structured-values");
     const { hue, transport } = exporter;
-    // 6,000 small rows, 300 KiB of JSON together with no one value over the cap: the receiver
+    // 24,000 small rows, 1.5 MiB of JSON together with no one value over the cap: the receiver
     // recognizes Hue's cut by its size at the cap, so a prefix of the rows that stopped early as
     // a shorter valid document would read as the whole result.
-    const rows = Array.from({ length: 6_000 }, (_, index) => ({
+    const rows = Array.from({ length: 24_000 }, (_, index) => ({
       id: index,
       name: `row-${String(index).padStart(5, "0")}`,
       note: "n".repeat(24),
     }));
     const whole = JSON.stringify(rows);
-    expect(Buffer.byteLength(whole)).toBeGreaterThan(256 * 1024);
+    expect(Buffer.byteLength(whole)).toBeGreaterThan(1024 * 1024);
     try {
       await hue.tool("list_rows", { page: 1 }, () => rows);
       await hue.flush();
       const helper = exporter.records().find((record) => record.name === "execute_tool list_rows")!;
       const result = attr(helper, "gen_ai.tool.call.result")!.stringValue!;
-      expect(Buffer.byteLength(result)).toBeLessThanOrEqual(256 * 1024);
-      expect(Buffer.byteLength(result)).toBeGreaterThan(256 * 1024 - 4);
+      expect(Buffer.byteLength(result)).toBeLessThanOrEqual(1024 * 1024);
+      expect(Buffer.byteLength(result)).toBeGreaterThan(1024 * 1024 - 4);
       expect(whole.startsWith(result)).toBe(true);
       expect(() => JSON.parse(result)).toThrow();
       expect(strings(attr(helper, "hue.truncated"))).toEqual(["gen_ai.tool.call.result"]);
@@ -1080,7 +1136,7 @@ describe("Hue SDK contract", () => {
       serviceName: "oversized-redactor",
       captureContent: true,
       baseUrl: endpoint.url,
-      redact: (text) => (text.startsWith("expand") ? "x".repeat(300_000) : text),
+      redact: (text) => (text.startsWith("expand") ? "x".repeat(1_100_000) : text),
     });
     const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
     const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
@@ -1088,7 +1144,7 @@ describe("Hue SDK contract", () => {
     try {
       const tracer = tracerProvider.getTracer("third-party");
       const kept = tracer.startSpan("kept");
-      kept.setAttribute("gen_ai.tool.call.result", "y".repeat(300_000));
+      kept.setAttribute("gen_ai.tool.call.result", "y".repeat(1_100_000));
       kept.end();
       const refused = tracer.startSpan("refused");
       refused.setAttribute("gen_ai.tool.call.result", "expand me");
@@ -1097,7 +1153,7 @@ describe("Hue SDK contract", () => {
       const records = endpoint.requests.flatMap((request) => request.records);
       expect(records.map((record) => record.name)).toEqual(["kept"]);
       expect(Buffer.byteLength(attr(records[0]!, "gen_ai.tool.call.result")!.stringValue!)).toBe(
-        256 * 1024,
+        1024 * 1024,
       );
       expect(transport.getIssues()).toContainEqual(
         expect.objectContaining({ kind: "invalid", count: 1 }),
@@ -1111,23 +1167,25 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("a record over the request limit sheds its largest content values to the receiver's marker and is exported", async () => {
+  test("a record over the request limit on the wire sheds its largest content values, measured after gzip", async () => {
     const endpoint = receiver();
     const exporter = exporting(endpoint, "shed-content");
     const { hue, tracerProvider, transport } = exporter;
     try {
       const span = tracerProvider.getTracer("third-party").startSpan("chat gpt");
-      // Four content values under the cap each and an event's content value, 1,150 KiB
-      // together: over the 1 MiB request.
+      // Four content values under the cap each and an event's content value, 1,900 KiB of text
+      // gzip cannot shrink much: about 1.4 MiB on the wire, over the receiver's 1 MiB.
       const sizes: Record<string, number> = {
-        "gen_ai.output.messages": 240,
-        "ai.prompt": 230,
-        "ai.response.text": 220,
-        "gen_ai.tool.call.result": 210,
+        "gen_ai.output.messages": 600,
+        "ai.prompt": 300,
+        "ai.response.text": 200,
+        "gen_ai.tool.call.result": 100,
       };
-      for (const [key, kib] of Object.entries(sizes))
-        span.setAttribute(key, "x".repeat(kib * 1024));
-      span.addEvent("gen_ai.content.prompt", { "gen_ai.prompt": "x".repeat(250 * 1024) });
+      const values = Object.fromEntries(
+        Object.entries(sizes).map(([key, kib]) => [key, noise(kib * 1024)]),
+      );
+      for (const [key, value] of Object.entries(values)) span.setAttribute(key, value);
+      span.addEvent("gen_ai.content.prompt", { "gen_ai.prompt": noise(700 * 1024) });
       span.setAttribute("gen_ai.request.model", "gpt-5.6-terra");
       span.end();
       await hue.flush();
@@ -1137,14 +1195,59 @@ describe("Hue SDK contract", () => {
       const [event] = record!.events!;
       expect(
         kvlist(event!.attributes!.find((item) => item.key === "gen_ai.prompt")!.value),
-      ).toEqual({ "hue.truncated": true, "hue.truncated_bytes": String(250 * 1024) });
-      expect(attr(record!, "gen_ai.output.messages")!.stringValue).toHaveLength(240 * 1024);
-      expect(attr(record!, "gen_ai.tool.call.result")!.stringValue).toHaveLength(210 * 1024);
+      ).toEqual({ "hue.truncated": true, "hue.truncated_bytes": String(700 * 1024) });
+      for (const [key, value] of Object.entries(values))
+        expect(attr(record!, key)!.stringValue).toBe(value);
       expect(strings(attr(record!, "hue.truncated"))).toEqual([
         "event:gen_ai.content.prompt:gen_ai.prompt",
       ]);
       expect(attr(record!, "gen_ai.request.model")!.stringValue).toBe("gpt-5.6-terra");
+      // Measured on the wire, not before gzip: the request is over 1 MiB decoded.
       expect(endpoint.requests).toHaveLength(1);
+      expect(endpoint.requests[0]!.wire).toBeLessThanOrEqual(1024 * 1024);
+      expect(endpoint.requests[0]!.bytes).toBeGreaterThan(1024 * 1024);
+      expect(transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
+    } finally {
+      await exporter.stop();
+    }
+  });
+
+  test("a record over the decoded request limit sheds its largest content values; under it, nothing is shed for its size before gzip", async () => {
+    const endpoint = receiver();
+    const exporter = exporting(endpoint, "shed-decoded", 32 * 1024 * 1024);
+    const { hue, tracerProvider, transport } = exporter;
+    try {
+      const tracer = tracerProvider.getTracer("third-party");
+      // 5,020 KiB of text that compresses to almost nothing: over the receiver's 4 MiB decoded
+      // limit, far under its 1 MiB on the wire.
+      const span = tracer.startSpan("chat gpt");
+      const keys = ["gen_ai.output.messages", "ai.prompt", "ai.response.text", "output.value"];
+      for (const key of keys) span.setAttribute(key, "x".repeat(1000 * 1024));
+      span.addEvent("gen_ai.content.prompt", { "gen_ai.prompt": "x".repeat(1020 * 1024) });
+      span.end();
+      // 3 MiB of the same text: sent whole, though over 1 MiB before gzip.
+      const whole = tracer.startSpan("whole");
+      for (const key of keys.slice(0, 3)) whole.setAttribute(key, "y".repeat(1000 * 1024));
+      whole.end();
+      await hue.flush();
+      const records = exporter.records();
+      const shed = records.find((record) => record.name === "chat gpt")!;
+      const [event] = shed.events!;
+      expect(
+        kvlist(event!.attributes!.find((item) => item.key === "gen_ai.prompt")!.value),
+      ).toEqual({ "hue.truncated": true, "hue.truncated_bytes": String(1020 * 1024) });
+      for (const key of keys) expect(attr(shed, key)!.stringValue).toHaveLength(1000 * 1024);
+      expect(strings(attr(shed, "hue.truncated"))).toEqual([
+        "event:gen_ai.content.prompt:gen_ai.prompt",
+      ]);
+      const kept = records.find((record) => record.name === "whole")!;
+      for (const key of keys.slice(0, 3))
+        expect(attr(kept, key)!.stringValue).toHaveLength(1000 * 1024);
+      expect(attr(kept, "hue.truncated")).toBeUndefined();
+      for (const request of endpoint.requests) {
+        expect(request.bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+        expect(request.wire).toBeLessThanOrEqual(1024 * 1024);
+      }
       expect(transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
     } finally {
       await exporter.stop();
@@ -1159,9 +1262,10 @@ describe("Hue SDK contract", () => {
       const tracer = tracerProvider.getTracer("third-party");
       const root = tracer.startSpan("agent turn");
       const child = tracer.startSpan("custom step", {}, trace.setSpan(context.active(), root));
-      // 1,250 KiB of metadata, which is never shed: the record cannot be sent.
-      for (let index = 0; index < 5; index++)
-        child.setAttribute(`custom.blob.${index}`, "x".repeat(250 * 1024));
+      // 1,500 KiB of metadata gzip cannot shrink to the receiver's 1 MiB, and metadata is never
+      // shed: the record cannot be sent.
+      for (let index = 0; index < 6; index++)
+        child.setAttribute(`custom.blob.${index}`, noise(250 * 1024));
       child.end();
       root.end();
       await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);
@@ -1173,7 +1277,7 @@ describe("Hue SDK contract", () => {
         expect.objectContaining({
           kind: "invalid",
           count: 1,
-          message: "Telemetry record exceeds the 1 MiB request limit",
+          message: "Telemetry record exceeds Hue's request limit without its content values",
         }),
       );
     } finally {
@@ -1197,7 +1301,7 @@ describe("Hue SDK contract", () => {
         traceIds?: string[],
       ): void;
       withDroppedRecords(span: ReadableSpan): ReadableSpan;
-      consumeDroppedRecords(traceIds: Iterable<string>): void;
+      consumeDroppedRecords(counts: ReadonlyMap<string, number>): void;
     };
     const traceId = "0af7651916cd43dd8448eb211c80319c";
     const span = (fields: Partial<ReadableSpan>): ReadableSpan => fields as ReadableSpan;
@@ -1211,14 +1315,19 @@ describe("Hue SDK contract", () => {
     expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(2);
     expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(2);
     // Acknowledged: the count has reached Hue, and the map holds nothing for the ended trace.
-    transport.consumeDroppedRecords([traceId]);
+    transport.consumeDroppedRecords(new Map([[traceId, 2]]));
     expect(transport.withDroppedRecords(root)).toBe(root);
     // A child never carries it, and another trace's count is another trace's.
     transport.issue("traces", "dropped", 1, "Telemetry queue is full", undefined, [traceId]);
     const child = span({ ...root, parentSpanContext: root.spanContext() });
     expect(transport.withDroppedRecords(child)).toBe(child);
-    transport.consumeDroppedRecords(["00000000000000000000000000000001"]);
+    transport.consumeDroppedRecords(new Map([["00000000000000000000000000000001", 1]]));
     expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(1);
+    // Only what the acknowledged root carried is consumed: a record lost while its request was in
+    // flight is still counted.
+    transport.issue("traces", "dropped", 2, "Telemetry queue is full", undefined, [traceId]);
+    transport.consumeDroppedRecords(new Map([[traceId, 1]]));
+    expect(transport.withDroppedRecords(root).attributes["hue.sdk.dropped_records"]).toBe(2);
   });
 
   test("export hashes inline files over 64 KiB in recorded messages and keeps smaller ones", async () => {
@@ -2561,7 +2670,32 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("serializes large content across bounded requests without dropping sibling spans", async () => {
+  test("batches requests to the 4 MiB target before gzip, each within the receiver's limits", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "test",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 32 * 1024 * 1024,
+    });
+    try {
+      // 4.8 MB of text that compresses well: over one batch, under 1 MiB on the wire either way.
+      for (let i = 0; i < 8; i++)
+        await hue.withSpan(`record-${i}`, ({ setOutput }) => setOutput("x".repeat(600_000)));
+      expect((await hue.flush()).acceptedSpans).toBe(8);
+      expect(endpoint.requests).toHaveLength(2);
+      for (const request of endpoint.requests) {
+        expect(request.bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+        expect(request.wire).toBeLessThanOrEqual(1024 * 1024);
+      }
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("splits a batch whose gzip size is over the wire limit without dropping sibling spans", async () => {
     const endpoint = receiver();
     const hue = createHue({
       apiKey,
@@ -2570,11 +2704,14 @@ describe("Hue SDK contract", () => {
       baseUrl: endpoint.url,
     });
     try {
+      // 1.6 MB of text gzip cannot shrink below 1 MiB: within the batch target before gzip, over
+      // the receiver's limit on the wire, so the batch travels in halves.
       for (let i = 0; i < 8; i++)
-        await hue.withSpan(`record-${i}`, ({ setOutput }) => setOutput("x".repeat(200000)));
+        await hue.withSpan(`record-${i}`, ({ setOutput }) => setOutput(noise(200_000)));
       expect((await hue.flush()).acceptedSpans).toBe(8);
       expect(endpoint.requests.length).toBeGreaterThan(1);
-      expect(endpoint.requests.every((request) => request.bytes <= 1024 * 1024)).toBe(true);
+      expect(endpoint.requests.every((request) => request.wire <= 1024 * 1024)).toBe(true);
+      expect(endpoint.requests.flatMap((request) => request.records)).toHaveLength(8);
     } finally {
       await hue.shutdown();
       await endpoint.server.stop(true);
@@ -2586,6 +2723,647 @@ const usage = {
   inputTokens: { total: 4, noCache: 4, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 2, text: 2, reasoning: 0 },
 };
+
+describe("Receiver limits", () => {
+  const MiB = 1024 * 1024;
+  /** The strings of a wire array value. */
+  const strings = (value: Value | undefined) =>
+    (
+      value as { arrayValue?: { values: { stringValue?: string }[] } } | undefined
+    )?.arrayValue?.values.map((item) => item.stringValue);
+  const named = (records: WireRecord[], name: string) =>
+    records.find((record) => record.name === name)!;
+
+  test("adopts the limits any response advertises, clamped to their ranges, and never exceeds them", async () => {
+    let advertised: Record<string, string> = {};
+    const endpoint = receiver("success", undefined, undefined, (index, signal) => {
+      if (signal !== "traces") return undefined;
+      // A refusal advertises too; a value cap of 1,000 bytes is clamped to 256 KiB.
+      if (index === 1)
+        return { status: 503, headers: { "Retry-After": "0", "Hue-Max-Value-Bytes": "1000" } };
+      return { headers: advertised };
+    });
+    const hue = createHue({
+      apiKey,
+      serviceName: "advertised-limits",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 64 * MiB,
+    });
+    try {
+      await hue.withSpan("first", () => undefined);
+      await hue.flush();
+      expect(endpoint.requests.map((request) => request.status)).toEqual([503, 200]);
+      const capped = hue.tracer.startSpan("capped");
+      capped.setAttribute("output.value", "v".repeat(300 * 1024));
+      capped.end();
+      await hue.flush();
+      const cappedRecord = named(endpoint.accepted(), "capped");
+      expect(attr(cappedRecord, "output.value")!.stringValue).toBe("v".repeat(256 * 1024));
+      expect(strings(attr(cappedRecord, "hue.truncated"))).toEqual(["output.value"]);
+
+      // A receiver that raises its limits: a 1.5 MiB value stays whole, and a record gzip cannot
+      // shrink to 1 MiB travels whole in one request, over 1 MiB on the wire.
+      advertised = {
+        "Hue-Max-Request-Bytes": String(4 * MiB),
+        "Hue-Max-Decoded-Bytes": String(16 * MiB),
+        "Hue-Max-Value-Bytes": String(2 * MiB),
+      };
+      await hue.withSpan("raised", () => undefined);
+      await hue.flush();
+      const text = "w".repeat(1.5 * MiB);
+      const random = noise(1.8 * MiB);
+      const wide = hue.tracer.startSpan("wide");
+      wide.setAttribute("output.value", text);
+      wide.setAttribute("input.value", random);
+      wide.end();
+      await hue.flush();
+      const wideRequest = endpoint.requests.find((request) =>
+        request.records.some((record) => record.name === "wide"),
+      )!;
+      expect(wideRequest.wire).toBeGreaterThan(MiB);
+      expect(wideRequest.wire).toBeLessThanOrEqual(4 * MiB);
+      const wideRecord = named(wideRequest.records, "wide");
+      expect(attr(wideRecord, "output.value")!.stringValue).toBe(text);
+      expect(attr(wideRecord, "input.value")!.stringValue).toBe(random);
+      expect(attr(wideRecord, "hue.truncated")).toBeUndefined();
+
+      // Lowered again, the lower limits are kept: the value is cut to 1 MiB, and the record sheds
+      // the content gzip cannot fit into 1 MiB.
+      advertised = {
+        "Hue-Max-Request-Bytes": String(MiB),
+        "Hue-Max-Decoded-Bytes": String(4 * MiB),
+        "Hue-Max-Value-Bytes": String(MiB),
+      };
+      await hue.withSpan("lowered", () => undefined);
+      await hue.flush();
+      const narrow = hue.tracer.startSpan("narrow");
+      narrow.setAttribute("output.value", text);
+      narrow.setAttribute("input.value", noise(1.8 * MiB));
+      narrow.end();
+      await hue.flush();
+      const narrowRequest = endpoint.requests.find((request) =>
+        request.records.some((record) => record.name === "narrow"),
+      )!;
+      expect(narrowRequest.wire).toBeLessThanOrEqual(MiB);
+      const narrowRecord = named(narrowRequest.records, "narrow");
+      expect(attr(narrowRecord, "output.value")!.stringValue).toBe("w".repeat(MiB));
+      expect(strings(attr(narrowRecord, "hue.truncated"))).toEqual(["output.value", "input.value"]);
+      expect(hue.transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a 429 whose Retry-After outlasts the request deadline keeps its records queued and sends them after it", async () => {
+    const endpoint = receiver("success", undefined, undefined, (index) =>
+      index === 1 ? { status: 429, headers: { "Retry-After": "30" } } : undefined,
+    );
+    const hue = createHue({
+      apiKey,
+      serviceName: "rate-limited",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan("held", () => undefined);
+      const flushing = hue.flush();
+      while (!endpoint.requests.length) await Bun.sleep(50);
+      await Bun.sleep(1000);
+      // Refused for its rate and held: still pending, nothing lost or reported.
+      expect(hue.transport.getReport()).toMatchObject({ pendingSpans: 1, failedSpans: 0 });
+      const report = await flushing;
+      expect(report).toMatchObject({
+        acceptedSpans: 1,
+        failedSpans: 0,
+        droppedSpans: 0,
+        pendingSpans: 0,
+      });
+      expect(endpoint.requests.map((request) => request.status)).toEqual([429, 200]);
+      expect(endpoint.requests[1]!.at - endpoint.requests[0]!.at).toBeGreaterThanOrEqual(29_900);
+      expect(named(endpoint.accepted(), "held")).toBeDefined();
+      expect(hue.transport.getIssues()).toEqual([]);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  }, 60_000);
+
+  test("a 429 whose Retry-After exceeds the 60 s hold loses its records at once and counts them on the trace's root", async () => {
+    const endpoint = receiver("success", undefined, undefined, (index) =>
+      index === 1 ? { status: 429, headers: { "Retry-After": "61" } } : undefined,
+    );
+    const hue = createHue({
+      apiKey,
+      serviceName: "rate-limited-long",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan("agent turn", async () => {
+        await hue.withSpan("step", () => undefined);
+        const started = Date.now();
+        const error = await hue.flush().catch((reason: unknown) => reason);
+        expect(Date.now() - started).toBeLessThan(5000);
+        expect(error).toBeInstanceOf(HueExportError);
+        expect((error as HueExportError).issues.filter((issue) => issue.count > 0)).toEqual([
+          expect.objectContaining({ kind: "failed", count: 1, status: 429 }),
+        ]);
+      });
+      await hue.flush();
+      const root = named(endpoint.accepted(), "agent turn");
+      expect(attr(root, "hue.sdk.dropped_records")).toEqual({ intValue: "1" });
+      expect(endpoint.accepted().map((record) => record.name)).toEqual(["agent turn"]);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a client's own spans keep 2,000 attributes, events and links, and its log records 2,000 attributes", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "wide-records",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      const target = hue.tracer.startSpan("target");
+      target.end();
+      const span = hue.tracer.startSpan("wide", {
+        links: Array.from({ length: 300 }, (_, index) => ({
+          context: target.spanContext(),
+          attributes: { "app.link": index },
+        })),
+      });
+      for (let index = 0; index < 2001; index++) span.setAttribute(`app.field.${index}`, index);
+      for (let index = 0; index < 300; index++) span.addEvent(`step ${index}`);
+      span.addEvent(
+        "wide event",
+        Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`app.key.${index}`, index])),
+      );
+      span.end();
+      // The client's own logger provider, as recordMessages uses it.
+      const { loggerProvider } = hue as unknown as { loggerProvider: LoggerProvider };
+      loggerProvider.getLogger("wide").emit({
+        body: "wide log",
+        attributes: Object.fromEntries(
+          Array.from({ length: 300 }, (_, index) => [`app.key.${index}`, index]),
+        ),
+      });
+      await hue.flush();
+      const records = endpoint.accepted();
+      const wide = named(records, "wide");
+      // OpenTelemetry's default keeps 128 of each; the client keeps 2,000, then drops the rest.
+      expect(wide.attributes).toHaveLength(2000);
+      expect(attr(wide, "app.field.1999")).toEqual({ intValue: "1999" });
+      expect(attr(wide, "app.field.2000")).toBeUndefined();
+      expect(wide.events).toHaveLength(301);
+      expect(wide.events!.at(-1)!.attributes).toHaveLength(200);
+      expect((wide as { links?: unknown[] }).links).toHaveLength(300);
+      const logs = endpoint.requests
+        .filter((request) => request.signal === "logs")
+        .flatMap((request) => request.records);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]!.attributes).toHaveLength(300);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a value of millions of characters is cut when queued, not charged whole, so its record is exported", async () => {
+    const endpoint = receiver();
+    // The default 8 MiB queue: these two values charged whole would take 18 MB of it.
+    const hue = createHue({
+      apiKey,
+      serviceName: "huge-values",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      const span = hue.tracer.startSpan("huge");
+      span.setAttribute("output.value", "z".repeat(4_000_000));
+      span.setAttribute("custom.blob", "q".repeat(5_000_000));
+      span.end();
+      const report = await hue.flush();
+      expect(report).toMatchObject({ acceptedSpans: 1, droppedSpans: 0, failedSpans: 0 });
+      const record = named(endpoint.accepted(), "huge");
+      expect(attr(record, "output.value")!.stringValue).toBe("z".repeat(MiB));
+      expect(attr(record, "custom.blob")!.stringValue).toBe("q".repeat(MiB));
+      expect(strings(attr(record, "hue.truncated"))).toEqual(["output.value", "custom.blob"]);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("text cut when queued never exports the end the redactor saw without its continuation", async () => {
+    const endpoint = receiver();
+    // The redactor recognizes a whole key only, and removes a large block, so what it returns of a
+    // cut text is shorter than the cap and would otherwise be exported to its last character.
+    const hue = createHue({
+      apiKey,
+      serviceName: "redacted-cut",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      redact: (text) => text.replaceAll(/sk-synthetic-s{40}/g, "[key]").replaceAll(/b{1000,}/g, ""),
+    });
+    // Cut when queued at the cap and 64 Ki code units, 20 characters into the key.
+    const queuedLength = MiB + 64 * 1024;
+    const key = `sk-synthetic-${"s".repeat(40)}`;
+    const text =
+      "b".repeat(300_000) + "a".repeat(queuedLength - 300_000 - 20) + key + "a".repeat(100_000);
+    try {
+      const span = hue.tracer.startSpan("redacted");
+      span.setAttribute("output.value", text);
+      span.setAttribute("input.value", `${key} kept whole`);
+      span.end();
+      await hue.flush();
+      const record = named(endpoint.accepted(), "redacted");
+      const exported = attr(record, "output.value")!.stringValue!;
+      expect(exported).not.toContain("sk-synthetic");
+      expect(exported).toBe("a".repeat(queuedLength - 300_000 - 64 * 1024));
+      expect(attr(record, "input.value")!.stringValue).toBe("[key] kept whole");
+      expect(strings(attr(record, "hue.truncated"))).toEqual(["output.value"]);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a recorded request cut when queued has its tool credentials removed from the whole value first", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "scrubbed-cut",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      const span = hue.tracer.startSpan("request");
+      span.setAttribute(
+        "input.value",
+        JSON.stringify({
+          model: "synthetic-model",
+          tools: [
+            {
+              type: "mcp",
+              server_label: "synthetic",
+              headers: { Authorization: "Bearer synthetic-cut-token" },
+            },
+          ],
+          input: "x".repeat(1_300_000),
+        }),
+      );
+      span.end();
+      await hue.flush();
+      const record = named(endpoint.accepted(), "request");
+      const exported = attr(record, "input.value")!.stringValue!;
+      expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain(
+        "synthetic-cut-token",
+      );
+      expect(exported.startsWith('{"model":"synthetic-model","tools":[{"type":"mcp"')).toBe(true);
+      expect(exported).toContain("[redacted]");
+      expect(Buffer.byteLength(exported)).toBe(MiB);
+      expect(strings(attr(record, "hue.truncated"))).toEqual(["input.value"]);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a client's own span with 2,000 events of several attributes each is exported whole", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "many-events",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      const span = hue.tracer.startSpan("many events");
+      for (let index = 0; index < 2000; index++)
+        span.addEvent(`step ${index}`, {
+          "app.step": index,
+          "app.kind": "tool",
+          "app.ok": true,
+          "app.note": `note ${index}`,
+          "app.cost": index / 10,
+        });
+      span.end();
+      const report = await hue.flush();
+      expect(report).toMatchObject({ acceptedSpans: 1, droppedSpans: 0, failedSpans: 0 });
+      const record = named(endpoint.accepted(), "many events");
+      expect(record.events).toHaveLength(2000);
+      expect(record.events!.at(-1)!.attributes).toHaveLength(5);
+      expect(record.droppedEventsCount ?? 0).toBe(0);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a span whose events outgrow the queue's byte budget keeps its newest events and counts the rest as dropped", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "events-over-budget",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 1024 * 1024,
+    });
+    try {
+      const target = hue.tracer.startSpan("target");
+      target.end();
+      const span = hue.tracer.startSpan("long turn", {
+        links: Array.from({ length: 600 }, (_, index) => ({
+          context: target.spanContext(),
+          attributes: { "app.link": index, "app.note": "l".repeat(1000) },
+        })),
+      });
+      span.setAttribute("output.value", "the final answer");
+      // About 4 MB charged for these events: four times the record's budget.
+      for (let index = 0; index < 2000; index++)
+        span.addEvent(`step ${index}`, { "app.note": "n".repeat(1000) });
+      span.end();
+      const report = await hue.flush();
+      expect(report).toMatchObject({ droppedSpans: 0, failedSpans: 0 });
+      const record = named(endpoint.accepted(), "long turn");
+      expect(attr(record, "output.value")!.stringValue).toBe("the final answer");
+      const kept = record.events!.length;
+      expect(kept).toBeGreaterThan(100);
+      expect(kept).toBeLessThan(2000);
+      expect(record.events!.at(-1)!.name).toBe("step 1999");
+      expect(record.events![0]!.name).toBe(`step ${2000 - kept}`);
+      expect(record.droppedEventsCount).toBe(2000 - kept);
+      // The events took what the budget held, so the links, copied after them, were left out.
+      const links = (record as { links?: unknown[] }).links ?? [];
+      expect(links.length + (record.droppedLinksCount ?? 0)).toBe(600);
+      expect(record.droppedLinksCount).toBeGreaterThan(0);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("recordMessages exports a body of more than 16,384 values", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "many-messages",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      const input = Array.from({ length: 20_000 }, (_, index) => index);
+      await hue.model(
+        "synthetic-model",
+        () => {
+          hue.recordMessages({ input });
+        },
+        { provider: "synthetic" },
+      );
+      const report = await hue.flush();
+      expect(report).toMatchObject({ droppedLogs: 0, failedLogs: 0, instrumentationFailures: 0 });
+      const logs = endpoint.requests
+        .filter((request) => request.signal === "logs")
+        .flatMap((request) => request.records);
+      expect(logs).toHaveLength(1);
+      const messages = logs[0]!.body!.kvlistValue!.values.find(
+        (item) => item.key === "gen_ai.input.messages",
+      )!;
+      expect(messages.value.arrayValue!.values).toHaveLength(20_000);
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test.each([
+    { decoded: 8 * MiB, target: 4 * MiB },
+    { decoded: 2 * MiB, target: 2 * MiB },
+  ])(
+    "batches to the lower of 4 MiB and an advertised decoded limit of $decoded bytes",
+    async ({ decoded, target }) => {
+      const endpoint = receiver("success", undefined, undefined, () => ({
+        headers: {
+          "Hue-Max-Request-Bytes": String(4 * MiB),
+          "Hue-Max-Decoded-Bytes": String(decoded),
+        },
+      }));
+      const hue = createHue({
+        apiKey,
+        serviceName: "batch-target",
+        captureContent: true,
+        baseUrl: endpoint.url,
+        maxQueueBytes: 32 * MiB,
+      });
+      try {
+        await hue.withSpan("adopt", () => undefined);
+        await hue.flush();
+        // 7.2 MB of text that compresses well: one request under the advertised ceiling alone.
+        for (let i = 0; i < 12; i++)
+          await hue.withSpan(`record-${i}`, ({ setOutput }) => setOutput("x".repeat(600_000)));
+        expect((await hue.flush()).acceptedSpans).toBe(13);
+        const batches = endpoint.requests.slice(1);
+        expect(batches.length).toBeGreaterThanOrEqual(Math.ceil((12 * 600_000) / target));
+        for (const request of batches) expect(request.bytes).toBeLessThanOrEqual(target);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+  );
+
+  test("a record over the wire limit with 1,500 incompressible content values sheds the fewest in bounded time", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "many-values",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    try {
+      // A long conversation flattened into 3 MB of messages, about 2.3 MB after gzip.
+      const span = hue.tracer.startSpan("conversation");
+      for (let index = 0; index < 1500; index++)
+        span.setAttribute(`llm.input_messages.${index}.message.content`, noise(2000));
+      span.end();
+      const started = Date.now();
+      const report = await hue.flush();
+      // Shedding one value per encoding and compression took over a minute here.
+      expect(Date.now() - started).toBeLessThan(20_000);
+      expect(report).toMatchObject({ acceptedSpans: 1, droppedSpans: 0, failedSpans: 0 });
+      expect(endpoint.requests).toHaveLength(1);
+      const [request] = endpoint.requests;
+      expect(request!.wire).toBeLessThanOrEqual(MiB);
+      // The fewest values are shed: the request is within a few values of the limit.
+      expect(request!.wire).toBeGreaterThan(MiB - 32 * 1024);
+      const record = named(request!.records, "conversation");
+      const listed = strings(attr(record, "hue.truncated"))!;
+      expect(listed.length).toBeGreaterThan(500);
+      expect(listed.length).toBeLessThan(1500);
+      for (const key of listed) expect(attr(record, key!)!.kvlistValue).toBeDefined();
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  }, 60_000);
+
+  test.each([
+    { status: 429, retryAfter: "3" },
+    { status: 503, retryAfter: "1" },
+  ])(
+    "a request over limits a $status lowered is split before it is sent again",
+    async ({ status, retryAfter }) => {
+      const lowered = {
+        "Hue-Max-Request-Bytes": String(MiB),
+        "Hue-Max-Decoded-Bytes": String(MiB),
+      };
+      const endpoint = receiver("success", undefined, undefined, (index, signal) => {
+        if (signal !== "traces") return undefined;
+        return index === 1
+          ? { status, headers: { ...lowered, "Retry-After": retryAfter } }
+          : { headers: lowered };
+      });
+      const hue = createHue({
+        apiKey,
+        serviceName: "lowered-while-sent",
+        captureContent: true,
+        baseUrl: endpoint.url,
+        timeoutMillis: 2000,
+      });
+      try {
+        // 2.4 MB that compresses well: one request under the 4 MiB decoded limit it was sent at.
+        for (let i = 0; i < 6; i++)
+          await hue.withSpan(`record-${i}`, ({ setOutput }) => setOutput("x".repeat(400_000)));
+        const report = await hue.flush();
+        expect(report).toMatchObject({ acceptedSpans: 6, failedSpans: 0, droppedSpans: 0 });
+        const [refused, ...resent] = endpoint.requests;
+        expect(refused!.status).toBe(status);
+        expect(refused!.bytes).toBeGreaterThan(MiB);
+        expect(resent.length).toBeGreaterThan(1);
+        for (const request of resent) expect(request.bytes).toBeLessThanOrEqual(MiB);
+        expect(hue.transport.getIssues().filter((issue) => issue.kind !== "warning")).toEqual([]);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    30_000,
+  );
+
+  test("a trace's root carries the records an earlier request of the same export lost", async () => {
+    // The child's request is refused for longer than an export holds it; the root, too large to
+    // share its request, follows in the same export.
+    const endpoint = receiver("success", undefined, undefined, (index, signal) =>
+      signal === "traces" && index === 1
+        ? { status: 429, headers: { "Retry-After": "61" } }
+        : undefined,
+    );
+    const hue = createHue({
+      apiKey,
+      serviceName: "root-after-loss",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 32 * MiB,
+    });
+    try {
+      // 2.7 MB each before gzip: two requests at the 4 MiB batch target.
+      const turn = hue.tracer.startSpan("agent turn");
+      const step = hue.tracer.startSpan("step", {}, trace.setSpan(context.active(), turn));
+      for (let index = 0; index < 3; index++)
+        step.setAttribute(`custom.blob.${index}`, "s".repeat(900_000));
+      step.end();
+      for (let index = 0; index < 3; index++)
+        turn.setAttribute(`custom.blob.${index}`, "r".repeat(900_000));
+      turn.end();
+      await hue.flush().catch(() => undefined);
+      const exported = named(endpoint.accepted(), "agent turn");
+      expect(attr(exported, "hue.sdk.dropped_records")).toEqual({ intValue: "1" });
+      expect(endpoint.requests.map((request) => request.status)).toEqual([429, 200]);
+    } finally {
+      await hue.shutdown().catch(() => undefined);
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a recorded request longer than the record's budget is replaced by the marker, never cut unscrubbed", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "unscrubbable",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 2 * MiB,
+    });
+    const recorded = JSON.stringify({
+      model: "synthetic-model",
+      tools: [
+        {
+          type: "mcp",
+          server_label: "synthetic",
+          headers: { Authorization: "Bearer synthetic-unscrubbed-token" },
+        },
+      ],
+      input: "x".repeat(1_300_000),
+    });
+    try {
+      const span = hue.tracer.startSpan("request");
+      span.setAttribute("input.value", recorded);
+      span.setAttribute("gen_ai.request.model", "synthetic-model");
+      span.end();
+      const report = await hue.flush();
+      expect(report).toMatchObject({ acceptedSpans: 1, droppedSpans: 0, failedSpans: 0 });
+      const record = named(endpoint.accepted(), "request");
+      const marker = Object.fromEntries(
+        attr(record, "input.value")!.kvlistValue!.values.map((item) => [item.key, item.value]),
+      );
+      expect(marker["hue.truncated"]).toEqual({ boolValue: true });
+      expect(marker["hue.truncated_bytes"]).toEqual({ intValue: String(recorded.length) });
+      expect(strings(attr(record, "hue.truncated"))).toEqual(["input.value"]);
+      expect(attr(record, "gen_ai.request.model")!.stringValue).toBe("synthetic-model");
+      expect(endpoint.requests.map((request) => request.raw).join(" ")).not.toContain(
+        "synthetic-unscrubbed-token",
+      );
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("a shutdownSafe budget that ends during a rate-limit hold ends the hold and reports its records lost", async () => {
+    const endpoint = receiver("success", undefined, undefined, (index) =>
+      index === 1 ? { status: 429, headers: { "Retry-After": "30" } } : undefined,
+    );
+    const hue = createHue({
+      apiKey,
+      serviceName: "rate-limited-shutdown",
+      captureContent: false,
+      baseUrl: endpoint.url,
+    });
+    try {
+      await hue.withSpan("held", () => undefined);
+      const started = Date.now();
+      const result = await hue.shutdownSafe({ timeoutMillis: 2000 });
+      expect(result).toMatchObject({ ok: false, timedOut: true });
+      // The hold ended with the budget: shutdown settles now, not after the 30 s Retry-After, and
+      // no timer of the hold keeps the process running.
+      const error = await hue.shutdown().catch((reason: unknown) => reason);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(error).toBeInstanceOf(HueExportError);
+      expect((error as HueExportError).issues.filter((issue) => issue.count > 0)).toEqual([
+        expect.objectContaining({ kind: "failed", count: 1, status: 429 }),
+      ]);
+      expect(endpoint.requests.map((request) => request.status)).toEqual([429]);
+    } finally {
+      await endpoint.server.stop(true);
+    }
+  });
+});
 
 describe("Vercel AI SDK integration", () => {
   test.each([true, false])(
@@ -3032,6 +3810,8 @@ describe("Application failure isolation", () => {
       serviceName: "safe",
       captureContent: true,
       baseUrl: endpoint.url,
+      // A span and its tool span, each with a 1 MiB input and output, held at once.
+      maxQueueBytes: 32 * 1024 * 1024,
     });
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
@@ -3042,7 +3822,7 @@ describe("Application failure isolation", () => {
         throw new Error(apiKey);
       },
     };
-    const invalid = ["x".repeat(262144), cyclic, accessor, { n: NaN }, 1n];
+    const invalid = ["x".repeat(1024 * 1024), cyclic, accessor, { n: NaN }, 1n];
     try {
       let executions = 0;
       for (const value of invalid) {
@@ -3062,7 +3842,7 @@ describe("Application failure isolation", () => {
       }
       expect(executions).toBe(invalid.length);
       expect(getterCalls).toBe(0);
-      // Five captures of each value; the 256 KiB string is cut to the cap, not a failure, except
+      // Five captures of each value; the 1 MiB string is cut to the cap, not a failure, except
       // as an inference log's body, which is parsed back and so still omitted.
       expect(hue.transport.getReport().instrumentationFailures).toBe(21);
       await expect(hue.flush()).rejects.toBeInstanceOf(HueExportError);

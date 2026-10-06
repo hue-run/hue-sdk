@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -33,6 +34,11 @@ from hue_sdk import Hue, ProjectValidationError, create_hue_safe
 from hue_sdk.transport import MAX_CONTENT_BYTES, TRUNCATED_KEY
 
 KEY = "synthetic-local-project-key"
+
+
+def noise(length: int) -> str:
+    """``length`` characters of random base64: text gzip cannot shrink below about 3/4."""
+    return base64.b64encode(os.urandom(length))[:length].decode()
 
 
 def attrs(span):
@@ -167,9 +173,9 @@ def test_model_records_system_instructions_and_tool_definitions(receiver, captur
 
 
 def test_tool_result_over_the_cap_is_cut_and_listed_not_omitted(receiver):
-    # 160 Ki two-byte characters: 320 KiB of UTF-8, over the 256 KiB value cap. The result's
+    # 640 Ki two-byte characters: 1.25 MiB of UTF-8, over the 1 MiB value cap. The result's
     # recorded prefix reaches Hue with the call, instead of the whole value being omitted.
-    large = {"body": "\u00e9" * (160 * 1024), "pages": 3}
+    large = {"body": "\u00e9" * (640 * 1024), "pages": 3}
     with Hue(receiver.url, KEY, capture_content=True) as hue:
         with hue.tool("read_document") as call:
             call.set_input({"id": "doc_1"})
@@ -909,7 +915,7 @@ def test_unsafe_base_urls_rejected_without_echoing_values(url):
 def test_a_whole_value_unmarks_its_cut_key_and_concurrent_cuts_list_both(receiver):
     from concurrent.futures import ThreadPoolExecutor
 
-    large = "\u00e9" * (160 * 1024)
+    large = "\u00e9" * (640 * 1024)
     with Hue(receiver.url, KEY, capture_content=True) as hue:
         # A whole value set after a cut one unmarks its key; another listed key stays.
         with hue.span("replaced") as span:
@@ -950,7 +956,7 @@ def test_invalid_capture_choice_and_json_are_rejected(receiver):
     with Hue(receiver.url, KEY, capture_content=True) as hue:
         with hue.span("invalid") as span:
             span.set_input(float("nan"))
-            span.set_output("x" * 262_144)
+            span.set_output("x" * MAX_CONTENT_BYTES)
             span.set_usage(input_tokens=-1)
             span.set_usage(output_tokens=True)
         assert not hue.force_flush()
@@ -1031,21 +1037,30 @@ def test_standard_exporter_retries_transient_response(receiver):
     assert receiver.requests[0][2] == receiver.requests[1][2]
 
 
-def test_encoded_batches_are_split_and_single_oversize_is_visible(receiver):
+def test_encoded_batches_are_split_on_the_wire_and_single_oversize_is_visible(receiver):
     with Hue(receiver.url, KEY, capture_content=True) as hue:
+        # 1.6 MB of each signal that gzip cannot shrink below 1 MiB: within the 4 MiB batch
+        # target before gzip, over the receiver's limit on the wire, so batches travel in parts.
         for index in range(8):
             with hue.span(f"large-{index}") as span:
-                span.set_input("x" * 200_000)
-                span.log_inference(output="y" * 200_000)
+                span.set_input(noise(200_000))
+                span.log_inference(output=noise(200_000))
         assert hue.force_flush()
         assert len(receiver.spans()) == len(receiver.logs()) == 8
         assert all(int(h["X-Wire-Bytes"]) <= 1_048_576 for _, h, _ in receiver.requests)
+        assert all(len(body) <= 4 * 1_048_576 for _, _, body in receiver.requests)
         assert len(receiver.requests) >= 4
         with hue.span("too-large-custom-record") as span:
-            # Caller-controlled arbitrary attributes are not silently truncated by Hue.
-            span.set_attribute("custom.content", "z" * 1_048_576)
+            # Metadata is never shed: caller-controlled custom attributes gzip cannot fit into
+            # one request leave the record unsendable, and that is visible.
+            for index in range(6):
+                span.set_attribute(f"custom.content.{index}", noise(250_000))
         assert not hue.force_flush()
         assert hue.export_status.failed_trace_batches == 1
+        issues = [issue for issue in hue.export_issues() if issue.kind == "dropped"]
+        assert [issue.message for issue in issues] == [
+            "Hue telemetry record exceeds the receiver's request limit without its content"
+        ]
     assert len(receiver.spans()) == 8
 
 
@@ -1289,7 +1304,34 @@ def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
     assert b"synthetic-header-secret" not in telemetry
 
 
-def test_oversized_tool_definition_is_dropped_without_being_parsed(receiver, monkeypatch):
+def test_oversized_tool_request_is_scrubbed_whole_before_it_is_cut(receiver):
+    provider = TracerProvider()
+    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        tracer = provider.get_tracer("third-party")
+        oversized = tracer.start_span("oversized")
+        # Over the value cap: its credentials are removed from the whole request before it is
+        # cut to a prefix that no longer parses, and the record is kept.
+        request = {
+            "tools": [{"type": "mcp", "headers": {"Authorization": "Bearer synthetic-cut-token"}}],
+            "input": "x" * 1_100_000,
+        }
+        oversized.set_attribute("input.value", json.dumps(request))
+        oversized.end()
+        assert hue.force_flush()
+    (span,) = receiver.spans()
+    stored = attrs(span)
+    value = stored["input.value"].string_value
+    assert len(value.encode("utf-8")) == MAX_CONTENT_BYTES
+    assert value.startswith('{"tools":[{"type":"mcp","headers":"[redacted]"}]')
+    assert b"synthetic-cut-token" not in b"".join(body for _, _, body in receiver.requests)
+    assert [item.string_value for item in stored[TRUNCATED_KEY].array_value.values] == [
+        "input.value"
+    ]
+
+
+def test_tool_request_too_large_to_parse_within_the_record_budget_is_marked_not_parsed(
+    receiver, monkeypatch
+):
     from hue_sdk import _tool_definitions
 
     parsed: list[int] = []
@@ -1298,18 +1340,32 @@ def test_oversized_tool_definition_is_dropped_without_being_parsed(receiver, mon
         _tool_definitions, "_parse", lambda text: parsed.append(len(text)) or original(text)
     )
     provider = TracerProvider()
-    with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+    with Hue(
+        receiver.url,
+        KEY,
+        capture_content=True,
+        tracer_provider=provider,
+        max_queue_bytes=2 * 1024 * 1024,
+    ) as hue:
         tracer = provider.get_tracer("third-party")
         oversized = tracer.start_span("oversized")
-        # Larger than one export request: admission drops the record before the scrub runs.
-        oversized.set_attribute("input.value", json.dumps({"tools": [], "input": "x" * 1_100_000}))
+        # Longer than the record's budget: never parsed on the application thread, so the value
+        # is replaced by the receiver's marker rather than exported unscrubbed; the span is kept.
+        oversized.set_attribute("input.value", json.dumps({"tools": [], "input": "x" * 3_000_000}))
         oversized.end()
         small = tracer.start_span("small")
         small.set_attribute("input.value", json.dumps({"tools": [{"authorization": "secret"}]}))
         small.end()
-        assert not hue.force_flush()
-        assert hue.export_status.dropped_trace_records == 1
-    assert [span.name for span in receiver.spans()] == ["small"]
+        assert hue.force_flush()
+    spans = {span.name: attrs(span) for span in receiver.spans()}
+    marker = {
+        item.key: item.value for item in spans["oversized"]["input.value"].kvlist_value.values
+    }
+    assert marker["hue.truncated"].bool_value is True
+    assert [item.string_value for item in spans["oversized"][TRUNCATED_KEY].array_value.values] == [
+        "input.value"
+    ]
+    assert "secret" not in spans["small"]["input.value"].string_value
     assert parsed and max(parsed) < 1_000
 
 
