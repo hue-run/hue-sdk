@@ -8,6 +8,7 @@ import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions
 import { hashInlineFiles, INLINE_FILE_LIMIT, isMessageKey } from "./inline-files.js";
 import { truncateUtf8 } from "./safety.js";
 import type { OffloadCollector } from "./blobs.js";
+import type { DigestedMessage } from "./snapshot.js";
 
 export { truncateUtf8 };
 
@@ -129,7 +130,7 @@ interface RedactionBudget {
   /** The record's value strings its queue cut when it was admitted. */
   cut?: ReadonlySet<string>;
   /** The span's own messages whose large inline files its queue shrank to their digest. */
-  digested?: ReadonlyMap<string, number>;
+  digested?: ReadonlyMap<string, DigestedMessage>;
   /** Where a span's own values over the cap are left whole for upload, when they may be. */
   offload?: OffloadCollector;
 }
@@ -142,7 +143,7 @@ export interface RedactionLimits {
   cut?: ReadonlySet<string>;
   /** The span's own messages whose large inline files were shrunk to their digest when it was
    * queued, with how many files each: reported as not uploaded when values may be. */
-  digested?: ReadonlyMap<string, number> | undefined;
+  digested?: ReadonlyMap<string, DigestedMessage> | undefined;
   /**
    * Set when a span's values over the cap may be uploaded: each of its own string or byte
    * attribute values still over the cap after the redactor, and each recorded message that may
@@ -226,7 +227,8 @@ function offloadValue(
   if (typeof value !== "string") return NOT_HELD;
   // Each large inline file the queue shrank to its digest is reported as not uploaded; what is
   // left of the message is placed like any other value, and reported too if it is cut.
-  const files = budget.digested?.get(value) ?? 0;
+  const digested = budget.digested?.get(key);
+  const files = digested?.text === value ? digested.files : 0;
   for (let file = 0; file < files; file++) collector.cut.push(key);
   if (budget.cut?.has(value)) {
     collector.cut.push(key);

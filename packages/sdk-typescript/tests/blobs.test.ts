@@ -655,6 +655,49 @@ describe("values over the inline limit", () => {
     }
   });
 
+  test("messages queued as the same cut text report their own files", async () => {
+    const endpoint = hue({ reserve: () => ({ status: 404, json: false }) });
+    const hueClient = client(endpoint);
+    // Both messages are cut when queued to the same text; their files, past the cut, differ.
+    const message = (images: number) =>
+      JSON.stringify([
+        {
+          role: "user",
+          parts: [
+            { type: "text", content: "u".repeat(MiB + 200 * KiB) },
+            ...Array.from({ length: images }, () => ({
+              type: "blob",
+              mime_type: "image/png",
+              content: randomBytes(100 * KiB).toString("base64"),
+            })),
+          ],
+        },
+      ]);
+    try {
+      await hueClient.withSpan("learn", (context) => {
+        context.span.setAttribute("custom.document", "n".repeat(2 * MiB));
+      });
+      await hueClient.flush();
+      await hueClient.withSpan("shared prefix", (context) => {
+        context.span.setAttribute("gen_ai.input.messages", message(1));
+        context.span.setAttribute("gen_ai.output.messages", message(2));
+      });
+      await hueClient.flush();
+      const record = endpoint.span("shared prefix")!;
+      expect(attr(record, "gen_ai.input.messages")!.stringValue).toBe(
+        attr(record, "gen_ai.output.messages")!.stringValue,
+      );
+      // One file and one cut, then two files and one cut.
+      const warnings = hueClient.transport
+        .getIssues()
+        .filter((issue) => issue.message.startsWith("This Hue server does not accept uploaded"));
+      expect(warnings.map((issue) => issue.count)).toEqual([1, 5]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("the fallback for an upload step that failed reports each inline file it digests", () => {
     const tally = newTally();
     const attributes = fallbackAttributes(

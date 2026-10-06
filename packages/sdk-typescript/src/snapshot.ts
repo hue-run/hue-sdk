@@ -53,6 +53,13 @@ export interface HoldLimits {
   first: boolean;
 }
 
+/** A span's own message whose large inline files shrank to their digest when it was queued: the
+ * text queued, and how many files it lost. */
+export interface DigestedMessage {
+  text: string;
+  files: number;
+}
+
 /** Where a copy stood before one event or link, to return to when the budget cannot hold it. */
 interface Mark {
   bytes: number;
@@ -76,9 +83,9 @@ class Snapshot {
   held = 0;
   /** Set while the span's own attributes are copied: only they may be held for upload. */
   private own = false;
-  /** The span's own messages whose large inline files shrank to their digest when queued, as
-   * queued (cut or not), and how many files each lost. */
-  digested = new Map<string, number>();
+  /** The span's own messages whose large inline files shrank to their digest when queued, by
+   * attribute: the text queued (cut or not), and how many files it lost. */
+  digested = new Map<string, DigestedMessage>();
   /** How many files each message text {@link inlineFiles} hashed replaced by their digest. */
   private hashedFiles = new Map<string, number>();
 
@@ -363,7 +370,7 @@ class Snapshot {
           this.own && shape === "attributes" && typeof source === "string"
             ? this.hashedFiles.get(source)
             : undefined;
-        if (files && typeof copied === "string") this.digested.set(copied, files);
+        if (files && typeof copied === "string") this.digested.set(key, { text: copied, files });
       }
     }
     this.ancestors.delete(value);
@@ -425,7 +432,7 @@ export interface RecordSnapshot<T> {
   unresolvedResource: boolean;
   cut: ReadonlySet<string>;
   held: number;
-  digested: ReadonlyMap<string, number>;
+  digested: ReadonlyMap<string, DigestedMessage>;
 }
 
 export function snapshotSpan(

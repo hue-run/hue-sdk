@@ -58,7 +58,7 @@ import {
   withoutPlaceholderMarkers,
 } from "./live-spans.js";
 import { estimateRecordBytes } from "./safety.js";
-import { snapshotLog, snapshotSpan } from "./snapshot.js";
+import { snapshotLog, snapshotSpan, type DigestedMessage } from "./snapshot.js";
 import {
   DROPPED_RECORDS_KEY,
   isContentKey,
@@ -229,7 +229,7 @@ export class HueTransport {
   // The value strings each admitted record's snapshot cut, for its redaction.
   private admissionCuts = new WeakMap<RecordValue, ReadonlySet<string>>();
   // The span's own messages whose large inline files each admitted span shrank to their digest.
-  private admissionDigests = new WeakMap<RecordValue, ReadonlyMap<string, number>>();
+  private admissionDigests = new WeakMap<RecordValue, ReadonlyMap<string, DigestedMessage>>();
   /** Uploads values over the inline limit apart from their spans; absent when disabled. */
   private uploader?: BlobUploader;
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
