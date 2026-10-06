@@ -33,7 +33,7 @@ from ._inline_files import (
     InlineFile,
     digest_part,
     dumps_message,
-    hash_inline_files,
+    hash_inline_files_counted,
     inline_file,
     large_inline_file_parts,
     may_inline_files,
@@ -265,13 +265,13 @@ def held_size(value: str | bytes) -> int:
 
 @dataclass
 class Held:
-    """A queued span's values held whole for upload, by key, and its message attributes whose
-    large inline files export uploads; the budget is released once, when the span is placed or
-    no longer referenced."""
+    """A queued span's values held whole for upload, by key (values over the inline limit, and
+    messages holding a large inline file); the budget is released once, when the span is placed
+    or no longer referenced."""
 
     values: dict[str, str | bytes] = field(default_factory=dict)
-    parts: list[str] = field(default_factory=list)
-    # Keys of values over the inline limit cut when the span was queued: never held whole.
+    # Keys of values over the inline limit cut, or of messages whose large inline files shrank to
+    # their digest, when the span was queued (once per file): never held whole.
     cut: list[str] = field(default_factory=list)
     size: int = 0
     budget: HeldValues | None = None
@@ -324,14 +324,22 @@ def _no_auth(request: Any) -> Any:
 
 
 class _Reply:
+    """A response read within ``deadline``, its body bounded by ``limit``. The read timeout only
+    bounds silence, so a peer that trickles its answer would keep an upload slot and its value
+    long after the export moved on: the body is read a byte at a time, each read waiting on the
+    peer at most once, and a reply not read whole by the deadline raises."""
+
     __slots__ = ("status", "headers", "body")
 
-    def __init__(self, response: requests.Response, limit: int) -> None:
+    def __init__(self, response: requests.Response, limit: int, deadline: float) -> None:
         self.status = response.status_code
         self.headers = response.headers
         content = bytearray()
         try:
-            for chunk in response.iter_content(chunk_size=4096):
+            # Hue's answers and the store's are small; a larger body is not read past ``limit``.
+            for chunk in response.iter_content(chunk_size=1):
+                if monotonic() >= deadline:
+                    raise TimeoutError("The reply ran out of time.")
                 content.extend(chunk)
                 if len(content) > limit:
                     break
@@ -416,7 +424,7 @@ class BlobUploader:
                     allow_redirects=False,
                     stream=True,
                 )
-                return _Reply(response, limit)
+                return _Reply(response, limit, deadline)
         except Exception:
             return None
         finally:
@@ -742,9 +750,7 @@ class _Span:
         # In the span's attribute order, as the TypeScript SDK places them.
         self.candidates: list[tuple[str, str | bytes]] = []
         for key in attributes:
-            if key not in held.values and key not in held.parts:
-                continue
-            value = held.values.get(key, attributes.get(key))
+            value = held.values.get(key)
             if isinstance(value, (str, bytes)):
                 self.candidates.append((key, value))
 
@@ -871,12 +877,14 @@ def _fallback(key: str, value: str | bytes, cap: int) -> _Result:
     the limit cut to it (bytes replaced by the receiver's marker) and listed. A value that cannot
     be scrubbed or encoded is replaced by the receiver's marker, never cut."""
     try:
-        placed: Any = hash_inline_files(key, scrub_tool_credentials(key, value))
+        placed, files = hash_inline_files_counted(key, scrub_tool_credentials(key, value))
+        # Each large inline file is reported as a value not uploaded, as the upload step does.
+        fallbacks = ["failed"] * files
         if isinstance(placed, str) and over_utf8(placed, cap):
-            return _Result(cut_utf8(placed, cap), listed=True, fallbacks=["failed"])
+            return _Result(cut_utf8(placed, cap), listed=True, fallbacks=[*fallbacks, "failed"])
         if isinstance(placed, bytes) and len(placed) > cap:
             return _Result(truncated_marker(len(placed)), listed=True, fallbacks=["failed"])
-        return _Result(placed)
+        return _Result(placed, fallbacks=fallbacks)
     except Exception:
         return _Result(truncated_marker(len(value)), listed=True, fallbacks=["failed"])
 

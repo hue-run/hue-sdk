@@ -91,6 +91,8 @@ function fileBytes(content: string): Buffer {
 
 interface HashState {
   changed: boolean;
+  /** The files replaced by their digest. */
+  files: number;
 }
 
 /** The key holding a part's inline content: GenAI `blob` parts and AI SDK 6 `file` parts. */
@@ -110,6 +112,7 @@ function hashNode(value: unknown, state: HashState, depth: number): unknown {
     if (bytes.byteLength > INLINE_FILE_LIMIT) {
       const { [key]: _omitted, ...rest } = part;
       state.changed = true;
+      state.files++;
       return {
         ...rest,
         sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -129,7 +132,12 @@ function hashNode(value: unknown, state: HashState, depth: number): unknown {
  * `mime_type`, `modality`, `mediaType`, …). Other attributes, shorter messages and values that
  * are not JSON are returned unchanged.
  */
-export function hashInlineFiles(key: string, value: unknown): unknown {
+export function hashInlineFiles(
+  key: string,
+  value: unknown,
+  /** Counts the files replaced by their digest, when given. */
+  count?: { files: number },
+): unknown {
   if (
     !messageKeys.has(key) ||
     typeof value !== "string" ||
@@ -140,8 +148,9 @@ export function hashInlineFiles(key: string, value: unknown): unknown {
     return value;
   try {
     const parsed: unknown = JSON.parse(value);
-    const state = { changed: false };
+    const state = { changed: false, files: 0 };
     const hashed = hashNode(parsed, state, 0);
+    if (count) count.files += state.files;
     return state.changed ? JSON.stringify(hashed) : value;
   } catch {
     // Not JSON, or nested too deeply to inspect: export decides the value's fate as before.

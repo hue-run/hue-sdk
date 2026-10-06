@@ -6,10 +6,12 @@ wheel."""
 from __future__ import annotations
 
 import base64
+import gc
 import gzip
 import hashlib
 import json
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,9 +49,14 @@ class Store:
             None
         )
         # The store's status for the n-th PUT: 200 stores, "hang" never answers, "expired"
-        # answers S3's expired-URL refusal.
+        # answers S3's expired-URL refusal, "trickle" answers 200 a byte at a time.
         self.put: Callable[[int], int | str] = lambda _: 200
         self.hang = Event()
+        # Trace requests are answered once ``release_traces`` is set; ``traces_received`` is set
+        # when one arrives.
+        self.release_traces = Event()
+        self.release_traces.set()
+        self.traces_received = Event()
 
     def span(self, name: str) -> Any:
         with self.lock:
@@ -132,6 +139,20 @@ def hue_store() -> Iterator[Store]:
                     store.puts.append(put)
                 if behavior == "hang":
                     store.hang.wait(30)
+                    return
+                if behavior == "trickle":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    for _ in range(1000):
+                        if store.hang.is_set():
+                            return
+                        try:
+                            self.wfile.write(b" ")
+                            self.wfile.flush()
+                        except OSError:
+                            return
+                        time.sleep(0.1)
                     return
                 if behavior == "expired":
                     put["status"] = 403
@@ -239,6 +260,8 @@ def hue_store() -> Iterator[Store]:
                         for scope in resource.scope_spans
                         for span in scope.spans
                     )
+                store.traces_received.set()
+                store.release_traces.wait(30)
                 self.reply(
                     200, b"", {"Content-Type": "application/x-protobuf", "Hue-Pending-Spans": "1"}
                 )
@@ -519,6 +542,120 @@ def test_an_upload_body_reports_its_position_and_ends_when_its_upload_must_stop(
         body.read(3)
     with pytest.raises(TimeoutError):
         _Body(b"x", 1, monotonic() - 1, lambda: False).read(1)
+
+
+def test_a_message_s_large_inline_file_is_held_apart_from_the_queue_budget(hue_store):
+    # The message's text is larger than the whole queue; its copy with the file as its digest is
+    # not, so the queue takes the span as it did before uploads existed.
+    image = os.urandom(200 * KIB)
+    with client(hue_store, max_queue_bytes=256 * KIB) as hue:
+        with hue.span("small queue") as span:
+            span.set_attribute("gen_ai.input.messages", message_with_image(image))
+        assert hue.force_flush()
+        status = hue.export_status
+        assert status.dropped_trace_records == 0 and status.uploaded_values == 1
+    (entry,) = blobs(hue_store.span("small queue"))
+    assert entry["key"] == "gen_ai.input.messages#/0/parts/1/content"
+    assert entry["sha256"] == sha256(image)
+
+
+def test_inline_files_queued_while_the_receiver_lacks_the_route_are_reported_per_file(hue_store):
+    hue_store.reserve = lambda _: (404, {}, False)
+    images = [os.urandom(100 * KIB), os.urandom(120 * KIB)]
+    with client(hue_store) as hue:
+        with hue.span("learn") as span:
+            span.set_attribute("custom.document", "n" * (2 * MIB))
+        assert hue.force_flush()
+        with hue.span("files") as span:
+            span.set_attribute(
+                "gen_ai.input.messages",
+                json.dumps(
+                    [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "type": "blob",
+                                    "mime_type": "image/png",
+                                    "content": base64.b64encode(image).decode(),
+                                }
+                            ],
+                        }
+                        for image in images
+                    ]
+                ),
+            )
+        assert hue.force_flush()
+        assert hue.export_status.upload_fallbacks == 3
+        warnings = [
+            issue.count
+            for issue in hue.export_issues()
+            if issue.message.startswith("This Hue server does not accept uploaded")
+        ]
+        assert warnings == [1, 2]
+    assert len(hue_store.reservations) == 1
+    messages = json.loads(attrs(hue_store.span("files"))["gen_ai.input.messages"].string_value)
+    assert [message["parts"][0]["sha256"] for message in messages] == [
+        sha256(image) for image in images
+    ]
+
+
+def test_the_fallback_for_an_unfinished_placement_reports_each_inline_file_it_digests():
+    from hue_sdk._blobs import _fallback
+
+    result = _fallback("gen_ai.input.messages", message_with_image(os.urandom(100 * KIB)), MIB)
+    assert '"sha256"' in result.value
+    assert result.fallbacks == ["failed"] and not result.listed
+
+
+def test_a_reply_that_trickles_is_cut_off_at_its_deadline_and_frees_its_upload_slot(hue_store):
+    hue_store.put = lambda _: "trickle"
+    hue = client(hue_store, export_timeout_seconds=0.5)
+    try:
+        with hue.span("trickled") as span:
+            span.set_attribute("custom.document", "t" * (2 * MIB))
+        started = time.monotonic()
+        assert hue.force_flush(timeout_millis=20_000)
+        # Six request budgets for the uploads, then the span's own request; the store's answer
+        # would have taken 100 s.
+        assert time.monotonic() - started < 6
+        assert hue.export_status.upload_fallbacks == 1
+        slots = hue._uploads.uploader._slots
+        deadline = time.monotonic() + 2
+        while slots._value < 4 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert slots._value == 4
+    finally:
+        hue.shutdown(timeout_millis=5_000)
+
+
+def test_a_placed_span_lets_go_of_its_whole_value_while_it_is_sent(hue_store):
+    hue_store.release_traces.clear()
+    text = "w" * (2 * MIB)
+    flushing = None
+    with client(hue_store) as hue:
+        try:
+            span = hue.tracer.start_span("released")
+            span.set_attribute("custom.document", text)
+            span.end()
+            del span
+            gc.collect()
+            # The application's reference, and the queued copy's.
+            queued = sys.getrefcount(text)
+            flushing = Thread(target=hue.force_flush, daemon=True)
+            flushing.start()
+            assert hue_store.traces_received.wait(10)
+            # Uploaded and being sent: the queued copy no longer holds the whole value, so the
+            # held-value budget it released is not held twice.
+            deadline = time.monotonic() + 2
+            while sys.getrefcount(text) >= queued and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert sys.getrefcount(text) == queued - 1
+        finally:
+            hue_store.release_traces.set()
+            if flushing is not None:
+                flushing.join(15)
+    assert len(blobs(hue_store.span("released"))) == 1
 
 
 def test_a_rate_limited_reservation_is_retried_after_its_retry_after(hue_store):

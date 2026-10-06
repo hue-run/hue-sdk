@@ -861,6 +861,9 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         result = list(spans)
         for (index, span, held), attributes in zip(entries, placed, strict=True):
             result[index] = replace_span(span, attributes=attributes)
+            # The placed copy is what this export sends, its retries included: the queued copy
+            # lets go of its whole values with their budget, so no more is held than it admits.
+            held.values.clear()
             held.release()
         self._report_uploads(tally)
         return result

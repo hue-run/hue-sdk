@@ -570,8 +570,11 @@ export class BlobUploader {
     let http: typeof import("node:http");
     try {
       // Loaded on first use, as the OTLP transport loads it, after the application's own http
-      // instrumentation could patch it.
-      http = (await import(url.protocol === "https:" ? "node:https" : "node:http")) as never;
+      // instrumentation could patch it. Each specifier is a literal, so the package's import
+      // boundary can be checked.
+      http = (
+        url.protocol === "https:" ? await import("node:https") : await import("node:http")
+      ) as never;
     } catch {
       return undefined;
     }
@@ -826,11 +829,14 @@ export function fallbackAttributes(
     countFallback(tally, "failed", traceId);
   for (const { key, value } of collector.candidates) {
     let placed: unknown = value;
+    // Each large inline file is reported as a value not uploaded, as the upload step reports it.
+    const count = { files: 0 };
     try {
-      placed = hashInlineFiles(key, value);
+      placed = hashInlineFiles(key, value, count);
     } catch {
       // Left as it is: cut below when over the limit.
     }
+    for (let file = 0; file < count.files; file++) countFallback(tally, "failed", traceId);
     if (typeof placed === "string") {
       if (Buffer.byteLength(placed, "utf8") > valueBytes) {
         placed = truncateUtf8(placed, valueBytes);

@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { createHue, type ExportIssue } from "../src/index.js";
+import { fallbackAttributes, newTally } from "../src/blobs.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
 type Value = {
@@ -549,6 +550,83 @@ describe("values over the inline limit", () => {
       await hueClient.shutdown();
       endpoint.server.stop(true);
     }
+  });
+
+  test("a message's large inline file is held for upload apart from the queue's byte budget", async () => {
+    const endpoint = hue();
+    // The message's text is larger than the whole queue; its copy with the file as its digest
+    // is not, so the queue takes the span as it did before uploads existed.
+    const hueClient = client(endpoint, { maxQueueBytes: 256 * KiB });
+    const image = randomBytes(200 * KiB);
+    try {
+      await hueClient.withSpan("small queue", (context) => {
+        context.span.setAttribute("gen_ai.input.messages", messageWithImage(image));
+      });
+      const report = await hueClient.flush();
+      expect(report.droppedSpans).toBe(0);
+      expect(report.uploadedValues).toBe(1);
+      expect(blobs(endpoint.span("small queue")!)).toMatchObject([
+        { key: "gen_ai.input.messages#/0/parts/1/content", sha256: sha256(image) },
+      ]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("inline files queued while the receiver lacks the upload route are reported, one per file", async () => {
+    const endpoint = hue({ reserve: () => ({ status: 404, json: false }) });
+    const hueClient = client(endpoint);
+    const images = [randomBytes(100 * KiB), randomBytes(120 * KiB)];
+    try {
+      await hueClient.withSpan("learn", (context) => {
+        context.span.setAttribute("custom.document", "n".repeat(2 * MiB));
+      });
+      await hueClient.flush();
+      await hueClient.withSpan("files", (context) => {
+        context.span.setAttribute(
+          "gen_ai.input.messages",
+          JSON.stringify(
+            images.map((image) => ({
+              role: "user",
+              parts: [{ type: "blob", mime_type: "image/png", content: image.toString("base64") }],
+            })),
+          ),
+        );
+      });
+      const report = await hueClient.flush();
+      expect(endpoint.reservations).toHaveLength(1);
+      expect(report.uploadFallbacks).toBe(3);
+      const messages = JSON.parse(
+        attr(endpoint.span("files")!, "gen_ai.input.messages")!.stringValue!,
+      ) as { parts: Record<string, unknown>[] }[];
+      expect(messages.map((message) => message.parts[0]!.sha256)).toEqual(images.map(sha256));
+      const warnings = hueClient.transport
+        .getIssues()
+        .filter((issue) => issue.message.startsWith("This Hue server does not accept uploaded"));
+      expect(warnings.map((issue) => issue.count)).toEqual([1, 2]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("the fallback for an upload step that failed reports each inline file it digests", () => {
+    const tally = newTally();
+    const attributes = fallbackAttributes(
+      { "gen_ai.input.messages": messageWithImage(randomBytes(100 * KiB)) },
+      {
+        candidates: [
+          { key: "gen_ai.input.messages", value: messageWithImage(randomBytes(100 * KiB)) },
+        ],
+        cut: [],
+      },
+      MiB,
+      tally,
+      "0af7651916cd43dd8448eb211c80319c",
+    );
+    expect(String(attributes["gen_ai.input.messages"])).toContain('"sha256"');
+    expect(tally.fallbacks.get("failed")?.count).toBe(1);
   });
 
   test("a rate-limited reservation is retried after its Retry-After", async () => {

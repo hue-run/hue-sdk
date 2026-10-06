@@ -564,11 +564,13 @@ the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no res
 asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm.
 
 To upload a value whole, the queue holds it until export apart from `maxQueueBytes`, within a
-128 MiB budget of held values (a string charged two bytes a code unit); `maxQueueBytes` is still
-charged what the value would cost cut, so one that cannot be uploaded is exported exactly as it was
-before. A value the budget cannot hold, or one queued while the receiver is known to lack the
-upload route, is cut when it is queued, as before; a single value larger than the whole budget is
-held while nothing else is. While values can be uploaded, helpers encode content whole, up to the
+128 MiB budget of held values (a string charged two bytes a code unit); a recorded message holding
+an inline file over 64 KiB is held the same way. `maxQueueBytes` is still charged what the value
+would cost cut (a message, its copy with the files as their digest), so one that cannot be
+uploaded is exported exactly as it was before. A value the budget cannot hold, or one queued while
+the receiver is known to lack the upload route, is cut (its files digested) when it is queued, as
+before, and reported as not uploaded, once per file; a single value larger than the whole budget
+is held while nothing else is. While values can be uploaded, helpers encode content whole, up to the
 upload limit and 1,048,576 values, rather than cutting it to the value limit as they record it.
 
 Nothing is uploaded with `captureContent: false` or a setup credential (`hue_setup_…`), nor from

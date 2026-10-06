@@ -24,7 +24,7 @@ from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
 from ._blobs import MAX_BLOB_BYTES, Held, HeldValues, attach_held, held_size
-from ._inline_files import hash_inline_files, may_inline_files
+from ._inline_files import hash_inline_files, hash_inline_files_counted
 from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY, cut_utf8, over_utf8
 from ._records import CONTENT_PREFIXES as CONTENT_PREFIXES
 from ._records import is_content_key as is_content_key
@@ -168,9 +168,6 @@ class Hold:
         self.budget = budget
         self.value_bytes = value_bytes
         self.active = active
-
-
-_NOT_HELD = object()
 
 
 class _BudgetExceeded(ValueError):
@@ -317,36 +314,44 @@ class _ValueBudget:
             }
         return source
 
-    def _held_value(self, key: str, item: Any) -> Any:
+    def _held_value(self, key: str, item: Any) -> tuple[bool, Any]:
         """One of the span's own attribute values held whole for export to upload, when it may
-        be: text or bytes over the cap within the held-value budget, replaced in the copy by the
-        receiver's marker until export places it, or a recorded message within the cap that may
-        inline a large file, copied whole. ``_NOT_HELD`` for a value copied as before."""
+        be, within the held-value budget: text or bytes over the cap, replaced in the copy by the
+        receiver's marker until export places it, or a recorded message within the cap holding a
+        large inline file, whose copy carries the files as their digest (what the queue is
+        charged, as before). ``(True, copy)`` for a held value, ``(False, value)`` for one copied
+        as before, its large inline files already shrunk to their digest. A value not held only
+        for the budget or a receiver without the upload route is listed in ``held.cut`` (once per
+        file for a message), so export counts it as not uploaded."""
         hold = self.hold
         assert hold is not None
+        digested, files = hash_inline_files_counted(key, item)
         if isinstance(item, str):
             try:
                 over = over_utf8(item, hold.value_bytes)
             except UnicodeEncodeError:
-                return _NOT_HELD
-            if not over:
-                if hold.active and may_inline_files(key, item):
-                    self.held.parts.append(key)
-                    return self.value(item)
-                return _NOT_HELD
+                return False, digested
+            if not over and not files:
+                return False, item
             value: str | bytes = str.__str__(item)
+            # What is not uploaded if the value is not held: each file, and the value itself
+            # when it is still over the cap with its files as their digest.
+            lost = files + (1 if over and over_utf8(digested, hold.value_bytes) else 0)
         elif isinstance(item, bytes) and len(item) > hold.value_bytes:
             value = item if type(item) is bytes else memoryview(item).tobytes()
+            over, lost = True, 1
         else:
-            return _NOT_HELD
+            return False, digested
         size = held_size(value)
         if not hold.active or not hold.budget.reserve(size, self.held.size):
-            # Cut when queued, as before uploads existed; export counts it as not uploaded.
-            self.held.cut.append(key)
-            return _NOT_HELD
+            # Cut, or its files digested, when queued, as before uploads existed.
+            self.held.cut.extend([key] * lost)
+            return False, digested
         self.held.size += size
         self.held.values[key] = value
-        return self.value(truncated_marker(len(value)))
+        # The copy carries what the queue is charged: the receiver's marker for a value over the
+        # cap, a message within it with its files as their digest.
+        return True, self.value(truncated_marker(len(value)) if over else digested)
 
     def copied_attributes(self, values: Any, prefix: str = "", own: bool = False) -> Any:
         """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key. A
@@ -361,12 +366,11 @@ class _ValueBudget:
                 raise ValueError("Telemetry mapping keys must be strings.")
             listed = f"{prefix}{key}"
             if holding:
-                kept = self._held_value(key, item)
-                if kept is not _NOT_HELD:
-                    copied[self.value(key, 1)] = kept
+                # Not held, a value's large inline files shrink to their digest, as before.
+                kept, item = self._held_value(key, item)
+                if kept:
+                    copied[self.value(key, 1)] = item
                     continue
-                # Not held: its large inline files shrink to their digest, as before.
-                item = hash_inline_files(key, item)
             scrubbed = self._scrubbed_before_cut(key, item)
             copied[self.value(key, 1)] = self.content(scrubbed, listed)
             if scrubbed is not item and is_truncated_marker(scrubbed):
@@ -444,7 +448,7 @@ class _SpanSnapshot(ReadableSpan):
             # The values held for a copy that failed are no one's.
             budget.held.release()
             raise
-        if budget.held.values or budget.held.parts or budget.held.cut:
+        if budget.held.values or budget.held.cut:
             attach_held(self, budget.held)
 
     def _copy(self, span: ReadableSpan, budget: _ValueBudget, capture_content: bool) -> None:

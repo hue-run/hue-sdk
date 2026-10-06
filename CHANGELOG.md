@@ -39,10 +39,12 @@ refuses to publish a version without a matching entry below.
   `<attribute>#<JSON pointer>` (`gen_ai.input.messages#/0/parts/1/content`), instead of being
   replaced by its `sha256` and `size`. A file that is not uploaded, and one in a log record or a
   span event, is still exported as its digest.
-- A span's own string over the value cap is held whole in the queue until export, within a
-  128 MiB budget of held values apart from `maxQueueBytes`, instead of being cut when queued;
-  `maxQueueBytes` is still charged what the cut would cost. A value the budget cannot hold, or one
-  queued while the receiver is known to lack the upload route, is cut when queued as before. While
+- A span's own string over the value cap, and a recorded message of its own holding an inline
+  file over 64 KiB, is held whole in the queue until export, within a 128 MiB budget of held
+  values apart from `maxQueueBytes`, instead of being cut (or its files digested) when queued;
+  `maxQueueBytes` is still charged what the cut or digested copy would cost. A value the budget
+  cannot hold, or one queued while the receiver is known to lack the upload route, is cut (its
+  files digested) when queued as before, and reported as not uploaded, once per file. While
   values can be uploaded, helpers encode content whole (up to 1 GB and 1,048,576 values) instead
   of cutting it at the cap when they record it, and `redact` sees the whole value.
 - Processors and a client's own providers wait up to six export timeouts longer for an export,
@@ -1386,10 +1388,13 @@ No registry release is claimed until publication and registry acceptance complet
   `hue.blobs` as `<attribute>#<JSON pointer>`, instead of being replaced by its `sha256` and
   `size`; a file that is not uploaded, and one in a log record or a span event, is still exported
   as its digest.
-- A span's own value over the value cap is held whole with its queued copy until export, within a
-  128 MiB budget of held values apart from `max_queue_bytes`, instead of being cut when queued; a
-  value the budget cannot hold, or one queued while the receiver is known to lack the upload
-  route, is cut as before. While values can be uploaded, `set_input` and `set_output` content has
+- A span's own value over the value cap, and a recorded message of its own holding an inline file
+  over 64 KiB, is held whole with its queued copy until export, within a 128 MiB budget of held
+  values apart from `max_queue_bytes` (the queue is still charged the cut or digested copy),
+  instead of being cut when queued; a value the budget cannot hold, or one queued while the
+  receiver is known to lack the upload route, is cut (its files digested) as before and reported
+  as not uploaded, once per file. The queued copy lets go of its held values once export has
+  placed them. While values can be uploaded, `set_input` and `set_output` content has
   a 1 GB snapshot budget and 1,048,576 values (instead of 4 MiB and 65,536, past which it was
   omitted) and is serialized whole; the redactor sees the whole value.
 - **Wire** A record over the request limit is no longer dropped whole. A value over the value cap

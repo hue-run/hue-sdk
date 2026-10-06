@@ -127,6 +127,8 @@ def content_key(part: dict[str, Any]) -> str | None:
 class _Hash:
     def __init__(self) -> None:
         self.changed = False
+        # The files replaced by their digest.
+        self.files = 0
 
     def node(self, value: Any, depth: int = 0) -> Any:
         if depth > _MAX_DEPTH:
@@ -141,6 +143,7 @@ class _Hash:
             data = _file_bytes(inline)
             if len(data) > INLINE_FILE_LIMIT:
                 self.changed = True
+                self.files += 1
                 rest = {name: item for name, item in value.items() if name != key}
                 return {**rest, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
         return {name: self.node(item, depth + 1) for name, item in value.items()}
@@ -154,23 +157,28 @@ def hash_inline_files(key: str, value: Any) -> Any:
     attributes, shorter messages, messages longer than ``MAX_INLINE_FILE_TEXT`` and values that
     are not JSON are returned unchanged.
     """
+    return hash_inline_files_counted(key, value)[0]
+
+
+def hash_inline_files_counted(key: str, value: Any) -> tuple[Any, int]:
+    """``hash_inline_files``, and how many files it replaced by their digest."""
     if (
         key not in _MESSAGE_KEYS
         or not isinstance(value, str)
         or not INLINE_FILE_LIMIT < utf8_size(value, MAX_INLINE_FILE_TEXT) <= MAX_INLINE_FILE_TEXT
         or ('"blob"' not in value and '"file"' not in value)
     ):
-        return value
+        return value, 0
     try:
         parsed = json.loads(value)
         hashed = _Hash()
         result = hashed.node(parsed)
     except (ValueError, RecursionError):
         # Not JSON, or nested too deeply to inspect: admission decides the value's fate as before.
-        return value
+        return value, 0
     if not hashed.changed:
-        return value
-    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        return value, 0
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")), hashed.files
 
 
 def is_message_key(key: str) -> bool:

@@ -76,6 +76,9 @@ class Snapshot {
   held = 0;
   /** Set while the span's own attributes are copied: only they may be held for upload. */
   private own = false;
+  /** The span's own messages whose large inline files shrank to their digest when queued, and
+   * how many files each lost. */
+  digested = new Map<string, number>();
 
   /**
    * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
@@ -115,8 +118,15 @@ class Snapshot {
         this.charge(fallback);
         return { value };
       }
-      // Within the queued length: copied whole as before, its inline files left for export.
-      return isMessageKey(key) ? { value: this.copy(value, 1, "value", true) } : undefined;
+      // Within the queued length: a recorded message holding a large inline file is held whole
+      // for export to upload the file, within the held-value budget, and the queue is charged
+      // its copy with the files as their digest, as before. Past the budget, the files shrink to
+      // their digest when queued, as before uploads existed.
+      if (!isMessageKey(key)) return undefined;
+      const digested = this.inlineFiles(key, value);
+      if (digested === value || !this.holds(value.length * 2)) return undefined;
+      this.copy(digested, 1, "value", true);
+      return { value };
     }
     if (!utilTypes.isUint8Array(value)) return undefined;
     const length = typedArrayByteLength.call(value);
@@ -199,7 +209,8 @@ class Snapshot {
 
   /** A message attribute with its large inline files hashed. The same text is hashed once per
    * record, and a record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} of it in all;
-   * beyond that, messages are charged as recorded. */
+   * beyond that, messages are charged as recorded. A span's own message whose files shrank is
+   * named in {@link digested}, so export reports the files as not uploaded. */
   private inlineFiles(key: string, value: unknown): unknown {
     // A UTF-16 unit is at most three UTF-8 bytes, so shorter text cannot hold a file to hash.
     if (typeof value !== "string" || !isMessageKey(key) || value.length * 3 <= INLINE_FILE_LIMIT)
@@ -207,8 +218,11 @@ class Snapshot {
     if (this.hashed.has(value)) return this.hashed.get(value);
     if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
     this.inspected += value.length;
-    const result = hashInlineFiles(key, value);
+    const count = { files: 0 };
+    const result = hashInlineFiles(key, value, count);
     this.hashed.set(value, result);
+    if (this.own && typeof result === "string" && count.files)
+      this.digested.set(result, count.files);
     return result;
   }
 
@@ -393,14 +407,16 @@ function contextReader(context: SpanContext): () => SpanContext {
 }
 
 /** What admission keeps of a record: its copy, the bytes charged for it, whether resource
- * attributes were still unresolved, the value strings it cut, and the bytes of the values it
- * held whole for upload. */
+ * attributes were still unresolved, the value strings it cut, the bytes of the values it held
+ * whole for upload, and the span's own messages whose large inline files it shrank to their
+ * digest (with how many files each). */
 export interface RecordSnapshot<T> {
   record: T;
   bytes: number;
   unresolvedResource: boolean;
   cut: ReadonlySet<string>;
   held: number;
+  digested: ReadonlyMap<string, number>;
 }
 
 export function snapshotSpan(
@@ -458,6 +474,7 @@ export function snapshotSpan(
     unresolvedResource: snapshot.unresolvedResource,
     cut: snapshot.cut,
     held: snapshot.held,
+    digested: snapshot.digested,
   };
 }
 
@@ -509,5 +526,6 @@ export function snapshotLog(
     unresolvedResource: snapshot.unresolvedResource,
     cut: snapshot.cut,
     held: 0,
+    digested: new Map(),
   };
 }

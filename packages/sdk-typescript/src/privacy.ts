@@ -128,6 +128,8 @@ interface RedactionBudget {
   valueBytes: number;
   /** The record's value strings its queue cut when it was admitted. */
   cut?: ReadonlySet<string>;
+  /** The span's own messages whose large inline files its queue shrank to their digest. */
+  digested?: ReadonlyMap<string, number>;
   /** Where a span's own values over the cap are left whole for upload, when they may be. */
   offload?: OffloadCollector;
 }
@@ -138,6 +140,9 @@ export interface RedactionLimits {
   valueBytes?: number;
   /** The record's value strings cut when it was queued. */
   cut?: ReadonlySet<string>;
+  /** The span's own messages whose large inline files were shrunk to their digest when it was
+   * queued, with how many files each: reported as not uploaded when values may be. */
+  digested?: ReadonlyMap<string, number> | undefined;
   /**
    * Set when a span's values over the cap may be uploaded: each of its own string or byte
    * attribute values still over the cap after the redactor, and each recorded message that may
@@ -154,6 +159,7 @@ function budgetOf(limits: RedactionLimits): RedactionBudget {
     truncated: [],
     valueBytes: limits.valueBytes ?? MAX_CONTENT_BYTES,
     ...(limits.cut?.size ? { cut: limits.cut } : {}),
+    ...(limits.digested?.size ? { digested: limits.digested } : {}),
     ...(limits.offload ? { offload: limits.offload } : {}),
   };
 }
@@ -220,6 +226,13 @@ function offloadValue(
   if (typeof value !== "string") return NOT_HELD;
   if (budget.cut?.has(value)) {
     collector.cut.push(key);
+    return NOT_HELD;
+  }
+  // A message whose large inline files the queue shrank to their digest: each file is reported as
+  // not uploaded, and the message is placed as before uploads existed.
+  const files = budget.digested?.get(value);
+  if (files) {
+    for (let file = 0; file < files; file++) collector.cut.push(key);
     return NOT_HELD;
   }
   const scrubbed = scrubToolCredentials(key, value);

@@ -228,6 +228,8 @@ export class HueTransport {
   private holdsReleased = false;
   // The value strings each admitted record's snapshot cut, for its redaction.
   private admissionCuts = new WeakMap<RecordValue, ReadonlySet<string>>();
+  // The span's own messages whose large inline files each admitted span shrank to their digest.
+  private admissionDigests = new WeakMap<RecordValue, ReadonlyMap<string, number>>();
   /** Uploads values over the inline limit apart from their spans; absent when disabled. */
   private uploader?: BlobUploader;
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
@@ -250,6 +252,7 @@ export class HueTransport {
         redactSpan(span, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
+          digested: this.admissionDigests.get(span),
           ...(offload ? { offload } : {}),
         }),
     );
@@ -413,6 +416,7 @@ export class HueTransport {
               valueUnits,
             );
       if (snapshot.cut.size) this.admissionCuts.set(snapshot.record, snapshot.cut);
+      if (snapshot.digested.size) this.admissionDigests.set(snapshot.record, snapshot.digested);
       if (snapshot.held) {
         this.heldBytes += snapshot.held;
         this.held.set(snapshot.record, snapshot.held);
