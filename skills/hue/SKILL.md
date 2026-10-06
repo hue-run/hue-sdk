@@ -213,9 +213,12 @@ organization connection as under Verify delivery):
    criteria or any starting world. Every correction uses the latest `revision` as
    `expected_revision`; read the draft again after each write.
 
-Automatic publication requires deterministic checks sufficient to assess the requested outcome;
-an unaligned judge alone cannot establish it. Missing essential evidence or a cut build input
-blocks publication; optional background omissions remain visible limitations. The original reply
+Automatic publication requires outcome checks and technical verification. Newly generated
+semantic judges are required, pinned and score the new execution. Deterministic checks still
+verify objective values, the target record, requested
+writes and procedural constraints, and protect unrelated fields. Historical advisory judge pins
+keep their policy. Missing essential evidence or a cut build input blocks publication; optional
+background omissions remain visible limitations. The original reply
 is evaluator-only evidence, never the agent's case input. Read the connection's tool schema
 before using these arguments; the [trace-to-case guide](https://docs.hue.run/evaluations/case-from-trace)
 describes supported evidence and correction actions.
@@ -237,9 +240,11 @@ it. Manual MCP publication leaves the version open even for a newly created eval
 
 A case publishes at a tier that says what is verified: T1 World verified, T2
 Some reads answered from the recording, T3 Partial, advisory, T4 Answer-only. A trace that still
-needs correction (T5) is never published. Run results report per tier. World-case judges are
-advisory until aligned; an answer-only case requires the **Answers the task** judge in its **Answer outcome**
-evaluator, so a missing judge leaves its result inconclusive.
+needs correction (T5) is never published. Run results report per tier. Newly generated world
+judges are required and score the new execution; historical advisory judge pins keep their
+policy. An answer-only case requires the **Answers the task** judge in its **Answer outcome**
+evaluator. A failed required check fails the case; otherwise a pending, unavailable or undecided
+required judge leaves its result inconclusive.
 
 ## Evaluate a published case
 
@@ -416,9 +421,11 @@ in the codebase's language and trim the functions no call site uses.
    (`include_failing_cases`), `get_run_item`, `get_run_execution` (the attempt, its output and
    each evaluator's state), `get_case_divergence` (where the run first diverged from its source
    trace) and `get_trace`; the run page shows the same evidence. Results report per tier,
-   `(advisory)` judges never decide a case. The required **Answers the task** judge in the
-   **Answer outcome** evaluator decides an answer-only case; a missing required judge result
-   leaves it inconclusive. An `n/a` column neither passes nor fails it. Change the agent and
+   newly generated world judges score the new execution as required; historical `(advisory)`
+   judge pins never decide a case. The required **Answers the task** judge in the **Answer outcome**
+   evaluator decides an answer-only case. A failed required check fails the case; otherwise a
+   pending, unavailable or undecided required judge leaves it inconclusive. An `n/a` column
+   neither passes nor fails it. Change the agent and
    rerun with `--baseline <previous experimentId>` to see improvements and
    regressions; use the `experimentId` from `--json` or the printed run URL, as `runId` is a
    different identifier. `no_calls` is advisory: on a case that needed app calls, a world flagged
