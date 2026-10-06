@@ -581,11 +581,15 @@ Failing cases print the scorer explanation. An evaluator Hue records as not appl
 that case's columns and neither passes nor fails it, so in a mixed eval set a case is decided by
 the evaluators that apply to it; the pass line counts the not-applicable results. A case that no
 pinned evaluator applies to is an error that names what they need. A result of a pinned Hue judge
-(an evaluator of kind `world_judge`) that Hue marks advisory is
+(an evaluator of kind `world_judge`) whose immutable version does not set `config.required: true`
+and that Hue marks advisory is
 shown in its column, marked `(advisory)`, but never decides a case or the exit code; the pass line
 counts advisory failures as not counted, and a case only advisory results ran for is an error.
-The Answer outcome evaluator uses its required judge to decide answer-only cases; if that judge
-cannot run, the case is inconclusive. Any
+Applicable outcome evaluators and judge versions pinned with `config.required: true` need a
+decision before a case can pass. A required result skipped without a decision is inconclusive;
+missing results remain pending and evaluator errors remain errors. A recorded failure takes
+precedence over an unavailable required evaluator. The Answer outcome evaluator uses its
+required judge to decide answer-only cases. Any
 other evaluator's result, an error, or a metric that carries `passed` is never advisory, whatever
 its evidence says. A metric name that
 several evaluators report, such as two judges' `verdict`, gets a column per evaluator, labelled

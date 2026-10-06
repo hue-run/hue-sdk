@@ -1250,7 +1250,7 @@ describe("file-based cases", () => {
       const f = fixture({ scorers: [version(grader.definition)] });
       f.setEnvironmentStatus(status);
       expect(f.item.environmentVersionId).toBeNull();
-      const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl });
+      const client = createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 });
       const hue = createHue({
         apiKey: key,
         baseUrl: f.baseUrl,
@@ -1269,7 +1269,7 @@ describe("file-based cases", () => {
           scorers: [grader],
           target: () => ({ summary: "done" }),
         });
-        expect(f.calls.environmentReads).toBeGreaterThanOrEqual(1);
+        expect(f.calls.environmentReads).toBe(status === 404 ? 1 : 4);
         expect(scored).toBe(status === 404 ? 1 : 0);
         expect(f.calls.results).toHaveLength(1);
         expect(f.calls.results[0]).toMatchObject(expected);
