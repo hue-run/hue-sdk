@@ -76,9 +76,11 @@ class Snapshot {
   held = 0;
   /** Set while the span's own attributes are copied: only they may be held for upload. */
   private own = false;
-  /** The span's own messages whose large inline files shrank to their digest when queued, and
-   * how many files each lost. */
+  /** The span's own messages whose large inline files shrank to their digest when queued, as
+   * queued (cut or not), and how many files each lost. */
   digested = new Map<string, number>();
+  /** How many files each message text {@link inlineFiles} hashed replaced by their digest. */
+  private hashedFiles = new Map<string, number>();
 
   /**
    * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
@@ -209,8 +211,7 @@ class Snapshot {
 
   /** A message attribute with its large inline files hashed. The same text is hashed once per
    * record, and a record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} of it in all;
-   * beyond that, messages are charged as recorded. A span's own message whose files shrank is
-   * named in {@link digested}, so export reports the files as not uploaded. */
+   * beyond that, messages are charged as recorded. */
   private inlineFiles(key: string, value: unknown): unknown {
     // A UTF-16 unit is at most three UTF-8 bytes, so shorter text cannot hold a file to hash.
     if (typeof value !== "string" || !isMessageKey(key) || value.length * 3 <= INLINE_FILE_LIMIT)
@@ -221,8 +222,7 @@ class Snapshot {
     const count = { files: 0 };
     const result = hashInlineFiles(key, value, count);
     this.hashed.set(value, result);
-    if (this.own && typeof result === "string" && count.files)
-      this.digested.set(result, count.files);
+    if (count.files) this.hashedFiles.set(value, count.files);
     return result;
   }
 
@@ -347,14 +347,23 @@ class Snapshot {
           (copy as Record<string, unknown>)[key] = held.value;
           continue;
         }
-        (copy as Record<string, unknown>)[key] = this.copy(
+        const source: unknown = descriptor.value;
+        const copied = this.copy(
           shape === "attributes"
-            ? this.scrubbedBeforeCut(key, this.inlineFiles(key, descriptor.value))
-            : descriptor.value,
+            ? this.scrubbedBeforeCut(key, this.inlineFiles(key, source))
+            : source,
           depth + 1,
           shape === "event" && key === "attributes" ? "attributes" : "value",
           content || shape === "attributes",
         );
+        (copy as Record<string, unknown>)[key] = copied;
+        // A span's own message whose large inline files shrank to their digest is named as it
+        // was queued, cut or not, so export reports each file as not uploaded.
+        const files =
+          this.own && shape === "attributes" && typeof source === "string"
+            ? this.hashedFiles.get(source)
+            : undefined;
+        if (files && typeof copied === "string") this.digested.set(copied, files);
       }
     }
     this.ancestors.delete(value);

@@ -611,6 +611,50 @@ describe("values over the inline limit", () => {
     }
   });
 
+  test("a message cut after the queue digested its files reports the files and the cut", async () => {
+    const endpoint = hue({ reserve: () => ({ status: 404, json: false }) });
+    const hueClient = client(endpoint);
+    // With its file as a digest, one message is still over the value limit but within what the
+    // queue keeps for the redactor (cut on export); the other is cut when it is queued.
+    const message = (text: string) =>
+      JSON.stringify([
+        {
+          role: "user",
+          parts: [
+            { type: "text", content: text },
+            {
+              type: "blob",
+              mime_type: "image/png",
+              content: randomBytes(100 * KiB).toString("base64"),
+            },
+          ],
+        },
+      ]);
+    try {
+      await hueClient.withSpan("learn", (context) => {
+        context.span.setAttribute("custom.document", "n".repeat(2 * MiB));
+      });
+      await hueClient.flush();
+      await hueClient.withSpan("long", (context) => {
+        context.span.setAttribute("gen_ai.input.messages", message("t".repeat(MiB + 20 * KiB)));
+        context.span.setAttribute("gen_ai.output.messages", message("u".repeat(MiB + 200 * KiB)));
+      });
+      const report = await hueClient.flush();
+      expect(report.uploadFallbacks).toBe(5);
+      expect(strings(attr(endpoint.span("long")!, "hue.truncated"))?.sort()).toEqual([
+        "gen_ai.input.messages",
+        "gen_ai.output.messages",
+      ]);
+      const warnings = hueClient.transport
+        .getIssues()
+        .filter((issue) => issue.message.startsWith("This Hue server does not accept uploaded"));
+      expect(warnings.map((issue) => issue.count)).toEqual([1, 4]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("the fallback for an upload step that failed reports each inline file it digests", () => {
     const tally = newTally();
     const attributes = fallbackAttributes(

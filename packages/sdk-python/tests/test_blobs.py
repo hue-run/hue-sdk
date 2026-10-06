@@ -600,6 +600,46 @@ def test_inline_files_queued_while_the_receiver_lacks_the_route_are_reported_per
     ]
 
 
+def test_a_message_cut_after_the_queue_digested_its_files_reports_the_files_and_the_cut(
+    hue_store,
+):
+    hue_store.reserve = lambda _: (404, {}, False)
+
+    def message(text: str) -> str:
+        return json.dumps(
+            [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "content": text},
+                        {
+                            "type": "blob",
+                            "mime_type": "image/png",
+                            "content": base64.b64encode(os.urandom(100 * KIB)).decode(),
+                        },
+                    ],
+                }
+            ]
+        )
+
+    with client(hue_store) as hue:
+        with hue.span("learn") as span:
+            span.set_attribute("custom.document", "n" * (2 * MIB))
+        assert hue.force_flush()
+        with hue.span("long") as span:
+            span.set_attribute("gen_ai.input.messages", message("t" * (MIB + 20 * KIB)))
+            span.set_attribute("gen_ai.output.messages", message("u" * (MIB + 200 * KIB)))
+        assert hue.force_flush()
+        assert hue.export_status.upload_fallbacks == 5
+        warnings = [
+            issue.count
+            for issue in hue.export_issues()
+            if issue.message.startswith("This Hue server does not accept uploaded")
+        ]
+        assert warnings == [1, 4]
+    assert listed(hue_store.span("long")) == ["gen_ai.input.messages", "gen_ai.output.messages"]
+
+
 def test_the_fallback_for_an_unfinished_placement_reports_each_inline_file_it_digests():
     from hue_sdk._blobs import _fallback
 

@@ -224,15 +224,12 @@ function offloadValue(
     return value;
   }
   if (typeof value !== "string") return NOT_HELD;
+  // Each large inline file the queue shrank to its digest is reported as not uploaded; what is
+  // left of the message is placed like any other value, and reported too if it is cut.
+  const files = budget.digested?.get(value) ?? 0;
+  for (let file = 0; file < files; file++) collector.cut.push(key);
   if (budget.cut?.has(value)) {
     collector.cut.push(key);
-    return NOT_HELD;
-  }
-  // A message whose large inline files the queue shrank to their digest: each file is reported as
-  // not uploaded, and the message is placed as before uploads existed.
-  const files = budget.digested?.get(value);
-  if (files) {
-    for (let file = 0; file < files; file++) collector.cut.push(key);
     return NOT_HELD;
   }
   const scrubbed = scrubToolCredentials(key, value);
