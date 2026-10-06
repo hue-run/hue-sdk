@@ -12,6 +12,7 @@ import {
 import { scrubsToolCredentials, scrubToolCredentials } from "./tool-definitions.js";
 import { MAX_RECORD_NODES } from "./config.js";
 import { truncatedMarker } from "./privacy.js";
+import { MAX_BLOB_BYTES } from "./blobs.js";
 
 // Intrinsic accessors are captured once and invoked with an explicit receiver so a
 // hostile object cannot override them; the unbound reference is the point.
@@ -39,6 +40,26 @@ function cutToUnits(value: string, units: number): string {
  * counted as dropped, where anything else loses the record. */
 class BudgetExceeded extends RangeError {}
 
+/**
+ * How a span's own values over the receiver's value cap are held whole for export to upload:
+ * the cap, the bytes the held-value budget has left, and whether nothing else is held (a single
+ * value larger than the whole budget is held then). A string is charged two bytes a code unit,
+ * bytes as themselves. The queue's byte budget is charged what the value would have cost cut
+ * when queued, so a value whose upload fails is exported cut exactly as before.
+ */
+export interface HoldLimits {
+  valueBytes: number;
+  budget: number;
+  first: boolean;
+}
+
+/** A span's own message whose large inline files shrank to their digest when it was queued: the
+ * text queued, and how many files it lost. */
+export interface DigestedMessage {
+  text: string;
+  files: number;
+}
+
 /** Where a copy stood before one event or link, to return to when the budget cannot hold it. */
 interface Mark {
   bytes: number;
@@ -58,6 +79,15 @@ class Snapshot {
   private copied = new Map<object, unknown>();
   private hashed = new Map<string, unknown>();
   private inspected = 0;
+  /** Bytes of values held whole for upload, charged to the held-value budget. */
+  held = 0;
+  /** Set while the span's own attributes are copied: only they may be held for upload. */
+  private own = false;
+  /** The span's own messages whose large inline files shrank to their digest when queued, by
+   * attribute: the text queued (cut or not), and how many files it lost. */
+  digested = new Map<string, DigestedMessage>();
+  /** How many files each message text {@link inlineFiles} hashed replaced by their digest. */
+  private hashedFiles = new Map<string, number>();
 
   /**
    * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
@@ -69,7 +99,56 @@ class Snapshot {
     private limit: number,
     private captureContent = true,
     private valueUnits = Infinity,
+    private hold?: HoldLimits,
   ) {}
+
+  /** Whether the held-value budget takes `bytes` more, charging them when it does. */
+  private holds(bytes: number): boolean {
+    const hold = this.hold!;
+    if (this.held + bytes > hold.budget && !(hold.first && this.held === 0)) return false;
+    this.held += bytes;
+    return true;
+  }
+
+  /**
+   * One of the span's own attribute values held whole for export to upload, when it may be: text
+   * longer than the queued value length or bytes over the cap, within the held-value budget, and
+   * a recorded message that may inline a large file kept as it is (export uploads the file).
+   * Undefined for a value copied as before; text over the length the budget cannot hold is then
+   * cut and its large inline files shrink to their digest, as before uploads existed.
+   */
+  private heldValue(key: string, value: unknown): { value: unknown } | undefined {
+    if (!this.hold || !this.own) return undefined;
+    if (typeof value === "string") {
+      if (value.length > this.valueUnits) {
+        // The queue must take the cut the value falls back to, as it would have taken it before.
+        const fallback = this.valueUnits * 2 + 16;
+        if (this.bytes + fallback > this.limit || !this.holds(value.length * 2)) return undefined;
+        this.charge(fallback);
+        return { value };
+      }
+      // Within the queued length: a recorded message holding a large inline file is held whole
+      // for export to upload the file, within the held-value budget, and the queue is charged
+      // its copy with the files as their digest, as before. Past the budget, the files shrink to
+      // their digest when queued, as before uploads existed.
+      if (!isMessageKey(key)) return undefined;
+      const digested = this.inlineFiles(key, value);
+      if (digested === value || !this.holds(value.length * 2)) return undefined;
+      this.copy(digested, 1, "value", true);
+      return { value };
+    }
+    if (!utilTypes.isUint8Array(value)) return undefined;
+    const length = typedArrayByteLength.call(value);
+    // Bytes over Hue's upload limit could only be exported cut: not copied whole for that.
+    if (length <= this.hold.valueBytes || length > MAX_BLOB_BYTES || !this.holds(length))
+      return undefined;
+    this.charge(16);
+    // Copied, so a later change by the application cannot alter what was recorded; charged to
+    // the held-value budget instead of the queue's.
+    const copy = new Uint8Array(length);
+    typedArraySet.call(copy, value);
+    return { value: copy };
+  }
 
   private charge(bytes: number): void {
     this.bytes += bytes;
@@ -127,6 +206,16 @@ class Snapshot {
     return this.copy(value, 1, "attributes");
   }
 
+  /** The span's own attribute map, whose values over the cap may be held whole for upload. */
+  ownAttributes<T>(value: T): T {
+    this.own = true;
+    try {
+      return this.attributes(value);
+    } finally {
+      this.own = false;
+    }
+  }
+
   /** A message attribute with its large inline files hashed. The same text is hashed once per
    * record, and a record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} of it in all;
    * beyond that, messages are charged as recorded. */
@@ -137,8 +226,10 @@ class Snapshot {
     if (this.hashed.has(value)) return this.hashed.get(value);
     if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
     this.inspected += value.length;
-    const result = hashInlineFiles(key, value);
+    const count = { files: 0 };
+    const result = hashInlineFiles(key, value, count);
     this.hashed.set(value, result);
+    if (count.files) this.hashedFiles.set(value, count.files);
     return result;
   }
 
@@ -258,14 +349,28 @@ class Snapshot {
           throw new TypeError("Telemetry accessors are unsupported");
         if (shape === "attributes" && !this.captureContent && isMessageKey(key)) continue;
         this.charge(key.length * 2 + 16);
-        (copy as Record<string, unknown>)[key] = this.copy(
+        const held = shape === "attributes" ? this.heldValue(key, descriptor.value) : undefined;
+        if (held) {
+          (copy as Record<string, unknown>)[key] = held.value;
+          continue;
+        }
+        const source: unknown = descriptor.value;
+        const copied = this.copy(
           shape === "attributes"
-            ? this.scrubbedBeforeCut(key, this.inlineFiles(key, descriptor.value))
-            : descriptor.value,
+            ? this.scrubbedBeforeCut(key, this.inlineFiles(key, source))
+            : source,
           depth + 1,
           shape === "event" && key === "attributes" ? "attributes" : "value",
           content || shape === "attributes",
         );
+        (copy as Record<string, unknown>)[key] = copied;
+        // A span's own message whose large inline files shrank to their digest is named as it
+        // was queued, cut or not, so export reports each file as not uploaded.
+        const files =
+          this.own && shape === "attributes" && typeof source === "string"
+            ? this.hashedFiles.get(source)
+            : undefined;
+        if (files && typeof copied === "string") this.digested.set(key, { text: copied, files });
       }
     }
     this.ancestors.delete(value);
@@ -318,12 +423,16 @@ function contextReader(context: SpanContext): () => SpanContext {
 }
 
 /** What admission keeps of a record: its copy, the bytes charged for it, whether resource
- * attributes were still unresolved, and the value strings it cut. */
+ * attributes were still unresolved, the value strings it cut, the bytes of the values it held
+ * whole for upload, and the span's own messages whose large inline files it shrank to their
+ * digest (with how many files each). */
 export interface RecordSnapshot<T> {
   record: T;
   bytes: number;
   unresolvedResource: boolean;
   cut: ReadonlySet<string>;
+  held: number;
+  digested: ReadonlyMap<string, DigestedMessage>;
 }
 
 export function snapshotSpan(
@@ -331,8 +440,9 @@ export function snapshotSpan(
   limit: number,
   captureContent = true,
   valueUnits = Infinity,
+  hold?: HoldLimits,
 ): RecordSnapshot<ReadableSpan> {
-  const snapshot = new Snapshot(limit, captureContent, valueUnits);
+  const snapshot = new Snapshot(limit, captureContent, valueUnits, hold);
   const context = snapshot.context(source.spanContext())!;
   const fields = snapshot.copy({
     name: source.name,
@@ -347,7 +457,7 @@ export function snapshotSpan(
     droppedLinksCount: source.droppedLinksCount,
   });
   const status = snapshot.value(source.status);
-  const attributes = snapshot.attributes(source.attributes);
+  const attributes = snapshot.ownAttributes(source.attributes);
   const parentSpanContext = snapshot.context(source.parentSpanContext);
   const resource = snapshot.resource(source.resource);
   // Last, with what the budget has left: past it, events and links are counted as dropped.
@@ -379,6 +489,8 @@ export function snapshotSpan(
     bytes: snapshot.bytes,
     unresolvedResource: snapshot.unresolvedResource,
     cut: snapshot.cut,
+    held: snapshot.held,
+    digested: snapshot.digested,
   };
 }
 
@@ -429,5 +541,7 @@ export function snapshotLog(
     bytes: snapshot.bytes,
     unresolvedResource: snapshot.unresolvedResource,
     cut: snapshot.cut,
+    held: 0,
+    digested: new Map(),
   };
 }

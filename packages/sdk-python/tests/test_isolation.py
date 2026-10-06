@@ -136,6 +136,16 @@ def test_redactor_mutations_preserve_application_values_and_error_identity(
         hue.shutdown_safe()
 
 
+def _without_uploads(hue):
+    """While values over the cap may be uploaded, the redactor sees content whole up to Hue's
+    upload limit; once the client learns its receiver lacks the upload route (the loopback
+    receiver does), its view is bounded by four value caps again."""
+    learning = hue.tracer.start_span("learns the receiver lacks uploads")
+    learning.set_attribute("custom.blob", "u" * (1024 * 1024 + 1))
+    learning.end()
+    assert hue.force_flush()
+
+
 @pytest.mark.parametrize("invalid", ["bytes", "nodes", "depth", "cycle", "custom", "nonfinite"])
 @pytest.mark.parametrize("with_redactor", [False, True])
 def test_content_snapshot_rejects_unsafe_input_before_redactor(receiver, invalid, with_redactor):
@@ -183,12 +193,15 @@ def test_content_snapshot_rejects_unsafe_input_before_redactor(receiver, invalid
         redactor=(lambda *args: calls.append(args)) if with_redactor else None,
     )
     try:
+        if invalid in ("bytes", "nodes"):
+            _without_uploads(hue)
         with hue.span("invalid") as span:
             span.set_input(value)
         assert not calls and not hooks
         assert hue.export_status.instrumentation_failures == 1
         assert not hue.force_flush()
-        assert all(attribute.key != "input.value" for attribute in receiver.spans()[0].attributes)
+        (invalid_span,) = [span for span in receiver.spans() if span.name == "invalid"]
+        assert all(attribute.key != "input.value" for attribute in invalid_span.attributes)
         if invalid == "cycle":
             assert len(value) == 1 and value[0] is value
         elif invalid == "custom":
@@ -239,6 +252,8 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
     output = {"nested": ["original"]}
     hue = Hue(receiver.url, KEY, capture_content=True, redactor=redact)
     try:
+        if invalid == "nested-oversize":
+            _without_uploads(hue)
         with hue.span("invalid-output") as span:
             span.set_output(output)
         assert calls == [1] and not hooks
@@ -259,7 +274,8 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
             return
         assert hue.export_status.instrumentation_failures == 1
         assert not hue.force_flush()
-        assert all(attribute.key != "output.value" for attribute in receiver.spans()[0].attributes)
+        (invalid_span,) = [span for span in receiver.spans() if span.name == "invalid-output"]
+        assert all(attribute.key != "output.value" for attribute in invalid_span.attributes)
     finally:
         hue.shutdown_safe()
 

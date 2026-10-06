@@ -88,10 +88,17 @@ function receiver(
     at: number;
   }[] = [];
   let hits = 0;
+  let blobRequests = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
+      // A receiver without the large-value upload route answers its framework's not-found; the
+      // upload tests use their own receiver.
+      if (new URL(request.url).pathname.startsWith("/api/v1/otlp/blobs")) {
+        blobRequests++;
+        return new Response("Not Found", { status: 404 });
+      }
       hits++;
       expect(request.headers.get("authorization")).toBe(`Bearer ${apiKey}`);
       if (mode === "redirect")
@@ -184,6 +191,8 @@ function receiver(
       requests.filter((request) => request.status === 200).flatMap((request) => request.records),
     url: `http://127.0.0.1:${server.port}`,
     hits: () => hits,
+    /** Requests to the upload route, which this receiver lacks. */
+    blobRequests: () => blobRequests,
   };
 }
 
@@ -2282,6 +2291,8 @@ describe("Hue SDK contract", () => {
         droppedLogs: 0,
         pendingBytes: 0,
         instrumentationFailures: 0,
+        uploadedValues: 0,
+        uploadFallbacks: 0,
       });
       const spans = endpoint.requests
         .filter((request) => request.signal === "traces")
@@ -2733,6 +2744,14 @@ describe("Receiver limits", () => {
     )?.arrayValue?.values.map((item) => item.stringValue);
   const named = (records: WireRecord[], name: string) =>
     records.find((record) => record.name === name)!;
+  /** Exports one value over the cap, so the client learns its receiver lacks the upload route and
+   * cuts values when they are queued again, as before uploads existed. */
+  const withoutUploads = async (hue: ReturnType<typeof createHue>) => {
+    const span = hue.tracer.startSpan("learns the receiver lacks uploads");
+    span.setAttribute("custom.blob", "u".repeat(MiB + 1));
+    span.end();
+    await hue.flush();
+  };
 
   test("adopts the limits any response advertises, clamped to their ranges, and never exceeds them", async () => {
     let advertised: Record<string, string> = {};
@@ -2977,6 +2996,7 @@ describe("Receiver limits", () => {
     const text =
       "b".repeat(300_000) + "a".repeat(queuedLength - 300_000 - 20) + key + "a".repeat(100_000);
     try {
+      await withoutUploads(hue);
       const span = hue.tracer.startSpan("redacted");
       span.setAttribute("output.value", text);
       span.setAttribute("input.value", `${key} kept whole`);

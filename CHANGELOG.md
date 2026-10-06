@@ -10,32 +10,79 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
-#### Changed
+### [0.15.0] - 2026-10-06
 
+This release follows Hue's receiver limits and uploads values over its inline limit to Hue, which
+changes default value, request, queue and wait budgets and what export sends (see Breaking), so it
+is a `0.MINOR` release. `hue eval` also needs a decision from each required evaluator before a case
+passes.
+
+#### Breaking
+
+- **Wire** A span's own string attribute over Hue's inline value limit (helper content such as
+  `input.value`, `output.value` and tool results, or another instrumentation's attribute) is
+  uploaded to Hue apart from the span, up to 1,000,000,000 bytes: reserved with
+  `POST /api/v1/otlp/blobs` under the project key (skipped when Hue already stores the value
+  under the trace), sent straight to the project's evidence store with the presigned `PUT` Hue
+  answers, and completed. The span keeps the value's first 16 KiB and lists it in the new
+  `hue.blobs` attribute, one compact JSON object per value (`key`, `sha256`, `size`,
+  `content_type`), and under `hue.truncated`. Uploads run in the export, at most four at once,
+  within six export timeouts per export, retried once, with a 429 waited out within the export's
+  60 s hold. A value that cannot be uploaded is exported cut as before, reported as a `warning`
+  issue per cause (its `count` the values, `traceIds` their traces) and counted in the new
+  `ExportReport.uploadFallbacks`; uploads are counted in `ExportReport.uploadedValues`. A
+  transient failure, or a refusal that is not about the value alone, pauses uploads for 30 s, and
+  a receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no
+  reservation) is not asked again for 10 minutes. Nothing is uploaded with
+  `captureContent: false`, a setup credential, or from log records, events, links, resources or
+  placeholders. `redact` and the credential scrub run on the whole value first; the uploaded bytes
+  are their answer. Migration: none for Hue, which reads an uploaded value whole from `hue.blobs`;
+  the span's own attribute keeps 16 KiB of it rather than a prefix up to the value limit. Where
+  egress is restricted, allow export's HTTPS `PUT` to the upload URLs Hue answers, or such values
+  fall back to the cut and are reported.
+- **Wire** An inline file over 64 KiB in a span's own recorded messages (`gen_ai.input.messages`,
+  `gen_ai.output.messages`, `ai.prompt.messages`) is uploaded with its part's media type and keeps
+  the first 16 KiB of its `content`/`data` in place, listed in `hue.blobs` as
+  `<attribute>#<JSON pointer>` (`gen_ai.input.messages#/0/parts/1/content`), instead of being
+  replaced by its `sha256` and `size`. A file that is not uploaded, and one in a log record or a
+  span event, is still exported as its digest. Migration: none for Hue, which reads the file from
+  `hue.blobs`; a reader that expected the digest in place finds the file's first 16 KiB there and
+  its `sha256` and `size` in `hue.blobs`.
+- A span's own string over the value cap, and a recorded message of its own holding an inline
+  file over 64 KiB, is held whole in the queue until export, within a 128 MiB budget of held
+  values apart from `maxQueueBytes`, instead of being cut (or its files digested) when queued;
+  `maxQueueBytes` is still charged what the cut or digested copy would cost. A value the budget
+  cannot hold, or one queued while the receiver is known to lack the upload route, is cut (its
+  files digested) when queued as before, and reported as not uploaded, once per file. While
+  values can be uploaded, helpers encode content whole (up to 1 GB and 1,048,576 values) instead
+  of cutting it at the cap when they record it, and `redact` sees the whole value. Migration: allow
+  for up to 128 MiB of held values beside `maxQueueBytes` in the process's memory limits, and for a
+  `redact` that sees whole values. A client with `captureContent: false` holds and uploads nothing.
+- Processors and a client's own providers wait up to six export timeouts longer for an export,
+  the uploads' budget. A `shutdownSafe()` whose budget runs out ends uploads in flight too; their
+  values are exported cut. Migration: allow for the longer drain in job and shutdown timeouts, or
+  bound shutdown with `shutdownSafe()`'s budget.
 - **Wire** Content values are kept whole up to 1 MiB, the value limit Hue's receiver stores,
   instead of being cut at 256 KiB. A value over it is still cut to a UTF-8 prefix (bytes and a
   structured log body replaced by the receiver's marker) and listed under `hue.truncated`.
+  Migration: none for Hue's receiver, which stores values up to 1 MiB; another OTLP receiver behind
+  `baseUrl` must accept them or advertise its own `Hue-Max-Value-Bytes`.
 - **Wire** Requests are measured as Hue's receiver measures them: after gzip against its request
   limit (1 MiB) and after decompression against its decoded limit (4 MiB), instead of 1 MiB before
   gzip, which was up to four times stricter. Batches are packed to 4 MiB before gzip; a batch over
   the wire limit is sent in halves, and a single record over a limit sheds its largest content
   values as before, finding how many with a number of encodings logarithmic in its values rather
   than one encoding per value shed. A record that compresses well is no longer shed for its size
-  before gzip.
+  before gzip. Migration: none for Hue's receiver; another OTLP receiver behind `baseUrl` must
+  accept requests of 1 MiB after gzip that decode to 4 MiB, or advertise its own limits (next
+  entry).
 - The limits a response advertises in `Hue-Max-Request-Bytes`, `Hue-Max-Decoded-Bytes` and
   `Hue-Max-Value-Bytes`, on any status, are adopted for later requests, value cuts and helper
   content, clamped to 1–64 MiB, 1–64 MiB and 256 KiB–16 MiB; a lower limit is adopted as readily
   as a higher one. Batches stay at 4 MiB, or the advertised decoded limit when that is lower; only
   a single record that needs more travels alone in a larger request. A request that limits
   lowered while it was retried or held no longer fit is split and shed again before it is sent.
-- A string far over the value cap is cut when its record is queued, to the cap and 64 Ki code
-  units of context, rather than charged to `maxQueueBytes` whole: a span holding a value of
-  millions of characters is exported with the value cut instead of being dropped before the cut
-  ran. `redact` still sees text past the cap; for a text cut when queued, the last 64 Ki code
-  units of its answer are never exported, so a secret it saw without its continuation is not
-  sent. Tool definitions and recorded requests cut there have their credentials removed from the
-  whole value first; one too long to parse within what the record's budget has left is replaced
-  by the receiver's marker instead, as in the Python SDK.
+  Migration: none; the limits change only for a receiver that sends these headers.
 - A request Hue refuses with HTTP 429 and a `Retry-After` longer than the request deadline keeps
   its records queued, within the queue's bounds, and is sent again once the wait has passed; an
   export holds its records for at most 60 s in all. Before, the batch was lost. A longer wait loses
@@ -45,7 +92,8 @@ refuses to publish a version without a matching entry below.
   the count it carried. `flush()` and `shutdown()` wait for a held export, and a
   client's own providers allow for the hold when they drain. When `shutdownSafe()`'s budget runs
   out first, a client that owns its providers ends the hold and reports its records lost the same
-  way, so the hold does not keep the process running.
+  way, so the hold does not keep the process running. Migration: allow up to 60 s more for `flush()`
+  and `shutdown()` in job and shutdown timeouts, or bound shutdown with `shutdownSafe()`'s budget.
 - **Wire** A client's own tracer provider keeps 2,000 attributes, events and links per span and
   2,000 attributes per event and link, and its logger provider 2,000 attributes per log record,
   instead of OpenTelemetry's 128, which silently dropped the rest of a long conversation's
@@ -53,7 +101,37 @@ refuses to publish a version without a matching entry below.
   may hold 1,048,576 values when it is queued and exported, up from 16,384, so a span with 2,000
   events of several attributes each is exported; the queue's byte budget still bounds it. A span
   whose events or links do not all fit that budget keeps its newest ones and counts the rest in
-  its dropped event and link counts, where before the whole span was dropped.
+  its dropped event and link counts, where before the whole span was dropped. Migration: none for
+  most applications, since the queue's byte budget still bounds a span; attach Hue to a provider of
+  your own to keep other limits.
+- `collectExperimentVerdicts` and `hue eval` need a decision from every applicable outcome evaluator
+  (`world_outcome`) and every judge version pinned with `config.required: true`, as the experiment's
+  immutable scorer versions define them. A required result that is skipped, or scored without a
+  pass/fail metric, leaves the case inconclusive (`skipped`, shown as `INCONCLUSIVE`, exit 1)
+  instead of letting the other evaluators pass it (exit 0), and a required judge's result is never
+  advisory, whatever its evidence says. A recorded failure takes precedence over an error from a
+  required evaluator, so such a case is `failed` rather than `error` (exit 1 either way). Genuine
+  not-applicable results and judges that are not required keep their behavior. Migration: allow for
+  exit 1 where a required evaluator cannot decide a case, and read the case's explanations for why
+  it did not.
+
+#### Added
+
+- `summarizeVerdicts` accepts `scorerVersions`, the experiment's immutable pinned definitions;
+  outcome evaluators and judge versions with `config.required: true` among them need a decision
+  before a case passes, as in `collectExperimentVerdicts`. Without it, results are summarized as
+  before.
+
+#### Changed
+
+- A string far over the value cap is cut when its record is queued, to the cap and 64 Ki code
+  units of context, rather than charged to `maxQueueBytes` whole: a span holding a value of
+  millions of characters is exported with the value cut instead of being dropped before the cut
+  ran. `redact` still sees text past the cap; for a text cut when queued, the last 64 Ki code
+  units of its answer are never exported, so a secret it saw without its continuation is not
+  sent. Tool definitions and recorded requests cut there have their credentials removed from the
+  whole value first; one too long to parse within what the record's budget has left is replaced
+  by the receiver's marker instead, as in the Python SDK.
 - `recordProviderToolCalls` turns up to 1,024 items of a response into spans, up from 128; the
   rest are still counted as skipped.
 - Helper content (`setInput`, `setOutput`, `hue.tool`, `recordMessages`) may hold 65,536 values,
@@ -1316,8 +1394,99 @@ No registry release is claimed until publication and registry acceptance complet
 
 ### [Unreleased]
 
+### [0.9.0] - 2026-10-06
+
+This release follows Hue's receiver limits, waits out rate limits and uploads values over its inline
+limit to Hue, as the TypeScript SDK does, which changes default value, request, queue and wait
+budgets and what export sends (see Breaking), so it is a `0.MINOR` release.
+
+#### Breaking
+
+- **Wire** A span's own string attribute over Hue's inline value limit (helper content such as
+  `input.value`, `output.value` and tool results, or another instrumentation's attribute) is
+  uploaded to Hue apart from the span, up to 1,000,000,000 bytes, as the TypeScript SDK uploads
+  it: reserved with `POST /api/v1/otlp/blobs` (skipped when Hue already stores the value under
+  the trace), streamed to the presigned `PUT` Hue answers, and completed. The span keeps the
+  value's first 16 KiB and lists it in the new `hue.blobs` attribute and under `hue.truncated`.
+  Uploads run on the export worker, at most four at once on daemon threads, within six export
+  timeouts per export. A value that cannot be uploaded is exported cut as before, recorded as a
+  `warning` export issue per cause and counted in the new `ExportStatus.upload_fallbacks`; uploads
+  are counted in `ExportStatus.uploaded_values`. Pauses after failures and a receiver without the
+  upload route are handled as in the TypeScript SDK, and an upload still sending past its export's
+  budget ends there. Nothing is uploaded with `capture_content=False`, a setup key, or from log
+  records, events, links or resources. Migration: none for Hue, which reads an uploaded value whole
+  from `hue.blobs`; the span's own attribute keeps 16 KiB of it rather than a prefix up to the value
+  limit. Where egress is restricted, allow export's HTTPS `PUT` to the upload URLs Hue answers, or
+  such values fall back to the cut and are reported.
+- **Wire** An inline file over 64 KiB in a span's own recorded messages is uploaded with its
+  part's media type and keeps the first 16 KiB of its `content`/`data` in place, listed in
+  `hue.blobs` as `<attribute>#<JSON pointer>`, instead of being replaced by its `sha256` and
+  `size`; a file that is not uploaded, and one in a log record or a span event, is still exported
+  as its digest. Migration: none for Hue, which reads the file from `hue.blobs`; a reader that
+  expected the digest in place finds the file's first 16 KiB there and its `sha256` and `size` in
+  `hue.blobs`.
+- A span's own value over the value cap, and a recorded message of its own holding an inline file
+  over 64 KiB, is held whole with its queued copy until export, within a 128 MiB budget of held
+  values apart from `max_queue_bytes` (the queue is still charged the cut or digested copy),
+  instead of being cut when queued; a value the budget cannot hold, or one queued while the
+  receiver is known to lack the upload route, is cut (its files digested) as before and reported
+  as not uploaded, once per file. The queued copy lets go of its held values once export has
+  placed them. While values can be uploaded, `set_input` and `set_output` content has
+  a 1 GB snapshot budget and 1,048,576 values (instead of 4 MiB and 65,536, past which it was
+  omitted) and is serialized whole; the redactor sees the whole value. Migration: allow for up to
+  128 MiB of held values beside `max_queue_bytes` in the process's memory limits, and for a redactor
+  that sees whole values. A client with `capture_content=False` holds and uploads nothing.
+- **Wire** A record over the request limit is no longer dropped whole. A value over the value cap
+  (1 MiB) is cut when the record is queued, to a UTF-8 prefix (bytes replaced by the receiver's
+  marker), and listed under `hue.truncated`; a record still over the receiver's limits sheds its
+  largest content values, each replaced by the marker and listed, as the TypeScript SDK does. A
+  span with a 2 MB input is exported with the input cut instead of being lost. One record's copy
+  may take the whole queue budget (`max_queue_bytes`) rather than 1 MiB. Tool definitions and
+  recorded requests cut there have their credentials removed from the whole value first; one too
+  long to parse within the record's budget is replaced by the marker instead. Migration: none;
+  `max_queue_bytes` still bounds the queue, one record's copy included.
+- **Wire** Helper content is kept whole up to 1 MiB instead of 256 KiB, and a redactor sees up to
+  4 MiB of it (was 1 MiB). Migration: none for Hue's receiver, which stores values up to 1 MiB;
+  another OTLP receiver behind `base_url` must accept them or advertise its own
+  `Hue-Max-Value-Bytes`, and a redactor sees longer values.
+- **Wire** Requests are measured as Hue's receiver measures them: after gzip against its request
+  limit (1 MiB) and after decompression against its decoded limit (4 MiB), instead of 1 MiB before
+  gzip. Batches are packed to 4 MiB before gzip and a batch over the wire limit is sent in parts.
+  A record over a limit finds how many content values to shed with a number of encodings
+  logarithmic in its values. Migration: none for Hue's receiver; another OTLP receiver behind
+  `base_url` must accept requests of 1 MiB after gzip that decode to 4 MiB, or advertise its own
+  limits (next entry).
+- The limits a response advertises in `Hue-Max-Request-Bytes`, `Hue-Max-Decoded-Bytes` and
+  `Hue-Max-Value-Bytes`, on any status, are adopted for later requests, value cuts and helper
+  content, clamped to 1–64 MiB, 1–64 MiB and 256 KiB–16 MiB; a lower limit is adopted as readily
+  as a higher one. Batches stay at 4 MiB, or the advertised decoded limit when that is lower. A
+  request that limits lowered while it was retried or held no longer fit is split and shed again
+  before it is sent. Migration: none; the limits change only for a receiver that sends these
+  headers.
+- A request Hue refuses with HTTP 429 and a `Retry-After` longer than the request deadline keeps
+  its records queued, within the queue's bounds, and is sent again once the wait has passed; an
+  export holds its records for at most 60 s in all. Before, the batch was lost. A longer wait loses
+  the records at once, recorded as a `failed` export issue and counted in
+  `hue.sdk.dropped_records`. A flush or shutdown budget shorter than the hold returns `False` while
+  the held export continues in the background. Migration: allow up to 60 s more for `force_flush()`
+  and `shutdown()` in job and shutdown timeouts, or accept their `False` result for a shorter
+  budget.
+- **Wire** A tracer provider Hue creates keeps 2,000 attributes, events and links per span and
+  2,000 attributes per event and link, instead of OpenTelemetry's 128, unless the environment sets
+  OpenTelemetry's own limit (`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`, `OTEL_ATTRIBUTE_COUNT_LIMIT` and
+  the event and link variables), which still wins. A borrowed provider keeps its own limits. Log
+  records keep OpenTelemetry's limits: its logger provider takes none in the supported range. A
+  span whose events or links do not all fit the queue's byte budget keeps its newest ones and
+  counts the rest in its dropped event and link counts, where before the whole span was dropped.
+  Migration: set OpenTelemetry's limit variables, or pass a `tracer_provider` of your own, to keep
+  other limits.
+
 #### Added
 
+- `ExportIssue.kind` may be `warning`: values exported cut because they could not be uploaded.
+  A warning does not affect `export_status.ok` or `force_flush()`, does not move
+  `export_failure_sequence()` (now the last failure's sequence), and evaluation runs do not count
+  it as a case's export failure.
 - **Wire** `hue.sdk.dropped_records` on a trace's root span, as the TypeScript SDK writes it: the
   records of the trace the SDK never sent (dropped from a queue, too large to send without their
   content, or refused for their rate for longer than an export holds them), so Hue reads the trace
@@ -1328,40 +1497,6 @@ No registry release is claimed until publication and registry acceptance complet
 
 #### Changed
 
-- **Wire** A record over the request limit is no longer dropped whole. A value over the value cap
-  (1 MiB) is cut when the record is queued, to a UTF-8 prefix (bytes replaced by the receiver's
-  marker), and listed under `hue.truncated`; a record still over the receiver's limits sheds its
-  largest content values, each replaced by the marker and listed, as the TypeScript SDK does. A
-  span with a 2 MB input is exported with the input cut instead of being lost. One record's copy
-  may take the whole queue budget (`max_queue_bytes`) rather than 1 MiB. Tool definitions and
-  recorded requests cut there have their credentials removed from the whole value first; one too
-  long to parse within the record's budget is replaced by the marker instead.
-- **Wire** Helper content is kept whole up to 1 MiB instead of 256 KiB, and a redactor sees up to
-  4 MiB of it (was 1 MiB).
-- **Wire** Requests are measured as Hue's receiver measures them: after gzip against its request
-  limit (1 MiB) and after decompression against its decoded limit (4 MiB), instead of 1 MiB before
-  gzip. Batches are packed to 4 MiB before gzip and a batch over the wire limit is sent in parts.
-  A record over a limit finds how many content values to shed with a number of encodings
-  logarithmic in its values.
-- The limits a response advertises in `Hue-Max-Request-Bytes`, `Hue-Max-Decoded-Bytes` and
-  `Hue-Max-Value-Bytes`, on any status, are adopted for later requests, value cuts and helper
-  content, clamped to 1–64 MiB, 1–64 MiB and 256 KiB–16 MiB; a lower limit is adopted as readily
-  as a higher one. Batches stay at 4 MiB, or the advertised decoded limit when that is lower. A
-  request that limits lowered while it was retried or held no longer fit is split and shed again
-  before it is sent.
-- A request Hue refuses with HTTP 429 and a `Retry-After` longer than the request deadline keeps
-  its records queued, within the queue's bounds, and is sent again once the wait has passed; an
-  export holds its records for at most 60 s in all. Before, the batch was lost. A longer wait loses
-  the records at once, recorded as a `failed` export issue and counted in
-  `hue.sdk.dropped_records`. A flush or shutdown budget shorter than the hold returns `False` while
-  the held export continues in the background.
-- **Wire** A tracer provider Hue creates keeps 2,000 attributes, events and links per span and
-  2,000 attributes per event and link, instead of OpenTelemetry's 128, unless the environment sets
-  OpenTelemetry's own limit (`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`, `OTEL_ATTRIBUTE_COUNT_LIMIT` and
-  the event and link variables), which still wins. A borrowed provider keeps its own limits. Log
-  records keep OpenTelemetry's limits: its logger provider takes none in the supported range. A
-  span whose events or links do not all fit the queue's byte budget keeps its newest ones and
-  counts the rest in its dropped event and link counts, where before the whole span was dropped.
 - `record_provider_tool_calls` turns up to 1,024 items of a response into spans, up from 128; the
   rest are still counted as skipped.
 

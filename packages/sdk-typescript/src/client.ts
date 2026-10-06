@@ -36,6 +36,7 @@ import {
   type EncodeLimits,
 } from "./safety.js";
 import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
+import { MAX_BLOB_BYTES } from "./blobs.js";
 import {
   createHueTransport,
   exportBudgetMillis,
@@ -44,7 +45,7 @@ import {
 } from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
-import { MAX_BODY_BYTES, MAX_FILE_DATA_BYTES } from "./config.js";
+import { MAX_BODY_BYTES, MAX_FILE_DATA_BYTES, MAX_RECORD_NODES } from "./config.js";
 import type {
   ExportReport,
   FileRecord,
@@ -893,13 +894,26 @@ export class HueClient {
    * A content value as a JSON attribute within Hue's value cap (1 MiB unless the receiver
    * advertises another). A larger value is cut to a UTF-8 prefix and its key listed under
    * `hue.truncated`, where Hue's receiver lists the values it cuts itself: the span carries the
-   * call and the recorded part of its value instead of losing the value whole. Only a value that
-   * cannot be encoded is omitted and counted.
+   * call and the recorded part of its value instead of losing the value whole. While values over
+   * the cap may be uploaded, the value is encoded whole, up to Hue's 1 GB upload limit and as many
+   * values as a queued record may hold, and export uploads it or cuts it. Only a value that cannot
+   * be encoded is omitted and counted.
    */
   private setContent(span: Span, key: string, value: unknown): void {
     if (!this.enabled || this.closed || !this.captureContent) return;
     try {
-      const { text, truncated } = encodeBoundedContent(value, this.contentLimits());
+      let encoded: { text: string; truncated: boolean } | undefined;
+      if (this.transport.holdsValues())
+        try {
+          encoded = encodeBoundedContent(value, {
+            ...this.contentLimits(),
+            bytes: MAX_BLOB_BYTES,
+            nodes: MAX_RECORD_NODES,
+          });
+        } catch {
+          // Past the runtime's longest string, or its memory: cut to the cap instead.
+        }
+      const { text, truncated } = encoded ?? encodeBoundedContent(value, this.contentLimits());
       span.setAttribute(key, text);
       // The span's list as it stands: the application's own entries (read from the SDK span,
       // which carries its attributes; the API alone shows none) and this helper's earlier ones.

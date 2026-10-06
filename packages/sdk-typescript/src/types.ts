@@ -100,7 +100,8 @@ export interface ExportIssue {
   signal: Signal;
   /** `rejected` by Hue, `failed` to deliver, `dropped` from the queue, `invalid` record or capture, or a non-failing `warning`. */
   kind: "rejected" | "failed" | "dropped" | "invalid" | "warning";
-  /** Records affected; zero for capture failures and for warnings other than lost in-progress span placeholders. */
+  /** Records affected; zero for capture failures and for warnings other than lost in-progress span
+   * placeholders and values that could not be uploaded, whose warnings count the values. */
   count: number;
   /** HTTP status when the issue came from a response. */
   status?: number;
@@ -141,6 +142,12 @@ export interface ExportReport {
   pendingBytes: number;
   /** Helper capture or instrumentation failures that omitted telemetry while preserving application results. */
   instrumentationFailures: number;
+  /** Span values over Hue's inline limit uploaded apart from their spans (or already stored by
+   * Hue), each listed under the span's `hue.blobs` with its first 16 KiB kept inline. */
+  uploadedValues: number;
+  /** Span values over Hue's inline limit that could not be uploaded and were exported cut to the
+   * limit (an inline file as its digest), each reported in a warning issue. */
+  uploadFallbacks: number;
 }
 
 /** Caller budget for {@link HueClient.flushSafe} and {@link HueClient.shutdownSafe}. */

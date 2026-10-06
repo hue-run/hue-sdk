@@ -10,9 +10,10 @@ import binascii
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
-from .transport import MAX_REQUEST_BYTES
+from ._limits import MAX_REQUEST_BYTES
 
 # Inline file content larger than this many UTF-8 bytes is exported as its digest instead.
 INLINE_FILE_LIMIT = 64 * 1024
@@ -31,7 +32,7 @@ _HEX = frozenset("0123456789abcdefABCDEF")
 _MAX_DEPTH = 256
 
 
-def _utf8_size(value: str, limit: int) -> int:
+def utf8_size(value: str, limit: int) -> int:
     """Count UTF-8 bytes without allocating an encoded copy beyond ``limit``."""
     size = 0
     for character in value:
@@ -77,7 +78,17 @@ def _percent_decoded(payload: str) -> bytes | None:
     return bytes(decoded)
 
 
-def _file_bytes(content: str) -> bytes:
+@dataclass(frozen=True)
+class InlineFile:
+    """An inline file's bytes, whether they were decoded from the part's text (base64 or
+    percent-escapes) rather than taken as its UTF-8, and the media type its data: URL names."""
+
+    data: bytes
+    decoded: bool
+    url_media_type: str | None
+
+
+def inline_file(content: str) -> InlineFile:
     """The file's own bytes, whatever its media type.
 
     A data: URL is decoded by its own encoding (base64 with ``;base64``, percent-escapes
@@ -95,10 +106,19 @@ def _file_bytes(content: str) -> bytes:
             decoded = base64.b64decode(payload, validate=True)
         except binascii.Error:
             decoded = None
-    return content.encode("utf-8") if decoded is None else decoded
+    media_type = match.group(1).split(";")[0].strip() if match else ""
+    return InlineFile(
+        content.encode("utf-8") if decoded is None else decoded,
+        decoded is not None,
+        media_type or None,
+    )
 
 
-def _content_key(part: dict[str, Any]) -> str | None:
+def _file_bytes(content: str) -> bytes:
+    return inline_file(content).data
+
+
+def content_key(part: dict[str, Any]) -> str | None:
     """The key holding a part's inline content: GenAI ``blob`` parts and AI SDK 6 ``file`` parts."""
     kind = part.get("type")
     return "content" if kind == "blob" else "data" if kind == "file" else None
@@ -107,6 +127,8 @@ def _content_key(part: dict[str, Any]) -> str | None:
 class _Hash:
     def __init__(self) -> None:
         self.changed = False
+        # The files replaced by their digest.
+        self.files = 0
 
     def node(self, value: Any, depth: int = 0) -> Any:
         if depth > _MAX_DEPTH:
@@ -115,12 +137,13 @@ class _Hash:
             return [self.node(item, depth + 1) for item in value]
         if not isinstance(value, dict):
             return value
-        key = _content_key(value)
+        key = content_key(value)
         inline = value.get(key) if key is not None else None
         if key is not None and isinstance(inline, str):
             data = _file_bytes(inline)
             if len(data) > INLINE_FILE_LIMIT:
                 self.changed = True
+                self.files += 1
                 rest = {name: item for name, item in value.items() if name != key}
                 return {**rest, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
         return {name: self.node(item, depth + 1) for name, item in value.items()}
@@ -134,20 +157,102 @@ def hash_inline_files(key: str, value: Any) -> Any:
     attributes, shorter messages, messages longer than ``MAX_INLINE_FILE_TEXT`` and values that
     are not JSON are returned unchanged.
     """
+    return hash_inline_files_counted(key, value)[0]
+
+
+def hash_inline_files_counted(key: str, value: Any) -> tuple[Any, int]:
+    """``hash_inline_files``, and how many files it replaced by their digest."""
     if (
         key not in _MESSAGE_KEYS
         or not isinstance(value, str)
-        or not INLINE_FILE_LIMIT < _utf8_size(value, MAX_INLINE_FILE_TEXT) <= MAX_INLINE_FILE_TEXT
+        or not INLINE_FILE_LIMIT < utf8_size(value, MAX_INLINE_FILE_TEXT) <= MAX_INLINE_FILE_TEXT
         or ('"blob"' not in value and '"file"' not in value)
     ):
-        return value
+        return value, 0
     try:
         parsed = json.loads(value)
         hashed = _Hash()
         result = hashed.node(parsed)
     except (ValueError, RecursionError):
         # Not JSON, or nested too deeply to inspect: admission decides the value's fate as before.
-        return value
+        return value, 0
     if not hashed.changed:
-        return value
-    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        return value, 0
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")), hashed.files
+
+
+def is_message_key(key: str) -> bool:
+    """Whether an attribute is one of the recorded message attributes that can inline files."""
+    return key in _MESSAGE_KEYS
+
+
+def may_inline_files(key: str, value: Any) -> bool:
+    """Whether a recorded message's text may inline a file over ``INLINE_FILE_LIMIT``."""
+    return (
+        key in _MESSAGE_KEYS
+        and isinstance(value, str)
+        and len(value) * 4 > INLINE_FILE_LIMIT
+        and ('"blob"' in value or '"file"' in value)
+    )
+
+
+@dataclass
+class InlineFilePart:
+    """One inline file part of a parsed message: the part, the key holding its inline content,
+    that content, and the content's place as a JSON Pointer (RFC 6901) into the message."""
+
+    part: dict[str, Any]
+    key: str
+    content: str
+    pointer: str
+
+
+def _pointer_segment(segment: str) -> str:
+    return segment.replace("~", "~0").replace("/", "~1")
+
+
+def large_inline_file_parts(value: Any) -> list[InlineFilePart]:
+    """The inline file parts of a parsed message whose content text is longer than
+    ``INLINE_FILE_LIMIT`` UTF-8 bytes, in document order. The caller decodes each and keeps the
+    ones whose file bytes are over the limit; the parts are the parsed value's own objects, so
+    the caller may replace their content in place."""
+    found: list[InlineFilePart] = []
+
+    def visit(node: Any, pointer: str, depth: int) -> None:
+        if depth > _MAX_DEPTH:
+            raise ValueError("Message exceeds its nesting limit.")
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                visit(item, f"{pointer}/{index}", depth + 1)
+            return
+        if not isinstance(node, dict):
+            return
+        key = content_key(node)
+        inline = node.get(key) if key is not None else None
+        # Decoding only shrinks the text, so text of at most the limit holds no file over it.
+        if (
+            key is not None
+            and isinstance(inline, str)
+            and len(inline) * 4 > INLINE_FILE_LIMIT
+            and utf8_size(inline, INLINE_FILE_LIMIT) > INLINE_FILE_LIMIT
+        ):
+            found.append(InlineFilePart(node, key, inline, f"{pointer}/{key}"))
+            return
+        for name, item in node.items():
+            visit(item, f"{pointer}/{_pointer_segment(str(name))}", depth + 1)
+
+    visit(value, "", 0)
+    return found
+
+
+def digest_part(part: dict[str, Any], key: str, sha256: str, size: int) -> None:
+    """The digest an inline file part is exported as when its bytes are not uploaded: its other
+    fields with the file's SHA-256 and byte size, as ``hash_inline_files`` writes it."""
+    part.pop(key, None)
+    part["sha256"] = sha256
+    part["size"] = size
+
+
+def dumps_message(value: Any) -> str:
+    """A parsed message as the SDK writes it back: compact JSON, as ``hash_inline_files``."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
