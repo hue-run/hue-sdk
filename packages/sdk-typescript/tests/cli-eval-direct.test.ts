@@ -834,6 +834,13 @@ const adapterSource = `export default async function (_inputs, context) {
 }
 `;
 
+/** A successful file-free execution for required-outcome verdict controls. */
+const answerSource = `import { readFileSync } from "node:fs";
+const inputs = JSON.parse(readFileSync(process.env.HUE_CASE_INPUTS, "utf8"));
+if (inputs.query !== "Answer the user") throw new Error("Wrong case inputs");
+process.stdout.write(JSON.stringify({ answer: "Synthetic answer" }));
+`;
+
 /** One relative entry point for a command worker's direct and world cases. */
 const workerSource = `import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1552,14 +1559,17 @@ process.stdout.write(key);
           verdict: true,
           advisory: true,
           required: true,
+          passed: true,
           skipped: undecided === "inline",
         },
       });
       const cwd = await mkdtemp(join(tmpdir(), "hue-eval-required-"));
-      await writeFile(join(cwd, "agent.mjs"), agentSource);
+      await writeFile(join(cwd, "agent.mjs"), answerSource);
       const args = [
         "--set",
         standIn.dataset.id,
+        "--set-version",
+        "1",
         ...standIn.scorerVersions.flatMap((version) => ["--scorer-version", version.id]),
         "--command",
         `${process.execPath} ${join(cwd, "agent.mjs")}`,
@@ -1569,6 +1579,7 @@ process.stdout.write(key);
       try {
         const env = { HUE_BASE_URL: standIn.baseUrl };
         const json = await hue([...args, "--json"], { cwd, env });
+        expect(json.stdout, json.stderr).not.toBe("");
         const report = JSON.parse(json.stdout) as {
           complete: boolean;
           cases: Record<string, unknown>[];
@@ -1618,12 +1629,14 @@ process.stdout.write(key);
         },
       });
       const cwd = await mkdtemp(join(tmpdir(), "hue-eval-required-control-"));
-      await writeFile(join(cwd, "agent.mjs"), agentSource);
+      await writeFile(join(cwd, "agent.mjs"), answerSource);
       try {
         const json = await hue(
           [
             "--set",
             standIn.dataset.id,
+            "--set-version",
+            "1",
             ...standIn.scorerVersions.flatMap((version) => ["--scorer-version", version.id]),
             "--command",
             `${process.execPath} ${join(cwd, "agent.mjs")}`,
@@ -1633,6 +1646,7 @@ process.stdout.write(key);
           ],
           { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
         );
+        expect(json.stdout, json.stderr).not.toBe("");
         const report = JSON.parse(json.stdout) as {
           complete: boolean;
           cases: Record<string, unknown>[];
