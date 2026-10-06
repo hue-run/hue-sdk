@@ -238,9 +238,9 @@ def test_the_redactor_sees_the_error_text_as_status_message(receiver):
 
 
 def test_a_redactor_returning_oversized_status_text_omits_it_as_an_issue(receiver):
-    # 100,000 emoji: under the 256 KiB bound in characters, about 400 KB of UTF-8.
+    # 300,000 emoji: under the 1 MiB bound in characters, about 1.2 MB of UTF-8.
     def redactor(field, value):
-        return "\U0001f600" * 100_000 if field == "status.message" else value
+        return "\U0001f600" * 300_000 if field == "status.message" else value
 
     with Hue(receiver.url, KEY, capture_content=True, redactor=redactor) as hue:
         with hue.model("synthetic-model", provider="openai") as span:
@@ -252,9 +252,11 @@ def test_a_redactor_returning_oversized_status_text_omits_it_as_an_issue(receive
 
 
 def test_a_large_metadata_only_catalog_keeps_its_summary(receiver):
-    # About 420 KB of definitions: over one content field's 256 KiB, within one export request.
+    # About 990 KB of definitions: under the 1 MiB a catalog is read to for its summary (one export
+    # request, which is also one content field's cap), far over the 256 KiB content cap this test
+    # was written against.
     tools = [
-        {"name": f"tool_{index}", "description": "d" * 1_300, "input_schema": {"type": "object"}}
+        {"name": f"tool_{index}", "description": "d" * 3_200, "input_schema": {"type": "object"}}
         for index in range(300)
     ]
     response = {"output": [{"type": "mcp_list_tools", "server_label": "big", "tools": tools}]}

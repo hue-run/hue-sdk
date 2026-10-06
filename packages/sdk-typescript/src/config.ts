@@ -1,7 +1,27 @@
 import type { HueOptions, SharedHueOptions } from "./types.js";
 
+/** One request on the wire (after gzip), as Hue's receiver accepts before it advertises its own
+ * limit with `Hue-Max-Request-Bytes`. */
 export const MAX_BODY_BYTES = 1024 * 1024;
-export const MAX_CONTENT_BYTES = 256 * 1024;
+/** One request after decompression, before the receiver advertises `Hue-Max-Decoded-Bytes`. */
+export const MAX_DECODED_BYTES = 4 * 1024 * 1024;
+/** One attribute value or log body kept whole, before the receiver advertises
+ * `Hue-Max-Value-Bytes`; a longer value is cut to it and listed under `hue.truncated`. */
+export const MAX_CONTENT_BYTES = 1024 * 1024;
+/**
+ * Text past the value cap that a record keeps when it is queued, in UTF-16 code units. A string
+ * longer than the cap and this context is cut when it is queued, so a huge value cannot exhaust
+ * the queue's byte budget and drop its record; the context lets `redact` still see a secret that
+ * crosses the cap, and what the redactor saw without its continuation is never exported.
+ */
+export const REDACTION_CONTEXT_UNITS = 64 * 1024;
+/**
+ * The values one record may hold when it is queued, redacted and measured for export. A client's
+ * own providers keep 2,000 events and links of 2,000 attributes each, so a record's byte budget
+ * (every value is charged at least 16 bytes against `maxQueueBytes`) bounds it before this does;
+ * this bounds the work on the application's thread when the queue budget is raised.
+ */
+export const MAX_RECORD_NODES = 1_048_576;
 /** Instrumentation scope of the client's own tracer and logger. */
 export const HUE_SCOPE = "@hue-run/sdk";
 /** Maximum bytes accepted when recordFile hashes caller-provided data locally. */

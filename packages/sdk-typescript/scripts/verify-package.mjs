@@ -88,6 +88,13 @@ if (!values.archive && !values["registry-version"]) {
     "placeholderSettled",
     "sendsPlaceholders",
     "rejectPlaceholders",
+    "withDroppedRecords",
+    "consumeDroppedRecords",
+    "countUndelivered",
+    "holdForRateLimit",
+    "releaseRateLimitHolds",
+    "receiverLimits",
+    "adoptLimits",
   ]) {
     if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
       throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);

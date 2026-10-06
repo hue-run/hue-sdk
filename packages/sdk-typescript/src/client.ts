@@ -28,6 +28,7 @@ import {
 } from "./provider-tools.js";
 import { toolCatalogSummary } from "./tool-definitions.js";
 import {
+  contentLimitsOf,
   encodeBoundedContent,
   encodeContent,
   noopSpan,
@@ -35,7 +36,12 @@ import {
   type EncodeLimits,
 } from "./safety.js";
 import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
-import { createHueTransport, HueExportError, HueTransport } from "./transport.js";
+import {
+  createHueTransport,
+  exportBudgetMillis,
+  HueExportError,
+  HueTransport,
+} from "./transport.js";
 import { verifyTrace } from "./receipt.js";
 import { sdkVersion } from "./version.js";
 import { MAX_BODY_BYTES, MAX_FILE_DATA_BYTES } from "./config.js";
@@ -242,6 +248,20 @@ class ContextualTracer implements Tracer {
 }
 
 const propagator = new W3CTraceContextPropagator();
+/**
+ * Attributes, events and links one span or log record of a client's own providers keeps, and
+ * attributes per event and link. OpenTelemetry's default of 128 silently dropped the rest of a
+ * long conversation's flattened messages; Hue's receiver counts none of them. Providers an
+ * application attaches Hue to keep their own limits.
+ */
+const OWNED_RECORD_LIMIT = 2000;
+const OWNED_SPAN_LIMITS = {
+  attributeCountLimit: OWNED_RECORD_LIMIT,
+  eventCountLimit: OWNED_RECORD_LIMIT,
+  linkCountLimit: OWNED_RECORD_LIMIT,
+  attributePerEventCountLimit: OWNED_RECORD_LIMIT,
+  attributePerLinkCountLimit: OWNED_RECORD_LIMIT,
+};
 /** A provider tool listing's bounds before its catalog summary: one export request, 64 levels and
  * 65,536 values, as the Python SDK's content snapshot. */
 const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, depth: 64 };
@@ -313,11 +333,13 @@ export class HueClient {
         resource,
         spanProcessors:
           this.transport.options.enabled === false ? [] : [this.transport.spanProcessor],
+        spanLimits: OWNED_SPAN_LIMITS,
       });
       const logger = new LoggerProvider({
         resource,
         processors:
           this.transport.options.enabled === false ? [] : [this.transport.logRecordProcessor],
+        logRecordLimits: { attributeCountLimit: OWNED_RECORD_LIMIT },
       });
       this.ownedProviders = { tracer, logger };
       this.tracerProvider = tracer;
@@ -664,7 +686,7 @@ export class HueClient {
         severityNumber: SeverityNumber.INFO,
         eventName: "gen_ai.client.inference.operation.details",
         attributes,
-        body: JSON.parse(encodeContent(body)),
+        body: JSON.parse(encodeContent(body, this.contentLimits())),
       });
     } catch {
       this.instrumentationFailed("logs");
@@ -862,16 +884,22 @@ export class HueClient {
   /** The keys of each span's content values that were cut to Hue's value cap, for `hue.truncated`. */
   private truncatedKeys = new WeakMap<Span, string[]>();
 
+  /** A content value's bounds: Hue's value cap as the receiver last advertised it. */
+  private contentLimits() {
+    return contentLimitsOf(this.transport.receiverLimits().valueBytes);
+  }
+
   /**
-   * A content value as a JSON attribute within Hue's 256 KiB value cap. A larger value is cut to
-   * a UTF-8 prefix and its key listed under `hue.truncated`, where Hue's receiver lists the
-   * values it cuts itself: the span carries the call and the recorded part of its value instead
-   * of losing the value whole. Only a value that cannot be encoded is omitted and counted.
+   * A content value as a JSON attribute within Hue's value cap (1 MiB unless the receiver
+   * advertises another). A larger value is cut to a UTF-8 prefix and its key listed under
+   * `hue.truncated`, where Hue's receiver lists the values it cuts itself: the span carries the
+   * call and the recorded part of its value instead of losing the value whole. Only a value that
+   * cannot be encoded is omitted and counted.
    */
   private setContent(span: Span, key: string, value: unknown): void {
     if (!this.enabled || this.closed || !this.captureContent) return;
     try {
-      const { text, truncated } = encodeBoundedContent(value);
+      const { text, truncated } = encodeBoundedContent(value, this.contentLimits());
       span.setAttribute(key, text);
       // The span's list as it stands: the application's own entries (read from the SDK span,
       // which carries its attributes; the API alone shows none) and this helper's earlier ones.
@@ -971,11 +999,20 @@ export class HueClient {
     return result;
   }
 
-  /** Safe for finally blocks; preserves the application's result or original exception. */
+  /**
+   * Safe for finally blocks; preserves the application's result or original exception. When its
+   * budget runs out while the client's own transport holds records for a receiver that limited
+   * the rate, the hold ends: those records are reported lost to the rate limit, and the hold no
+   * longer keeps the process running.
+   */
   shutdownSafe(options: SafeLifecycleOptions = {}): Promise<SafeLifecycleResult> {
     if (this.safeShutdownPromise) return this.safeShutdownPromise;
     const work = this.shutdown();
-    const result = this.safeLifecycle(() => work, options);
+    const result = this.safeLifecycle(() => work, options).then((outcome) => {
+      // A transport the application attached keeps running past this client's shutdown.
+      if (outcome.timedOut && this.ownedProviders) this.transport.releaseRateLimitHolds();
+      return outcome;
+    });
     this.safeShutdownPromise = result;
     const clear = () => {
       this.safeShutdownPromise = undefined;
@@ -1047,9 +1084,17 @@ export class HueClient {
   }
 
   private async flushOnce(): Promise<ExportReport> {
+    // Providers this client owns wait as long as an export may take, a rate-limit hold included,
+    // instead of OpenTelemetry's 30 s; borrowed providers keep their own budget.
+    const owned = this.ownedProviders;
+    const budget = { timeoutMillis: exportBudgetMillis(this.transport.options.timeoutMillis) };
     const results = await Promise.allSettled([
-      Promise.resolve().then(() => this.tracerProvider.forceFlush()),
-      Promise.resolve().then(() => this.loggerProvider.forceFlush()),
+      Promise.resolve().then(() =>
+        owned ? owned.tracer.forceFlush(budget) : this.tracerProvider.forceFlush(),
+      ),
+      Promise.resolve().then(() =>
+        owned ? owned.logger.forceFlush(budget) : this.loggerProvider.forceFlush(),
+      ),
     ]);
     for (const [index, result] of results.entries())
       if (result.status === "rejected")

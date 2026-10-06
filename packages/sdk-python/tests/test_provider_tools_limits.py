@@ -28,10 +28,13 @@ ERROR_TEXT_FIXTURE = (
 )
 LISTING_DIGEST_FIXTURE = ERROR_TEXT_FIXTURE.with_name("provider-tool-listing.json")
 PLANTED_SECRETS_FIXTURE = ERROR_TEXT_FIXTURE.with_name("planted-secrets.json")
+# The provider items one response is read for; later items are counted as skipped.
+ITEMS = 1024
 
 
 def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
-    oversized = '{"value":"' + ("x" * 300_000) + '"}'
+    # Over the 1 MiB value cap, so it is not parsed.
+    oversized = '{"value":"' + ("x" * 1_100_000) + '"}'
     activity = hosted_tool_activity(
         "openai",
         {
@@ -50,10 +53,11 @@ def test_provider_calls_are_bounded_and_oversized_arguments_are_not_parsed():
             ]
         },
     )
-    # The malformed first item is counted within the 128-item parse cap, so 127 valid calls remain.
-    assert len(activity.calls) == 127
+    # The malformed first item is counted within the parse cap, so one fewer valid call remains;
+    # it and the oversized arguments are skipped with every item past the cap.
+    assert len(activity.calls) == ITEMS - 1
     assert activity.calls[0].arguments is ABSENT
-    assert activity.skipped == 1_876
+    assert activity.skipped == 2_002 - ITEMS + 2
 
 
 def test_oversized_mcp_arguments_are_counted_as_skipped():
@@ -65,7 +69,7 @@ def test_oversized_mcp_arguments_are_counted_as_skipped():
                     "type": "mcp_call",
                     "id": "oversized",
                     "name": "tool",
-                    "arguments": "x" * 262_145,
+                    "arguments": "x" * 1_048_577,
                 }
             ]
         },
@@ -115,7 +119,7 @@ def test_anthropic_use_without_bounded_result_is_skipped():
                         "tool_use_id": f"result-{index}",
                         "content": {"type": "text", "text": "ok"},
                     }
-                    for index in range(127)
+                    for index in range(ITEMS - 1)
                 ),
                 {
                     "type": "mcp_tool_result",
@@ -213,13 +217,13 @@ def test_broken_tail_item_does_not_discard_bounded_prefix():
             "output": [
                 *(
                     {"type": "mcp_call", "id": f"call-{index}", "name": "tool"}
-                    for index in range(128)
+                    for index in range(ITEMS)
                 ),
                 _RaisingType(),
             ]
         },
     )
-    assert len(activity.calls) == 128
+    assert len(activity.calls) == ITEMS
     assert activity.skipped == 1
 
 
@@ -230,7 +234,7 @@ def test_broken_anthropic_tail_item_does_not_discard_bounded_prefix():
             "content": [
                 *[
                     item
-                    for index in range(64)
+                    for index in range(ITEMS // 2)
                     for item in (
                         {"type": "server_tool_use", "id": f"call-{index}", "name": "tool"},
                         {
@@ -244,7 +248,7 @@ def test_broken_anthropic_tail_item_does_not_discard_bounded_prefix():
             ]
         },
     )
-    assert len(activity.calls) == 64
+    assert len(activity.calls) == ITEMS // 2
     assert activity.skipped == 1
 
 

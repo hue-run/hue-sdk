@@ -10,12 +10,12 @@ The snapshots accept ordinary built-in dictionaries, lists, tuples, strings, int
 
 Every captured value is checked before redaction, including when no redactor is configured. The redactor's returned value is checked again before JSON serialization. Each check has an independent limit:
 
-- A 1 MiB conservative value budget: eight bytes per visited value/key, plus UTF-8 string bytes and conservative numeric conversion overhead. This is a traversal bound, not a measurement of process memory or serialized JSON size.
+- A 4 MiB conservative value budget: eight bytes per visited value/key, plus UTF-8 string bytes and conservative numeric conversion overhead. This is a traversal bound, not a measurement of process memory or serialized JSON size.
 - Integers, including dictionary keys, have at most 14,000 bits of magnitude (about 4,215 decimal digits), independently of Python's configurable integer-string limit. This bounds decimal conversion work before serialization.
 - Maximum nesting depth 64, with the root at depth zero.
 - At most 65,536 visited values and dictionary keys. Repeated references count again; cycles are rejected.
 
-The final UTF-8 JSON field must fit 256 KiB. A redactor can reduce a larger input only if the input fits the snapshot limits. Unsupported values, nonfinite numbers, cycles, exhausted budgets, redactor exceptions and serialization failures omit the content and increment `export_status.instrumentation_failures`; they do not raise into the application's traced operation. If an inference-log field fails, that log emission is omitted. Failure counters remain visible through flush/status checks.
+The final UTF-8 JSON field is cut to 1 MiB (or the value limit Hue's receiver advertises) and its key listed under `hue.truncated`; an inference-log field over it is omitted, since its prefix is no JSON. A redactor sees an input only if it fits the snapshot limits, which are four times the cap, so a secret that crosses the cap is the redactor's to recognize. Unsupported values, nonfinite numbers, cycles, exhausted budgets, redactor exceptions and serialization failures omit the content and increment `export_status.instrumentation_failures`; they do not raise into the application's traced operation. If an inference-log field fails, that log emission is omitted. Failure counters remain visible through flush/status checks.
 
 ## Callback boundary
 

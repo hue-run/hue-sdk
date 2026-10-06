@@ -22,6 +22,8 @@ class Receiver:
     # A receiver that predates live spans (an older Hue or a generic collector) omits the
     # Hue-Pending-Spans header from its default trace acknowledgements.
     legacy: bool = False
+    # Headers every default OTLP acknowledgement carries, such as advertised limits.
+    advertise: dict[str, str] = field(default_factory=dict)
     requests: list[tuple[str, dict[str, str], bytes]] = field(default_factory=list)
     replies: deque[tuple[int, bytes, dict[str, str]]] = field(default_factory=deque)
     lock: Lock = field(default_factory=Lock)
@@ -95,6 +97,7 @@ def receiver():
                     )
                 else:
                     status, result, headers = 200, b"", {"Content-Type": "application/x-protobuf"}
+                    headers.update(state.advertise)
                     if self.path.endswith("/traces") and not state.legacy:
                         # A current Hue marks every trace acknowledgement this way.
                         headers["Hue-Pending-Spans"] = "1"
