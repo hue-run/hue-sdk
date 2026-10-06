@@ -22,9 +22,10 @@ from opentelemetry.context import attach, detach
 from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
+from ._limits import AdvertisedLimits
 from ._otel_compat import export_context, instrumentation_suppressed
 from .snapshots import snapshot_log, snapshot_pending_span, snapshot_span
-from .transport import MAX_BATCH_BYTES, PendingSpan
+from .transport import BATCH_TARGET_BYTES, MAX_BATCH_BYTES, DroppedRecords, PendingSpan
 
 # The instrumentation scope of ``Hue.tracer``; its spans are always announced while open.
 HUE_TRACER_SCOPE = "hue-run"
@@ -43,7 +44,8 @@ MAX_REMEMBERED_TRACES = 10_000
 
 
 class _BoundedProcessor:
-    _snapshot: Callable[[Any, bool], Any]
+    # Copies a record for the queue: ``(record, capture_content, record_bytes, value_bytes)``.
+    _copy: Callable[..., Any]
 
     def __init__(
         self,
@@ -52,6 +54,9 @@ class _BoundedProcessor:
         max_records: int,
         max_bytes: int,
         capture_content: bool = True,
+        *,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
     ) -> None:
         self._pid = os.getpid()
         self._capture_content = capture_content
@@ -59,6 +64,10 @@ class _BoundedProcessor:
         self._encode = encode
         self._max_records = max_records
         self._max_bytes = max_bytes
+        # The receiver's value cap, as it last advertised it, cuts values when they are queued.
+        self._limits = limits or AdvertisedLimits()
+        # Records this processor drops are counted on their trace's root span.
+        self._dropped_records = dropped_records
         self._condition = Condition()
         self._queue: deque[tuple[Any, int]] = deque()
         self._pending_records = 0
@@ -75,6 +84,23 @@ class _BoundedProcessor:
         with self._condition:
             return self._dropped, self._pending_records + self._admissions, self._pending_bytes
 
+    def _snapshot(self, item: Any, capture_content: bool) -> Any:
+        """The record copied for the queue: a value over the receiver's value cap is cut to it, and
+        the record may take the whole queue budget, so one large value cannot lose it."""
+        return type(self)._copy(
+            item,
+            capture_content,
+            record_bytes=self._max_bytes,
+            value_bytes=self._limits.current.value_bytes,
+        )
+
+    def _lost(self, *items: Any) -> None:
+        """Counts records dropped before export, also on their traces' root spans. Called under
+        the queue lock."""
+        self._dropped += sum(not self._advisory(item) for item in items)
+        if self._dropped_records is not None:
+            self._dropped_records.count([item for item in items if not self._advisory(item)])
+
     def _enqueue(self, item: Any) -> None:
         if self._pid != os.getpid():
             return
@@ -86,10 +112,10 @@ class _BoundedProcessor:
             # includes in-flight records, so a stalled receiver cannot grow it.
             with self._condition:
                 if self._closed:
-                    self._dropped += 1
+                    self._lost(item)
                     return
                 if self._pending_records + self._admissions >= self._max_records:
-                    self._dropped += 1
+                    self._lost(item)
                     return
                 # Reserve a record slot before snapshotting outside the lock.
                 # Flush must also wait for this admission to finish or be dropped.
@@ -104,16 +130,15 @@ class _BoundedProcessor:
                 admitted = False
                 self._condition.notify_all()
                 if self._closed:
-                    self._dropped += 1
+                    self._lost(item)
                     return
-                if size > MAX_BATCH_BYTES:
-                    self._dropped += 1
-                    self._exporter.record_failure((item,))
-                elif (
+                # A record over the receiver's request limits is not refused here: its exporter
+                # sheds its largest content values until it fits.
+                if (
                     self._pending_records >= self._max_records
                     or self._pending_bytes + size > self._max_bytes
                 ):
-                    self._dropped += 1
+                    self._lost(item)
                 else:
                     self._queue.append((item, size))
                     self._pending_records += 1
@@ -121,7 +146,7 @@ class _BoundedProcessor:
                     self._condition.notify_all()
         except Exception:
             with self._condition:
-                self._dropped += 1
+                self._lost(item)
             self._exporter.record_failure((item,))
         finally:
             if admitted:
@@ -168,9 +193,14 @@ class _BoundedProcessor:
         except Exception:
             self._exporter.record_failure()
             with self._condition:
+                # The pending count includes a batch that was in flight when the worker failed.
                 self._dropped += self._pending_records - sum(
                     self._advisory(item) for item, _ in self._queue
                 )
+                if self._dropped_records is not None:
+                    self._dropped_records.count(
+                        [item for item, _ in self._queue if not self._advisory(item)]
+                    )
                 self._queue.clear()
                 self._pending_records = 0
                 self._pending_bytes = 0
@@ -206,7 +236,7 @@ class _BoundedProcessor:
                     # Keep later records queued until it finishes; never replay
                     # the ambiguous batch or create additional network workers.
                     if self._closed:
-                        self._dropped += sum(not self._advisory(item) for item, _ in self._queue)
+                        self._lost(*(item for item, _ in self._queue))
                         self._pending_records -= len(self._queue)
                         self._pending_bytes -= sum(size for _, size in self._queue)
                         self._queue.clear()
@@ -218,12 +248,13 @@ class _BoundedProcessor:
                 batch_bytes = 0
                 while self._queue and len(batch) < 64:
                     size = self._queue[0][1]
-                    if batch_bytes + size > MAX_BATCH_BYTES:
+                    if batch and batch_bytes + size > BATCH_TARGET_BYTES:
                         break
                     batch.append(self._queue.popleft())
                     batch_bytes += size
-                # Per-record encodings include resource/scope overhead, so this
-                # conservative sum keeps each export within one HTTP request.
+                # Per-record encodings include resource/scope overhead, so this conservative
+                # sum keeps an export near the ordinary request size; the exporter measures
+                # each request against the receiver's limits and splits or sheds to fit them.
                 kept = self._prune(batch)
                 if len(kept) != len(batch):
                     self._pending_records -= len(batch) - len(kept)
@@ -289,7 +320,7 @@ class _LiveSpan:
 
 
 class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
-    _snapshot = staticmethod(snapshot_span)
+    _copy = staticmethod(snapshot_span)
 
     def __init__(
         self,
@@ -300,6 +331,8 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         capture_content: bool = True,
         *,
         live_spans: bool = False,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
     ) -> None:
         # Set before the worker starts; it reads these on every loop.
         self._live_spans = live_spans
@@ -309,7 +342,15 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         # traces forgotten first.
         self._ended: dict[str, int] = {}
         self._ended_lock = Lock()
-        super().__init__(exporter, encode, max_records, max_bytes, capture_content)
+        super().__init__(
+            exporter,
+            encode,
+            max_records,
+            max_bytes,
+            capture_content,
+            limits=limits,
+            dropped_records=dropped_records,
+        )
 
     def spans_ended(self, trace_id: str) -> int | None:
         """How many spans of the trace ended in this process, or ``None`` once forgotten."""
@@ -442,7 +483,7 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
 
 
 class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
-    _snapshot = staticmethod(snapshot_log)
+    _copy = staticmethod(snapshot_log)
 
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
         self._enqueue(log_record)

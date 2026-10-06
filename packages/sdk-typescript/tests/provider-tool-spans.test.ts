@@ -179,11 +179,13 @@ describe("provider tool spans", () => {
     expect(metadata.raw).not.toContain("Upstream rejected");
   });
 
-  test("a metadata-only catalog over one content field's bound keeps its summary", async () => {
-    // About 420 KB of definitions: over one content field's 256 KiB, within one export request.
+  test("a metadata-only catalog of nearly one export request keeps its summary", async () => {
+    // About 990 KB of definitions: under the 1 MiB a catalog is read to for its summary (one
+    // export request, which is also one content field's cap), far over the 256 KiB content cap
+    // this test was written against.
     const tools = Array.from({ length: 300 }, (_, index) => ({
       name: `tool_${index}`,
-      description: "d".repeat(1_300),
+      description: "d".repeat(3_200),
       input_schema: { type: "object" },
     }));
     const response = { output: [{ type: "mcp_list_tools", server_label: "big", tools }] };

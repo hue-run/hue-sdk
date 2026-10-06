@@ -762,7 +762,8 @@ describe("Live spans", () => {
   test(
     "no request of placeholders follows the acknowledgement that turned live spans off",
     async () => {
-      // Enough placeholder bytes for two requests; the first acknowledgement lacks the header.
+      // Enough placeholder bytes for two requests of the 4 MiB batch target; the first
+      // acknowledgement lacks the header.
       const endpoint = receiver(() => ({}), { legacy: true });
       const hue = createHue({
         apiKey,
@@ -770,22 +771,22 @@ describe("Live spans", () => {
         captureContent: false,
         baseUrl: endpoint.url,
         // Placeholders may use a quarter of the queue's bytes; keep that above the two requests.
-        maxQueueBytes: 32 * 1024 * 1024,
+        maxQueueBytes: 64 * 1024 * 1024,
       });
       try {
         const large = "x".repeat(60_000);
-        const spans = Array.from({ length: 20 }, (_, index) =>
+        const spans = Array.from({ length: 80 }, (_, index) =>
           hue.tracer.startSpan(`burst ${index}`, { attributes: { "gen_ai.request.model": large } }),
         );
-        await queued(hue.transport, 20);
+        await queued(hue.transport, 80);
         const mid = await hue.flush();
         expect(endpoint.requests).toHaveLength(1);
         expect(endpoint.placeholders().length).toBeGreaterThan(0);
-        expect(endpoint.placeholders().length).toBeLessThan(20);
+        expect(endpoint.placeholders().length).toBeLessThan(80);
         expect(mid.failedSpans + mid.rejectedSpans + mid.droppedSpans).toBe(0);
         for (const span of spans) span.end();
         const report = await hue.flush();
-        expect(report.acceptedSpans).toBe(20);
+        expect(report.acceptedSpans).toBe(80);
         expect(hue.transport.getIssues()).toEqual([
           expect.objectContaining({
             kind: "warning",
@@ -883,12 +884,12 @@ describe("Live spans", () => {
       try {
         await hue.withSpan("chat.request", async () => {
           await queued(hue.transport, 1);
-          // Over the 1 MiB request limit in metadata alone, which is never shed: invalid on this
-          // side, never sent, no receiver failure.
+          // Over the receiver's 4 MiB decoded request limit in metadata alone, which is never
+          // shed: invalid on this side, never sent, no receiver failure.
           hue.tracer
             .startSpan("too large", {
               attributes: Object.fromEntries(
-                Array.from({ length: 20 }, (_, index) => [
+                Array.from({ length: 80 }, (_, index) => [
                   `gen_ai.request.option.${index}`,
                   "x".repeat(60_000),
                 ]),

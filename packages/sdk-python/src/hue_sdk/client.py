@@ -21,11 +21,12 @@ from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import SpanLimits, TracerProvider
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
+from ._limits import AdvertisedLimits
 from ._otel_compat import encode_logs
 from ._provider_tools import (
     ABSENT,
@@ -41,10 +42,10 @@ from .receipts import TraceReceiptField, TraceVerificationResult, verify_trace
 from .snapshots import snapshot_content
 from .transport import (
     DEFAULT_BASE_URL,
-    MAX_CONTENT_BYTES,
     TRUNCATED_KEY,
     BoundedLogExporter,
     BoundedSpanExporter,
+    DroppedRecords,
     ExportIssue,
     ExportStatus,
     IssueLedger,
@@ -58,6 +59,27 @@ _MISSING = object()
 _FILE_ROLES = frozenset({"input", "attachment", "output"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_FILE_DATA_BYTES = 25 * 1024 * 1024
+# Attributes, events and links one span of a client's own tracer provider keeps, and attributes per
+# event and link. OpenTelemetry's default of 128 silently dropped the rest of a long conversation's
+# flattened messages; Hue's receiver counts none of them.
+_OWNED_RECORD_LIMIT = 2000
+
+
+def _owned_span_limits() -> SpanLimits:
+    """2,000 of each, except where the environment sets OpenTelemetry's own limit, which wins."""
+
+    def limit(*variables: str) -> int | None:
+        return None if any(name in os.environ for name in variables) else _OWNED_RECORD_LIMIT
+
+    return SpanLimits(
+        max_events=limit("OTEL_SPAN_EVENT_COUNT_LIMIT"),
+        max_links=limit("OTEL_SPAN_LINK_COUNT_LIMIT"),
+        max_span_attributes=limit("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "OTEL_ATTRIBUTE_COUNT_LIMIT"),
+        max_event_attributes=limit(
+            "OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT", "OTEL_ATTRIBUTE_COUNT_LIMIT"
+        ),
+        max_link_attributes=limit("OTEL_LINK_ATTRIBUTE_COUNT_LIMIT", "OTEL_ATTRIBUTE_COUNT_LIMIT"),
+    )
 
 
 def _utf8_byte_size(value: str, limit: int) -> int:
@@ -596,6 +618,9 @@ class Hue:
         self._issues = 0
         self._issues_lock = Lock()
         self._redactor = redactor
+        # The receiver's limits as it last advertised them, shared by the exporters, processors
+        # and content helpers.
+        self._limits = AdvertisedLimits()
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._timeout = export_timeout_seconds
         self._closed = False
@@ -662,7 +687,7 @@ class Hue:
             else Resource.create({"service.name": service_name})
         )
         sdk_tracer_provider = tracer_provider or TracerProvider(
-            resource=resource, shutdown_on_exit=False
+            resource=resource, shutdown_on_exit=False, span_limits=_owned_span_limits()
         )
         sdk_logger_provider = logger_provider or LoggerProvider(
             resource=resource, shutdown_on_exit=False
@@ -670,15 +695,24 @@ class Hue:
         self.tracer_provider = sdk_tracer_provider
         self.logger_provider = sdk_logger_provider
         self._ledger = IssueLedger()
+        # Records of a trace the SDK never sent, reported on the trace's root span.
+        dropped_records = DroppedRecords()
         self._span_exporter = BoundedSpanExporter(
             f"{self.base_url}/api/v1/otlp/v1/traces",
             self._headers,
             self._timeout,
             self._ledger,
             live_spans=live_spans,
+            limits=self._limits,
+            dropped_records=dropped_records,
         )
         self._log_exporter = BoundedLogExporter(
-            f"{self.base_url}/api/v1/otlp/v1/logs", self._headers, self._timeout, self._ledger
+            f"{self.base_url}/api/v1/otlp/v1/logs",
+            self._headers,
+            self._timeout,
+            self._ledger,
+            limits=self._limits,
+            dropped_records=dropped_records,
         )
         self._span_processor = BoundedSpanProcessor(
             self._span_exporter,
@@ -687,6 +721,8 @@ class Hue:
             max_queue_bytes,
             capture_content=self.capture_content,
             live_spans=live_spans,
+            limits=self._limits,
+            dropped_records=dropped_records,
         )
         self._log_processor = BoundedLogProcessor(
             self._log_exporter,
@@ -694,6 +730,8 @@ class Hue:
             max_queue_size,
             max_queue_bytes,
             capture_content=self.capture_content,
+            limits=self._limits,
+            dropped_records=dropped_records,
         )
         sdk_tracer_provider.add_span_processor(self._span_processor)
         sdk_logger_provider.add_log_record_processor(self._log_processor)
@@ -742,11 +780,8 @@ class Hue:
             if self._redactor is not None:
                 value = snapshot_content(self._redactor(key, value))
             # Bounded in UTF-8 bytes, as content is; a lone surrogate fails to encode.
-            if (
-                not isinstance(value, str)
-                or len(value) > MAX_CONTENT_BYTES
-                or len(value.encode("utf-8")) > MAX_CONTENT_BYTES
-            ):
+            cap = self._limits.current.value_bytes
+            if not isinstance(value, str) or len(value) > cap or len(value.encode("utf-8")) > cap:
                 raise ValueError("Redacted text is not bounded text.")
             return value
         except Exception:
@@ -758,17 +793,19 @@ class Hue:
         log's body): a value the cap would cut is omitted instead, since its prefix is no JSON."""
         content, truncated = self._bounded_content(key, value)
         if truncated:
-            raise ValueError("Captured content exceeds Hue's 256 KiB field limit.")
+            raise ValueError("Captured content exceeds Hue's value cap.")
         return content
 
     def _bounded_content(self, key: str, value: Any) -> tuple[str, bool]:
-        """The value as JSON text within Hue's 256 KiB value cap, and whether it was cut to fit.
+        """The value as JSON text within Hue's value cap (1 MiB unless the receiver advertises
+        another), and whether it was cut to fit.
 
         A value over the cap is cut to a UTF-8 prefix, as Hue's receiver cuts a value over its own
         cap, rather than omitted: the span still carries the call, the result's recorded part and
         the rest of its evidence, and the caller lists the key under ``hue.truncated`` so a
         reader knows the value is partial. Only a value that cannot be serialized is omitted.
         """
+        cap = self._limits.current.value_bytes
         # Redact before serialization, before queues and before any exporter receives content.
         try:
             # A redactor may mutate its argument before returning or raising.
@@ -780,8 +817,8 @@ class Hue:
                 value = snapshot_content(self._redactor(key, value))
             # A direct string past the cap is cut before JSON creates an escaped copy: its text
             # is cut again below to the cap, so the prefix kept is the same.
-            if isinstance(value, str) and len(value) > MAX_CONTENT_BYTES:
-                value = value[:MAX_CONTENT_BYTES]
+            if isinstance(value, str) and len(value) > cap:
+                value = value[:cap]
             # Stop accumulating once the text passes the cap; what follows is cut anyway.
             parts: list[str] = []
             size = 0
@@ -790,7 +827,7 @@ class Hue:
             ).iterencode(value):
                 parts.append(part)
                 size += len(part.encode("utf-8"))
-                if size > MAX_CONTENT_BYTES:
+                if size > cap:
                     break
             serialized = "".join(parts)
         except Exception:
@@ -798,9 +835,9 @@ class Hue:
                 "Content redaction or JSON serialization failed; content was omitted."
             ) from None
         encoded = serialized.encode("utf-8")
-        if len(encoded) <= MAX_CONTENT_BYTES:
+        if len(encoded) <= cap:
             return serialized, False
-        return encoded[:MAX_CONTENT_BYTES].decode("utf-8", errors="ignore"), True
+        return encoded[:cap].decode("utf-8", errors="ignore"), True
 
     @contextmanager
     def context(

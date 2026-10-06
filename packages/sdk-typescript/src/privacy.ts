@@ -3,7 +3,7 @@ import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord } from "@opentelemetry/sdk-logs";
 import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import type { HueOptions } from "./types.js";
-import { MAX_CONTENT_BYTES } from "./config.js";
+import { MAX_CONTENT_BYTES, MAX_RECORD_NODES, REDACTION_CONTEXT_UNITS } from "./config.js";
 import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions.js";
 import { hashInlineFiles } from "./inline-files.js";
 import { truncateUtf8 } from "./safety.js";
@@ -72,9 +72,10 @@ export function isContentKey(key: string): boolean {
   return contentPrefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}.`));
 }
 
-/** The record attribute listing the keys whose values were cut to fit Hue's 256 KiB value cap:
- * Hue's receiver writes it for the values it cuts, and the SDK writes it for the values it cuts
- * before export, under the same name, so a reader learns of a cut value from one place. */
+/** The record attribute listing the keys whose values were cut to fit Hue's value cap (1 MiB
+ * unless the receiver advertises another): Hue's receiver writes it for the values it cuts, and
+ * the SDK writes it for the values it cuts before export, under the same name, so a reader learns
+ * of a cut value from one place. */
 export const TRUNCATED_KEY = "hue.truncated";
 /** The size of a structured value the marker replaced. */
 export const TRUNCATED_BYTES_KEY = "hue.truncated_bytes";
@@ -98,6 +99,16 @@ export function truncatedMarker(bytes: number): Record<string, unknown> {
   return { [TRUNCATED_KEY]: true, [TRUNCATED_BYTES_KEY]: bytes };
 }
 
+/** Whether a value is the receiver's marker for a value that was shed or replaced. */
+export function isTruncatedMarker(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>)[TRUNCATED_KEY] === true
+  );
+}
+
 /** `listed` with `keys` added, each once, in order. */
 export function withTruncatedKeys(listed: unknown, keys: readonly string[]): string[] {
   const result = Array.isArray(listed)
@@ -112,10 +123,39 @@ interface RedactionBudget {
   nodes: number;
   /** The keys whose values were cut or replaced, as `hue.truncated` lists them. */
   truncated: string[];
+  /** The value cap: the receiver's advertised value limit. */
+  valueBytes: number;
+  /** The record's value strings its queue cut when it was admitted. */
+  cut?: ReadonlySet<string>;
+}
+
+/** How one record is redacted: the receiver's value cap, and the value strings the queue cut. */
+export interface RedactionLimits {
+  /** The value cap in UTF-8 bytes. Default 1 MiB, the receiver's limit before it advertises one. */
+  valueBytes?: number;
+  /** The record's value strings cut when it was queued. */
+  cut?: ReadonlySet<string>;
+}
+
+function budgetOf(limits: RedactionLimits): RedactionBudget {
+  return {
+    bytes: 0,
+    nodes: 0,
+    truncated: [],
+    valueBytes: limits.valueBytes ?? MAX_CONTENT_BYTES,
+    ...(limits.cut?.size ? { cut: limits.cut } : {}),
+  };
+}
+
+/** `text` without its last `units` code units, never ending on the first half of a pair. */
+function withoutTail(text: string, units: number): string {
+  let end = Math.max(0, text.length - units);
+  if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
+  return text.slice(0, end);
 }
 
 /**
- * One value through the redactor and Hue's value cap. Text over 256 KiB is cut to a UTF-8 prefix
+ * One value through the redactor and Hue's value cap. Text over the cap is cut to a UTF-8 prefix
  * and bytes over it are replaced by the receiver's marker, as the receiver itself does to a
  * value over its cap, and the value's key (`listAs`) is listed under `hue.truncated`: the span
  * is exported whole with the rest of its evidence, and a reader knows the one value is partial.
@@ -129,12 +169,17 @@ function redactValue(
   depth = 0,
   listAs = path,
 ): unknown {
-  if (++budget.nodes > 16384 || depth > 32)
+  if (++budget.nodes > MAX_RECORD_NODES || depth > 32)
     throw new Error("Telemetry value exceeds the supported nesting limit");
   if (typeof value === "string") {
-    // The redactor sees the whole recorded text, so a secret that crosses the cap is still its
-    // to recognize; what it returns is cut to the cap afterwards.
-    const result = options.redact ? options.redact(value, path) : value;
+    const cap = budget.valueBytes;
+    // The redactor sees the recorded text past the cap, so a secret that crosses the cap is still
+    // its to recognize; what it returns is cut to the cap afterwards. Text the queue cut when the
+    // record was admitted (far past the cap) reached the redactor without its continuation, so
+    // the end of the answer, which may hold the start of a secret it could not recognize, is
+    // never exported.
+    const cutWhenQueued = budget.cut?.has(value) === true;
+    let result = options.redact ? options.redact(value, path) : value;
     // JavaScript can supply an async redactor despite the synchronous contract.
     // Observe its rejection before dropping the invalid record.
     if (result && typeof result === "object") void Promise.resolve(result).catch(() => {});
@@ -143,29 +188,38 @@ function redactValue(
     // anything scans it, since scanning would materialize text the record never held.
     if (
       typeof result !== "string" ||
-      result.length > Math.max(MAX_CONTENT_BYTES, value.length) ||
+      result.length > Math.max(cap, value.length) ||
       !result.isWellFormed() ||
       result.includes("\u0000")
     )
       throw new Error("Redaction produced unsupported text");
+    if (cutWhenQueued && options.redact) result = withoutTail(result, REDACTION_CONTEXT_UNITS);
     const bytes = Buffer.byteLength(result);
-    if (bytes <= MAX_CONTENT_BYTES) {
+    if (bytes <= cap && !cutWhenQueued) {
       budget.bytes += bytes;
       return result;
     }
-    // Within the cap's code units but over its bytes (multibyte text): cut to the bytes.
+    // Within the cap's code units but over its bytes (multibyte text), or cut when queued: cut to
+    // the bytes, and listed either way.
     if (!budget.truncated.includes(listAs)) budget.truncated.push(listAs);
-    budget.bytes += MAX_CONTENT_BYTES;
-    return truncateUtf8(result, MAX_CONTENT_BYTES);
+    budget.bytes += cap;
+    return truncateUtf8(result, cap);
+  }
+  // A value the queue replaced by the receiver's marker (a tool definition or recorded request
+  // too long to scrub when it was queued) is listed as cut.
+  if (depth === 0 && isTruncatedMarker(value)) {
+    if (!budget.truncated.includes(listAs)) budget.truncated.push(listAs);
+    return value;
   }
   if (Array.isArray(value)) {
-    if (value.length > 16384) throw new Error("Telemetry array exceeds the complexity limit");
+    if (value.length > MAX_RECORD_NODES)
+      throw new Error("Telemetry array exceeds the complexity limit");
     return value.map((item, index) =>
       redactValue(item, `${path}.${index}`, options, budget, depth + 1, listAs),
     );
   }
   if (value instanceof Uint8Array) {
-    if (value.byteLength <= MAX_CONTENT_BYTES) {
+    if (value.byteLength <= budget.valueBytes) {
       budget.bytes += value.byteLength;
       return value;
     }
@@ -282,8 +336,9 @@ export function redactSpan(
   span: ReadableSpan,
   options: HueOptions,
   cache: ResourceCache,
+  limits: RedactionLimits = {},
 ): ReadableSpan {
-  const budget: RedactionBudget = { bytes: 0, nodes: 0, truncated: [] };
+  const budget = budgetOf(limits);
   // Derived before metadata-only stripping so the identity survives without the result itself.
   const hosted = hostedMcpCall(span.attributes);
   const source: Attributes = {
@@ -353,13 +408,14 @@ export function redactLog(
   log: ReadableLogRecord,
   options: HueOptions,
   cache: ResourceCache,
+  limits: RedactionLimits = {},
 ): ReadableLogRecord {
-  const budget: RedactionBudget = { bytes: 0, nodes: 0, truncated: [] };
+  const budget = budgetOf(limits);
   let body = options.captureContent ? redactValue(log.body, "body", options, budget) : undefined;
   if (body !== undefined && typeof body !== "string") {
     // A structured body over the cap is replaced by the receiver's marker, as the receiver would
     // replace it; the marker names the body's size as recorded, before any text part was cut.
-    if (Buffer.byteLength(JSON.stringify(body)) > MAX_CONTENT_BYTES) {
+    if (Buffer.byteLength(JSON.stringify(body)) > budget.valueBytes) {
       body = truncatedMarker(structuredBytes(log.body));
       if (!budget.truncated.includes("body")) budget.truncated.push("body");
     }
