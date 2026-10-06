@@ -1,6 +1,6 @@
 import type { EvaluationClient } from "./client.js";
 import { uuid } from "./json.js";
-import type { ExperimentItem, Metric, Subject, TypedError } from "./types.js";
+import type { ExperimentItem, Metric, ScorerVersion, Subject, TypedError } from "./types.js";
 
 /** Subset of {@link EvaluationClient} used to wait for results. */
 export type VerdictClient = Pick<
@@ -51,7 +51,7 @@ export interface VerdictResult {
   notApplicable?: boolean;
   /** What a not-applicable evaluator needs that the case lacks, such as `outcome_criteria`. */
   requires?: string;
-  /** Whether Hue recorded the result as advisory, as it does for every judge today: a result of a
+  /** Whether Hue recorded the result as advisory: a result of a
    * pinned Hue judge whose evidence says `advisory: true`, not an error, and whose metrics carry
    * no `passed`. It is shown with its verdict but never decides a case. Absent means false. */
   advisory?: boolean;
@@ -189,8 +189,8 @@ export interface CaseVerdict {
   /** `passed` and `failed` are scored verdicts; `error`, `skipped` and `pending` carry no verdict.
    * Only the evaluators that apply to the case decide it; one where none applies is an error. */
   state: "passed" | "failed" | "error" | "skipped" | "pending";
-  /** True only for `state: "passed"`: every scored metric of an applicable pin passed and no
-   * applicable pin errored or is missing. */
+  /** True only for `state: "passed"`: every deciding metric passed, required evaluators decided,
+   * and no applicable pin errored or is missing. */
   passed: boolean;
   /** Pinned scorer versions Hue recorded as not applicable to the case; always set by
    * {@link summarizeVerdicts}. */
@@ -223,7 +223,7 @@ export interface VerdictSummary {
     failed: number;
     /** Cases with a scorer error. */
     error: number;
-    /** Cases whose pins were all skipped. */
+    /** Cases whose deciding pins were skipped or whose required evaluator has no decision. */
     skipped: number;
     /** Cases still missing a result. */
     pending: number;
@@ -239,10 +239,21 @@ export function metricPassed(metric: Metric): boolean {
   return typeof metric.value === "boolean" ? metric.value : true;
 }
 
+/** Outcome entries decide the case; a separate judge's immutable version opts into that policy.
+ * A named answer reference remains inside its outcome entry, not an advisory judge promotion. */
+function requiresDecision(definition: unknown): boolean {
+  if (!definition || typeof definition !== "object" || Array.isArray(definition)) return false;
+  const pinned = definition as { kind?: unknown; config?: { required?: unknown } };
+  return (
+    pinned.kind === "world_outcome" ||
+    (pinned.kind === "world_judge" && pinned.config?.required === true)
+  );
+}
+
 /**
  * Groups results by experiment case. Cases link to results through their execution's subject;
- * pass `subjects` when the items do not carry `execution.subjectId`. A case passes when every
- * pinned scorer scored it without a failing metric.
+ * pass `subjects` when the items do not carry `execution.subjectId`. Applicable required pins
+ * need a decision before a case can pass; genuine not-applicable and advisory pins are exempt.
  */
 export function summarizeVerdicts(
   results: VerdictResults,
@@ -251,12 +262,20 @@ export function summarizeVerdicts(
     experimentItems: Pick<ExperimentItem, "id" | "externalKey" | "execution">[];
     /** Scorer versions every case needs a result for; defaults to the versions seen in `results`. */
     scorerVersionIds?: string[];
+    /** Immutable pinned definitions, as returned on the experiment. Outcome entries and required
+     * judge versions need a decision; result evidence cannot change their required policy. */
+    scorerVersions?: Pick<ScorerVersion, "id" | "definition">[];
     /** Subject to case links for servers that omit `execution.subjectId`. */
     subjects?: Pick<Subject, "id" | "caseId">[];
   },
 ): VerdictSummary {
   const pins = new Set(
     options.scorerVersionIds ?? results.results.map((result) => result.scorerVersionId),
+  );
+  const required = new Set(
+    (options.scorerVersions ?? [])
+      .filter((version) => requiresDecision(version.definition))
+      .map((version) => version.id),
   );
   const subjectByCase = new Map<string, string>();
   for (const subject of options.subjects ?? []) subjectByCase.set(subject.caseId, subject.id);
@@ -272,6 +291,7 @@ export function summarizeVerdicts(
     const skippedAsInapplicable = (result: VerdictResult) =>
       result.state === "skipped" && result.notApplicable === true;
     const isAdvisory = (result: VerdictResult) =>
+      !required.has(result.scorerVersionId) &&
       result.advisory === true &&
       result.state !== "error" &&
       result.metrics.every((metric) => metric.passed === undefined);
@@ -283,19 +303,35 @@ export function summarizeVerdicts(
     const errors = deciding.filter((result) => result.state === "error");
     const scored = deciding.filter((result) => result.state === "scored");
     const failing = scored.filter((result) => !result.metrics.every(metricPassed));
+    const undecided = deciding.filter(
+      (result) =>
+        required.has(result.scorerVersionId) &&
+        result.state !== "error" &&
+        (result.state !== "scored" ||
+          !result.metrics.some(
+            (metric) => typeof metric.passed === "boolean" || typeof metric.value === "boolean",
+          )),
+    );
     const missing = [...pins].some((pin) => !own.some((result) => result.scorerVersionId === pin));
     const noneApplies = !missing && own.length > 0 && !applicable.length;
     const noneDecides = !missing && applicable.length > 0 && !deciding.length;
-    const state: CaseVerdict["state"] =
-      errors.length || noneApplies || noneDecides
+    // A real failure still decides the case if only required evaluators are unavailable. Other
+    // scorer errors keep their existing precedence over quality metrics.
+    const failureWins =
+      failing.length > 0 && errors.every((result) => required.has(result.scorerVersionId));
+    const state: CaseVerdict["state"] = failureWins
+      ? "failed"
+      : errors.length || noneApplies || noneDecides
         ? "error"
         : failing.length
           ? "failed"
           : missing || !own.length
             ? "pending"
-            : scored.length
-              ? "passed"
-              : "skipped";
+            : undecided.length
+              ? "skipped"
+              : scored.length
+                ? "passed"
+                : "skipped";
     const requires = [
       ...new Set(inapplicable.flatMap((result) => (result.requires ? [result.requires] : []))),
     ];
@@ -309,6 +345,11 @@ export function summarizeVerdicts(
       advisory: advisory.map((result) => result.scorerVersionId),
       metrics,
       explanations: [
+        ...(state === "skipped" &&
+        undecided.length &&
+        !undecided.some((result) => /^inconclusive:/i.test(result.explanation ?? ""))
+          ? ["Inconclusive: a required evaluator did not decide this case."]
+          : []),
         ...(noneApplies
           ? [
               `No pinned evaluator applies to this case${requires.length ? ` (they need ${requires.join(" or ")})` : ""}; pin one that grades it`,
@@ -326,7 +367,10 @@ export function summarizeVerdicts(
             ]
           : []),
         ...deciding
-          .filter((result) => result.state !== "scored" || failing.includes(result))
+          .filter(
+            (result) =>
+              result.state !== "scored" || failing.includes(result) || undecided.includes(result),
+          )
           .map((result) => result.explanation)
           .filter((explanation): explanation is string => !!explanation),
       ],
@@ -434,10 +478,13 @@ export async function collectExperimentVerdicts(
   const experiment = await client.getExperiment(options.experimentId);
   const scorerVersionIds = experiment.evaluation.scorerVersions.map((version) => version.id);
   const { experimentId: _experimentId, ...wait } = options;
-  // Hue's own judges, the only evaluators whose results can be advisory.
+  // Only non-required Hue judges can be advisory. Their immutable policy is already in this
+  // response; a required version's result evidence cannot override it.
   const judgeScorerVersionIds = experiment.evaluation.scorerVersions
     .filter(
-      (version) => (version.definition as { kind?: unknown } | undefined)?.kind === "world_judge",
+      (version) =>
+        (version.definition as { kind?: unknown } | undefined)?.kind === "world_judge" &&
+        !requiresDecision(version.definition),
     )
     .map((version) => version.id);
   const results = await waitForResults(client, {
@@ -463,6 +510,11 @@ export async function collectExperimentVerdicts(
     runId: experiment.evaluation.id,
     scorerVersionIds,
     results,
-    summary: summarizeVerdicts(results, { experimentItems, scorerVersionIds, subjects }),
+    summary: summarizeVerdicts(results, {
+      experimentItems,
+      scorerVersionIds,
+      scorerVersions: experiment.evaluation.scorerVersions,
+      subjects,
+    }),
   };
 }
