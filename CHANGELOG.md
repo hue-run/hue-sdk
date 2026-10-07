@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Fixed
+
+- The evaluation guide and the `RunLocalAgentOptions.concurrency` documentation give the enforced
+  bound of 1–64 cases in flight, which `runExperiment()`, `runLocalAgent()` and
+  `hue eval --concurrency` have accepted since 0.8.0; they still said 1–16.
+
 ### [0.15.0] - 2026-10-06
 
 This release follows Hue's receiver limits and uploads values over its inline limit to Hue, which
