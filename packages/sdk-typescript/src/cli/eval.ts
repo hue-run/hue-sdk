@@ -160,7 +160,7 @@ Output and limits:
                                   --content the case span still carries the output
   --save-version                  Freeze an unsaved eval-set version before running
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
-  --concurrency <n>               Cases in flight, 1-64 (default: 1)
+  --concurrency <n>               Cases in flight, 1-100 (default: 1)
   --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
                                   (default) completes it as failed with the evidence omitted;
                                   pending completes it in its true state with the trace still to
@@ -1317,7 +1317,7 @@ async function runOnce(
   signal: AbortSignal,
 ): Promise<number> {
   const client = new EvaluationClient(connection);
-  const concurrency = integer("concurrency", values.concurrency, 1, 1, 64);
+  const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
   const pins = await resolveSelection(client, values);
@@ -1583,7 +1583,7 @@ async function runWorker(
   const client = new ObservedClient(connection);
   const environmentClient = createEnvironmentClient(connection);
   const wait = integer("wait", values.wait, 300, 0, 86_400);
-  const concurrency = integer("concurrency", values.concurrency, 1, 1, 64);
+  const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
   const maxRuns =
     values["max-runs"] === undefined
       ? undefined
