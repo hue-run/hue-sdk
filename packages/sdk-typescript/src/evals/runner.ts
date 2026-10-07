@@ -151,7 +151,7 @@ interface RunnerOptions {
    * (for example a Hue-operated grading worker that owns the evaluator source) instead of
    * refusing the run. Their IDs are reported in `deferredScorerVersionIds`. */
   deferUnboundLocalScorers?: boolean;
-  /** Cases in flight at once, 1–64. Default 1. */
+  /** Cases in flight at once, 1–100. Default 1. */
   concurrency?: number;
   /** Deadline for JSON Schema scoring in its worker, 100–60000 ms. Default 2000. */
   schemaTimeoutMillis?: number;
@@ -416,8 +416,8 @@ function settings(options: RunnerOptions): number {
   if (typeof options.persistResultContent !== "boolean")
     throw new TypeError("Choose persistResultContent explicitly: true or false");
   const concurrency = options.concurrency ?? 1;
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64)
-    throw new RangeError("concurrency must be 1–64");
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 100)
+    throw new RangeError("concurrency must be 1–100");
   const timeout = options.schemaTimeoutMillis ?? 2000;
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 60_000)
     throw new RangeError("schemaTimeoutMillis must be 100–60000");

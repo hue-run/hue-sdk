@@ -10,6 +10,18 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Changed
+
+- `runExperiment()`, `rescore()`, `runLocalAgent()`, simulations and `hue eval --concurrency`
+  (one-shot and `--worker`) accept up to 100 cases in flight (was 64), so a 100-case eval set can
+  run as one wave. The default stays 1. Cases that use Hue worlds also count toward the project's
+  live-world quota, which every run and worker in the project shares.
+
+#### Fixed
+
+- The evaluation guide and the `RunLocalAgentOptions.concurrency` documentation give the enforced
+  bound; since 0.8.0 they had still said 1–16.
+
 ### [0.15.0] - 2026-10-06
 
 This release follows Hue's receiver limits and uploads values over its inline limit to Hue, which
@@ -1393,6 +1405,10 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+#### Changed
+
+- `run_experiment` and `rescore` accept `concurrency` up to 100 (was 64). The default stays 1.
 
 ### [0.9.0] - 2026-10-06
 

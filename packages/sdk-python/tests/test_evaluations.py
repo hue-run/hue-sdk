@@ -1433,10 +1433,10 @@ def test_async_target_errors_and_cancellation_stay_distinct_and_redacted(
         arguments["hue"].shutdown()
 
 
-def test_concurrency_allows_up_to_64_cases_in_flight():
-    runner_module._settings(False, 64, 2000)
-    for concurrency in (0, 65):
-        with pytest.raises(ValueError, match="concurrency must be 1–64"):
+def test_concurrency_allows_up_to_100_cases_in_flight():
+    runner_module._settings(False, 100, 2000)
+    for concurrency in (0, 101):
+        with pytest.raises(ValueError, match="concurrency must be 1–100"):
             runner_module._settings(False, concurrency, 2000)
 
 

@@ -184,8 +184,8 @@ def _decide_export(
 def _settings(persist: bool, concurrency: int, timeout: int) -> None:
     if type(persist) is not bool:
         raise TypeError("Choose persist_result_content explicitly: True or False.")
-    if type(concurrency) is not int or not 1 <= concurrency <= 64:
-        raise ValueError("concurrency must be 1–64.")
+    if type(concurrency) is not int or not 1 <= concurrency <= 100:
+        raise ValueError("concurrency must be 1–100.")
     if type(timeout) is not int or not 100 <= timeout <= 60_000:
         raise ValueError("schema_timeout_millis must be 100–60000.")
 
