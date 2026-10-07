@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.15.1] - 2026-10-07
+
 #### Changed
 
 - `runExperiment()`, `rescore()`, `runLocalAgent()`, simulations and `hue eval --concurrency`
@@ -1405,6 +1407,8 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### [0.9.1] - 2026-10-07
 
 #### Changed
 
