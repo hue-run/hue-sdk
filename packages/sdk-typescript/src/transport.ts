@@ -1611,7 +1611,8 @@ const MAX_BACKOFF_MILLIS = 5000;
 const BACKOFF_MULTIPLIER = 1.5;
 const JITTER = 0.2;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
-const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+// Hue also retries transient collector HTTP 500 responses within the same attempt/deadline budget.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_NETWORK_ERRORS = new Set([
   "ECONNRESET",
   "ECONNREFUSED",

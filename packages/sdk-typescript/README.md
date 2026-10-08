@@ -491,8 +491,8 @@ const hue = createHue({
 
 ## Delivery behavior
 
-Exports retry temporary HTTP/network failures (429, 502, 503, 504 and connection errors,
-honoring `Retry-After`) within the export timeout, by OpenTelemetry's OTLP/HTTP exporter rules. A
+Exports retry temporary HTTP/network failures (429, 500, 502, 503, 504 and connection errors,
+honoring `Retry-After`) within the export timeout. A
 429 whose `Retry-After` outlasts the export timeout keeps its records queued, within the queue's
 bounds, and sends them again once the wait has passed; an export holds its records this way for at
 most 60 seconds in all, and a longer wait loses them, reported as a `failed` issue with status 429.
