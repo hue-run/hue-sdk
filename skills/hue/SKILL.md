@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.6.7"
+  version: "0.6.8"
 ---
 
 # Hue
