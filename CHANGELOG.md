@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.15.2] - 2026-10-08
+
+#### Fixed
+
+- Trace and log exporters retry transient HTTP 500 responses within the existing retry and timeout budgets.
+
 ### [0.15.1] - 2026-10-07
 
 #### Changed

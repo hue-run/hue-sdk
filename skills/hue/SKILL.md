@@ -223,7 +223,7 @@ evaluator, so a missing judge leaves its result inconclusive.
 ## Evaluate a published case
 
 When the user asks to evaluate or regression-test their agent against a published Hue case, or to
-make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.15.1
+make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.15.2
 (`HUE_WORLD_NOW` needs 0.13.0; `--case` and `--command` are available since 0.12.1). Confirm registry availability before running version-pinned install commands; a source commit is not a release. `hue eval`
 runs on Node.js 22 or 24, also for a Python agent, and the agent itself needs no Hue package.
 Hue never executes the agent: it runs in the user's process. Hue hosts a simulated world when
@@ -356,7 +356,7 @@ in the codebase's language and trim the functions no call site uses.
    the evaluation from the shell:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.15.1 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
    ```
 
    The two `--package` flags put the CLI and its `zod` peer in npx's cache, so the agent's
@@ -412,7 +412,7 @@ in the codebase's language and trim the functions no call site uses.
 7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.15.1 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
    ```
 
 A worker upgrade from an environment-only registration needs a new `--revision`, because Hue

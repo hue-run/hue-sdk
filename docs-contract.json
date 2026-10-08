@@ -507,7 +507,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.15.1"
+      "version": "0.15.2"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -519,7 +519,7 @@
       "version": "0.6.7"
     },
     "name": "hue",
-    "sha256": "sha256:866638eb7977ed010f2a315afbf95468b698270f4faf0c356e822460d5e3d6db",
+    "sha256": "sha256:5cb52c40f177281f1fb59f193385a8a9a6b54acbd61bdb7e7512fba903804d2c",
     "source": "skills/hue/SKILL.md"
   }
 }
