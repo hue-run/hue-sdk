@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,18 +31,23 @@ describe("checkpoint lock recovery", () => {
     try {
       const store = await CheckpointStore.acquire(root, { kind: "test" });
       const owner = JSON.parse(await readFile(join(root, ".lock", "owner.json"), "utf8"));
-      expect(owner.value).toEqual({ pid: process.pid, host: hostname() });
+      expect(owner.value).toMatchObject({ pid: process.pid, host: hostname() });
       expect(store.reclaimed).toBe(true);
-      expect(await readdir(root)).not.toContain(".lock-reclaim");
+      expect((await readdir(root)).filter((name) => name.startsWith(".lock-dead-"))).toHaveLength(
+        1,
+      );
       await store.release();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  test("a lock another process is reclaiming refuses", async () => {
+  test("a dead owner another process already took over refuses", async () => {
     const root = await leftLocked({ pid: exitedPid(), host: hostname() });
-    await mkdir(join(root, ".lock-reclaim"), { mode: 0o700 });
+    const owner = await readFile(join(root, ".lock", "owner.json"), "utf8");
+    const taken = join(root, `.lock-dead-${createHash("sha256").update(owner).digest("hex")}`);
+    await mkdir(taken, { mode: 0o700 });
+    await writeFile(join(taken, "owner.json"), owner);
     try {
       await expect(CheckpointStore.acquire(root, { kind: "test" })).rejects.toThrow("locked");
     } finally {

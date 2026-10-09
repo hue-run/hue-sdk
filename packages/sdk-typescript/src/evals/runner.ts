@@ -199,6 +199,8 @@ async function removeCaseFiles(directory: string): Promise<void> {
  * them gone. */
 interface CaseFiles {
   keepOutputs: boolean;
+  /** The world case's directory for the current attempt. */
+  directory: string;
 }
 /** Everything of a world case's directory except the staged outputs. */
 const WORK_PARTS = ["inputs", "evaluator-inputs", "work"];
@@ -408,14 +410,16 @@ interface Uploading {
   output?: JsonValue;
   error?: TypedError;
   files: StagedOutputFile[];
+  attempt?: string;
 }
+// `attempt` names the execution a retry replaced; its world files are kept apart from that one's.
 type CaseCheckpoint =
   | Prepared
   | Uploading
   | { stage: "starting"; startKey: string; traceExternalId: string; previousExecutionId?: string }
-  | { stage: "running" | "serialization_failed"; executionId: string }
+  | { stage: "running" | "serialization_failed"; executionId: string; attempt?: string }
   // The caller's signal stopped the target: the next run retries the case with a new attempt.
-  | { stage: "interrupted"; executionId: string };
+  | { stage: "interrupted"; executionId: string; attempt?: string };
 
 function settings(options: RunnerOptions): number {
   if (
@@ -801,12 +805,13 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     }
     // A case pinned to a world keeps its files apart and removes them when it ends: the agent's
     // copies of its inputs, its work, the evaluator's downloads and the staged outputs.
-    const worldDirectoryOf = (itemId: string) => join(filesRoot, `world-case-${uuid(itemId)}`);
+    // A retry gets its own, so an agent a dead run left behind cannot write into it.
+    const worldDirectoryOf = (itemId: string, attempt?: string) =>
+      join(filesRoot, `world-case-${uuid(itemId)}${attempt ? `-${uuid(attempt)}` : ""}`);
     const runCase = async (item: (typeof items)[number], files: CaseFiles) => {
       const file = `case-${uuid(item.id)}`;
-      const worldDirectory = worldDirectoryOf(item.id);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
-        frozen.environmentVersionId ? worldDirectory : join(filesRoot, `case-${uuid(item.id)}`);
+        frozen.environmentVersionId ? files.directory : join(filesRoot, `case-${uuid(item.id)}`);
       let checkpoint: CaseCheckpoint | undefined;
       try {
         checkpoint = await store.read<CaseCheckpoint>(file);
@@ -817,16 +822,20 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         throw error;
       }
       files.keepOutputs = checkpoint?.stage === "uploading";
+      if (checkpoint && "attempt" in checkpoint)
+        files.directory = worldDirectoryOf(item.id, checkpoint.attempt);
       let retryOf: string | undefined;
       // A case left running by a process that died here is as interrupted as one the caller
       // stopped; a fresh world isolates it from anything the dead run's agent still does.
       if (checkpoint?.stage === "running" && store.reclaimed && options.rerunCrashedCases) {
-        checkpoint = { stage: "interrupted", executionId: checkpoint.executionId };
+        checkpoint = { ...checkpoint, stage: "interrupted" };
         await store.write(file, checkpoint);
       }
       if (checkpoint?.stage === "interrupted") {
         retryOf = checkpoint.executionId;
         checkpoint = undefined;
+        await removeCaseFiles(files.directory);
+        files.directory = worldDirectoryOf(item.id, retryOf);
       }
       if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
         if (checkpoint.stage === "serialization_failed")
@@ -903,7 +912,8 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
               traceExternalId: span.traceId,
               ...retry(retryOf),
             });
-            await store.write(file, { stage: "running", executionId: execution.id });
+            const attempt = retryOf ? { attempt: retryOf } : {};
+            await store.write(file, { stage: "running", executionId: execution.id, ...attempt });
             let state: TerminalState = "succeeded";
             let output: JsonValue | undefined;
             let generated: TargetResult["files"] | undefined;
@@ -927,7 +937,11 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
               // resumed run to replace instead of being scored as cancelled.
               if (error instanceof TargetCancelledError && options.signal?.aborted) {
                 options.hue.recordError(span.span, error);
-                await store.write(file, { stage: "interrupted", executionId: execution.id });
+                await store.write(file, {
+                  stage: "interrupted",
+                  executionId: execution.id,
+                  ...attempt,
+                });
                 throw error;
               }
               state = error instanceof TargetCancelledError ? "cancelled" : "error";
@@ -982,6 +996,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
               ...(options.persistResultContent && output !== undefined ? { output } : {}),
               ...(state === "error" ? { error: errorPayload(targetError) } : {}),
               files: staged,
+              ...attempt,
             };
             // Without persisted result content a restart cannot reconstruct the outcome; the
             // saved stage then reports the execution as uncertain instead of guessing.
@@ -1189,19 +1204,20 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       // A world case's directory goes however the case ends, a forced exit included. An
       // interrupted upload keeps only the staged outputs it resumes from; inputs are downloaded
       // anew for scoring. A direct case has no such directory, so nothing is removed for it.
-      const worldDirectory = worldDirectoryOf(item.id);
-      const files: CaseFiles = { keepOutputs: true };
-      const untrack = onForcedExit(() => releaseWorldFilesSync(worldDirectory, files.keepOutputs));
+      const files: CaseFiles = { keepOutputs: true, directory: worldDirectoryOf(item.id) };
+      const untrack = onForcedExit(() => releaseWorldFilesSync(files.directory, files.keepOutputs));
       try {
         await runCase(item, files);
-        await releaseWorldFiles(worldDirectory, false);
+        await releaseWorldFiles(files.directory, false);
       } catch (error) {
-        await releaseWorldFiles(worldDirectory, files.keepOutputs);
+        await releaseWorldFiles(files.directory, files.keepOutputs);
         throw error;
       } finally {
         untrack();
       }
     });
+    // A stop that came while the last cases saved their outcomes still leaves the run open.
+    if (options.signal?.aborted) throw new TargetCancelledError();
     let finish = await store.read<{ key: string }>("finish");
     if (!finish) {
       finish = { key: randomUUID() };

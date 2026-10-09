@@ -2,7 +2,7 @@ import { constants, rmSync } from "node:fs";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { onForcedExit } from "./exit-cleanup.js";
 import { digest } from "./json.js";
 
@@ -76,10 +76,11 @@ function running(pid: number): boolean {
   }
 }
 
-/** Takes over a lock whose owner ran on this machine and has exited. One process reclaims at a
- * time: the one that creates `.lock-reclaim` compares the owner again and replaces the lock, and
- * any other refuses. A lock without a readable owner, from another machine or from an SDK that did
- * not record the machine is never reclaimed. */
+/** Takes over a lock whose owner ran on this machine and has exited. The lock moves to a name
+ * derived from its unique owner record, which a rename can claim only once, so of the processes
+ * that saw the same dead owner one takes the lock and no live lock is ever moved; that name stays
+ * behind as the record. A lock without a readable owner, from another machine or from an SDK that
+ * did not record the machine is never reclaimed. */
 async function reclaimLock(root: string, lock: string): Promise<boolean> {
   const owner = await readFile(join(lock, "owner.json"), "utf8").catch(() => undefined);
   if (owner === undefined) return false;
@@ -100,16 +101,17 @@ async function reclaimLock(root: string, lock: string): Promise<boolean> {
     running(pid)
   )
     return false;
-  const guard = join(root, ".lock-reclaim");
-  if (!(await createLock(guard))) return false;
+  const dead = join(root, `.lock-dead-${createHash("sha256").update(owner).digest("hex")}`);
   try {
-    if ((await readFile(join(lock, "owner.json"), "utf8").catch(() => undefined)) !== owner)
-      return false;
-    await rm(lock, { recursive: true, force: true });
-    return await createLock(lock);
-  } finally {
-    await rm(guard, { recursive: true, force: true });
+    await rename(lock, dead);
+  } catch {
+    return false;
   }
+  if ((await readFile(join(dead, "owner.json"), "utf8").catch(() => undefined)) !== owner) {
+    await rename(dead, lock).catch(() => {});
+    return false;
+  }
+  return createLock(lock);
 }
 
 /** One owner per directory. A forced exit of `hue eval`, which stops its agents first, releases
@@ -137,7 +139,7 @@ export class CheckpointStore {
     store.reclaimed = !created;
     store.untrack = onForcedExit(() => rmSync(lock, { recursive: true, force: true }));
     try {
-      await store.write(".lock/owner", { pid: process.pid, host: hostname() });
+      await store.write(".lock/owner", { pid: process.pid, host: hostname(), id: randomUUID() });
       const expected = { format: 1, identity, digest: digest(identity) };
       const prior = await store.read<typeof expected>("manifest");
       if (prior && (prior.format !== 1 || prior.digest !== expected.digest))
