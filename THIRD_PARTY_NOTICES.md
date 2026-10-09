@@ -23,7 +23,7 @@ core does not register a global context manager.
 
 | Package | License | Used by |
 | --- | --- | --- |
-| `zod` | MIT | `@hue-run/sdk/evals`; optional peer dependency from 0.2.0 |
+| `zod` | MIT | `@hue-run/sdk/evals` and `hue eval`; optional peer dependency from 0.2.0, regular dependency from 0.16.0 |
 | `ajv` (with `fast-uri` under BSD-3-Clause, `fast-deep-equal`, `json-schema-traverse`, `require-from-string`) | MIT | `@hue-run/sdk/evals`; regular dependency in 0.1.x, optional peer dependency from 0.2.0 |
 | `jsonschema`, `referencing`, `jsonschema-specifications`, `rpds-py`, `attrs` | MIT | `hue-run[evals]` |
 

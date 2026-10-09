@@ -1,8 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -35,6 +36,8 @@ function hueStandIn(
     verdict?: Verdict;
     deferredPolls?: number;
     frozen?: boolean;
+    /** Cases of the version that pin no world, listed after the world case. */
+    answerOnlyCases?: number;
     /** Answer creates as a deployment whose simulation gateway serves the world. */
     gateway?: boolean;
     /** Refuse trace exports with 400, drop their connection without an answer, or answer the
@@ -127,6 +130,8 @@ function hueStandIn(
     otlp: 0,
     frozen: [] as number[],
     completions: [] as Record<string, unknown>[],
+    /** Every execution start's body, replays and retries included. */
+    starts: [] as Record<string, unknown>[],
     /** Trace evidence each completion declared, in completion order. */
     evidence: [] as Record<string, unknown>[],
     /** Exported spans, decoded: name and attribute keys. */
@@ -235,9 +240,21 @@ function hueStandIn(
       }
       if (path === `/datasets/${dataset.id}`) return Response.json(dataset);
       if (path === `/dataset-versions/${version.id}`) return Response.json(version);
+      if (path === `/scorer-versions/${scorerVersion.id}`) return Response.json(scorerVersion);
+      if (path.startsWith("/scorer-versions/")) return new Response(null, { status: 404 });
       // The case pins a world, so `hue eval --set` on this stand-in stays a simulation run.
       if (path === `/dataset-versions/${version.id}/cases`)
-        return Response.json({ items: [frozenCase], nextCursor: null });
+        return Response.json({
+          items: [
+            frozenCase,
+            ...Array.from({ length: options.answerOnlyCases ?? 0 }, () => ({
+              ...frozenCase,
+              id: randomUUID(),
+              environmentVersionId: null,
+            })),
+          ],
+          nextCursor: null,
+        });
       if (path === `/dataset-versions/${version.id}/freeze`) {
         calls.frozen.push(Number(body.expectedRevision));
         if (body.expectedRevision !== version.revision) return new Response(null, { status: 409 });
@@ -263,14 +280,18 @@ function hueStandIn(
           return Response.json({ id: experiment.id, finishedAt: experiment.finishedAt });
         }
         if (experimentMatch[3]) {
-          const existing = [...executions.values()].find(
-            (execution) =>
-              execution.experimentId === experiment.id && execution.caseId === frozenCase.id,
-          );
-          if (existing) return Response.json(existing);
+          calls.starts.push(body);
+          const prior = [...executions.values()]
+            .filter(
+              (execution) =>
+                execution.experimentId === experiment.id && execution.caseId === frozenCase.id,
+            )
+            .at(-1);
+          if (prior && body.previousExecutionId !== prior.id) return Response.json(prior);
+          if (prior) prior.state = "uncertain";
           const execution = {
             id: randomUUID(),
-            attempt: 1,
+            attempt: (prior?.attempt ?? 0) + 1,
             state: "started" as const,
             traceExternalId: String(body.traceExternalId),
             experimentId: experiment.id,
@@ -291,9 +312,9 @@ function hueStandIn(
                 externalKey: frozenCase.externalKey,
                 hasExpected: true,
                 execution:
-                  [...executions.values()].find(
-                    (execution) => execution.experimentId === experiment.id,
-                  ) ?? null,
+                  [...executions.values()]
+                    .filter((execution) => execution.experimentId === experiment.id)
+                    .at(-1) ?? null,
               },
             ],
             nextCursor: null,
@@ -602,8 +623,8 @@ function hue(
     dropKey?: boolean;
     /** Sends SIGINT once the CLI prints a line matching this, standing in for Ctrl+C. */
     interruptOn?: RegExp;
-    /** Sends SIGINT this many times, 100 ms apart, once this file exists. */
-    interruptAfter?: { file: string; times: number; gapMillis?: number };
+    /** Sends SIGINT (or `signal`) this many times, 100 ms apart, once this file exists. */
+    interruptAfter?: { file: string; times: number; gapMillis?: number; signal?: NodeJS.Signals };
   },
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
@@ -636,12 +657,12 @@ function hue(
       maybeInterrupt(chunk);
     });
     if (options.interruptAfter) {
-      const { file, times, gapMillis = 100 } = options.interruptAfter;
+      const { file, times, gapMillis = 100, signal = "SIGINT" } = options.interruptAfter;
       const waiting = setInterval(() => {
         if (!existsSync(file)) return;
         clearInterval(waiting);
         for (let index = 0; index < times; index++)
-          setTimeout(() => child.kill("SIGINT"), index * gapMillis);
+          setTimeout(() => child.kill(signal), index * gapMillis);
       }, 50);
       child.on("close", () => clearInterval(waiting));
     }
@@ -726,6 +747,18 @@ if (process.env.HUE_TEST_CONFIG_RECORD)
 setInterval(() => {}, 1_000);
 `;
 
+/** Hangs until stopped the first time it runs, recording its pid; answers on every later run. */
+const onceSource = `import { existsSync, writeFileSync } from "node:fs";
+const marker = process.env.HUE_TEST_SURVIVOR;
+if (!existsSync(marker)) {
+  writeFileSync(marker, String(process.pid));
+  setInterval(() => {}, 1_000);
+} else {
+  for await (const _ of process.stdin);
+  process.stdout.write(JSON.stringify({ answer: "saved" }));
+}
+`;
+
 /** Prints its credentials, as a careless agent or a debug log would. */
 const leakySource = `import { readFileSync } from "node:fs";
 process.stdout.write(JSON.stringify({
@@ -787,6 +820,7 @@ async function workspace() {
   await writeFile(join(directory, "agent-command.mjs"), commandSource);
   await writeFile(join(directory, "agent-spawner.mjs"), spawnerSource);
   await writeFile(join(directory, "agent-stubborn.mjs"), stubbornSource);
+  await writeFile(join(directory, "agent-once.mjs"), onceSource);
   await writeFile(join(directory, "agent-leaky.mjs"), leakySource);
   await writeFile(join(directory, "hue-frozen.mjs"), frozenAdapterSource);
   await writeFile(join(directory, "agent-banana.mjs"), bananaSource);
@@ -836,6 +870,45 @@ test("an agent command's key skips its interpreter, a Windows executable name in
 });
 
 describe("hue eval", () => {
+  test("a key already in the shell ignores ./.env.hue, so the file cannot send it to another origin", async () => {
+    const f = hueStandIn();
+    const cwd = await workspace();
+    try {
+      await writeFile(join(cwd, ".env.hue"), "HUE_BASE_URL=http://127.0.0.1:9\n");
+      const result = await hue(["--case", "refund FLOW", "./hue-agent.ts", "--check"], {
+        cwd,
+        env: { HUE_BASE_URL: f.baseUrl },
+      });
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Check passed.");
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("loads ./.env.hue when no --env-file is named and keeps shell variables ahead of it", async () => {
+    const f = hueStandIn();
+    const cwd = await workspace();
+    try {
+      await writeFile(
+        join(cwd, ".env.hue"),
+        `HUE_API_KEY=${key}\nHUE_BASE_URL=http://127.0.0.1:9\n`,
+      );
+      const result = await hue(["--case", "refund FLOW", "./hue-agent.ts", "--check"], {
+        cwd,
+        dropKey: true,
+        env: { HUE_BASE_URL: f.baseUrl },
+      });
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Check passed.");
+      expect(f.experiments.size).toBe(0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("rejects conflicting content flags before running an agent", async () => {
     const result = await hue(["--content", "--no-content"], { cwd: process.cwd() });
     expect(result.status).toBe(2);
@@ -876,7 +949,7 @@ describe("hue eval", () => {
         expect(f.calls.experiments[0]).toMatchObject({ scorerVersionIds: [f.scorerVersion.id] });
         expect(experiment!.finishedAt).toBeTruthy();
         const lines = result.stdout.split("\n");
-        expect(lines[0]).toBe(`Run: ${f.baseUrl}/experiments/${experiment!.id}`);
+        expect(lines[0]).toBe(`Run: ${f.baseUrl}/runs/${experiment!.id}`);
         expect(lines[1]).toBe(`Experiment: ${experiment!.id}`);
         expect(lines.slice(2, 6)).toEqual([
           "[refund] world created",
@@ -888,7 +961,7 @@ describe("hue eval", () => {
         expect(result.stdout).toContain("refund  PASS             polite  PASSED");
         expect(result.stdout).toContain("1 of 1 case passed");
         expect(result.stdout.trim().split("\n").at(-1)).toBe(
-          `Run: ${f.baseUrl}/experiments/${experiment!.id}`,
+          `Run: ${f.baseUrl}/runs/${experiment!.id}`,
         );
         expect([...f.worlds.values()].map((world) => [world.status, world.steps])).toEqual([
           ["completed", [{ action: "save", args: { note: "refund charge ch_2" } }]],
@@ -993,7 +1066,7 @@ describe("hue eval", () => {
         expect(document).toMatchObject({
           experimentId: experiment!.id,
           runId: experiment!.evaluation.id,
-          runUrl: `${f.baseUrl}/experiments/${experiment!.id}`,
+          runUrl: `${f.baseUrl}/runs/${experiment!.id}`,
           complete: true,
           totals: { cases: 1, passed: 1, failed: 0, error: 0, skipped: 0, pending: 1 - 1 },
         });
@@ -1906,8 +1979,9 @@ describe("hue eval", () => {
         );
         pid = Number(await readFile(survivor, "utf8"));
         expect(result.status).toBe(130);
-        // Not forced: the case was reported cancelled after the grace killed the agent.
-        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "cancelled" })]);
+        // Not forced: the grace killed the agent, and the case stays open for a resume instead
+        // of being completed as cancelled.
+        expect(f.calls.completions).toEqual([]);
         expect(alive(pid)).toBe(false);
       } finally {
         if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
@@ -1916,6 +1990,107 @@ describe("hue eval", () => {
       }
     },
     SPAWN_TIMEOUT,
+  );
+
+  test(
+    "an interrupted run stays open and the same command resumes it with a new attempt",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      const args = [
+        "--scenario",
+        "Refund flow",
+        "--command",
+        `${process.execPath} agent-once.mjs`,
+        "--origin",
+        f.baseUrl,
+        "--wait",
+        "0",
+      ];
+      const finishes = () =>
+        f.calls.requests.filter((request) => /^POST \/experiments\/[^/]+\/finish$/.test(request));
+      try {
+        const interrupted = await hue(args, {
+          cwd,
+          env: { HUE_TEST_SURVIVOR: survivor },
+          interruptAfter: { file: survivor, times: 1 },
+        });
+        expect(interrupted.status).toBe(130);
+        expect(interrupted.stderr).toContain(
+          "Interrupted. The run stays open; run the same command again to resume it.",
+        );
+        expect(f.calls.completions).toEqual([]);
+        expect(finishes()).toHaveLength(0);
+        const runUrl = /Run: (\S+)/.exec(interrupted.stdout + interrupted.stderr)?.[1];
+        expect(runUrl).toContain("/runs/");
+
+        const resumed = await hue(args, { cwd, env: { HUE_TEST_SURVIVOR: survivor } });
+        expect(resumed.status).toBe(0);
+        expect(resumed.stdout + resumed.stderr).toContain(`Run: ${runUrl}`);
+        // One run: the resume replaced the interrupted attempt in a fresh world and finished it.
+        expect(f.calls.experiments).toHaveLength(1);
+        expect(f.calls.worldCreates).toHaveLength(2);
+        const [first, retry] = f.calls.starts;
+        expect(f.calls.starts).toHaveLength(2);
+        expect(first).not.toHaveProperty("previousExecutionId");
+        expect(retry).toMatchObject({ allowUncertainRetry: true });
+        expect(retry!.idempotencyKey).not.toBe(first!.idempotencyKey);
+        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
+        expect(f.calls.completions[0]!.executionId).not.toBe(retry!.previousExecutionId);
+        expect(finishes()).toHaveLength(1);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "a run whose process was killed resumes on the same command and reruns the case it left running",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      const args = [
+        "--scenario",
+        "Refund flow",
+        "--command",
+        `${process.execPath} agent-once.mjs`,
+        "--origin",
+        f.baseUrl,
+        "--wait",
+        "0",
+      ];
+      try {
+        const killing = hue(args, {
+          cwd,
+          env: { HUE_TEST_SURVIVOR: survivor },
+          interruptAfter: { file: survivor, times: 1, signal: "SIGKILL" },
+        });
+        // The agent's process group outlives a killed CLI; stop it as the operator would.
+        while (!existsSync(survivor)) await sleep(50);
+        await sleep(500);
+        const pid = (await readFile(survivor, "utf8")).trim();
+        const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", pid]).stdout.toString().trim());
+        process.kill(-group, "SIGKILL");
+        expect((await killing).status).not.toBe(0);
+        expect(f.calls.completions).toEqual([]);
+
+        const resumed = await hue(args, { cwd, env: { HUE_TEST_SURVIVOR: survivor } });
+        expect(resumed.stderr).not.toContain("locked");
+        expect(resumed.status).toBe(0);
+        expect(f.calls.experiments).toHaveLength(1);
+        expect(f.calls.starts).toHaveLength(2);
+        expect(f.calls.starts[1]).toMatchObject({ allowUncertainRetry: true });
+        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
   );
 
   test(
@@ -2180,6 +2355,94 @@ describe("hue eval", () => {
   );
 
   test(
+    "a set mixing world and answer-only cases is refused before a run exists",
+    async () => {
+      const f = hueStandIn({ answerOnlyCases: 2 });
+      const cwd = await workspace();
+      const args = [
+        "--set",
+        "Refund flow",
+        "--scorer-version",
+        f.scorerVersion.id,
+        "./hue-agent.ts",
+        "--origin",
+        f.baseUrl,
+      ];
+      try {
+        const checked = await hue([...args, "--check"], { cwd });
+        expect(checked.status).toBe(1);
+        expect(checked.stderr).toContain("2 of the 3 cases pin no world");
+        const json = await hue([...args, "--check", "--json"], { cwd });
+        expect(json.status).toBe(1);
+        expect(JSON.parse(json.stdout).check).toMatchObject({
+          ok: false,
+          selection: { cases: 3 },
+          worldCases: 1,
+        });
+        const run = await hue(args, { cwd });
+        expect(run.status).toBe(1);
+        expect(run.stderr).toContain("2 of the 3 cases pin no world");
+        expect(f.experiments.size).toBe(0);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "--check resolves the selection and creates nothing",
+    async () => {
+      const f = hueStandIn({ frozen: false });
+      const cwd = await workspace();
+      const args = [
+        "--set",
+        "Refund flow",
+        "--scorer-version",
+        f.scorerVersion.id,
+        "./hue-agent.ts",
+        "--origin",
+        f.baseUrl,
+        "--check",
+      ];
+      try {
+        const unsaved = await hue(args, { cwd });
+        expect(unsaved.status).toBe(1);
+        expect(unsaved.stderr).toContain("--save-version");
+        const checked = await hue([...args, "--save-version"], { cwd });
+        expect(checked.status).toBe(0);
+        expect(checked.stdout).toContain('Selection: eval set "Refund flow"');
+        expect(checked.stdout).toContain("Check passed. Nothing was created");
+        const json = await hue([...args, "--save-version", "--json"], { cwd });
+        expect(json.status).toBe(0);
+        expect(JSON.parse(json.stdout).check).toMatchObject({
+          ok: true,
+          selection: { kind: "eval_set", name: "Refund flow", saved: false },
+        });
+        const unknown = await hue([...args, "--save-version", "--scorer-version", randomUUID()], {
+          cwd,
+        });
+        expect(unknown.status).toBe(1);
+        expect(unknown.stderr).toContain("was not found");
+        const badWait = await hue([...args, "--save-version", "--wait", "nope"], { cwd });
+        expect(badWait.status).toBe(2);
+        expect(f.calls.frozen).toEqual([]);
+        expect(f.experiments.size).toBe(0);
+        const worker = await hue(["--worker", "./hue-agent.ts", "--origin", f.baseUrl, "--check"], {
+          cwd,
+        });
+        expect(worker.status).toBe(2);
+        expect(worker.stderr).toContain("--check applies to one-shot runs");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
     "compares verdicts with a --baseline experiment",
     async () => {
       const f = hueStandIn();
@@ -2191,7 +2454,7 @@ describe("hue eval", () => {
         const firstId = /^Experiment: (.+)$/m.exec(first.stdout)?.[1];
         expect(firstId).toBeTruthy();
         f.state.verdict = "fail";
-        const second = await hue([...common, "--baseline", `${f.baseUrl}/experiments/${firstId}`], {
+        const second = await hue([...common, "--baseline", `${f.baseUrl}/runs/${firstId}`], {
           cwd,
         });
         expect(second.status).toBe(1);
@@ -2264,7 +2527,7 @@ describe("hue eval", () => {
           `Registered agent refund-bot (revision v7) with ${f.baseUrl}; waiting for runs launched from Hue (stops after 1)`,
         );
         expect(result.stdout).toContain(
-          `Claimed run ${queued.runId}: ${f.baseUrl}/experiments/${queued.experimentId}`,
+          `Claimed run ${queued.runId}: ${f.baseUrl}/runs/${queued.experimentId}`,
         );
         expect(result.stdout).toContain("[refund] agent started");
         expect(result.stdout).toContain("completed: 1 case");

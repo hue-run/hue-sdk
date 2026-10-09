@@ -10,6 +10,20 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.16.0] - 2026-10-08
+
+#### Added
+
+- `hue eval --check` resolves the key's project, the selection, the case kind and the agent, prints what the run would do and exits without creating a run, a world or a checkpoint. `--json` prints it as one `check` object. A selection that mixes world and answer-only cases is refused, by `--check` and by the run, before anything is created.
+
+#### Changed
+
+- `zod` is a regular dependency instead of an optional peer, so `npx -y @hue-run/sdk@0.16.0 eval` runs without a second `--package "zod@…"`; `hue` is the package's only binary, so npx needs no `--package … hue`. Migration: nothing is required; a project that installed `zod` only for the SDK may remove it.
+- `hue eval` loads `./.env.hue`, the file `hue login` writes, when no `--env-file` is named and the shell has no `HUE_API_KEY`; a key already in the shell keeps its own origin, so a checkout's file cannot redirect it. The `hue login` next-step hint drops `--env-file .env.hue` for the default file.
+- `hue eval`, `runSimulation()` and the worker print run links as `/runs/<id>`; `--baseline` accepts both `/runs/<id>` and legacy `/experiments/<id>` URLs.
+- An interrupted `hue eval` (Ctrl+C or SIGTERM) leaves its run open instead of finishing it with the case in flight scored as cancelled, and prints that the same command resumes it. Rerunning it keeps the finished cases and runs the interrupted ones again as a new attempt, in a fresh world for a world case. `runExperiment()` and `runSimulation()` behave the same when their `signal` aborts: no further case starts, the experiment stays unfinished and the call rejects with `TargetCancelledError`.
+- A checkpoint lock left by a crashed or killed process is reclaimed once that process has exited on the same machine, and a world case it left running runs again as a new attempt in a fresh world; an answer-only case it left running stays uncertain, since its agent may still be acting. A lock whose owner may still be running still refuses. Before, every leftover `.lock` had to be removed by hand.
+
 ### [0.15.3] - 2026-10-08
 
 #### Fixed
@@ -1955,6 +1969,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.7.0 (2026-10-08): evals run through `hue eval` with SDK 0.16.0: `--check` first, one command is one run, never a custom harness or tool stand-ins; an interrupted run stays open and the identical command resumes it.
 - 0.6.9 (2026-10-08): link the skill and SDK guides to the consolidated Quickstart, production setup, and MCP recipes pages.
 - 0.6.3 (2026-10-05): align the evaluation procedure and verification checklist with answer-only cases: either execution or world token marks an eval, answer paths skip app clients, and required app connections still fail without a world. Direct adapters pass their execution marker to the helper; one-shot direct commands use an absolute entry path. The **Answers the task** judge in the **Answer outcome** evaluator is required for answer-only cases; worker exit codes do not report run verdicts.
 - 0.6.2 (2026-10-05): answer-only cases need no starting world or app-client initialization; command workers run both case kinds from the application directory with SDK 0.13.2. Existing registrations need a new revision, and adapter-file workers opt into direct cases explicitly. The Answer outcome judge decides answer-only results.

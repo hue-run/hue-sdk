@@ -204,7 +204,7 @@ describe("hue login", () => {
     expect(result.stdout).toContain(
       `hue mcp install --client claude-code --auth key --url ${ORIGIN}/api/mcp`,
     );
-    expect(result.stdout).toContain('hue eval --case "<name>" ./hue-agent.ts --env-file .env.hue');
+    expect(result.stdout).toContain('hue eval --case "<name>" ./hue-agent.ts\n');
     expect(result.stdout).not.toContain(KEY);
     expect(result.stdout).not.toContain("Opened");
     const envPath = join(root, ".env.hue");

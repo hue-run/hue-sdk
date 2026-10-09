@@ -1,6 +1,6 @@
 # Compatibility
 
-This checkout covers TypeScript `0.15.3` and Python `0.9.1`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This checkout covers TypeScript `0.16.0` and Python `0.9.1`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -15,8 +15,6 @@ This checkout covers TypeScript `0.15.3` and Python `0.9.1`. Registry availabili
 ## Existing dependencies
 
 `@hue-run/sdk` core can coexist with AI SDK 6 (installed-package validation covers 6.0.116). The `hueTelemetry` adapter still requires AI SDK 7 and a compatible `@ai-sdk/otel` peer; it explicitly rejects AI SDK 6. Keep AI SDK 6 instrumentation on its existing provider and attach Hue transport, or use a standard OTLP exporter. Do not force dependency resolution or upgrade a framework solely to add tracing.
-
-`zod` `^3.25.76` or `^4.6.5` satisfies the optional evaluations peer, and installed-package validation covers AI SDK `6.0.116` with `zod` `3.25.76`.
 
 Python declares `opentelemetry-api`, `opentelemetry-sdk` and `opentelemetry-exporter-otlp-proto-http` as `>=1.40,<2`, so `hue-run` installs next to applications and `opentelemetry-instrumentation-*` packages that are on a different OpenTelemetry 1.x release. `uv.lock` records the certified combination (OpenTelemetry 1.44.0) used by the frozen CI jobs and the release verification; a second CI job re-resolves every direct dependency at its declared floor (`uv lock --resolution lowest-direct`, OpenTelemetry 1.40.0) and runs the whole behavioral suite, including the installed wheel. The Python transport uses two OpenTelemetry internals, the instrumentation-suppression context key and the OTLP log encoder. Both are present in every release of the range and both are guarded: a missing log encoder raises an `ImportError` naming the supported range at import time, and a missing suppression key emits a one-time `RuntimeWarning`, after which Hue exports without OpenTelemetry suppression while its own queues still ignore its export work. A lockfile records what was tested; it does not certify every compatible-looking version.
 

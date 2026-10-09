@@ -238,20 +238,15 @@ run(
   ],
   minimal,
 );
-// Without the optional zod peer, hue eval names it and the install command instead of the
-// runtime's resolution error, and exits with the configuration error code.
-const missingPeer = spawnSync(
+// zod is a dependency, so `npx @hue-run/sdk eval` needs no second package.
+const evalHelp = spawnSync(
   process.execPath,
   [join(minimal, "node_modules/@hue-run/sdk/dist/setup/cli.js"), "eval", "--help"],
   { cwd: minimal, encoding: "utf8" },
 );
-if (
-  missingPeer.status !== 2 ||
-  !missingPeer.stderr.includes("hue eval needs zod, a peer dependency of @hue-run/sdk") ||
-  !missingPeer.stderr.includes(`npm install "zod@${pkg.peerDependencies.zod}"`)
-)
+if (evalHelp.status !== 0 || !evalHelp.stdout.includes("Usage: hue eval"))
   throw new Error(
-    `hue eval without zod did not name the missing peer (status ${missingPeer.status}): ${missingPeer.stderr.slice(0, 500)}`,
+    `hue eval --help failed in a consumer with only @hue-run/sdk (status ${evalHelp.status}): ${evalHelp.stderr.slice(0, 500)}`,
   );
 // CommonJS applications on the Node floor (22.12+) load the ESM build through require(esm):
 // every entry point resolves through its "default" condition, and the build must stay free of
@@ -715,7 +710,7 @@ await writeFile(
   JSON.stringify({
     private: true,
     type: "module",
-    dependencies: { "@hue-run/sdk": packageSpec, zod: pkg.devDependencies.zod },
+    dependencies: { "@hue-run/sdk": packageSpec },
   }),
 );
 run(
