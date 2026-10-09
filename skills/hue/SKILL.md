@@ -364,9 +364,11 @@ in the codebase's language and trim the functions no call site uses.
    stand-ins around the SDK's evaluation API. `--check` confirms the key, the selection, the case
    kind and the agent, then exits without creating a run; fix what it reports before the real
    command. One invocation is one run holding every selected case (a 100-case eval set is one
-   run with 100 executions), and it prints the run URL once that run exists. Run it once. When
-   it is interrupted, rerun the identical command: it resumes from its checkpoint instead of
-   starting another run. The `--package` flag puts the CLI in npx's cache, so the agent's
+   run with 100 executions), and it prints the run URL once that run exists. Run it once and let
+   it finish: start it in the background or with a long tool timeout, never a short one. Ctrl+C or
+   SIGTERM closes the run, so running the command again starts a new run. A killed process leaves
+   a stale `.lock`; once its owner is gone, remove that `.lock` and the identical command
+   reattaches to the same run. Never delete `.hue/eval` to start over. The `--package` flag puts the CLI in npx's cache, so the agent's
    repository gains no package.json or dependency. Always pin the version: in a project that already
    depends on `@hue-run/sdk`, an unpinned `--package @hue-run/sdk` runs that local, possibly
    older, copy. Each world case starts the command with a fresh world's variables, listed under
