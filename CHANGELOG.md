@@ -20,6 +20,8 @@ refuses to publish a version without a matching entry below.
 
 - `zod` is a regular dependency instead of an optional peer, so `npx --package @hue-run/sdk@0.16.0 hue eval` runs without a second `--package "zod@…"`. Migration: nothing is required; a project that installed `zod` only for the SDK may remove it.
 - `hue eval`, `runSimulation()` and the worker print run links as `/runs/<id>`; `--baseline` accepts both `/runs/<id>` and legacy `/experiments/<id>` URLs.
+- An interrupted `hue eval` (Ctrl+C or SIGTERM) leaves its run open instead of finishing it with the case in flight scored as cancelled, and prints that the same command resumes it. Rerunning it keeps the finished cases and runs the interrupted ones again as a new attempt, in a fresh world for a world case. `runExperiment()` and `runSimulation()` behave the same when their `signal` aborts: no further case starts, the experiment stays unfinished and the call rejects with `TargetCancelledError`.
+- A checkpoint lock left by a crashed or killed process is reclaimed once that process has exited on the same machine; a lock whose owner may still be running still refuses. Before, every leftover `.lock` had to be removed by hand.
 
 ### [0.15.2] - 2026-10-08
 

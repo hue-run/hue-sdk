@@ -29,6 +29,7 @@ import {
   type EvaluationClient,
   type JsonValue,
   type SimulationProgress,
+  TargetCancelledError,
 } from "../src/evals.js";
 
 const project = {
@@ -1332,7 +1333,7 @@ describe("one-shot simulation workflow", () => {
     }
   });
 
-  test("publishes the run URL before target work and cancels without invoking the callback", async () => {
+  test("publishes the run URL before target work and leaves the run open when cancelled first", async () => {
     const fixture = harness({
       evidenceFailures: 0,
       loseCompletionAcknowledgement: false,
@@ -1343,31 +1344,26 @@ describe("one-shot simulation workflow", () => {
     const progress: SimulationProgress[] = [];
     controller.abort(new Error("stop requested"));
     try {
-      const report = await runSimulation({
-        ...fixture,
-        checkpointDirectory: directory,
-        definition: scenario,
-        persistResultContent: false,
-        traceEvidence: { mode: "required" },
-        signal: controller.signal,
-        onProgress(event) {
-          progress.push(event);
-        },
-      });
+      await expect(
+        runSimulation({
+          ...fixture,
+          checkpointDirectory: directory,
+          definition: scenario,
+          persistResultContent: false,
+          traceEvidence: { mode: "required" },
+          signal: controller.signal,
+          onProgress(event) {
+            progress.push(event);
+          },
+        }),
+      ).rejects.toBeInstanceOf(TargetCancelledError);
       expect(fixture.targetCalls()).toBe(0);
-      expect(progress.map((event) => event.type)).toEqual([
-        "run_created",
-        "world_created",
-        "world_sealed",
-      ]);
-      expect(progress[0]).toEqual({
-        type: "run_created",
-        experimentId: report.experimentId,
-        runUrl: report.runUrl,
-      });
-      expect([...fixture.worlds.values()][0]?.status).toBe("abandoned");
-      const [item] = (await fixture.client.listExperimentItems(report.experimentId)).items;
-      expect(item?.execution?.state).toBe("cancelled");
+      // No case starts once the signal aborted: no world, no execution, and the run stays open.
+      expect(progress.map((event) => event.type)).toEqual(["run_created"]);
+      expect(fixture.worlds.size).toBe(0);
+      const created = progress[0] as Extract<SimulationProgress, { type: "run_created" }>;
+      const [item] = (await fixture.client.listExperimentItems(created.experimentId)).items;
+      expect(item?.execution).toBeNull();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

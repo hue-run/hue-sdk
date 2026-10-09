@@ -1,5 +1,6 @@
 import { constants, rmSync } from "node:fs";
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { onForcedExit } from "./exit-cleanup.js";
@@ -55,8 +56,67 @@ function contentPolicyOnly(prior: unknown, identity: unknown) {
   return Object.fromEntries(CONTENT_POLICY.map((key) => [key, before[key]]));
 }
 
-/** One owner per directory. A crash leaves .lock for explicit operator recovery; a forced exit of
- * `hue eval`, which stops its agents first, releases it. */
+async function createLock(lock: string): Promise<boolean> {
+  try {
+    await mkdir(lock, { mode: 0o700 });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+/** Whether a process with this ID is running; one owned by another user still counts. */
+function running(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Takes over a lock whose owner ran on this machine and has exited. The lock is moved aside and
+ * its owner compared again before it is removed, so a lock another process took meanwhile is put
+ * back rather than deleted. A lock without a readable owner, from another machine or from an SDK
+ * that did not record the machine is never reclaimed. */
+async function reclaimLock(root: string, lock: string): Promise<boolean> {
+  const owner = await readFile(join(lock, "owner.json"), "utf8").catch(() => undefined);
+  if (owner === undefined) return false;
+  let pid: unknown;
+  let host: unknown;
+  try {
+    ({ pid, host } =
+      (JSON.parse(owner) as { value?: { pid?: unknown; host?: unknown } }).value ?? {});
+  } catch {
+    return false;
+  }
+  if (
+    typeof pid !== "number" ||
+    !Number.isInteger(pid) ||
+    pid <= 0 ||
+    pid === process.pid ||
+    host !== hostname() ||
+    running(pid)
+  )
+    return false;
+  const aside = join(root, `.lock-stale-${randomUUID()}`);
+  try {
+    await rename(lock, aside);
+  } catch {
+    return false;
+  }
+  if ((await readFile(join(aside, "owner.json"), "utf8").catch(() => undefined)) !== owner) {
+    await rename(aside, lock).catch(() => {});
+    return false;
+  }
+  await rm(aside, { recursive: true, force: true });
+  return createLock(lock);
+}
+
+/** One owner per directory. A forced exit of `hue eval`, which stops its agents first, releases
+ * it; a crash leaves .lock, which the next owner reclaims once the process that held it on this
+ * machine has exited. Any other lock is left for explicit operator recovery. */
 export class CheckpointStore {
   private untrack = () => {};
   private constructor(readonly directory: string) {}
@@ -67,18 +127,14 @@ export class CheckpointStore {
     if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0)
       throw new Error("Use a private checkpoint directory (mode 0700, no symlink)");
     const store = new CheckpointStore(root);
-    try {
-      await mkdir(join(root, ".lock"), { mode: 0o700 });
-      store.untrack = onForcedExit(() =>
-        rmSync(join(root, ".lock"), { recursive: true, force: true }),
-      );
-    } catch {
+    const lock = join(root, ".lock");
+    if (!(await createLock(lock)) && !(await reclaimLock(root, lock)))
       throw new Error(
-        "Checkpoint directory is locked; confirm its owner stopped before explicitly removing .lock",
+        "Checkpoint directory is locked by a process that may still be running; confirm it stopped before explicitly removing .lock",
       );
-    }
+    store.untrack = onForcedExit(() => rmSync(lock, { recursive: true, force: true }));
     try {
-      await store.write(".lock/owner", { pid: process.pid });
+      await store.write(".lock/owner", { pid: process.pid, host: hostname() });
       const expected = { format: 1, identity, digest: digest(identity) };
       const prior = await store.read<typeof expected>("manifest");
       if (prior && (prior.format !== 1 || prior.digest !== expected.digest))

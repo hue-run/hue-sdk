@@ -232,6 +232,11 @@ export interface RunExperimentTargetContext {
 export interface RunExperimentOptions extends RunnerOptions {
   /** Hue tracing client; each case runs inside a `hue.experiment.case` span. */
   hue: HueClient;
+  /** Caller cancellation. Once it aborts, no further case starts, a case whose target stops with
+   * `TargetCancelledError` is saved as interrupted rather than completed, and the experiment is
+   * left unfinished: the call rejects with `TargetCancelledError`, and calling it again with the
+   * same checkpoint directory keeps the finished cases and runs the interrupted ones anew. */
+  signal?: AbortSignal;
   /** Experiment to run; its dataset version must be frozen. */
   experimentId: string;
   /** Whether each case waits for acknowledged trace export or explicitly omits evidence. Required. */
@@ -403,8 +408,10 @@ interface Uploading {
 type CaseCheckpoint =
   | Prepared
   | Uploading
-  | { stage: "starting"; startKey: string; traceExternalId: string }
-  | { stage: "running" | "serialization_failed"; executionId: string };
+  | { stage: "starting"; startKey: string; traceExternalId: string; previousExecutionId?: string }
+  | { stage: "running" | "serialization_failed"; executionId: string }
+  // The caller's signal stopped the target: the next run retries the case with a new attempt.
+  | { stage: "interrupted"; executionId: string };
 
 function settings(options: RunnerOptions): number {
   if (
@@ -446,6 +453,11 @@ async function allPages<T>(
  * world that cannot be sealed), telemetry not accepted by the one transport the cases share, or
  * a target outcome left uncertain because its world could not be sealed or read back. Starting
  * more cases into it only piles up the same failure; the run is resumed later instead. */
+/** A new attempt replacing an interrupted one, which Hue still holds as started. */
+function retry(previousExecutionId: string | undefined) {
+  return previousExecutionId ? { previousExecutionId, allowUncertainRetry: true } : {};
+}
+
 function systemic(error: unknown): boolean {
   // A saved outcome still waiting for its trace (`TraceExportUnacknowledgedError`) is not
   // systemic: the flush failed on an earlier attempt, telemetry may have recovered since, and
@@ -793,6 +805,11 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         throw error;
       }
       files.keepOutputs = checkpoint?.stage === "uploading";
+      let retryOf: string | undefined;
+      if (checkpoint?.stage === "interrupted") {
+        retryOf = checkpoint.executionId;
+        checkpoint = undefined;
+      }
       if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
         if (checkpoint.stage === "serialization_failed")
           throw new OutcomeSerializationError(checkpoint.executionId);
@@ -801,6 +818,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
             ? await options.client.startExecution(experiment.id, item.id, {
                 idempotencyKey: checkpoint.startKey,
                 traceExternalId: checkpoint.traceExternalId,
+                ...retry(checkpoint.previousExecutionId),
               })
             : await options.client.getExecution(checkpoint.executionId);
         throw new UncertainExecutionError(item.id, execution.id);
@@ -821,7 +839,9 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         files.keepOutputs = false;
       }
       if (!checkpoint) {
-        if (item.execution) throw new UncertainExecutionError(item.id, item.execution.id);
+        if (options.signal?.aborted) throw new TargetCancelledError();
+        if (item.execution && item.execution.id !== retryOf)
+          throw new UncertainExecutionError(item.id, item.execution.id);
         const frozenCase = await options.client.getExperimentCase(experiment.id, item.id);
         if (frozenCase.datasetVersionId !== version.id)
           throw new Error("Case is not from the pinned dataset version");
@@ -857,11 +877,13 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
               stage: "starting" as const,
               startKey: randomUUID(),
               traceExternalId: span.traceId,
+              ...(retryOf ? { previousExecutionId: retryOf } : {}),
             };
             await store.write(file, start);
             const execution = await options.client.startExecution(experiment.id, item.id, {
               idempotencyKey: start.startKey,
               traceExternalId: span.traceId,
+              ...retry(retryOf),
             });
             await store.write(file, { stage: "running", executionId: execution.id });
             let state: TerminalState = "succeeded";
@@ -883,6 +905,13 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
               } else output = result;
             } catch (error) {
               if (error instanceof TargetOutcomeUncertainError) throw error;
+              // A stop the caller asked for is no outcome: the execution stays open for the
+              // resumed run to replace instead of being scored as cancelled.
+              if (error instanceof TargetCancelledError && options.signal?.aborted) {
+                options.hue.recordError(span.span, error);
+                await store.write(file, { stage: "interrupted", executionId: execution.id });
+                throw error;
+              }
               state = error instanceof TargetCancelledError ? "cancelled" : "error";
               targetError = error;
               options.hue.recordError(span.span, error);

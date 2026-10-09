@@ -1555,7 +1555,9 @@ async function runDirect(
     });
     let attempt = await store.read<DirectAttempt>("active-attempt");
     if (attempt && attempt.stage !== "completed" && attempt.selectionDigest !== selectionDigest)
-      throw new Error("Recover the unfinished direct run before running a changed selection");
+      throw new Error(
+        "Recover the unfinished direct run before running a changed selection: run the unchanged command again to finish it, or pass another --checkpoint-dir",
+      );
     if (!attempt || attempt.stage === "completed") {
       attempt = { selectionDigest, idempotencyKey: randomUUID(), stage: "preparing" };
       await store.write("active-attempt", attempt);
@@ -1588,6 +1590,7 @@ async function runDirect(
       traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
       onTelemetryNotAccepted: telemetry.report,
       concurrency: run.concurrency,
+      signal,
       scorers: [],
       deferUnboundLocalScorers: true,
       environmentEvidence: "when_pinned",
@@ -1818,8 +1821,10 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
   process.on("SIGTERM", interrupt);
   let hue: HueClient | undefined;
   let json = false;
+  let worker = false;
   try {
     const { values, positionals } = parse(argv);
+    worker = values.worker;
     if (values.content && values["no-content"])
       throw new UsageError("Choose either --content or --no-content");
     // A usage error before anything is prepared or created: no run is left to recover from it.
@@ -1916,7 +1921,11 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       : await runOnce(values, connection, agents, agent, hue, output, controller.signal);
   } catch (error) {
     if (controller.signal.aborted || error instanceof TargetCancelledError) {
-      process.stderr.write("Interrupted.\n");
+      process.stderr.write(
+        worker
+          ? "Interrupted.\n"
+          : "Interrupted. The run stays open; run the same command again to resume it.\n",
+      );
       return 130;
     }
     if (error instanceof UsageError) {
