@@ -76,10 +76,10 @@ function running(pid: number): boolean {
   }
 }
 
-/** Takes over a lock whose owner ran on this machine and has exited. The lock is moved aside and
- * its owner compared again before it is removed, so a lock another process took meanwhile is put
- * back rather than deleted. A lock without a readable owner, from another machine or from an SDK
- * that did not record the machine is never reclaimed. */
+/** Takes over a lock whose owner ran on this machine and has exited. One process reclaims at a
+ * time: the one that creates `.lock-reclaim` compares the owner again and replaces the lock, and
+ * any other refuses. A lock without a readable owner, from another machine or from an SDK that did
+ * not record the machine is never reclaimed. */
 async function reclaimLock(root: string, lock: string): Promise<boolean> {
   const owner = await readFile(join(lock, "owner.json"), "utf8").catch(() => undefined);
   if (owner === undefined) return false;
@@ -100,18 +100,16 @@ async function reclaimLock(root: string, lock: string): Promise<boolean> {
     running(pid)
   )
     return false;
-  const aside = join(root, `.lock-stale-${randomUUID()}`);
+  const guard = join(root, ".lock-reclaim");
+  if (!(await createLock(guard))) return false;
   try {
-    await rename(lock, aside);
-  } catch {
-    return false;
+    if ((await readFile(join(lock, "owner.json"), "utf8").catch(() => undefined)) !== owner)
+      return false;
+    await rm(lock, { recursive: true, force: true });
+    return await createLock(lock);
+  } finally {
+    await rm(guard, { recursive: true, force: true });
   }
-  if ((await readFile(join(aside, "owner.json"), "utf8").catch(() => undefined)) !== owner) {
-    await rename(aside, lock).catch(() => {});
-    return false;
-  }
-  await rm(aside, { recursive: true, force: true });
-  return createLock(lock);
 }
 
 /** One owner per directory. A forced exit of `hue eval`, which stops its agents first, releases

@@ -797,6 +797,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       : undefined;
     const report = await runExperiment({
       signal: options.signal,
+      rerunCrashedCases: true,
       client: options.client,
       hue: options.hue,
       experimentId,

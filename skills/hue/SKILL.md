@@ -367,8 +367,9 @@ in the codebase's language and trim the functions no call site uses.
    run with 100 executions), and it prints the run URL once that run exists. Run it once and let
    it finish: start it in the background or with a long tool timeout, never a short one. If it
    stops early (Ctrl+C, SIGTERM, a tool timeout or a crash), the run stays open: run the identical
-   command again to resume it. Finished cases are kept and an interrupted case runs again in a
-   fresh world. Never delete `.hue/eval` to start over. The `--package` flag puts the CLI in npx's cache, so the agent's
+   command again to resume it. Finished cases are kept and an interrupted case runs again, in a
+   fresh world for a world case; after a crash, an answer-only case that was mid-run is reported
+   uncertain instead. Never delete `.hue/eval` to start over. The `--package` flag puts the CLI in npx's cache, so the agent's
    repository gains no package.json or dependency. Always pin the version: in a project that already
    depends on `@hue-run/sdk`, an unpinned `--package @hue-run/sdk` runs that local, possibly
    older, copy. Each world case starts the command with a fresh world's variables, listed under

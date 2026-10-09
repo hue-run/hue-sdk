@@ -32,8 +32,18 @@ describe("checkpoint lock recovery", () => {
       const owner = JSON.parse(await readFile(join(root, ".lock", "owner.json"), "utf8"));
       expect(owner.value).toEqual({ pid: process.pid, host: hostname() });
       expect(store.reclaimed).toBe(true);
-      expect((await readdir(root)).filter((name) => name.startsWith(".lock-stale-"))).toEqual([]);
+      expect(await readdir(root)).not.toContain(".lock-reclaim");
       await store.release();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a lock another process is reclaiming refuses", async () => {
+    const root = await leftLocked({ pid: exitedPid(), host: hostname() });
+    await mkdir(join(root, ".lock-reclaim"), { mode: 0o700 });
+    try {
+      await expect(CheckpointStore.acquire(root, { kind: "test" })).rejects.toThrow("locked");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

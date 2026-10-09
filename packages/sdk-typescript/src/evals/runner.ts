@@ -237,6 +237,10 @@ export interface RunExperimentOptions extends RunnerOptions {
    * left unfinished: the call rejects with `TargetCancelledError`, and calling it again with the
    * same checkpoint directory keeps the finished cases and runs the interrupted ones anew. */
   signal?: AbortSignal;
+  /** Rerun, as a new attempt, a case that a process which died on this machine left running.
+   * Only for targets that give every attempt a fresh world: elsewhere the dead run's agent may
+   * still be acting, so such a case stays uncertain. */
+  rerunCrashedCases?: boolean;
   /** Experiment to run; its dataset version must be frozen. */
   experimentId: string;
   /** Whether each case waits for acknowledged trace export or explicitly omits evidence. Required. */
@@ -481,6 +485,7 @@ async function pool<T>(
   let position = 0;
   const failures: unknown[] = [];
   let stop = false;
+  let cancelled: TargetCancelledError | undefined;
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {
       while (position < items.length && !stop) {
@@ -488,12 +493,19 @@ async function pool<T>(
         try {
           await execute(item);
         } catch (error) {
+          // The caller's stop: start nothing more, and report the stop once the cases in flight settle.
+          if (error instanceof TargetCancelledError) {
+            cancelled = error;
+            stop = true;
+            continue;
+          }
           failures.push(error);
           if (systemic(error)) stop = true;
         }
       }
     }),
   );
+  if (cancelled) throw cancelled;
   if (failures.length === 1) throw failures[0];
   if (failures.length) {
     const first = failures[0];
@@ -808,10 +820,11 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       let retryOf: string | undefined;
       // A case left running by a process that died here is as interrupted as one the caller
       // stopped; a fresh world isolates it from anything the dead run's agent still does.
-      if (
-        checkpoint?.stage === "interrupted" ||
-        (checkpoint?.stage === "running" && store.reclaimed)
-      ) {
+      if (checkpoint?.stage === "running" && store.reclaimed && options.rerunCrashedCases) {
+        checkpoint = { stage: "interrupted", executionId: checkpoint.executionId };
+        await store.write(file, checkpoint);
+      }
+      if (checkpoint?.stage === "interrupted") {
         retryOf = checkpoint.executionId;
         checkpoint = undefined;
       }
