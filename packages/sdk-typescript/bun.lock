@@ -13,6 +13,7 @@
         "@opentelemetry/resources": "2.11.0",
         "@opentelemetry/sdk-logs": "0.222.0",
         "@opentelemetry/sdk-trace": "2.11.0",
+        "zod": "^4.6.5",
       },
       "devDependencies": {
         "@ai-sdk/otel": "1.0.99",
@@ -24,20 +25,17 @@
         "ajv": "8.20.0",
         "protobufjs": "8.8.0",
         "typescript": "7.0.2",
-        "zod": "4.6.5",
       },
       "peerDependencies": {
         "@ai-sdk/otel": "^1.0.99",
         "@opentelemetry/api": "^1.9.1",
         "ai": "^6.0.0 || ^7.0.99",
         "ajv": "^8.17.0",
-        "zod": "^4.6.5",
       },
       "optionalPeers": [
         "@ai-sdk/otel",
         "ai",
         "ajv",
-        "zod",
       ],
     },
   },

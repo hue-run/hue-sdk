@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.15.2`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.16.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -469,7 +469,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.15.2.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.16.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -480,7 +480,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.15.2.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.16.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -510,7 +510,7 @@ and prints Hue's verdicts. It is the command-line form of `runSimulation()` (one
 process, Hue creates one isolated simulated world per case, and Hue-owned outcome checks grade
 the sealed world. Hue never executes the agent. `HUE_API_KEY` must be a **Read and
 write** project key (a **Read** or **Tracing only** key cannot read cases or create runs);
-the CLI never prints it. The optional `zod` peer of `@hue-run/sdk/evals` must be installed.
+the CLI never prints it.
 
 Run the agent's own start command with `--command`. `hue eval` spawns it once per case with the
 world's environment (below) and `{"inputs", "config"}` on stdin, and stores its stdout as the
@@ -519,18 +519,19 @@ committed helper described in [Make your agent eval-ready](https://docs.hue.run/
 reads `HUE_SIM_<SURFACE ID>_URL` and `HUE_WORLD_TOKEN` when `HUE_WORLD_TOKEN` is set, fails
 closed when a needed variable is missing, and returns the production URL and credential
 otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`) or a tool its
-production agent lacks. Pin the SDK and bring its `zod` peer along, so the agent's repository
-gains no dependency:
+production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
-npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
-npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision> --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.16.0 hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
+npx --yes --package @hue-run/sdk@0.16.0 hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx --yes --package @hue-run/sdk@0.16.0 hue eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision> --env-file .env.hue
 ```
 
-Without the second `--package`, `hue eval` exits with `hue eval needs zod`, even for `--help`;
-installing zod in the project does not help when the SDK itself is not installed there. An
+One invocation creates one run holding every selected case; it prints the run URL
+(`https://app.hue.run/runs/<id>`) once the run exists. Add `--check` to confirm the key, the
+selection, the case kind and the agent first: it prints what the run would do and exits without
+creating a run, a world or a checkpoint. An
 unpinned `--package @hue-run/sdk` runs a local, possibly older, copy in a project that already
 depends on it.
 
@@ -562,7 +563,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
+npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.

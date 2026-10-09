@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.6.8"
+  version: "0.7.0"
 ---
 
 # Hue
@@ -223,7 +223,7 @@ evaluator, so a missing judge leaves its result inconclusive.
 ## Evaluate a published case
 
 When the user asks to evaluate or regression-test their agent against a published Hue case, or to
-make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.15.2
+make their agent eval-ready, follow this procedure end to end. Use `@hue-run/sdk` 0.16.0
 (`HUE_WORLD_NOW` needs 0.13.0; `--case` and `--command` are available since 0.12.1). Confirm registry availability before running version-pinned install commands; a source commit is not a release. `hue eval`
 runs on Node.js 22 or 24, also for a Python agent, and the agent itself needs no Hue package.
 Hue never executes the agent: it runs in the user's process. Hue hosts a simulated world when
@@ -356,13 +356,18 @@ in the codebase's language and trim the functions no call site uses.
    the evaluation from the shell:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue --check
+   npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
    ```
 
-   The two `--package` flags put the CLI and its `zod` peer in npx's cache, so the agent's
-   repository gains no package.json or dependency; without the second, the CLI exits with
-   `hue eval needs zod`, even for `--help`, and installing zod in the project does not help
-   when the SDK itself is not installed there. Always pin the version: in a project that already
+   Use this CLI rather than a script of your own: don't write a harness, a runner or tool
+   stand-ins around the SDK's evaluation API. `--check` confirms the key, the selection, the case
+   kind and the agent, then exits without creating a run; fix what it reports before the real
+   command. One invocation is one run holding every selected case (a 100-case eval set is one
+   run with 100 executions), and it prints the run URL once that run exists. Run it once. When
+   it is interrupted, rerun the identical command: it resumes from its checkpoint instead of
+   starting another run. The `--package` flag puts the CLI in npx's cache, so the agent's
+   repository gains no package.json or dependency. Always pin the version: in a project that already
    depends on `@hue-run/sdk`, an unpinned `--package @hue-run/sdk` runs that local, possibly
    older, copy. Each world case starts the command with a fresh world's variables, listed under
    [Run it](https://docs.hue.run/evaluations/eval-ready-agent#run-it): `HUE_WORLD_ID`,
@@ -412,7 +417,7 @@ in the codebase's language and trim the functions no call site uses.
 7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.15.2 --package "zod@^4.6.5" hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
+   npx --yes --package @hue-run/sdk@0.16.0 hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
    ```
 
 A worker upgrade from an environment-only registration needs a new `--revision`, because Hue
@@ -456,7 +461,7 @@ them.
 | Symptom | Fix |
 | --- | --- |
 | Exit 1 with an unsaved eval-set version | Rerun with `--save-version` |
-| `hue eval needs zod` | Use the two-package `npx` form above |
+| Unsure what a run will do | Add `--check`; it creates nothing |
 | Helper throws "no world handoff" | An app connection was requested without a world handoff; skip app clients for an answer-only case, or check the world case's gateway handoff |
 | Helper throws "`HUE_SIM_…_URL` is not set" | The world does not include that app; connect it only where `appInWorld` is true |
 | 501 `surface_unavailable` | The case needs a mirror this deployment does not serve |

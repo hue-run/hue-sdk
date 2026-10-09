@@ -159,6 +159,8 @@ Output and limits:
                                   explanations (stored by default; --worker always stores); with
                                   --content the case span still carries the output
   --save-version                  Freeze an unsaved eval-set version before running
+  --check                         One-shot: check the key, selection and agent, print what the
+                                  run would do and exit without creating a run or a world
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
   --concurrency <n>               Cases in flight, 1-100 (default: 1)
   --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
@@ -229,6 +231,7 @@ function parse(argv: string[]) {
         "no-output": { type: "boolean", default: false },
         "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
+        check: { type: "boolean", default: false },
         "checkpoint-dir": { type: "string" },
         concurrency: { type: "string" },
         timeout: { type: "string" },
@@ -1296,7 +1299,7 @@ async function reportVerdicts(
 
 function parseBaseline(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  const parsed = parseScenarioSelector(value, ["experiments"]);
+  const parsed = parseScenarioSelector(value, ["runs", "experiments"]);
   if (parsed.kind !== "id")
     throw new UsageError("--baseline must be an experiment ID or its Hue URL");
   return parsed.id;
@@ -1321,6 +1324,7 @@ async function runOnce(
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
   const pins = await resolveSelection(client, values);
+  if (values.check) return checkRun(client, values, pins, mode, agent, output);
   if (!pins.saved) {
     if (!values["save-version"]) {
       output.error(
@@ -1427,6 +1431,71 @@ async function runOnce(
   );
 }
 
+/**
+ * `--check`: everything a one-shot run resolves before it creates anything (the key's project,
+ * the selection, the case kind and the agent), printed with the command that would start it.
+ * Nothing is created, frozen or checkpointed.
+ */
+async function checkRun(
+  client: EvaluationClient,
+  values: ReturnType<typeof parse>["values"],
+  pins: ScenarioPins,
+  mode: RunMode,
+  agent: { key: string; revision: string },
+  output: Output,
+): Promise<number> {
+  const project = await client.checkConnection();
+  let cases = 0;
+  let worldCases = 0;
+  let after: string | undefined;
+  do {
+    const page = await client.listCases(pins.datasetVersionId, { after });
+    cases += page.items.length;
+    worldCases += page.items.filter((item) => item.environmentVersionId).length;
+    after = page.nextCursor ?? undefined;
+  } while (after);
+  const direct = await detectDirect(client, pins, mode);
+  const unsaved = !pins.saved && !values["save-version"];
+  const check = {
+    ok: !unsaved,
+    project: { id: project.id, name: project.name },
+    selection: {
+      kind: pins.scenarioId ? "case" : "eval_set",
+      name: pins.name,
+      datasetVersionId: pins.datasetVersionId,
+      saved: pins.saved,
+      cases,
+      evaluators: pins.scorerVersionIds.length,
+    },
+    mode: direct ? "direct" : "simulation",
+    worldCases: direct ? 0 : worldCases,
+    agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "1" },
+  };
+  if (values.json) process.stdout.write(`${JSON.stringify({ check })}\n`);
+  else {
+    output.log(`Project: ${project.name} (${project.id})`);
+    output.log(
+      `Selection: ${check.selection.kind === "case" ? "case" : "eval set"} "${pins.name}", ${cases} ${cases === 1 ? "case" : "cases"}, ${pins.scorerVersionIds.length} ${pins.scorerVersionIds.length === 1 ? "evaluator" : "evaluators"}`,
+    );
+    output.log(
+      direct
+        ? "Mode: direct; the agent answers without a simulated world or app mirrors"
+        : `Mode: simulation; ${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`,
+    );
+    output.log(`Agent: ${agent.key} @ ${agent.revision}`);
+  }
+  if (unsaved) {
+    output.error(
+      `The ${pins.scenarioId ? "Scenario" : "eval set"} "${pins.name}" points at an unsaved version; add --save-version to freeze it when the run starts.`,
+    );
+    return 1;
+  }
+  output.log(
+    "Check passed. Nothing was created; run the same command without --check to start one run.",
+  );
+  return 0;
+}
+
 /** Resumable direct-run attempt: the created experiment is finished before a new one starts. */
 interface DirectAttempt {
   /** Digest of the selection: dataset version, scorer pins and experiment configuration. */
@@ -1504,7 +1573,7 @@ async function runDirect(
       await store.write("active-attempt", attempt);
     }
     experimentId = attempt.experimentId;
-    runUrl = new URL(`/experiments/${experimentId}`, connection.baseUrl).toString();
+    runUrl = new URL(`/runs/${experimentId}`, connection.baseUrl).toString();
     output.log(`Run: ${runUrl}`);
     output.log(`Experiment: ${experimentId}`);
     report = await runExperiment({
@@ -1605,7 +1674,7 @@ async function runWorker(
   client.onClaimed = (claim) => {
     current = claim;
     output.log(
-      `Claimed run ${claim.runId}: ${new URL(`/experiments/${claim.experimentId}`, connection.baseUrl).toString()}`,
+      `Claimed run ${claim.runId}: ${new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString()}`,
     );
   };
   const telemetry = telemetryReporter(output);
@@ -1701,7 +1770,7 @@ async function runWorker(
         if (signal.aborted) return;
         if (values.json)
           process.stdout.write(
-            `${JSON.stringify(toJson(verdicts, new URL(`/experiments/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
+            `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
           );
         else renderTable(verdicts, output);
       } catch (error) {
@@ -1811,6 +1880,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       throw new UsageError(
         "--no-output applies to one-shot runs; a run launched from Hue always stores its outputs",
       );
+    if (values.worker && values.check) throw new UsageError("--check applies to one-shot runs");
     if (!values.worker && values.capability?.length)
       throw new UsageError("--capability applies to --worker only");
     const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;

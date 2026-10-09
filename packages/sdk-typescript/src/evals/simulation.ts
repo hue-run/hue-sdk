@@ -787,7 +787,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       ];
     }
     const experimentId = checkpointSegment(attempt.experimentId, "experiment id");
-    const runUrl = new URL(`/experiments/${experimentId}`, options.client.baseUrl).toString();
+    const runUrl = new URL(`/runs/${experimentId}`, options.client.baseUrl).toString();
     await options.onProgress?.({ type: "run_created", experimentId, runUrl });
     const requested = requestedConfiguration
       ? pinRequestedAttemptV2(

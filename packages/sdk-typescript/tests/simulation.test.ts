@@ -882,7 +882,7 @@ describe("one-shot simulation workflow", () => {
           return "saved";
         },
       });
-      expect(report.runUrl).toBe(`${baseUrl}/experiments/${report.experimentId}`);
+      expect(report.runUrl).toBe(`${baseUrl}/runs/${report.experimentId}`);
       expect(targetCalls).toBe(1);
       expect(progress.map((event) => event.type)).toEqual([
         "run_created",
@@ -1199,7 +1199,7 @@ describe("one-shot simulation workflow", () => {
       expect((firstError as Error).message).toContain("lost completion acknowledgement");
       const recovered = await runSimulation(options);
       expect(fixture.targetCalls()).toBe(1);
-      expect(recovered.runUrl).toBe(`${baseUrl}/experiments/${recovered.experimentId}`);
+      expect(recovered.runUrl).toBe(`${baseUrl}/runs/${recovered.experimentId}`);
       const repeated = await runSimulation(options);
       expect(fixture.targetCalls()).toBe(2);
       expect(repeated.experimentId).not.toBe(recovered.experimentId);
@@ -1592,7 +1592,7 @@ describe("pinned scenarios", () => {
       expect(experiment.finishedAt).toBeTruthy();
       expect(fixture.targetCalls()).toBe(1);
       expect(report.subjectIds).toHaveLength(1);
-      expect(report.runUrl).toBe(`${baseUrl}/experiments/${report.experimentId}`);
+      expect(report.runUrl).toBe(`${baseUrl}/runs/${report.experimentId}`);
       expect(fixture.results).toEqual([
         expect.objectContaining({ state: "scored", scorerVersionId: pins.exact.id }),
       ]);

@@ -10,6 +10,17 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.16.0] - 2026-10-08
+
+#### Added
+
+- `hue eval --check` resolves the key's project, the selection, the case kind and the agent, prints what the run would do and exits without creating a run, a world or a checkpoint. `--json` prints it as one `check` object.
+
+#### Changed
+
+- `zod` is a regular dependency instead of an optional peer, so `npx --package @hue-run/sdk@0.16.0 hue eval` runs without a second `--package "zod@…"`. Migration: nothing is required; a project that installed `zod` only for the SDK may remove it.
+- `hue eval`, `runSimulation()` and the worker print run links as `/runs/<id>`; `--baseline` accepts both `/runs/<id>` and legacy `/experiments/<id>` URLs.
+
 ### [0.15.2] - 2026-10-08
 
 #### Fixed

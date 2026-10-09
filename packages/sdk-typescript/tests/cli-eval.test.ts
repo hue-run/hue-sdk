@@ -876,7 +876,7 @@ describe("hue eval", () => {
         expect(f.calls.experiments[0]).toMatchObject({ scorerVersionIds: [f.scorerVersion.id] });
         expect(experiment!.finishedAt).toBeTruthy();
         const lines = result.stdout.split("\n");
-        expect(lines[0]).toBe(`Run: ${f.baseUrl}/experiments/${experiment!.id}`);
+        expect(lines[0]).toBe(`Run: ${f.baseUrl}/runs/${experiment!.id}`);
         expect(lines[1]).toBe(`Experiment: ${experiment!.id}`);
         expect(lines.slice(2, 6)).toEqual([
           "[refund] world created",
@@ -888,7 +888,7 @@ describe("hue eval", () => {
         expect(result.stdout).toContain("refund  PASS             polite  PASSED");
         expect(result.stdout).toContain("1 of 1 case passed");
         expect(result.stdout.trim().split("\n").at(-1)).toBe(
-          `Run: ${f.baseUrl}/experiments/${experiment!.id}`,
+          `Run: ${f.baseUrl}/runs/${experiment!.id}`,
         );
         expect([...f.worlds.values()].map((world) => [world.status, world.steps])).toEqual([
           ["completed", [{ action: "save", args: { note: "refund charge ch_2" } }]],
@@ -993,7 +993,7 @@ describe("hue eval", () => {
         expect(document).toMatchObject({
           experimentId: experiment!.id,
           runId: experiment!.evaluation.id,
-          runUrl: `${f.baseUrl}/experiments/${experiment!.id}`,
+          runUrl: `${f.baseUrl}/runs/${experiment!.id}`,
           complete: true,
           totals: { cases: 1, passed: 1, failed: 0, error: 0, skipped: 0, pending: 1 - 1 },
         });
@@ -2180,6 +2180,50 @@ describe("hue eval", () => {
   );
 
   test(
+    "--check resolves the selection and creates nothing",
+    async () => {
+      const f = hueStandIn({ frozen: false });
+      const cwd = await workspace();
+      const args = [
+        "--set",
+        "Refund flow",
+        "--scorer-version",
+        f.scorerVersion.id,
+        "./hue-agent.ts",
+        "--origin",
+        f.baseUrl,
+        "--check",
+      ];
+      try {
+        const unsaved = await hue(args, { cwd });
+        expect(unsaved.status).toBe(1);
+        expect(unsaved.stderr).toContain("--save-version");
+        const checked = await hue([...args, "--save-version"], { cwd });
+        expect(checked.status).toBe(0);
+        expect(checked.stdout).toContain('Selection: eval set "Refund flow"');
+        expect(checked.stdout).toContain("Check passed. Nothing was created");
+        const json = await hue([...args, "--save-version", "--json"], { cwd });
+        expect(json.status).toBe(0);
+        expect(JSON.parse(json.stdout).check).toMatchObject({
+          ok: true,
+          selection: { kind: "eval_set", name: "Refund flow", saved: false },
+        });
+        expect(f.calls.frozen).toEqual([]);
+        expect(f.experiments.size).toBe(0);
+        const worker = await hue(["--worker", "./hue-agent.ts", "--origin", f.baseUrl, "--check"], {
+          cwd,
+        });
+        expect(worker.status).toBe(2);
+        expect(worker.stderr).toContain("--check applies to one-shot runs");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
     "compares verdicts with a --baseline experiment",
     async () => {
       const f = hueStandIn();
@@ -2191,7 +2235,7 @@ describe("hue eval", () => {
         const firstId = /^Experiment: (.+)$/m.exec(first.stdout)?.[1];
         expect(firstId).toBeTruthy();
         f.state.verdict = "fail";
-        const second = await hue([...common, "--baseline", `${f.baseUrl}/experiments/${firstId}`], {
+        const second = await hue([...common, "--baseline", `${f.baseUrl}/runs/${firstId}`], {
           cwd,
         });
         expect(second.status).toBe(1);
@@ -2264,7 +2308,7 @@ describe("hue eval", () => {
           `Registered agent refund-bot (revision v7) with ${f.baseUrl}; waiting for runs launched from Hue (stops after 1)`,
         );
         expect(result.stdout).toContain(
-          `Claimed run ${queued.runId}: ${f.baseUrl}/experiments/${queued.experimentId}`,
+          `Claimed run ${queued.runId}: ${f.baseUrl}/runs/${queued.experimentId}`,
         );
         expect(result.stdout).toContain("[refund] agent started");
         expect(result.stdout).toContain("completed: 1 case");
