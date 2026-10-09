@@ -7,7 +7,7 @@ Install the optional runtime-contract peer with the SDK before importing
 npm install @hue-run/sdk zod
 ```
 
-The SDK executes targets and scorers on your machine. Hue stores pinned definitions, experiment progress and results. It does not execute uploaded source code. Follow the [installation guide](https://docs.hue.run/installation) to add `@hue-run/sdk` to your application.
+The SDK executes targets and scorers on your machine. Hue stores pinned definitions, experiment progress and results. It does not execute uploaded source code. Follow [Install the SDK](https://docs.hue.run/quickstart#2-install-the-sdk) to add `@hue-run/sdk` to your application.
 
 Create a **Read and write** project service key under **Settings → Integrations & API keys** and expose it to this server-side process as `HUE_API_KEY`. A **Tracing only** key cannot author datasets or evaluation runs.
 
