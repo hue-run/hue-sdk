@@ -743,6 +743,42 @@ run(
   ],
   evaluation,
 );
+// AI SDK 6 accepts zod 3, so the packed SDK must install and import its evaluation entry beside it.
+const ai6Zod3Evaluation = join(destination, "ai6-zod3-evaluation-consumer");
+await mkdir(ai6Zod3Evaluation);
+await writeFile(
+  join(ai6Zod3Evaluation, "package.json"),
+  JSON.stringify({
+    private: true,
+    type: "module",
+    dependencies: { "@hue-run/sdk": packageSpec, ai: "6.0.116", zod: "3.25.76" },
+  }),
+);
+run(
+  "npm",
+  ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"],
+  ai6Zod3Evaluation,
+);
+run(
+  process.execPath,
+  [
+    "--input-type=module",
+    "-e",
+    `
+  import { strict as assert } from "node:assert";
+  const sdk = await import("@hue-run/sdk");
+  assert.equal(typeof sdk.createHue, "function");
+  const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
+  const score = await scoreLocally(
+    { definition: builtins.jsonSchema({ type: "string" }) },
+    { inputs: {}, output: "text", hasOutput: true, hasExpected: false },
+  );
+  assert.equal(score.state, "error");
+  assert.equal(score.error.type, "SchemaValidatorUnavailable");
+`,
+  ],
+  ai6Zod3Evaluation,
+);
 // Core imports must coexist with an existing AI SDK 6 application without
 // forcing an upgrade. Its AI SDK telemetry adapter remains explicitly v7-only.
 const ai6 = join(destination, "ai6-core-consumer");

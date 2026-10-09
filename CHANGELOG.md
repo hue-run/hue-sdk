@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.15.3] - 2026-10-08
+
+#### Fixed
+
+- The optional `zod` peer accepts `^3.25.76 || ^4.6.5`. `@hue-run/sdk/evals` now imports `zod/v4`, which zod 3.25.76 and later also ship, so npm installs the SDK next to zod 3 applications (including AI SDK 6 and 7 apps) without `--legacy-peer-deps`.
+
 ### [0.15.2] - 2026-10-08
 
 #### Fixed
