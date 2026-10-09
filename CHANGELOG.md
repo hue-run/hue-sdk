@@ -24,6 +24,12 @@ refuses to publish a version without a matching entry below.
 - An interrupted `hue eval` (Ctrl+C or SIGTERM) leaves its run open instead of finishing it with the case in flight scored as cancelled, and prints that the same command resumes it. Rerunning it keeps the finished cases and runs the interrupted ones again as a new attempt, in a fresh world for a world case. `runExperiment()` and `runSimulation()` behave the same when their `signal` aborts: no further case starts, the experiment stays unfinished and the call rejects with `TargetCancelledError`.
 - A checkpoint lock left by a crashed or killed process is reclaimed once that process has exited on the same machine, and a world case it left running runs again as a new attempt in a fresh world; an answer-only case it left running stays uncertain, since its agent may still be acting. A lock whose owner may still be running still refuses. Before, every leftover `.lock` had to be removed by hand.
 
+### [0.15.3] - 2026-10-08
+
+#### Fixed
+
+- The optional `zod` peer accepts `^3.25.76 || ^4.6.5`. `@hue-run/sdk/evals` now imports `zod/v4`, which zod 3.25.76 and later also ship, so npm installs the SDK next to zod 3 applications (including AI SDK 6 and 7 apps) without `--legacy-peer-deps`.
+
 ### [0.15.2] - 2026-10-08
 
 #### Fixed
