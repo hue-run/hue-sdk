@@ -523,7 +523,7 @@ production agent lacks. Pin the SDK, so the agent's repository gains no dependen
 
 ```sh
 npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
-npx --yes --package @hue-run/sdk@0.16.0 hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <experiment id>
+npx --yes --package @hue-run/sdk@0.16.0 hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
 npx --yes --package @hue-run/sdk@0.16.0 hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
 npx --yes --package @hue-run/sdk@0.16.0 hue eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision> --env-file .env.hue
 ```
@@ -594,7 +594,7 @@ required judge to decide answer-only cases. Any
 other evaluator's result, an error, or a metric that carries `passed` is never advisory, whatever
 its evidence says. A metric name that
 several evaluators report, such as two judges' `verdict`, gets a column per evaluator, labelled
-with the version's first eight characters. `--baseline <experiment id|url>` adds improvement,
+with the version's first eight characters. `--baseline <run id|url>` adds improvement,
 regression and unchanged counts with per-case deltas. `--json` prints one JSON document
 (`experimentId`, `runId`, `runUrl`, `complete`, `cases`, `totals`, optional `baseline`) on stdout
 and sends progress to stderr; each case lists its not-applicable evaluator versions in
@@ -736,7 +736,7 @@ published version, beside or instead of explicit `--scorer-version` IDs.
 hue eval --set gia-d1-citation --scorer gia-d1-citation \
   --command "pnpm --filter @august/frontend run hue:gia-agent" \
   --revision prompt-v10 --wait 1800 --content --json --env-file .env.hue
-hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-agent.ts --content --baseline <experiment id>
+hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-agent.ts --content --baseline <run id>
 ```
 
 For each case the command is spawned once **inside a private case directory** with

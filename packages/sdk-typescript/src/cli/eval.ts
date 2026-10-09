@@ -151,7 +151,7 @@ Connection:
 
 Output and limits:
   --name <run name>               Run name (default: <agent key> @ <revision>, hashes shortened)
-  --baseline <experiment id|url>  Compare verdicts with a previous experiment
+  --baseline <run id|url>         Compare verdicts with a previous run
   --json                          Print one JSON document on stdout; progress goes to stderr
   --content                       Capture telemetry content (the default)
   --no-content                    Omit telemetry inputs, outputs and messages
