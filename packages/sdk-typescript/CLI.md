@@ -671,7 +671,8 @@ the sealed world at once and attaches the trace once its export is complete. The
 A Scenario or eval set whose dataset version is not saved cannot back an experiment: the command
 exits 1 and asks for **Save eval-set version** in Hue or `--save-version`, which freezes that
 version at its current revision. Connection settings are `HUE_API_KEY` and `HUE_BASE_URL`
-(default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given; `--origin`
+(default `https://app.hue.run`), loaded from `--env-file <path>` (or its alias `--env-path`) first when given, otherwise from
+`./.env.hue` when the shell has no `HUE_API_KEY` (a key in the shell keeps its own origin); `--origin`
 overrides the origin. Since TypeScript 0.14.0, telemetry content capture defaults on; `--no-content` opts out.
 Earlier releases require `--content`; the examples include it for compatibility. Model and tool spans inside the agent come
 only from the agent's own instrumentation. Case outputs, error messages and explanations are

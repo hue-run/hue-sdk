@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-/** The key file `hue login` writes and `hue eval` loads when no env file is named. */
+/** The key file `hue login` writes; `hue eval` loads it when no env file is named and the shell has no HUE_API_KEY. */
 export const DEFAULT_ENV_FILE = ".env.hue";
 
 /**

@@ -146,8 +146,8 @@ Modes:
 
 Connection:
   --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first;
-                                  ./.env.hue loads by default when it exists. Variables
-                                  already set in the environment win
+                                  ./.env.hue loads by default when HUE_API_KEY is not
+                                  set. Variables already set in the environment win
   --env-path <path>               Same as --env-file
   --origin <url>                  Hue origin (default: HUE_BASE_URL or https://app.hue.run)
 
@@ -1874,7 +1874,10 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     } catch (error) {
       throw new UsageError((error as Error).message);
     }
-    if (envFile === undefined && existsSync(DEFAULT_ENV_FILE)) envFile = DEFAULT_ENV_FILE;
+    // A key already in the environment keeps its own origin: the checkout's .env.hue is
+    // consulted only when it has to supply the key, so it cannot point an inherited key elsewhere.
+    if (envFile === undefined && !process.env.HUE_API_KEY && existsSync(DEFAULT_ENV_FILE))
+      envFile = DEFAULT_ENV_FILE;
     if (envFile) {
       try {
         process.loadEnvFile(resolve(envFile));
