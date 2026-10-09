@@ -751,7 +751,14 @@ await writeFile(
   JSON.stringify({
     private: true,
     type: "module",
-    dependencies: { "@hue-run/sdk": packageSpec, ai: "6.0.116", zod: "3.25.76" },
+    dependencies: {
+      "@hue-run/sdk": packageSpec,
+      "@types/bun": pkg.devDependencies["@types/bun"],
+      "@types/node": pkg.devDependencies["@types/node"],
+      ai: "6.0.116",
+      typescript: pkg.devDependencies.typescript,
+      zod: "3.25.76",
+    },
   }),
 );
 run(
@@ -779,6 +786,29 @@ run(
   ],
   ai6Zod3Evaluation,
 );
+await mkdir(join(ai6Zod3Evaluation, "tests"));
+const ai6Zod3Tsconfig = JSON.parse(await readFile(join(source, "tsconfig.json"), "utf8"));
+ai6Zod3Tsconfig.compilerOptions.lib = ["esnext"];
+await writeFile(join(ai6Zod3Evaluation, "tsconfig.json"), JSON.stringify(ai6Zod3Tsconfig, null, 2));
+await writeFile(
+  join(ai6Zod3Evaluation, "tests", "evals-types.ts"),
+  `
+import { createHue } from "@hue-run/sdk";
+import { attemptBaselineV2 } from "@hue-run/sdk/evals";
+import { z } from "zod/v4";
+
+type AttemptBaseline = z.infer<typeof attemptBaselineV2>;
+
+const parsed = attemptBaselineV2.safeParse({});
+if (parsed.success) {
+  const baseline: AttemptBaseline = parsed.data;
+  void baseline;
+}
+const hue = createHue({ enabled: false, captureContent: false });
+void hue;
+`,
+);
+run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], ai6Zod3Evaluation);
 // Core imports must coexist with an existing AI SDK 6 application without
 // forcing an upgrade. Its AI SDK telemetry adapter remains explicitly v7-only.
 const ai6 = join(destination, "ai6-core-consumer");
