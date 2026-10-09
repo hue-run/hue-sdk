@@ -238,7 +238,7 @@ run(
   ],
   minimal,
 );
-// zod is a dependency, so `npx --package @hue-run/sdk hue eval` needs no second package.
+// zod is a dependency, so `npx @hue-run/sdk eval` needs no second package.
 const evalHelp = spawnSync(
   process.execPath,
   [join(minimal, "node_modules/@hue-run/sdk/dist/setup/cli.js"), "eval", "--help"],

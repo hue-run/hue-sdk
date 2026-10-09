@@ -1,5 +1,8 @@
 import { resolve } from "node:path";
 
+/** The key file `hue login` writes and `hue eval` loads when no env file is named. */
+export const DEFAULT_ENV_FILE = ".env.hue";
+
 /**
  * Node 22 and 24 scan the whole command line for `--env-file`, including arguments meant for the
  * script, and exit with "node: <path>: not found" before the CLI runs when that file does not

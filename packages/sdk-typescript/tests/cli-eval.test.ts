@@ -858,6 +858,28 @@ test("an agent command's key skips its interpreter, a Windows executable name in
 });
 
 describe("hue eval", () => {
+  test("loads ./.env.hue when no --env-file is named and keeps shell variables ahead of it", async () => {
+    const f = hueStandIn();
+    const cwd = await workspace();
+    try {
+      await writeFile(
+        join(cwd, ".env.hue"),
+        `HUE_API_KEY=${key}\nHUE_BASE_URL=http://127.0.0.1:9\n`,
+      );
+      const result = await hue(["--case", "refund FLOW", "./hue-agent.ts", "--check"], {
+        cwd,
+        dropKey: true,
+        env: { HUE_BASE_URL: f.baseUrl },
+      });
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Check passed.");
+      expect(f.experiments.size).toBe(0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("rejects conflicting content flags before running an agent", async () => {
     const result = await hue(["--content", "--no-content"], { cwd: process.cwd() });
     expect(result.status).toBe(2);

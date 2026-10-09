@@ -522,17 +522,17 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "Refund an eligible charge" --command "node agent.js" --env-file .env.hue
-npx --yes --package @hue-run/sdk@0.16.0 hue eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx --yes --package @hue-run/sdk@0.16.0 hue eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx --yes --package @hue-run/sdk@0.16.0 hue eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision> --env-file .env.hue
+npx -y @hue-run/sdk@0.16.0 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.16.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.16.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.16.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
 (`https://app.hue.run/runs/<id>`) once the run exists. Add `--check` to confirm the key, the
 selection, the case kind and the agent first: it prints what the run would do and exits without
 creating a run, a world or a checkpoint. An
-unpinned `--package @hue-run/sdk` runs a local, possibly older, copy in a project that already
+unpinned `npx @hue-run/sdk` runs a local, possibly older, copy in a project that already
 depends on it.
 
 An adapter module is the in-process alternative for a TypeScript agent. It exports `default` or
@@ -563,7 +563,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "Refund an eligible charge" ./hue-agent.ts --content --env-file .env.hue
+npx -y @hue-run/sdk@0.16.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -735,7 +735,7 @@ published version, beside or instead of explicit `--scorer-version` IDs.
 ```sh
 hue eval --set gia-d1-citation --scorer gia-d1-citation \
   --command "pnpm --filter @august/frontend run hue:gia-agent" \
-  --revision prompt-v10 --wait 1800 --content --json --env-file .env.hue
+  --revision prompt-v10 --wait 1800 --content --json
 hue eval --set gia-d1-citation --set-version 1 --scorer gia-d1-citation ./hue-agent.ts --content --baseline <run id>
 ```
 

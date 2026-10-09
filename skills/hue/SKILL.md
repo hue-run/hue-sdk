@@ -356,8 +356,8 @@ in the codebase's language and trim the functions no call site uses.
    the evaluation from the shell:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue --check
-   npx --yes --package @hue-run/sdk@0.16.0 hue eval --case "<name>" --command "<the agent's start command>" --env-file .env.hue
+   npx -y @hue-run/sdk@0.16.0 eval --case "<name>" --command "<the agent's start command>" --check
+   npx -y @hue-run/sdk@0.16.0 eval --case "<name>" --command "<the agent's start command>"
    ```
 
    Use this CLI rather than a script of your own: don't write a harness, a runner or tool
@@ -370,9 +370,9 @@ in the codebase's language and trim the functions no call site uses.
    command again to resume it. Finished cases are kept and an interrupted case runs again, in a
    fresh world for a world case; after a crash, an answer-only case that was mid-run is reported
    uncertain instead. If it stops while waiting for Hue's checks, after the cases finished, the run
-   is already complete: open its run URL instead of rerunning. Never delete `.hue/eval` to start over. The `--package` flag puts the CLI in npx's cache, so the agent's
+   is already complete: open its run URL instead of rerunning. Never delete `.hue/eval` to start over. npx caches the CLI, so the agent's
    repository gains no package.json or dependency. Always pin the version: in a project that already
-   depends on `@hue-run/sdk`, an unpinned `--package @hue-run/sdk` runs that local, possibly
+   depends on `@hue-run/sdk`, an unpinned `npx @hue-run/sdk` runs that local, possibly
    older, copy. Each world case starts the command with a fresh world's variables, listed under
    [Run it](https://docs.hue.run/evaluations/eval-ready-agent#run-it): `HUE_WORLD_ID`,
    `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW`, one `HUE_SIM_<SURFACE>_URL` per mirror, `HUE_MCP_CONFIG`,
@@ -421,7 +421,7 @@ in the codebase's language and trim the functions no call site uses.
 7. To let the Run button and `launch_local_run` use this agent, start a worker instead:
 
    ```sh
-   npx --yes --package @hue-run/sdk@0.16.0 hue eval --worker --command "<the agent's start command>" --revision <new-agent-revision> --env-file .env.hue
+   npx -y @hue-run/sdk@0.16.0 eval --worker --command "<the agent's start command>" --revision <new-agent-revision>
    ```
 
 A worker upgrade from an environment-only registration needs a new `--revision`, because Hue
@@ -483,7 +483,7 @@ grading executor scores the uploaded documents after the run.
 
    ```sh
    hue eval --set <eval-set-slug> --scorer <evaluator-slug> --command "<agent command>" \
-     --revision <prompt or commit revision> --wait 1800 --json --env-file .env.hue
+     --revision <prompt or commit revision> --wait 1800 --json
    ```
 
 2. The command runs once per case inside a private case directory: read `HUE_CASE_INPUTS`

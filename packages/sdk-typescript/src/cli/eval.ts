@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
@@ -65,7 +65,7 @@ import {
   type VerdictComparison,
 } from "../evals/verdicts.js";
 import type { JsonValue } from "../types.js";
-import { envFileArgument, envFileOptions } from "./env-file.js";
+import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 
 /** Adapter contract: the module's `default` or `runMyAgent` export. */
 export type EvalAdapter = (
@@ -145,7 +145,9 @@ Modes:
                                   environment-files:v1 and input:pdf for world cases with files
 
 Connection:
-  --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first
+  --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first;
+                                  ./.env.hue loads by default when it exists. Variables
+                                  already set in the environment win
   --env-path <path>               Same as --env-file
   --origin <url>                  Hue origin (default: HUE_BASE_URL or https://app.hue.run)
 
@@ -1872,6 +1874,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     } catch (error) {
       throw new UsageError((error as Error).message);
     }
+    if (envFile === undefined && existsSync(DEFAULT_ENV_FILE)) envFile = DEFAULT_ENV_FILE;
     if (envFile) {
       try {
         process.loadEnvFile(resolve(envFile));
@@ -1884,7 +1887,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     const apiKey = process.env.HUE_API_KEY?.trim();
     if (!apiKey)
       throw new UsageError(
-        'HUE_API_KEY is required: a "Read and write" project key, set in the environment or an ignored --env-file',
+        'HUE_API_KEY is required: a "Read and write" project key, set in the environment, ./.env.hue or an ignored --env-file',
       );
     secrets.push(apiKey);
     const baseUrl = values.origin ?? process.env.HUE_BASE_URL?.trim() ?? "https://app.hue.run";

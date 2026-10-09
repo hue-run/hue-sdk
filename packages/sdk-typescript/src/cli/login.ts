@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { isLoopbackHost } from "../config.js";
-import { envFileArgument, envFileOptions } from "./env-file.js";
+import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 
 /**
  * `hue login`: guided storage of keys that a person creates in Hue. The command never mints a key.
@@ -28,7 +28,6 @@ export interface LoginCommandIo {
 }
 
 const DEFAULT_ORIGIN = "https://app.hue.run";
-const DEFAULT_ENV_FILE = ".env.hue";
 /** Settings section that lists and creates project service keys. */
 const KEY_SETTINGS_PATH = "/settings/integrations";
 const REQUEST_TIMEOUT_MILLIS = 10_000;
@@ -796,6 +795,8 @@ export async function runLoginCommand(argv: string[], io: LoginCommandIo = {}): 
       `  hue mcp install --client claude-code --auth key${mcpUrl === mcpUrlForOrigin(DEFAULT_ORIGIN) ? "" : ` --url ${mcpUrl}`}`,
     );
   if (stored.includes("evaluations"))
-    out(`  hue eval --case "<name>" ./hue-agent.ts --env-file ${envDisplay}`);
+    out(
+      `  hue eval --case "<name>" ./hue-agent.ts${envDisplay === DEFAULT_ENV_FILE ? "" : ` --env-file ${envDisplay}`}`,
+    );
   return 0;
 }
