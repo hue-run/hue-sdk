@@ -1962,6 +1962,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.7.0 (2026-10-08): evals run through `hue eval` with SDK 0.16.0: `--check` first, one command is one run, never a custom harness or tool stand-ins; an interrupted run stays open and the identical command resumes it.
+- 0.6.9 (2026-10-08): link the skill and SDK guides to the consolidated Quickstart, production setup, and MCP recipes pages.
 - 0.6.3 (2026-10-05): align the evaluation procedure and verification checklist with answer-only cases: either execution or world token marks an eval, answer paths skip app clients, and required app connections still fail without a world. Direct adapters pass their execution marker to the helper; one-shot direct commands use an absolute entry path. The **Answers the task** judge in the **Answer outcome** evaluator is required for answer-only cases; worker exit codes do not report run verdicts.
 - 0.6.2 (2026-10-05): answer-only cases need no starting world or app-client initialization; command workers run both case kinds from the application directory with SDK 0.13.2. Existing registrations need a new revision, and adapter-file workers opt into direct cases explicitly. The Answer outcome judge decides answer-only results.
 

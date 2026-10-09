@@ -53,7 +53,7 @@ inactive; do not run it.
 
 ## Install and configure
 
-Use the current [installation guide](https://docs.hue.run/installation) and verify that the intended package version is published before installing it:
+Use the current [Install the SDK](https://docs.hue.run/quickstart#2-install-the-sdk) section and verify that the intended package version is published before installing it:
 
 ```sh
 # TypeScript: run in the application directory.
@@ -93,7 +93,7 @@ Keep spans open until streamed work completes or aborts. A returned streaming `R
 
 ## Isolate serving requests from Hue failures
 
-Read [production safety](https://docs.hue.run/guides/production-safety). These APIs require TypeScript 0.1.5 or Python 0.1.3; verify publication/installation first. Use `createHueSafe` / `create_hue_safe` once per serving process (after fork in Python). Explicitly read `HUE_TRACING_ENABLED` and pass `enabled`; `false` disables Hue without needing a key. Use `flushSafe` / `shutdownSafe` or `force_flush_safe` / `shutdown_safe` with an appropriate bounded deadline (default 1 second). Preserve borrowed-provider ownership.
+Read [TypeScript production setup](https://docs.hue.run/sdks/typescript#production-setup) and [Python production setup](https://docs.hue.run/sdks/python#production-setup). These APIs require TypeScript 0.1.5 or Python 0.1.3; verify publication/installation first. Use `createHueSafe` / `create_hue_safe` once per serving process (after fork in Python). Explicitly read `HUE_TRACING_ENABLED` and pass `enabled`; `false` disables Hue without needing a key. Use `flushSafe` / `shutdownSafe` or `force_flush_safe` / `shutdown_safe` with an appropriate bounded deadline (default 1 second). Preserve borrowed-provider ownership.
 
 Keep strict connection, flush and receipt checks in a separate setup/diagnostic path; do not gate application readiness or a customer response on Hue. Do not rerun business work after a telemetry failure. Verify a collector outage, oversized capture, failing redactor, original exception/cancellation and queue overflow against the application's actual entry point. Assert the same result/error and exactly one tool invocation. Observe sanitized cumulative failure/drop counters through a health channel independent of Hue. Explain that bounded memory queues can lose records and cannot guarantee survival of process termination or arbitrary third-party hooks.
 
@@ -122,7 +122,7 @@ and why, which tools fail, what is slow) and the Hue MCP server is connected, fe
 its read tools and do the analysis yourself. Hue returns stored traces, spans, findings, attention
 states, counts and percentiles and, where the project set them up, trace-check results and intents;
 it does not diagnose or summarize. The
-[production recipes](https://docs.hue.run/agents/investigate-production) give the tool sequence
+[production recipes](https://docs.hue.run/agents/mcp-tools#recipes) give the tool sequence
 for each question and explain the fields.
 
 Hue's default connection lists the production reads used below. It also lists `search_hue_tools`,
