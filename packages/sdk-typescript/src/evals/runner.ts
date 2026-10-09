@@ -383,6 +383,7 @@ type SavedResult = {
 interface Prepared {
   stage: "prepared";
   executionId: string;
+  attempt?: string;
   complete: CompleteExecution;
   completion?: Completion;
   scores: SavedResult[];
@@ -799,6 +800,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         scores,
         exportState: "pending",
         ...(saved.trace ? { trace: saved.trace } : {}),
+        ...(saved.attempt ? { attempt: saved.attempt } : {}),
       };
       await store.write(file, prepared);
       return prepared;

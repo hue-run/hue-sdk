@@ -1269,7 +1269,9 @@ async function reportVerdicts(
   // The wait returns its partial state on abort rather than throwing, so Ctrl+C here must not
   // fall through to a baseline read and a verdict table that nobody asked to finish.
   if (signal.aborted) {
-    process.stderr.write("Interrupted.\n");
+    process.stderr.write(
+      `Interrupted while waiting for Hue's checks. The run already finished; open ${run.runUrl} instead of rerunning.\n`,
+    );
     return 130;
   }
   let baseline: { experimentId: string; comparison: VerdictComparison } | undefined;
@@ -1323,6 +1325,7 @@ async function runOnce(
   const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
+  integer("wait", values.wait, 300, 0, 86_400);
   const pins = await resolveSelection(client, values);
   if (values.check) return checkRun(client, values, pins, mode, agent, output);
   if (!pins.saved) {
@@ -1445,6 +1448,20 @@ async function checkRun(
   output: Output,
 ): Promise<number> {
   const project = await client.checkConnection();
+  for (const id of pins.scorerVersionIds) {
+    const found = await client.getScorerVersion(id).then(
+      () => true,
+      (error: unknown) => {
+        if (error instanceof HueApiError && (error.status === 404 || error.status === 403))
+          return false;
+        throw error;
+      },
+    );
+    if (!found) {
+      output.error(`Evaluator version ${id} was not found in project "${project.name}".`);
+      return 1;
+    }
+  }
   let cases = 0;
   let worldCases = 0;
   let after: string | undefined;

@@ -238,6 +238,8 @@ function hueStandIn(
       }
       if (path === `/datasets/${dataset.id}`) return Response.json(dataset);
       if (path === `/dataset-versions/${version.id}`) return Response.json(version);
+      if (path === `/scorer-versions/${scorerVersion.id}`) return Response.json(scorerVersion);
+      if (path.startsWith("/scorer-versions/")) return new Response(null, { status: 404 });
       // The case pins a world, so `hue eval --set` on this stand-in stays a simulation run.
       if (path === `/dataset-versions/${version.id}/cases`)
         return Response.json({ items: [frozenCase], nextCursor: null });
@@ -2330,6 +2332,13 @@ describe("hue eval", () => {
           ok: true,
           selection: { kind: "eval_set", name: "Refund flow", saved: false },
         });
+        const unknown = await hue([...args, "--save-version", "--scorer-version", randomUUID()], {
+          cwd,
+        });
+        expect(unknown.status).toBe(1);
+        expect(unknown.stderr).toContain("was not found");
+        const badWait = await hue([...args, "--save-version", "--wait", "nope"], { cwd });
+        expect(badWait.status).toBe(2);
         expect(f.calls.frozen).toEqual([]);
         expect(f.experiments.size).toBe(0);
         const worker = await hue(["--worker", "./hue-agent.ts", "--origin", f.baseUrl, "--check"], {
