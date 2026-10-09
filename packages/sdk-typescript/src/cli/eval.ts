@@ -1270,7 +1270,7 @@ async function reportVerdicts(
   // fall through to a baseline read and a verdict table that nobody asked to finish.
   if (signal.aborted) {
     process.stderr.write(
-      `Interrupted while waiting for Hue's checks. The run already finished; open ${run.runUrl} instead of rerunning.\n`,
+      `Interrupted. The cases already finished and Hue is still checking them; open ${run.runUrl} instead of rerunning.\n`,
     );
     return 130;
   }
