@@ -1,8 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -608,8 +609,8 @@ function hue(
     dropKey?: boolean;
     /** Sends SIGINT once the CLI prints a line matching this, standing in for Ctrl+C. */
     interruptOn?: RegExp;
-    /** Sends SIGINT this many times, 100 ms apart, once this file exists. */
-    interruptAfter?: { file: string; times: number; gapMillis?: number };
+    /** Sends SIGINT (or `signal`) this many times, 100 ms apart, once this file exists. */
+    interruptAfter?: { file: string; times: number; gapMillis?: number; signal?: NodeJS.Signals };
   },
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
@@ -642,12 +643,12 @@ function hue(
       maybeInterrupt(chunk);
     });
     if (options.interruptAfter) {
-      const { file, times, gapMillis = 100 } = options.interruptAfter;
+      const { file, times, gapMillis = 100, signal = "SIGINT" } = options.interruptAfter;
       const waiting = setInterval(() => {
         if (!existsSync(file)) return;
         clearInterval(waiting);
         for (let index = 0; index < times; index++)
-          setTimeout(() => child.kill("SIGINT"), index * gapMillis);
+          setTimeout(() => child.kill(signal), index * gapMillis);
       }, 50);
       child.on("close", () => clearInterval(waiting));
     }
@@ -1985,6 +1986,52 @@ describe("hue eval", () => {
         expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
         expect(f.calls.completions[0]!.executionId).not.toBe(retry!.previousExecutionId);
         expect(finishes()).toHaveLength(1);
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "a run whose process was killed resumes on the same command and reruns the case it left running",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const survivor = join(cwd, "survivor.txt");
+      const args = [
+        "--scenario",
+        "Refund flow",
+        "--command",
+        `${process.execPath} agent-once.mjs`,
+        "--origin",
+        f.baseUrl,
+        "--wait",
+        "0",
+      ];
+      try {
+        const killing = hue(args, {
+          cwd,
+          env: { HUE_TEST_SURVIVOR: survivor },
+          interruptAfter: { file: survivor, times: 1, signal: "SIGKILL" },
+        });
+        // The agent's process group outlives a killed CLI; stop it as the operator would.
+        while (!existsSync(survivor)) await sleep(50);
+        await sleep(500);
+        const pid = (await readFile(survivor, "utf8")).trim();
+        const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", pid]).stdout.toString().trim());
+        process.kill(-group, "SIGKILL");
+        expect((await killing).status).not.toBe(0);
+        expect(f.calls.completions).toEqual([]);
+
+        const resumed = await hue(args, { cwd, env: { HUE_TEST_SURVIVOR: survivor } });
+        expect(resumed.stderr).not.toContain("locked");
+        expect(resumed.status).toBe(0);
+        expect(f.calls.experiments).toHaveLength(1);
+        expect(f.calls.starts).toHaveLength(2);
+        expect(f.calls.starts[1]).toMatchObject({ allowUncertainRetry: true });
+        expect(f.calls.completions).toEqual([expect.objectContaining({ state: "succeeded" })]);
       } finally {
         f.stop();
         await rm(cwd, { recursive: true, force: true });

@@ -119,6 +119,9 @@ async function reclaimLock(root: string, lock: string): Promise<boolean> {
  * machine has exited. Any other lock is left for explicit operator recovery. */
 export class CheckpointStore {
   private untrack = () => {};
+  /** Whether this store took over the lock of a process that died here, so whatever that process
+   * was running never finished. */
+  reclaimed = false;
   private constructor(readonly directory: string) {}
   static async acquire(directory: string, identity: unknown): Promise<CheckpointStore> {
     const root = resolve(directory);
@@ -128,10 +131,12 @@ export class CheckpointStore {
       throw new Error("Use a private checkpoint directory (mode 0700, no symlink)");
     const store = new CheckpointStore(root);
     const lock = join(root, ".lock");
-    if (!(await createLock(lock)) && !(await reclaimLock(root, lock)))
+    const created = await createLock(lock);
+    if (!created && !(await reclaimLock(root, lock)))
       throw new Error(
         "Checkpoint directory is locked by a process that may still be running; confirm it stopped before explicitly removing .lock",
       );
+    store.reclaimed = !created;
     store.untrack = onForcedExit(() => rmSync(lock, { recursive: true, force: true }));
     try {
       await store.write(".lock/owner", { pid: process.pid, host: hostname() });

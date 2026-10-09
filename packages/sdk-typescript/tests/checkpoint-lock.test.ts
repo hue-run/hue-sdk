@@ -31,6 +31,7 @@ describe("checkpoint lock recovery", () => {
       const store = await CheckpointStore.acquire(root, { kind: "test" });
       const owner = JSON.parse(await readFile(join(root, ".lock", "owner.json"), "utf8"));
       expect(owner.value).toEqual({ pid: process.pid, host: hostname() });
+      expect(store.reclaimed).toBe(true);
       expect((await readdir(root)).filter((name) => name.startsWith(".lock-stale-"))).toEqual([]);
       await store.release();
     } finally {

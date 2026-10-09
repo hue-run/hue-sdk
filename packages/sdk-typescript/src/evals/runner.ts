@@ -806,7 +806,12 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       }
       files.keepOutputs = checkpoint?.stage === "uploading";
       let retryOf: string | undefined;
-      if (checkpoint?.stage === "interrupted") {
+      // A case left running by a process that died here is as interrupted as one the caller
+      // stopped; a fresh world isolates it from anything the dead run's agent still does.
+      if (
+        checkpoint?.stage === "interrupted" ||
+        (checkpoint?.stage === "running" && store.reclaimed)
+      ) {
         retryOf = checkpoint.executionId;
         checkpoint = undefined;
       }
