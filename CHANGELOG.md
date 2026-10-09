@@ -14,7 +14,7 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
-- `hue eval --check` resolves the key's project, the selection, the case kind and the agent, prints what the run would do and exits without creating a run, a world or a checkpoint. `--json` prints it as one `check` object.
+- `hue eval --check` resolves the key's project, the selection, the case kind and the agent, prints what the run would do and exits without creating a run, a world or a checkpoint. `--json` prints it as one `check` object. A selection that mixes world and answer-only cases is refused, by `--check` and by the run, before anything is created.
 
 #### Changed
 

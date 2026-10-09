@@ -36,6 +36,8 @@ function hueStandIn(
     verdict?: Verdict;
     deferredPolls?: number;
     frozen?: boolean;
+    /** Cases of the version that pin no world, listed after the world case. */
+    answerOnlyCases?: number;
     /** Answer creates as a deployment whose simulation gateway serves the world. */
     gateway?: boolean;
     /** Refuse trace exports with 400, drop their connection without an answer, or answer the
@@ -242,7 +244,17 @@ function hueStandIn(
       if (path.startsWith("/scorer-versions/")) return new Response(null, { status: 404 });
       // The case pins a world, so `hue eval --set` on this stand-in stays a simulation run.
       if (path === `/dataset-versions/${version.id}/cases`)
-        return Response.json({ items: [frozenCase], nextCursor: null });
+        return Response.json({
+          items: [
+            frozenCase,
+            ...Array.from({ length: options.answerOnlyCases ?? 0 }, () => ({
+              ...frozenCase,
+              id: randomUUID(),
+              environmentVersionId: null,
+            })),
+          ],
+          nextCursor: null,
+        });
       if (path === `/dataset-versions/${version.id}/freeze`) {
         calls.frozen.push(Number(body.expectedRevision));
         if (body.expectedRevision !== version.revision) return new Response(null, { status: 409 });
@@ -2334,6 +2346,43 @@ describe("hue eval", () => {
         expect(saved.stdout).toContain('Saved "Refund flow" version 1.');
         expect(f.calls.frozen).toEqual([2]);
         expect([...f.experiments.values()][0]?.name).toBe("Saved on demand");
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT * 2,
+  );
+
+  test(
+    "a set mixing world and answer-only cases is refused before a run exists",
+    async () => {
+      const f = hueStandIn({ answerOnlyCases: 2 });
+      const cwd = await workspace();
+      const args = [
+        "--set",
+        "Refund flow",
+        "--scorer-version",
+        f.scorerVersion.id,
+        "./hue-agent.ts",
+        "--origin",
+        f.baseUrl,
+      ];
+      try {
+        const checked = await hue([...args, "--check"], { cwd });
+        expect(checked.status).toBe(1);
+        expect(checked.stderr).toContain("2 of the 3 cases pin no world");
+        const json = await hue([...args, "--check", "--json"], { cwd });
+        expect(json.status).toBe(1);
+        expect(JSON.parse(json.stdout).check).toMatchObject({
+          ok: false,
+          selection: { cases: 3 },
+          worldCases: 1,
+        });
+        const run = await hue(args, { cwd });
+        expect(run.status).toBe(1);
+        expect(run.stderr).toContain("2 of the 3 cases pin no world");
+        expect(f.experiments.size).toBe(0);
       } finally {
         f.stop();
         await rm(cwd, { recursive: true, force: true });

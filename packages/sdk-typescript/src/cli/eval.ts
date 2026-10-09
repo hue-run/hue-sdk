@@ -1154,21 +1154,33 @@ function parseMode(value: string | undefined): RunMode {
   throw new UsageError("--mode must be auto, direct or simulation");
 }
 
-/** Direct when nothing pins a simulated world: not a Scenario, and no case of the version does. */
-async function detectDirect(
+/** The selection's cases, and whether the run is direct: when `--mode` leaves it open, direct
+ * means nothing pins a simulated world, not a Scenario and no case of the version. A simulation
+ * run cannot execute a case that pins no world, so a selection mixing both kinds is refused. */
+async function inspectSelection(
   client: EvaluationClient,
   pins: ScenarioPins,
   mode: RunMode,
-): Promise<boolean> {
-  if (mode !== "auto") return mode === "direct";
-  if (pins.scenarioId || pins.environmentVersionId) return false;
+): Promise<{ direct: boolean; cases: number; worldCases: number; refusal?: string }> {
+  let cases = 0;
+  let worldCases = 0;
   let after: string | undefined;
   do {
     const page = await client.listCases(pins.datasetVersionId, { after });
-    if (page.items.some((item) => item.environmentVersionId)) return false;
+    cases += page.items.length;
+    worldCases += page.items.filter((item) => item.environmentVersionId).length;
     after = page.nextCursor ?? undefined;
   } while (after);
-  return true;
+  const direct =
+    mode === "auto"
+      ? !pins.scenarioId && !pins.environmentVersionId && worldCases === 0
+      : mode === "direct";
+  const answerOnly = cases - worldCases;
+  const refusal =
+    !direct && answerOnly > 0
+      ? `${answerOnly} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} no world, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. Put the answer-only cases in their own eval set${mode === "simulation" ? ", or drop --mode simulation" : ""}.`
+      : undefined;
+  return { direct, cases, worldCases, ...(refusal ? { refusal } : {}) };
 }
 
 function toJson(
@@ -1329,7 +1341,12 @@ async function runOnce(
   const mode = parseMode(values.mode);
   integer("wait", values.wait, 300, 0, 86_400);
   const pins = await resolveSelection(client, values);
-  if (values.check) return checkRun(client, values, pins, mode, agent, output);
+  const selection = await inspectSelection(client, pins, mode);
+  if (values.check) return checkRun(client, values, pins, selection, agent, output);
+  if (selection.refusal) {
+    output.error(selection.refusal);
+    return 1;
+  }
   if (!pins.saved) {
     if (!values["save-version"]) {
       output.error(
@@ -1342,7 +1359,7 @@ async function runOnce(
   }
   const runName = values.name ?? defaultRunName(agent);
   const project = await client.checkConnection();
-  if (await detectDirect(client, pins, mode))
+  if (selection.direct)
     return runDirect(
       {
         client,
@@ -1445,7 +1462,7 @@ async function checkRun(
   client: EvaluationClient,
   values: ReturnType<typeof parse>["values"],
   pins: ScenarioPins,
-  mode: RunMode,
+  selection: Awaited<ReturnType<typeof inspectSelection>>,
   agent: { key: string; revision: string },
   output: Output,
 ): Promise<number> {
@@ -1464,19 +1481,10 @@ async function checkRun(
       return 1;
     }
   }
-  let cases = 0;
-  let worldCases = 0;
-  let after: string | undefined;
-  do {
-    const page = await client.listCases(pins.datasetVersionId, { after });
-    cases += page.items.length;
-    worldCases += page.items.filter((item) => item.environmentVersionId).length;
-    after = page.nextCursor ?? undefined;
-  } while (after);
-  const direct = await detectDirect(client, pins, mode);
+  const { direct, cases, worldCases, refusal } = selection;
   const unsaved = !pins.saved && !values["save-version"];
   const check = {
-    ok: !unsaved,
+    ok: !unsaved && !refusal,
     project: { id: project.id, name: project.name },
     selection: {
       kind: pins.scenarioId ? "case" : "eval_set",
@@ -1502,6 +1510,10 @@ async function checkRun(
         : `Mode: simulation; ${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`,
     );
     output.log(`Agent: ${agent.key} @ ${agent.revision}`);
+  }
+  if (refusal) {
+    output.error(refusal);
+    return 1;
   }
   if (unsaved) {
     output.error(

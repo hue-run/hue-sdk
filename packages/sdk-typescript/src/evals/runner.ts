@@ -812,8 +812,9 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       join(filesRoot, `world-case-${uuid(itemId)}${attempt ? `-${uuid(attempt)}` : ""}`);
     const runCase = async (item: (typeof items)[number], files: CaseFiles) => {
       const file = `case-${uuid(item.id)}`;
+      const directDirectory = join(filesRoot, `case-${uuid(item.id)}`);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
-        frozen.environmentVersionId ? files.directory : join(filesRoot, `case-${uuid(item.id)}`);
+        frozen.environmentVersionId ? files.directory : directDirectory;
       let checkpoint: CaseCheckpoint | undefined;
       try {
         checkpoint = await store.read<CaseCheckpoint>(file);
@@ -836,7 +837,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
       if (checkpoint?.stage === "interrupted") {
         retryOf = checkpoint.executionId;
         checkpoint = undefined;
+        // A direct case's directory goes too, so the retry finds no input copy or output of the
+        // stopped attempt.
         await removeCaseFiles(files.directory);
+        await removeCaseFiles(directDirectory);
         files.directory = worldDirectoryOf(item.id, retryOf);
       }
       if (checkpoint && checkpoint.stage !== "prepared" && checkpoint.stage !== "uploading") {
