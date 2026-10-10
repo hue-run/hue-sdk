@@ -25,4 +25,4 @@ Preconditions:
 ## Gotchas
 
 - The loopback stub does not implement evaluation routes, so a full run needs a real Hue project key. That is a maintainer step, not PR verification; say so in the PR when you change this example.
-- The example writes to `--checkpoint-directory`; point it into `.context/verify-examples/`.
+- The example writes to `--checkpoint-directory`; point it into `$V/`.

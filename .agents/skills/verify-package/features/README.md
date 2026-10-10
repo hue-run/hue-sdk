@@ -6,7 +6,7 @@ The maintained source for proving changes to how the SDKs are built, installed a
 
 - Root and package dependencies installed with frozen lockfiles.
 - No `HUE_API_KEY` or registry token in the shell.
-- Archives go to `.context/verify-package/`.
+- Archives go to the per-run `$V` from the skill's Launch.
 
 ## Driving conventions
 

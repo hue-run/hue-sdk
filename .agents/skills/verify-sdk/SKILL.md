@@ -19,9 +19,9 @@ Nothing to keep running. Install once per checkout (about 2 s when cached):
 For a drive, start the loopback Hue stand-in. It prints `{"ready": "<url>"}` and then one JSON line per request:
 
 ```sh
-mkdir -p .context/verify-sdk
-.agents/skills/verify-sdk/scripts/stub-hue.py > .context/verify-sdk/stub.log & echo $! > .context/verify-sdk/stub.pid
-sleep 1; export HUE_BASE_URL=$(head -1 .context/verify-sdk/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
+mkdir -p .context && export V=$(mktemp -d "$PWD/.context/verify-sdk-XXXXXX")
+.agents/skills/verify-sdk/scripts/stub-hue.py > $V/stub.log & echo $! > $V/stub.pid
+sleep 1; export HUE_BASE_URL=$(head -1 $V/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
 ```
 
 ## Doctor
@@ -42,11 +42,11 @@ Pick the feature in [features/](features/README.md) and run its narrowest comman
 
 ## Evidence
 
-Paste text into the PR: the command, the pass/fail summary lines, and for a drive the script output plus the stub's request lines (path, status, byte count). Keep files under `.context/verify-sdk/` (ignored by Git and eslint). A stub drive is a fake-API check: the real SDK makes its real HTTP export, but `stub-hue.py` stands in for Hue and acknowledges everything. Call it a loopback-stub drive in the PR, not end to end; only a run against a real Hue project proves server acceptance. A trace ID without the stub's export line is not proof.
+Paste text into the PR: the command, the pass/fail summary lines, and for a drive the script output plus the stub's request lines (path, status, byte count). Keep files under `$V`, a per-run directory in `.context/` (ignored by Git and eslint), so concurrent runs in one checkout do not collide. A stub drive is a fake-API check: the real SDK makes its real HTTP export, but `stub-hue.py` stands in for Hue and acknowledges everything. Call it a loopback-stub drive in the PR, not end to end; only a run against a real Hue project proves server acceptance. A trace ID without the stub's export line is not proof.
 
 ## Cleanup
 
-Print the evidence first: `cat .context/verify-sdk/stub.log`. Then `kill $(cat .context/verify-sdk/stub.pid)`. Keep `.context/verify-sdk/*.log` as evidence. Never write scratch scripts elsewhere in the repo: `eslint .` lints every `.mjs`/`.js` outside the ignored paths.
+Print the evidence first: `cat $V/stub.log`. Then `kill $(cat $V/stub.pid)`. Then `rm -rf "$V"`. Never write scratch scripts elsewhere in the repo: `eslint .` lints every `.mjs`/`.js` outside the ignored paths.
 
 ## Helpers
 

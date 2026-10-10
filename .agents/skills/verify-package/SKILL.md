@@ -11,7 +11,7 @@ Run the narrowest check that covers the change. The full verifier takes about 6.
 
 ## Launch
 
-Nothing to keep running. Install once: `bun install --frozen-lockfile` at the root, plus the package installs in [verify-sdk](../verify-sdk/SKILL.md). Write archives to `.context/verify-package/` (ignored by Git and eslint).
+Nothing to keep running. Install once: `bun install --frozen-lockfile` at the root, plus the package installs in [verify-sdk](../verify-sdk/SKILL.md). Then make a per-run directory for archives: `mkdir -p .context && export V=$(mktemp -d "$PWD/.context/verify-package-XXXXXX")` (ignored by Git and eslint; concurrent runs do not collide).
 
 ## Doctor
 
@@ -37,4 +37,4 @@ Paste the command and its last lines: the inventory counts (`total files`, `Insp
 
 ## Cleanup
 
-Each step prints its own evidence; copy it into the PR before `rm -rf .context/verify-package`. The full verifier works in a `/tmp/hue-sdk-package-*` directory it prints; delete it after reading its output.
+Each step prints its own evidence; copy it into the PR before `rm -rf $V`. The full verifier works in a `/tmp/hue-sdk-package-*` directory it prints; delete it after reading its output.

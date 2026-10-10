@@ -20,14 +20,14 @@ Preconditions:
 - **Build and inspect** (0.9 s):
 
   ```sh
-  V=$(python3 -c 'import tomllib;print(tomllib.load(open("packages/sdk-python/pyproject.toml","rb"))["project"]["version"])')
-  rm -rf .context/verify-package/python
-  (cd packages/sdk-python && uv build --out-dir ../../.context/verify-package/python)
-  rm .context/verify-package/python/.gitignore
-  python3 scripts/release-artifacts.py inspect python "$V" .context/verify-package/python
+  VER=$(python3 -c 'import tomllib;print(tomllib.load(open("packages/sdk-python/pyproject.toml","rb"))["project"]["version"])')
+  rm -rf $V/python
+  (cd packages/sdk-python && uv build --out-dir $V/python)
+  rm $V/python/.gitignore
+  python3 scripts/release-artifacts.py inspect python "$VER" $V/python
   ```
 
-  Expected: `Inspected hue_run-<V>-py3-none-any.whl: 33 files` and `Inspected hue_run-<V>.tar.gz: 38 files` (counts change only when you add or remove files).
+  Expected: `Inspected hue_run-<VER>-py3-none-any.whl: 33 files` and `Inspected hue_run-<VER>.tar.gz: 38 files` (counts change only when you add or remove files).
 - **Installed consumer.** The python-agent drive in [verify-examples](../../verify-examples/features/python-agent.md) installs this wheel into a fresh venv and exports to the loopback stub (a fake Hue API) in a few seconds.
 - **Standalone wheel acceptance** (about 3 min, CI): `cd packages/sdk-python && uv run --frozen --all-groups pytest tests/test_wheel.py -q`.
 

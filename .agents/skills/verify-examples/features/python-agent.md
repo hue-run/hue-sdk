@@ -21,12 +21,12 @@ Preconditions:
 - **Install the branch's wheel** (a few seconds):
 
   ```sh
-  (cd packages/sdk-python && uv build --wheel --out-dir ../../.context/verify-examples/dist)
-  uv venv -q .context/verify-examples/venv && uv pip install -q --python .context/verify-examples/venv/bin/python .context/verify-examples/dist/hue_run-*.whl
+  (cd packages/sdk-python && uv build --wheel --out-dir $V/dist)
+  uv venv -q $V/venv && uv pip install -q --python $V/venv/bin/python $V/dist/hue_run-*.whl
   ```
 
-- **Run it.** `.context/verify-examples/venv/bin/python examples/python-agent/main.py --capture-content yes`. Expected: `mode=synthetic trace_id=<32 hex> exported=true`, and the stub log gains `GET /api/v1/projects/current`, `POST /api/v1/otlp/v1/traces` and `POST /api/v1/otlp/v1/logs`, all 200 with `"bearer": true`.
-- **Print the export evidence.** `cat .context/verify-examples/stub.log`.
+- **Run it.** `$V/venv/bin/python examples/python-agent/main.py --capture-content yes`. Expected: `mode=synthetic trace_id=<32 hex> exported=true`, and the stub log gains `GET /api/v1/projects/current`, `POST /api/v1/otlp/v1/traces` and `POST /api/v1/otlp/v1/logs`, all 200 with `"bearer": true`.
+- **Print the export evidence.** `cat $V/stub.log`.
 - **Metadata only.** Rerun with `--capture-content no`. Expected: the same success line and a new traces POST.
 
 ## Gotchas

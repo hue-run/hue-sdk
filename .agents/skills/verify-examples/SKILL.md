@@ -10,9 +10,9 @@ Examples are what users copy, so prove them the way a user runs them: install th
 ## Launch
 
 ```sh
-mkdir -p .context/verify-examples
-.agents/skills/verify-sdk/scripts/stub-hue.py > .context/verify-examples/stub.log & echo $! > .context/verify-examples/stub.pid
-sleep 1; export HUE_BASE_URL=$(head -1 .context/verify-examples/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
+mkdir -p .context && export V=$(mktemp -d "$PWD/.context/verify-examples-XXXXXX")
+.agents/skills/verify-sdk/scripts/stub-hue.py > $V/stub.log & echo $! > $V/stub.pid
+sleep 1; export HUE_BASE_URL=$(head -1 $V/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
 export HUE_API_KEY=synthetic-verify-key
 ```
 
@@ -37,4 +37,4 @@ Paste the example's own output (mode, trace ID, `exported=true` or the SSE event
 
 ## Cleanup
 
-Print the evidence first: `cat .context/verify-examples/stub.log` (and `server.log` if you started the chatbot). Then `kill $(cat .context/verify-examples/stub.pid)` and any server you started (its PID file is in the feature file), then `rm -rf .context/verify-examples` once the evidence is in the PR.
+Print the evidence first: `cat $V/stub.log` (and `cat $V/server.log` if you started the chatbot). Then `kill $(cat $V/stub.pid)`, `kill $(cat $V/server.pid)` if you started the chatbot, and `rm -rf "$V"` once the evidence is in the PR. All paths are absolute, so this works from any directory.
