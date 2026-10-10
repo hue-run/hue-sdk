@@ -23,3 +23,11 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
 CI runs the same checks on Node 22, 24 and 26 (the installed package also under Bun 1.4.2) and on Python 3.10 and 3.14. Documentation-only changes need accurate, runnable snippets and working links. See CONTRIBUTING.md for review expectations, RELEASING.md for releases, VERSIONING.md for the compatibility policy and SECURITY.md for vulnerability reports.
+
+## Before opening a PR
+
+- Keep the change minimal (ponytail), never at the cost of validation, error handling, security or accessibility, and run `/ponytail-review` on the diff where the host supports it.
+- Verify the change with the matching `.agents/skills/verify-*` skill (`verify-sdk`, `verify-package`, `verify-examples`) and paste its evidence into the PR: text output by default, one screenshot only for a visible UI change, never a recording. Run the narrowest check the skill names; CI runs the full suites above.
+- If the change adds or alters a feature, update that skill's `features/` map (`maintain-verification-skill` for bigger changes) and any affected user-facing docs (`technical-writing`).
+
+`create-verification-skill` and `maintain-verification-skill` say `.cursor/skills/`; in this repository they write to `.agents/skills/verify-<area>/` (`.claude/skills` links there).
