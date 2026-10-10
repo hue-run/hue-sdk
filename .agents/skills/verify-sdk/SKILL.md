@@ -20,8 +20,8 @@ For a drive, start the loopback Hue stand-in. It prints `{"ready": "<url>"}` and
 
 ```sh
 mkdir -p .context && export V=$(mktemp -d "$PWD/.context/verify-sdk-XXXXXX")
-.agents/skills/verify-sdk/scripts/stub-hue.py > $V/stub.log & echo $! > $V/stub.pid
-sleep 1; export HUE_BASE_URL=$(head -1 $V/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
+.agents/skills/verify-sdk/scripts/stub-hue.py > "$V"/stub.log & echo $! > "$V"/stub.pid
+sleep 1; export HUE_BASE_URL=$(head -1 "$V"/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
 ```
 
 ## Doctor
@@ -46,7 +46,15 @@ Paste text into the PR: the command, the pass/fail summary lines, and for a driv
 
 ## Cleanup
 
-Print the evidence first: `cat $V/stub.log`. Then `kill $(cat $V/stub.pid)`. Then `rm -rf "$V"`. Never write scratch scripts elsewhere in the repo: `eslint .` lints every `.mjs`/`.js` outside the ignored paths.
+Print the evidence first: `cat "$V"/stub.log`. Then `kill $(cat "$V"/stub.pid)`. Keep the proof files (stub log, drive script) in a named evidence directory before removing scratch:
+
+```sh
+E=.context/verify-sdk-evidence/$(basename "$V") && mkdir -p "$E"
+find "$V" -maxdepth 1 \( -name "*.log" -o -name "*.mjs" \) -exec cp {} "$E"/ \;
+ls "$E" && rm -rf "$V"
+```
+
+Never write scratch scripts elsewhere in the repo: `eslint .` lints every `.mjs`/`.js` outside the ignored paths.
 
 ## Helpers
 

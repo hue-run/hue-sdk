@@ -14,7 +14,7 @@ The maintained source for proving changes to `examples/`. Read this index, then 
 
 ## Proof and skip reporting
 
-- Proof is the example's output plus the stub's `POST /api/v1/otlp/v1/traces` line from the same run (`cat $V/stub.log`), labeled as a loopback-stub run against a fake Hue API.
+- Proof is the example's output plus the stub's `POST /api/v1/otlp/v1/traces` line from the same run (`cat "$V"/stub.log`), labeled as a loopback-stub run against a fake Hue API.
 - Say so when an example needs a real Hue project (python-evaluation) and you only checked it statically.
 
 ## Features

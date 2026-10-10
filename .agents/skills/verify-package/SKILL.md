@@ -37,4 +37,4 @@ Paste the command and its last lines: the inventory counts (`total files`, `Insp
 
 ## Cleanup
 
-Each step prints its own evidence; copy it into the PR before `rm -rf $V`. The full verifier works in a `/tmp/hue-sdk-package-*` directory it prints; delete it after reading its output.
+Each step prints its own evidence; copy it into the PR before `rm -rf "$V"`. The full verifier works in a `/tmp/hue-sdk-package-*` directory it prints; delete it after reading its output.

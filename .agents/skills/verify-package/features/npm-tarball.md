@@ -18,13 +18,13 @@ Preconditions:
 
 - `bun install --frozen-lockfile` done in `packages/sdk-typescript`.
 
-- **Inventory** (0.4 s). `(cd packages/sdk-typescript && bun run build && npm pack --dry-run --json --ignore-scripts) > $V/pack.json && python3 -c 'import json,sys;[print(f["path"]) for f in json.load(open(sys.argv[1]))[0]["files"]]' $V/pack.json | sort > $V/files.txt && wc -l < $V/files.txt`. Expected: exit 0 and the file count (142 when this was written). When you add or remove files, run the same command on `main` into another file and paste the `diff` of the two lists.
+- **Inventory** (0.4 s). `(cd packages/sdk-typescript && bun run build && npm pack --dry-run --json --ignore-scripts) > "$V"/pack.json && python3 -c 'import json,sys;[print(f["path"]) for f in json.load(open(sys.argv[1]))[0]["files"]]' "$V"/pack.json | sort > "$V"/files.txt && wc -l < "$V"/files.txt`. Expected: exit 0 and the file count (142 when this was written). When you add or remove files, run the same command on `main` into another file and paste the `diff` of the two lists.
 - **Installed consumer** (about 2 s once packed). Pack, install into a scratch project and import the changed entry point:
 
   ```sh
-  mkdir -p $V/consumer
-  (cd packages/sdk-typescript && npm pack --ignore-scripts --pack-destination $V)
-  (cd $V/consumer && npm init -y >/dev/null && npm install --no-audit --no-fund ../hue-run-sdk-*.tgz &&
+  mkdir -p "$V"/consumer
+  (cd packages/sdk-typescript && npm pack --ignore-scripts --pack-destination "$V")
+  (cd "$V"/consumer && npm init -y >/dev/null && npm install --no-audit --no-fund ../hue-run-sdk-*.tgz &&
     node --input-type=module -e 'const m = await import("@hue-run/sdk"); console.log(typeof m.createHue)')
   ```
 

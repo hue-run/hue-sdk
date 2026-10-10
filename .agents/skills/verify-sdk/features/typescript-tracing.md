@@ -23,7 +23,7 @@ Preconditions:
 - **Drive.** Write the README example against the stub and run it:
 
   ```sh
-  cat > $V/drive.mjs <<'JS'
+  cat > "$V"/drive.mjs <<'JS'
   import { createHue } from "../../packages/sdk-typescript/dist/index.js";
   const hue = createHue({ apiKey: "synthetic-verify-key", baseUrl: process.env.HUE_BASE_URL, serviceName: "verify-sdk", captureContent: true });
   try {
@@ -37,8 +37,8 @@ Preconditions:
     await hue.shutdownSafe();
   }
   JS
-  node $V/drive.mjs
-  cat $V/stub.log
+  node "$V"/drive.mjs
+  cat "$V"/stub.log
   ```
 
   Expected: `project 00000000-0000-4000-8000-000000000001`, a trace ID, and `flush {"acceptedSpans":2,...,"failedSpans":0,...}`. The stub log gains `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.

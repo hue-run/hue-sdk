@@ -11,8 +11,8 @@ Examples are what users copy, so prove them the way a user runs them: install th
 
 ```sh
 mkdir -p .context && export V=$(mktemp -d "$PWD/.context/verify-examples-XXXXXX")
-.agents/skills/verify-sdk/scripts/stub-hue.py > $V/stub.log & echo $! > $V/stub.pid
-sleep 1; export HUE_BASE_URL=$(head -1 $V/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
+.agents/skills/verify-sdk/scripts/stub-hue.py > "$V"/stub.log & echo $! > "$V"/stub.pid
+sleep 1; export HUE_BASE_URL=$(head -1 "$V"/stub.log | python3 -c 'import json,sys;print(json.load(sys.stdin)["ready"])')
 export HUE_API_KEY=synthetic-verify-key
 ```
 
@@ -37,4 +37,4 @@ Paste the example's own output (mode, trace ID, `exported=true` or the SSE event
 
 ## Cleanup
 
-Print the evidence first: `cat $V/stub.log` (and `cat $V/server.log` if you started the chatbot). Then `kill $(cat $V/stub.pid)`, `kill $(cat $V/server.pid)` if you started the chatbot, and `rm -rf "$V"` once the evidence is in the PR. All paths are absolute, so this works from any directory.
+Print the evidence first: `cat "$V"/stub.log` (and `cat "$V"/server.log` if you started the chatbot). Then `kill $(cat "$V"/stub.pid)`, `kill $(cat "$V"/server.pid)` if you started the chatbot, then keep the logs before removing the copies and venvs: `E=.context/verify-examples-evidence/$(basename "$V") && mkdir -p "$E" && cp "$V"/*.log "$E"/ && rm -rf "$V"`. All paths are absolute, so this works from any directory.

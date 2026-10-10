@@ -21,10 +21,10 @@ Preconditions:
 
   ```sh
   VER=$(python3 -c 'import tomllib;print(tomllib.load(open("packages/sdk-python/pyproject.toml","rb"))["project"]["version"])')
-  rm -rf $V/python
-  (cd packages/sdk-python && uv build --out-dir $V/python)
-  rm $V/python/.gitignore
-  python3 scripts/release-artifacts.py inspect python "$VER" $V/python
+  rm -rf "$V"/python
+  (cd packages/sdk-python && uv build --out-dir "$V"/python)
+  rm "$V"/python/.gitignore
+  python3 scripts/release-artifacts.py inspect python "$VER" "$V"/python
   ```
 
   Expected: `Inspected hue_run-<VER>-py3-none-any.whl: 33 files` and `Inspected hue_run-<VER>.tar.gz: 38 files` (counts change only when you add or remove files).
