@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -1083,6 +1085,50 @@ class Hue:
         with self.span(f"execute_tool {name}", attributes=attributes, _category="tool") as span:
             yield span
 
+    def subagent(
+        self,
+        name: str,
+        *,
+        input: Any = _MISSING,
+        parent_context: Context | None = None,
+        kind: SpanKind = SpanKind.INTERNAL,
+    ) -> _Subagent:
+        """An ``invoke_agent {name}`` span for one sub-agent run, as a context manager or decorator.
+
+        The span carries ``gen_ai.operation.name`` ``invoke_agent``, ``gen_ai.agent.name`` and
+        ``hue.agent.role`` ``subagent``. It nests under the active span, normally the ``tool()``
+        span of the call that started the sub-agent, or under ``parent_context``, for example
+        ``Hue.extract(headers)`` in another process. The sub-agent's own model and tool spans nest
+        under it, and ``context()`` identifiers are inherited. ``input`` is recorded as
+        ``input.value`` when content is captured; ``with`` blocks record output with
+        ``set_output``, and a decorated function or coroutine function records a result other
+        than ``None`` as ``output.value``. Errors are recorded and re-raised as in ``span()``. A
+        blank or non-string name is recorded as ``unknown`` and counted.
+        """
+        if not _is_label(name):
+            if self._active:
+                self._record_issue()
+            name = "unknown"
+        return _Subagent(self, name, input, parent_context, kind)
+
+    @contextmanager
+    def _subagent_span(
+        self, name: str, input: Any, parent_context: Context | None, kind: SpanKind
+    ) -> Iterator[HueSpan]:
+        with self.span(
+            f"invoke_agent {name}",
+            attributes={
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": name,
+                "hue.agent.role": "subagent",
+            },
+            kind=kind,
+            parent_context=parent_context,
+        ) as span:
+            if input is not _MISSING:
+                span.set_input(input)
+            yield span
+
     def _metadata_string(self, value: Any, fallback: str) -> str:
         if not self._active:
             return fallback
@@ -1355,6 +1401,54 @@ class Hue:
 
     def __exit__(self, *_exc: object) -> None:
         self.shutdown_safe()
+
+
+class _Subagent:
+    """Returned by ``Hue.subagent``: one ``with`` block, or a decorator whose every call opens a
+    fresh span (coroutine functions keep it open until they finish)."""
+
+    def __init__(
+        self,
+        client: Hue,
+        name: str,
+        input: Any,
+        parent_context: Context | None,
+        kind: SpanKind,
+    ) -> None:
+        self._open = lambda: client._subagent_span(name, input, parent_context, kind)
+        self._scopes: list[Any] = []
+
+    def __enter__(self) -> HueSpan:
+        scope = self._open()
+        span = scope.__enter__()
+        self._scopes.append(scope)
+        return span
+
+    def __exit__(self, *exc: Any) -> bool | None:
+        return self._scopes.pop().__exit__(*exc)
+
+    def __call__(self, function: Callable[..., Any]) -> Callable[..., Any]:
+        if inspect.iscoroutinefunction(function):
+
+            @functools.wraps(function)
+            async def run_async(*args: Any, **kwargs: Any) -> Any:
+                with self._open() as span:
+                    result = await function(*args, **kwargs)
+                    if result is not None:
+                        span.set_output(result)
+                    return result
+
+            return run_async
+
+        @functools.wraps(function)
+        def run(*args: Any, **kwargs: Any) -> Any:
+            with self._open() as span:
+                result = function(*args, **kwargs)
+                if result is not None:
+                    span.set_output(result)
+                return result
+
+        return run
 
 
 def create_hue_safe(*args: Any, **kwargs: Any) -> Hue:

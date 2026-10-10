@@ -108,13 +108,14 @@ Before redaction, helpers copy supported content into detached built-in containe
 | `span(name)`                                   | Generic `input.value` / `output.value`, optional OTel attributes and kind                                                                      |
 | `model(model, provider=..., system_instructions=..., tools=...)` | `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.provider.name`; message content in `gen_ai.input.messages` / `gen_ai.output.messages`; optional content `gen_ai.system_instructions` and `gen_ai.tool.definitions` |
 | `tool(name, call_id=..., mcp=...)`             | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, call ID, optional MCP `initialize` `serverInfo` as `mcp.server.name` / `mcp.server.version` and Hue `provider` / `surface` as `hue.mcp.provider` / `hue.mcp.surface`, arguments and result |
+| `subagent(name, input=..., parent_context=...)` | `invoke_agent {name}` span with `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name` and `hue.agent.role=subagent`, as a context manager or a decorator; see [Sub-agents](#sub-agents) |
 | `context(session_id=..., user_id=...)`         | Task-local `gen_ai.conversation.id` / `user.id` on nested Hue helpers; observed users are not Hue account identities                           |
 | `span.set_usage(...)`                          | Nonnegative reported `gen_ai.usage.input_tokens` / `output_tokens`; `None` leaves a field absent                                               |
 | `span.record_provider_tool_calls(response, request=..., servers=...)` | On a `model()` span: one `execute_tool {name}` child span per tool the provider ran itself (OpenAI Responses `mcp_call`, `web_search_call`, `file_search_call`, `code_interpreter_call`; Anthropic `mcp_tool_use` / `server_tool_use` with their results) with `gen_ai.tool.type=extension`, `gen_ai.tool.call.id`, `hue.tool.call.position` (the 0-based position of its item in the response, in both capture modes), `mcp.server.name`, `server.address` from the request's server URL (a host name keeps its underscores, as in the TypeScript SDK), content-gated arguments and result, and `error.type` plus ERROR status on failure; with `capture_content=True` a failed OpenAI MCP call's status description is the provider's error text, credentials scrubbed and cut to 1,024 characters and a `…` as in the TypeScript SDK, then passed to your redactor as `status.message`; an `mcp_list_tools` item becomes a `tools/list` span carrying that server's `gen_ai.tool.definitions`, or only `hue.tool.names` and `hue.tool.definitions.sha256` with `capture_content=False` |
 | `span.log_inference(input=..., output=..., system_instructions=...)` | Correlated `gen_ai.client.inference.operation.details` log linked to that span: structured body plus request metadata and session attributes |
 | `span.record_file(role=..., media_type=..., data=... or sha256=..., name=..., upload=False)` | `hue.file` event keyed by `hue.file.sha256`, with role, media type and size in both capture modes. Up to 25 MiB of `data` is hashed locally. `upload=True` also stores supplied bytes during export and adds a same-span blob entry keyed `event:hue.file:<sha256>` when content capture and ordinary project credentials permit it. `hue.file.name` requires content capture |
 | `span.record_error(error)`                     | Exception type event and ERROR status; context managers also record escaping errors/cancellation                                               |
-| `Hue.inject(headers)` / `Hue.extract(headers)` | W3C trace context propagation; pass extracted context to `span(parent_context=...)`                                                            |
+| `Hue.inject(headers)` / `Hue.extract(headers)` | W3C trace context propagation; pass extracted context to `span(parent_context=...)` or `subagent(parent_context=...)`, from trusted internal callers only |
 
 To upload a file your work reads or produces:
 
@@ -138,6 +139,65 @@ failures. Pass `sha256` and `byte_size` when you already have the file's identit
 Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
 
 Hue helpers implement the model/tool metadata and inference-message subset of the Development GenAI conventions. They accept caller-supplied JSON without full schema validation. For model helpers, pass the message representation produced by your integration. When authoring your own messages, prefer the shape defined by the GenAI semantic conventions' [input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json) and [output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json) JSON schemas. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. Call `log_inference` inside `model(..., provider=...)`, or pass `operation=` and `provider=` explicitly, to include the required inference metadata. `log_inference` sends a structured body (an explicit `None` field keeps its key with an empty value, distinct from an absent field) and copies `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` from the enclosing `model()` block, or from its `operation=`, `provider=` and `model=` keywords, plus `gen_ai.conversation.id` from `context()`, onto the record's attributes when known. A blank or over-long keyword is omitted and counted as an instrumentation failure.
+
+## Sub-agents
+
+Run a sub-agent inside `hue.subagent(name)`, within the tool call that starts it:
+
+```python
+with hue.tool("research") as research:
+    research.set_input({"topic": topic})
+    with hue.subagent("researcher", input=topic) as agent:
+        with hue.model("gpt-5-mini", provider="openai") as model:
+            notes = call_model(topic)
+            model.set_output(notes)
+        with hue.tool("summarize") as summarize:
+            findings = summarize_notes(notes)
+            summarize.set_output(findings)
+        agent.set_output(findings)
+    research.set_output(findings)
+```
+
+The sub-agent runs inside one `invoke_agent researcher` span with `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` `researcher` and `hue.agent.role` `subagent`. That span is a child of the active span, here the `execute_tool research` span, and the sub-agent's own model and tool spans are its children, so Hue scopes them to the sub-agent. Sub-agents nest: a sub-agent's tool can start another. The span is `INTERNAL` unless `kind=` says otherwise, and identifiers from `context()` are inherited. `input` is recorded as `input.value` when content is captured, and errors are recorded and re-raised as in `span()`.
+
+`subagent()` also decorates a function or a coroutine function. Each call runs in its own span, and a result other than `None` is recorded as `output.value` when content is captured:
+
+```python
+@hue.subagent("researcher")
+async def research(topic: str) -> str:
+    ...
+```
+
+The calling agent's role is not set for you: Hue reads roles only from the spans that state them, and the span a sub-agent starts under is usually a tool call, not the agent. To label the calling agent, give its own span the role:
+
+```python
+with hue.span(
+    "invoke_agent planner",
+    attributes={
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": "planner",
+        "hue.agent.role": "orchestrator",
+    },
+):
+    run_planner()
+```
+
+When the sub-agent runs in another process, send the caller's trace context with the request and start the sub-agent under it:
+
+```python
+# The calling process, inside the tool call that hands the task over.
+with hue.tool("research"):
+    headers = {"Content-Type": "application/json"}
+    Hue.inject(headers)  # adds `traceparent` only
+    requests.post(researcher_url, headers=headers, json={"topic": topic, "session_id": session_id})
+
+# The sub-agent's process, for example a request handler.
+with hue.context(session_id=body["session_id"]):
+    with hue.subagent("researcher", parent_context=Hue.extract(request.headers)):
+        findings = research(body["topic"])
+```
+
+The `invoke_agent researcher` span then belongs to the caller's trace, with the caller's `execute_tool research` span as its parent. Only `traceparent` crosses the boundary, never the API key, baggage or the session, so set the session identifier yourself as above. Accept `traceparent` only from your own services: whoever sets it chooses the trace the sub-agent's spans join. On an endpoint that also serves other callers, extract it only from authenticated internal requests and start a new trace otherwise.
 
 ## Existing instrumentation
 

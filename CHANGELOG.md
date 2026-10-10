@@ -10,6 +10,18 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Added
+
+- **Wire** `hue.subagent(name, callback, options)` runs a sub-agent inside an `invoke_agent {name}`
+  span carrying `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and the new
+  `hue.agent.role` `subagent`. The span nests under the active span, normally the `tool()` span
+  of the call that started the sub-agent, or under `options.parentContext`, so the sub-agent's
+  model and tool spans sit inside it. In another process, `hue.extract(headers)` of the
+  `traceparent` that `hue.inject()` wrote continues the caller's trace. `options.input` and the
+  callback's result follow `captureContent` as `input.value` / `output.value`; errors are recorded
+  as in `withSpan`. The calling agent's role stays explicit: set `hue.agent.role` `orchestrator`
+  on its own span to label it.
+
 ### [0.17.0] - 2026-10-10
 
 #### Breaking
@@ -1451,6 +1463,16 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+#### Added
+
+- **Wire** `hue.subagent(name, input=..., parent_context=...)`, a context manager and a decorator
+  for functions and coroutine functions, opens an `invoke_agent {name}` span carrying
+  `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and the new `hue.agent.role`
+  `subagent`, as the TypeScript SDK does. It nests under the active span, normally the `tool()`
+  span of the call that started the sub-agent, or under `parent_context`, for example
+  `Hue.extract(headers)` in another process. `input` and a decorated function's result follow
+  `capture_content` as `input.value` / `output.value`; errors are recorded as in `span()`.
 
 ### [0.10.0] - 2026-10-10
 
