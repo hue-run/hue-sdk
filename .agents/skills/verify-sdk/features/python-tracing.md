@@ -12,7 +12,7 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
 
 - `from hue_sdk import Hue` after `pip install hue-run` (packages/sdk-python/README.md).
 
-## Driving it with uv and the stub
+## Driving it with uv and the loopback stub (fake Hue API)
 
 Preconditions:
 
@@ -30,6 +30,7 @@ Preconditions:
           run.set_input({"q": "hello"}); run.set_output({"a": "HELLO"}); trace = run.trace_id
       print("trace_id", trace, "flushed", hue.force_flush())
   '
+  cat ../../.context/verify-sdk/stub.log
   ```
 
   Expected: `trace_id <32 hex> flushed True`, and the stub logs `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.

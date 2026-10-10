@@ -30,7 +30,8 @@ Preconditions:
 - **Start it.** `HUE_CHAT_MODE=synthetic PORT=3401 node dist/server.js > ../server.log 2>&1 & echo $! > ../server.pid; sleep 1; curl -s http://127.0.0.1:3401/config`. Expected: JSON with `"mode":"synthetic"`.
 - **Chat.** `curl -sN http://127.0.0.1:3401/chat -H 'content-type: application/json' -d "{\"sessionId\":\"$(python3 -c 'import uuid;print(uuid.uuid4())')\",\"messages\":[{\"role\":\"user\",\"content\":\"count the words in hello world\"}]}"`. Expected: SSE `trace`, a `textStatistics` tool call and result, text deltas, a telemetry event with `accepted`, then `done`. The stub log gains `POST /api/v1/otlp/v1/traces` and `/v1/logs` with status 200.
 - **Controlled error.** Same request with `,"mode":"controlled-error"` in the body. Expected: an `error` event and telemetry still `accepted`.
-- **Both capture policies at once** (about 10 s). `node scripts/acceptance.mjs` from the chatbot copy runs the server for `HUE_CAPTURE_CONTENT=true` and `false` against `HUE_BASE_URL`.
+- **Print the export evidence.** `cat ../stub.log ../server.log` from the chatbot copy.
+- **Both capture policies at once** (about 10 s). `node scripts/acceptance.mjs` from the chatbot copy runs the server for `HUE_CAPTURE_CONTENT=true` and `false` against `HUE_BASE_URL` (the stub) and prints its JSON report.
 
 ## Gotchas
 

@@ -26,6 +26,7 @@ Preconditions:
   ```
 
 - **Run it.** `.context/verify-examples/venv/bin/python examples/python-agent/main.py --capture-content yes`. Expected: `mode=synthetic trace_id=<32 hex> exported=true`, and the stub log gains `GET /api/v1/projects/current`, `POST /api/v1/otlp/v1/traces` and `POST /api/v1/otlp/v1/logs`, all 200 with `"bearer": true`.
+- **Print the export evidence.** `cat .context/verify-examples/stub.log`.
 - **Metadata only.** Rerun with `--capture-content no`. Expected: the same success line and a new traces POST.
 
 ## Gotchas

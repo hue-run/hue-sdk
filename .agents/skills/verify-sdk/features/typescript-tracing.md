@@ -14,7 +14,7 @@ An application creates a client with `createHue`, records spans and tools, and r
 - `import { createHue } from "@hue-run/sdk"` in a Node 22+ or Bun script (README "Send a trace").
 - `@hue-run/sdk/ai-sdk` for Vercel AI SDK telemetry.
 
-## Driving it with node and the stub
+## Driving it with node and the loopback stub (fake Hue API)
 
 Preconditions:
 
@@ -38,6 +38,7 @@ Preconditions:
   }
   JS
   node .context/verify-sdk/drive.mjs
+  cat .context/verify-sdk/stub.log
   ```
 
   Expected: `project 00000000-0000-4000-8000-000000000001`, a trace ID, and `flush {"acceptedSpans":2,...,"failedSpans":0,...}`. The stub log gains `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.

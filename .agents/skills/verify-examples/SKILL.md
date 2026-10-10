@@ -5,7 +5,7 @@ description: "Verify a change to the runnable examples under examples/: the refe
 
 # Verify the examples
 
-Examples are what users copy, so prove them the way a user runs them: install the SDK package, start the example in synthetic mode and send its export to a Hue endpoint. Here that endpoint is the loopback stub from [verify-sdk](../verify-sdk/SKILL.md), so no real key or model provider is involved.
+Examples are what users copy, so prove them the way a user runs them: install the SDK package, start the example in synthetic mode and send its export to a Hue endpoint. Here that endpoint is the loopback stub from [verify-sdk](../verify-sdk/SKILL.md), a fake Hue API that acknowledges everything, so no real key or model provider is involved. These are loopback-stub runs: they prove the example and the SDK's HTTP export, not acceptance by a real Hue backend. Say so in the PR.
 
 ## Launch
 
@@ -37,4 +37,4 @@ Paste the example's own output (mode, trace ID, `exported=true` or the SSE event
 
 ## Cleanup
 
-`kill $(cat .context/verify-examples/stub.pid)` and any server you started (its PID file is in the feature file), then `rm -rf .context/verify-examples` once the evidence is in the PR.
+Print the evidence first: `cat .context/verify-examples/stub.log` (and `server.log` if you started the chatbot). Then `kill $(cat .context/verify-examples/stub.pid)` and any server you started (its PID file is in the feature file), then `rm -rf .context/verify-examples` once the evidence is in the PR.

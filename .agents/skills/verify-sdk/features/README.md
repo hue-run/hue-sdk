@@ -17,7 +17,7 @@ The maintained source for proving changes to the public SDK surface. Read this i
 ## Proof and skip reporting
 
 - Test proof: the command and its `pass`/`fail` summary.
-- Drive proof: the script output and the stub request lines for the same run.
+- Drive proof: the script output and the stub request lines (`cat .context/verify-sdk/stub.log`) for the same run, labeled as a loopback-stub drive. The stub is a fake Hue API.
 - Name any language you did not cover. Do not report a TypeScript run as proof for Python.
 
 ## Features

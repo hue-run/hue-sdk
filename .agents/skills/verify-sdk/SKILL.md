@@ -42,11 +42,11 @@ Pick the feature in [features/](features/README.md) and run its narrowest comman
 
 ## Evidence
 
-Paste text into the PR: the command, the pass/fail summary lines, and for a drive the script output plus the stub's request lines (path, status, byte count). Keep files under `.context/verify-sdk/` (ignored by Git and eslint). A drive proves the user path only if the stub shows the export request; a printed trace ID alone is not proof.
+Paste text into the PR: the command, the pass/fail summary lines, and for a drive the script output plus the stub's request lines (path, status, byte count). Keep files under `.context/verify-sdk/` (ignored by Git and eslint). A stub drive is a fake-API check: the real SDK makes its real HTTP export, but `stub-hue.py` stands in for Hue and acknowledges everything. Call it a loopback-stub drive in the PR, not end to end; only a run against a real Hue project proves server acceptance. A trace ID without the stub's export line is not proof.
 
 ## Cleanup
 
-`kill $(cat .context/verify-sdk/stub.pid)`. Keep `.context/verify-sdk/*.log` as evidence. Never write scratch scripts elsewhere in the repo: `eslint .` lints every `.mjs`/`.js` outside the ignored paths.
+Print the evidence first: `cat .context/verify-sdk/stub.log`. Then `kill $(cat .context/verify-sdk/stub.pid)`. Keep `.context/verify-sdk/*.log` as evidence. Never write scratch scripts elsewhere in the repo: `eslint .` lints every `.mjs`/`.js` outside the ignored paths.
 
 ## Helpers
 
