@@ -26,7 +26,7 @@ sleep 1; export HUE_BASE_URL=$(head -1 .context/verify-sdk/stub.log | python3 -c
 
 ## Doctor
 
-`node -v` (22, 24 or 26), `bun -v` (1.4.2), `uv --version` (0.12.5), then `curl -s $HUE_BASE_URL/api/v1/projects/current` returns the synthetic project. A drive also fails if `dist/` is stale: rerun `bun run build` (0.5 s).
+`node -v` (22, 24 or 26), `bun -v` (1.4.2), `uv --version` (uv 0.12.5), then `curl -s $HUE_BASE_URL/api/v1/projects/current` returns the synthetic project. A drive also fails if `dist/` is stale: rerun `bun run build` (0.5 s).
 
 ## Drive
 

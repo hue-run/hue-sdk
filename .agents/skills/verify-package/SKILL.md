@@ -15,7 +15,7 @@ Nothing to keep running. Install once: `bun install --frozen-lockfile` at the ro
 
 ## Doctor
 
-`node -v` (22, 24 or 26), `bun -v` (1.4.2), `uv --version` (0.12.5), `python3 -V` (3.11+ for the release scripts). Unset `HUE_API_KEY` before the full verifier: a key in the shell makes its installed-setup case fail with `configuration_conflict`.
+`node -v` (22, 24 or 26), `bun -v` (1.4.2), `uv --version` (uv 0.12.5), `python3 -V` (3.11+ for the release scripts). Unset `HUE_API_KEY` before the full verifier: a key in the shell makes its installed-setup case fail with `configuration_conflict`.
 
 ## Drive
 

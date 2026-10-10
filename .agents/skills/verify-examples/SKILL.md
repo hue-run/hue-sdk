@@ -20,7 +20,7 @@ Then follow the feature file for the example you changed.
 
 ## Doctor
 
-`curl -s $HUE_BASE_URL/api/v1/projects/current` returns the synthetic project. `node -v` is 22.12+ for the chatbot; `uv --version` is 0.12.5 for the Python examples.
+`curl -s $HUE_BASE_URL/api/v1/projects/current` returns the synthetic project. `node -v` is 22.12+ for the chatbot; `uv --version` reports uv 0.12.5 for the Python examples.
 
 ## Drive
 
