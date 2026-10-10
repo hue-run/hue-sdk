@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
 from time import monotonic, time_ns
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import requests
 from opentelemetry import trace
@@ -59,6 +59,7 @@ from .transport import (
 )
 
 Redactor = Callable[[str, Any], Any]
+_Function = TypeVar("_Function", bound=Callable[..., Any])
 _MISSING = object()
 _FILE_ROLES = frozenset({"input", "attachment", "output"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -1427,7 +1428,7 @@ class _Subagent:
     def __exit__(self, *exc: Any) -> bool | None:
         return self._scopes.pop().__exit__(*exc)
 
-    def __call__(self, function: Callable[..., Any]) -> Callable[..., Any]:
+    def __call__(self, function: _Function) -> _Function:
         if inspect.iscoroutinefunction(function):
 
             @functools.wraps(function)
@@ -1438,7 +1439,7 @@ class _Subagent:
                         span.set_output(result)
                     return result
 
-            return run_async
+            return cast(_Function, run_async)
 
         @functools.wraps(function)
         def run(*args: Any, **kwargs: Any) -> Any:
@@ -1448,7 +1449,7 @@ class _Subagent:
                     span.set_output(result)
                 return result
 
-        return run
+        return cast(_Function, run)
 
 
 def create_hue_safe(*args: Any, **kwargs: Any) -> Hue:
