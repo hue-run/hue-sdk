@@ -49,7 +49,7 @@ Paste text into the PR: the command, the pass/fail summary lines, and for a driv
 Print the evidence first: `cat "$V"/stub.log`. Then `kill $(cat "$V"/stub.pid)`. Keep the proof files (stub log, drive script) in a named evidence directory before removing scratch:
 
 ```sh
-E=.context/verify-sdk-evidence/$(basename "$V") && mkdir -p "$E"
+E="$V"-evidence && mkdir -p "$E"
 find "$V" -maxdepth 1 \( -name "*.log" -o -name "*.mjs" \) -exec cp {} "$E"/ \;
 ls "$E" && rm -rf "$V"
 ```
