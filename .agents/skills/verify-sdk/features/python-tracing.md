@@ -5,6 +5,7 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
 ## Sub-features
 
 - `py-span` records `span`, `model`, `tool` and `context` with input and output.
+- `py-subagent` records `subagent()` (a `with` block, or a decorator for functions and coroutine functions) as an `invoke_agent {name}` span under the active tool span, or under `parent_context` from `Hue.extract()` in another process.
 - `py-capture` honors `capture_content` and redaction before export.
 - `py-ack` returns `force_flush()` and receipt results that match the receiver.
 - `py-media` inspects bounded, nonempty media and exports exact digests and blob entries.
@@ -37,6 +38,7 @@ Preconditions:
 
   Expected: `trace_id <32 hex> flushed True`, and the stub logs `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.
 - **Behavior test.** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k redact`. Expected: all selected tests pass in about 2 s.
+- **Sub-agents (`py-subagent`).** `uv run --frozen --all-groups pytest tests/test_sdk.py -q -k subagent`. Expected: `3 passed` in about 2 s.
 - **Static checks** (3.5 s): `uv run --frozen --all-groups ruff check src tests && uv run --frozen --all-groups mypy`.
 
 ## Gotchas
