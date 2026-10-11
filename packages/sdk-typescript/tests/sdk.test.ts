@@ -2546,6 +2546,145 @@ describe("Hue SDK contract", () => {
     }
   });
 
+  test.each(["backoff", "zero", "seconds", "date"] as const)(
+    "transient HTTP 500 recovers for traces and logs with %s Retry-After",
+    async (policy) => {
+      const attempts = new Map<string, number>();
+      const earliest = new Map<string, number>();
+      const endpoint = receiver("success", undefined, undefined, (_index, signal) => {
+        const attempt = (attempts.get(signal) ?? 0) + 1;
+        attempts.set(signal, attempt);
+        if (attempt !== 1) return;
+        const now = Date.now();
+        const value =
+          policy === "zero"
+            ? "0"
+            : policy === "seconds"
+              ? "1"
+              : policy === "date"
+                ? new Date(now + 2000).toUTCString()
+                : undefined;
+        earliest.set(
+          signal,
+          policy === "date"
+            ? Date.parse(value!)
+            : now + (policy === "seconds" ? 900 : policy === "backoff" ? 700 : 0),
+        );
+        return { status: 500, headers: value === undefined ? undefined : { "Retry-After": value } };
+      });
+      const hue = createHue({
+        apiKey,
+        serviceName: "retry-500",
+        captureContent: true,
+        liveSpans: false,
+        baseUrl: endpoint.url,
+        timeoutMillis: 5000,
+      });
+      try {
+        await hue.withSpan("retry-500", () => hue.recordMessages({ output: "synthetic output" }));
+        const report = await hue.flush();
+        expect(report).toMatchObject({
+          acceptedSpans: 1,
+          acceptedLogs: 1,
+          failedSpans: 0,
+          failedLogs: 0,
+        });
+        expect(hue.transport.getIssues()).toEqual([]);
+        for (const signal of ["traces", "logs"] as const) {
+          const requests = endpoint.requests.filter((request) => request.signal === signal);
+          expect(requests.map((request) => request.status)).toEqual([500, 200]);
+          expect(requests[1]!.at).toBeGreaterThanOrEqual(earliest.get(signal)!);
+          // Retry exactly the refused records, without changing trace or span identity.
+          expect(requests[1]!.raw).toBe(requests[0]!.raw);
+        }
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+    15000,
+  );
+
+  test("persistent HTTP 500 exhausts six attempts and counts each signal's failed batch once", async () => {
+    const endpoint = receiver("success", undefined, undefined, () => ({
+      status: 500,
+      headers: { "Retry-After": "0" },
+    }));
+    const hue = createHue({
+      apiKey,
+      serviceName: "persistent-500",
+      captureContent: true,
+      liveSpans: false,
+      baseUrl: endpoint.url,
+      timeoutMillis: 1500,
+    });
+    try {
+      await hue.withSpan("persistent-500", () =>
+        hue.recordMessages({ output: "synthetic output" }),
+      );
+      const error = await hue.flush().catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(HueExportError);
+      expect((error as HueExportError).report).toMatchObject({
+        acceptedSpans: 0,
+        acceptedLogs: 0,
+        failedSpans: 1,
+        failedLogs: 1,
+      });
+      const issues = hue.transport.getIssues().filter((issue) => issue.count > 0);
+      expect(issues).toHaveLength(2);
+      for (const signal of ["traces", "logs"] as const) {
+        expect(endpoint.requests.filter((request) => request.signal === signal)).toHaveLength(6);
+        expect(issues.filter((issue) => issue.signal === signal)).toEqual([
+          expect.objectContaining({ kind: "failed", count: 1 }),
+        ]);
+      }
+    } finally {
+      await hue.shutdown();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test.each(["backoff", "seconds", "date", "terminal-501"] as const)(
+    "HTTP 500 request budget and terminal status are bounded: %s",
+    async (policy) => {
+      const endpoint = receiver("success", undefined, undefined, () => ({
+        status: policy === "terminal-501" ? 501 : 500,
+        headers:
+          policy === "seconds"
+            ? { "Retry-After": "30" }
+            : policy === "date"
+              ? { "Retry-After": new Date(Date.now() + 30000).toUTCString() }
+              : undefined,
+      }));
+      const hue = createHue({
+        apiKey,
+        serviceName: "retry-budget",
+        captureContent: false,
+        liveSpans: false,
+        baseUrl: endpoint.url,
+        timeoutMillis: 300,
+      });
+      try {
+        await hue.withSpan("budget", () => {});
+        const started = Date.now();
+        const error = await hue.flush().catch((reason: unknown) => reason);
+        expect(error).toBeInstanceOf(HueExportError);
+        expect(Date.now() - started).toBeLessThan(1500);
+        expect(endpoint.requests).toHaveLength(1);
+        expect((error as HueExportError).report).toMatchObject({
+          acceptedSpans: 0,
+          failedSpans: 1,
+        });
+        expect((error as HueExportError).issues.filter((issue) => issue.count > 0)).toEqual([
+          expect.objectContaining({ kind: "failed", count: 1 }),
+        ]);
+      } finally {
+        await hue.shutdown();
+        await endpoint.server.stop(true);
+      }
+    },
+  );
+
   test("a receiver that never acknowledges fails the export at its deadline and is disconnected", async () => {
     let disconnected!: () => void;
     const closed = new Promise<void>((resolve) => {

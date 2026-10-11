@@ -18,6 +18,8 @@ from urllib.request import Request, urlopen
 SETUP_PARSER = "@babel/parser"
 SETUP_PARSER_VERSION = "7.29.9"
 SETUP_PARSER_MODULE = "package/dist/setup/source.js"
+# zod is loaded only by the evals and CLI entry points; tracing never imports it.
+EVAL_CONTRACTS = "zod"
 
 
 def javascript_tokens(source: str) -> list[tuple[str, str]]:
@@ -365,7 +367,9 @@ def inspect(path: Path, language: str, version: str) -> None:
         assert metadata.get("license") not in (None, "UNLICENSED")
         assert metadata.get("publishConfig", {}).get("access") == "public"
         dependencies = metadata.get("dependencies", {})
-        core = sorted(name for name in dependencies if name != SETUP_PARSER)
+        core = sorted(
+            name for name in dependencies if name not in (SETUP_PARSER, EVAL_CONTRACTS)
+        )
         assert all(name.startswith("@opentelemetry/") for name in core), (
             f"Core tracing dependencies must be OpenTelemetry packages: {core}"
         )

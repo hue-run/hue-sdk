@@ -1,6 +1,6 @@
 # Compatibility
 
-This checkout covers TypeScript `0.15.1` and Python `0.9.1`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
+This checkout covers TypeScript `0.16.0` and Python `0.9.1`. Registry availability is established by the completed [release workflow](https://github.com/hue-run/hue-sdk/blob/main/RELEASING.md). See [VERSIONING.md](./VERSIONING.md) for the versioning, deprecation and runtime support policy. Tested combinations establish the paths below; accepting standard OTLP is broader than testing every instrumentation library.
 
 | Path | Verified support | Boundary |
 | --- | --- | --- |
@@ -60,7 +60,7 @@ The TypeScript and Python managed target adapters use the same versioned HTTP co
 
 ## Failure isolation
 
-Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: false` / `enabled=False` for a local kill switch, and bounded safe lifecycle methods. See [production safety](https://docs.hue.run/guides/production-safety). Helper capture failures omit telemetry, preserve business results/errors and increment diagnostic counters. TypeScript defaults to an 8 MiB combined trace/log queue budget; Python defaults to 8 MiB per signal, including in-flight records. These are telemetry budgets, not process RSS ceilings. A process kill, arbitrary slow user hook, third-party instrumentation or out-of-memory condition remains outside an in-process SDK guarantee.
+Serving applications should use `createHueSafe` / `create_hue_safe`, `enabled: false` / `enabled=False` for a local kill switch, and bounded safe lifecycle methods. See [TypeScript production setup](https://docs.hue.run/sdks/typescript#production-setup) and [Python production setup](https://docs.hue.run/sdks/python#production-setup). Helper capture failures omit telemetry, preserve business results/errors and increment diagnostic counters. TypeScript defaults to an 8 MiB combined trace/log queue budget; Python defaults to 8 MiB per signal, including in-flight records. These are telemetry budgets, not process RSS ceilings. A process kill, arbitrary slow user hook, third-party instrumentation or out-of-memory condition remains outside an in-process SDK guarantee.
 
 ## App-launched local agents
 

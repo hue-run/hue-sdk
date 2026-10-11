@@ -6,14 +6,14 @@ const failing = (message: string) => () => Promise.reject(new Error(message));
 
 test("a command whose peer is not installed names it and how to install it", async () => {
   // Node's resolution error for a bare peer, and Bun's for a scoped one.
-  const zod = await loadCommand(
+  const ajv = await loadCommand(
     "eval",
-    failing("Cannot find package 'zod' imported from /app/node_modules/@hue-run/sdk/dist/x.js"),
+    failing("Cannot find package 'ajv' imported from /app/node_modules/@hue-run/sdk/dist/x.js"),
   ).catch((error: unknown) => error);
-  expect(zod).toBeInstanceOf(MissingPeerError);
-  expect(zod).toMatchObject({ command: "eval", peer: "zod", range: pkg.peerDependencies.zod });
-  expect((zod as Error).message).toBe(
-    `hue eval needs zod, a peer dependency of @hue-run/sdk that this project has not installed. Install it with: npm install "zod@${pkg.peerDependencies.zod}" (or bun add, pnpm add or yarn add with the same argument)`,
+  expect(ajv).toBeInstanceOf(MissingPeerError);
+  expect(ajv).toMatchObject({ command: "eval", peer: "ajv", range: pkg.peerDependencies.ajv });
+  expect((ajv as Error).message).toBe(
+    `hue eval needs ajv, a peer dependency of @hue-run/sdk that this project has not installed. Install it with: npm install "ajv@${pkg.peerDependencies.ajv}" (or bun add, pnpm add or yarn add with the same argument)`,
   );
   const api = await loadCommand(
     "mcp",
