@@ -761,7 +761,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       attempt.scenarioDigest !== previousDigest
     )
       throw new Error(
-        "Recover the unfinished simulation before running a changed scenario or agent revision",
+        "Recover the unfinished simulation before running a changed scenario or agent revision: run the unchanged one again to finish it, or use another checkpoint directory",
       );
     if (!attempt || attempt.stage === "completed") {
       attempt = {
@@ -787,7 +787,7 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
       ];
     }
     const experimentId = checkpointSegment(attempt.experimentId, "experiment id");
-    const runUrl = new URL(`/experiments/${experimentId}`, options.client.baseUrl).toString();
+    const runUrl = new URL(`/runs/${experimentId}`, options.client.baseUrl).toString();
     await options.onProgress?.({ type: "run_created", experimentId, runUrl });
     const requested = requestedConfiguration
       ? pinRequestedAttemptV2(
@@ -796,6 +796,8 @@ export async function runSimulation(options: RunSimulationOptions): Promise<Simu
         )
       : undefined;
     const report = await runExperiment({
+      signal: options.signal,
+      rerunCrashedCases: true,
       client: options.client,
       hue: options.hue,
       experimentId,

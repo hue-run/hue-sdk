@@ -24,7 +24,7 @@ Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue
 - **Full traces, metadata-only opt-out.** Starting with TypeScript 0.14.0 and Python 0.8.0, `captureContent` / `capture_content` defaults to `true`. Earlier releases require an explicit choice. Set it to `true` to record the prompts, responses and tool inputs/outputs that trace inspection, evaluations and judges read; your redaction hook and built-in credential filtering still apply. Metadata-only mode (`false`) is the opt-out when a policy forbids sending that content; it strips recognized GenAI, OpenInference, OpenLLMetry, Langfuse and Vercel AI SDK content fields at export time in both SDKs.
 - **Fail-open by contract.** Safe constructors, byte- and record-bounded queues, cumulative loss counters and bounded lifecycle deadlines are written down in [RELIABILITY.md](./RELIABILITY.md) and tested against the installed packages.
 - **Provable delivery.** `verifyTrace()` / `verify_trace()` confirm that a real request's spans and fields were stored, without exposing content.
-- **Small, auditable footprint.** The tracing core depends only on official OpenTelemetry packages (plus `requests` in Python), and the JSON Schema validator used by the evaluation scorers is an opt-in extra. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
+- **Small, auditable footprint.** The tracing core depends only on official OpenTelemetry packages (plus `requests` in Python; `zod` ships for the evaluation CLI but tracing never loads it), and the JSON Schema validator used by the evaluation scorers is an opt-in extra. Releases are built once, hash-verified, published through OIDC trusted publishing and re-verified from the registries.
 
 ## Choose your SDK
 
@@ -127,7 +127,7 @@ To keep the skill in your project for later sessions, install it with the [skill
 
 To connect the [Hue MCP server](https://docs.hue.run/agents/mcp-server) by hand, use its production URL, `https://mcp.hue.run/mcp`. The `hue` executable handles the configuration: `hue mcp install --client claude-code` (also `codex` and `conductor`) writes only the URL, and you sign in with Hue in the client. The other clients (`cursor`, `vscode`, `windsurf` and `gemini`), `--read-only` and `--auth key` use a key: the configuration references the `HUE_MCP_KEY` environment variable (VS Code prompts for the key), never a key value, and `hue login` validates a **Read and write** key created in Settings and stores it in `.env.hue` (`hue login --keys coding-agent` also accepts a **Read** key, for read-only access). See [Install the MCP for your coding agent](./packages/sdk-typescript/CLI.md#install-the-mcp-for-your-coding-agent), which also says when a rerun keeps an existing key.
 
-For production request handlers, follow [production safety](https://docs.hue.run/guides/production-safety). The strict setup example above intentionally exposes delivery failures.
+For production request handlers, follow [production setup](https://docs.hue.run/sdks/typescript#production-setup). The strict setup example above intentionally exposes delivery failures.
 
 The [tracing reliability contract](./RELIABILITY.md) maps failure isolation and resource limits to regression tests and application acceptance checks.
 
