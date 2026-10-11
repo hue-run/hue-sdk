@@ -32,3 +32,12 @@ core does not register a global context manager.
 `packages/sdk-typescript/tests/fixtures/otlp-schema.json` is generated from the
 [OpenTelemetry protobuf definitions](https://github.com/open-telemetry/opentelemetry-proto) (Apache-2.0).
 The license is included next to it and the fixture is excluded from published packages.
+
+## Coding-agent tooling
+
+These files guide coding agents working in this repository. They are not part of the published packages.
+
+| Path | Source | License |
+| --- | --- | --- |
+| `.agents/skills/{create-verification-skill,maintain-verification-skill,principle-prove-it-works,technical-writing,unslop}/` | [pstack](https://github.com/cursor/plugins/tree/d73344bee8cf22e53b9d5f4cf5749d38ba38c174/pstack) at `d73344b`, unmodified | MIT (Lauren Tan), `LICENSE` in each directory |
+| `.cursor/rules/ponytail.mdc`; `ponytail@ponytail` plugin enabled in `.claude/settings.json` | [ponytail](https://github.com/DietrichGebert/ponytail) `v5.1.0` (`9cc65d0`), rule unmodified | MIT (DietrichGebert), `.cursor/rules/ponytail.LICENSE` |
