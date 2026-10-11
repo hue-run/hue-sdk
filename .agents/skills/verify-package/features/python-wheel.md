@@ -35,3 +35,9 @@ Preconditions:
 
 - `uv build --out-dir` writes a `.gitignore` into the directory; `release-artifacts.py inspect` rejects it as unexpected inventory, so delete it first.
 - `scripts/verify-python-release.py` is the release-time version of the consumer check and needs both Python 3.10 and 3.14 available.
+
+## Media release contract
+
+For Python 0.10.0, compare `pyproject.toml`, `src/hue_sdk/_version.py`, the editable project in `uv.lock`, wheel and sdist metadata, and `docs-contract.json`. Run `python3 scripts/check-doc-versions.py` and `python3 scripts/generate-docs-contract.py --check` from the repository root. Confirm the frozen lock retains every resolved dependency version.
+
+From an installed wheel, send binary media and text over 64 KiB to a loopback blob receiver. Check decoded bytes, the binary part's digest and size, and the text prefix and content-field entry. Exercise `record_file` with upload omitted and enabled, a Unicode name, an upload failure, content capture disabled and setup credentials. Supplied helper data is limited to 25 MiB; whole string attributes retain their separate 1,000,000,000-byte limit. Inspect the same-span `event:hue.file:<sha256>` entry and the unchanged `hue.file` event. The shared corpus must remain byte-identical to the TypeScript copy; fixtures must not enter the wheel.

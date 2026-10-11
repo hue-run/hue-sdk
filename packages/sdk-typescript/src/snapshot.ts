@@ -5,9 +5,10 @@ import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord, ReadWriteLogRecord } from "@opentelemetry/sdk-logs";
 import {
   hashInlineFiles,
-  INLINE_FILE_LIMIT,
+  type MediaDigestMemo,
   INLINE_FILE_TEXT_PER_RECORD,
   isMessageKey,
+  mayInlineFiles,
 } from "./inline-files.js";
 import { scrubsToolCredentials, scrubToolCredentials } from "./tool-definitions.js";
 import { MAX_RECORD_NODES } from "./config.js";
@@ -53,7 +54,7 @@ export interface HoldLimits {
   first: boolean;
 }
 
-/** A span's own message whose large inline files shrank to their digest when it was queued: the
+/** A span's own message whose inline media shrank to their digest when it was queued: the
  * text queued, and how many files it lost. */
 export interface DigestedMessage {
   text: string;
@@ -83,7 +84,7 @@ class Snapshot {
   held = 0;
   /** Set while the span's own attributes are copied: only they may be held for upload. */
   private own = false;
-  /** The span's own messages whose large inline files shrank to their digest when queued, by
+  /** The span's own messages whose inline media shrank to their digest when queued, by
    * attribute: the text queued (cut or not), and how many files it lost. */
   digested = new Map<string, DigestedMessage>();
   /** How many files each message text {@link inlineFiles} hashed replaced by their digest. */
@@ -100,6 +101,8 @@ class Snapshot {
     private captureContent = true,
     private valueUnits = Infinity,
     private hold?: HoldLimits,
+    private memo?: MediaDigestMemo,
+    private traceId = "",
   ) {}
 
   /** Whether the held-value budget takes `bytes` more, charging them when it does. */
@@ -115,7 +118,7 @@ class Snapshot {
    * longer than the queued value length or bytes over the cap, within the held-value budget, and
    * a recorded message that may inline a large file kept as it is (export uploads the file).
    * Undefined for a value copied as before; text over the length the budget cannot hold is then
-   * cut and its large inline files shrink to their digest, as before uploads existed.
+   * cut and its inline media shrink to their digest, as before uploads existed.
    */
   private heldValue(key: string, value: unknown): { value: unknown } | undefined {
     if (!this.hold || !this.own) return undefined;
@@ -127,7 +130,7 @@ class Snapshot {
         this.charge(fallback);
         return { value };
       }
-      // Within the queued length: a recorded message holding a large inline file is held whole
+      // Within the queued length: a recorded message holding an inline media part is held whole
       // for export to upload the file, within the held-value budget, and the queue is charged
       // its copy with the files as their digest, as before. Past the budget, the files shrink to
       // their digest when queued, as before uploads existed.
@@ -199,7 +202,7 @@ class Snapshot {
   }
 
   /**
-   * An attribute map. A large inline file in a message attribute shrinks to its digest before it
+   * An attribute map. A inline media part in a message attribute shrinks to its digest before it
    * is charged: export replaces it anyway, and charging the file could drop the whole record.
    */
   attributes<T>(value: T): T {
@@ -216,18 +219,16 @@ class Snapshot {
     }
   }
 
-  /** A message attribute with its large inline files hashed. The same text is hashed once per
+  /** A message attribute with its inline media hashed. The same text is hashed once per
    * record, and a record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} of it in all;
    * beyond that, messages are charged as recorded. */
   private inlineFiles(key: string, value: unknown): unknown {
-    // A UTF-16 unit is at most three UTF-8 bytes, so shorter text cannot hold a file to hash.
-    if (typeof value !== "string" || !isMessageKey(key) || value.length * 3 <= INLINE_FILE_LIMIT)
-      return value;
+    if (typeof value !== "string" || !mayInlineFiles(key, value)) return value;
     if (this.hashed.has(value)) return this.hashed.get(value);
     if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
     this.inspected += value.length;
     const count = { files: 0 };
-    const result = hashInlineFiles(key, value, count);
+    const result = hashInlineFiles(key, value, count, this.memo, this.traceId);
     this.hashed.set(value, result);
     if (count.files) this.hashedFiles.set(value, count.files);
     return result;
@@ -364,7 +365,7 @@ class Snapshot {
           content || shape === "attributes",
         );
         (copy as Record<string, unknown>)[key] = copied;
-        // A span's own message whose large inline files shrank to their digest is named as it
+        // A span's own message whose inline media shrank to their digest is named as it
         // was queued, cut or not, so export reports each file as not uploaded.
         const files =
           this.own && shape === "attributes" && typeof source === "string"
@@ -424,7 +425,7 @@ function contextReader(context: SpanContext): () => SpanContext {
 
 /** What admission keeps of a record: its copy, the bytes charged for it, whether resource
  * attributes were still unresolved, the value strings it cut, the bytes of the values it held
- * whole for upload, and the span's own messages whose large inline files it shrank to their
+ * whole for upload, and the span's own messages whose inline media it shrank to their
  * digest (with how many files each). */
 export interface RecordSnapshot<T> {
   record: T;
@@ -441,8 +442,16 @@ export function snapshotSpan(
   captureContent = true,
   valueUnits = Infinity,
   hold?: HoldLimits,
+  memo?: MediaDigestMemo,
 ): RecordSnapshot<ReadableSpan> {
-  const snapshot = new Snapshot(limit, captureContent, valueUnits, hold);
+  const snapshot = new Snapshot(
+    limit,
+    captureContent,
+    valueUnits,
+    hold,
+    memo,
+    source.spanContext().traceId,
+  );
   const context = snapshot.context(source.spanContext())!;
   const fields = snapshot.copy({
     name: source.name,

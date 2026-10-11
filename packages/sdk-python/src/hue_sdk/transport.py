@@ -854,6 +854,7 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                 for _, span, held in entries
             ],
             uploader=uploads.uploader,
+            memo=uploads.memo,
             value_bytes=self._limits.current.value_bytes,
             deadline=monotonic() + upload_budget_seconds(uploads.timeout),
             wait=self._wait_for_rate,
@@ -864,6 +865,8 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
             # The placed copy is what this export sends, its retries included: the queued copy
             # lets go of its whole values with their budget, so no more is held than it admits.
             held.values.clear()
+            held.files.clear()
+            held.digests.clear()
             held.release()
         self._report_uploads(tally)
         return result

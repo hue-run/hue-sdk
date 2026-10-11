@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { isMediaName } from "./inline-files.js";
 import {
   context,
   isSpanContextValid,
@@ -814,7 +815,7 @@ export class HueClient {
    * Adds a `hue.file` event to the active (or given) span for a file the work read, received or
    * produced: `hue.file.sha256`, `hue.file.role`, `hue.file.media_type`, `hue.file.size` when known
    * and, when `captureContent` is true, `hue.file.name`. `data` is hashed and measured locally and
-   * never exported. The event is metadata, so it is recorded in both capture modes. An invalid
+   * uploaded only with `upload: true`. The event is metadata, so it is recorded in both capture modes. An invalid
    * record, or one without an active span, is omitted and counted, never thrown; an invalid name
    * alone is omitted and counted while the rest is recorded.
    */
@@ -831,8 +832,9 @@ export class HueClient {
       if (!isLabel(mediaType)) throw new TypeError("Invalid media type");
       let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
       let byteSize = file.byteSize;
+      let bytes: Uint8Array | undefined;
       if (data !== undefined) {
-        const bytes =
+        bytes =
           typeof data === "string"
             ? (() => {
                 // Buffer.byteLength measures UTF-8 without allocating the copy that hashing would
@@ -852,7 +854,10 @@ export class HueClient {
                   })()
               : undefined;
         if (!bytes) throw new TypeError("File data must be bytes or a string");
-        const digest = createHash("sha256").update(bytes).digest("hex");
+        const digest =
+          file.upload === true && this.transport.holdsValues()
+            ? this.transport.digestMedia(bytes, span.spanContext().traceId).sha256
+            : createHash("sha256").update(bytes).digest("hex");
         // A caller-supplied digest or size must describe the same bytes.
         if (
           (sha256 !== undefined && sha256 !== digest) ||
@@ -873,10 +878,22 @@ export class HueClient {
       };
       if (byteSize !== undefined) attributes["hue.file.size"] = byteSize;
       if (this.captureContent && name !== undefined) {
-        if (isLabel(name)) attributes["hue.file.name"] = name;
+        if (isMediaName(name)) attributes["hue.file.name"] = name;
         else this.instrumentationFailed();
       }
       span.addEvent("hue.file", attributes);
+      if (file.upload === true && this.transport.offloadsValues()) {
+        if (
+          !bytes ||
+          !this.transport.stageMedia(span, {
+            bytes,
+            digest: { sha256, size: bytes.byteLength },
+            contentType: mediaType,
+            ...(isMediaName(name) ? { name } : {}),
+          })
+        )
+          this.instrumentationFailed();
+      }
     } catch {
       this.instrumentationFailed();
     }

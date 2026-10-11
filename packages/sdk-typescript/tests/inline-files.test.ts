@@ -1,35 +1,59 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import fixture from "./fixtures/inline-file-digests.json" with { type: "json" };
-import { hashInlineFiles, INLINE_FILE_LIMIT } from "../src/inline-files.js";
+import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
+import {
+  hashInlineFiles,
+  INLINE_FILE_LIMIT,
+  isMediaName,
+  MediaDigestMemo,
+} from "../src/inline-files.js";
 
-test("the shared digest fixture uses the SDK's inline file limit", () => {
-  expect(fixture.limit).toBe(INLINE_FILE_LIMIT);
+for (const item of corpus.fixtures)
+  test(`media digest fallback: ${item.id}`, () => {
+    expect(
+      JSON.parse(hashInlineFiles(item.attribute, JSON.stringify(item.messages)) as string),
+    ).toEqual(item.failure.messages);
+  });
+
+test("media names use code point limits and reject controls", () => {
+  expect(INLINE_FILE_LIMIT).toBe(65536);
+  expect(isMediaName("🎧".repeat(256))).toBe(true);
+  expect(isMediaName("🎧".repeat(257))).toBe(false);
+  for (const name of ["", "a\u0000b", "a\u001fb", "a\u007fb", "a\u009fb", "\ud800"])
+    expect(isMediaName(name)).toBe(false);
 });
 
-// The Python suite reads the same file; each digest is of the bytes the case was built from.
-for (const item of fixture.cases)
-  test(`inline file digest: ${item.name}`, () => {
-    const { prefix, unit, times, suffix } = item.content;
-    const part = { ...item.part, [item.key]: `${prefix}${unit.repeat(times)}${suffix}` };
-    const file = item.part.type === "file";
-    const value = JSON.stringify([
-      file ? { role: "user", content: [part] } : { role: "user", parts: [part] },
-    ]);
-    const result = hashInlineFiles(file ? "ai.prompt.messages" : "gen_ai.input.messages", value);
-    if (item.expected === null) {
-      expect(result).toBe(value);
-      return;
-    }
-    const [message] = JSON.parse(result as string) as {
-      content?: unknown[];
-      parts?: unknown[];
-    }[];
-    expect((file ? message!.content : message!.parts)![0]).toEqual({
-      ...item.part,
-      ...item.expected,
-    });
-  });
+test("the digest memo shares byte identity within a trace and evicts bounded entries", () => {
+  const memo = new MediaDigestMemo();
+  const bytes = Buffer.from("same bytes");
+  const first = memo.bytes(bytes, "trace-a");
+  expect(memo.bytes(Uint8Array.from(bytes), "trace-a")).toBe(first);
+  expect(memo.bytes(bytes, "trace-b")).not.toBe(first);
+  for (let index = 0; index < 4096; index++) memo.bytes(Buffer.from(String(index)), "trace-a");
+  expect(memo.bytes(bytes, "trace-a")).not.toBe(first);
+  expect(memo.bytes(bytes, "trace-a")).toEqual(first);
+  memo.clear();
+  expect(memo.bytes(bytes, "trace-a")).not.toBe(first);
+});
+
+test("escaped media type names pass the shared cheap JSON prefilter", () => {
+  const bytes = Buffer.from([1, 2, 3]);
+  const value = JSON.stringify([
+    { parts: [{ type: "blob", mime_type: "image/png", content: bytes.toString("base64") }] },
+  ]).replace('"blob"', '"\\u0062lob"');
+  expect(JSON.parse(hashInlineFiles("gen_ai.input.messages", value) as string)).toEqual([
+    {
+      parts: [
+        {
+          type: "blob",
+          mime_type: "image/png",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          size: 3,
+        },
+      ],
+    },
+  ]);
+});
 
 test("a data: URL with millions of parameters is still decoded by its own encoding", () => {
   // Past where a pattern repeated per parameter overflows Node's stack or stops matching in Bun.

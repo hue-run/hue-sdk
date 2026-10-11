@@ -36,3 +36,9 @@ Preconditions:
 - `npm pack` without `--ignore-scripts` is fine too, but build first: the tarball takes whatever is in `dist/`.
 - A `HUE_API_KEY` in the shell fails the full verifier's `express-npm installed setup succeeds` assertion with `configuration_conflict`.
 - The verifier's own temp directory is printed in its final JSON; it is not cleaned up automatically.
+
+## Media release contract
+
+For TypeScript 0.17.0, compare `package.json`, `src/version.ts`, the packed package metadata and `docs-contract.json`. Run `python3 scripts/check-doc-versions.py` and `python3 scripts/generate-docs-contract.py --check` from the repository root. Confirm the frozen lock retains every resolved dependency version.
+
+From an installed tarball, send binary media and text over 64 KiB to a loopback blob receiver. Check decoded bytes, the binary part's digest and size, and the text prefix and content-field entry. Exercise `recordFile` with upload omitted and enabled, a Unicode name, an upload failure, content capture disabled and setup credentials. Supplied helper data is limited to 25 MiB; whole string attributes retain their separate 1,000,000,000-byte limit. Inspect the same-span `event:hue.file:<sha256>` entry and the unchanged `hue.file` event. The shared corpus must remain byte-identical to the Python copy; fixtures are development inputs and must not enter the npm tarball.

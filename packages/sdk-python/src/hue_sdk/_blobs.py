@@ -1,10 +1,8 @@
-"""Values larger than Hue's inline limit, uploaded apart from their span.
+"""Large values and binary media, uploaded apart from their span.
 
-The exporter uploads such a value's bytes straight to the project's evidence store through a
-presigned PUT that Hue answers at ``POST /api/v1/otlp/blobs``, keeps the value's first 16 KiB in
-the attribute it replaced, and lists the value in the span attribute ``hue.blobs``. A value that
-cannot be uploaded is exported as it was before uploads existed: cut to the inline limit and
-listed under ``hue.truncated`` (an inline file as its digest), reported as a warning and counted.
+The exporter uses reservation, presigned PUT, and completion. Text keeps a 16 KiB prefix.
+Binary media keeps digest metadata on its part. Successful uploads are listed in ``hue.blobs``;
+failures keep inline fallback or file metadata, are reported as warnings, and are counted.
 Mirrors the TypeScript SDK's ``blobs.ts``.
 """
 
@@ -17,6 +15,7 @@ import json
 import re
 import sys
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from threading import Event, Lock, Semaphore, Thread
@@ -30,13 +29,15 @@ from opentelemetry.context import attach, detach
 from ._inline_files import (
     INLINE_FILE_LIMIT,
     MAX_INLINE_FILE_TEXT,
-    InlineFile,
+    MediaDigestMemo,
     digest_part,
     dumps_message,
     hash_inline_files_counted,
-    inline_file,
+    is_text_media_type,
     large_inline_file_parts,
     may_inline_files,
+    media_bytes,
+    media_content_type,
     utf8_size,
 )
 from ._limits import TRUNCATED_KEY, cut_utf8, over_utf8
@@ -45,7 +46,7 @@ from ._records import truncated_marker, with_truncated_keys
 from ._tool_definitions import scrub_tool_credentials
 
 # The span attribute listing the values the SDK uploaded apart from the span: one compact JSON
-# object per value, ``{"key", "sha256", "size", "content_type"}``, as Hue reads it.
+# object per value, ``{"key", "sha256", "size", "content_type"}``, with an optional ``name``.
 BLOBS_KEY = "hue.blobs"
 # The largest value one upload may hold (``Hue-Max-Blob-Bytes``); a larger value is cut inline.
 MAX_BLOB_BYTES = 1_000_000_000
@@ -80,21 +81,19 @@ def upload_budget_seconds(timeout: float) -> float:
     return timeout * 6
 
 
-# Why a value over the inline limit was exported cut instead of uploaded, and the fixed
-# description an export issue reports for it.
+# Why content kept its fallback instead of being uploaded, and its export issue description.
 FALLBACK_MESSAGES = {
     "unsupported": (
-        "This Hue server does not accept uploaded values; values over its inline limit were "
-        "exported cut to it (inline files as their digest)"
+        "This Hue server does not accept uploaded values; large values were cut inline "
+        "and media kept digest metadata"
     ),
     "failed": (
-        "Values over Hue's inline limit could not be uploaded; they were exported cut to it "
-        "(inline files as their digest)"
+        "Content could not be uploaded; large values were cut inline and media kept digest metadata"
     ),
-    "too_large": "Values over Hue's 1 GB upload limit were exported cut to the inline limit",
+    "too_large": "Content over its upload limit kept inline fallback or file metadata",
     "budget": (
-        "Values over Hue's inline limit did not fit the SDK's upload budget; they were exported "
-        "cut to it (inline files as their digest)"
+        "Content did not fit the SDK's upload budget; large values were cut inline "
+        "and media kept digest metadata"
     ),
 }
 
@@ -113,8 +112,10 @@ def is_blob_content_type(value: Any) -> bool:
 
 
 def _is_blob_key(key: str) -> bool:
-    return 1 <= len(key) <= _MAX_BLOB_KEY_LENGTH and not any(
-        ord(char) < 0x20 or ord(char) == 0x7F for char in key
+    return (
+        isinstance(key, str)
+        and 1 <= len(key) <= _MAX_BLOB_KEY_LENGTH
+        and not any(ord(char) < 0x20 or ord(char) == 0x7F for char in key)
     )
 
 
@@ -128,17 +129,6 @@ def text_content_type(text: str) -> str:
     ):
         return "application/json"
     return "text/plain; charset=utf-8"
-
-
-def _file_content_type(part: Mapping[str, Any], file: InlineFile) -> str:
-    """The media type an inline file is stored under: the part's own, its data: URL's, or else
-    bytes, or UTF-8 text for content that was not encoded."""
-    for name in ("mime_type", "mimeType", "mediaType", "media_type"):
-        if is_blob_content_type(part.get(name)):
-            return str(part[name])
-    if is_blob_content_type(file.url_media_type):
-        return str(file.url_media_type)
-    return "application/octet-stream" if file.decoded else "text/plain; charset=utf-8"
 
 
 def blob_prefix(value: str | bytes) -> str | bytes:
@@ -217,11 +207,18 @@ class _Body(io.RawIOBase):
         return result
 
 
-def _blob_entry(key: str, sha256: str, size: int, content_type: str) -> str:
-    return json.dumps(
-        {"key": key, "sha256": sha256, "size": size, "content_type": content_type},
-        separators=(",", ":"),
-    )
+def _blob_entry(
+    key: str, sha256: str, size: int, content_type: str, name: str | None = None
+) -> str:
+    entry: dict[str, Any] = {
+        "key": key,
+        "sha256": sha256,
+        "size": size,
+        "content_type": content_type,
+    }
+    if name is not None:
+        entry["name"] = name
+    return json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
 
 
 def _loopback(hostname: str) -> bool:
@@ -265,16 +262,20 @@ def held_size(value: str | bytes) -> int:
 
 @dataclass
 class Held:
-    """A queued span's values held whole for upload, by key (values over the inline limit, and
-    messages holding a large inline file); the budget is released once, when the span is placed
-    or no longer referenced."""
+    """A queued span's values held whole for upload, by key.
+
+    Values include those over the inline limit and messages with binary or large textual
+    inline files. The budget is released once, when placed or no longer referenced.
+    """
 
     values: dict[str, str | bytes] = field(default_factory=dict)
-    # Keys of values over the inline limit cut, or of messages whose large inline files shrank to
-    # their digest, when the span was queued (once per file): never held whole.
+    # Keys of values cut at the inline limit or messages whose binary and large textual
+    # inline files shrank to digests when queued (once per file): never held whole.
     cut: list[str] = field(default_factory=list)
     size: int = 0
     budget: HeldValues | None = None
+    files: list[ExplicitFile] = field(default_factory=list)
+    digests: dict[str, dict[str, tuple[str, int]]] = field(default_factory=dict)
     _released: bool = False
 
     def release(self) -> None:
@@ -295,6 +296,20 @@ def held_of(record: Any) -> Held | None:
     return held if isinstance(held, Held) else None
 
 
+@dataclass(frozen=True)
+class ExplicitFile:
+    data: bytes
+    digest: tuple[str, int]
+    content_type: str
+    name: str | None
+
+
+@dataclass
+class _Staged:
+    held: Held
+    finalizer: Any
+
+
 class Uploads:
     """A client's uploads of span values over the inline limit: its uploader, the budget of
     values queued spans hold whole for it, and the request budget its exports follow. A client
@@ -305,6 +320,61 @@ class Uploads:
         self.uploader = BlobUploader(base_url, headers, timeout)
         self.held = HeldValues()
         self.timeout = timeout
+        self.memo = MediaDigestMemo()
+        self._lock = Lock()
+        self._staged: dict[tuple[int, int], _Staged] = {}
+        self._closed = False
+
+    def stage(self, span: Any, file: ExplicitFile) -> bool:
+        context = span.get_span_context()
+        key = (context.trace_id, context.span_id)
+        size = held_size(file.data) + 1024
+        with self._lock:
+            if self._closed:
+                return False
+            staged = self._staged.get(key)
+            if staged is None:
+                if len(self._staged) >= 256:
+                    return False
+                held = Held(budget=self.held)
+            else:
+                held = staged.held
+            if len(held.files) >= MAX_BLOB_ENTRIES or not self.held.reserve(size, held.size):
+                return False
+            held.size += size
+            held.files.append(file)
+            if staged is None:
+
+                def abandoned() -> None:
+                    with self._lock:
+                        item = self._staged.pop(key, None)
+                    if item is not None:
+                        item.held.release()
+
+                self._staged[key] = _Staged(held, weakref.finalize(span, abandoned))
+            return True
+
+    def take(self, span: Any) -> Held | None:
+        context = span.context
+        if context is None:
+            return None
+        with self._lock:
+            item = self._staged.pop((context.trace_id, context.span_id), None)
+        if item is None:
+            return None
+        item.finalizer.detach()
+        return item.held
+
+    def close(self) -> None:
+        self.uploader.close()
+        self.memo.clear()
+        with self._lock:
+            self._closed = True
+            items = list(self._staged.values())
+            self._staged.clear()
+        for item in items:
+            item.finalizer.detach()
+            item.held.release()
 
     def holds(self) -> bool:
         """Whether values over the inline limit are worth holding whole for upload now."""
@@ -366,6 +436,9 @@ class BlobUploader:
         self._paused_until = 0.0
         self._closed = False
         self._slots = Semaphore(UPLOAD_CONCURRENCY)
+        # Outcomes retain only identifiers and completion metadata, never upload bytes.
+        self._outcomes: OrderedDict[tuple[str, str], tuple[Event, list[_Outcome]]] = OrderedDict()
+        self._outcome_limit = 1024
 
     def available(self) -> bool:
         """Whether a value over the inline limit is worth holding whole for upload now."""
@@ -389,6 +462,7 @@ class BlobUploader:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            self._outcomes.clear()
 
     def _pause(self) -> None:
         with self._lock:
@@ -446,9 +520,6 @@ class BlobUploader:
     ) -> _Outcome:
         """Stores ``value`` under ``key`` of the trace: reserved, uploaded unless Hue already
         holds it, and completed. Holds an upload slot meanwhile."""
-        refused = self.refusal()
-        if refused:
-            return _Outcome(False, refused)
         sha256, size = digest
         if size > MAX_BLOB_BYTES:
             return _Outcome(False, "too_large")
@@ -459,12 +530,41 @@ class BlobUploader:
             or trace_id == "0" * 32
         ):
             return _Outcome(False, "failed")
-        if not self._slots.acquire(timeout=max(0.0, deadline - monotonic())):
+        identity = (trace_id, sha256)
+        with self._lock:
+            known = self._outcomes.get(identity)
+            owner = known is None
+            if known is None:
+                if len(self._outcomes) >= self._outcome_limit:
+                    finished = next(
+                        (k for k, (event, _) in self._outcomes.items() if event.is_set()), None
+                    )
+                    if finished is None:
+                        return _Outcome(False, "budget")
+                    del self._outcomes[finished]
+                known = (Event(), [])
+                self._outcomes[identity] = known
+        event, outcomes = known
+        if not owner:
+            if event.wait(max(0.0, deadline - monotonic())):
+                return outcomes[0]
             return _Outcome(False, "failed")
+        outcome = _Outcome(False, "failed")
         try:
-            return self._store(trace_id, key, value, content_type, sha256, size, deadline, wait)
+            refused = self.refusal()
+            if refused:
+                outcome = _Outcome(False, refused)
+            elif self._slots.acquire(timeout=max(0.0, deadline - monotonic())):
+                try:
+                    outcome = self._store(
+                        trace_id, key, value, content_type, sha256, size, deadline, wait
+                    )
+                finally:
+                    self._slots.release()
+            return outcome
         finally:
-            self._slots.release()
+            outcomes.append(outcome)
+            event.set()
 
     def _store(
         self,
@@ -738,6 +838,7 @@ class _Span:
     def __init__(self, attributes: Mapping[str, Any], held: Held, trace_id: str) -> None:
         self.attributes = attributes
         self.trace_id = trace_id
+        self.held = held
         existing = attributes.get(BLOBS_KEY)
         self.existing = (
             [item for item in existing if isinstance(item, str)]
@@ -748,11 +849,12 @@ class _Span:
         self._slots = MAX_BLOB_ENTRIES - len(self.existing)
         self.cut = len(held.cut)
         # In the span's attribute order, as the TypeScript SDK places them.
-        self.candidates: list[tuple[str, str | bytes]] = []
+        self.candidates: list[tuple[str, str | bytes | ExplicitFile]] = []
         for key in attributes:
             value = held.values.get(key)
             if isinstance(value, (str, bytes)):
                 self.candidates.append((key, value))
+        self.candidates.extend((f"event:hue.file:{file.digest[0]}", file) for file in held.files)
 
     def slot(self) -> bool:
         with self._lock:
@@ -772,16 +874,17 @@ class _Context:
     value_bytes: int
     deadline: float
     wait: Callable[[float], bool]
+    memo: MediaDigestMemo
 
 
 def _upload_parts(
     span: _Span, index: int, key: str, text: str, context: _Context, result: _Result
 ) -> str:
-    """A recorded message with each inline file over the limit uploaded and replaced by its first
-    16 KiB, or by its digest, as before, when it could not be."""
-    if not may_inline_files(key, text):
-        return text
-    if not INLINE_FILE_LIMIT < utf8_size(text, MAX_INLINE_FILE_TEXT) <= MAX_INLINE_FILE_TEXT:
+    """Upload recognized media, keeping digests for binary and prefixes for large text."""
+    if (
+        not may_inline_files(key, text)
+        or utf8_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
+    ):
         return text
     try:
         parsed = json.loads(text)
@@ -790,21 +893,27 @@ def _upload_parts(
         return text
     changed = False
     for position, file in enumerate(found):
-        part_key = f"{key}#{file.pointer}"
-        has_slot = _is_blob_key(part_key) and span.slot()
-        decoded = inline_file(file.content)
-        if len(decoded.data) <= INLINE_FILE_LIMIT:
-            if has_slot:
-                span.give_back()
+        decoded = media_bytes(file)
+        content_type = media_content_type(file, decoded)
+        if not is_blob_content_type(content_type):
+            content_type = (
+                "application/octet-stream" if decoded.decoded else "text/plain; charset=utf-8"
+            )
+        textual = is_text_media_type(content_type)
+        if textual and len(decoded.data) <= INLINE_FILE_LIMIT:
             continue
         changed = True
-        digest = digest_of(decoded.data)
+        part_key = f"{key}#{file.pointer if textual else file.part_pointer}"
+        has_slot = _is_blob_key(part_key) and span.slot()
+        digest = span.held.digests.get(key, {}).get(file.pointer) or context.memo.digest(
+            decoded.data, span.trace_id
+        )
         outcome = (
             context.uploader.store(
                 span.trace_id,
                 part_key,
                 decoded.data,
-                _file_content_type(file.part, decoded),
+                content_type,
                 digest,
                 context.deadline,
                 context.wait,
@@ -813,21 +922,48 @@ def _upload_parts(
             else _Outcome(False, "budget")
         )
         if outcome.ok:
-            file.part[file.key] = blob_prefix(file.content)
+            if textual:
+                file.owner[file.key] = blob_prefix(file.content)
+            else:
+                digest_part(file, *digest)
             result.entries.append(
-                ((index, position), _blob_entry(part_key, *digest, outcome.content_type))
+                ((index, position), _blob_entry(part_key, *digest, outcome.content_type, file.name))
             )
             result.uploads += 1
         else:
-            digest_part(file.part, file.key, *digest)
+            digest_part(file, *digest)
             result.fallbacks.append(outcome.reason)
     return dumps_message(parsed) if changed else text
 
 
-def _place(span: _Span, index: int, key: str, value: str | bytes, context: _Context) -> _Result:
+def _place(
+    span: _Span, index: int, key: str, value: str | bytes | ExplicitFile, context: _Context
+) -> _Result:
     """One candidate placed: whole within the limit, uploaded, or cut as before."""
     result = _Result(value)
     cap = context.value_bytes
+    if isinstance(value, ExplicitFile):
+        outcome = (
+            context.uploader.store(
+                span.trace_id,
+                key,
+                value.data,
+                value.content_type,
+                value.digest,
+                context.deadline,
+                context.wait,
+            )
+            if span.slot()
+            else _Outcome(False, "budget")
+        )
+        if outcome.ok:
+            result.entries.append(
+                ((index, 0), _blob_entry(key, *value.digest, outcome.content_type, value.name))
+            )
+            result.uploads += 1
+        else:
+            result.fallbacks.append(outcome.reason)
+        return result
     if isinstance(value, str):
         # Credentials leave tool definitions and recorded requests before anything is stored.
         scrubbed = scrub_tool_credentials(key, value)
@@ -847,7 +983,7 @@ def _place(span: _Span, index: int, key: str, value: str | bytes, context: _Cont
     def cut() -> Any:
         return cut_utf8(placed, cap) if isinstance(placed, str) else truncated_marker(size)
 
-    refused = "too_large" if size > MAX_BLOB_BYTES else context.uploader.refusal()
+    refused = "too_large" if size > MAX_BLOB_BYTES else None
     if refused or not span.slot():
         result.value = cut()
         result.fallbacks.append(refused or "budget")
@@ -871,14 +1007,18 @@ def _place(span: _Span, index: int, key: str, value: str | bytes, context: _Cont
     return result
 
 
-def _fallback(key: str, value: str | bytes, cap: int) -> _Result:
-    """A candidate placed as it was before uploads existed, for a placement that failed or did
-    not finish in time: credentials scrubbed, large inline files as their digest, a value over
-    the limit cut to it (bytes replaced by the receiver's marker) and listed. A value that cannot
-    be scrubbed or encoded is replaced by the receiver's marker, never cut."""
+def _fallback(key: str, value: str | bytes | ExplicitFile, cap: int) -> _Result:
+    """Place a candidate whose upload failed or did not finish in time.
+
+    Scrub credentials, replace binary and large textual inline files with digests, and cut
+    values over the limit (bytes use the receiver's marker). Values that cannot be scrubbed
+    or encoded use the receiver's marker.
+    """
+    if isinstance(value, ExplicitFile):
+        return _Result(None, fallbacks=["failed"])
     try:
         placed, files = hash_inline_files_counted(key, scrub_tool_credentials(key, value))
-        # Each large inline file is reported as a value not uploaded, as the upload step does.
+        # Report each binary or large textual inline file as not uploaded.
         fallbacks = ["failed"] * files
         if isinstance(placed, str) and over_utf8(placed, cap):
             return _Result(cut_utf8(placed, cap), listed=True, fallbacks=[*fallbacks, "failed"])
@@ -896,6 +1036,7 @@ def place_spans(
     value_bytes: int,
     deadline: float,
     wait: Callable[[float], bool],
+    memo: MediaDigestMemo | None = None,
 ) -> tuple[list[dict[str, Any]], Tally]:
     """Each span's own attributes with its held values, and its messages holding a large inline
     file, placed: a file uploaded and replaced by its first 16 KiB (or its digest), a value still
@@ -904,7 +1045,7 @@ def place_spans(
     ``hue.truncated``. Values are placed on up to ``UPLOAD_CONCURRENCY`` threads; one not placed
     by ``deadline`` falls back to the cut, and an upload still running then stops sending its body
     at that deadline; its answer goes unused."""
-    context = _Context(uploader, value_bytes, deadline, wait)
+    context = _Context(uploader, value_bytes, deadline, wait, memo or MediaDigestMemo())
     placements = [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans]
     pending = [
         (number, index, key, value)
@@ -958,7 +1099,8 @@ def place_spans(
         entries: list[tuple[tuple[int, int], str]] = []
         for index, (key, value) in enumerate(span.candidates):
             result = placed.get((number, index)) or _fallback(key, value, value_bytes)
-            result_attributes[key] = result.value
+            if not isinstance(value, ExplicitFile):
+                result_attributes[key] = result.value
             if result.listed:
                 listed.append(key)
             entries.extend(result.entries)

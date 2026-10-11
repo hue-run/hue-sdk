@@ -1355,7 +1355,7 @@ describe("Hue SDK contract", () => {
     const imageDigest = createHash("sha256").update(image).digest("hex");
     const text = `${"line\n".repeat(20000)}end`;
     const textDigest = createHash("sha256").update(text, "utf8").digest("hex");
-    // In the base64 alphabet, so it is decoded whatever its media type: 48 KiB, kept inline.
+    // Declared text stays raw UTF-8 even in the base64 alphabet: over 64 KiB, hashed.
     const asciiText = "A".repeat(64 * 1024 + 4);
     try {
       const span = tracerProvider.getTracer("third-party").startSpan("external");
@@ -1424,7 +1424,13 @@ describe("Hue SDK contract", () => {
           sha256: textDigest,
           size: Buffer.byteLength(text),
         },
-        { type: "blob", modality: "document", mime_type: "text/plain", content: asciiText },
+        {
+          type: "blob",
+          modality: "document",
+          mime_type: "text/plain",
+          sha256: createHash("sha256").update(asciiText, "utf8").digest("hex"),
+          size: Buffer.byteLength(asciiText),
+        },
         {
           type: "blob",
           modality: "image",
@@ -1470,7 +1476,7 @@ describe("Hue SDK contract", () => {
             byteSize: 2048,
           });
           // A string is hashed as UTF-8; a blank name is omitted (and counted when captured).
-          hue.recordFile({ role: "attachment", mediaType: "text/plain", data: body, name: " " });
+          hue.recordFile({ role: "attachment", mediaType: "text/plain", data: body, name: "" });
           // Each of these is omitted and counted; the callback keeps running.
           hue.recordFile({ role: "draft" as never, mediaType: "text/plain", data: body });
           hue.recordFile({ role: "input", mediaType: "text/plain", sha256: "not-a-digest" });

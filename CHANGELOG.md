@@ -10,6 +10,18 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.17.0] - 2026-10-10
+
+#### Breaking
+
+- **Wire** Binary media in a span's recorded messages now uploads at every size and exports as the part's `sha256` and `size`. The `hue.blobs` key points to the part, for example `gen_ai.input.messages#/0/parts/1`. Successful uploads previously kept a 16 KiB prefix in the byte field and pointed to that field. Text media over 64 KiB still keeps a 16 KiB UTF-8 prefix and a content-field entry. Upload failures retain the digest without a blob entry. Migration: readers must resolve the part-level entry for binary media. Hue reads both forms. Ship after `hue-run/fern#3105` and the following readers change are on `main` and deployed.
+
+#### Added
+
+- Recorded media supports GenAI, AI SDK, OpenAI Chat and Responses, Anthropic, Gemini, Vertex and Bedrock shapes, including OpenAI content arrays. The three inspected attributes remain `gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`. Remote URLs and file IDs stay unchanged; the SDK never fetches them.
+- Blob entries preserve a valid recorded filename, name or title. Names must be nonempty, at most 256 characters and contain no control characters.
+- `recordFile({ upload: true, ... })` uploads supplied file data up to 25 MiB and adds a `hue.blobs` entry to the same span, keyed `event:hue.file:<sha256>`. The existing `hue.file` event remains. Upload defaults to false and is disabled by `captureContent: false` or setup credentials.
+
 ### [0.16.0] - 2026-10-08
 
 #### Added
@@ -1062,7 +1074,6 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   carrying only placeholders never fails `flush()`. **Wire**
 - `liveSpans` option (default `true`; always off for setup credentials).
 
-
 ### [0.6.0] - 2026-09-23
 
 #### Added
@@ -1433,6 +1444,18 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### [0.10.0] - 2026-10-10
+
+#### Breaking
+
+- **Wire** Binary media in a span's recorded messages now uploads at every size and exports as the part's `sha256` and `size`. The `hue.blobs` key points to the part, for example `gen_ai.input.messages#/0/parts/1`. Successful uploads previously kept a 16 KiB prefix in the byte field and pointed to that field. Text media over 64 KiB still keeps a 16 KiB UTF-8 prefix and a content-field entry. Upload failures retain the digest without a blob entry. Migration: readers must resolve the part-level entry for binary media. Hue reads both forms. Ship after `hue-run/fern#3105` and the following readers change are on `main` and deployed.
+
+#### Added
+
+- Recorded media supports GenAI, AI SDK, OpenAI Chat and Responses, Anthropic, Gemini, Vertex and Bedrock shapes, including OpenAI content arrays. The three inspected attributes remain `gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`. Remote URLs and file IDs stay unchanged; the SDK never fetches them.
+- Blob entries preserve a valid recorded filename, name or title. Names must be nonempty, at most 256 characters and contain no control characters.
+- `record_file(upload=True, ...)` uploads supplied file data up to 25 MiB and adds a `hue.blobs` entry to the same span, keyed `event:hue.file:<sha256>`. The existing `hue.file` event remains. Upload defaults to false and is disabled by `capture_content=False` or setup credentials.
 
 ### [0.9.1] - 2026-10-07
 

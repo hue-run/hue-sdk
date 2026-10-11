@@ -366,7 +366,7 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         uploads = self._uploads
         if uploads is None:
             return None
-        return Hold(uploads.held, value_bytes, uploads.holds())
+        return Hold(uploads.held, value_bytes, uploads.holds(), uploads)
 
     def spans_ended(self, trace_id: str) -> int | None:
         """How many spans of the trace ended in this process, or ``None`` once forgotten."""

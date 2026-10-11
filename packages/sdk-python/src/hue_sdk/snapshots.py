@@ -23,8 +23,14 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
-from ._blobs import MAX_BLOB_BYTES, Held, HeldValues, attach_held, held_size
-from ._inline_files import hash_inline_files, hash_inline_files_counted
+from ._blobs import MAX_BLOB_BYTES, Held, HeldValues, Uploads, attach_held, held_size
+from ._inline_files import (
+    INLINE_FILE_TEXT_PER_RECORD,
+    MAX_INLINE_FILE_TEXT,
+    hash_inline_files_counted,
+    may_inline_files,
+    utf8_size,
+)
 from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY, cut_utf8, over_utf8
 from ._records import CONTENT_PREFIXES as CONTENT_PREFIXES
 from ._records import is_content_key as is_content_key
@@ -162,12 +168,19 @@ class Hold:
     held-value budget, the cap, and whether values are held now (``active``): a client whose
     receiver lacks the upload route cuts them when they are queued, and export counts the cuts."""
 
-    __slots__ = ("budget", "value_bytes", "active")
+    __slots__ = ("budget", "value_bytes", "active", "uploads")
 
-    def __init__(self, budget: HeldValues, value_bytes: int, active: bool = True) -> None:
+    def __init__(
+        self,
+        budget: HeldValues,
+        value_bytes: int,
+        active: bool = True,
+        uploads: Uploads | None = None,
+    ) -> None:
         self.budget = budget
         self.value_bytes = value_bytes
         self.active = active
+        self.uploads = uploads
 
 
 class _BudgetExceeded(ValueError):
@@ -189,7 +202,10 @@ class _ValueBudget:
         record_bytes: int = MAX_REQUEST_BYTES,
         value_bytes: int | None = None,
         hold: Hold | None = None,
+        trace_id: str = "",
     ) -> None:
+        self.trace_id = trace_id
+        self.media_remaining = INLINE_FILE_TEXT_PER_RECORD
         self.remaining = record_bytes
         self.capture_content = capture_content
         self.value_bytes = value_bytes
@@ -298,41 +314,57 @@ class _ValueBudget:
             return truncated_marker(sum(len(text) for text in long))
         return scrub_tool_credentials(key, value)
 
-    def permitted(self, values: Any, files: bool = True) -> Any:
+    def permitted(self, values: Any, files: bool = False) -> Any:
         """Apply the content policy: metadata-only mode drops recognized content keys. With
-        ``files`` false, large inline files are left for export to upload."""
+        ``files`` false, binary and large textual inline files are left for export to upload."""
         source = values or {}
         if not self.capture_content and isinstance(source, Mapping):
             # Summarize the tool definitions metadata-only export removes by name and digest.
             source = with_tool_catalog_summary(source)
         if isinstance(source, Mapping):
-            # Large inline files shrink to their digest before the budget, so the span survives.
+            # Binary and large textual inline files shrink before charging the copy's budget.
             source = {
-                key: hash_inline_files(key, item) if files and isinstance(key, str) else item
+                key: self._media(key, item)[0] if files and isinstance(key, str) else item
                 for key, item in source.items()
                 if self.capture_content or not (isinstance(key, str) and is_content_key(key))
             }
         return source
 
+    def _media(self, key: str, value: Any) -> tuple[Any, int]:
+        if not may_inline_files(key, value):
+            return value, 0
+        size = utf8_size(value, MAX_INLINE_FILE_TEXT)
+        if size > MAX_INLINE_FILE_TEXT or size > self.media_remaining:
+            return truncated_marker(size), 0
+        self.media_remaining -= size
+        receipts: dict[str, tuple[str, int]] = {}
+        memo = self.hold.uploads.memo if self.hold and self.hold.uploads else None
+        result = hash_inline_files_counted(key, value, memo, receipts, self.trace_id)
+        if receipts:
+            self.held.digests[key] = receipts
+        return result
+
     def _held_value(self, key: str, item: Any) -> tuple[bool, Any]:
         """One of the span's own attribute values held whole for export to upload, when it may
         be, within the held-value budget: text or bytes over the cap, replaced in the copy by the
         receiver's marker until export places it, or a recorded message within the cap holding a
-        large inline file, whose copy carries the files as their digest (what the queue is
-        charged, as before). ``(True, copy)`` for a held value, ``(False, value)`` for one copied
-        as before, its large inline files already shrunk to their digest. A value not held only
-        for the budget or a receiver without the upload route is listed in ``held.cut`` (once per
-        file for a message), so export counts it as not uploaded."""
+        binary or large textual inline file, whose copy carries the files as digests (what
+        the queue is charged). ``(True, copy)`` for a held value, ``(False, value)`` for one
+        copied with its binary and large textual inline files already shrunk to digests.
+        Values not held because of the budget or a receiver without the upload route are
+        listed in ``held.cut`` (once per file), so export counts them as not uploaded."""
         hold = self.hold
         assert hold is not None
-        digested, files = hash_inline_files_counted(key, item)
+        digested, files = self._media(key, item)
         if isinstance(item, str):
             try:
                 over = over_utf8(item, hold.value_bytes)
             except UnicodeEncodeError:
                 return False, digested
             if not over and not files:
-                return False, item
+                return False, digested
+            if not isinstance(digested, str):
+                return False, digested
             value: str | bytes = str.__str__(item)
             # What is not uploaded if the value is not held: each file, and the value itself
             # when it is still over the cap with its files as their digest.
@@ -357,7 +389,7 @@ class _ValueBudget:
         """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key. A
         span's ``own`` values over the cap are held whole for upload when they may be."""
         holding = own and self.hold is not None
-        source = self.permitted(values, files=not holding)
+        source = self.permitted(values, files=own and not holding)
         if not isinstance(source, Mapping):
             return self.value(source)
         copied: dict[str, Any] = {}
@@ -366,7 +398,7 @@ class _ValueBudget:
                 raise ValueError("Telemetry mapping keys must be strings.")
             listed = f"{prefix}{key}"
             if holding:
-                # Not held, a value's large inline files shrink to their digest, as before.
+                # Unheld binary and large textual inline files shrink to digests.
                 kept, item = self._held_value(key, item)
                 if kept:
                     copied[self.value(key, 1)] = item
@@ -440,15 +472,24 @@ class _SpanSnapshot(ReadableSpan):
         hold: Hold | None = None,
     ) -> None:
         budget = _ValueBudget(
-            capture_content, record_bytes=record_bytes, value_bytes=value_bytes, hold=hold
+            capture_content,
+            record_bytes=record_bytes,
+            value_bytes=value_bytes,
+            hold=hold,
+            trace_id=format(span.context.trace_id, "032x") if span.context else "",
         )
+        staged = hold.uploads.take(span) if hold and hold.uploads else None
+        if staged is not None:
+            budget.held.files = staged.files
+            budget.held.size = staged.size
+            staged._released = True
         try:
             self._copy(span, budget, capture_content)
         except BaseException:
             # The values held for a copy that failed are no one's.
             budget.held.release()
             raise
-        if budget.held.values or budget.held.cut:
+        if budget.held.values or budget.held.cut or budget.held.files:
             attach_held(self, budget.held)
 
     def _copy(self, span: ReadableSpan, budget: _ValueBudget, capture_content: bool) -> None:
@@ -599,7 +640,7 @@ def snapshot_pending_span(span: ReadableSpan, capture_content: bool = True) -> P
     copied = budget.value(
         {
             key: value
-            for key, value in budget.permitted(_live_attributes(span)).items()
+            for key, value in budget.permitted(_live_attributes(span), files=True).items()
             if isinstance(key, str)
             and not _placeholder_omits(key)
             and _value_bytes(value, MAX_PLACEHOLDER_VALUE_BYTES) <= MAX_PLACEHOLDER_VALUE_BYTES

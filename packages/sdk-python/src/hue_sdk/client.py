@@ -26,7 +26,8 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
-from ._blobs import MAX_BLOB_BYTES, Uploads
+from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Uploads
+from ._inline_files import is_media_name
 from ._limits import AdvertisedLimits, cut_utf8
 from ._otel_compat import encode_logs
 from ._provider_tools import (
@@ -404,12 +405,14 @@ class HueSpan:
         data: bytes | bytearray | memoryview | str | None = None,
         byte_size: int | None = None,
         name: str | None = None,
+        upload: bool = False,
     ) -> None:
         """Add a ``hue.file`` event for a file the work read, received or produced.
 
         ``role`` is ``input`` (given to the agent), ``attachment`` (from a tool or message) or
-        ``output`` (produced by the agent). ``data`` is hashed and measured locally and never
-        exported; a ``str`` is hashed as UTF-8. The event carries ``hue.file.sha256``,
+        ``output`` (produced by the agent). ``data`` is hashed and measured locally;
+        ``upload=True`` also stores its bytes when content capture and a project key are enabled.
+        A ``str`` is hashed as UTF-8. The event carries ``hue.file.sha256``,
         ``hue.file.role``, ``hue.file.media_type``, ``hue.file.size`` when known and, when
         content is captured, ``hue.file.name``. An invalid record is omitted and counted; an
         invalid name alone is omitted and counted while the rest is recorded.
@@ -417,7 +420,7 @@ class HueSpan:
         if not self._client._active:
             return
         self._client._instrument(
-            lambda: self._record_file(role, media_type, sha256, data, byte_size, name)
+            lambda: self._record_file(role, media_type, sha256, data, byte_size, name, upload)
         )
 
     def _record_file(
@@ -428,6 +431,7 @@ class HueSpan:
         data: bytes | bytearray | memoryview | str | None,
         byte_size: int | None,
         name: str | None,
+        upload: bool,
     ) -> None:
         # Nothing to attach to: report once, before hashing or validating anything.
         if not self.otel_span.is_recording():
@@ -436,6 +440,8 @@ class HueSpan:
             raise ValueError("Invalid file role.")
         if not _is_text_label(media_type):
             raise ValueError("Invalid media type.")
+        content: bytes | None = None
+        uploads = self._client._uploads
         digest = sha256.lower() if isinstance(sha256, str) else sha256
         size = byte_size
         if data is not None:
@@ -449,7 +455,13 @@ class HueSpan:
                 content = bytes(data)
             else:
                 raise ValueError("File data must be bytes or a string.")
-            computed = hashlib.sha256(content).hexdigest()
+            computed = (
+                uploads.memo.digest(
+                    content, format(self.otel_span.get_span_context().trace_id, "032x")
+                )[0]
+                if upload and uploads
+                else hashlib.sha256(content).hexdigest()
+            )
             # A caller-supplied digest or size must describe the same bytes.
             if (digest is not None and digest != computed) or (
                 size is not None and size != len(content)
@@ -470,9 +482,22 @@ class HueSpan:
         if size is not None:
             attributes["hue.file.size"] = size
         if self._client.capture_content and name is not None:
-            if _is_text_label(name):
+            if is_media_name(name):
                 attributes["hue.file.name"] = name
             else:
+                self._client._record_issue()
+        if upload and uploads is not None:
+            if content is None:
+                self._client._record_issue()
+            elif not uploads.stage(
+                self.otel_span,
+                ExplicitFile(
+                    content,
+                    (digest, len(content)),
+                    media_type,
+                    name if is_media_name(name) else None,
+                ),
+            ):
                 self._client._record_issue()
         self.otel_span.add_event("hue.file", attributes)
 
@@ -1282,6 +1307,8 @@ class Hue:
                     except Exception:
                         self._shutdown_result = False
                     finally:
+                        if self._uploads is not None:
+                            self._uploads.close()
                         self._shutdown_done.set()
 
                 try:

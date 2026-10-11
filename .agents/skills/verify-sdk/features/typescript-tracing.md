@@ -49,3 +49,13 @@ Preconditions:
 - The drive imports `dist/`, so rebuild after editing `src/`.
 - `tests/sdk.test.ts` takes 46 s whole because one case waits out a 30 s Retry-After. Always use `-t`.
 - The stub acknowledges everything. Rejection and partial-success paths need the test receivers in `tests/`, not the stub.
+
+## Recorded media and file uploads
+
+- `ts-media` covers the shared `tests/fixtures/media-parts/cases.json` corpus across `gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`, including OpenAI content arrays. Compare both successful uploads and failed uploads with each fixture's exact messages and ordered compact JSON strings in `hue.blobs`. Hash the decoded bytes, not their base64 spelling. Declared `text/plain` non-data content such as `YWJj` stays raw UTF-8. An invalid declared MIME type falls back to a valid data URL MIME type, then the binary/text default.
+- Binary parts export part-level `sha256` and `size` at every size. Successful text uploads over 64 KiB retain a UTF-8-safe 16 KiB prefix and a content-field blob entry. Failed text uploads retain the digest and size without an entry.
+- Names accept Unicode, must be nonempty, contain at most 256 characters and have no control characters. Invalid source names stay in the message but do not enter blob metadata. Remote URLs, file IDs and S3 locations stay unchanged and cause no fetch.
+- `ts-file-upload` covers `recordFile`: the existing `hue.file` event stays present, `upload` defaults to `false`, and supplied data is limited to 25 MiB. With `upload: true`, a successful upload adds `event:hue.file:<sha256>` to the same span. Digest-only records do not upload.
+- Verify duplicate media is reserved once per trace, failed uploads add no entries, and `captureContent: false` and setup credentials cause no upload requests. Whole string attributes retain their separate 1,000,000,000-byte upload limit.
+
+Use a loopback receiver that implements blob reservation, byte upload and completion for the success path, then refuse reservation or upload for the fallback path. The generic `stub-hue.py` returns 404 for blobs and proves only fallback. Repeat the helper upload and privacy checks from an installed npm tarball and inspect the decoded OTLP payload and received bytes.

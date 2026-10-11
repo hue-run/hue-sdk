@@ -9,7 +9,12 @@ from typing import Any
 
 import pytest
 
-from hue_sdk._inline_files import INLINE_FILE_LIMIT, _file_bytes, hash_inline_files
+from hue_sdk._inline_files import (
+    INLINE_FILE_LIMIT,
+    _file_bytes,
+    hash_inline_files,
+    is_text_media_type,
+)
 
 # The TypeScript suite reads the same file; each digest is of the bytes the case was built from.
 # A checkout without the TypeScript fixtures skips these tests rather than failing to collect;
@@ -48,7 +53,30 @@ def test_inline_file_digest_matches_the_shared_fixture(case: dict[str, Any]) -> 
     message = {"role": "user", "content": [part]} if file else {"role": "user", "parts": [part]}
     value = json.dumps([message])
     result = hash_inline_files("ai.prompt.messages" if file else "gen_ai.input.messages", value)
+    mime = part.get("mime_type", part.get("mediaType", ""))
+    if is_text_media_type(mime) and not part[case["key"]].startswith("data:"):
+        text = part[case["key"]]
+        data = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace").encode()
+        if len(data) <= INLINE_FILE_LIMIT:
+            assert result is value
+        else:
+            [exported] = json.loads(result)
+            assert (exported["content"] if file else exported["parts"])[0] == {
+                **case["part"],
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            }
+        return
     if case["expected"] is None:
+        if part[case["key"]].startswith("data:application/octet-stream"):
+            [exported] = json.loads(result)
+            data = _file_bytes(part[case["key"]])
+            assert exported["parts"][0] == {
+                **case["part"],
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            }
+            return
         assert result is value
         return
     [exported] = json.loads(result)

@@ -1,6 +1,6 @@
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
-import type { Attributes } from "@opentelemetry/api";
+import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import {
   createOtlpNetworkExportDelegate,
@@ -39,6 +39,7 @@ import {
   offloadAttributes,
   uploadBudgetMillis,
   type OffloadCollector,
+  type MediaAttachment,
   type OffloadTally,
   type UploadContext,
 } from "./blobs.js";
@@ -57,7 +58,8 @@ import {
   PLACEHOLDERS_HEADER,
   withoutPlaceholderMarkers,
 } from "./live-spans.js";
-import { estimateRecordBytes } from "./safety.js";
+import { estimateRecordBytes, spanSource } from "./safety.js";
+import { MediaDigestMemo, isMediaName } from "./inline-files.js";
 import { snapshotLog, snapshotSpan, type DigestedMessage } from "./snapshot.js";
 import {
   DROPPED_RECORDS_KEY,
@@ -107,6 +109,7 @@ interface ExportSink {
   receiverLimits(): ReceiverLimits;
   adoptLimits(headers: IncomingHttpHeaders): void;
   offloadsValues(): boolean;
+  mediaAttachments(record: RecordValue, redacted: ReadableSpan): MediaAttachment[];
   offloadSpan(
     span: ReadableSpan,
     collector: OffloadCollector,
@@ -235,6 +238,17 @@ export class HueTransport {
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
   private heldBytes = 0;
   private held = new WeakMap<RecordValue, number>();
+  private mediaMemo = new MediaDigestMemo();
+  // Context identity also matches safe API wrappers to the provider's ended span. Abandoned
+  // spans retain no span objects, and share the 2048-span / 128 MiB holding bounds.
+  private media = new Map<string, MediaAttachment[]>();
+  private mediaOwners = new Map<string, { source: WeakRef<ApiSpan>; token: object }>();
+  private mediaTimer?: ReturnType<typeof setInterval>;
+  private mediaFinalizer = new FinalizationRegistry<{ identity: string; token: object }>(
+    ({ identity, token }) => {
+      if (this.mediaOwners.get(identity)?.token === token) this.releaseMediaIdentity(identity);
+    },
+  );
   private uploaded = 0;
   private uploadFallbacks = 0;
 
@@ -310,14 +324,22 @@ export class HueTransport {
         if (this.live.delete(span) && !this.live.size) this.stopLiveTimer();
         let admitted: ReadableSpan | undefined;
         try {
-          if (!(span.spanContext().traceFlags & 1)) return;
+          if (!(span.spanContext().traceFlags & 1)) {
+            this.releaseMedia(span);
+            return;
+          }
           const queued = this.enqueue("traces", span);
-          if (!queued) return;
+          if (!queued) {
+            this.releaseMedia(span);
+            return;
+          }
           admitted = queued as ReadableSpan;
+          this.protectMedia(admitted);
           this.countEnded(admitted);
           spans.onEnd(admitted);
         } catch {
           if (admitted) this.finish("traces", [admitted]);
+          else this.releaseMedia(span);
           this.issue(
             "traces",
             "invalid",
@@ -408,6 +430,7 @@ export class HueTransport {
               this.options.captureContent,
               valueUnits,
               hold,
+              this.mediaMemo,
             )
           : snapshotLog(
               record as ReadableLogRecord,
@@ -468,7 +491,11 @@ export class HueTransport {
       this.live.delete(span);
       try {
         // Ended without reaching onEnd: a wrapping processor filtered it, so no real span follows.
-        if (!this.liveSpans || span.ended || !this.batchSpans) continue;
+        if (span.ended) {
+          this.releaseMedia(span);
+          continue;
+        }
+        if (!this.liveSpans || !this.batchSpans) continue;
         const { record, markers } = pendingPlaceholder(span);
         const admitted = this.enqueue("traces", record, true) as ReadableSpan | undefined;
         if (!admitted) continue;
@@ -536,6 +563,7 @@ export class HueTransport {
   /** @internal Exporter callback: releases queued records after an export attempt settles. */
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
+      this.releaseMedia(record);
       const pending = signal === "traces" ? this.spans : this.logs;
       this.pendingBytes -= pending.get(record as ReadableSpan & ReadableLogRecord) ?? 0;
       pending.delete(record as ReadableSpan & ReadableLogRecord);
@@ -547,7 +575,141 @@ export class HueTransport {
     }
   }
 
-  /** @internal Whether spans' values over the inline limit are uploaded: content is captured and
+  /** @internal The same bounded digest memo is used by explicit and inline media. */
+  digestMedia(bytes: Uint8Array, traceId: string) {
+    return this.mediaMemo.bytes(bytes, traceId);
+  }
+
+  /** @internal Retain a defensive copy within the existing held-value budget. */
+  stageMedia(span: ApiSpan, file: MediaAttachment): boolean {
+    if (this.closed || !this.offloadsValues()) return true;
+    if (!this.holdsValues()) {
+      this.uploadFallbacks++;
+      this.issue(
+        "traces",
+        "warning",
+        1,
+        "File bytes could not be uploaded while the upload service was unavailable; their hue.file metadata was recorded",
+        undefined,
+        [span.spanContext().traceId],
+      );
+      return false;
+    }
+    const identity = this.mediaIdentity(span)!;
+    this.sweepMedia();
+    const files = this.media.get(identity) ?? [];
+    if (
+      files.length >= 64 ||
+      (!this.media.has(identity) && this.media.size >= 2048) ||
+      this.heldBytes + file.bytes.byteLength > MAX_HELD_BLOB_BYTES
+    ) {
+      this.uploadFallbacks++;
+      this.issue(
+        "traces",
+        "warning",
+        1,
+        "File bytes did not fit the SDK's upload budget; their hue.file metadata was recorded",
+        undefined,
+        [span.spanContext().traceId],
+      );
+      return false;
+    }
+    const bytes = Uint8Array.from(file.bytes);
+    files.push({ ...file, bytes });
+    this.media.set(identity, files);
+    if (!this.mediaOwners.has(identity)) {
+      const source = spanSource(span);
+      const token = {};
+      this.mediaOwners.set(identity, { source: new WeakRef(source), token });
+      this.mediaFinalizer.register(source, { identity, token }, token);
+      if (!this.mediaTimer) {
+        this.mediaTimer = setInterval(() => this.sweepMedia(), LIVE_SPAN_INTERVAL_MILLIS);
+        this.mediaTimer.unref();
+      }
+    }
+    this.heldBytes += bytes.byteLength;
+    return true;
+  }
+
+  private mediaIdentity(record: object): string | undefined {
+    if (!("spanContext" in record) || typeof record.spanContext !== "function") return undefined;
+    const { traceId, spanId } = record.spanContext();
+    return `${traceId}:${spanId}`;
+  }
+
+  private releaseMedia(record: object): void {
+    const identity = this.mediaIdentity(record);
+    if (!identity) return;
+    this.releaseMediaIdentity(identity);
+  }
+
+  private protectMedia(record: object): void {
+    const identity = this.mediaIdentity(record);
+    if (!identity) return;
+    const owner = this.mediaOwners.get(identity);
+    if (owner) this.mediaFinalizer.unregister(owner.token);
+    this.mediaOwners.delete(identity);
+    if (!this.mediaOwners.size) {
+      clearInterval(this.mediaTimer);
+      this.mediaTimer = undefined;
+    }
+  }
+
+  private releaseMediaIdentity(identity: string): void {
+    const owner = this.mediaOwners.get(identity);
+    if (owner) this.mediaFinalizer.unregister(owner.token);
+    this.mediaOwners.delete(identity);
+    if (!this.mediaOwners.size) {
+      clearInterval(this.mediaTimer);
+      this.mediaTimer = undefined;
+    }
+    const files = this.media.get(identity);
+    if (!files) return;
+    for (const file of files) this.heldBytes -= file.bytes.byteLength;
+    this.media.delete(identity);
+  }
+
+  private sweepMedia(): void {
+    for (const [identity, owner] of this.mediaOwners) {
+      try {
+        const source = owner.source.deref();
+        if (
+          !source ||
+          (source as ApiSpan & { ended?: boolean }).ended === true ||
+          source.isRecording?.() === false
+        )
+          this.releaseMediaIdentity(identity);
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  /** @internal Only events that survive redaction authorize their staged upload. */
+  mediaAttachments(record: RecordValue, redacted: ReadableSpan): MediaAttachment[] {
+    const identity = this.mediaIdentity(record);
+    return (identity ? (this.media.get(identity) ?? []) : []).flatMap((file) => {
+      const event = redacted.events.find(
+        (event) =>
+          event.name === "hue.file" &&
+          event.attributes?.["hue.file.sha256"] === file.digest.sha256 &&
+          event.attributes?.["hue.file.size"] === file.digest.size &&
+          event.attributes?.["hue.file.media_type"] === file.contentType,
+      );
+      if (!event) return [];
+      const name = event.attributes?.["hue.file.name"];
+      return [
+        {
+          bytes: file.bytes,
+          digest: file.digest,
+          contentType: file.contentType,
+          ...(isMediaName(name) ? { name } : {}),
+        },
+      ];
+    });
+  }
+
+  /** @internal Whether spans' content and media may be uploaded: content is captured and
    * the key is a project key (setup credentials send metadata only). A value that then cannot be
    * uploaded is cut, reported and counted. */
   offloadsValues(): boolean {
@@ -558,7 +720,7 @@ export class HueTransport {
     );
   }
 
-  /** @internal Whether values over the inline limit are worth holding whole for upload now: they
+  /** @internal Whether content and media are worth holding whole for upload now: they
    * are uploaded, and the receiver has not shown it lacks the upload route. */
   holdsValues(): boolean {
     return this.offloadsValues() && this.uploader?.available() === true;
@@ -587,6 +749,7 @@ export class HueTransport {
         valueBytes,
         upload,
         tally,
+        memo: this.mediaMemo,
       });
       return { ...span, attributes: attributes as Attributes };
     } catch {
@@ -598,6 +761,7 @@ export class HueTransport {
           valueBytes,
           tally,
           traceId,
+          this.mediaMemo,
         ) as Attributes,
       };
     }
@@ -873,6 +1037,10 @@ export class HueTransport {
           this.spanProcessor.shutdown(),
           this.logRecordProcessor.shutdown(),
         ]);
+        await Promise.allSettled([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+        this.uploader?.close();
+        for (const identity of this.media.keys()) this.releaseMediaIdentity(identity);
+        this.mediaMemo.clear();
       }
     })();
     return this.shutdownPromise;
@@ -1143,11 +1311,14 @@ class ReportingExporter<T extends RecordValue> {
             ? { candidates: [], cut: [] }
             : undefined;
         const redacted = this.redact(record, cache, offload);
+        if (offload)
+          offload.attachments = this.transport.mediaAttachments(record, redacted as ReadableSpan);
         placed.push({
           record,
           ...(markers ? { markers } : {}),
           redacted:
-            offload && (offload.candidates.length || offload.cut.length)
+            offload &&
+            (offload.candidates.length || offload.cut.length || offload.attachments?.length)
               ? (this.transport.offloadSpan(
                   redacted as ReadableSpan,
                   offload,

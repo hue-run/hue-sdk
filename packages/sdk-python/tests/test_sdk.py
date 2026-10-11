@@ -476,7 +476,7 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
             span.record_file(
                 role="output", media_type="application/pdf", sha256=pdf, byte_size=2048
             )
-            # A str is hashed as UTF-8; a blank name is omitted (and counted when captured).
+            # A str is hashed as UTF-8; a one-code-point space is a valid name.
             span.record_file(role="attachment", media_type="text/plain", data=body, name=" ")
             # Each of these is omitted and counted; the block keeps running.
             span.record_file(role="draft", media_type="text/plain", data=body)
@@ -485,7 +485,7 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
             span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=-1)
             span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=2**63)
             span.record_file(role="input", media_type="", sha256=digest)
-        assert hue.export_status.instrumentation_failures == (7 if capture_content else 6)
+        assert hue.export_status.instrumentation_failures == 6
         hue.force_flush()
     (request,) = receiver.spans()
     files = [
@@ -512,6 +512,7 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
             "hue.file.role": "attachment",
             "hue.file.media_type": "text/plain",
             "hue.file.size": len(body),
+            **({"hue.file.name": " "} if capture_content else {}),
         },
     ]
     telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))
@@ -1198,7 +1199,12 @@ def test_large_inline_files_in_messages_export_as_their_digest(receiver):
             "sha256": document_digest,
             "size": len(document),
         },
-        {"type": "blob", "modality": "text", "content": "c21hbGw="},
+        {
+            "type": "blob",
+            "modality": "text",
+            "sha256": hashlib.sha256(b"small").hexdigest(),
+            "size": 5,
+        },
     ]
     (prompt,) = json.loads(values["ai.prompt.messages"].string_value)
     assert prompt["content"] == [

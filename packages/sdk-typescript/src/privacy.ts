@@ -5,7 +5,7 @@ import { resourceFromAttributes, type Resource } from "@opentelemetry/resources"
 import type { HueOptions } from "./types.js";
 import { MAX_CONTENT_BYTES, MAX_RECORD_NODES, REDACTION_CONTEXT_UNITS } from "./config.js";
 import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions.js";
-import { hashInlineFiles, INLINE_FILE_LIMIT, isMessageKey } from "./inline-files.js";
+import { hashInlineFiles, mayInlineFiles } from "./inline-files.js";
 import { truncateUtf8 } from "./safety.js";
 import type { OffloadCollector } from "./blobs.js";
 import type { DigestedMessage } from "./snapshot.js";
@@ -129,7 +129,7 @@ interface RedactionBudget {
   valueBytes: number;
   /** The record's value strings its queue cut when it was admitted. */
   cut?: ReadonlySet<string>;
-  /** The span's own messages whose large inline files its queue shrank to their digest. */
+  /** The span's own messages whose inline media its queue shrank to their digest. */
   digested?: ReadonlyMap<string, DigestedMessage>;
   /** Where a span's own values over the cap are left whole for upload, when they may be. */
   offload?: OffloadCollector;
@@ -141,7 +141,7 @@ export interface RedactionLimits {
   valueBytes?: number;
   /** The record's value strings cut when it was queued. */
   cut?: ReadonlySet<string>;
-  /** The span's own messages whose large inline files were shrunk to their digest when it was
+  /** The span's own messages whose inline media were shrunk to their digest when it was
    * queued, with how many files each: reported as not uploaded when values may be. */
   digested?: ReadonlyMap<string, DigestedMessage> | undefined;
   /**
@@ -191,22 +191,13 @@ function redactedText(value: string, path: string, options: HueOptions, cap: num
   return result;
 }
 
-/** Whether a recorded message's text may inline a file over the inline file limit. */
-function mayInlineFiles(key: string, text: string): boolean {
-  return (
-    isMessageKey(key) &&
-    text.length * 3 > INLINE_FILE_LIMIT &&
-    (text.includes('"blob"') || text.includes('"file"'))
-  );
-}
-
 /** Marks a value the upload step does not place. */
 const NOT_HELD: unique symbol = Symbol("not held");
 
 /**
  * One of a span's own attribute values, when its values may be uploaded: text through the
  * credential scrub and the redactor, whole, and collected when it is over the cap or may inline
- * a large file; bytes over the cap collected as they are. {@link NOT_HELD} for any other value,
+ * media; bytes over the cap collected as they are. {@link NOT_HELD} for any other value,
  * and for text the queue cut when the record was admitted, which is never the whole value.
  */
 function offloadValue(
@@ -225,7 +216,7 @@ function offloadValue(
     return value;
   }
   if (typeof value !== "string") return NOT_HELD;
-  // Each large inline file the queue shrank to its digest is reported as not uploaded; what is
+  // Each inline media part the queue shrank to its digest is reported as not uploaded; what is
   // left of the message is placed like any other value, and reported too if it is cut.
   const digested = budget.digested?.get(key);
   const files = digested?.text === value ? digested.files : 0;

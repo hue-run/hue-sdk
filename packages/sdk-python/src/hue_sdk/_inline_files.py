@@ -1,4 +1,4 @@
-"""Large inline files in recorded messages, exported as their digest.
+"""Binary and large textual inline files in recorded messages, exported as digests.
 
 Mirrors the TypeScript SDK's ``inline-files.ts`` so both SDKs export the same part shape.
 """
@@ -10,18 +10,22 @@ import binascii
 import hashlib
 import json
 import re
+import sys
+from collections import OrderedDict
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 from ._limits import MAX_REQUEST_BYTES
 
-# Inline file content larger than this many UTF-8 bytes is exported as its digest instead.
+# Textual file content over this decoded byte limit is exported as a digest; binary always is.
 INLINE_FILE_LIMIT = 64 * 1024
 # Admission runs on the application thread, so the JSON parsed there is bounded. Eight requests'
 # worth matches the TypeScript SDK's default queue budget; a longer message is dropped as before.
 MAX_INLINE_FILE_TEXT = 8 * MAX_REQUEST_BYTES
+INLINE_FILE_TEXT_PER_RECORD = 2 * MAX_INLINE_FILE_TEXT
 
-# Message attributes whose JSON can inline files: GenAI blob parts and AI SDK 6 file parts.
+# Message attributes whose JSON can contain inline media parts.
 _MESSAGE_KEYS = frozenset({"gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"})
 # Strict base64: alphabet characters only, padded to a multiple of four.
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
@@ -30,6 +34,20 @@ _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
 _DATA_URL = re.compile(r"data:([^,]*),")
 _HEX = frozenset("0123456789abcdefABCDEF")
 _MAX_DEPTH = 256
+_MEDIA_MARKERS = (
+    "blob",
+    "file",
+    "image",
+    "input_audio",
+    "media",
+    "inlineData",
+    "inline_data",
+    "document",
+    "\\u",
+)
+_CONTENT_TYPE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9!#$&^_.+-]+(?: *;[ -~]*)?\Z"
+)
 
 
 def utf8_size(value: str, limit: int) -> int:
@@ -89,11 +107,12 @@ class InlineFile:
 
 
 def inline_file(content: str) -> InlineFile:
-    """The file's own bytes, whatever its media type.
+    """Decode content without a declared media type or provider encoding contract.
 
     A data: URL is decoded by its own encoding (base64 with ``;base64``, percent-escapes
     otherwise), content in the base64 alphabet is decoded, and anything else, such as a text
     file's own text, is UTF-8. A data: URL whose data does not decode is taken as UTF-8 too.
+    ``media_bytes`` handles declared textual content and provider-specific base64 fields.
     """
     content = _well_formed(content)
     match = _DATA_URL.match(content)
@@ -118,93 +137,180 @@ def _file_bytes(content: str) -> bytes:
     return inline_file(content).data
 
 
-def content_key(part: dict[str, Any]) -> str | None:
-    """The key holding a part's inline content: GenAI ``blob`` parts and AI SDK 6 ``file`` parts."""
-    kind = part.get("type")
-    return "content" if kind == "blob" else "data" if kind == "file" else None
-
-
-class _Hash:
-    def __init__(self) -> None:
-        self.changed = False
-        # The files replaced by their digest.
-        self.files = 0
-
-    def node(self, value: Any, depth: int = 0) -> Any:
-        if depth > _MAX_DEPTH:
-            raise ValueError("Message exceeds its nesting limit.")
-        if isinstance(value, list):
-            return [self.node(item, depth + 1) for item in value]
-        if not isinstance(value, dict):
-            return value
-        key = content_key(value)
-        inline = value.get(key) if key is not None else None
-        if key is not None and isinstance(inline, str):
-            data = _file_bytes(inline)
-            if len(data) > INLINE_FILE_LIMIT:
-                self.changed = True
-                self.files += 1
-                rest = {name: item for name, item in value.items() if name != key}
-                return {**rest, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
-        return {name: self.node(item, depth + 1) for name, item in value.items()}
-
-
-def hash_inline_files(key: str, value: Any) -> Any:
-    """Replace inline files longer than ``INLINE_FILE_LIMIT`` in a recorded message attribute.
-
-    Each such part keeps its other fields and gains ``sha256`` and ``size``, so a span that inlines
-    a large file exports the file's identity instead of being dropped for its size. Other
-    attributes, shorter messages, messages longer than ``MAX_INLINE_FILE_TEXT`` and values that
-    are not JSON are returned unchanged.
-    """
-    return hash_inline_files_counted(key, value)[0]
-
-
-def hash_inline_files_counted(key: str, value: Any) -> tuple[Any, int]:
-    """``hash_inline_files``, and how many files it replaced by their digest."""
-    if (
-        key not in _MESSAGE_KEYS
-        or not isinstance(value, str)
-        or not INLINE_FILE_LIMIT < utf8_size(value, MAX_INLINE_FILE_TEXT) <= MAX_INLINE_FILE_TEXT
-        or ('"blob"' not in value and '"file"' not in value)
-    ):
-        return value, 0
-    try:
-        parsed = json.loads(value)
-        hashed = _Hash()
-        result = hashed.node(parsed)
-    except (ValueError, RecursionError):
-        # Not JSON, or nested too deeply to inspect: admission decides the value's fate as before.
-        return value, 0
-    if not hashed.changed:
-        return value, 0
-    return json.dumps(result, ensure_ascii=False, separators=(",", ":")), hashed.files
-
-
 def is_message_key(key: str) -> bool:
-    """Whether an attribute is one of the recorded message attributes that can inline files."""
     return key in _MESSAGE_KEYS
 
 
 def may_inline_files(key: str, value: Any) -> bool:
-    """Whether a recorded message's text may inline a file over ``INLINE_FILE_LIMIT``."""
     return (
-        key in _MESSAGE_KEYS
+        is_message_key(key)
         and isinstance(value, str)
-        and len(value) * 4 > INLINE_FILE_LIMIT
-        and ('"blob"' in value or '"file"' in value)
+        and any(marker in value for marker in _MEDIA_MARKERS)
     )
+
+
+def is_media_name(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 256
+        and not any(
+            ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F or 0xD800 <= ord(char) <= 0xDFFF
+            for char in value
+        )
+    )
+
+
+def is_media_content_type(value: Any) -> bool:
+    return (
+        isinstance(value, str) and 3 <= len(value) <= 255 and bool(_CONTENT_TYPE.fullmatch(value))
+    )
+
+
+def is_text_media_type(content_type: str) -> bool:
+    mime = content_type.split(";", 1)[0].strip().lower()
+    return (
+        mime.startswith("text/")
+        or mime.endswith(("+json", "+xml"))
+        or mime
+        in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/x-javascript",
+            "application/x-www-form-urlencoded",
+            "application/yaml",
+            "application/x-yaml",
+        }
+    )
+
+
+_AUDIO_TYPES = {
+    "wav": "audio/wav",
+    "mp3": "audio/mpeg",
+    "flac": "audio/flac",
+    "ogg": "audio/ogg",
+    "opus": "audio/opus",
+    "aac": "audio/aac",
+    "m4a": "audio/mp4",
+    "webm": "audio/webm",
+    "pcm16": "audio/pcm",
+}
+_DOCUMENT_TYPES = {
+    "pdf": "application/pdf",
+    "csv": "text/csv",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "html": "text/html",
+    "txt": "text/plain",
+    "md": "text/markdown",
+}
+_REMOTE = re.compile(r"(?:https?:|s3:|gs:|file:|blob:)", re.IGNORECASE)
 
 
 @dataclass
 class InlineFilePart:
-    """One inline file part of a parsed message: the part, the key holding its inline content,
-    that content, and the content's place as a JSON Pointer (RFC 6901) into the message."""
+    """The provider part and the exact content leaf, with both JSON pointers."""
 
     part: dict[str, Any]
+    owner: dict[str, Any]
     key: str
     content: str
     pointer: str
+    part_pointer: str
+    content_type: str | None = None
+    name: str | None = None
+    base64: bool = False
+
+
+def _object(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _string(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def content_path(part: dict[str, Any], pointer: str = "") -> InlineFilePart | None:
+    """Describe a supported provider part, its content leaf, and wire metadata."""
+    owner = part
+    key: str | None
+    path = ""
+    mime = _string(
+        part.get("mime_type", part.get("mimeType", part.get("mediaType", part.get("media_type"))))
+    )
+    name = _string(part.get("name", part.get("filename")))
+    encoded = url_only = False
+    source = _object(part.get("source"))
+    inline = _object(part.get("inlineData", part.get("inline_data")))
+    audio = _object(part.get("input_audio"))
+    chat_file = _object(part.get("file"))
+    bedrock = _object(part.get("image", part.get("document")))
+    kind = part.get("type")
+    if inline is not None:
+        owner, key = inline, "data"
+        path = "/inlineData" if "inlineData" in part else "/inline_data"
+        mime = _string(inline.get("mimeType", inline.get("mime_type")))
+        encoded, name = True, None
+    elif audio is not None and kind == "input_audio":
+        owner, key, path = audio, "data", "/input_audio"
+        mime, encoded, name = _AUDIO_TYPES.get(_string(audio.get("format")) or ""), True, None
+    elif chat_file is not None and kind == "file":
+        owner, key, path = chat_file, "file_data", "/file"
+        name, url_only = _string(chat_file.get("filename")), True
+    elif bedrock is not None and _object(bedrock.get("source")) is not None:
+        owner = bedrock["source"]
+        key = "bytes"
+        image = isinstance(part.get("image"), dict)
+        path = "/image/source" if image else "/document/source"
+        fmt = _string(bedrock.get("format")) or ""
+        mime = (
+            f"image/{fmt}"
+            if image and fmt in ("png", "jpeg", "gif", "webp")
+            else _DOCUMENT_TYPES.get(fmt)
+        )
+        name, encoded = None if image else _string(bedrock.get("name")), True
+    elif source is not None and kind in ("image", "document"):
+        if source.get("type") != "base64":
+            return None
+        owner, key, path = source, "data", "/source"
+        mime, name, encoded = _string(source.get("media_type")), _string(part.get("title")), True
+    elif kind == "image_url":
+        image_url = _object(part.get("image_url"))
+        owner = image_url if image_url is not None else part
+        key, path = ("url", "/image_url") if image_url is not None else ("image_url", "")
+        mime, name, url_only = None, None, True
+    elif kind == "input_image":
+        key, mime, name, url_only = "image_url", None, None, True
+    elif kind == "input_file":
+        key, mime, name, url_only = "file_data", None, _string(part.get("filename")), True
+    elif kind == "image":
+        key, name = "image", None
+    elif kind == "media":
+        key, name = "data", None
+    else:
+        key = "content" if kind == "blob" else "data" if kind == "file" else None
+    if key is None:
+        return None
+    content = owner.get(key)
+    if not isinstance(content, str) or _REMOTE.match(content):
+        return None
+    if url_only and not content.startswith("data:"):
+        return None
+    if encoded and (len(content) % 4 or not _BASE64.fullmatch(content)):
+        return None
+    return InlineFilePart(
+        part,
+        owner,
+        key,
+        content,
+        f"{pointer}{path}/{key}",
+        pointer,
+        mime,
+        name if is_media_name(name) else None,
+        encoded,
+    )
 
 
 def _pointer_segment(segment: str) -> str:
@@ -212,10 +318,7 @@ def _pointer_segment(segment: str) -> str:
 
 
 def large_inline_file_parts(value: Any) -> list[InlineFilePart]:
-    """The inline file parts of a parsed message whose content text is longer than
-    ``INLINE_FILE_LIMIT`` UTF-8 bytes, in document order. The caller decodes each and keeps the
-    ones whose file bytes are over the limit; the parts are the parsed value's own objects, so
-    the caller may replace their content in place."""
+    """Recognized inline media in document order; the caller applies the decoded text limit."""
     found: list[InlineFilePart] = []
 
     def visit(node: Any, pointer: str, depth: int) -> None:
@@ -224,35 +327,117 @@ def large_inline_file_parts(value: Any) -> list[InlineFilePart]:
         if isinstance(node, list):
             for index, item in enumerate(node):
                 visit(item, f"{pointer}/{index}", depth + 1)
-            return
-        if not isinstance(node, dict):
-            return
-        key = content_key(node)
-        inline = node.get(key) if key is not None else None
-        # Decoding only shrinks the text, so text of at most the limit holds no file over it.
-        if (
-            key is not None
-            and isinstance(inline, str)
-            and len(inline) * 4 > INLINE_FILE_LIMIT
-            and utf8_size(inline, INLINE_FILE_LIMIT) > INLINE_FILE_LIMIT
-        ):
-            found.append(InlineFilePart(node, key, inline, f"{pointer}/{key}"))
-            return
-        for name, item in node.items():
-            visit(item, f"{pointer}/{_pointer_segment(str(name))}", depth + 1)
+        elif isinstance(node, dict):
+            file = content_path(node, pointer)
+            if file is not None:
+                found.append(file)
+            else:
+                for name, item in node.items():
+                    visit(item, f"{pointer}/{_pointer_segment(str(name))}", depth + 1)
 
     visit(value, "", 0)
     return found
 
 
-def digest_part(part: dict[str, Any], key: str, sha256: str, size: int) -> None:
-    """The digest an inline file part is exported as when its bytes are not uploaded: its other
-    fields with the file's SHA-256 and byte size, as ``hash_inline_files`` writes it."""
-    part.pop(key, None)
-    part["sha256"] = sha256
-    part["size"] = size
+def media_bytes(file: InlineFilePart) -> InlineFile:
+    if file.base64:
+        return InlineFile(base64.b64decode(file.content, validate=True), True, None)
+    if (
+        is_media_content_type(file.content_type)
+        and is_text_media_type(file.content_type or "")
+        and not file.content.startswith("data:")
+    ):
+        return InlineFile(_well_formed(file.content).encode("utf-8"), False, None)
+    return inline_file(file.content)
+
+
+def media_content_type(file: InlineFilePart, decoded: InlineFile) -> str:
+    for mime in (file.content_type, decoded.url_media_type):
+        if is_media_content_type(mime):
+            assert mime is not None
+            return mime
+    return "application/octet-stream" if decoded.decoded else "text/plain; charset=utf-8"
+
+
+class MediaDigestMemo:
+    """Bounded byte-identity cache shared by admission, export and explicit files."""
+
+    def __init__(self, limit: int = 4 * 1024 * 1024, capacity: int = 256) -> None:
+        self._lock = Lock()
+        self._entries: OrderedDict[tuple[str, bytes], tuple[str, int]] = OrderedDict()
+        self._size = 0
+        self.limit, self.capacity = limit, capacity
+
+    def digest(self, data: bytes, trace_id: str = "") -> tuple[str, int]:
+        identity = (trace_id, data)
+        with self._lock:
+            known = self._entries.get(identity)
+            if known is not None:
+                return known
+            digest = hashlib.sha256(data).hexdigest(), len(data)
+            charge = sys.getsizeof(data) + sys.getsizeof(trace_id) + sys.getsizeof(identity)
+            if charge <= self.limit:
+                while self._entries and (
+                    len(self._entries) >= self.capacity or self._size + charge > self.limit
+                ):
+                    key, _ = self._entries.popitem(last=False)
+                    self._size -= sys.getsizeof(key[1]) + sys.getsizeof(key[0]) + sys.getsizeof(key)
+                self._entries[identity] = digest
+                self._size += charge
+            return digest
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._size = 0
+
+
+def digest_part(file: InlineFilePart, sha256: str, size: int) -> None:
+    file.owner.pop(file.key, None)
+    file.part["sha256"] = sha256
+    file.part["size"] = size
+
+
+def hash_inline_files(key: str, value: Any, memo: MediaDigestMemo | None = None) -> Any:
+    return hash_inline_files_counted(key, value, memo)[0]
+
+
+def hash_inline_files_counted(
+    key: str,
+    value: Any,
+    memo: MediaDigestMemo | None = None,
+    receipts: dict[str, tuple[str, int]] | None = None,
+    trace_id: str = "",
+) -> tuple[Any, int]:
+    if (
+        not may_inline_files(key, value)
+        or utf8_size(value, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
+    ):
+        return value, 0
+    try:
+        parsed = json.loads(value)
+        files = large_inline_file_parts(parsed)
+        count = 0
+        for file in files:
+            decoded = media_bytes(file)
+            if (
+                is_text_media_type(media_content_type(file, decoded))
+                and len(decoded.data) <= INLINE_FILE_LIMIT
+            ):
+                continue
+            digest = (
+                memo.digest(decoded.data, trace_id)
+                if memo
+                else (hashlib.sha256(decoded.data).hexdigest(), len(decoded.data))
+            )
+            if receipts is not None:
+                receipts[file.pointer] = digest
+            digest_part(file, *digest)
+            count += 1
+        return (dumps_message(parsed), count) if count else (value, 0)
+    except (ValueError, RecursionError):
+        return value, 0
 
 
 def dumps_message(value: Any) -> str:
-    """A parsed message as the SDK writes it back: compact JSON, as ``hash_inline_files``."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))

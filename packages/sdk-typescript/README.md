@@ -205,26 +205,30 @@ while the callback result is returned unchanged.
 ## Files
 
 Record a file the work read, received or produced with `hue.recordFile`. It adds a `hue.file`
-event to the active span (or the span of an explicit context passed second), keyed by the file's
-SHA-256, so a trace can be linked to the same file elsewhere without exporting its bytes:
+event to the active span, or to the span of an explicit context passed second. The event identifies
+the file by SHA-256. Pass `upload: true` to store its bytes in Hue as well:
 
 ```ts
 import { readFile } from "node:fs/promises";
 
 await hue.withSpan("review contract", async () => {
   const pdf = await readFile("contract.pdf");
-  hue.recordFile({ role: "input", mediaType: "application/pdf", data: pdf, name: "contract.pdf" });
-  // ...
+  hue.recordFile({
+    role: "input", mediaType: "application/pdf", data: pdf, name: "contract.pdf", upload: true,
+  });
 });
 ```
 
-`data` up to 25 MiB is hashed and measured locally and never exported; larger data is omitted and
-counted as an instrumentation failure, so pass `sha256` (and `byteSize`) instead when you already
-have them. The event carries `hue.file.sha256`, `hue.file.role` (`input`,
-`attachment` or `output`), `hue.file.media_type` and `hue.file.size`. It is metadata, so it is
-recorded in both capture modes, while `hue.file.name` is recorded only when `captureContent` is
-true. An invalid record, or one without an active span, is omitted and counted as an
-instrumentation failure.
+`upload` defaults to `false`, which hashes and measures `data` locally without exporting bytes.
+`data` is limited to 25 MiB. Larger data is omitted and counted as an instrumentation failure;
+pass `sha256` and `byteSize` when you already have them. Upload requires supplied bytes, content
+capture and an ordinary project key. It runs during export and adds a `hue.blobs` entry to the
+same span, keyed `event:hue.file:<sha256>`, while preserving the event.
+
+The event carries `hue.file.sha256`, `hue.file.role` (`input`, `attachment` or `output`),
+`hue.file.media_type` and `hue.file.size` in both capture modes. `hue.file.name` requires
+`captureContent: true`. Names must be nonempty, at most 256 characters and contain no control
+characters. Invalid records and records without an active span count as instrumentation failures.
 
 ## Vercel AI SDK 6
 
@@ -369,26 +373,30 @@ definition list. The digest is the same in both SDKs and does not change when a 
 rotates. Only definitions another integration recorded can be summarized: `hueTelemetry(hue)` with
 `captureContent: false` records none, whereas an application whose AI SDK integration records
 inputs and exports through Hue's attached processors gets the summary.
-Recorded messages can inline files: GenAI `blob` parts in `gen_ai.input.messages` /
-`gen_ai.output.messages` (what the AI SDK 7 adapter records for a file part) and AI SDK 6 `file`
-parts in `ai.prompt.messages`. A file is measured by its own bytes whatever its media type (base64
-content and `;base64` `data:` URLs decoded, other `data:` URLs percent-decoded, anything else as
-UTF-8 text). When a span's own message attribute inlines a file larger than 64 KiB, export uploads
-the file's bytes to Hue under the part's media type (`mime_type` or `mediaType`, else its `data:`
-URL's) and keeps the first 16 KiB of the part's `content`/`data` in place, listing the file in the
-span's `hue.blobs` as `<attribute>#<JSON pointer>`, for example
-`gen_ai.input.messages#/0/parts/1/content` (see
-[Values over the inline limit](#values-over-the-inline-limit)). A file that is not uploaded, and a
-large inline file in a log record or a span event, keeps the earlier behavior: the part's
-`content`/`data` is replaced by the file's `sha256` and `size`, keeping its other fields such as
-`type`, `mime_type` and `mediaType`, when the record is queued (or, for a span's own messages, at
-export). Smaller inline files are exported as recorded. The digest matches `hue.recordFile`'s
-`hue.file.sha256` for the same bytes, so a file can be recognized wherever it appears. It is bounded:
-a message attribute longer than 8 MiB of text is not inspected for files, and is uploaded or cut
-like any value over the cap. Base64 grows a file by a third, so that ceiling is an inline file of
-about 6 MiB. The same message text is inspected once per record, and a record inspects at most
-16 MiB of message text in all. With `captureContent: false` the messages, which export removes,
-are neither inspected nor charged.
+Recorded messages can contain images, documents and audio. Hue inspects
+`gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`, including `parts`
+and OpenAI `content` arrays. Supported byte shapes include GenAI `blob`, AI SDK `file` and
+`image`, OpenAI Chat and Responses image, file and audio parts, Anthropic base64 sources, Gemini
+`inlineData` and `inline_data`, Vertex `media`, and Bedrock image and document sources.
+Remote URLs, provider file IDs and S3 references stay unchanged. Hue never fetches them.
+
+Binary media uploads from a span's own message attributes at every size. The byte field is
+removed and the part carries `sha256` and `size`; the span's `hue.blobs` entry points to the part,
+for example `gen_ai.input.messages#/0/parts/1`. Text media over 64 KiB of decoded bytes uploads
+with a UTF-8-safe 16 KiB prefix in its content field. Its entry points to that field, for example
+`gen_ai.input.messages#/0/parts/1/content`. Smaller text stays inline. Hue reads both these forms
+and earlier binary prefixes. If upload fails, the part keeps its digest with no blob entry.
+Log records and span events use the digest without uploading eligible media.
+
+Entries use the recorded media type and, when valid, the filename, name or title. A valid name
+is nonempty, at most 256 characters and contains no control characters. Invalid names are omitted
+from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
+base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
+declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
+matches `hue.recordFile`'s digest for the same bytes. Inspection is bounded to 8 MiB of
+text per message attribute and 16 MiB per record. Longer attributes use the ordinary value limit.
+With `captureContent: false`, messages are removed without inspection or uploads. See
+[Values over the inline limit](#values-over-the-inline-limit).
 
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
@@ -528,8 +536,7 @@ dropped event and link counts, rather than being dropped whole.
 
 Hue keeps a value inline up to its value limit (1 MiB unless the receiver advertises another in
 `Hue-Max-Value-Bytes`). A span's own string attribute larger than that (helper content such as
-`input.value`, `output.value` and tool results, or another instrumentation's attribute), and an
-inline file over 64 KiB in a span's own recorded messages, is uploaded to Hue apart from the span,
+`input.value`, `output.value` and tool results, or another instrumentation's attribute), and eligible media in a span's own recorded messages, are uploaded to Hue apart from the span,
 up to Hue's upload limit of 1,000,000,000 bytes:
 
 1. Export computes the SHA-256 of the value's bytes (a string as UTF-8, a file as its own bytes)
@@ -541,8 +548,9 @@ up to Hue's upload limit of 1,000,000,000 bytes:
    with `allowInsecureHttp`), and
    the upload is confirmed with `POST /api/v1/otlp/blobs/complete`. A PUT the store answers with
    412 (the same value uploaded at the same time by another span) counts as stored.
-3. The span keeps the value's first 16 KiB in the attribute it replaced and lists the value in its
-   `hue.blobs` attribute, one compact JSON object per value:
+3. Whole string values and large text media keep a UTF-8-safe 16 KiB prefix. Binary media keeps
+   its digest on the part. The span lists stored values in `hue.blobs`, at most 64 compact JSON
+   strings with fields ordered `key`, `sha256`, `size`, `content_type` and optional `name`:
    `{"key":"output.value","sha256":"<64 hex>","size":5242880,"content_type":"application/json"}`.
    A whole value is listed under `hue.truncated` as well, since its inline text is a prefix.
 
@@ -565,7 +573,7 @@ asked again for 10 minutes, so an unavailable store or another OTLP receiver mee
 
 To upload a value whole, the queue holds it until export apart from `maxQueueBytes`, within a
 128 MiB budget of held values (a string charged two bytes a code unit); a recorded message holding
-an inline file over 64 KiB is held the same way. `maxQueueBytes` is still charged what the value
+eligible media is held the same way. `maxQueueBytes` is still charged what the value
 would cost cut (a message, its copy with the files as their digest), so one that cannot be
 uploaded is exported exactly as it was before. A value the budget cannot hold, or one queued while
 the receiver is known to lack the upload route, is cut (its files digested) when it is queued, as
@@ -574,8 +582,9 @@ is held while nothing else is. While values can be uploaded, helpers encode cont
 upload limit and 1,048,576 values, rather than cutting it to the value limit as they record it.
 
 Nothing is uploaded with `captureContent: false` or a setup credential (`hue_setup_…`), nor from
-log records (Hue does not read a log record's uploaded values yet), span events, links, resources
-or in-progress placeholders: those values are cut as before. `redact` and the credential scrub of
+log records (Hue does not read a log record's uploaded values yet), links, resources
+or in-progress placeholders. Span events upload only through explicit `recordFile({ upload: true, ... })`;
+other event values are cut as before. `redact` and the credential scrub of
 tool definitions and recorded requests run on the whole value before it is hashed, so a value they
 rewrite is uploaded as rewritten.
 

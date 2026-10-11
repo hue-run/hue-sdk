@@ -96,8 +96,16 @@ class SafeSpan implements Span {
   }
 }
 
+const spanSources = new WeakMap<Span, Span>();
+
 export function safeSpan(source: Span, failed: () => void): Span {
-  return new SafeSpan(source, failed);
+  const span = new SafeSpan(source, failed);
+  spanSources.set(span, spanSource(source));
+  return span;
+}
+
+export function spanSource(span: Span): Span {
+  return spanSources.get(span) ?? span;
 }
 
 /** The bounds `encodeContent` enforces while it copies a value. */
