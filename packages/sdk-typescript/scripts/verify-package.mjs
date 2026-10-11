@@ -238,20 +238,15 @@ run(
   ],
   minimal,
 );
-// Without the optional zod peer, hue eval names it and the install command instead of the
-// runtime's resolution error, and exits with the configuration error code.
-const missingPeer = spawnSync(
+// zod is a dependency, so `npx @hue-run/sdk eval` needs no second package.
+const evalHelp = spawnSync(
   process.execPath,
   [join(minimal, "node_modules/@hue-run/sdk/dist/setup/cli.js"), "eval", "--help"],
   { cwd: minimal, encoding: "utf8" },
 );
-if (
-  missingPeer.status !== 2 ||
-  !missingPeer.stderr.includes("hue eval needs zod, a peer dependency of @hue-run/sdk") ||
-  !missingPeer.stderr.includes(`npm install "zod@${pkg.peerDependencies.zod}"`)
-)
+if (evalHelp.status !== 0 || !evalHelp.stdout.includes("Usage: hue eval"))
   throw new Error(
-    `hue eval without zod did not name the missing peer (status ${missingPeer.status}): ${missingPeer.stderr.slice(0, 500)}`,
+    `hue eval --help failed in a consumer with only @hue-run/sdk (status ${evalHelp.status}): ${evalHelp.stderr.slice(0, 500)}`,
   );
 // CommonJS applications on the Node floor (22.12+) load the ESM build through require(esm):
 // every entry point resolves through its "default" condition, and the build must stay free of
@@ -715,7 +710,7 @@ await writeFile(
   JSON.stringify({
     private: true,
     type: "module",
-    dependencies: { "@hue-run/sdk": packageSpec, zod: pkg.devDependencies.zod },
+    dependencies: { "@hue-run/sdk": packageSpec },
   }),
 );
 run(
@@ -743,6 +738,72 @@ run(
   ],
   evaluation,
 );
+// AI SDK 6 accepts zod 3, so the packed SDK must install and import its evaluation entry beside it.
+const ai6Zod3Evaluation = join(destination, "ai6-zod3-evaluation-consumer");
+await mkdir(ai6Zod3Evaluation);
+await writeFile(
+  join(ai6Zod3Evaluation, "package.json"),
+  JSON.stringify({
+    private: true,
+    type: "module",
+    dependencies: {
+      "@hue-run/sdk": packageSpec,
+      "@types/bun": pkg.devDependencies["@types/bun"],
+      "@types/node": pkg.devDependencies["@types/node"],
+      ai: "6.0.116",
+      typescript: pkg.devDependencies.typescript,
+      zod: "3.25.76",
+    },
+  }),
+);
+run(
+  "npm",
+  ["install", "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund"],
+  ai6Zod3Evaluation,
+);
+run(
+  process.execPath,
+  [
+    "--input-type=module",
+    "-e",
+    `
+  import { strict as assert } from "node:assert";
+  const sdk = await import("@hue-run/sdk");
+  assert.equal(typeof sdk.createHue, "function");
+  const { builtins, scoreLocally } = await import("@hue-run/sdk/evals");
+  const score = await scoreLocally(
+    { definition: builtins.jsonSchema({ type: "string" }) },
+    { inputs: {}, output: "text", hasOutput: true, hasExpected: false },
+  );
+  assert.equal(score.state, "error");
+  assert.equal(score.error.type, "SchemaValidatorUnavailable");
+`,
+  ],
+  ai6Zod3Evaluation,
+);
+await mkdir(join(ai6Zod3Evaluation, "tests"));
+const ai6Zod3Tsconfig = JSON.parse(await readFile(join(source, "tsconfig.json"), "utf8"));
+ai6Zod3Tsconfig.compilerOptions.lib = ["esnext"];
+await writeFile(join(ai6Zod3Evaluation, "tsconfig.json"), JSON.stringify(ai6Zod3Tsconfig, null, 2));
+await writeFile(
+  join(ai6Zod3Evaluation, "tests", "evals-types.ts"),
+  `
+import { createHue } from "@hue-run/sdk";
+import { attemptBaselineV2 } from "@hue-run/sdk/evals";
+import { z } from "zod/v4";
+
+type AttemptBaseline = z.infer<typeof attemptBaselineV2>;
+
+const parsed = attemptBaselineV2.safeParse({});
+if (parsed.success) {
+  const baseline: AttemptBaseline = parsed.data;
+  void baseline;
+}
+const hue = createHue({ enabled: false, captureContent: false });
+void hue;
+`,
+);
+run("npm", ["exec", "--", "tsc", "--project", "tsconfig.json", "--noEmit"], ai6Zod3Evaluation);
 // Core imports must coexist with an existing AI SDK 6 application without
 // forcing an upgrade. Its AI SDK telemetry adapter remains explicitly v7-only.
 const ai6 = join(destination, "ai6-core-consumer");

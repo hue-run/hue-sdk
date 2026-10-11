@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
@@ -65,7 +65,7 @@ import {
   type VerdictComparison,
 } from "../evals/verdicts.js";
 import type { JsonValue } from "../types.js";
-import { envFileArgument, envFileOptions } from "./env-file.js";
+import { DEFAULT_ENV_FILE, envFileArgument, envFileOptions } from "./env-file.js";
 
 /** Adapter contract: the module's `default` or `runMyAgent` export. */
 export type EvalAdapter = (
@@ -145,13 +145,15 @@ Modes:
                                   environment-files:v1 and input:pdf for world cases with files
 
 Connection:
-  --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first
+  --env-file <path>               Load a dotenv file (HUE_API_KEY, HUE_BASE_URL) first;
+                                  ./.env.hue loads by default when HUE_API_KEY is not
+                                  set. Variables already set in the environment win
   --env-path <path>               Same as --env-file
   --origin <url>                  Hue origin (default: HUE_BASE_URL or https://app.hue.run)
 
 Output and limits:
   --name <run name>               Run name (default: <agent key> @ <revision>, hashes shortened)
-  --baseline <experiment id|url>  Compare verdicts with a previous experiment
+  --baseline <run id|url>         Compare verdicts with a previous run
   --json                          Print one JSON document on stdout; progress goes to stderr
   --content                       Capture telemetry content (the default)
   --no-content                    Omit telemetry inputs, outputs and messages
@@ -159,6 +161,8 @@ Output and limits:
                                   explanations (stored by default; --worker always stores); with
                                   --content the case span still carries the output
   --save-version                  Freeze an unsaved eval-set version before running
+  --check                         One-shot: check the key, selection and agent, print what the
+                                  run would do and exit without creating a run or a world
   --checkpoint-dir <path>         Private checkpoint directory (default: .hue/eval/<agent-key>)
   --concurrency <n>               Cases in flight, 1-100 (default: 1)
   --trace-not-accepted <policy>   A case whose telemetry Hue did not accept in time: fail_case
@@ -229,6 +233,7 @@ function parse(argv: string[]) {
         "no-output": { type: "boolean", default: false },
         "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
+        check: { type: "boolean", default: false },
         "checkpoint-dir": { type: "string" },
         concurrency: { type: "string" },
         timeout: { type: "string" },
@@ -1149,21 +1154,33 @@ function parseMode(value: string | undefined): RunMode {
   throw new UsageError("--mode must be auto, direct or simulation");
 }
 
-/** Direct when nothing pins a simulated world: not a Scenario, and no case of the version does. */
-async function detectDirect(
+/** The selection's cases, and whether the run is direct: when `--mode` leaves it open, direct
+ * means nothing pins a simulated world, not a Scenario and no case of the version. A simulation
+ * run cannot execute a case that pins no world, so a selection mixing both kinds is refused. */
+async function inspectSelection(
   client: EvaluationClient,
   pins: ScenarioPins,
   mode: RunMode,
-): Promise<boolean> {
-  if (mode !== "auto") return mode === "direct";
-  if (pins.scenarioId || pins.environmentVersionId) return false;
+): Promise<{ direct: boolean; cases: number; worldCases: number; refusal?: string }> {
+  let cases = 0;
+  let worldCases = 0;
   let after: string | undefined;
   do {
     const page = await client.listCases(pins.datasetVersionId, { after });
-    if (page.items.some((item) => item.environmentVersionId)) return false;
+    cases += page.items.length;
+    worldCases += page.items.filter((item) => item.environmentVersionId).length;
     after = page.nextCursor ?? undefined;
   } while (after);
-  return true;
+  const direct =
+    mode === "auto"
+      ? !pins.scenarioId && !pins.environmentVersionId && worldCases === 0
+      : mode === "direct";
+  const answerOnly = cases - worldCases;
+  const refusal =
+    !direct && answerOnly > 0
+      ? `${answerOnly} of the ${cases} ${cases === 1 ? "case pins" : "cases pin"} no world, so a simulation run would fail ${answerOnly === 1 ? "it" : "them"} before the agent starts. Put the answer-only cases in their own eval set${mode === "simulation" ? ", or drop --mode simulation" : ""}.`
+      : undefined;
+  return { direct, cases, worldCases, ...(refusal ? { refusal } : {}) };
 }
 
 function toJson(
@@ -1266,7 +1283,9 @@ async function reportVerdicts(
   // The wait returns its partial state on abort rather than throwing, so Ctrl+C here must not
   // fall through to a baseline read and a verdict table that nobody asked to finish.
   if (signal.aborted) {
-    process.stderr.write("Interrupted.\n");
+    process.stderr.write(
+      `Interrupted. The cases already finished and Hue is still checking them; open ${run.runUrl} instead of rerunning.\n`,
+    );
     return 130;
   }
   let baseline: { experimentId: string; comparison: VerdictComparison } | undefined;
@@ -1296,7 +1315,7 @@ async function reportVerdicts(
 
 function parseBaseline(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  const parsed = parseScenarioSelector(value, ["experiments"]);
+  const parsed = parseScenarioSelector(value, ["runs", "experiments"]);
   if (parsed.kind !== "id")
     throw new UsageError("--baseline must be an experiment ID or its Hue URL");
   return parsed.id;
@@ -1320,7 +1339,14 @@ async function runOnce(
   const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
   const baselineId = parseBaseline(values.baseline);
   const mode = parseMode(values.mode);
+  integer("wait", values.wait, 300, 0, 86_400);
   const pins = await resolveSelection(client, values);
+  const selection = await inspectSelection(client, pins, mode);
+  if (values.check) return checkRun(client, values, pins, selection, agent, output);
+  if (selection.refusal) {
+    output.error(selection.refusal);
+    return 1;
+  }
   if (!pins.saved) {
     if (!values["save-version"]) {
       output.error(
@@ -1333,7 +1359,7 @@ async function runOnce(
   }
   const runName = values.name ?? defaultRunName(agent);
   const project = await client.checkConnection();
-  if (await detectDirect(client, pins, mode))
+  if (selection.direct)
     return runDirect(
       {
         client,
@@ -1427,6 +1453,80 @@ async function runOnce(
   );
 }
 
+/**
+ * `--check`: everything a one-shot run resolves before it creates anything (the key's project,
+ * the selection, the case kind and the agent), printed with the command that would start it.
+ * Nothing is created, frozen or checkpointed.
+ */
+async function checkRun(
+  client: EvaluationClient,
+  values: ReturnType<typeof parse>["values"],
+  pins: ScenarioPins,
+  selection: Awaited<ReturnType<typeof inspectSelection>>,
+  agent: { key: string; revision: string },
+  output: Output,
+): Promise<number> {
+  const project = await client.checkConnection();
+  for (const id of pins.scorerVersionIds) {
+    const found = await client.getScorerVersion(id).then(
+      () => true,
+      (error: unknown) => {
+        if (error instanceof HueApiError && (error.status === 404 || error.status === 403))
+          return false;
+        throw error;
+      },
+    );
+    if (!found) {
+      output.error(`Evaluator version ${id} was not found in project "${project.name}".`);
+      return 1;
+    }
+  }
+  const { direct, cases, worldCases, refusal } = selection;
+  const unsaved = !pins.saved && !values["save-version"];
+  const check = {
+    ok: !unsaved && !refusal,
+    project: { id: project.id, name: project.name },
+    selection: {
+      kind: pins.scenarioId ? "case" : "eval_set",
+      name: pins.name,
+      datasetVersionId: pins.datasetVersionId,
+      saved: pins.saved,
+      cases,
+      evaluators: pins.scorerVersionIds.length,
+    },
+    mode: direct ? "direct" : "simulation",
+    worldCases: direct ? 0 : worldCases,
+    agent: { key: agent.key, revision: agent.revision, concurrency: values.concurrency ?? "1" },
+  };
+  if (values.json) process.stdout.write(`${JSON.stringify({ check })}\n`);
+  else {
+    output.log(`Project: ${project.name} (${project.id})`);
+    output.log(
+      `Selection: ${check.selection.kind === "case" ? "case" : "eval set"} "${pins.name}", ${cases} ${cases === 1 ? "case" : "cases"}, ${pins.scorerVersionIds.length} ${pins.scorerVersionIds.length === 1 ? "evaluator" : "evaluators"}`,
+    );
+    output.log(
+      direct
+        ? "Mode: direct; the agent answers without a simulated world or app mirrors"
+        : `Mode: simulation; ${worldCases} ${worldCases === 1 ? "case gets" : "cases get"} a fresh world, reached through the HUE_SIM_*_URL mirrors and HUE_WORLD_TOKEN`,
+    );
+    output.log(`Agent: ${agent.key} @ ${agent.revision}`);
+  }
+  if (refusal) {
+    output.error(refusal);
+    return 1;
+  }
+  if (unsaved) {
+    output.error(
+      `The ${pins.scenarioId ? "Scenario" : "eval set"} "${pins.name}" points at an unsaved version; add --save-version to freeze it when the run starts.`,
+    );
+    return 1;
+  }
+  output.log(
+    "Check passed. Nothing was created; run the same command without --check to start one run.",
+  );
+  return 0;
+}
+
 /** Resumable direct-run attempt: the created experiment is finished before a new one starts. */
 interface DirectAttempt {
   /** Digest of the selection: dataset version, scorer pins and experiment configuration. */
@@ -1486,7 +1586,9 @@ async function runDirect(
     });
     let attempt = await store.read<DirectAttempt>("active-attempt");
     if (attempt && attempt.stage !== "completed" && attempt.selectionDigest !== selectionDigest)
-      throw new Error("Recover the unfinished direct run before running a changed selection");
+      throw new Error(
+        "Recover the unfinished direct run before running a changed selection: run the unchanged command again to finish it, or pass another --checkpoint-dir",
+      );
     if (!attempt || attempt.stage === "completed") {
       attempt = { selectionDigest, idempotencyKey: randomUUID(), stage: "preparing" };
       await store.write("active-attempt", attempt);
@@ -1504,7 +1606,7 @@ async function runDirect(
       await store.write("active-attempt", attempt);
     }
     experimentId = attempt.experimentId;
-    runUrl = new URL(`/experiments/${experimentId}`, connection.baseUrl).toString();
+    runUrl = new URL(`/runs/${experimentId}`, connection.baseUrl).toString();
     output.log(`Run: ${runUrl}`);
     output.log(`Experiment: ${experimentId}`);
     report = await runExperiment({
@@ -1519,6 +1621,7 @@ async function runDirect(
       traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
       onTelemetryNotAccepted: telemetry.report,
       concurrency: run.concurrency,
+      signal,
       scorers: [],
       deferUnboundLocalScorers: true,
       environmentEvidence: "when_pinned",
@@ -1605,7 +1708,7 @@ async function runWorker(
   client.onClaimed = (claim) => {
     current = claim;
     output.log(
-      `Claimed run ${claim.runId}: ${new URL(`/experiments/${claim.experimentId}`, connection.baseUrl).toString()}`,
+      `Claimed run ${claim.runId}: ${new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString()}`,
     );
   };
   const telemetry = telemetryReporter(output);
@@ -1701,7 +1804,7 @@ async function runWorker(
         if (signal.aborted) return;
         if (values.json)
           process.stdout.write(
-            `${JSON.stringify(toJson(verdicts, new URL(`/experiments/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
+            `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
           );
         else renderTable(verdicts, output);
       } catch (error) {
@@ -1749,8 +1852,10 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
   process.on("SIGTERM", interrupt);
   let hue: HueClient | undefined;
   let json = false;
+  let worker = false;
   try {
     const { values, positionals } = parse(argv);
+    worker = values.worker;
     if (values.content && values["no-content"])
       throw new UsageError("Choose either --content or --no-content");
     // A usage error before anything is prepared or created: no run is left to recover from it.
@@ -1781,6 +1886,10 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     } catch (error) {
       throw new UsageError((error as Error).message);
     }
+    // A key already in the environment keeps its own origin: the checkout's .env.hue is
+    // consulted only when it has to supply the key, so it cannot point an inherited key elsewhere.
+    if (envFile === undefined && !process.env.HUE_API_KEY && existsSync(DEFAULT_ENV_FILE))
+      envFile = DEFAULT_ENV_FILE;
     if (envFile) {
       try {
         process.loadEnvFile(resolve(envFile));
@@ -1793,7 +1902,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     const apiKey = process.env.HUE_API_KEY?.trim();
     if (!apiKey)
       throw new UsageError(
-        'HUE_API_KEY is required: a "Read and write" project key, set in the environment or an ignored --env-file',
+        'HUE_API_KEY is required: a "Read and write" project key, set in the environment, ./.env.hue or an ignored --env-file',
       );
     secrets.push(apiKey);
     const baseUrl = values.origin ?? process.env.HUE_BASE_URL?.trim() ?? "https://app.hue.run";
@@ -1811,6 +1920,7 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       throw new UsageError(
         "--no-output applies to one-shot runs; a run launched from Hue always stores its outputs",
       );
+    if (values.worker && values.check) throw new UsageError("--check applies to one-shot runs");
     if (!values.worker && values.capability?.length)
       throw new UsageError("--capability applies to --worker only");
     const loaded = adapterFile ? await loadAdapter(adapterFile) : undefined;
@@ -1846,7 +1956,11 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
       : await runOnce(values, connection, agents, agent, hue, output, controller.signal);
   } catch (error) {
     if (controller.signal.aborted || error instanceof TargetCancelledError) {
-      process.stderr.write("Interrupted.\n");
+      process.stderr.write(
+        worker
+          ? "Interrupted.\n"
+          : "Interrupted. The run stays open; run the same command again to resume it.\n",
+      );
       return 130;
     }
     if (error instanceof UsageError) {

@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v4";
 import { json, digest } from "./json.js";
 import type { JsonValue, ScorerDefinition } from "./types.js";
 

@@ -100,9 +100,10 @@ function fixture() {
   const traceIds = new Set<string>();
   /** Span ids Hue holds, by trace, as the receipt reports them. */
   const spanIds = new Map<string, Set<string>>();
-  /** Case ids whose next export batch (the one carrying the case's root span) is refused, as a
+  /** Case ids whose configured export attempts (carrying the case's root span) are refused, as a
    * collector refuses a batch: every span in it, this case's and any other's, does not land. */
-  const rejectedCases = new Set<string>();
+  const rejectedCases = new Map<string, { status: number; remaining: number }>();
+  let refusedBatches = 0;
   /** Signals whose next batch Hue accepts partially, rejecting one record without naming it. */
   const partialRejections = new Set<"traces" | "logs">();
   /** Cases whose spans Hue counts as rejected in every batch and never holds. */
@@ -205,8 +206,10 @@ function fixture() {
             .map(caseOf)
             .find((id) => id !== undefined && rejectedCases.has(id));
           if (rejected) {
-            rejectedCases.delete(rejected);
-            return new Response(null, { status: 500 });
+            const refusal = rejectedCases.get(rejected)!;
+            if (--refusal.remaining === 0) rejectedCases.delete(rejected);
+            refusedBatches++;
+            return new Response(null, { status: refusal.status, headers: { "Retry-After": "0" } });
           }
         }
         wire.push(JSON.stringify(value));
@@ -471,8 +474,10 @@ function fixture() {
     executions,
     failComplete: () => (completeFailures = 1),
     failTelemetry: () => (telemetryFailures = 1),
-    /** Refuses the next export batch carrying this case's root span. */
-    rejectCase: (caseId: string) => rejectedCases.add(caseId),
+    /** Refuses the configured number of batch attempts carrying this case's root span. */
+    rejectCase: (caseId: string, status = 401, attempts = 1) =>
+      rejectedCases.set(caseId, { status, remaining: attempts }),
+    refusedBatches: () => refusedBatches,
     /** Forgets one held span of the trace, as if a child span's batch had never landed. */
     forgetSpan: (traceId: string, spanId: string) => spanIds.get(traceId)?.delete(spanId),
     spansHeld: (traceId: string) => spanIds.get(traceId)?.size ?? 0,
@@ -1017,6 +1022,112 @@ describe("installed evaluation API and runner contract", () => {
       f.server.stop(true);
     }
   });
+  test("a failed HTTP 500 batch does not poison eight later concurrent executions on the same client", async () => {
+    const f = fixture();
+    f.cases.splice(
+      0,
+      2,
+      ...Array.from({ length: 8 }, (_, index) => ({
+        ...f.cases[0]!,
+        id: randomUUID(),
+        externalKey: `batch-${index}`,
+      })),
+    );
+    const exp = f.create();
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "concurrent-500",
+      captureContent: false,
+      liveSpans: false,
+      timeoutMillis: 1500,
+    });
+    // End all eight roots before any runner drain starts, so they share one refused batch.
+    const flush = hue.flush.bind(hue);
+    let flushCalls = 0;
+    let releaseFlush!: () => void;
+    const flushBarrier = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    hue.flush = async () => {
+      const call = ++flushCalls;
+      if (call === 8) releaseFlush();
+      if (call <= 8) await flushBarrier;
+      return flush();
+    };
+    let entered = 0;
+    let releaseTargets!: () => void;
+    const targetBarrier = new Promise<void>((resolve) => {
+      releaseTargets = resolve;
+    });
+    f.rejectCase(f.cases[0]!.id, 500, 6);
+    try {
+      const error = await runExperiment({
+        client: f.client,
+        hue,
+        experimentId: exp.id,
+        checkpointDirectory: await directory(),
+        concurrency: 8,
+        persistResultContent: true,
+        traceEvidence: { mode: "required" },
+        target: async () => {
+          if (++entered === 8) releaseTargets();
+          await targetBarrier;
+          return "synthetic output";
+        },
+      }).catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toHaveLength(8);
+      expect((error as AggregateError).errors.every((item) => item instanceof HueExportError)).toBe(
+        true,
+      );
+      expect(f.refusedBatches()).toBe(6);
+      expect(hue.transport.getReport()).toMatchObject({ failedSpans: 8, acceptedSpans: 0 });
+      const failedIssues = hue.transport.getIssues().filter((issue) => issue.count > 0);
+      expect(failedIssues).toEqual([
+        expect.objectContaining({ signal: "traces", kind: "failed", count: 8 }),
+      ]);
+      const failedTraceIds = failedIssues[0]!.traceIds!;
+      expect(new Set(failedTraceIds).size).toBe(8);
+      expect(failedTraceIds.every((id) => f.spansHeld(id) === 0)).toBe(true);
+      expect(f.requests.filter((request) => request.path.endsWith("/complete"))).toHaveLength(0);
+
+      const healthy = f.create();
+      await runExperiment({
+        client: f.client,
+        hue,
+        experimentId: healthy.id,
+        checkpointDirectory: await directory(),
+        concurrency: 8,
+        persistResultContent: true,
+        traceEvidence: { mode: "required" },
+        target: async () => "healthy output",
+      });
+      const completions = f.requests.filter((request) => request.path.endsWith("/complete"));
+      expect(completions).toHaveLength(8);
+      expect(
+        completions.every(
+          (request) =>
+            request.body.state === "succeeded" && request.body.traceEvidence === "required",
+        ),
+      ).toBe(true);
+      const executions = [...f.executions.values()].filter(
+        (execution) => execution.experimentId === healthy.id,
+      );
+      expect(executions).toHaveLength(8);
+      for (const execution of executions) {
+        expect(f.spansHeld(execution.traceExternalId!)).toBe(1);
+        expect(failedTraceIds).not.toContain(execution.traceExternalId!);
+      }
+      // History remains available, but the fresh execution windows and receipts decide success.
+      expect(hue.transport.getReport()).toMatchObject({ failedSpans: 8, acceptedSpans: 8 });
+      expect(hue.transport.getIssues().filter((issue) => issue.count > 0)).toEqual(failedIssues);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+  }, 15000);
+
   test("an export failure is attributed to the traces it concerned: the case beside it completes, and the failed case alone is refused on resume", async () => {
     const f = fixture();
     const exp = f.create();
