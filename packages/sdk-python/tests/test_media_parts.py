@@ -15,22 +15,69 @@ from threading import Event
 from typing import Any
 
 import pytest
+from opentelemetry._logs import LogRecord
+from opentelemetry.sdk._logs import ReadWriteLogRecord
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.trace import SpanContext, TraceFlags
-from test_blobs import KEY, attrs, blobs, client, message_with_image, sha256
+from opentelemetry.sdk.trace import Event as SpanEvent
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+from opentelemetry.trace import Link, SpanContext, TraceFlags
+from test_blobs import KEY, attrs, blobs, client, listed, message_with_image, sha256
 from test_blobs import hue_store as hue_store
 
 from hue_sdk import Hue
-from hue_sdk._blobs import BlobUploader
+from hue_sdk._blobs import BlobUploader, HeldValues, Uploads, held_of, held_size
 from hue_sdk._inline_files import (
+    INLINE_FILE_TEXT_PER_RECORD,
+    MAX_INLINE_FILE_TEXT,
     MediaDigestMemo,
     content_path,
     is_media_name,
     may_inline_files,
 )
+from hue_sdk._limits import cut_utf8
+from hue_sdk.snapshots import Hold, _ValueBudget, snapshot_log, snapshot_span
 
 ATTRIBUTE = "gen_ai.input.messages"
+
+
+def assert_image_digest(message: str, data: bytes) -> None:
+    part = json.loads(message)[0]["parts"][1]
+    assert part == {
+        "type": "blob",
+        "modality": "image",
+        "mime_type": "image/png",
+        "sha256": sha256(data),
+        "size": len(data),
+    }
+
+
+def external_span(**kwargs: Any) -> ReadableSpan:
+    return ReadableSpan(
+        name="external",
+        context=SpanContext(1, 2, False, TraceFlags(TraceFlags.SAMPLED)),
+        start_time=1,
+        end_time=2,
+        **kwargs,
+    )
+
+
+@pytest.fixture(scope="module")
+def oversized_message() -> str:
+    messages = json.loads(message_with_image(b"tiny"))
+    messages[0]["parts"][0]["content"] = "é" * (MAX_INLINE_FILE_TEXT // 2 + 128 * 1024)
+    value = json.dumps(messages, ensure_ascii=False)
+    assert len(value) < MAX_INLINE_FILE_TEXT < len(value.encode("utf-8"))
+    return value
+
+
+@pytest.fixture
+def uploads(hue_store):
+    value = Uploads(hue_store.url, {"Authorization": f"Bearer {KEY}"}, 2)
+    try:
+        yield value
+    finally:
+        value.close()
 
 
 def entries(record: Any) -> list[str]:
@@ -247,7 +294,8 @@ def test_disabled_capture_and_setup_never_upload(hue_store, capture, credential)
 
 
 def test_only_own_message_attributes_upload(hue_store):
-    message = message_with_image(b"private nested provider media")
+    data = b"private nested provider media"
+    message = message_with_image(data)
     provider = TracerProvider(
         resource=Resource.create({ATTRIBUTE: message}), shutdown_on_exit=False
     )
@@ -263,10 +311,13 @@ def test_only_own_message_attributes_upload(hue_store):
             assert hue.force_flush()
         record = hue_store.span("ownership")
         assert attrs(record)["custom.message"].string_value == message
-        assert attrs(record.events[0])[ATTRIBUTE].string_value == message
-        assert attrs(record.links[0])[ATTRIBUTE].string_value == message
+        assert_image_digest(attrs(record.events[0])[ATTRIBUTE].string_value, data)
+        assert_image_digest(attrs(record.links[0])[ATTRIBUTE].string_value, data)
         assert len(hue_store.logs) == 2
-        assert hue_store.reservations == []
+        (log,) = [log for log in hue_store.logs if log.body.string_value == message]
+        assert_image_digest(attrs(log)[ATTRIBUTE].string_value, data)
+        assert entries(record) == [] and all(entries(log) == [] for log in hue_store.logs)
+        assert hue_store.reservations == hue_store.puts == hue_store.completions == []
     finally:
         provider.shutdown()
 
@@ -376,9 +427,6 @@ def test_content_path_describes_nested_provider_metadata():
 
 
 def test_media_inspection_budget_allows_two_six_mib_message_attributes():
-    from hue_sdk._records import is_truncated_marker
-    from hue_sdk.snapshots import _ValueBudget
-
     message = json.dumps([{"parts": [{"type": "blob", "content": "YQ==" * (1536 * 1024)}]}])
     budget = _ValueBudget()
     copied = budget.permitted(
@@ -387,4 +435,333 @@ def test_media_inspection_budget_allows_two_six_mib_message_attributes():
     )
     for key in (ATTRIBUTE, "gen_ai.output.messages"):
         assert json.loads(copied[key])[0]["parts"][0]["size"] > 64 * 1024
-    assert is_truncated_marker(copied["ai.prompt.messages"])
+    assert bool(copied["ai.prompt.messages"] is message)
+    assert budget.media_remaining == INLINE_FILE_TEXT_PER_RECORD - 2 * len(message.encode())
+
+
+@pytest.mark.parametrize("skip", ["value", "record"])
+def test_media_inspection_skip_preserves_original_and_state(uploads, oversized_message, skip):
+    message = oversized_message if skip == "value" else message_with_image(b"small")
+    budget = _ValueBudget(hold=Hold(uploads.held, 128, uploads=uploads), trace_id="1" * 32)
+    if skip == "record":
+        budget.media_remaining = 0
+    budget.held.digests[ATTRIBUTE] = {"/existing": (sha256(b"existing"), 8)}
+    uploads.memo.digest(b"existing", budget.trace_id)
+    receipts = {key: dict(value) for key, value in budget.held.digests.items()}
+    memo = list(uploads.memo._entries.items()), uploads.memo._size
+    allowance = budget.media_remaining
+    copied, files = budget._media(ATTRIBUTE, message)
+    assert bool(copied is message)
+    assert files == 0 and budget.media_remaining == allowance
+    assert budget.held.digests == receipts
+    assert (list(uploads.memo._entries.items()), uploads.memo._size) == memo
+
+
+@pytest.mark.parametrize("skip", ["value", "record"])
+def test_media_inspection_skip_holds_original_and_charges_size(oversized_message, skip):
+    message = oversized_message if skip == "value" else message_with_image(b"small")
+    held_budget = HeldValues()
+    budget = _ValueBudget(value_bytes=128, hold=Hold(held_budget, 128))
+    if skip == "record":
+        budget.media_remaining = 0
+    allowance = budget.media_remaining
+    try:
+        budget.copied_attributes({ATTRIBUTE: message}, own=True)
+        assert budget.held.values[ATTRIBUTE] is message
+        assert budget.held.size == held_budget.held == held_size(message)
+        assert budget.held.digests == {} and budget.held.cut == budget.truncated == []
+        assert budget.media_remaining == allowance
+    finally:
+        budget.held.release()
+    assert held_budget.held == 0
+
+
+@pytest.mark.parametrize("skip", ["value", "record"])
+@pytest.mark.parametrize("unavailable", ["inactive", "rejected"])
+def test_media_inspection_skip_cuts_once_when_hold_unavailable(
+    oversized_message, skip, unavailable
+):
+    message = oversized_message if skip == "value" else message_with_image(b"small")
+    held_budget = HeldValues(limit=128)
+    if unavailable == "rejected":
+        assert held_budget.reserve(128)
+    charged = held_budget.held
+    budget = _ValueBudget(
+        value_bytes=128, hold=Hold(held_budget, 128, active=unavailable != "inactive")
+    )
+    if skip == "record":
+        budget.media_remaining = 0
+    copied = budget.copied_attributes({ATTRIBUTE: message}, own=True)
+    assert copied[ATTRIBUTE] == cut_utf8(message, 128)
+    assert budget.truncated == budget.held.cut == [ATTRIBUTE]
+    assert budget.held.values == budget.held.digests == {} and budget.held.size == 0
+    assert held_budget.held == charged
+
+
+def test_oversized_media_uploads_whole_original_utf8(hue_store, oversized_message):
+    data = oversized_message.encode("utf-8")
+    digest = sha256(data)
+    with client(hue_store) as hue:
+        with hue.span("oversized") as span:
+            trace_id = span.trace_id
+            span.set_attribute(ATTRIBUTE, oversized_message)
+        assert hue.force_flush(timeout_millis=30_000)
+        assert hue.export_status.ok and hue.export_status.uploaded_values == 1
+        assert hue.export_status.upload_fallbacks == 0
+        assert hue._uploads.held.held == 0
+    assert hue_store.objects[f"{trace_id}/{digest}"] == (data, "application/json")
+    assert blobs(hue_store.span("oversized")) == [
+        {"key": ATTRIBUTE, "sha256": digest, "size": len(data), "content_type": "application/json"}
+    ]
+    assert len(hue_store.reservations) == len(hue_store.puts) == len(hue_store.completions) == 1
+    request = hue_store.reservations[0]
+    assert request["sha256"] == digest and request["byteSize"] == len(data)
+    assert hue_store.completions[0] == {"traceId": trace_id, "sha256": digest}
+    assert hue_store.puts[0]["status"] == 200 and hue_store.puts[0]["bytes"] == len(data)
+
+
+def test_oversized_media_refusal_acknowledges_one_fallback(hue_store, oversized_message):
+    hue_store.reserve = lambda _: (409, {}, True)
+    with client(hue_store) as hue:
+        with hue.span("refused oversized") as span:
+            span.set_attribute(ATTRIBUTE, oversized_message)
+        assert hue.force_flush(timeout_millis=30_000)
+        assert hue.export_status.ok and hue.export_status.upload_fallbacks == 1
+        assert hue.export_status.uploaded_values == 0
+        assert hue._uploads.held.held == 0
+    record = hue_store.span("refused oversized")
+    assert bool(attrs(record)[ATTRIBUTE].string_value == cut_utf8(oversized_message, 1024 * 1024))
+    assert listed(record) == [ATTRIBUTE] and entries(record) == []
+    assert len(hue_store.reservations) == 1
+    assert hue_store.puts == hue_store.completions == []
+
+
+@pytest.mark.parametrize("location", ["resource", "event", "link", "log"])
+def test_nested_media_digests_before_value_and_record_admission(
+    hue_store, uploads, monkeypatch, location
+):
+    import hue_sdk.snapshots as snapshots
+
+    data = b"nested admission" * 512
+    message = message_with_image(data)
+    assert len(message.encode()) > 4096
+    inspected = []
+    original = snapshots.hash_inline_files_counted
+
+    def inspect(key, value, memo=None, receipts=None, trace_id=""):
+        inspected.append((memo, receipts))
+        return original(key, value, memo, receipts, trace_id)
+
+    monkeypatch.setattr(snapshots, "hash_inline_files_counted", inspect)
+    options = {
+        "value_bytes": 512,
+        "record_bytes": 4096,
+        "hold": Hold(uploads.held, 512, uploads=uploads),
+    }
+    if location == "log":
+        copied = snapshot_log(
+            ReadWriteLogRecord(
+                LogRecord(body="body", attributes={ATTRIBUTE: message}), Resource({})
+            ),
+            **options,
+        )
+        value = copied.log_record.attributes[ATTRIBUTE]
+        assert "hue.truncated" not in copied.log_record.attributes
+        assert copied.dropped_attributes == 0
+    else:
+        context = SpanContext(1, 3, False, TraceFlags(TraceFlags.SAMPLED))
+        fields = {
+            "resource": {"resource": Resource({ATTRIBUTE: message})},
+            "event": {"events": (SpanEvent("provider.event", {ATTRIBUTE: message}, 1),)},
+            "link": {"links": (Link(context, {ATTRIBUTE: message}),)},
+        }
+        copied = snapshot_span(external_span(**fields[location]), **options)
+        assert copied.dropped_events == copied.dropped_links == 0
+        assert "hue.truncated" not in copied.attributes
+        if location == "resource":
+            value = copied.resource.attributes[ATTRIBUTE]
+        else:
+            items = copied.events if location == "event" else copied.links
+            assert len(items) == 1
+            value = items[0].attributes[ATTRIBUTE]
+    assert_image_digest(value, data)
+    assert inspected == [(None, None)]
+    assert held_of(copied) is None and uploads.held.held == 0
+    assert uploads.memo._entries == {} and uploads.memo._size == 0
+    assert "hue.blobs" not in (
+        copied.log_record.attributes if location == "log" else copied.attributes
+    )
+    assert hue_store.reservations == hue_store.puts == hue_store.completions == []
+
+
+def test_stateless_media_inspection_preserves_own_receipts_and_memo(uploads):
+    budget = _ValueBudget(hold=Hold(uploads.held, 1024, uploads=uploads), trace_id="1" * 32)
+    own = message_with_image(b"own bytes")
+    try:
+        budget.copied_attributes({ATTRIBUTE: own}, own=True)
+        uploads.memo.digest(b"older memo entry", budget.trace_id)
+        receipts = {key: dict(value) for key, value in budget.held.digests.items()}
+        memo = list(uploads.memo._entries.items()), uploads.memo._size
+        for data in (b"resource bytes", b"event bytes of another size", b"link"):
+            copied = budget.permitted({ATTRIBUTE: message_with_image(data)}, files=True)
+            assert_image_digest(copied[ATTRIBUTE], data)
+            assert budget.held.digests == receipts
+            assert (list(uploads.memo._entries.items()), uploads.memo._size) == memo
+    finally:
+        budget.held.release()
+
+
+def test_identical_nested_media_never_calls_upload_memo(uploads, monkeypatch):
+    import hue_sdk.snapshots as snapshots
+
+    message = message_with_image(b"same bytes")
+    budget = _ValueBudget(hold=Hold(uploads.held, 1024, uploads=uploads), trace_id="1" * 32)
+    try:
+        budget.copied_attributes({ATTRIBUTE: message}, own=True)
+        calls, inspected = [], []
+        original_digest = uploads.memo.digest
+        original_inspect = snapshots.hash_inline_files_counted
+
+        def digest(*args):
+            calls.append(args)
+            return original_digest(*args)
+
+        def inspect(key, value, memo=None, receipts=None, trace_id=""):
+            inspected.append((memo, receipts))
+            return original_inspect(key, value, memo, receipts, trace_id)
+
+        monkeypatch.setattr(uploads.memo, "digest", digest)
+        monkeypatch.setattr(snapshots, "hash_inline_files_counted", inspect)
+        copied = budget.permitted({ATTRIBUTE: message}, files=True)
+        assert_image_digest(copied[ATTRIBUTE], b"same bytes")
+        assert calls == []
+        assert inspected == [(None, None)]
+    finally:
+        budget.held.release()
+
+
+def test_nested_media_same_pointer_preserves_own_upload(hue_store, monkeypatch):
+    data = b"own media receipt"
+    provider = TracerProvider(
+        resource=Resource({ATTRIBUTE: message_with_image(b"different resource bytes")}),
+        shutdown_on_exit=False,
+    )
+    observations = []
+    original = _ValueBudget.resource
+
+    def resource(budget, value):
+        receipts = {key: dict(item) for key, item in budget.held.digests.items()}
+        memo = budget.hold.uploads.memo if budget.hold and budget.hold.uploads else None
+        before = (list(memo._entries.items()), memo._size) if memo else None
+        copied = original(budget, value)
+        if receipts:
+            observations.append((receipts, before, copied.attributes[ATTRIBUTE]))
+        return copied
+
+    monkeypatch.setattr(_ValueBudget, "resource", resource)
+    try:
+        with client(hue_store, tracer_provider=provider) as hue:
+            snapshots = []
+            processor_type = type(hue._span_processor)
+            original_copy = processor_type._copy
+
+            def copy_span(*args, **kwargs):
+                copied = original_copy(*args, **kwargs)
+                if held_of(copied):
+                    held = held_of(copied)
+                    memo = hue._uploads.memo
+                    snapshots.append(
+                        (dict(held.digests[ATTRIBUTE]), list(memo._entries.items()), memo._size)
+                    )
+                return copied
+
+            monkeypatch.setattr(processor_type, "_copy", staticmethod(copy_span))
+            with hue.span("collision") as span:
+                trace_id = span.trace_id
+                span.set_attribute(ATTRIBUTE, message_with_image(data))
+                span.otel_span.add_event(
+                    "provider.event", {ATTRIBUTE: message_with_image(b"different event")}
+                )
+                span.otel_span.add_link(
+                    SpanContext(1, 3, False), {ATTRIBUTE: message_with_image(b"link")}
+                )
+            assert hue.force_flush()
+        assert len(observations) == len(snapshots) == 1
+        receipts, before, resource_value = observations[0]
+        assert receipts[ATTRIBUTE] == {"/0/parts/1/content": (sha256(data), len(data))}
+        assert snapshots[0] == (receipts[ATTRIBUTE], *before)
+        assert_image_digest(resource_value, b"different resource bytes")
+        record = hue_store.span("collision")
+        assert_image_digest(attrs(record.events[0])[ATTRIBUTE].string_value, b"different event")
+        assert_image_digest(attrs(record.links[0])[ATTRIBUTE].string_value, b"link")
+        assert blobs(record) == [
+            {
+                "key": f"{ATTRIBUTE}#/0/parts/1",
+                "sha256": sha256(data),
+                "size": len(data),
+                "content_type": "image/png",
+            }
+        ]
+        assert hue_store.objects[f"{trace_id}/{sha256(data)}"] == (data, "image/png")
+        assert len(hue_store.reservations) == len(hue_store.puts) == len(hue_store.completions) == 1
+        assert hue_store.completions[0] == {"traceId": trace_id, "sha256": sha256(data)}
+        assert hue_store.reservations[0]["sha256"] == sha256(data)
+        assert hue_store.reservations[0]["byteSize"] == len(data)
+        assert hue_store.puts[0]["status"] == 200 and hue_store.puts[0]["bytes"] == len(data)
+    finally:
+        provider.shutdown()
+
+
+def test_capture_off_filters_own_nested_and_log_media_before_inspection(uploads, monkeypatch):
+    import hue_sdk.snapshots as snapshots
+
+    message = message_with_image(b"filtered content")
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("Filtered media reached inspection")
+
+    monkeypatch.setattr(snapshots, "hash_inline_files_counted", forbidden)
+    hold = Hold(uploads.held, 128, uploads=uploads)
+    context = SpanContext(1, 3, False)
+    copied = snapshot_span(
+        external_span(
+            attributes={ATTRIBUTE: message, "metadata": "kept"},
+            resource=Resource({ATTRIBUTE: message}),
+            events=(SpanEvent("provider.event", {ATTRIBUTE: message}, 1),),
+            links=(Link(context, {ATTRIBUTE: message}),),
+        ),
+        capture_content=False,
+        hold=hold,
+    )
+    log = snapshot_log(
+        ReadWriteLogRecord(
+            LogRecord(body=message, attributes={ATTRIBUTE: message}), Resource({ATTRIBUTE: message})
+        ),
+        capture_content=False,
+        hold=hold,
+    )
+    assert dict(copied.attributes) == {"metadata": "kept"}
+    assert ATTRIBUTE not in copied.resource.attributes
+    assert all(ATTRIBUTE not in item.attributes for item in (*copied.events, *copied.links))
+    assert log.log_record.body is None
+    assert ATTRIBUTE not in log.log_record.attributes and ATTRIBUTE not in log.resource.attributes
+    assert calls == [] and held_of(copied) is held_of(log) is None
+    assert uploads.memo._entries == {} and uploads.memo._size == uploads.held.held == 0
+
+
+@pytest.mark.parametrize("record", ["span", "log"])
+def test_scope_media_and_log_body_keep_ordinary_copying(record):
+    message = message_with_image(b"ordinary copying" * 128)
+    scope = InstrumentationScope("provider", attributes={ATTRIBUTE: message})
+    if record == "span":
+        copied = snapshot_span(external_span(instrumentation_scope=scope), value_bytes=128)
+    else:
+        copied = snapshot_log(
+            ReadWriteLogRecord(LogRecord(body=message), Resource({}), scope), value_bytes=128
+        )
+        assert copied.log_record.body == cut_utf8(message, 128)
+        assert copied.log_record.attributes["hue.truncated"] == ("body",)
+    assert copied.instrumentation_scope.attributes[ATTRIBUTE] is message
+    assert copied.instrumentation_scope is not scope

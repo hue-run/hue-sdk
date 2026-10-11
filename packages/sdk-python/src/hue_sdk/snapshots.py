@@ -330,17 +330,23 @@ class _ValueBudget:
             }
         return source
 
-    def _media(self, key: str, value: Any) -> tuple[Any, int]:
+    def _media(
+        self, key: str, value: Any, *, collect_upload_state: bool = False
+    ) -> tuple[Any, int]:
         if not may_inline_files(key, value):
             return value, 0
         size = utf8_size(value, MAX_INLINE_FILE_TEXT)
         if size > MAX_INLINE_FILE_TEXT or size > self.media_remaining:
-            return truncated_marker(size), 0
+            return value, 0
         self.media_remaining -= size
-        receipts: dict[str, tuple[str, int]] = {}
-        memo = self.hold.uploads.memo if self.hold and self.hold.uploads else None
+        receipts: dict[str, tuple[str, int]] | None = {} if collect_upload_state else None
+        memo = (
+            self.hold.uploads.memo
+            if collect_upload_state and self.hold and self.hold.uploads
+            else None
+        )
         result = hash_inline_files_counted(key, value, memo, receipts, self.trace_id)
-        if receipts:
+        if collect_upload_state and receipts:
             self.held.digests[key] = receipts
         return result
 
@@ -355,7 +361,7 @@ class _ValueBudget:
         listed in ``held.cut`` (once per file), so export counts them as not uploaded."""
         hold = self.hold
         assert hold is not None
-        digested, files = self._media(key, item)
+        digested, files = self._media(key, item, collect_upload_state=True)
         if isinstance(item, str):
             try:
                 over = over_utf8(item, hold.value_bytes)
@@ -389,7 +395,7 @@ class _ValueBudget:
         """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key. A
         span's ``own`` values over the cap are held whole for upload when they may be."""
         holding = own and self.hold is not None
-        source = self.permitted(values, files=own and not holding)
+        source = self.permitted(values, files=not holding)
         if not isinstance(source, Mapping):
             return self.value(source)
         copied: dict[str, Any] = {}
