@@ -428,7 +428,8 @@ evaluator material must stay out of its reach. Verified copies live under `files
 `<checkpointDirectory>/files`, created mode 0700), evaluator-only files apart from the agent's, and
 each case gets its own private `context.outputDirectory` to write into. The files of a case pinned
 to a world are removed when it ends, except staged outputs an interrupted upload resumes from;
-those of a direct case stay for inspection.
+those of a direct case stay for inspection, except its evaluator-only files, which are removed when
+it ends so no later case's agent finds them.
 
 Return generated documents by wrapping the output in `withFiles(output, files)`. Each entry names a
 `path` or in-memory `bytes`, a `filename`, a Hue-accepted `contentType` and at most one `primary`.

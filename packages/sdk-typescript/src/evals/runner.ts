@@ -810,9 +810,10 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     // A retry gets its own, so an agent a dead run left behind cannot write into it.
     const worldDirectoryOf = (itemId: string, attempt?: string) =>
       join(filesRoot, `world-case-${uuid(itemId)}${attempt ? `-${uuid(attempt)}` : ""}`);
+    const directDirectoryOf = (itemId: string) => join(filesRoot, `case-${uuid(itemId)}`);
     const runCase = async (item: (typeof items)[number], files: CaseFiles) => {
       const file = `case-${uuid(item.id)}`;
-      const directDirectory = join(filesRoot, `case-${uuid(item.id)}`);
+      const directDirectory = directDirectoryOf(item.id);
       const caseDirectoryOf = (frozen: ExperimentCase) =>
         frozen.environmentVersionId ? files.directory : directDirectory;
       let checkpoint: CaseCheckpoint | undefined;
@@ -1209,9 +1210,14 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
     await pool(items, concurrency, async (item) => {
       // A world case's directory goes however the case ends, a forced exit included. An
       // interrupted upload keeps only the staged outputs it resumes from; inputs are downloaded
-      // anew for scoring. A direct case has no such directory, so nothing is removed for it.
+      // anew for scoring. A direct case's directory stays for inspection, except the scorers'
+      // copies of evaluator-only files, which go too, so no later case's target finds them.
       const files: CaseFiles = { keepOutputs: true, directory: worldDirectoryOf(item.id) };
-      const untrack = onForcedExit(() => releaseWorldFilesSync(files.directory, files.keepOutputs));
+      const evaluatorInputs = join(directDirectoryOf(item.id), "evaluator-inputs");
+      const untrack = onForcedExit(() => {
+        releaseWorldFilesSync(files.directory, files.keepOutputs);
+        rmSync(evaluatorInputs, { recursive: true, force: true });
+      });
       try {
         await runCase(item, files);
         await releaseWorldFiles(files.directory, false);
@@ -1219,6 +1225,7 @@ export async function runExperiment(options: RunExperimentOptions): Promise<Runn
         await releaseWorldFiles(files.directory, files.keepOutputs);
         throw error;
       } finally {
+        await removeCaseFiles(evaluatorInputs);
         untrack();
       }
     });

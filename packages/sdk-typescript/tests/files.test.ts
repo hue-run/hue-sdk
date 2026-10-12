@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1142,6 +1143,66 @@ describe("file-based cases", () => {
       await hue.shutdown();
       f.server.stop(true);
     }
+  });
+
+  test("a direct case's evaluator-only files are gone when it ends; the agent's stay for inspection", async () => {
+    const scored: LocalFile[] = [];
+    const grader = defineLocalScorer({
+      source: "grade with every pinned file",
+      entrypoint: "grade",
+      metrics: [{ name: "files", type: "number", min: 0 }],
+      score(context) {
+        scored.push(...(context.files ?? []));
+        return {
+          state: "scored",
+          metrics: [{ name: "files", value: context.files?.length ?? 0, passed: true }],
+        };
+      },
+    });
+    const f = fixture({ scorers: [version(grader.definition)] });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "direct-cleanup",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    let work = "";
+    try {
+      await runExperiment({
+        client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl }),
+        hue,
+        experimentId: f.experiment.id,
+        checkpointDirectory,
+        persistResultContent: true,
+        environmentEvidence: "when_pinned",
+        traceEvidence: { mode: "required" },
+        scorers: [grader],
+        target(_inputs, context) {
+          work = context.outputDirectory;
+          return withFiles({ ok: true }, [
+            { bytes: Buffer.from("letter"), filename: "Letter.docx", contentType: docx },
+          ]);
+        },
+      });
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
+    // The scorer graded the evaluator-only template from disk; it is not left for a later case's
+    // target to find, while the agent's copies, its work and its outputs stay for inspection.
+    expect(scored.map((file) => file.role).sort()).toEqual([
+      "attached_template",
+      "org_template",
+      "output",
+      "source",
+    ]);
+    for (const file of scored)
+      expect([file.role, existsSync(file.path)]).toEqual([file.role, file.role !== "org_template"]);
+    expect(existsSync(work)).toBe(true);
+    expect(
+      existsSync(join(checkpointDirectory, "files", `case-${f.item.id}`, "evaluator-inputs")),
+    ).toBe(false);
   });
 
   test("a failed upload resumes from the staged files without invoking the target again", async () => {
