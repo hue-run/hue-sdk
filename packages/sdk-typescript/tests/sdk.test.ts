@@ -25,6 +25,8 @@ import { MockLanguageModelV4 } from "ai/test";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 import hostedFixtures from "./fixtures/hosted-tool-calls.json" with { type: "json" };
 import sdkPackage from "@hue-run/sdk/package.json" with { type: "json" };
+import { snapshotLog, snapshotSpan } from "../src/snapshot.js";
+import { INLINE_FILE_TEXT_PER_RECORD, MediaDigestMemo } from "../src/inline-files.js";
 
 type Value = {
   stringValue?: string;
@@ -42,7 +44,9 @@ type WireRecord = {
   attributes?: Attribute[];
   body?: Value;
   status?: { code?: number; message?: string };
-  events?: { name: string; attributes?: Attribute[] }[];
+  startTimeUnixNano?: string;
+  endTimeUnixNano?: string;
+  events?: { name: string; timeUnixNano?: string; attributes?: Attribute[] }[];
   droppedEventsCount?: number;
   droppedLinksCount?: number;
 };
@@ -813,8 +817,175 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
-  test("a 5 MiB span-own inline file exports as its digest while event messages truncate ordinarily", async () => {
-    // The span's own message is held for export. The event uses the ordinary value cap.
+  test("nested legacy: snapshots retain small media and digest large media without uploader memo", () => {
+    const key = "gen_ai.input.messages";
+    const messages = (size: number) =>
+      JSON.stringify(
+        [
+          {
+            role: "user",
+            parts: [
+              {
+                type: "blob",
+                mime_type: "image/png",
+                content: Buffer.alloc(size, 11).toString("base64"),
+              },
+            ],
+          },
+        ],
+        null,
+        2,
+      );
+    const small = messages(65536);
+    const large = messages(65537);
+    const attributes = { [key]: small, "gen_ai.output.messages": large };
+    const resource = resourceFromAttributes(attributes);
+    const spanContext = { traceId: "1".repeat(32), spanId: "2".repeat(16), traceFlags: 1 };
+    const source: ReadableSpan = {
+      name: "nested-media",
+      kind: 0,
+      startTime: [0, 0],
+      endTime: [0, 1],
+      duration: [0, 1],
+      ended: true,
+      instrumentationScope: { name: "synthetic" },
+      droppedAttributesCount: 0,
+      droppedEventsCount: 0,
+      droppedLinksCount: 0,
+      status: { code: 0 },
+      attributes: {},
+      resource,
+      events: [{ name: "media", time: [0, 0], attributes }],
+      links: [{ context: spanContext, attributes }],
+      spanContext: () => spanContext,
+    };
+    const memo = new MediaDigestMemo();
+    const digest = spyOn(memo, "bytes");
+    const expected = JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          {
+            type: "blob",
+            mime_type: "image/png",
+            sha256: createHash("sha256").update(Buffer.alloc(65537, 11)).digest("hex"),
+            size: 65537,
+          },
+        ],
+      },
+    ]);
+    try {
+      const snapshot = snapshotSpan(source, 4 * 1024 * 1024, true, 1024 * 1024, undefined, memo);
+      expect(digest).not.toHaveBeenCalled();
+      expect(snapshot.digested.size).toBe(0);
+      expect(snapshot.held).toBe(0);
+      for (const copied of [
+        snapshot.record.events[0]!.attributes!,
+        snapshot.record.links[0]!.attributes!,
+        snapshot.record.resource.attributes,
+      ]) {
+        expect(copied[key]).toBe(small);
+        expect(copied["gen_ai.output.messages"]).toBe(expected);
+      }
+      // Own-span small binary still digests; the same nested text keeps its original bytes.
+      const own = snapshotSpan(
+        { ...source, attributes },
+        4 * 1024 * 1024,
+        true,
+        1024 * 1024,
+        undefined,
+        memo,
+      );
+      expect(own.record.attributes[key]).not.toBe(small);
+      expect(own.record.events[0]!.attributes![key]).toBe(small);
+      expect(own.record.links[0]!.attributes![key]).toBe(small);
+      expect(own.record.resource.attributes[key]).toBe(small);
+      expect(digest).toHaveBeenCalledTimes(2);
+      const log = snapshotLog(
+        {
+          hrTime: [0, 0],
+          hrTimeObserved: [0, 0],
+          instrumentationScope: { name: "synthetic" },
+          droppedAttributesCount: 0,
+          attributes,
+          resource,
+          body: attributes,
+        },
+        4 * 1024 * 1024,
+        true,
+        1024 * 1024,
+      );
+      expect(log.record.attributes[key]).toBe(small);
+      expect(log.record.attributes["gen_ai.output.messages"]).toBe(expected);
+      expect(log.record.resource.attributes["gen_ai.output.messages"]).toBe(expected);
+      expect(log.record.body).toEqual(attributes);
+    } finally {
+      digest.mockRestore();
+    }
+  });
+
+  test("nested legacy: events and log attributes never request uploads", async () => {
+    const endpoint = receiver();
+    const transport = createHueTransport({
+      apiKey,
+      serviceName: "nested-media",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const tracerProvider = new TracerProvider({ spanProcessors: [transport.spanProcessor] });
+    const loggerProvider = new LoggerProvider({ processors: [transport.logRecordProcessor] });
+    const messages = (size: number) =>
+      JSON.stringify([
+        {
+          parts: [
+            {
+              type: "blob",
+              mime_type: "image/png",
+              content: Buffer.alloc(size, 12).toString("base64"),
+            },
+          ],
+        },
+      ]);
+    const small = messages(65536);
+    const large = messages(65537);
+    const attributes = { "gen_ai.input.messages": small, "gen_ai.output.messages": large };
+    try {
+      const span = tracerProvider.getTracer("synthetic").startSpan("nested-only");
+      span.addEvent("media", attributes);
+      span.end();
+      loggerProvider.getLogger("synthetic").emit({ body: "nested-only", attributes });
+      await tracerProvider.forceFlush();
+      await loggerProvider.forceFlush();
+      const report = await transport.flush();
+      expect(report).toMatchObject({ acceptedSpans: 1, acceptedLogs: 1 });
+      expect(endpoint.blobRequests()).toBe(0);
+      const records = endpoint.accepted();
+      const event = records.find((item) => item.name === "nested-only")!.events![0]!;
+      const log = records.find((item) => item.body?.stringValue === "nested-only")!;
+      for (const copied of [event.attributes!, log.attributes!]) {
+        expect(copied.find((item) => item.key === "gen_ai.input.messages")!.value.stringValue).toBe(
+          small,
+        );
+        const file = JSON.parse(
+          copied.find((item) => item.key === "gen_ai.output.messages")!.value.stringValue!,
+        )[0].parts[0];
+        expect(file).toEqual({
+          type: "blob",
+          mime_type: "image/png",
+          sha256: createHash("sha256").update(Buffer.alloc(65537, 12)).digest("hex"),
+          size: 65537,
+        });
+      }
+    } finally {
+      await tracerProvider.shutdown();
+      await loggerProvider.shutdown();
+      await transport.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("nested legacy: a 5 MiB event inline file exports as its digest alongside span-own media", async () => {
+    // Both paths digest large inline media before the ordinary value cap can cut the JSON.
     const endpoint = receiver();
     const hue = createHue({
       apiKey,
@@ -862,8 +1033,8 @@ describe("Hue SDK contract", () => {
       const eventMessages = event.attributes!.find(
         (attribute) => attribute.key === "gen_ai.input.messages",
       )!;
-      expect(eventMessages.value.stringValue).toBe(messages.slice(0, 1024 * 1024));
-      expect(strings(attr(record, "hue.truncated"))).toContain(
+      expect(JSON.parse(eventMessages.value.stringValue!)[0].parts).toEqual(expected);
+      expect(strings(attr(record, "hue.truncated")) ?? []).not.toContain(
         "event:messages:gen_ai.input.messages",
       );
       expect(hue.transport.getReport()).toMatchObject({ droppedSpans: 0, failedSpans: 0 });
@@ -873,7 +1044,7 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("admission inspects shared span-own messages once and copies event messages ordinarily", async () => {
+  test("nested legacy: admission caches own and nested messages separately and bounds inspection", async () => {
     const endpoint = receiver();
     const hue = createHue({
       apiKey,
@@ -920,16 +1091,20 @@ describe("Hue SDK contract", () => {
           "ai.prompt.messages": shared,
         });
       repeated.end();
-      expect(parsed).toHaveLength(1);
-      // Events never authorize media inspection, including distinct messages.
+      expect(parsed).toHaveLength(2);
+      // Distinct nested messages share the finite record inspection budget.
       parsed.length = 0;
       const many = hue.tracer.startSpan("distinct-messages");
       distinct.forEach((text, index) =>
         many.addEvent(`event-${index}`, { "gen_ai.input.messages": text }),
       );
       many.end();
-      expect(parsed).toHaveLength(0);
-      // Ordinary event copies consume the queue budget. Keep the newest and count the rest.
+      expect(parsed.length).toBeGreaterThan(0);
+      expect(parsed.length).toBeLessThan(distinct.length);
+      expect(parsed.reduce((total, units) => total + units, 0)).toBeLessThanOrEqual(
+        INLINE_FILE_TEXT_PER_RECORD,
+      );
+      // Uninspected event copies consume the queue budget. Keep the newest and count the rest.
       await hue.flush();
       expect(hue.transport.getReport().droppedSpans).toBe(0);
       const sharedRecord = endpoint.accepted().find((span) => span.name === "shared-message")!;
@@ -937,8 +1112,18 @@ describe("Hue SDK contract", () => {
       expect(sharedEvent.name).toBe("event-127");
       for (const key of ["gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"])
         expect(
-          sharedEvent.attributes!.find((attribute) => attribute.key === key)!.value.stringValue,
-        ).toBe(shared);
+          JSON.parse(
+            sharedEvent.attributes!.find((attribute) => attribute.key === key)!.value.stringValue!,
+          )[0].parts[0],
+        ).toEqual({
+          type: "blob",
+          modality: "document",
+          mime_type: "application/pdf",
+          sha256: createHash("sha256")
+            .update(Buffer.alloc(512 * 1024, 1))
+            .digest("hex"),
+          size: 512 * 1024,
+        });
       const record = endpoint.accepted().find((span) => span.name === "distinct-messages")!;
       const kept = record.events!.length;
       expect(kept).toBeGreaterThan(0);
@@ -1612,6 +1797,56 @@ describe("Hue SDK contract", () => {
       }
     },
   );
+  test("recordFile uses each span's clock when wall time is one hour ahead", async () => {
+    const endpoint = receiver();
+    const hue = createHue({
+      apiKey,
+      serviceName: "files-clock",
+      captureContent: true,
+      baseUrl: endpoint.url,
+    });
+    const ahead = Date.now() + 60 * 60 * 1000;
+    const clock = spyOn(Date, "now").mockReturnValue(ahead);
+    try {
+      await hue.withSpan("shifted clock", ({ span }) => {
+        clock.mockRestore();
+        span.addEvent("before files");
+        for (let index = 0; index < 2; index++)
+          hue.recordFile({ role: "input", mediaType: "text/plain", data: "same bytes" });
+        span.addEvent("after files");
+      });
+      await hue.withSpan("normal clock", ({ span }) => {
+        span.addEvent("before files");
+        hue.recordFile({ role: "input", mediaType: "text/plain", data: "same bytes" });
+        span.addEvent("after files");
+      });
+      const result = await hue.flushSafe();
+      expect(result.ok).toBe(true);
+      for (const name of ["shifted clock", "normal clock"]) {
+        const record = endpoint.requests
+          .flatMap((request) => request.records)
+          .find((span) => span.name === name)!;
+        const start = BigInt(record.startTimeUnixNano!);
+        const end = BigInt(record.endTimeUnixNano!);
+        if (name === "shifted clock")
+          expect(start).toBeGreaterThanOrEqual(BigInt(ahead) * 1_000_000n);
+        else expect(start).toBeLessThan(BigInt(ahead - 30 * 60 * 1000) * 1_000_000n);
+        const times = record.events!.map((event) => BigInt(event.timeUnixNano!));
+        expect(record.events!.map((event) => event.name)).toEqual(
+          name === "shifted clock"
+            ? ["before files", "hue.file", "hue.file", "after files"]
+            : ["before files", "hue.file", "after files"],
+        );
+        expect(times.every((time) => time >= start && time <= end)).toBe(true);
+        expect(times.every((time, index) => index === 0 || time >= times[index - 1]!)).toBe(true);
+        if (name === "shifted clock") expect(times[2]!).toBeGreaterThan(times[1]!);
+      }
+    } finally {
+      clock.mockRestore();
+      await hue.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
   test("recordFile rejects oversized data before hashing or exporting it", async () => {
     const endpoint = receiver();
     const hue = createHue({

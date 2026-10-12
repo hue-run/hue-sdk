@@ -1587,9 +1587,13 @@ class ReportingExporter<T extends RecordValue> {
     const pack = async (accepted: T[], advisory: boolean) => {
       // Every record is measured, shed and, where it cannot be sent, counted lost before any root
       // is written, so a root carries the losses of children that ended after it.
-      const prepared: { record: T; bytes: number }[] = [];
+      const admitted: {
+        fitted: { record: T; bytes: number };
+        attachments?: { span: ReadableSpan; files: MediaAttachment[] };
+      }[] = [];
       for (const record of accepted) {
         let fitted: { record: T; bytes: number } | undefined;
+        let attachments: { span: ReadableSpan; files: MediaAttachment[] } | undefined;
         const helper = helpers.get(record);
         let remaining = helper?.files ?? [];
         try {
@@ -1617,18 +1621,8 @@ class ReportingExporter<T extends RecordValue> {
               if (baseline.length) attributes[BLOBS_KEY] = baseline;
               else delete attributes[BLOBS_KEY];
             }
-            const uploaded = await this.transport.offloadSpan(
-              { ...span, attributes },
-              { candidates: [], cut: [], attachments: files },
-              upload,
-              tally,
-            );
+            attachments = { span: { ...span, attributes }, files };
             remaining = [];
-            measured.delete(fitted.record);
-            // Actual references can differ when an existing object supplies its media type.
-            const final = await probe(uploaded as T);
-            fitted = final;
-            if (final?.request) measured.set(final.record, final.request);
           }
         } catch {
           for (let index = 0; index < remaining.length; index++)
@@ -1642,14 +1636,40 @@ class ReportingExporter<T extends RecordValue> {
           invalid(advisory, OVER_REQUEST_LIMIT, record);
           continue;
         }
-        prepared.push(fitted);
+        admitted.push({ fitted, attachments });
       }
+      // Decide every event/reference admission before starting helper uploads. The shared
+      // uploader's four workers place files across spans under the same upload deadline.
+      const placed = await Promise.all(
+        admitted.map(async ({ fitted, attachments }) => {
+          if (!attachments) return fitted;
+          try {
+            const uploaded = await this.transport.offloadSpan(
+              attachments.span,
+              { candidates: [], cut: [], attachments: attachments.files },
+              upload,
+              tally,
+            );
+            measured.delete(fitted.record);
+            // Actual references can differ when an existing object supplies its media type.
+            const final = await probe(uploaded as T);
+            if (final?.request) measured.set(final.record, final.request);
+            if (!final) invalid(advisory, OVER_REQUEST_LIMIT, fitted.record);
+            return final;
+          } catch {
+            invalid(advisory, "Telemetry record could not be serialized", fitted.record);
+            return undefined;
+          }
+        }),
+      );
       // Preparation includes explicit file uploads. Report their outcome once, before delivery
       // failures can consume the diagnostic callback's rate-limit slot. Placeholders never upload.
       if (!advisory) this.transport.reportOffload(tally);
       let batch: T[] = [];
       let batchBytes = 0;
-      for (const { record, bytes: recordBytes } of prepared) {
+      for (const fitted of placed) {
+        if (!fitted) continue;
+        const { record, bytes: recordBytes } = fitted;
         const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
         const target = Math.min(this.transport.receiverLimits().decodedBytes, BATCH_TARGET_BYTES);
         if (batch.length && batchBytes + framedBytes > target) {

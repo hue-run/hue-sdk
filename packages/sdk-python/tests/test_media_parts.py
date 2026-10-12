@@ -11,8 +11,9 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Any
 
 import pytest
@@ -45,6 +46,7 @@ from hue_sdk._inline_files import (
     content_path,
     is_media_name,
     may_inline_files,
+    utf16_size,
 )
 from hue_sdk._limits import cut_utf8
 from hue_sdk._records import replace_span
@@ -77,9 +79,9 @@ def external_span(**kwargs: Any) -> ReadableSpan:
 @pytest.fixture(scope="module")
 def oversized_message() -> str:
     messages = json.loads(message_with_image(b"tiny"))
-    messages[0]["parts"][0]["content"] = "é" * (MAX_INLINE_FILE_TEXT // 2 + 128 * 1024)
+    messages[0]["parts"][0]["content"] = "é" * (MAX_INLINE_FILE_TEXT + 128 * 1024)
     value = json.dumps(messages, ensure_ascii=False)
-    assert len(value) < MAX_INLINE_FILE_TEXT < len(value.encode("utf-8"))
+    assert MAX_INLINE_FILE_TEXT < len(value) < len(value.encode("utf-8"))
     return value
 
 
@@ -192,7 +194,7 @@ def test_media_and_explicit_files_share_trace_digest_and_reservation(hue_store, 
             with hue.span("media again") as span:
                 span.set_attribute(ATTRIBUTE, message_with_image(data))
             assert hue.force_flush()
-            assert calls == []
+            assert len(calls) == 2
             monkeypatch.setattr(inline.hashlib, "sha256", original)
         with hue.span("other trace") as span:
             span.record_file(role="input", media_type="image/png", data=data, upload=True)
@@ -261,7 +263,7 @@ def test_inflight_upload_reused_and_outcomes_bounded_and_cleared(hue_store):
     assert uploader._outcomes == {}
 
 
-def test_digest_cache_is_trace_scoped_and_charges_retained_bytes(monkeypatch):
+def test_digest_cache_is_trace_scoped_and_retains_only_digest_keys(monkeypatch):
     import hue_sdk._inline_files as inline
 
     original = hashlib.sha256
@@ -275,12 +277,20 @@ def test_digest_cache_is_trace_scoped_and_charges_retained_bytes(monkeypatch):
     memo = MediaDigestMemo(limit=512, capacity=2)
     assert memo.digest(b"one", "a") == memo.digest(b"one", "a")
     memo.digest(b"one", "b")
-    assert len(calls) == 2
+    assert len(calls) == 3
+    assert set(memo._entries) == {("a", sha256(b"one")), ("b", sha256(b"one"))}
     for index in range(8):
         memo.digest(str(index).encode(), "a")
         assert memo._size <= memo.limit and len(memo._entries) <= memo.capacity
     memo.digest(b"x" * 1024, "a")
-    assert all(len(key[1]) < 1024 for key in memo._entries)
+    assert all(
+        isinstance(trace, str) and isinstance(digest, str) and len(digest) == 64
+        for trace, digest in memo._entries
+    )
+    assert all(
+        isinstance(digest, str) and isinstance(size, int)
+        for digest, size in memo._entries.values()
+    )
     memo.clear()
     assert memo._entries == {} and memo._size == 0
 
@@ -563,9 +573,9 @@ def test_nested_media_uses_ordinary_value_and_record_admission(
     inspected = []
     original = snapshots.hash_inline_files_counted
 
-    def inspect(key, value, memo=None, receipts=None, trace_id=""):
+    def inspect(key, value, memo=None, receipts=None, trace_id="", **kwargs):
         inspected.append((memo, receipts))
-        return original(key, value, memo, receipts, trace_id)
+        return original(key, value, memo, receipts, trace_id, **kwargs)
 
     monkeypatch.setattr(snapshots, "hash_inline_files_counted", inspect)
     options = {
@@ -603,7 +613,7 @@ def test_nested_media_uses_ordinary_value_and_record_admission(
             assert len(items) == 1
             value = items[0].attributes[ATTRIBUTE]
     assert value == cut_utf8(message, 512)
-    assert inspected == []
+    assert inspected == [(None, None)]
     assert held_of(copied) is None and uploads.held.held == 0
     assert uploads.memo._entries == {} and uploads.memo._size == 0
     assert "hue.blobs" not in (
@@ -620,9 +630,13 @@ def test_stateless_media_inspection_preserves_own_receipts_and_memo(uploads):
         uploads.memo.digest(b"older memo entry", budget.trace_id)
         receipts = {key: dict(value) for key, value in budget.held.digests.items()}
         memo = list(uploads.memo._entries.items()), uploads.memo._size
-        for data in (b"resource bytes", b"event bytes of another size", b"link"):
-            copied = budget.permitted({ATTRIBUTE: message_with_image(data)}, files=True)
-            assert_image_digest(copied[ATTRIBUTE], data)
+        for data in (b"resource bytes", b"event bytes of another size", b"link", b"x" * 65537):
+            message = message_with_image(data)
+            copied = budget.permitted({ATTRIBUTE: message}, files=True, nested=True)
+            if len(data) <= 65536:
+                assert copied[ATTRIBUTE] == message
+            else:
+                assert_image_digest(copied[ATTRIBUTE], data)
             assert budget.held.digests == receipts
             assert (list(uploads.memo._entries.items()), uploads.memo._size) == memo
     finally:
@@ -632,7 +646,8 @@ def test_stateless_media_inspection_preserves_own_receipts_and_memo(uploads):
 def test_identical_nested_media_never_calls_upload_memo(uploads, monkeypatch):
     import hue_sdk.snapshots as snapshots
 
-    message = message_with_image(b"same bytes")
+    data = b"same bytes" * 8192
+    message = message_with_image(data)
     budget = _ValueBudget(hold=Hold(uploads.held, 1024, uploads=uploads), trace_id="1" * 32)
     try:
         budget.copied_attributes({ATTRIBUTE: message}, own=True)
@@ -644,14 +659,14 @@ def test_identical_nested_media_never_calls_upload_memo(uploads, monkeypatch):
             calls.append(args)
             return original_digest(*args)
 
-        def inspect(key, value, memo=None, receipts=None, trace_id=""):
+        def inspect(key, value, memo=None, receipts=None, trace_id="", **kwargs):
             inspected.append((memo, receipts))
-            return original_inspect(key, value, memo, receipts, trace_id)
+            return original_inspect(key, value, memo, receipts, trace_id, **kwargs)
 
         monkeypatch.setattr(uploads.memo, "digest", digest)
         monkeypatch.setattr(snapshots, "hash_inline_files_counted", inspect)
-        copied = budget.permitted({ATTRIBUTE: message}, files=True)
-        assert_image_digest(copied[ATTRIBUTE], b"same bytes")
+        copied = budget.permitted({ATTRIBUTE: message}, files=True, nested=True)
+        assert_image_digest(copied[ATTRIBUTE], data)
         assert calls == []
         assert inspected == [(None, None)]
     finally:
@@ -1104,6 +1119,88 @@ def helper(data=b"helper", *, name="original.png", timestamp=1):
     return ExplicitFile(data, (sha256(data), len(data)), "image/png", name, timestamp=timestamp)
 
 
+def test_helpers_across_spans_share_concurrent_upload_budget(hue_store, monkeypatch):
+    import hue_sdk.transport as transport
+
+    budget_seconds = 1.5
+    put_delay_seconds = 0.3
+    monkeypatch.setattr(transport, "upload_budget_seconds", lambda _: budget_seconds)
+    lock = Lock()
+    active = peak = 0
+    original_headers = BaseHTTPRequestHandler.end_headers
+
+    def delayed_headers(handler):
+        nonlocal active, peak
+        if handler.command != "PUT":
+            return original_headers(handler)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(put_delay_seconds)
+            return original_headers(handler)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", delayed_headers)
+    files = [helper(f"concurrent helper {index}".encode()) for index in range(9)]
+    with client(hue_store) as hue:
+        exporter = hue._span_exporter
+        staged = [
+            staged_helpers(hue, [file], attributes={"case": index})
+            for index, file in enumerate(files)
+        ]
+        admitted_spans = set()
+        reservation_admissions = []
+        released_sizes = []
+        original_fit = exporter._fit
+        original_release = hue._uploads.held.release
+
+        def fit(record):
+            index = record.attributes["case"]
+            admitted_spans.add(index)
+            if index == 8:
+                record = replace_span(record, events=[])
+            return original_fit(record)
+
+        def reserve(_):
+            reservation_admissions.append(set(admitted_spans))
+            return None
+
+        def release(size):
+            released_sizes.append(size)
+            original_release(size)
+
+        monkeypatch.setattr(exporter, "_fit", fit)
+        monkeypatch.setattr(hue._uploads.held, "release", release)
+        hue_store.reserve = reserve
+        started = time.monotonic()
+        assert exporter.export([span for span, _ in staged]) is SpanExportResult.SUCCESS
+        elapsed = time.monotonic() - started
+        assert elapsed < budget_seconds
+        assert 1 < peak <= 4 and active == 0
+        assert reservation_admissions == [set(range(9))] * 8
+        assert hue.export_status.uploaded_values == 8
+        assert hue.export_status.upload_fallbacks == 1
+        assert all(held.files == [] and held.values == held.digests == {} for _, held in staged)
+        assert released_sizes == [held.size for _, held in staged]
+        assert hue._uploads.held.held == 0
+        for _, held in staged:
+            held.release()
+        assert released_sizes == [held.size for _, held in staged]
+        assert hue._uploads.held.held == 0
+    assert len(hue_store.reservations) == len(hue_store.puts) == len(hue_store.completions) == 8
+    assert {request["sha256"] for request in hue_store.reservations} == {
+        file.digest[0] for file in files[:8]
+    }
+    assert len(hue_store.spans) == 9
+    for record in hue_store.spans:
+        index = attrs(record)["case"].int_value
+        assert entries(record) == ([exporter._file_entry(files[index])] if index < 8 else [])
+        assert len(record.events) == (1 if index < 8 else 0)
+
+
 @pytest.mark.parametrize(
     "mismatch", ["missing", "event_name", "timestamp", "sha256", "size", "media_type", "role"]
 )
@@ -1309,7 +1406,7 @@ def test_inspection_allowance_from_unheld_value_limits_export_eligibility(hue_st
         ensure_ascii=False,
     )
     first, skipped = message_with_image(b"first"), message_with_image(b"skipped" * 160_000)
-    allowance = len(small.encode()) + len(first.encode())
+    allowance = utf16_size(small, MAX_INLINE_FILE_TEXT) + len(first)
     monkeypatch.setattr(snapshots, "INLINE_FILE_TEXT_PER_RECORD", allowance)
     with client(hue_store) as hue:
         copied = snapshot_span(

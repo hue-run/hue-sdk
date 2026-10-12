@@ -3,10 +3,73 @@ import { createHash } from "node:crypto";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
 import {
   hashInlineFiles,
+  hashNestedInlineFiles,
   INLINE_FILE_LIMIT,
+  MAX_INLINE_FILE_TEXT,
   isMediaName,
   MediaDigestMemo,
 } from "../src/inline-files.js";
+
+test("nested legacy media preserves empty and boundary-size binary verbatim", () => {
+  for (const size of [0, INLINE_FILE_LIMIT, INLINE_FILE_LIMIT + 1]) {
+    const bytes = Buffer.alloc(size, 7);
+    const value = JSON.stringify(
+      [
+        {
+          role: "user",
+          parts: [{ type: "blob", mime_type: "image/png", content: bytes.toString("base64") }],
+        },
+      ],
+      null,
+      2,
+    );
+    for (const key of ["gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"]) {
+      const result = hashNestedInlineFiles(key, value);
+      if (size <= INLINE_FILE_LIMIT) expect(result).toBe(value);
+      else
+        expect(JSON.parse(result as string)).toEqual([
+          {
+            role: "user",
+            parts: [
+              {
+                type: "blob",
+                mime_type: "image/png",
+                sha256: createHash("sha256").update(bytes).digest("hex"),
+                size,
+              },
+            ],
+          },
+        ]);
+    }
+  }
+  const value =
+    '[ { "parts": [ { "type": "blob", "mime_type": "image/png", "content": "AQID" } ] } ]';
+  expect(hashNestedInlineFiles("gen_ai.input.messages", value)).toBe(value);
+  expect(hashInlineFiles("gen_ai.input.messages", value)).not.toBe(value);
+});
+
+test("nested legacy inspection uses the UTF-16 MAX guard", () => {
+  const bytes = Buffer.alloc(INLINE_FILE_LIMIT + 1, 9);
+  const messages = [
+    {
+      role: "user",
+      parts: [{ type: "blob", mime_type: "image/png", content: bytes.toString("base64") }],
+      padding: "",
+    },
+  ];
+  messages[0]!.padding = "é".repeat(MAX_INLINE_FILE_TEXT - JSON.stringify(messages).length);
+  const value = JSON.stringify(messages);
+  expect(value.length).toBe(MAX_INLINE_FILE_TEXT);
+  expect(Buffer.byteLength(value, "utf8")).toBeGreaterThan(MAX_INLINE_FILE_TEXT);
+  const result = JSON.parse(hashNestedInlineFiles("gen_ai.input.messages", value) as string);
+  expect(result[0].parts[0]).toEqual({
+    type: "blob",
+    mime_type: "image/png",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    size: bytes.length,
+  });
+  expect(hashNestedInlineFiles("gen_ai.input.messages", `${value} `)).toBe(`${value} `);
+});
 
 for (const item of corpus.fixtures)
   test(`media digest fallback: ${item.id}`, () => {

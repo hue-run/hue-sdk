@@ -75,8 +75,9 @@ for example `gen_ai.input.messages#/0/parts/1`. Text media over 64 KiB of decode
 with a UTF-8-safe 16 KiB prefix in its content field. Its entry points to that field, for example
 `gen_ai.input.messages#/0/parts/1/content`. Smaller text stays inline. Hue reads both these forms
 and earlier binary prefixes. If upload fails, the part keeps its digest with no blob entry.
-Media digest replacement applies only to a span's own message attributes. Resources, events,
-links and log records preserve media content under their ordinary hold, cut or drop rules.
+In resources, events, links and log records, inline media up to 64 KiB stays verbatim; larger
+inline media is replaced by its digest, preserving the 0.9 behavior. These nested values never
+upload. Ordinary hold, cut or drop rules still apply to the resulting record.
 
 Entries use the recorded media type and, when valid, the filename, name or title. A valid name
 is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
@@ -339,9 +340,14 @@ its JSON body, status code and headers. Limit request bodies to 1 MiB; use
 and 30-second finalization budget.
 
 For generated files, return `ManagedOutputFile` entries containing actual bytes,
-filename, content type and an optional primary flag. Managed outputs accept any
-valid MIME type, including `image/gif`, `audio/mpeg`, `audio/wav`, `audio/ogg`,
-`audio/webm`, `audio/mp4` and `audio/flac`. The helper claims the
+filename, content type and an optional primary flag. Managed outputs accept the same 22
+content types as TypeScript: PDF, DOCX, PPTX, XLSX, `application/json`, `text/plain`, `text/csv`,
+`image/png`, `image/jpeg`, `image/webp`, `image/gif`, `image/avif`, `audio/mpeg`, `audio/wav`,
+`audio/ogg`, `audio/webm`, `audio/mp4`, `audio/flac`, `audio/opus`, `audio/aac`, `video/mp4`
+and `video/webm`. Other output types, including `audio/pcm`, are unsupported. Declare
+`audio/mp4` or `video/mp4` for `.mp4` files, and `audio/webm` or `video/webm` for `.webm`
+files; the extension alone does not distinguish audio from video. Input files still accept
+arbitrary valid MIME types. The helper claims the
 invocation, verifies files and saves the outcome without automatically rerunning
 the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs)
 and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider

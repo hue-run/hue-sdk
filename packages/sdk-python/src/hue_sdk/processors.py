@@ -22,7 +22,7 @@ from opentelemetry.context import attach, detach
 from opentelemetry.sdk._logs import LogRecordProcessor, ReadWriteLogRecord
 from opentelemetry.sdk.trace import SpanProcessor
 
-from ._blobs import Uploads
+from ._blobs import Tally, Uploads, held_of
 from ._limits import AdvertisedLimits
 from ._otel_compat import export_context, instrumentation_suppressed
 from .snapshots import Hold, snapshot_log, snapshot_pending_span, snapshot_span
@@ -108,6 +108,10 @@ class _BoundedProcessor:
         self._dropped += sum(not self._advisory(item) for item in items)
         if self._dropped_records is not None:
             self._dropped_records.count([item for item in items if not self._advisory(item)])
+        self._discard(*items)
+
+    def _discard(self, *items: Any) -> None:
+        """Release upload requests owned by records lost before export."""
 
     def _enqueue(self, item: Any) -> None:
         if self._pid != os.getpid():
@@ -209,6 +213,7 @@ class _BoundedProcessor:
                     self._dropped_records.count(
                         [item for item, _ in self._queue if not self._advisory(item)]
                     )
+                self._discard(*(item for item, _ in self._queue))
                 self._queue.clear()
                 self._pending_records = 0
                 self._pending_bytes = 0
@@ -367,6 +372,24 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
         if uploads is None:
             return None
         return Hold(uploads.held, value_bytes, uploads.holds(), uploads)
+
+    def _discard(self, *items: Any) -> None:
+        uploads = self._uploads
+        if uploads is None:
+            return
+        tally = Tally()
+        for item in items:
+            held = held_of(item) or uploads.take(item)
+            if held is None:
+                continue
+            trace_id = format(item.context.trace_id, "032x") if item.context else ""
+            for _ in held.files:
+                tally.fallback("budget", trace_id)
+            held.values.clear()
+            held.files.clear()
+            held.digests.clear()
+            held.release()
+        self._exporter._report_uploads(tally)
 
     def spans_ended(self, trace_id: str) -> int | None:
         """How many spans of the trace ended in this process, or ``None`` once forgotten."""

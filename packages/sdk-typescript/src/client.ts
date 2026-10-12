@@ -17,9 +17,9 @@ import {
 } from "@opentelemetry/api";
 import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
-import { hrTime, W3CTraceContextPropagator } from "@opentelemetry/core";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
-import { TracerProvider } from "@opentelemetry/sdk-trace";
+import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
 import { HUE_SCOPE } from "./config.js";
 import {
@@ -35,6 +35,7 @@ import {
   encodeContent,
   noopSpan,
   safeSpan,
+  spanSource,
   type EncodeLimits,
 } from "./safety.js";
 import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
@@ -882,9 +883,16 @@ export class HueClient {
         if (isMediaName(name)) attributes["hue.file.name"] = name;
         else this.instrumentationFailed();
       }
-      const eventTime = hrTime();
-      const previous = this.fileEventTime;
+      // Let OpenTelemetry use the span's wall-clock anchor, then keep this event's exact
+      // timestamp for upload admission. A dropped event cannot authorize an upload.
+      const source = spanSource(span) as Span & Partial<Pick<ReadableSpan, "events">>;
+      const previousEvent = source.events?.at(-1);
+      span.addEvent("hue.file", attributes);
+      const event = source.events?.at(-1);
+      const eventTime = event && event !== previousEvent ? event.time : undefined;
+      const previous = this.fileEventTimes.get(source);
       if (
+        eventTime &&
         previous &&
         (eventTime[0] < previous[0] ||
           (eventTime[0] === previous[0] && eventTime[1] <= previous[1]))
@@ -896,13 +904,12 @@ export class HueClient {
           eventTime[1] = 0;
         }
       }
-      this.fileEventTime = eventTime;
-      span.addEvent("hue.file", attributes, eventTime);
+      if (eventTime) this.fileEventTimes.set(source, eventTime);
       if (file.upload === true && this.transport.offloadsValues()) {
         if (
           !this.transport.stageMedia(
             span,
-            bytes
+            bytes && eventTime
               ? {
                   bytes,
                   digest: { sha256, size: bytes.byteLength },
@@ -924,7 +931,7 @@ export class HueClient {
   private truncatedKeys = new WeakMap<Span, string[]>();
 
   /** Distinguishes requests whose helper events otherwise have identical metadata. */
-  private fileEventTime?: HrTime;
+  private fileEventTimes = new WeakMap<Span, HrTime>();
 
   /** A content value's bounds: Hue's value cap as the receiver last advertised it. */
   private contentLimits() {

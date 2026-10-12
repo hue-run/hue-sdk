@@ -61,6 +61,21 @@ def utf8_size(value: str, limit: int) -> int:
     return size
 
 
+_ASTRAL = re.compile("[\U00010000-\U0010ffff]")
+
+
+def utf16_size(value: str, limit: int) -> int:
+    """Count JavaScript string units, without making an encoded copy."""
+    size = len(value)
+    if size > limit:
+        return size
+    for _ in _ASTRAL.finditer(value):
+        size += 1
+        if size > limit:
+            break
+    return size
+
+
 def _base64_header(header: str) -> bool:
     """Whether a data: URL header's parameters, after its media type, include ``base64``."""
     semicolon = header.find(";")
@@ -368,22 +383,22 @@ def media_content_type(file: InlineFilePart, decoded: InlineFile) -> str:
 
 
 class MediaDigestMemo:
-    """Bounded byte-identity cache shared by admission, export and explicit files."""
+    """Bounded trace/digest cache; payload bytes are never retained."""
 
     def __init__(self, limit: int = 4 * 1024 * 1024, capacity: int = 256) -> None:
         self._lock = Lock()
-        self._entries: OrderedDict[tuple[str, bytes], tuple[str, int]] = OrderedDict()
+        self._entries: OrderedDict[tuple[str, str], tuple[str, int]] = OrderedDict()
         self._size = 0
         self.limit, self.capacity = limit, capacity
 
     def digest(self, data: bytes, trace_id: str = "") -> tuple[str, int]:
-        identity = (trace_id, data)
+        digest = hashlib.sha256(data).hexdigest(), len(data)
+        identity = (trace_id, digest[0])
         with self._lock:
             known = self._entries.get(identity)
             if known is not None:
                 return known
-            digest = hashlib.sha256(data).hexdigest(), len(data)
-            charge = sys.getsizeof(data) + sys.getsizeof(trace_id) + sys.getsizeof(identity)
+            charge = sys.getsizeof(identity[1]) + sys.getsizeof(trace_id) + sys.getsizeof(identity)
             if charge <= self.limit:
                 while self._entries and (
                     len(self._entries) >= self.capacity or self._size + charge > self.limit
@@ -416,10 +431,12 @@ def hash_inline_files_counted(
     memo: MediaDigestMemo | None = None,
     receipts: dict[str, tuple[str, int]] | None = None,
     trace_id: str = "",
+    *,
+    preserve_small_binary: bool = False,
 ) -> tuple[Any, int]:
     if (
         not may_inline_files(key, value)
-        or utf8_size(value, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
+        or utf16_size(value, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
     ):
         return value, 0
     try:
@@ -429,7 +446,7 @@ def hash_inline_files_counted(
         for file in files:
             decoded = media_bytes(file)
             if not decoded.data or (
-                is_text_media_type(media_content_type(file, decoded))
+                (preserve_small_binary or is_text_media_type(media_content_type(file, decoded)))
                 and len(decoded.data) <= INLINE_FILE_LIMIT
             ):
                 continue

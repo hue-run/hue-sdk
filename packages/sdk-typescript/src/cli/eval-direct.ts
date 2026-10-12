@@ -23,8 +23,9 @@ import type { JsonValue } from "../types.js";
  *   <case dir>/output/                where the command writes what it produced
  *
  * Everything under `output/` becomes the execution's generated files. Optional helpers there:
- * `manifest.json` (`{ "primary": "<filename>", "output": <json> }`), `result.json` (the JSON
- * output) and `summary.txt` / `summary.md` (recorded as `{ "summary": "…" }`).
+ * `manifest.json` (`{ "primary": "<filename>", "output": <json>, "contentTypes": { "<path>": "<MIME>" } }`),
+ * `result.json` (the JSON output) and `summary.txt` / `summary.md` (recorded as `{ "summary": "…" }`).
+ * MP4 and WebM outputs require a contentTypes declaration because either container can hold audio or video.
  */
 export const directCaseEnvironment = [
   "HUE_CASE_DIR",
@@ -49,16 +50,24 @@ export const outputExtensions: Readonly<Record<string, string>> = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".gif": "image/gif",
+  ".avif": "image/avif",
   ".mp3": "audio/mpeg",
   ".mpeg": "audio/mpeg",
   ".wav": "audio/wav",
   ".ogg": "audio/ogg",
-  ".webm": "audio/webm",
-  ".mp4": "audio/mp4",
   ".m4a": "audio/mp4",
   ".flac": "audio/flac",
+  ".opus": "audio/opus",
+  ".aac": "audio/aac",
 };
-for (const type of Object.values(outputExtensions))
+const ambiguousOutputExtensions: Readonly<Record<string, readonly string[]>> = {
+  ".mp4": ["audio/mp4", "video/mp4"],
+  ".webm": ["audio/webm", "video/webm"],
+};
+for (const type of [
+  ...Object.values(outputExtensions),
+  ...Object.values(ambiguousOutputExtensions).flat(),
+])
   if (!outputContentTypes.includes(type))
     throw new Error(`outputExtensions maps to a content type Hue does not accept: ${type}`);
 
@@ -327,15 +336,48 @@ export async function collectDirectOutputs(
   );
   // Directory order differs between filesystems; keep uploads stable.
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  const unsupported = entries.filter(
-    (entry) => !outputExtensions[extname(entry.name).toLowerCase()],
-  );
+  const declaredTypes =
+    manifest && typeof manifest === "object" && !Array.isArray(manifest)
+      ? manifest.contentTypes
+      : undefined;
+  if (
+    declaredTypes !== undefined &&
+    (!declaredTypes || typeof declaredTypes !== "object" || Array.isArray(declaredTypes))
+  )
+    throw new Error("manifest.json contentTypes must map output paths to MIME type strings");
+  for (const [name, type] of Object.entries(declaredTypes ?? {})) {
+    if (typeof type !== "string" || !outputContentTypes.includes(type))
+      throw new Error(`manifest.json declares an unsupported content type for ${name}`);
+    if (!entries.some((entry) => entry.name === name))
+      throw new Error(
+        `manifest.json declares a content type for a file that was not written: ${name}`,
+      );
+  }
+  const unsupported = entries.filter((entry) => {
+    const extension = extname(entry.name).toLowerCase();
+    return !outputExtensions[extension] && !ambiguousOutputExtensions[extension];
+  });
   if (unsupported.length)
     throw new Error(
-      `The agent wrote files Hue does not accept as generated documents: ${unsupported.map((entry) => entry.name).join(", ")} (accepted: ${Object.keys(outputExtensions).join(" ")})`,
+      `The agent wrote files Hue does not accept as generated documents: ${unsupported.map((entry) => entry.name).join(", ")} (accepted: ${[...Object.keys(outputExtensions), ...Object.keys(ambiguousOutputExtensions)].join(" ")})`,
     );
   const files: OutputFile[] = [];
   for (const entry of entries) {
+    const extension = extname(entry.name).toLowerCase();
+    const declared =
+      declaredTypes && Object.hasOwn(declaredTypes, entry.name)
+        ? declaredTypes[entry.name]
+        : undefined;
+    const contentType = declared ?? outputExtensions[extension];
+    const acceptedTypes = ambiguousOutputExtensions[extension] ?? [outputExtensions[extension]!];
+    if (contentType === undefined)
+      throw new Error(
+        `Declare ${entry.name} as ${acceptedTypes.join(" or ")} in manifest.json contentTypes`,
+      );
+    if (typeof contentType !== "string" || !acceptedTypes.includes(contentType))
+      throw new Error(
+        `manifest.json content type for ${entry.name} must be ${acceptedTypes.join(" or ")}`,
+      );
     const bytes = (await readAgentFile(
       entry.path,
       `Generated file ${entry.name}`,
@@ -346,7 +388,7 @@ export async function collectDirectOutputs(
     files.push({
       bytes,
       filename: artifactFilename(entry.name),
-      contentType: outputExtensions[extname(entry.name).toLowerCase()]!,
+      contentType,
     });
   }
   if (typeof declaredPrimary === "string") {

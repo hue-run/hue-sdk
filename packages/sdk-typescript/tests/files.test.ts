@@ -30,6 +30,7 @@ import {
   type Subject,
   type SubjectFile,
 } from "../src/evals.js";
+import { outputContentTypes } from "../src/evals/files.js";
 
 const key = "synthetic-files-key";
 const digest = "c".repeat(64);
@@ -37,15 +38,47 @@ const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes
 const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const directory = () => mkdtemp(join(tmpdir(), "hue-files-"));
 
-test("generated GIF and audio outputs upload exact bytes while unsupported MIME stays blocked", async () => {
+test("generated output content types match the exact 22-type list", () => {
+  expect(outputContentTypes).toEqual([
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/json",
+    "text/plain",
+    "text/csv",
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/avif",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/ogg",
+    "audio/webm",
+    "audio/mp4",
+    "audio/flac",
+    "audio/opus",
+    "audio/aac",
+    "video/mp4",
+    "video/webm",
+  ]);
+});
+
+test("generated media outputs upload exact bytes while unsupported MIME stays blocked", async () => {
   const outputs = [
     ["animation.gif", "image/gif"],
+    ["image.avif", "image/avif"],
     ["reply.mp3", "audio/mpeg"],
     ["reply.wav", "audio/wav"],
     ["reply.ogg", "audio/ogg"],
     ["reply.webm", "audio/webm"],
     ["reply.mp4", "audio/mp4"],
     ["reply.flac", "audio/flac"],
+    ["reply.opus", "audio/opus"],
+    ["reply.aac", "audio/aac"],
+    ["clip.mp4", "video/mp4"],
+    ["clip.webm", "video/webm"],
   ] as const;
   const bytes = Buffer.from([0, 1, 2, 127, 128, 255]);
   for (const supported of [true, false]) {
@@ -66,7 +99,7 @@ test("generated GIF and audio outputs upload exact bytes while unsupported MIME 
         traceEvidence: { mode: "required" },
         target: () =>
           withFiles(
-            { reply: "generated audio" },
+            { reply: "generated media" },
             supported
               ? outputs.map(([filename, contentType]) => ({ filename, contentType, bytes }))
               : [{ filename: "program.exe", contentType: "application/x-msdownload", bytes }],

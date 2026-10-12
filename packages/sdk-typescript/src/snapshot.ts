@@ -5,8 +5,10 @@ import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord, ReadWriteLogRecord } from "@opentelemetry/sdk-logs";
 import {
   hashInlineFiles,
+  hashNestedInlineFiles,
   type MediaDigestMemo,
   INLINE_FILE_TEXT_PER_RECORD,
+  MAX_INLINE_FILE_TEXT,
   isMessageKey,
   mayInlineFiles,
 } from "./inline-files.js";
@@ -66,6 +68,7 @@ interface Mark {
   bytes: number;
   nodes: number;
   copied: number;
+  attributesCopied: number;
 }
 
 /** Copies only exported data, with the same finite budget used for admission. */
@@ -78,7 +81,10 @@ class Snapshot {
   private nodes = 0;
   private ancestors = new Set<object>();
   private copied = new Map<object, unknown>();
+  private attributesCopied = new Map<object, unknown>();
+  private ownAttributesCopied = new Map<object, unknown>();
   private hashed = new Map<string, unknown>();
+  private nestedHashed = new Map<string, unknown>();
   private inspected = 0;
   /** Bytes of values held whole for upload, charged to the held-value budget. */
   held = 0;
@@ -159,7 +165,12 @@ class Snapshot {
   }
 
   private mark(): Mark {
-    return { bytes: this.bytes, nodes: this.nodes, copied: this.copied.size };
+    return {
+      bytes: this.bytes,
+      nodes: this.nodes,
+      copied: this.copied.size,
+      attributesCopied: this.attributesCopied.size,
+    };
   }
 
   /** Back to `mark`, forgetting the values copied since: a later copy must not reuse a partial
@@ -170,6 +181,9 @@ class Snapshot {
     this.ancestors.clear();
     let index = 0;
     for (const key of [...this.copied.keys()]) if (index++ >= mark.copied) this.copied.delete(key);
+    index = 0;
+    for (const key of [...this.attributesCopied.keys()])
+      if (index++ >= mark.attributesCopied) this.attributesCopied.delete(key);
   }
 
   /**
@@ -219,18 +233,27 @@ class Snapshot {
     }
   }
 
-  /** A message attribute with its inline media hashed. The same text is hashed once per
-   * record, and a record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} of it in all;
-   * beyond that, messages are charged as recorded. */
+  /** A message attribute with its inline media hashed. Own and nested attributes cache
+   * separately because small binary media stays inline only in nested attributes. A record
+   * inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} code units in all; beyond that,
+   * messages are charged as recorded. */
   private inlineFiles(key: string, value: unknown): unknown {
-    if (typeof value !== "string" || !mayInlineFiles(key, value)) return value;
-    if (this.hashed.has(value)) return this.hashed.get(value);
+    if (
+      typeof value !== "string" ||
+      value.length > MAX_INLINE_FILE_TEXT ||
+      !mayInlineFiles(key, value)
+    )
+      return value;
+    const hashed = this.own ? this.hashed : this.nestedHashed;
+    if (hashed.has(value)) return hashed.get(value);
     if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
     this.inspected += value.length;
     const count = { files: 0 };
-    const result = hashInlineFiles(key, value, count, this.memo, this.traceId);
-    this.hashed.set(value, result);
-    if (count.files) this.hashedFiles.set(value, count.files);
+    const result = this.own
+      ? hashInlineFiles(key, value, count, this.memo, this.traceId)
+      : hashNestedInlineFiles(key, value);
+    hashed.set(value, result);
+    if (this.own && count.files) this.hashedFiles.set(value, count.files);
     return result;
   }
 
@@ -312,7 +335,15 @@ class Snapshot {
     if (typeof value !== "object") throw new TypeError("Unsupported telemetry value");
     if (utilTypes.isProxy(value)) throw new TypeError("Telemetry proxies are unsupported");
     if (this.ancestors.has(value)) throw new TypeError("Cyclic telemetry value");
-    if (this.copied.has(value)) return this.copied.get(value) as T;
+    // One object can be reused as own attributes, nested attributes and an ordinary log body.
+    // Their copies differ: only attributes inspect media, and only own attributes upload it.
+    const copies =
+      shape === "attributes"
+        ? this.own
+          ? this.ownAttributesCopied
+          : this.attributesCopied
+        : this.copied;
+    if (copies.has(value)) return copies.get(value) as T;
     if (utilTypes.isUint8Array(value)) {
       // Own accessors/subclasses cannot disguise the retained byte count.
       // A length-tracking SharedArrayBuffer view can grow on another thread
@@ -322,14 +353,14 @@ class Snapshot {
       this.charge(length);
       const copy = new Uint8Array(length);
       typedArraySet.call(copy, value);
-      this.copied.set(value, copy);
+      copies.set(value, copy);
       return copy as T;
     }
     const array = Array.isArray(value);
     if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(value)))
       throw new TypeError("Telemetry must contain data objects");
     const copy: unknown[] | Record<string, unknown> = array ? [] : Object.create(null);
-    this.copied.set(value, copy);
+    copies.set(value, copy);
     this.ancestors.add(value);
     if (array) {
       if (value.length > MAX_RECORD_NODES)
@@ -358,7 +389,7 @@ class Snapshot {
         const source: unknown = descriptor.value;
         const copied = this.copy(
           shape === "attributes"
-            ? this.scrubbedBeforeCut(key, this.own ? this.inlineFiles(key, source) : source)
+            ? this.scrubbedBeforeCut(key, this.inlineFiles(key, source))
             : source,
           depth + 1,
           shape === "event" && key === "attributes" ? "attributes" : "value",
@@ -409,7 +440,7 @@ class Snapshot {
       if (value == null || Object.hasOwn(attributes, key)) continue;
       this.charge(key.length * 2 + 16);
       attributes[key] = this.copy(
-        this.scrubbedBeforeCut(key, value),
+        this.scrubbedBeforeCut(key, this.inlineFiles(key, value)),
         0,
         "value",
         true,

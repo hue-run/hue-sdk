@@ -33,7 +33,6 @@ from opentelemetry.trace import get_current_span
 from ._blobs import (
     BLOBS_KEY,
     FALLBACK_MESSAGES,
-    MAX_BLOB_ENTRIES,
     ExplicitFile,
     Held,
     Tally,
@@ -41,6 +40,7 @@ from ._blobs import (
     _blob_entry,
     held_of,
     place_spans,
+    prepare_spans,
     upload_budget_seconds,
 )
 from ._inline_files import is_media_name
@@ -857,9 +857,10 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         entries = [(index, span, held) for index, span, held in holding if held is not None]
         if uploads is None or not entries:
             return spans
-        deadline = monotonic() + upload_budget_seconds(uploads.timeout)
-        placed, tally = place_spans(
-            [
+        result = list(spans)
+        tally = Tally()
+        try:
+            candidates = [
                 (
                     span.attributes or {},
                     Held(
@@ -867,81 +868,75 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                         cut=held.cut,
                         digests=held.digests,
                         inspected=held.inspected,
+                        files=self._surviving_files(held.files, span, tally),
                     ),
                     _record_trace_id(span) or "",
                 )
                 for _, span, held in entries
-            ],
-            uploader=uploads.uploader,
-            memo=uploads.memo,
-            value_bytes=self._limits.current.value_bytes,
-            deadline=deadline,
-            wait=self._wait_for_rate,
-        )
-        result = list(spans)
-        for (index, span, held), attributes in zip(entries, placed, strict=True):
-            trace_id = _record_trace_id(span) or ""
-            record = replace_span(span, attributes=attributes)
-            try:
-                files = self._surviving_files(held.files, record, tally)
-                if files:
-                    listed = attributes.get(BLOBS_KEY)
-                    baseline = (
-                        [item for item in listed if isinstance(item, str)]
-                        if isinstance(listed, (list, tuple))
-                        else []
-                    )
-                    slots = max(0, MAX_BLOB_ENTRIES - len(baseline))
-                    for _ in files[slots:]:
-                        tally.fallback("budget", trace_id)
-                    files = files[:slots]
-                    provisional = [self._file_entry(file) for file in files]
-                    fitted = self._fit(
-                        replace_span(
-                            record, attributes={**attributes, BLOBS_KEY: [*baseline, *provisional]}
-                        )
-                    )
-                    if fitted is None:
-                        for _ in files:
-                            tally.fallback("budget", trace_id)
-                    else:
-                        record = fitted[0]
-                        files = self._surviving_files(files, record, tally)
-                        fitted_attributes = dict(record.attributes or {})
-                        listed = fitted_attributes.get(BLOBS_KEY)
-                        references = list(listed) if isinstance(listed, (list, tuple)) else []
-                        admitted = []
-                        for file in files:
-                            entry = self._file_entry(file)
-                            try:
-                                position = references.index(entry, len(baseline))
-                            except ValueError:
-                                tally.fallback("budget", trace_id)
-                            else:
-                                references.pop(position)
-                                admitted.append(file)
-                        # Only baseline references survive until actual uploads succeed.
-                        existing = references[: len(baseline)]
-                        if existing:
-                            fitted_attributes[BLOBS_KEY] = existing
-                        else:
-                            fitted_attributes.pop(BLOBS_KEY, None)
-                        uploaded, helper_tally = place_spans(
-                            [(fitted_attributes, Held(files=admitted, inspected=set()), trace_id)],
-                            uploader=uploads.uploader,
-                            memo=uploads.memo,
-                            value_bytes=self._limits.current.value_bytes,
-                            deadline=deadline,
-                            wait=self._wait_for_rate,
-                        )
-                        record = replace_span(record, attributes=uploaded[0])
-                        tally.uploaded += helper_tally.uploaded
-                        for reason, (count, traces) in helper_tally.fallbacks.items():
-                            previous, named = tally.fallbacks.get(reason, (0, set()))
-                            tally.fallbacks[reason] = (previous + count, named | traces)
+            ]
+            placements, planned, references = prepare_spans(
+                candidates,
+                uploader=uploads.uploader,
+                memo=uploads.memo,
+                value_bytes=self._limits.current.value_bytes,
+            )
+            # Fit every span's normal values, media parts and helpers before any network call.
+            for (index, span, _), placement, attributes, provisional in zip(
+                entries, placements, planned, references, strict=True
+            ):
+                fitted = self._fit(replace_span(span, attributes=attributes))
+                placement.allowed = set()
+                placement.writable = set()
+                if fitted is None:
+                    continue
+                record = fitted[0]
+                fitted_attributes = dict(record.attributes or {})
+                placement.writable = {
+                    key for key, value in attributes.items()
+                    if key in fitted_attributes and fitted_attributes[key] == value
+                }
+                listed = fitted_attributes.get(BLOBS_KEY)
+                surviving = list(listed) if isinstance(listed, (list, tuple)) else []
+                baseline_count = len(placement.existing)
+                existing = surviving[:baseline_count]
+                remaining = surviving[baseline_count:]
+                files = self._surviving_files(placement.held.files, record, Tally())
+                for identity, reference in provisional:
+                    key, candidate = placement.candidates[identity[0]]
+                    if isinstance(candidate, ExplicitFile):
+                        if candidate not in files:
+                            continue
+                        files.remove(candidate)
+                    elif key not in placement.writable:
+                        continue
+                    if reference in remaining:
+                        remaining.remove(reference)
+                        placement.allowed.add(identity)
+                if existing:
+                    fitted_attributes[BLOBS_KEY] = existing
+                else:
+                    fitted_attributes.pop(BLOBS_KEY, None)
+                placement.attributes = fitted_attributes
+                placement.existing = existing
                 result[index] = record
-            finally:
-                # Release the queued copy once, including helper requests rejected by admission.
+            deadline = monotonic() + upload_budget_seconds(uploads.timeout)
+            placed, uploaded = place_spans(
+                candidates,
+                prepared=placements,
+                uploader=uploads.uploader,
+                memo=uploads.memo,
+                value_bytes=self._limits.current.value_bytes,
+                deadline=deadline,
+                wait=self._wait_for_rate,
+            )
+            for (index, _, _), attributes in zip(entries, placed, strict=True):
+                result[index] = replace_span(result[index], attributes=attributes)
+            tally.uploaded += uploaded.uploaded
+            for reason, (count, traces) in uploaded.fallbacks.items():
+                previous, named = tally.fallbacks.get(reason, (0, set()))
+                tally.fallbacks[reason] = (previous + count, named | traces)
+        finally:
+            for _, _, held in entries:
                 held.values.clear()
                 held.files.clear()
                 held.digests.clear()

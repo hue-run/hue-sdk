@@ -3,7 +3,7 @@ import { MAX_BODY_BYTES } from "./config.js";
 
 /** Text media above this decoded byte limit is offloaded; binary media always uses a digest. */
 export const INLINE_FILE_LIMIT = 64 * 1024;
-/** The longest message text, in UTF-8 bytes, inspected for inline files. */
+/** The longest message text, in UTF-16 code units, inspected for inline files. */
 export const MAX_INLINE_FILE_TEXT = 8 * MAX_BODY_BYTES;
 /** Message text one record inspects for inline files in all, in UTF-16 code units. */
 export const INLINE_FILE_TEXT_PER_RECORD = 2 * MAX_INLINE_FILE_TEXT;
@@ -379,10 +379,26 @@ export function hashInlineFiles(
   memo?: MediaDigestMemo,
   traceId = "",
 ): unknown {
+  return hashFiles(key, value, false, count, memo, traceId);
+}
+
+/** Nested message attributes retain small media and digest larger media without upload state. */
+export function hashNestedInlineFiles(key: string, value: unknown): unknown {
+  return hashFiles(key, value, true);
+}
+
+function hashFiles(
+  key: string,
+  value: unknown,
+  nested: boolean,
+  count?: { files: number },
+  memo?: MediaDigestMemo,
+  traceId = "",
+): unknown {
   if (
     typeof value !== "string" ||
     !mayInlineFiles(key, value) ||
-    Buffer.byteLength(value, "utf8") > MAX_INLINE_FILE_TEXT
+    value.length > MAX_INLINE_FILE_TEXT
   )
     return value;
   try {
@@ -393,7 +409,7 @@ export function hashInlineFiles(
       const decoded = mediaBytes(file);
       if (!decoded.bytes.byteLength) continue;
       if (
-        isTextMediaType(mediaContentType(file, decoded)) &&
+        (nested || isTextMediaType(mediaContentType(file, decoded))) &&
         decoded.bytes.byteLength <= INLINE_FILE_LIMIT
       )
         continue;

@@ -757,13 +757,20 @@ minutes, so a completion that cannot reach Hue takes that long to fail; a reserv
 that cannot reach Hue still fails at once.
 
 Every regular file the command leaves under `output/` is uploaded as a generated document
-(accepted: `.pdf .docx .pptx .xlsx .json .txt .csv .png .jpg .jpeg .webp`; another extension or an
-empty file is the case's error). Optional helpers: `manifest.json` (`{"primary": "<filename>",
-"output": <json>}`) names the primary document and the JSON output; `result.json` is the JSON
+(accepted: `.pdf .docx .pptx .xlsx .json .txt .csv .png .jpg .jpeg .webp .gif .avif .mp3 .mpeg
+.wav .ogg .m4a .flac .opus .aac .mp4 .webm`; another extension or an empty file is the case's
+error). Optional helpers: `manifest.json` (`{"primary": "<filename>", "output": <json>,
+"contentTypes": {"<path>": "<MIME>"}}`) names the primary document, the JSON output and declared
+content types; `result.json` is the JSON
 output; `summary.txt` or `summary.md` is recorded as `{"summary": "..."}`. When none is written,
 the command's stdout is the output (JSON when it parses). A single generated file is the primary
 document by default. Model and provider credentials stay in the command's own environment; the
 scoped case files are copies under `--checkpoint-dir` (default `.hue/eval/<agent-key>/<project>/direct/<experiment>`).
+
+For `.mp4` and `.webm` files, `manifest.json.contentTypes` must declare the matching audio or
+video MIME type: `audio/mp4` or `video/mp4`, and `audio/webm` or `video/webm`. Each key must match
+the actual relative path under `output/`, including case. For example,
+`{"contentTypes":{"nested/clip.MP4":"video/mp4"}}` declares `output/nested/clip.MP4`.
 
 The same collection serves world cases, and it does not trust paths the agent controls. `output/`
 must be a real directory, and a helper name, when present, a regular file; a symlink, FIFO or

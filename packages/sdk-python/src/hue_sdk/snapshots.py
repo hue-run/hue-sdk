@@ -29,7 +29,7 @@ from ._inline_files import (
     MAX_INLINE_FILE_TEXT,
     hash_inline_files_counted,
     may_inline_files,
-    utf8_size,
+    utf16_size,
 )
 from ._limits import MAX_CONTENT_BYTES, TRUNCATED_KEY, cut_utf8, over_utf8
 from ._records import CONTENT_PREFIXES as CONTENT_PREFIXES
@@ -314,7 +314,7 @@ class _ValueBudget:
             return truncated_marker(sum(len(text) for text in long))
         return scrub_tool_credentials(key, value)
 
-    def permitted(self, values: Any, files: bool = False) -> Any:
+    def permitted(self, values: Any, files: bool = False, *, nested: bool = False) -> Any:
         """Apply the content policy: metadata-only mode drops recognized content keys. With
         ``files`` false, binary and large textual inline files are left for export to upload."""
         source = values or {}
@@ -324,18 +324,20 @@ class _ValueBudget:
         if isinstance(source, Mapping):
             # Binary and large textual inline files shrink before charging the copy's budget.
             source = {
-                key: self._media(key, item)[0] if files and isinstance(key, str) else item
+                key: self._media(key, item, nested=nested)[0]
+                if files and isinstance(key, str)
+                else item
                 for key, item in source.items()
                 if self.capture_content or not (isinstance(key, str) and is_content_key(key))
             }
         return source
 
     def _media(
-        self, key: str, value: Any, *, collect_upload_state: bool = False
+        self, key: str, value: Any, *, collect_upload_state: bool = False, nested: bool = False
     ) -> tuple[Any, int]:
         if not may_inline_files(key, value):
             return value, 0
-        size = utf8_size(value, MAX_INLINE_FILE_TEXT)
+        size = utf16_size(value, MAX_INLINE_FILE_TEXT)
         if size > MAX_INLINE_FILE_TEXT or size > self.media_remaining:
             return value, 0
         self.media_remaining -= size
@@ -348,7 +350,9 @@ class _ValueBudget:
             if collect_upload_state and self.hold and self.hold.uploads
             else None
         )
-        result = hash_inline_files_counted(key, value, memo, receipts, self.trace_id)
+        result = hash_inline_files_counted(
+            key, value, memo, receipts, self.trace_id, preserve_small_binary=nested
+        )
         if collect_upload_state and receipts:
             self.held.digests[key] = receipts
         return result
@@ -398,7 +402,7 @@ class _ValueBudget:
         """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key. A
         span's ``own`` values over the cap are held whole for upload when they may be."""
         holding = own and self.hold is not None
-        source = self.permitted(values, files=own and not holding)
+        source = self.permitted(values, files=not holding, nested=not own)
         if not isinstance(source, Mapping):
             return self.value(source)
         copied: dict[str, Any] = {}

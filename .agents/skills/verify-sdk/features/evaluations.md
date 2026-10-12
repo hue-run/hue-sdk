@@ -29,7 +29,7 @@ Preconditions:
 
 ## Generated media files
 
-TypeScript's generated-file allowlist adds GIF (`image/gif`) and audio (`audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/webm`, `audio/mp4`, `audio/flac`) alongside the existing document, text and image types. Python managed outputs continue to accept arbitrary valid MIME types, including GIF and those audio types. Verify byte identity, content types, generated-file reservation and completion with a synthetic receiver.
+Both SDKs accept the same 22 generated-file content types: PDF, DOCX, PPTX, XLSX, `application/json`, `text/plain`, `text/csv`, `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `image/avif`, `audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/webm`, `audio/mp4`, `audio/flac`, `audio/opus`, `audio/aac`, `video/mp4` and `video/webm`. TypeScript adds GIF and six audio types; Python now restricts managed outputs to this list. Python input files still accept arbitrary valid MIME types. Verify rejection of unsupported outputs such as `audio/pcm`, byte identity, content types, generated-file reservation and completion with a synthetic receiver. For `.mp4` and `.webm`, verify that the declared MIME type distinguishes audio from video.
 
 The file lifecycle checks are:
 
