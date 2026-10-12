@@ -1,10 +1,20 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ArtifactSizeError, HueApiError, type EvaluationClient } from "./client.js";
-import type { ArtifactReservation, CaseFile, LocalFile, OutputFile, SubjectFile } from "./types.js";
+import { uuid } from "./json.js";
+import type {
+  ArtifactReservation,
+  CaseFile,
+  CaseFileReference,
+  CaseFileWrite,
+  CaseWrite,
+  LocalFile,
+  OutputFile,
+  SubjectFile,
+} from "./types.js";
 
 /** Roles the target receives. Organization templates stay with grading, as in the managed protocol. */
 export const targetFileRoles: readonly CaseFile["role"][] = [
@@ -472,32 +482,216 @@ export async function uploadOutputFiles(
   for (const file of files) {
     if (file.artifactId) continue;
     const bytes = await verifiedBytes(file.path, file);
-    const reserved = await client.reserveArtifact({
-      idempotencyKey: `hue-sdk:${executionId}:${file.sha256}:${sha256(Buffer.from(file.filename)).slice(0, 16)}`,
-      filename: file.filename,
-      contentType: file.contentType,
-      byteSize: file.byteSize,
-      sha256: file.sha256,
-    });
-    let state = reserved.state;
-    if (state !== "ready") {
-      // A verification already running holds the uploaded bytes; Hue refuses another upload then.
-      if (reserved.copyState !== "acknowledged" && state !== "verifying") {
-        const upload = await client.requestArtifactUpload(reserved.id);
-        try {
-          await client.uploadArtifactBytes(upload, bytes, file.contentType);
-        } catch {
-          // A lost staging acknowledgement or an immutable object already present can only be
-          // settled by verified completion; never rewrite a final object here.
-        }
-      }
-      state = await settleArtifact(client, reserved.id, timing);
-    }
-    if (state !== "ready")
-      throw new Error(`Generated file ${file.filename} was not verified by Hue (${state})`);
-    file.artifactId = reserved.id;
+    file.artifactId = await publishArtifact(
+      client,
+      {
+        idempotencyKey: `hue-sdk:${executionId}:${file.sha256}:${sha256(Buffer.from(file.filename)).slice(0, 16)}`,
+        filename: file.filename,
+        contentType: file.contentType,
+        byteSize: file.byteSize,
+        sha256: file.sha256,
+      },
+      bytes,
+      `Generated file ${file.filename}`,
+      timing,
+    );
     await save();
   }
+}
+
+/** Reserve, stage and verify one artifact; its ID once Hue verified it. Replaying the key settles
+ * on the same artifact, including one Hue finished verifying after an earlier attempt stopped. */
+async function publishArtifact(
+  client: EvaluationClient,
+  declared: Parameters<EvaluationClient["reserveArtifact"]>[0],
+  bytes: Uint8Array,
+  label: string,
+  timing: typeof artifactSettling,
+): Promise<string> {
+  const reserved = await client.reserveArtifact(declared);
+  let state = reserved.state;
+  if (state !== "ready") {
+    // A verification already running holds the uploaded bytes; Hue refuses another upload then.
+    if (reserved.copyState !== "acknowledged" && state !== "verifying") {
+      const upload = await client.requestArtifactUpload(reserved.id);
+      try {
+        await client.uploadArtifactBytes(upload, bytes, declared.contentType);
+      } catch {
+        // A lost staging acknowledgement or an immutable object already present can only be
+        // settled by verified completion; never rewrite a final object here.
+      }
+    }
+    state = await settleArtifact(client, reserved.id, timing);
+  }
+  if (state !== "ready") throw new Error(`${label} was not verified by Hue (${state})`);
+  return reserved.id;
+}
+
+/** Roles a pinned case input can carry. */
+const caseFileRoles: readonly CaseFile["role"][] = [
+  ...targetFileRoles,
+  "org_template",
+  "evaluator_reference",
+];
+/** The most input files one case pins. */
+const MAX_CASE_FILES = 32;
+
+/** A case file name as the artifact API takes it: well-formed Unicode of 1–255 UTF-16 code units,
+ * as Hue counts them, without a control character or a path separator. */
+function caseFileName(name: unknown): string {
+  if (
+    typeof name !== "string" ||
+    !name.length ||
+    name.length > 255 ||
+    !name.isWellFormed() ||
+    [...name].some(
+      (c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127 || c === "/" || c === "\\",
+    )
+  )
+    throw new TypeError(
+      "A case file needs a well-formed filename of 1–255 UTF-16 code units without path separators or control characters",
+    );
+  return name;
+}
+
+/** The bytes of a case file given by path: a regular file within the size limit, read once. */
+async function caseFileBytes(path: unknown, label: string): Promise<Uint8Array> {
+  if (typeof path !== "string" || !path) throw new TypeError(`${label} needs bytes or a path`);
+  // A path with no file behind it, or one that cannot be read, is refused as any invalid file.
+  const unreadable = (error: unknown) =>
+    new TypeError(`${label} could not be read`, { cause: error });
+  const info = await stat(path).catch((error: unknown) => {
+    throw unreadable(error);
+  });
+  if (!info.isFile()) throw new TypeError(`${label} is not a regular file`);
+  if (info.size > outputFileLimits.bytes) throw new RangeError(`${label} exceeds 25 MiB`);
+  return readFile(path).catch((error: unknown) => {
+    throw unreadable(error);
+  });
+}
+
+/** A stand-in for an artifact a case file is uploaded as, the length of a real ID. */
+const STAND_IN_ID = "00000000-0000-4000-8000-000000000000";
+
+/**
+ * The `files` of a case write as the case API takes them: references kept, and each file given
+ * as bytes or a path checked against the artifact policy (role, name, one of
+ * `outputContentTypes`, 1 byte to 25 MiB) and uploaded as a verified artifact. Every file is
+ * checked, and then `beforeUpload` is given the references with a stand-in ID for each upload,
+ * before the first upload. The reservation key names the version, the case's `externalKey`, the
+ * role and the bytes, so the same write sent again reuses its artifacts. Each artifact is pinned
+ * once with a role, even when a reference names the artifact a file was uploaded as.
+ */
+export async function caseFileReferences(
+  client: EvaluationClient,
+  versionId: string,
+  input: CaseWrite,
+  beforeUpload: (references: CaseFileReference[]) => void = () => undefined,
+  timing: typeof artifactSettling = artifactSettling,
+): Promise<CaseFileReference[]> {
+  const files: unknown = input.files;
+  if (!Array.isArray(files)) throw new TypeError("files must be a list of case files");
+  if (files.length > MAX_CASE_FILES)
+    throw new RangeError(`A case pins at most ${MAX_CASE_FILES} files`);
+  type Prepared =
+    | CaseFileReference
+    | {
+        role: CaseFile["role"];
+        filename: string;
+        contentType: string;
+        bytes: Uint8Array;
+        sha256: string;
+      };
+  const prepared: Prepared[] = [];
+  const seen = new Set<string>();
+  for (const [index, file] of (files as CaseFileWrite[]).entries()) {
+    const label = `Case file ${index + 1}`;
+    if (!file || typeof file !== "object") throw new TypeError(`${label} is not a file`);
+    if (!caseFileRoles.includes(file.role))
+      throw new TypeError(`${label} has an unsupported role ${String(file.role)}`);
+    let identity: string;
+    if (file.artifactId !== undefined) {
+      // A reference keeps the artifact's own name and type; a file field beside it is refused
+      // rather than ignored.
+      const fields = file as Partial<
+        Record<"filename" | "contentType" | "bytes" | "path", unknown>
+      >;
+      if (
+        fields.filename !== undefined ||
+        fields.contentType !== undefined ||
+        fields.bytes !== undefined ||
+        fields.path !== undefined
+      )
+        throw new TypeError(`${label} names an artifactId and a file; give one`);
+      const reference = { artifactId: uuid(file.artifactId).toLowerCase(), role: file.role };
+      prepared.push(reference);
+      identity = `artifact:${reference.artifactId}`;
+    } else {
+      const filename = caseFileName(file.filename);
+      if (!outputContentTypes.includes(file.contentType))
+        throw new TypeError(`${label} has an unsupported content type ${String(file.contentType)}`);
+      if (file.bytes !== undefined && file.path !== undefined)
+        throw new TypeError(`${label} names bytes and a path; give one`);
+      if (file.bytes !== undefined && !(file.bytes instanceof Uint8Array))
+        throw new TypeError(`${label} bytes must be a Uint8Array`);
+      const bytes = file.bytes ?? (await caseFileBytes(file.path, label));
+      if (!bytes.byteLength) throw new RangeError(`${label} is empty`);
+      if (bytes.byteLength > outputFileLimits.bytes)
+        throw new RangeError(`${label} exceeds 25 MiB`);
+      const digest = sha256(bytes);
+      prepared.push({
+        role: file.role,
+        filename,
+        contentType: file.contentType,
+        bytes,
+        sha256: digest,
+      });
+      identity = `file:${digest}:${file.contentType}:${filename}`;
+    }
+    const pinned = `${identity}:${file.role}`;
+    if (seen.has(pinned))
+      throw new TypeError(`${label} is pinned twice with the role ${file.role}`);
+    seen.add(pinned);
+  }
+  beforeUpload(
+    prepared.map((item) =>
+      "artifactId" in item ? item : { artifactId: STAND_IN_ID, role: item.role },
+    ),
+  );
+  const caseKey = sha256(Buffer.from(String(input.externalKey))).slice(0, 16);
+  const references: CaseFileReference[] = [];
+  // A reference and an upload that settle on the same artifact are pinned once: Hue refuses an
+  // artifact pinned twice with one role.
+  const pins = new Set<string>();
+  const pin = (reference: CaseFileReference) => {
+    const identity = `${reference.artifactId.toLowerCase()}:${reference.role}`;
+    if (pins.has(identity)) return;
+    pins.add(identity);
+    references.push(reference);
+  };
+  for (const item of prepared) {
+    if ("artifactId" in item) {
+      pin(item);
+      continue;
+    }
+    const artifactId = await publishArtifact(
+      client,
+      {
+        // The key names everything the reservation declares, so a corrected name or type reserves
+        // a new artifact instead of colliding with the earlier one.
+        idempotencyKey: `hue-sdk:case:${versionId}:${caseKey}:${item.role}:${item.sha256}:${sha256(Buffer.from(item.filename)).slice(0, 16)}:${sha256(Buffer.from(item.contentType)).slice(0, 16)}`,
+        filename: item.filename,
+        contentType: item.contentType,
+        byteSize: item.bytes.byteLength,
+        sha256: item.sha256,
+      },
+      item.bytes,
+      `Case file ${item.filename}`,
+      timing,
+    );
+    pin({ artifactId, role: item.role });
+  }
+  return references;
 }
 
 /** Project uploaded staged files as the verified local files handed to scorers. */

@@ -936,6 +936,9 @@ const installedPackageTests = [
   "inline-files.test.ts",
   // Values over the inline limit uploaded to a loopback Hue implementing the upload routes.
   "blobs.test.ts",
+  // Recorded media read back by digest and files pinned on case writes, against loopback routes.
+  "media.test.ts",
+  "case-files.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);
@@ -1028,6 +1031,7 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/evals/environment-target.js"',
         )
         .replaceAll('"../src/evals/files.js"', '"../node_modules/@hue-run/sdk/dist/evals/files.js"')
+        .replaceAll('"../src/evals/media.js"', '"../node_modules/@hue-run/sdk/dist/evals/media.js"')
         .replaceAll('"../src/evals/json.js"', '"../node_modules/@hue-run/sdk/dist/evals/json.js"')
         .replaceAll(
           '"../src/provider-tools.js"',

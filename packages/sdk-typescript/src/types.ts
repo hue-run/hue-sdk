@@ -6,7 +6,9 @@ import type {
   Tracer,
   TracerProvider,
 } from "@opentelemetry/api";
+import type { AttributeValue } from "@opentelemetry/api";
 import type { LoggerProvider } from "@opentelemetry/api-logs";
+import type { Attachment } from "./attachment.js";
 
 /**
  * JSON-compatible data: the shape content has on the wire after the helpers encode it. Helpers
@@ -20,6 +22,16 @@ export type JsonValue =
   | string
   | JsonValue[]
   | { [key: string]: JsonValue };
+/**
+ * JSON data that may hold an {@link Attachment} anywhere: what a span attribute passed to a helper
+ * may be besides an OpenTelemetry attribute value. Such a value is recorded as JSON text with each
+ * attachment as its digest part.
+ */
+export type AttachmentJson =
+  | Attachment
+  | JsonValue
+  | AttachmentJson[]
+  | { [key: string]: AttachmentJson };
 /** Telemetry signal named by export reports, issues and processors. */
 export type Signal = "traces" | "logs";
 
@@ -142,11 +154,13 @@ export interface ExportReport {
   pendingBytes: number;
   /** Helper capture or instrumentation failures that omitted telemetry while preserving application results. */
   instrumentationFailures: number;
-  /** Whole span attributes, inline media, and opted-in file helper uploads stored apart from
-   * their spans (or already held by Hue), each listed under the span's `hue.blobs`. */
+  /** Whole span attributes, inline media, attachments and opted-in file helper uploads stored
+   * apart from their records (or already held by Hue), each listed under the record's
+   * `hue.blobs`. */
   uploadedValues: number;
-  /** Whole-attribute, inline-media, and opted-in file helper uploads that could not be attached.
-   * Content falls back to truncation, media digests, or file metadata, with a warning issue. */
+  /** Whole-attribute, inline-media, attachment and opted-in file helper uploads that could not be
+   * attached. Content falls back to truncation, media digests, or file metadata, with a warning
+   * issue. */
   uploadFallbacks: number;
 }
 
@@ -170,8 +184,13 @@ export interface SafeLifecycleResult {
 export interface SpanOptions {
   /** OpenTelemetry span kind; `INTERNAL` by default. */
   kind?: SpanKind;
-  /** Attributes set when the span starts. */
-  attributes?: Attributes;
+  /**
+   * Attributes set when the span starts. A value that is a JSON object, an array OpenTelemetry
+   * cannot hold (not of one primitive type) or an {@link Attachment} is recorded as JSON text, with
+   * each attachment as its digest part and its bytes uploaded; put files under `metadata` for Hue to
+   * list them as the span's metadata files.
+   */
+  attributes?: { [key: string]: AttributeValue | AttachmentJson | undefined };
   /** Recorded as `gen_ai.conversation.id` on this span and inherited by nested helper spans. */
   sessionId?: string;
   /** Recorded as `user.id` on this span and inherited by nested helper spans. */

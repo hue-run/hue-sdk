@@ -18,8 +18,8 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass, field
-from threading import Event, Lock, Semaphore, Thread
+from dataclasses import dataclass, field, replace
+from threading import Event, Lock, Semaphore, Thread, local
 from time import monotonic, time
 from typing import Any
 from urllib.parse import urlsplit
@@ -31,15 +31,24 @@ from ._inline_files import (
     INLINE_FILE_LIMIT,
     INLINE_FILE_TEXT_PER_RECORD,
     MAX_INLINE_FILE_TEXT,
+    InlineFilePart,
     MediaDigestMemo,
+    MediaValue,
     digest_part,
-    dumps_message,
     hash_inline_files_counted,
+    is_message_key,
     is_text_media_type,
-    large_inline_file_parts,
+    keeps_prefix,
+    literal_keys,
     may_inline_files,
     media_bytes,
     media_content_type,
+    media_in,
+    placeable,
+    placed_media_text,
+    prefix_part,
+    read_media_text,
+    reencode_media,
     utf16_size,
 )
 from ._limits import TRUNCATED_KEY, cut_utf8, over_utf8
@@ -117,9 +126,11 @@ def is_blob_content_type(value: Any) -> bool:
 
 
 def _is_blob_key(key: str) -> bool:
+    """A key Hue accepts: 1 to 256 UTF-16 code units, as Hue and the TypeScript SDK count them,
+    with no C0 control or DEL."""
     return (
         isinstance(key, str)
-        and 1 <= len(key) <= _MAX_BLOB_KEY_LENGTH
+        and 1 <= utf16_size(key, _MAX_BLOB_KEY_LENGTH) <= _MAX_BLOB_KEY_LENGTH
         and not any(ord(char) < 0x20 or ord(char) == 0x7F for char in key)
     )
 
@@ -282,6 +293,12 @@ class Held:
     files: list[ExplicitFile] = field(default_factory=list)
     digests: dict[str, dict[str, tuple[str, int]]] = field(default_factory=dict)
     inspected: set[str] | None = None
+    # A log record whose GenAI body export places, and the strings over the cap its copy cut,
+    # held whole by their JSON pointer in the body.
+    body: bool = False
+    body_values: dict[str, str] = field(default_factory=dict)
+    # The JSON pointers of the body's strings its copy cut and did not hold: never read as files.
+    body_cut: set[str] = field(default_factory=set)
     _released: bool = False
 
     def release(self) -> None:
@@ -292,7 +309,8 @@ class Held:
 
 def attach_held(record: Any, held: Held) -> None:
     """Hold ``held`` with the record; its budget is released when the record is garbage."""
-    record._hue_held = held
+    # A log record is a frozen dataclass: the held values ride on it all the same.
+    object.__setattr__(record, "_hue_held", held)
     if held.size:
         weakref.finalize(record, held.release)
 
@@ -310,6 +328,17 @@ class ExplicitFile:
     name: str | None
     role: str = "input"
     timestamp: int | None = None
+    # For an attachment placed in a value: the record's attribute (or ``body``) holding its part,
+    # and the part's JSON pointer there.
+    attribute: str | None = None
+    pointer: str | None = None
+
+    @property
+    def key(self) -> str:
+        """The file's ``hue.blobs`` key: its part's, else its ``hue.file`` event's."""
+        if self.attribute is not None and self.pointer is not None:
+            return f"{self.attribute}#{self.pointer}"
+        return f"event:hue.file:{self.digest[0]}"
 
 
 @dataclass
@@ -332,6 +361,8 @@ class Uploads:
         self._lock = Lock()
         self._staged: dict[tuple[int, int], _Staged] = {}
         self._closed = False
+        # Attachments placed in a log record's body, from ``log_inference`` to its admission.
+        self._pending_log = local()
 
     def stage(self, span: Any, file: ExplicitFile) -> bool:
         context = span.get_span_context()
@@ -361,6 +392,98 @@ class Uploads:
 
                 self._staged[key] = _Staged(held, weakref.finalize(span, abandoned))
             return True
+
+    def stage_parts(self, span: Any, attribute: str, files: list[ExplicitFile]) -> list[str]:
+        """Stage the attachments placed in a span's ``attribute``, replacing those an earlier
+        value of the attribute placed. The fallback reason of each file that cannot be held."""
+        context = span.get_span_context()
+        key = (context.trace_id, context.span_id)
+        refused: list[str] = []
+        with self._lock:
+            if self._closed:
+                return ["failed" for _ in files]
+            staged = self._staged.get(key)
+            if staged is not None:
+                held = staged.held
+                kept = []
+                for file in held.files:
+                    if file.attribute == attribute:
+                        released = held_size(file.data) + 1024
+                        held.size -= released
+                        self.held.release(released)
+                    else:
+                        kept.append(file)
+                held.files[:] = kept
+            for file in files:
+                reason = self.uploader.refusal()
+                if reason is not None or not self.uploader.available():
+                    refused.append(reason or "unsupported")
+                    continue
+                size = held_size(file.data) + 1024
+                staged = self._staged.get(key)
+                if staged is None:
+                    if len(self._staged) >= 256:
+                        refused.append("budget")
+                        continue
+                    held = Held(budget=self.held)
+                else:
+                    held = staged.held
+                if len(held.files) >= MAX_BLOB_ENTRIES or not self.held.reserve(size, held.size):
+                    refused.append("budget")
+                    continue
+                held.size += size
+                held.files.append(file)
+                if staged is None:
+                    self._staged[key] = _Staged(held, weakref.finalize(span, self._abandoned, key))
+        return refused
+
+    def _abandoned(self, key: tuple[int, int]) -> None:
+        with self._lock:
+            item = self._staged.pop(key, None)
+        if item is not None:
+            item.held.release()
+
+    def stage_log(self, body: Any, files: list[ExplicitFile]) -> list[str]:
+        """Stage the attachments placed in a log record's body until the record is emitted on
+        this thread (``take_log``). The fallback reason of each file that cannot be held."""
+        refused: list[str] = []
+        kept: list[ExplicitFile] = []
+        size = 0
+        for file in files:
+            reason = self.uploader.refusal()
+            if reason is not None or not self.uploader.available():
+                refused.append(reason or "unsupported")
+            elif len(kept) >= MAX_BLOB_ENTRIES:
+                refused.append("budget")
+            else:
+                kept.append(file)
+                size += held_size(file.data) + 1024
+        self._pending_log.value = (body, kept, size) if kept else None
+        return refused
+
+    def take_log(self, body: Any) -> Held | None:
+        """The attachments staged for a log record being admitted, held within the held-value
+        budget; those the budget refused are listed under ``cut``, once per file."""
+        pending = getattr(self._pending_log, "value", None)
+        if pending is None or not (pending[0] is body or pending[0] == body):
+            return None
+        self._pending_log.value = None
+        _, files, size = pending
+        if not self.held.reserve(size):
+            return Held(cut=["body" for _ in files])
+        return Held(budget=self.held, files=list(files), size=size)
+
+    def drop_log(self, body: Any) -> int:
+        """Drops the attachments staged for a log record lost before it was admitted: how many."""
+        pending = getattr(self._pending_log, "value", None)
+        if pending is None or not (pending[0] is body or pending[0] == body):
+            return 0
+        self._pending_log.value = None
+        return len(pending[1])
+
+    def unstage_log(self) -> None:
+        """Drops what ``stage_log`` staged and no processor of this client admitted."""
+        self._pending_log.value = None
 
     def take(self, span: Any) -> Held | None:
         context = span.context
@@ -853,12 +976,26 @@ class _Result:
 
 
 class _Span:
-    """One span's placement: its candidates, and the ``hue.blobs`` places it has left."""
+    """One span's or log record's placement: its candidates, and the ``hue.blobs`` places it has
+    left. A log record (``log``) places the media of its held attributes and of its ``body``, the
+    body first, and uploads no value whole."""
 
-    def __init__(self, attributes: Mapping[str, Any], held: Held, trace_id: str) -> None:
+    def __init__(
+        self,
+        attributes: Mapping[str, Any],
+        held: Held,
+        trace_id: str,
+        *,
+        log: bool = False,
+        body: Any = None,
+    ) -> None:
         self.attributes = attributes
         self.trace_id = trace_id
         self.held = held
+        self.log = log
+        self.body_media: MediaValue | None = None
+        self.body_files: list[InlineFilePart] = []
+        self.placed_body: Any = None
         existing = attributes.get(BLOBS_KEY)
         self.existing = (
             [item for item in existing if isinstance(item, str)]
@@ -868,18 +1005,43 @@ class _Span:
         self._lock = Lock()
         self._slots = MAX_BLOB_ENTRIES - len(self.existing)
         self.cut = len(held.cut)
-        # In the span's attribute order, as the TypeScript SDK places them.
-        self.candidates: list[tuple[str, str | bytes | ExplicitFile]] = []
+        # In the span's attribute order, as the TypeScript SDK places them; a log record's body
+        # first.
+        self.candidates: list[tuple[str, Any]] = []
+        inspected_units = 0
+        if log and held.body:
+            self.candidates.append(("body", body))
+            # A body's files count toward the record's inspection bounds first, each by its
+            # content, as an attribute counts by its text. The upload threads place them in a copy
+            # of the body, so the body itself stays intact for the fallback.
+            try:
+                self.body_media = media_in(_containers_copied(body))
+            except (ValueError, RecursionError):
+                self.body_media = None
+            for file in self.body_media.files if self.body_media else ():
+                # A string the queue cut holds only the start of its file: it stays as cut.
+                if file.pointer in held.body_cut:
+                    continue
+                units = utf16_size(file.content, MAX_INLINE_FILE_TEXT)
+                if (
+                    units <= MAX_INLINE_FILE_TEXT
+                    and inspected_units + units <= INLINE_FILE_TEXT_PER_RECORD
+                ):
+                    inspected_units += units
+                    self.body_files.append(file)
         for key in attributes:
             value = held.values.get(key)
             if isinstance(value, (str, bytes)):
                 self.candidates.append((key, value))
-        self.inspected: set[str] = set(held.inspected or ())
-        inspected_units = 0
+        # A span's export inspects only what admission inspected; a log record's within its own
+        # allowance, its body's files first.
+        self.inspected: set[str] = set(() if log else held.inspected or ())
+        literal = literal_keys(attributes)
         for key, candidate in self.candidates:
             if (
-                held.inspected is None
+                (log or held.inspected is None)
                 and isinstance(candidate, str)
+                and key not in literal
                 and may_inline_files(key, candidate)
             ):
                 size = utf16_size(candidate, MAX_INLINE_FILE_TEXT)
@@ -889,7 +1051,7 @@ class _Span:
                 ):
                     self.inspected.add(key)
                     inspected_units += size
-        self.candidates.extend((f"event:hue.file:{file.digest[0]}", file) for file in held.files)
+        self.candidates.extend((file.key, file) for file in held.files)
 
     def slot(self) -> bool:
         with self._lock:
@@ -914,34 +1076,35 @@ class _Context:
     sharing: Callable[[], AbstractContextManager[None]] = nullcontext
 
 
-def _upload_parts(
-    span: _Span, index: int, key: str, text: str, context: _Context, result: _Result
-) -> str:
-    """Upload recognized media, keeping digests for binary and prefixes for large text."""
-    if (
-        key not in span.inspected
-        or not may_inline_files(key, text)
-        or utf16_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
-    ):
-        return text
-    try:
-        parsed = json.loads(text)
-        found = large_inline_file_parts(parsed)
-    except (ValueError, RecursionError):
-        return text
+def _place_files(
+    span: _Span,
+    index: int,
+    key: str,
+    files: list[InlineFilePart],
+    context: _Context,
+    result: _Result,
+) -> bool:
+    """Upload each file of a value and place it; whether any was placed. A file is placed in its
+    digest form (a text file in a provider part keeps a 16 KiB prefix). One that is not uploaded
+    keeps its bytes inline, except in a recorded message: a span's own message keeps its digest,
+    and a log record's keeps the digest of a file over the inline limit, as nested messages kept
+    them before log records uploaded."""
+    message = is_message_key(key)
     changed = False
-    for position, file in enumerate(found):
+    for position, file in enumerate(files):
         decoded = media_bytes(file)
+        if not placeable(file, decoded):
+            continue
         content_type = media_content_type(file, decoded)
         if not is_blob_content_type(content_type):
             content_type = (
                 "application/octet-stream" if decoded.decoded else "text/plain; charset=utf-8"
             )
         textual = is_text_media_type(content_type)
-        if not decoded.data or (textual and len(decoded.data) <= INLINE_FILE_LIMIT):
+        if textual and len(decoded.data) <= INLINE_FILE_LIMIT:
             continue
-        changed = True
-        part_key = f"{key}#{file.pointer if textual else file.part_pointer}"
+        prefix = keeps_prefix(file, textual)
+        part_key = f"{key}#{file.pointer if prefix else file.part_pointer}"
         has_slot = _is_blob_key(part_key) and span.slot()
         digest = span.held.digests.get(key, {}).get(file.pointer) or context.memo.digest(
             decoded.data, span.trace_id
@@ -961,18 +1124,79 @@ def _upload_parts(
             else _Outcome(False, "budget")
         )
         if outcome.ok:
-            if textual:
-                file.owner[file.key] = blob_prefix(file.content)
+            if prefix:
+                prefix_part(file, blob_prefix(file.content))  # type: ignore[arg-type]
             else:
                 digest_part(file, *digest)
+            changed = True
             result.entries.append(
                 ((index, position), _blob_entry(part_key, *digest, outcome.content_type, file.name))
             )
             result.uploads += 1
         else:
-            digest_part(file, *digest)
+            if message and (not span.log or len(decoded.data) > INLINE_FILE_LIMIT):
+                digest_part(file, *digest)
+                changed = True
             result.fallbacks.append(outcome.reason)
-    return dumps_message(parsed) if changed else text
+    return changed
+
+
+def _upload_parts(
+    span: _Span, index: int, key: str, text: str, context: _Context, result: _Result
+) -> str:
+    """Upload recognized media, keeping digests for binary and prefixes for large text."""
+    if (
+        key not in span.inspected
+        or not may_inline_files(key, text)
+        or utf16_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
+    ):
+        return text
+    try:
+        media = read_media_text(key, text)
+    except (ValueError, RecursionError):
+        return text
+    if media is None or not media.files:
+        return text
+    return (
+        placed_media_text(media)
+        if _place_files(span, index, key, media.files, context, result)
+        else text
+    )
+
+
+def _containers_copied(value: Any) -> Any:
+    """A JSON-like value with its dicts and lists copied (strings are shared)."""
+    if isinstance(value, dict):
+        return {key: _containers_copied(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_containers_copied(item) for item in value]
+    return value
+
+
+def _cap_body(body: Any, cap: int) -> tuple[Any, bool]:
+    """A log record's placed body cut as its copy would have been: each string over the cap cut
+    to it and bytes over it replaced by the receiver's marker. Whether anything was cut."""
+    cut = False
+
+    def visit(value: Any) -> Any:
+        nonlocal cut
+        if isinstance(value, str):
+            if not over_utf8(value, cap):
+                return value
+            cut = True
+            return cut_utf8(value, cap)
+        if isinstance(value, bytes):
+            if len(value) <= cap:
+                return value
+            cut = True
+            return truncated_marker(len(value))
+        if isinstance(value, Mapping):
+            return {key: visit(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [visit(item) for item in value]
+        return value
+
+    return visit(body), cut
 
 
 def _place(
@@ -981,6 +1205,15 @@ def _place(
     """One candidate placed: whole within the limit, uploaded, or cut as before."""
     result = _Result(value)
     cap = context.value_bytes
+    if span.log and key == "body" and index == 0:
+        # A log record's body: its files placed, then what is left over the cap cut.
+        if span.body_media is not None and _place_files(
+            span, index, key, span.body_files, context, result
+        ):
+            reencode_media(span.body_media)
+        body = span.body_media.box["value"] if span.body_media is not None else value
+        result.value, result.listed = _cap_body(body, cap)
+        return result
     if isinstance(value, ExplicitFile):
         outcome = (
             context.uploader.store(
@@ -1023,6 +1256,10 @@ def _place(
     def cut() -> Any:
         return cut_utf8(placed, cap) if isinstance(placed, str) else truncated_marker(size)
 
+    if span.log:
+        # A log record's value is cut, as no log reader pages an uploaded text value.
+        result.value = cut()
+        return result
     refused = "too_large" if size > MAX_BLOB_BYTES else None
     if refused or not span.slot():
         result.value = cut()
@@ -1054,26 +1291,34 @@ def _place(
     return result
 
 
-def _fallback(
-    key: str, value: str | bytes | ExplicitFile, cap: int, inspect: bool = True
-) -> _Result:
+def _fallback(key: str, value: Any, cap: int, inspect: bool = True, log: bool = False) -> _Result:
     """Place a candidate whose upload failed or did not finish in time.
 
-    Scrub credentials, replace binary and large textual inline files with digests, and cut
-    values over the limit (bytes use the receiver's marker). Values that cannot be scrubbed
-    or encoded use the receiver's marker.
+    Scrub credentials, replace a span's recorded messages' binary and large textual inline files
+    with digests, and cut values over the limit (bytes use the receiver's marker). Values that
+    cannot be scrubbed or encoded use the receiver's marker. A log record's files keep their bytes
+    inline, its messages' files over the inline limit their digest, and its values over the limit
+    are cut, as before log records uploaded.
     """
     if isinstance(value, ExplicitFile):
         return _Result(None, fallbacks=["failed"])
+    if log and key == "body":
+        body, listed = _cap_body(value, cap)
+        return _Result(body, listed=listed)
     try:
         scrubbed = scrub_tool_credentials(key, value)
-        placed, files = hash_inline_files_counted(key, scrubbed) if inspect else (scrubbed, 0)
+        placed, files = (
+            hash_inline_files_counted(key, scrubbed, preserve_small_binary=log)
+            if inspect
+            else (scrubbed, 0)
+        )
         # Report each binary or large textual inline file as not uploaded.
         fallbacks = ["failed"] * files
+        failed = [] if log else ["failed"]
         if isinstance(placed, str) and over_utf8(placed, cap):
-            return _Result(cut_utf8(placed, cap), listed=True, fallbacks=[*fallbacks, "failed"])
+            return _Result(cut_utf8(placed, cap), listed=True, fallbacks=[*fallbacks, *failed])
         if isinstance(placed, bytes) and len(placed) > cap:
-            return _Result(truncated_marker(len(placed)), listed=True, fallbacks=["failed"])
+            return _Result(truncated_marker(len(placed)), listed=True, fallbacks=failed)
         return _Result(placed, fallbacks=fallbacks)
     except Exception:
         return _Result(truncated_marker(len(value)), listed=True, fallbacks=["failed"])
@@ -1097,7 +1342,26 @@ def place_spans(
     files never hold the places new files need; one not placed by ``deadline`` falls back to the
     cut, and an upload still running then stops sending its body at that deadline; its answer goes
     unused."""
-    placements = [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans]
+    return _place_all(
+        [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans],
+        uploader=uploader,
+        value_bytes=value_bytes,
+        deadline=deadline,
+        wait=wait,
+        memo=memo,
+    )
+
+
+def _place_all(
+    placements: list[_Span],
+    *,
+    uploader: BlobUploader,
+    value_bytes: int,
+    deadline: float,
+    wait: Callable[[float], bool],
+    memo: MediaDigestMemo | None,
+) -> tuple[list[dict[str, Any]], Tally]:
+    """The records' candidates placed on the shared upload threads (see ``place_spans``)."""
     pending = [
         (number, index, key, value)
         for number, span in enumerate(placements)
@@ -1155,7 +1419,11 @@ def place_spans(
                         results[(number, index)] = result
                     else:
                         results[(number, index)] = _fallback(
-                            key, value, value_bytes, key in placements[number].inspected
+                            key,
+                            value,
+                            value_bytes,
+                            key in placements[number].inspected,
+                            placements[number].log,
                         )
                     if len(results) == total:
                         done.set()
@@ -1185,9 +1453,11 @@ def place_spans(
         entries: list[tuple[tuple[int, int], str]] = []
         for index, (key, value) in enumerate(span.candidates):
             result = placed.get((number, index)) or _fallback(
-                key, value, value_bytes, key in span.inspected
+                key, value, value_bytes, key in span.inspected, span.log
             )
-            if not isinstance(value, ExplicitFile):
+            if span.log and key == "body" and index == 0:
+                span.placed_body = result.value
+            elif not isinstance(value, ExplicitFile):
                 result_attributes[key] = result.value
             if result.listed:
                 listed.append(key)
@@ -1206,3 +1476,55 @@ def place_spans(
             ]
         attributes.append(result_attributes)
     return attributes, tally
+
+
+def place_logs(
+    logs: list[tuple[Mapping[str, Any], Held, str, Any]],
+    *,
+    uploader: BlobUploader,
+    value_bytes: int,
+    deadline: float,
+    wait: Callable[[float], bool],
+    memo: MediaDigestMemo | None = None,
+) -> tuple[list[dict[str, Any]], list[Any], Tally]:
+    """Each log record's attributes and body with the media its copy held placed: each file
+    uploaded under the log record's trace and listed in its own ``hue.blobs``, keyed
+    ``<attribute>#<pointer>`` or ``body#<pointer>``, or kept inline when it is not uploaded (a
+    message's file over the inline limit as its digest); what is left over the inline limit is cut
+    as before. The attachments a body holds (``held.files``, keyed ``body#<pointer>``) then take
+    the ``hue.blobs`` places left, as a span's helper files follow its values, on the same threads
+    and deadline. ``logs`` holds each record's attributes, held values, trace id and body (a
+    JSON-like copy, with the strings its copy held whole restored)."""
+    placements = [
+        _Span(attributes, replace(held, files=[]), trace_id, log=True, body=body)
+        for attributes, held, trace_id, body in logs
+    ]
+    attributes, tally = _place_all(
+        placements,
+        uploader=uploader,
+        value_bytes=value_bytes,
+        deadline=deadline,
+        wait=wait,
+        memo=memo,
+    )
+    attaching = [
+        (number, _Span(attributes[number], Held(files=list(held.files), inspected=set()), trace_id))
+        for number, (_, held, trace_id, _) in enumerate(logs)
+        if held.files
+    ]
+    if attaching:
+        placed, attached = _place_all(
+            [span for _, span in attaching],
+            uploader=uploader,
+            value_bytes=value_bytes,
+            deadline=deadline,
+            wait=wait,
+            memo=memo,
+        )
+        for (number, _), result in zip(attaching, placed, strict=True):
+            attributes[number] = result
+        tally.uploaded += attached.uploaded
+        for reason, (count, traces) in attached.fallbacks.items():
+            previous, named = tally.fallbacks.get(reason, (0, set()))
+            tally.fallbacks[reason] = (previous + count, named | traces)
+    return attributes, [placement.placed_body for placement in placements], tally

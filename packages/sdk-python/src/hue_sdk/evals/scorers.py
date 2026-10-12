@@ -189,7 +189,14 @@ def score_locally(
     if "output" not in context:
         raise ValueError("has_output requires present JSON output.")
     try:
-        owned = copy.deepcopy(json_value(context, 1024 * 1024))
+        # Local files are paths on this machine, handed to code scorers as they are; the rest of
+        # the context is JSON.
+        files = context.get("files")
+        owned = copy.deepcopy(
+            json_value(
+                {key: value for key, value in context.items() if key != "files"}, 1024 * 1024
+            )
+        )
         definition = version["definition"]
         if definition["kind"] not in ("builtin", "local_code"):
             raise ValueError(
@@ -202,6 +209,8 @@ def score_locally(
             )
             if binding is None:
                 return {"state": "error", "error": {"type": "ScorerBindingUnavailable"}}
+            if files is not None:
+                owned["files"] = list(files)
             return validate_score(invoke(binding.score, owned), definition)
         entry = definition["entry"]
         if entry == "hue.json_schema.v1":

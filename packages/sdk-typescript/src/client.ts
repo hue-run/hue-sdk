@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
-import { isMediaName } from "./inline-files.js";
+import { digestFormBytes, INLINE_FILE_TEXT_PER_RECORD, isMediaName } from "./inline-files.js";
 import {
   context,
   isSpanContextValid,
@@ -17,7 +17,7 @@ import {
 } from "@opentelemetry/api";
 import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { isAttributeValue, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
@@ -37,9 +37,17 @@ import {
   safeSpan,
   spanSource,
   type EncodeLimits,
+  type PlaceAttachment,
 } from "./safety.js";
 import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
-import { MAX_BLOB_BYTES } from "./blobs.js";
+import { countFallback, MAX_BLOB_BYTES, newTally, type MediaAttachment } from "./blobs.js";
+import {
+  attachmentPart,
+  attachmentState,
+  holdsAttachment,
+  MAX_ATTACHMENT_DEPTH,
+  type PlacedAttachment,
+} from "./attachment.js";
 import {
   createHueTransport,
   exportBudgetMillis,
@@ -270,6 +278,17 @@ const OWNED_SPAN_LIMITS = {
  * 65,536 values, as the Python SDK's content snapshot. */
 const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, depth: 64 };
 
+/** Whether a span attribute passed to a helper is recorded as JSON text: an attachment, a value
+ * holding one, or JSON data OpenTelemetry cannot hold as an attribute (a plain object, or an array
+ * that is not of one primitive type). */
+function recordedAsJson(value: unknown): boolean {
+  if (holdsAttachment(value)) return true;
+  if (value === null || typeof value !== "object" || isAttributeValue(value)) return false;
+  if (Array.isArray(value)) return true;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 /**
  * Hue tracing client. Helpers create spans through a private tracer and local async context, never
  * through global OpenTelemetry registration, and they fail open: capture problems are counted in
@@ -404,13 +423,16 @@ export class HueClient {
           workspaceId: identifier(options.workspaceId ?? inherited?.workspaceId),
           model: inherited?.model,
         };
+        const { attributes, placed } = this.attributeValues(options.attributes);
         span = this.storage.run(active, () =>
           this.tracer.startSpan(
             name,
-            { kind: options.kind ?? SpanKind.INTERNAL, attributes: options.attributes },
+            { kind: options.kind ?? SpanKind.INTERNAL, attributes },
             active.context,
           ),
         );
+        for (const [key, found] of placed)
+          this.stageAttachments(span, key, found, this.captureContent);
       } catch {
         this.instrumentationFailed();
       }
@@ -685,16 +707,141 @@ export class HueClient {
       stamp("gen_ai.provider.name", messages.provider, enclosing?.model?.provider);
       stamp("gen_ai.request.model", messages.model, enclosing?.model?.requestModel);
       stamp("gen_ai.conversation.id", undefined, enclosing?.sessionId);
-      this.logger.emit({
-        context: active,
-        severityNumber: SeverityNumber.INFO,
-        eventName: "gen_ai.client.inference.operation.details",
-        attributes,
-        body: JSON.parse(encodeContent(body, this.contentLimits())),
-      });
+      // While media may be uploaded, the body may hold files past the value cap: it is emitted
+      // when it fits the cap with each file as its digest, and export uploads the files (under
+      // `body#<pointer>` keys) or cuts the body as before. Otherwise a body over the cap is
+      // refused, as before. Each attachment is written as its digest part.
+      const limits = this.contentLimits();
+      const placed: PlacedAttachment[] = [];
+      const place = this.placer(placed, true);
+      let text: string;
+      if (this.transport.holdsValues()) {
+        text = encodeContent(
+          body,
+          { ...limits, bytes: limits.bytes + INLINE_FILE_TEXT_PER_RECORD },
+          place,
+        );
+        if (
+          Buffer.byteLength(text) > limits.bytes &&
+          digestFormBytes(JSON.parse(text)) > limits.bytes
+        )
+          throw new RangeError("Content limit exceeded");
+      } else text = encodeContent(body, limits, place);
+      const recorded: object = JSON.parse(text);
+      // Attachments in the body are staged with the body until this transport admits the record;
+      // export uploads them with the media the body holds.
+      const traceId = trace.getSpanContext(active)!.traceId;
+      const files = this.attachmentFiles(placed, true, "logs", traceId, false);
+      if (files.length) this.transport.stageLogParts(recorded, traceId, files);
+      try {
+        this.logger.emit({
+          context: active,
+          severityNumber: SeverityNumber.INFO,
+          eventName: "gen_ai.client.inference.operation.details",
+          attributes,
+          body: recorded as Record<string, never>,
+        });
+      } finally {
+        this.transport.unstageLogParts(recorded);
+      }
     } catch {
       this.instrumentationFailed("logs");
     }
+  }
+
+  /** Writes each attachment as its digest part, `null` for an invalid one, collecting them. */
+  private placer(placed: PlacedAttachment[], captureContent: boolean): PlaceAttachment {
+    return (attachment, pointer, depth) => {
+      const state = attachmentState(attachment)!;
+      const part = attachmentPart(state, captureContent);
+      placed.push({ state, ...(part ? { part } : {}), pointer, depth });
+      return part ?? null;
+    };
+  }
+
+  /**
+   * The files of the attachments a value placed that are uploaded: an invalid attachment, and
+   * an invalid name with content capture, count as instrumentation failures; nothing is uploaded
+   * without content capture or with setup credentials; a value that was `cut`, or a part deeper
+   * than Hue reads, keeps its digest part and counts as not uploaded.
+   */
+  private attachmentFiles(
+    placed: readonly PlacedAttachment[],
+    captureContent: boolean,
+    signal: Signal,
+    traceId: string,
+    cut: boolean,
+  ): MediaAttachment[] {
+    const files: MediaAttachment[] = [];
+    const tally = newTally();
+    for (const { state, part, depth } of placed) {
+      if (!part || !state.bytes || !state.sha256) {
+        this.instrumentationFailed(signal);
+        continue;
+      }
+      if (state.invalidName && captureContent) this.instrumentationFailed(signal);
+      if (!this.transport.offloadsValues() || !state.bytes.byteLength) continue;
+      if (cut || depth > MAX_ATTACHMENT_DEPTH) {
+        countFallback(tally, "budget", traceId);
+        continue;
+      }
+      files.push({
+        bytes: state.bytes,
+        digest: { sha256: state.sha256, size: state.bytes.byteLength },
+        contentType: state.contentType,
+        ...(state.name === undefined ? {} : { name: state.name }),
+      });
+    }
+    if (tally.fallbacks.size) this.transport.reportOffload(tally, signal);
+    return files;
+  }
+
+  /** Stages the attachments a span's `attribute` now holds, replacing its earlier ones. */
+  private stageAttachments(
+    span: Span,
+    attribute: string,
+    placed: readonly PlacedAttachment[],
+    captureContent: boolean,
+    cut = false,
+  ): void {
+    const traceId = span.spanContext().traceId;
+    const files = this.attachmentFiles(placed, captureContent, "traces", traceId, cut);
+    if (span.isRecording()) this.transport.stageParts(span, attribute, files);
+  }
+
+  /**
+   * Span attributes as recorded: a value that is an {@link Attachment}, an object or array holding
+   * one, or JSON data OpenTelemetry cannot hold as an attribute (an object, or an array that is not
+   * of one primitive type), becomes its JSON text with each attachment as its digest part (an
+   * invalid attachment alone is omitted); every other value is left to OpenTelemetry as given.
+   */
+  private attributeValues(input: SpanOptions["attributes"]): {
+    attributes: Attributes | undefined;
+    placed: [string, PlacedAttachment[]][];
+  } {
+    const placed: [string, PlacedAttachment[]][] = [];
+    if (!input || typeof input !== "object") return { attributes: input as undefined, placed };
+    let attributes: Attributes | undefined;
+    for (const [key, value] of Object.entries(input)) {
+      if (!recordedAsJson(value)) continue;
+      attributes ??= { ...input } as Attributes;
+      const found: PlacedAttachment[] = [];
+      try {
+        const text = encodeContent(
+          value,
+          this.contentLimits(),
+          this.placer(found, this.captureContent),
+        );
+        if (text === "null") delete attributes[key];
+        else attributes[key] = text;
+      } catch {
+        delete attributes[key];
+        this.instrumentationFailed();
+        continue;
+      }
+      placed.push([key, found]);
+    }
+    return { attributes: attributes ?? (input as Attributes), placed };
   }
 
   /**
@@ -960,10 +1107,17 @@ export class HueClient {
   private setContent(span: Span, key: string, value: unknown): void {
     if (!this.enabled || this.closed || !this.captureContent) return;
     try {
-      let encoded: { text: string; truncated: boolean } | undefined;
+      const encode = (limits: EncodeLimits) => {
+        const placed: PlacedAttachment[] = [];
+        return {
+          ...encodeBoundedContent(value, limits, true, this.placer(placed, true)),
+          placed,
+        };
+      };
+      let encoded: ReturnType<typeof encode> | undefined;
       if (this.transport.holdsValues())
         try {
-          encoded = encodeBoundedContent(value, {
+          encoded = encode({
             ...this.contentLimits(),
             bytes: MAX_BLOB_BYTES,
             nodes: MAX_RECORD_NODES,
@@ -971,8 +1125,10 @@ export class HueClient {
         } catch {
           // Past the runtime's longest string, or its memory: cut to the cap instead.
         }
-      const { text, truncated } = encoded ?? encodeBoundedContent(value, this.contentLimits());
+      const { text, truncated, placed } = encoded ?? encode(this.contentLimits());
       span.setAttribute(key, text);
+      // The attachments the value holds are staged for upload in place of any it held before.
+      this.stageAttachments(span, key, placed, true, truncated);
       // The span's list as it stands: the application's own entries (read from the SDK span,
       // which carries its attributes; the API alone shows none) and this helper's earlier ones.
       const listed = withTruncatedKeys(

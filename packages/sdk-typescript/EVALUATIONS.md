@@ -295,13 +295,63 @@ an `error` of type `TargetTimeout` and the world is sealed abandoned. Public pac
 proves this lifecycle against local fixtures; exact installed-registry-package to hosted-facade
 acceptance remains a post-publication Fern gate.
 
+## Case files
+
+`addCase` and `addEvalSetCase` pin up to 32 input files with `files`. Name an artifact the
+project already holds as `{ artifactId, role }`, or give the file, from `bytes` or a `path`, and
+the client uploads it as a verified artifact first:
+
+```ts
+await client.addEvalSetCase(versionId, {
+  expectedRevision,
+  externalKey: "chart-question",
+  inputs: { messages },
+  files: [
+    { role: "source", filename: "chart.png", contentType: "image/png", bytes: chart },
+    { role: "evaluator_reference", filename: "answers.csv", contentType: "text/csv", path: "answers.csv" },
+  ],
+});
+```
+
+An uploaded file needs one of `outputContentTypes`, a well-formed name of 1–255 UTF-16 code units
+(as JavaScript counts a string's `length`) without path separators or control characters, and 1
+byte to 25 MiB. Every file, and the case itself as it will be sent (its revision, key, values and
+size), is checked before the first upload; a file outside that policy, a `path` that cannot be
+read, or a case Hue would refuse throws `TypeError` or `RangeError` without a request. The
+reservation key names the version, the case's `externalKey`, the role, the bytes, the name and the
+content type, so sending the same case again reuses its artifacts and a corrected name or type
+reserves a new one; a reference to the artifact a file uploads as pins it once. `source`, `attached_template`, `attached_reference` and `original` files reach
+the target as `context.files`; `org_template` and `evaluator_reference` files reach only scorers.
+
+Recorded messages copied into a case's inputs keep their large files as digest parts. Pin each file
+to the case, and the target can send the recorded model call again with the real image, document
+or audio:
+
+```ts
+import { rehydrateMedia, runExperiment } from "@hue-run/sdk/evals";
+
+await runExperiment({
+  // ...client, hue, experimentId, checkpointDirectory and the other options
+  target: async (inputs, { files }) => {
+    const { value } = await rehydrateMedia(inputs, files);
+    return callModel(value);
+  },
+});
+```
+
+`rehydrateMedia(value, files, { as })` matches digest parts to files by SHA-256, checks each
+file's bytes against the digest and writes them as `client.media.resolve` does (see the
+[README](README.md#read-recorded-media-back)); `files` may also hold `{ sha256, contentType, bytes }`
+entries. A part without a matching file stays as it is and is listed in `failures`.
+
 ## Direct cases and files
 
 Cases without a simulated world — answer-only tasks, or document workflows with pinned files —
 run on the same runner under the same checkpoint rules. They shipped in `@hue-run/sdk` `0.5.0`
 and require a Hue deployment that serves case `inputFiles` on experiment
 items, subject `files`, and the artifact reservation, upload, completion and download APIs. The
-Python SDK has no equivalent.
+Python SDK's `run_experiment` and `rescore` hand pinned input files to targets and scorers;
+generated files and the outbound worker are TypeScript-only.
 
 Since TypeScript 0.13.2, the `hue eval --worker --command "…"` wrapper supplies both callbacks, so one
 command worker accepts direct and world cases, including mixed eval sets. It keeps the launch
@@ -380,7 +430,8 @@ evaluator material must stay out of its reach. Verified copies live under `files
 `<checkpointDirectory>/files`, created mode 0700), evaluator-only files apart from the agent's, and
 each case gets its own private `context.outputDirectory` to write into. The files of a case pinned
 to a world are removed when it ends, except staged outputs an interrupted upload resumes from;
-those of a direct case stay for inspection.
+those of a direct case stay for inspection, except its evaluator-only files, which are removed when
+it ends so no later case's agent finds them.
 
 Return generated documents by wrapping the output in `withFiles(output, files)`. Each entry names a
 `path` or in-memory `bytes`, a `filename`, a Hue-accepted `contentType` and at most one `primary`.

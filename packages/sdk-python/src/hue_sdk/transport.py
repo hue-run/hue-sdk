@@ -30,6 +30,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import get_current_span
 
+from ._attachment import placed_part
 from ._blobs import (
     BLOBS_KEY,
     FALLBACK_MESSAGES,
@@ -40,6 +41,7 @@ from ._blobs import (
     Uploads,
     _blob_entry,
     held_of,
+    place_logs,
     place_spans,
     upload_budget_seconds,
 )
@@ -53,7 +55,7 @@ from ._limits import MAX_REQUEST_BYTES as MAX_REQUEST_BYTES
 from ._limits import TRUNCATED_KEY as TRUNCATED_KEY
 from ._limits import AdvertisedLimits, fits_without_compression, gzip_size
 from ._otel_compat import encode_logs, export_context
-from ._records import replace_span, shed_content, sheddable_content
+from ._records import replace_log, replace_span, shed_content, sheddable_content
 from ._version import __version__
 
 # In-progress span placeholders, which are small, stay 1 KiB short of the default wire limit.
@@ -133,9 +135,10 @@ class ExportStatus:
     trace acknowledgement lacked the ``Hue-Pending-Spans`` header, so the receiver predates
     live-span placeholders and this client stopped sending them.
 
-    ``uploaded_values`` counts whole span attributes, inline media parts, and opted-in file
-    helpers uploaded apart from their spans (or already stored by Hue). Whole attributes keep
-    a 16 KiB prefix; binary media keeps digest metadata; file helpers keep their event metadata.
+    ``uploaded_values`` counts whole span attributes, inline media parts, attachments, and
+    opted-in file helpers uploaded apart from their records (or already stored by Hue). Whole
+    attributes keep a 16 KiB prefix; binary media and attachments keep digest metadata; file
+    helpers keep their event metadata.
     Each accepted upload adds a ``hue.blobs`` reference. ``upload_fallbacks`` counts requested
     uploads that fail or cannot be admitted, including dropped file helper events or references.
     Fallbacks keep the available inline content or metadata and produce warning issues.
@@ -896,7 +899,9 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
             for (index, span, held), attributes in zip(entries, placed, strict=True):
                 record = replace_span(span, attributes=attributes)
                 result[index] = record
-                admitted = self._admit_files(record, held.files, tally)
+                admitted = self._admit_files(
+                    record, held.files, tally, source=span, values=held.values
+                )
                 if admitted is not None:
                     result[index], fitted_attributes, files = admitted
                     helpers.append((index, fitted_attributes, files, _record_trace_id(span) or ""))
@@ -926,14 +931,22 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         return result
 
     def _admit_files(
-        self, record: Any, staged: list[ExplicitFile], tally: Tally
+        self,
+        record: Any,
+        staged: list[ExplicitFile],
+        tally: Tally,
+        *,
+        source: Any = None,
+        values: Mapping[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any], list[ExplicitFile]] | None:
         """The record fitted with a provisional reference for each staged file whose ``hue.file``
-        event survived, its attributes without those references, and the files whose event and
-        reference both survived the fit: the only ones uploaded. ``None`` when no file survived
-        redaction; every file left out is counted as not uploaded."""
+        event, or attachment part, survived, its attributes without those references, and the
+        files whose event or part and reference all survived the fit: the only ones uploaded.
+        ``None`` when no file survived redaction; every file left out is counted as not uploaded,
+        except an attachment whose part the redactor removed. An attachment's part is found in
+        ``source``, the span as admission copied it, with the values it held whole (``values``)."""
         trace_id = _record_trace_id(record) or ""
-        files = self._surviving_files(staged, record, tally)
+        files = self._surviving_files(staged, record, tally, source=source, values=values)
         if not files:
             return None
         attributes = dict(record.attributes or {})
@@ -955,8 +968,9 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
             for _ in files:
                 tally.fallback("budget", trace_id)
             return None
+        before = record.attributes or {}
         record = fitted[0]
-        files = self._surviving_files(files, record, tally)
+        files = self._surviving_files(files, record, tally, before=before)
         fitted_attributes = dict(record.attributes or {})
         listed = fitted_attributes.get(BLOBS_KEY)
         references = list(listed) if isinstance(listed, (list, tuple)) else []
@@ -980,16 +994,44 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
 
     @staticmethod
     def _file_entry(file: ExplicitFile) -> str:
-        return _blob_entry(
-            f"event:hue.file:{file.digest[0]}", *file.digest, file.content_type, file.name
-        )
+        return _blob_entry(file.key, *file.digest, file.content_type, file.name)
 
     @staticmethod
-    def _surviving_files(files: list[ExplicitFile], span: Any, tally: Tally) -> list[ExplicitFile]:
-        """Each matching surviving event admits one staged file, including repeated digests."""
+    def _surviving_files(
+        files: list[ExplicitFile],
+        span: Any,
+        tally: Tally,
+        *,
+        source: Any = None,
+        values: Mapping[str, Any] | None = None,
+        before: Mapping[str, Any] | None = None,
+    ) -> list[ExplicitFile]:
+        """Each matching surviving event admits one staged file, including repeated digests. An
+        attachment placed in a value is admitted by its own part there: after redaction, the part
+        at its pointer in the attribute of ``source`` (the span itself when absent) or the value
+        held whole for upload, in ``values``, a part removed taking its upload with it; once
+        fitted (``before``, the attributes as they were fitted), while fitting left its attribute
+        as it was."""
         consumed: set[int] = set()
         surviving = []
+        parsed: dict[str, Any] = {}
+        attributes = (source if source is not None else span).attributes or {}
         for file in files:
+            if file.attribute is not None:
+                if before is not None:
+                    fitted = span.attributes or {}
+                    if file.attribute in fitted and fitted[file.attribute] == before.get(
+                        file.attribute
+                    ):
+                        surviving.append(file)
+                    else:
+                        tally.fallback("budget", _record_trace_id(span) or "")
+                    continue
+                part = placed_part(file, attributes, values or {}, parsed)
+                if part is not None:
+                    name = part.get("name")
+                    surviving.append(replace(file, name=name if is_media_name(name) else None))
+                continue
             for index, event in enumerate(span.events or ()):
                 fields = event.attributes or {}
                 if (
@@ -1009,7 +1051,7 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                 tally.fallback("budget", _record_trace_id(span) or "")
         return surviving
 
-    def _report_uploads(self, tally: Tally) -> None:
+    def _report_uploads(self, tally: Tally, signal: str = "traces") -> None:
         fallbacks = sum(count for count, _ in tally.fallbacks.values())
         with self._lock:
             self._uploaded += tally.uploaded
@@ -1017,7 +1059,7 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         for reason, (count, traces) in tally.fallbacks.items():
             named = tuple(trace for trace in traces if trace)
             self._ledger.record(
-                "traces",
+                signal,
                 "warning",
                 count,
                 FALLBACK_MESSAGES[reason],
@@ -1109,6 +1151,36 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         self._delegate.shutdown()
 
 
+def _restored_body(body: Any, held: Mapping[str, str]) -> Any:
+    """A log record's queued body as JSON values (lists for its sequences), with each string its
+    copy held whole put back at its JSON pointer."""
+
+    def copied(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: copied(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [copied(item) for item in value]
+        return value
+
+    result = copied(body)
+    for pointer, text in held.items():
+        segments = [
+            segment.replace("~1", "/").replace("~0", "~") for segment in pointer.split("/")[1:]
+        ]
+        if not segments:
+            result = text
+            continue
+        owner = result
+        for segment in segments[:-1]:
+            owner = owner[int(segment)] if isinstance(owner, list) else owner[segment]
+        last = segments[-1]
+        if isinstance(owner, list):
+            owner[int(last)] = text
+        else:
+            owner[last] = text
+    return result
+
+
 class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
     signal = "logs"
 
@@ -1121,8 +1193,15 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         *,
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
+        report_uploads: Callable[[Tally, str], None] | None = None,
     ) -> None:
         self._setup(ledger, limits, dropped_records)
+        # Uploads of correlated GenAI log records' media and of the attachments their bodies
+        # hold; None when the client uploads none. Their outcomes are counted with the span
+        # exporter's.
+        self._uploads = uploads
+        self._report = report_uploads
         self._session = SafeSession("logs", limits=self._limits)
         self._delegate = OTLPLogExporter(
             endpoint=endpoint,
@@ -1136,10 +1215,98 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
     def _delegate_export(self, batch: Sequence[Any]) -> bool:
         return self._delegate.export(batch) is LogRecordExportResult.SUCCESS
 
+    def _wait_for_rate(self, seconds: float) -> bool:
+        """Waits out a rate-limited reservation within the export's hold; False when the hold
+        may not take ``seconds`` more."""
+        with self._lock:
+            if self._held + seconds > MAX_RATE_LIMIT_HOLD_SECONDS:
+                return False
+            self._held += seconds
+        Event().wait(seconds)
+        return True
+
+    def _place_held(self, records: list[Any]) -> list[Any]:
+        """The log records with the media their copies held, and the attachments their bodies
+        hold, placed in one step: each file uploaded under the record's trace and listed in its
+        own ``hue.blobs`` (keys ``<attribute>#<pointer>`` and ``body#<pointer>``), or kept inline
+        (an attachment as its digest part); what is left over the cap cut as before. Every
+        fallback is counted and reported as a warning naming its traces."""
+        uploads = self._uploads
+        entries = [
+            (index, record, held)
+            for index, record in enumerate(records)
+            if (held := held_of(record)) is not None
+        ]
+        if uploads is None or not entries:
+            return records
+        result = list(records)
+        try:
+            logs = []
+            refused = Tally()
+            for _, record, held in entries:
+                log = record.log_record
+                trace_id = _record_trace_id(record) or ""
+                body = _restored_body(log.body, held.body_values) if held.body else None
+                # An attachment uploads while its own part is still where it was placed, under
+                # the record's trace: a record that names none uploads none.
+                held.files[:] = self._surviving_files(
+                    held.files, log.body if body is None else body
+                )
+                if not trace_id:
+                    for _ in held.files:
+                        refused.fallback("budget", trace_id)
+                    held.files.clear()
+                logs.append((log.attributes or {}, held, trace_id, body))
+            placed, bodies, tally = place_logs(
+                logs,
+                uploader=uploads.uploader,
+                memo=uploads.memo,
+                value_bytes=self._limits.current.value_bytes,
+                deadline=monotonic() + upload_budget_seconds(uploads.timeout),
+                wait=self._wait_for_rate,
+            )
+            for (index, record, held), attributes, body in zip(
+                entries, placed, bodies, strict=True
+            ):
+                result[index] = (
+                    replace_log(record, attributes=attributes, body=body)
+                    if held.body
+                    else replace_log(record, attributes=attributes)
+                )
+        finally:
+            for _, _, held in entries:
+                held.values.clear()
+                held.body_values.clear()
+                held.files.clear()
+                held.release()
+        _add_tally(tally, refused)
+        self._report_uploads(tally)
+        return result
+
+    @staticmethod
+    def _surviving_files(files: list[ExplicitFile], body: Any) -> list[ExplicitFile]:
+        """The attachments whose own part is at its pointer in the body, each with the name the
+        part carries; a part removed takes its upload with it."""
+        surviving = []
+        parsed: dict[str, Any] = {}
+        for file in files:
+            part = placed_part(file, {"body": body}, {}, parsed)
+            if part is not None:
+                name = part.get("name")
+                surviving.append(replace(file, name=name if is_media_name(name) else None))
+        return surviving
+
+    def _report_uploads(self, tally: Tally, signal: str = "logs") -> None:
+        if self._report is not None:
+            self._report(tally, signal)
+
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         failed = False
         self._held = 0.0
         try:
+            # A correlated GenAI record's media, and the attachments its body holds, are uploaded
+            # before any record is measured.
+            batch = self._place_held(list(batch))
             entries: list[tuple[Any, int]] = []
             for record in batch:
                 entry = self._fit(record)

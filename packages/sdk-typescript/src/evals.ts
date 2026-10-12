@@ -6,6 +6,19 @@ export {
   isTransientApiError,
 } from "./evals/client.js";
 export type { EvaluationClientOptions } from "./evals/client.js";
+export { MediaFetchError, rehydrateMedia } from "./evals/media.js";
+export type {
+  MediaClient,
+  MediaFetchErrorReason,
+  MediaFetchOptions,
+  MediaFetchTarget,
+  MediaFile,
+  MediaResolution,
+  MediaResolveFailure,
+  MediaResolveOptions,
+  MediaSourceFile,
+  MediaWriteOptions,
+} from "./evals/media.js";
 export {
   runExperiment,
   rescore,

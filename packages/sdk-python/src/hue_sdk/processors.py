@@ -26,7 +26,13 @@ from ._blobs import Tally, Uploads, held_of
 from ._limits import AdvertisedLimits
 from ._otel_compat import export_context, instrumentation_suppressed
 from .snapshots import Hold, snapshot_log, snapshot_pending_span, snapshot_span
-from .transport import BATCH_TARGET_BYTES, MAX_BATCH_BYTES, DroppedRecords, PendingSpan
+from .transport import (
+    BATCH_TARGET_BYTES,
+    MAX_BATCH_BYTES,
+    DroppedRecords,
+    PendingSpan,
+    _record_trace_id,
+)
 
 # The instrumentation scope of ``Hue.tracer``; its spans are always announced while open.
 HUE_TRACER_SCOPE = "hue-run"
@@ -528,6 +534,70 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
 
 class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
     _copy = staticmethod(snapshot_log)
+
+    def __init__(
+        self,
+        exporter: Any,
+        encode: Callable[[Any], Any],
+        max_records: int,
+        max_bytes: int,
+        capture_content: bool = True,
+        *,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
+    ) -> None:
+        # Set before the worker starts; admission reads it.
+        self._uploads = uploads
+        super().__init__(
+            exporter,
+            encode,
+            max_records,
+            max_bytes,
+            capture_content,
+            limits=limits,
+            dropped_records=dropped_records,
+        )
+
+    def _hold(self, value_bytes: int) -> Hold | None:
+        """A correlated log record's media are held for upload like a span's, with the
+        attachments ``log_inference`` staged for it."""
+        uploads = self._uploads
+        if uploads is None:
+            return None
+        return Hold(uploads.held, value_bytes, uploads.holds(), uploads)
+
+    def _discard(self, *items: Any) -> None:
+        """A dropped record's held media are released, and the attachments ``log_inference``
+        staged for it are counted as not uploaded."""
+        uploads = self._uploads
+        if uploads is None:
+            return
+        tally = Tally()
+        for item in items:
+            held = held_of(item)
+            record = getattr(item, "log_record", None)
+            trace_id = _record_trace_id(item) or ""
+            # A record lost before its copy was made still holds what log_inference staged; a
+            # copy lists the attachments the held-value budget refused under ``cut``.
+            dropped = (
+                len(held.files) + len(held.cut)
+                if held is not None
+                else uploads.drop_log(record.body)
+                if record is not None
+                else 0
+            )
+            for _ in range(dropped):
+                tally.fallback("budget", trace_id)
+            if held is not None:
+                held.values.clear()
+                held.body_values.clear()
+                held.files.clear()
+                held.cut.clear()
+                held.release()
+        report = getattr(self._exporter, "_report_uploads", None)
+        if tally.fallbacks and report is not None:
+            report(tally)
 
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
         self._enqueue(log_record)

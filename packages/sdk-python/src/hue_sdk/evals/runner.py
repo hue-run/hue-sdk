@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,6 +17,13 @@ from opentelemetry.context import Context
 from ..client import Hue
 from ._checkpoint import CheckpointStore
 from ._failure import error_cause, error_type
+from ._files import (
+    TARGET_FILE_ROLES,
+    download_case_files,
+    download_case_inputs,
+    remove_case_files,
+    verify_case_files,
+)
 from ._json import (
     MISSING,
     VALUE_BYTES,
@@ -27,7 +35,7 @@ from ._json import (
 )
 from .client import EvaluationClient
 from .scorers import invoke, persisted_score, score_locally, validate_bindings
-from .types import LocalScorer, RunnerReport, ScoreContext, TargetContext, TraceEvidence
+from .types import LocalFile, LocalScorer, RunnerReport, ScoreContext, TargetContext, TraceEvidence
 
 
 class UncertainExecutionError(RuntimeError):
@@ -367,6 +375,24 @@ def _error_message(error: Exception) -> str:
     )
 
 
+def _code_scorer_here(versions: list[dict[str, Any]]) -> bool:
+    """Whether a pinned local code scorer grades here: every one is bound in this process."""
+    return any(version["definition"]["kind"] == "local_code" for version in versions)
+
+
+def _needed_input_files(
+    files: list[dict[str, Any]] | None, versions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Pinned inputs this process downloads: the agent-visible roles for the target, and the
+    scorer-only roles (organization templates, evaluator references) only when a local code
+    scorer grades here."""
+    if not files:
+        return []
+    if _code_scorer_here(versions):
+        return list(files)
+    return [file for file in files if file["role"] in TARGET_FILE_ROLES]
+
+
 def run_experiment(
     *,
     client: EvaluationClient,
@@ -379,11 +405,20 @@ def run_experiment(
     scorers: list[LocalScorer] | None = None,
     concurrency: int = 1,
     schema_timeout_millis: int = 2000,
+    files_directory: str | Path | None = None,
 ) -> RunnerReport:
     """Run trusted sync/async targets locally; never automatically repeat uncertain work.
 
     This synchronous entry point runs callbacks in worker threads. In an async application,
     call it with asyncio.to_thread. Custom callbacks have no claimed cancellation timeout.
+
+    A case's pinned input files are downloaded and checked against its manifest before its
+    execution starts, under ``files_directory`` (default ``<checkpoint_directory>/files``, mode
+    0700): the target receives the agent-visible ones as ``context.files`` and local scorers
+    receive every one as ``files`` in their context. Evaluator-only files are not on disk while
+    a target runs: they are checked before the execution starts without being kept, saved for
+    the scorers after the target finished and removed when the case ends. A file that does not
+    match its manifest raises ``CaseFileError`` without spending the case's execution.
     """
     _settings(persist_result_content, concurrency, schema_timeout_millis)
     if not isinstance(trace_evidence, TraceEvidence) or trace_evidence.mode not in (
@@ -439,10 +474,78 @@ def run_experiment(
     )
     report = RunnerReport(experiment["evaluation"]["id"], [], [], deferred)
     report_lock = Lock()
+    files_root = Path(os.path.abspath(files_directory or Path(checkpoint_directory) / "files"))
 
     def execute(item: dict[str, Any]) -> None:
+        # The scorers' copies of evaluator-only files go however the case ends, so no later
+        # case's target finds them; the target's own copies stay for inspection.
+        try:
+            run_case(item)
+        finally:
+            remove_case_files(files_root / f"case-{uuid(item['id'])}" / "evaluator-inputs")
+
+    def prepare(
+        file: str, finished: dict[str, Any], case: dict[str, Any], output: Any
+    ) -> dict[str, Any]:
+        """The scores and completion of a target that finished, saved as the ``prepared``
+        checkpoint. The scorers' copies of evaluator-only files are fetched here, after the
+        target, so they are never on disk while it runs."""
+        needed = _needed_input_files(case.get("inputFiles"), versions)
+        score_files: list[LocalFile] = (
+            download_case_inputs(client, needed, files_root / file)[0] if needed else []
+        )
+        has_output = finished["hasOutput"]
+        scores = _scores(
+            versions,
+            {
+                "inputs": case["inputs"],
+                "has_expected": case["hasExpected"],
+                **({"expected": case["expected"]} if case["hasExpected"] else {}),
+                "metadata": case["metadata"],
+                "has_output": has_output,
+                **({"output": output} if has_output else {}),
+                "execution_state": finished["state"],
+                **({"files": score_files} if score_files else {}),
+            },
+            local,
+            persist_result_content,
+            schema_timeout_millis,
+        )
+        complete = {
+            "idempotencyKey": str(uuid4()),
+            "state": finished["state"],
+            **({"output": output} if persist_result_content and has_output else {}),
+            **({"error": finished["error"]} if "error" in finished else {}),
+            # A pending policy asks for the trace as required until the export's outcome is
+            # known.
+            "traceEvidence": (
+                "required" if trace_evidence.mode == "pending" else trace_evidence.mode
+            ),
+            **({"omissionReason": trace_evidence.reason} if trace_evidence.mode == "omit" else {}),
+        }
+        prepared = {
+            "stage": "prepared",
+            "executionId": finished["executionId"],
+            "complete": complete,
+            "scores": scores,
+            "exportState": "pending",
+            "trace": dict(finished["trace"]),
+        }
+        store.write(file, prepared)
+        return prepared
+
+    def run_case(item: dict[str, Any]) -> None:
         file = f"case-{uuid(item['id'])}"
+        case_directory = files_root / file
         checkpoint = store.read(file)
+        if checkpoint is not None and checkpoint["stage"] == "finished":
+            # The target finished and its outcome is saved: score it without a second
+            # invocation. Without persisted result content its output is lost, so the execution
+            # is reported as uncertain instead of guessed.
+            if checkpoint["hasOutput"] and "output" not in checkpoint:
+                raise UncertainExecutionError(item["id"], checkpoint["executionId"])
+            case = client.get_experiment_case(experiment_id, item["id"])
+            checkpoint = prepare(file, checkpoint, case, checkpoint.get("output", MISSING))
         if checkpoint is not None and checkpoint["stage"] != "prepared":
             if checkpoint["stage"] == "serialization_failed":
                 raise OutcomeSerializationError(checkpoint["executionId"])
@@ -468,106 +571,109 @@ def run_experiment(
             target_inputs = copy.deepcopy(json_value(case["inputs"]))
             target_config = copy.deepcopy(configuration)
             target_case = copy.deepcopy(case)
+            # Pinned files are verified before an execution exists for the same reason. Only the
+            # agent-visible ones are saved now: evaluator-only files a local code scorer needs are
+            # checked and dropped, and saved for scoring after the target finished, so they are
+            # not on disk while it runs.
+            needed = _needed_input_files(case.get("inputFiles"), versions)
+            agent_files = [entry for entry in needed if entry["role"] in TARGET_FILE_ROLES]
+            verify_case_files(
+                client, [entry for entry in needed if entry["role"] not in TARGET_FILE_ROLES]
+            )
+            target_files: list[LocalFile] = (
+                download_case_inputs(client, agent_files, case_directory)[1] if agent_files else []
+            )
             sequence_before = hue.export_failure_sequence()
-            with hue.span(
-                "hue.experiment.case",
-                parent_context=Context(),
-                attributes={"hue.experiment.id": experiment_id, "hue.dataset.case.id": item["id"]},
-            ) as span:
-                span.set_input(case["inputs"])
-                start = {
-                    "stage": "starting",
-                    "startKey": str(uuid4()),
-                    "traceExternalId": span.trace_id,
-                }
-                store.write(file, start)
-                execution = client.start_execution(
-                    experiment_id,
-                    item["id"],
-                    idempotency_key=start["startKey"],
-                    trace_external_id=span.trace_id,
-                )
-                store.write(file, {"stage": "running", "executionId": execution["id"]})
-                state, output, target_error = "succeeded", MISSING, None
-                try:
-                    output = invoke(
-                        target,
-                        target_inputs,
-                        TargetContext(target_config, target_case, span),
-                    )
-                except asyncio.CancelledError as error:
-                    state = "cancelled"
-                    span.record_error(error)
-                except Exception as error:
-                    state, target_error = "error", error
-                    span.record_error(error)
-                if output is not MISSING:
-                    try:
-                        json_value(output)
-                    except (JsonLimitError, MemoryError) as error:
-                        # An output over the size, count or depth bounds, or too large to read in
-                        # memory, is the target's own failure: the case completes as an error and
-                        # the run goes on. Output that is not JSON at all still stops the run for
-                        # inspection.
-                        state, output = "error", MISSING
-                        limit = error.limit if isinstance(error, JsonLimitError) else "bytes"
-                        target_error = OutputTooLargeError(limit)
-                        span.record_error(target_error)
-                    except (ValueError, TypeError, RecursionError):
-                        store.write(
-                            file, {"stage": "serialization_failed", "executionId": execution["id"]}
-                        )
-                        raise OutcomeSerializationError(execution["id"]) from None
-                    else:
-                        span.set_output(output)
-                scores = _scores(
-                    versions,
-                    {
-                        "inputs": case["inputs"],
-                        "has_expected": case["hasExpected"],
-                        **({"expected": case["expected"]} if case["hasExpected"] else {}),
-                        "metadata": case["metadata"],
-                        "has_output": output is not MISSING,
-                        **({"output": output} if output is not MISSING else {}),
-                        "execution_state": state,
+            finished: dict[str, Any] | None = None
+            try:
+                with hue.span(
+                    "hue.experiment.case",
+                    parent_context=Context(),
+                    attributes={
+                        "hue.experiment.id": experiment_id,
+                        "hue.dataset.case.id": item["id"],
                     },
-                    local,
-                    persist_result_content,
-                    schema_timeout_millis,
-                )
-                complete = {
-                    "idempotencyKey": str(uuid4()),
-                    "state": state,
-                    **(
-                        {"output": output}
-                        if persist_result_content and output is not MISSING
-                        else {}
-                    ),
-                    **(
-                        {"error": _typed_error(target_error, persist_result_content)}
-                        if target_error is not None
-                        else {}
-                    ),
-                    # A pending policy asks for the trace as required until the export's
-                    # outcome is known.
-                    "traceEvidence": (
-                        "required" if trace_evidence.mode == "pending" else trace_evidence.mode
-                    ),
-                    **(
-                        {"omissionReason": trace_evidence.reason}
-                        if trace_evidence.mode == "omit"
-                        else {}
-                    ),
-                }
-                checkpoint = {
-                    "stage": "prepared",
-                    "executionId": execution["id"],
-                    "complete": complete,
-                    "scores": scores,
-                    "exportState": "pending",
-                    "trace": {"traceId": span.trace_id, "spanId": span.span_id},
-                }
-                store.write(file, checkpoint)
+                ) as span:
+                    span.set_input(case["inputs"])
+                    start = {
+                        "stage": "starting",
+                        "startKey": str(uuid4()),
+                        "traceExternalId": span.trace_id,
+                    }
+                    store.write(file, start)
+                    execution = client.start_execution(
+                        experiment_id,
+                        item["id"],
+                        idempotency_key=start["startKey"],
+                        trace_external_id=span.trace_id,
+                    )
+                    store.write(file, {"stage": "running", "executionId": execution["id"]})
+                    state, output, target_error = "succeeded", MISSING, None
+                    try:
+                        output = invoke(
+                            target,
+                            target_inputs,
+                            TargetContext(target_config, target_case, span, tuple(target_files)),
+                        )
+                    except asyncio.CancelledError as error:
+                        state = "cancelled"
+                        span.record_error(error)
+                    except Exception as error:
+                        state, target_error = "error", error
+                        span.record_error(error)
+                    if output is not MISSING:
+                        try:
+                            json_value(output)
+                        except (JsonLimitError, MemoryError) as error:
+                            # An output over the size, count or depth bounds, or too large to read
+                            # in memory, is the target's own failure: the case completes as an error
+                            # and the run goes on. Output that is not JSON at all still stops the
+                            # run for inspection.
+                            state, output = "error", MISSING
+                            limit = error.limit if isinstance(error, JsonLimitError) else "bytes"
+                            target_error = OutputTooLargeError(limit)
+                            span.record_error(target_error)
+                        except (ValueError, TypeError, RecursionError):
+                            store.write(
+                                file,
+                                {"stage": "serialization_failed", "executionId": execution["id"]},
+                            )
+                            raise OutcomeSerializationError(execution["id"]) from None
+                        else:
+                            span.set_output(output)
+                    finished = {
+                        "stage": "finished",
+                        "executionId": execution["id"],
+                        "trace": {"traceId": span.trace_id, "spanId": span.span_id},
+                        "state": state,
+                        "hasOutput": output is not MISSING,
+                        **(
+                            {"output": output}
+                            if persist_result_content and output is not MISSING
+                            else {}
+                        ),
+                        **(
+                            {"error": _typed_error(target_error, persist_result_content)}
+                            if target_error is not None
+                            else {}
+                        ),
+                    }
+                    # Saved before any further request: a failure while the scorers' files are
+                    # fetched leaves an outcome a resume scores without running the target again.
+                    store.write(file, finished)
+                    checkpoint = prepare(file, finished, case, output)
+            except BaseException:
+                if finished is not None and (
+                    checkpoint is None or checkpoint["stage"] != "prepared"
+                ):
+                    # A failure after the outcome was saved (fetching the scorers' files): the root
+                    # has ended, so the count of spans the case ended is saved with the outcome, and
+                    # a resume holds the trace's receipt to it before completing.
+                    ended = hue.spans_ended(finished["trace"]["traceId"])
+                    if ended is not None:
+                        finished["trace"]["spans"] = ended
+                        store.write(file, finished)
+                raise
             # The root has ended: the count of spans this case ended is what its receipt is held
             # to, saved before the flush so a resume can hold the receipt to it too.
             ended = hue.spans_ended(span.trace_id)
@@ -648,8 +754,14 @@ def rescore(
     scorers: list[LocalScorer] | None = None,
     concurrency: int = 1,
     schema_timeout_millis: int = 2000,
+    files_directory: str | Path | None = None,
 ) -> RunnerReport:
-    """Score existing immutable subjects. This entry point has no target callback."""
+    """Score existing immutable subjects. This entry point has no target callback.
+
+    When a local code scorer grades here, each subject's frozen input and output files are
+    downloaded, verified, under ``files_directory`` (default ``<checkpoint_directory>/files``)
+    and passed to scorers as ``files``.
+    """
     _settings(persist_result_content, concurrency, schema_timeout_millis)
     project, run = client.check_connection(), client.get_evaluation_run(run_id)
     versions, local = run["scorerVersions"], scorers or []
@@ -670,12 +782,23 @@ def rescore(
         },
     )
     report, report_lock = RunnerReport(run_id, [], [], deferred), Lock()
+    files_root = Path(os.path.abspath(files_directory or Path(checkpoint_directory) / "files"))
+    code_scorer_here = _code_scorer_here(versions)
 
     def execute(item: dict[str, Any]) -> None:
         file = f"item-{uuid(item['id'])}"
         saved = store.read(file)
         if saved is None:
             subject = client.get_subject(item["subjectId"])
+            files = (
+                download_case_files(
+                    client,
+                    subject["files"],
+                    files_root / f"subject-{uuid(item['subjectId'])}",
+                )
+                if code_scorer_here and subject.get("files")
+                else []
+            )
             scores = _scores(
                 versions,
                 {
@@ -686,6 +809,7 @@ def rescore(
                     **({"expected": subject["expected"]} if subject["hasExpected"] else {}),
                     "metadata": subject["metadata"],
                     "execution_state": subject["executionState"],
+                    **({"files": files} if files else {}),
                 },
                 local,
                 persist_result_content,
