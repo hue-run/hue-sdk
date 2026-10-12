@@ -438,9 +438,8 @@ a new value; the input is not changed. With `as: "dataUrl"` (the default) each p
 `input_file` and `computer_screenshot`, AI SDK `image` and `file`) and bare base64 where its
 convention requires it (GenAI `blob`, OpenAI `input_audio` and assistant `audio`, Anthropic
 `source.data`, Gemini `inlineData`, Vertex `media`, Bedrock `source.bytes`), so the messages can be
-sent to the provider again. A GenAI `blob` or Vertex `media` part that declares a textual media type
-(`text/*`, JSON, XML, YAML and the like) receives the file's UTF-8 text, as Hue reads that field, or
-a typed `data:` URL when the bytes are no UTF-8, so recording the value again keeps the same bytes;
+sent to the provider again. A GenAI `blob` or Vertex `media` part receives base64 whatever its media
+type, as the GenAI conventions define its content and as Hue reads content that reads as base64;
 `as: "bytes"` writes a `Uint8Array`. A resolved part no longer carries `sha256` and `size`. A part
 whose file cannot be read stays as it is and is listed in `failures` with its JSON pointer and
 reason. Parts inside JSON-encoded strings, such as tool-call arguments, and Langfuse media tokens,

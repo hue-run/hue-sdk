@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isLoopbackHost } from "../config.js";
-import { isMediaContentType, isTextMediaType } from "../inline-files.js";
 import { uuid } from "./json.js";
 
 /**
@@ -708,9 +707,6 @@ interface Slot {
   key: string;
   encoding: "base64" | "dataUrl";
   mediaType?: string;
-  /** Set for a field read as raw UTF-8 text when its part declares a textual media type (a GenAI
-   * `blob`'s `content`, a Vertex `media`'s `data`), as Hue and the SDK's capture read it. */
-  text?: boolean;
 }
 interface DigestPart {
   pointer: string;
@@ -784,7 +780,6 @@ function slotOf(part: Plain): Slot | undefined {
         key: "content",
         encoding: "base64",
         mediaType: declaredType(part),
-        text: true,
       };
     case "file": {
       const file = plain(part.file);
@@ -853,7 +848,6 @@ function slotOf(part: Plain): Slot | undefined {
         key: "data",
         encoding: "base64",
         mediaType: declaredType(part),
-        text: true,
       };
     case undefined: {
       for (const key of ["inlineData", "inline_data"]) {
@@ -943,30 +937,15 @@ function dataUrlType(slot: Slot, file: MediaFile): string {
   return "application/octet-stream";
 }
 
-const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-
 /**
- * A file's bytes as a slot's convention spells them. A field read as raw text when its part
- * declares a textual media type receives the bytes' UTF-8 text, so recording the value again
- * keeps the same bytes; bytes that are no UTF-8, or text that would read as a `data:` URL, take a
- * typed `data:` URL instead, which the field also reads. Other fields take bare base64 or a
- * `data:` URL as their convention requires.
+ * A file's bytes as a slot's convention spells them: bare base64 or a `data:` URL. A GenAI `blob`
+ * or Vertex `media` part takes base64 for every media type, as the GenAI conventions define its
+ * content and as Hue's reader decodes content that reads as base64; raw text such as `test`
+ * would itself read as base64 and stand for other bytes.
  */
 function spelled(slot: Slot, file: MediaFile): string {
-  const base64 = () => Buffer.from(file.bytes).toString("base64");
-  const dataUrl = () => `data:${dataUrlType(slot, file)};base64,${base64()}`;
-  if (slot.encoding === "dataUrl") return dataUrl();
-  const declared = slot.mediaType;
-  if (slot.text && isMediaContentType(declared) && isTextMediaType(declared)) {
-    let text: string | undefined;
-    try {
-      text = utf8.decode(file.bytes);
-    } catch {
-      text = undefined;
-    }
-    return text !== undefined && !text.startsWith("data:") ? text : dataUrl();
-  }
-  return base64();
+  const base64 = Buffer.from(file.bytes).toString("base64");
+  return slot.encoding === "dataUrl" ? `data:${dataUrlType(slot, file)};base64,${base64}` : base64;
 }
 
 /** Sets an own enumerable property, a key named `__proto__` included, which assignment would take

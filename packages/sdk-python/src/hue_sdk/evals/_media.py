@@ -24,8 +24,6 @@ from urllib.parse import urlsplit
 
 import requests
 
-from .._inline_files import is_media_content_type, is_text_media_type
-
 MediaFetchErrorReason = Literal[
     "not_found", "missing", "unavailable", "forbidden", "too_large", "digest_mismatch", "failed"
 ]
@@ -537,9 +535,6 @@ class _Slot:
     key: str
     encoding: Literal["base64", "data_url"]
     media_type: str | None
-    # Set for a field read as raw UTF-8 text when its part declares a textual media type (a GenAI
-    # ``blob``'s ``content``, a Vertex ``media``'s ``data``), as Hue and the SDK's capture read it.
-    text: bool = False
 
 
 @dataclass(frozen=True)
@@ -611,7 +606,7 @@ def _slot(part: dict[str, Any]) -> _Slot | None:
     reference = isinstance(part.get("file_id"), str)
     declared = _declared(part)
     if kind == "blob":
-        return _Slot((), "content", "base64", declared, text=True)
+        return _Slot((), "content", "base64", declared)
     if kind == "file":
         nested = part.get("file")
         if isinstance(nested, dict):
@@ -642,7 +637,7 @@ def _slot(part: dict[str, Any]) -> _Slot | None:
             return None
         return _Slot((), "file_data", "data_url", declared)
     if kind == "media":
-        return _Slot((), "data", "base64", declared, text=True)
+        return _Slot((), "data", "base64", declared)
     if kind is None:
         for key in ("inlineData", "inline_data"):
             data = part.get(key)
@@ -720,22 +715,13 @@ def _data_url_type(slot: _Slot, file: MediaFile) -> str:
 
 
 def _spelled(slot: _Slot, file: MediaFile) -> str:
-    """A file's bytes as a slot's convention spells them. A field read as raw text when its part
-    declares a textual media type receives the bytes' UTF-8 text, so recording the value again
-    keeps the same bytes; bytes that are no UTF-8, or text that would read as a ``data:`` URL,
-    take a typed ``data:`` URL instead, which the field also reads. Other fields take bare base64
-    or a ``data:`` URL as their convention requires."""
+    """A file's bytes as a slot's convention spells them: bare base64 or a ``data:`` URL. A GenAI
+    ``blob`` or Vertex ``media`` part takes base64 for every media type, as the GenAI conventions
+    define its content and as Hue's reader decodes content that reads as base64; raw text such as
+    ``test`` would itself read as base64 and stand for other bytes."""
     encoded = base64.b64encode(file.data).decode("ascii")
-    data_url = f"data:{_data_url_type(slot, file)};base64,{encoded}"
     if slot.encoding == "data_url":
-        return data_url
-    declared = slot.media_type
-    if slot.text and is_media_content_type(declared) and is_text_media_type(declared or ""):
-        try:
-            text = file.data.decode("utf-8")
-        except UnicodeDecodeError:
-            return data_url
-        return data_url if text.startswith("data:") else text
+        return f"data:{_data_url_type(slot, file)};base64,{encoded}"
     return encoded
 
 

@@ -17,7 +17,7 @@ from uuid import uuid4
 import pytest
 
 import hue_sdk.evals._media as media_module
-from hue_sdk._inline_files import content_path, media_bytes
+from hue_sdk._inline_files import inline_file
 from hue_sdk.evals import (
     CaseFileWrite,
     EvaluationClient,
@@ -678,8 +678,9 @@ def test_rehydrate_media_writes_a_cases_local_files_back_into_its_inputs(tmp_pat
 
 
 HELLO = b"hello"
+# Four letters of the base64 alphabet: written raw, Hue would read them as base64.
+TEST4 = b"test"
 LATIN1 = bytes([0x63, 0x61, 0x66, 0xE9])
-LOOKS_LIKE_URL = b"data:,not a url"
 MARKDOWN = "\ufeff# Notes\n".encode()
 
 
@@ -692,8 +693,8 @@ class _Bytes:
 
 TEXT_FILES = [
     _Bytes(sha(HELLO), "text/plain", HELLO),
+    _Bytes(sha(TEST4), "text/plain", TEST4),
     _Bytes(sha(LATIN1), "text/csv", LATIN1),
-    _Bytes(sha(LOOKS_LIKE_URL), "text/plain", LOOKS_LIKE_URL),
     _Bytes(sha(MARKDOWN), "text/markdown", MARKDOWN),
     _Bytes(sha(PDF), "application/pdf", PDF),
 ]
@@ -705,35 +706,31 @@ def text_parts() -> list[dict[str, Any]]:
 
     return [
         blob(HELLO, "text/plain"),
+        blob(TEST4, "text/plain"),
         blob(LATIN1, "text/csv"),
-        blob(LOOKS_LIKE_URL, "text/plain"),
         blob(MARKDOWN, "text/markdown", "media"),
         blob(PDF, "application/pdf"),
     ]
 
 
 def assert_written_back(value: list[dict[str, Any]]) -> None:
-    # Text is written as its UTF-8, a byte order mark included; bytes that are no UTF-8, or text
-    # that would read as a data: URL, as a typed data: URL; binary media as base64.
-    assert [part.get("content", part.get("data")) for part in value] == [
-        "hello",
-        f"data:text/csv;base64,{b64(LATIN1)}",
-        f"data:text/plain;base64,{b64(LOOKS_LIKE_URL)}",
-        "\ufeff# Notes\n",
-        b64(PDF),
-    ]
-    # Recorded again, every part reads as the same bytes.
-    for part, file in zip(value, TEXT_FILES, strict=True):
-        assert sha(media_bytes(content_path(part)).data) == file.sha256
+    written = [part.get("content", part.get("data")) for part in value]
+    # GenAI blob and Vertex media content is base64 for every media type.
+    assert written == [b64(file.data) for file in TEXT_FILES]
+    # Read as Hue reads it (a data: URL, base64 when it reads as base64, the text otherwise), every
+    # part stands for the file's own bytes; "test" written raw would not.
+    for content, file in zip(written, TEXT_FILES, strict=True):
+        assert sha(inline_file(content).data) == file.sha256
+    assert sha(inline_file("test").data) != sha(TEST4)
 
 
-def test_rehydrate_media_writes_textual_blobs_as_the_text_hue_reads_them_as():
+def test_rehydrate_media_writes_blob_content_as_base64_for_every_media_type():
     resolved = rehydrate_media(text_parts(), TEXT_FILES)
     assert resolved.resolved == 5
     assert_written_back(resolved.value)
 
 
-def test_resolve_writes_textual_blobs_as_the_text_hue_reads_them_as(hue):
+def test_resolve_writes_blob_content_as_base64_for_every_media_type(hue):
     hue.answers.update(
         {file.sha256: stored(file.data, file.content_type, "file") for file in TEXT_FILES}
     )
