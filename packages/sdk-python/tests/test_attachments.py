@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from test_blobs import attrs, blobs, client, sha256
+from test_blobs import KIB, MIB, attrs, blobs, client, listed, sha256
 from test_blobs import hue_store as hue_store
 
 from hue_sdk import Attachment, Hue
@@ -250,6 +250,40 @@ def test_setup_credentials_record_the_digest_part_and_upload_nothing(hue_store):
         assert hue.force_flush(timeout_millis=30_000)
         assert hue.export_status.upload_fallbacks == 0
     assert hue_store.reservations == []
+
+
+def test_an_attachment_in_a_value_that_uploads_whole_is_not_uploaded_or_listed(hue_store):
+    data = base64.b64decode(CORPUS["files"]["pixel"]["data"])
+    pixel = Attachment(data, content_type="image/png", name="pixel.png")
+    with client(hue_store) as hue:
+        # With its file as the digest part, the value is still over the 1 MiB value limit: it
+        # uploads whole and keeps only its first 16 KiB inline, where no reader finds the part.
+        with hue.span("uploads whole") as span:
+            span.set_input({"notes": "n" * (2 * MIB), "image": pixel})
+        with hue.span("fits") as span:
+            fits_trace = span.trace_id
+            span.set_input({"notes": "n" * (512 * KIB), "image": pixel})
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+        assert (status.uploaded_values, status.upload_fallbacks) == (2, 1)
+    whole = hue_store.span("uploads whole")
+    assert [entry["key"] for entry in blobs(whole)] == ["input.value"]
+    assert listed(whole) == ["input.value"]
+    assert blobs(hue_store.span("fits")) == [
+        {
+            "key": "input.value#/image",
+            "sha256": sha256(data),
+            "size": len(data),
+            "content_type": "image/png",
+            "name": "pixel.png",
+        }
+    ]
+    # The file is stored once, for the span that lists it.
+    assert [
+        reservation["traceId"]
+        for reservation in hue_store.reservations
+        if reservation["sha256"] == sha256(data)
+    ] == [fits_trace]
 
 
 PNG = base64.b64decode(

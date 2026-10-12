@@ -60,7 +60,10 @@ const MiB = 1024 * KiB;
 interface Behavior {
   /** The reservation route's status; 200 answers `exists` or `upload` as the store holds it,
    * unless a `body` is given. */
-  reserve?: (index: number) => {
+  reserve?: (
+    index: number,
+    body?: Record<string, unknown>,
+  ) => {
     status: number;
     headers?: Record<string, string>;
     json?: boolean;
@@ -150,7 +153,7 @@ function hue(behavior: Behavior = {}) {
       if (url.pathname === "/api/v1/otlp/blobs") {
         const body = (await request.json()) as Record<string, unknown>;
         reservations.push(body);
-        const answer = behavior.reserve?.(++reserveCount);
+        const answer = behavior.reserve?.(++reserveCount, body);
         if (answer?.body !== undefined)
           return new Response(answer.body, { status: answer.status, headers: answer.headers });
         if (answer && answer.status !== 200)
@@ -2577,6 +2580,90 @@ describe("attachments", () => {
       // Only the part past Hue's reading depth is reported: it kept its digest.
       expect(report.uploadFallbacks).toBe(1);
       expect(attr(endpoint.span("deep")!, "input.value")!.stringValue).toContain(sha256(bytes));
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("an attachment in a value that uploads whole is not uploaded or listed; one that fits is", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const bytes = Buffer.from(files.pixel.data, "base64");
+    const pixel = new Attachment({ data: bytes, contentType: "image/png", name: "pixel.png" });
+    try {
+      // With its file as the digest part, the value is still over the 1 MiB value limit: it
+      // uploads whole and keeps only its first 16 KiB inline, where no reader finds the part.
+      await hueClient.withSpan("uploads whole", (span) =>
+        span.setInput({ notes: "n".repeat(2 * MiB), image: pixel }),
+      );
+      await hueClient.withSpan("fits", (span) =>
+        span.setInput({ notes: "n".repeat(512 * KiB), image: pixel }),
+      );
+      const report = await hueClient.flush();
+      expect([report.uploadedValues, report.uploadFallbacks]).toEqual([2, 1]);
+      const whole = endpoint.span("uploads whole")!;
+      expect(blobs(whole).map((entry) => entry.key)).toEqual(["input.value"]);
+      expect(strings(attr(whole, "hue.truncated"))).toEqual(["input.value"]);
+      expect(blobs(endpoint.span("fits")!)).toEqual([
+        {
+          key: "input.value#/image",
+          sha256: sha256(bytes),
+          size: bytes.byteLength,
+          content_type: "image/png",
+          name: "pixel.png",
+        },
+      ]);
+      // The file is stored once, for the span that lists it.
+      expect(
+        endpoint.reservations
+          .filter((reservation) => reservation.sha256 === sha256(bytes))
+          .map((reservation) => reservation.traceId),
+      ).toEqual([Buffer.from(endpoint.span("fits")!.traceId, "base64").toString("hex")]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("an attachment in a log body replaced by the receiver's marker is not uploaded", async () => {
+    // Each image fits the inline limit, so one whose upload is refused stays inline: twenty of
+    // them put the body over the value limit, and it is replaced by the receiver's marker.
+    const images = Array.from({ length: 20 }, (_, index) => Buffer.alloc(60 * KiB, index + 1));
+    const refused = new Set(images.map((image) => sha256(image)));
+    const endpoint = hue({
+      reserve: (_index, body) =>
+        refused.has(String(body?.sha256)) ? { status: 400 } : { status: 200 },
+    });
+    const hueClient = client(endpoint);
+    const bytes = Buffer.from(files.pixel.data, "base64");
+    try {
+      await hueClient.withSpan("marker body", () => {
+        hueClient.recordMessages({
+          input: [
+            {
+              role: "user",
+              parts: [
+                ...images.map((image) => ({
+                  type: "blob",
+                  modality: "image",
+                  mime_type: "image/png",
+                  content: image.toString("base64"),
+                })),
+                new Attachment({ data: bytes, contentType: "image/png" }),
+              ],
+            },
+          ],
+        });
+      });
+      const report = await hueClient.flush();
+      const [log] = endpoint.logs();
+      expect(strings(attr(log!, "hue.truncated"))).toEqual(["body"]);
+      expect(attr(log!, "hue.blobs")).toBeUndefined();
+      expect(endpoint.reservations.map((reservation) => reservation.sha256)).not.toContain(
+        sha256(bytes),
+      );
+      expect([report.uploadedValues, report.uploadFallbacks]).toEqual([0, 21]);
     } finally {
       await hueClient.shutdown();
       endpoint.server.stop(true);

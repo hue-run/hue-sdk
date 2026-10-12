@@ -28,7 +28,13 @@ import {
   readMediaText,
   reencodeMedia,
 } from "./inline-files.js";
-import { capLogBody, TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
+import {
+  capLogBody,
+  isTruncatedMarker,
+  TRUNCATED_KEY,
+  truncatedMarker,
+  withTruncatedKeys,
+} from "./privacy.js";
 import { truncateUtf8 } from "./safety.js";
 
 /**
@@ -114,6 +120,10 @@ export interface OffloadCollector {
   /** The strings of a log record's body the queue cut when the record was admitted: never read
    * as files, since their bytes are not the file's. */
   bodyCut?: Set<string>;
+  /** Set by the upload step: the record's values it uploaded whole or cut (`body` for a log
+   * record's body it replaced by the receiver's marker). Their inline text holds no part a reader
+   * can find, so an attachment placed in one is not uploaded and counts as a fallback. */
+  whole?: Set<string>;
 }
 
 export interface MediaAttachment {
@@ -793,6 +803,7 @@ export async function offloadRecord(
   options: OffloadOptions,
 ): Promise<{ attributes: Record<string, unknown>; body?: unknown }> {
   const { uploader, traceId, valueBytes, upload, tally } = options;
+  const whole = (collector.whole ??= new Set());
   const result: Record<string, unknown> = { ...attributes };
   const existing = Array.isArray(attributes[BLOBS_KEY])
     ? (attributes[BLOBS_KEY] as unknown[]).filter(
@@ -912,6 +923,7 @@ export async function offloadRecord(
       return;
     }
     listed.push({ order: index, key });
+    whole.add(key);
     const cut = () =>
       typeof placed === "string" ? truncateUtf8(placed, valueBytes) : truncatedMarker(size);
     // A log record's value is cut, as no log reader pages an uploaded text value.
@@ -949,9 +961,22 @@ export async function offloadRecord(
 
   const body = collector.body ? placeBody(collector.body.value) : undefined;
   await Promise.all(collector.candidates.map((candidate, index) => place(index, candidate)));
+  let placedBody: unknown;
+  if (body) {
+    const capped = capLogBody(await body, valueBytes);
+    placedBody = capped.body;
+    if (capped.cut) listed.push({ order: -1, key: "body" });
+    if (isTruncatedMarker(placedBody)) whole.add("body");
+  }
   await Promise.all(
     (collector.attachments ?? []).map((file, position) => {
       if (!file.bytes.byteLength) return Promise.resolve();
+      // A part in a value that is now its first bytes, or the receiver's marker, is read by no
+      // reader: its file is not uploaded.
+      if (file.attribute !== undefined && whole.has(file.attribute)) {
+        fallback("budget");
+        return Promise.resolve();
+      }
       const slot = slots > 0 ? (slots--, true) : false;
       return (async () => {
         const key = mediaKey(file);
@@ -974,12 +999,6 @@ export async function offloadRecord(
       })();
     }),
   );
-  let placedBody: unknown;
-  if (body) {
-    const capped = capLogBody(await body, valueBytes);
-    placedBody = capped.body;
-    if (capped.cut) listed.push({ order: -1, key: "body" });
-  }
   if (listed.length)
     result[TRUNCATED_KEY] = withTruncatedKeys(
       result[TRUNCATED_KEY],
@@ -1022,11 +1041,13 @@ export function fallbackRecord(
 ): { attributes: Record<string, unknown>; body?: unknown } {
   const result: Record<string, unknown> = { ...attributes };
   const listed: string[] = [];
+  const whole = (collector.whole ??= new Set());
   let body: unknown;
   if (collector.body) {
     const capped = capLogBody(collector.body.value, valueBytes);
     body = capped.body;
     if (capped.cut) listed.push("body");
+    if (isTruncatedMarker(body)) whole.add("body");
   }
   for (const _file of collector.attachments ?? []) countFallback(tally, "failed", traceId);
   for (let index = 0; index < collector.cut.length; index++)
@@ -1050,11 +1071,13 @@ export function fallbackRecord(
       if (Buffer.byteLength(placed, "utf8") > valueBytes) {
         placed = truncateUtf8(placed, valueBytes);
         listed.push(key);
+        whole.add(key);
         if (!collector.log) countFallback(tally, "failed", traceId);
       }
     } else if (placed instanceof Uint8Array && placed.byteLength > valueBytes) {
       placed = truncatedMarker(placed.byteLength);
       listed.push(key);
+      whole.add(key);
       if (!collector.log) countFallback(tally, "failed", traceId);
     }
     result[key] = placed;
