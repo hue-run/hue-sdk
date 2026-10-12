@@ -84,6 +84,7 @@ export type MediaFetchTarget =
       /** 16-hex OpenTelemetry span ID of the span that recorded the part. Pass it when known: Hue
        * then reads that span's record alone instead of searching the trace. */
       spanId?: string;
+      /** Not set when reading a live trace's file. */
       snapshotId?: undefined;
     }
   | {
@@ -91,7 +92,9 @@ export type MediaFetchTarget =
       snapshotId: string;
       /** Lowercase hex SHA-256 the part records. */
       sha256: string;
+      /** Not set when reading a snapshot's pinned copy. */
       traceId?: undefined;
+      /** Not set when reading a snapshot's pinned copy. */
       spanId?: undefined;
     };
 
@@ -112,12 +115,15 @@ export type MediaResolveOptions = (
       traceId: string;
       /** 16-hex OpenTelemetry span ID of the span that recorded the value. */
       spanId?: string;
+      /** Not set when resolving a live trace's files. */
       snapshotId?: undefined;
     }
   | {
       /** Trace snapshot ID whose pinned copies hold the files. */
       snapshotId: string;
+      /** Not set when resolving a snapshot's pinned copies. */
       traceId?: undefined;
+      /** Not set when resolving a snapshot's pinned copies. */
       spanId?: undefined;
     }
 ) &
@@ -172,7 +178,20 @@ export type MediaSourceFile = {
   sha256: string;
   /** The file's media type, used when the part declares none. */
   contentType?: string;
-} & ({ path: string; bytes?: undefined } | { bytes: Uint8Array; path?: undefined });
+} & (
+  | {
+      /** Path of the file on this machine. */
+      path: string;
+      /** Not set when the file is given as a path. */
+      bytes?: undefined;
+    }
+  | {
+      /** The file's bytes. */
+      bytes: Uint8Array;
+      /** Not set when the file is given as bytes. */
+      path?: undefined;
+    }
+);
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
