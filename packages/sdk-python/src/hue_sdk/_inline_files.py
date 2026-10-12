@@ -22,6 +22,7 @@ from ._limits import MAX_REQUEST_BYTES
 INLINE_FILE_LIMIT = 64 * 1024
 # Admission runs on the application thread, so the JSON parsed there is bounded. Eight requests'
 # worth matches the TypeScript SDK's default queue budget; a longer message is dropped as before.
+# Both bounds count UTF-16 code units, as the TypeScript SDK measures strings.
 MAX_INLINE_FILE_TEXT = 8 * MAX_REQUEST_BYTES
 INLINE_FILE_TEXT_PER_RECORD = 2 * MAX_INLINE_FILE_TEXT
 
@@ -50,22 +51,12 @@ _CONTENT_TYPE = re.compile(
 )
 
 
-def utf8_size(value: str, limit: int) -> int:
-    """Count UTF-8 bytes without allocating an encoded copy beyond ``limit``."""
-    size = 0
-    for character in value:
-        code = ord(character)
-        size += 1 if code <= 0x7F else 2 if code <= 0x7FF else 3 if code <= 0xFFFF else 4
-        if size > limit:
-            return size
-    return size
-
-
 _ASTRAL = re.compile("[\U00010000-\U0010ffff]")
 
 
 def utf16_size(value: str, limit: int) -> int:
-    """Count JavaScript string units, without making an encoded copy."""
+    """Count UTF-16 code units, as the TypeScript SDK measures strings, without an encoded copy;
+    counting stops once ``limit`` is exceeded."""
     size = len(value)
     if size > limit:
         return size

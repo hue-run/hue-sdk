@@ -2023,3 +2023,83 @@ test("requested helper uploads of spans dropped at the queue count as upload fal
     endpoint.server.stop(true);
   }
 });
+
+test("per-record media inspection counts UTF-16 code units", async () => {
+  // Each message is about 3.5 M code units but 7 MB of UTF-8: three fit the 16 MiB per-record
+  // inspection bound only when counted in code units, so the last message's image is found.
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  // "image" makes every message a candidate for inspection, charged to the record's bound.
+  const filler = `Describe this image. ${"é".repeat(3_500_000)}`;
+  const image = Buffer.alloc(4096, 7);
+  const message = (withImage: boolean) =>
+    JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: filler },
+          ...(withImage
+            ? [
+                {
+                  type: "blob",
+                  modality: "image",
+                  mime_type: "image/png",
+                  content: image.toString("base64"),
+                },
+              ]
+            : []),
+        ],
+      },
+    ]);
+  try {
+    await hueClient.withSpan("utf-16 inspection", ({ span }) => {
+      span.setAttribute("gen_ai.input.messages", message(false));
+      span.setAttribute("gen_ai.output.messages", message(false));
+      span.setAttribute("ai.prompt.messages", message(true));
+    });
+    await hueClient.flush();
+    const record = endpoint.span("utf-16 inspection")!;
+    expect(blobs(record).map((entry) => entry.key)).toEqual([
+      "gen_ai.input.messages",
+      "gen_ai.output.messages",
+      "ai.prompt.messages#/0/parts/1",
+      "ai.prompt.messages",
+    ]);
+    expect(blobs(record)[2]!.sha256).toBe(sha256(image));
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("a message of 8 Mi code units is inspected even when its UTF-8 is longer", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const image = Buffer.alloc(4096, 9);
+  const messages = [
+    {
+      role: "user",
+      parts: [{ type: "blob", mime_type: "image/png", content: image.toString("base64") }],
+      padding: "",
+    },
+  ];
+  messages[0]!.padding = "é".repeat(8 * MiB - JSON.stringify(messages).length);
+  const value = JSON.stringify(messages);
+  expect(value.length).toBe(8 * MiB);
+  expect(Buffer.byteLength(value, "utf8")).toBeGreaterThan(8 * MiB);
+  try {
+    await hueClient.withSpan("utf-16 message bound", ({ span }) => {
+      span.setAttribute("gen_ai.input.messages", value);
+    });
+    await hueClient.flush();
+    const record = endpoint.span("utf-16 message bound")!;
+    expect(blobs(record).map((entry) => entry.key)).toEqual([
+      "gen_ai.input.messages#/0/parts/0",
+      "gen_ai.input.messages",
+    ]);
+    expect(blobs(record)[0]!.sha256).toBe(sha256(image));
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});

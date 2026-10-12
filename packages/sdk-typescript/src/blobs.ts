@@ -757,9 +757,8 @@ export async function offloadAttributes(
   let inspected = 0;
 
   const parts = async (index: number, key: string, text: string): Promise<string> => {
-    if (!mayInlineFiles(key, text)) return text;
-    const bytes = Buffer.byteLength(text, "utf8");
-    if (bytes > MAX_INLINE_FILE_TEXT) return text;
+    // Both bounds count UTF-16 code units, as admission does.
+    if (!mayInlineFiles(key, text) || text.length > MAX_INLINE_FILE_TEXT) return text;
     if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
     inspected += text.length;
     let parsed: unknown;

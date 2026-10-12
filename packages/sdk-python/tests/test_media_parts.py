@@ -1466,3 +1466,67 @@ def test_requested_uploads_of_spans_dropped_at_the_queue_are_counted(hue_store):
         hue_store.release_traces.set()
     assert [span.name for span in hue_store.spans] == ["queued"]
     assert hue_store.reservations == []
+
+
+def _filler_message(filler: str, image: bytes | None = None) -> str:
+    parts: list[dict[str, Any]] = [{"type": "text", "content": filler}]
+    if image is not None:
+        parts.append(
+            {
+                "type": "blob",
+                "modality": "image",
+                "mime_type": "image/png",
+                "content": base64.b64encode(image).decode(),
+            }
+        )
+    return json.dumps([{"role": "user", "parts": parts}], ensure_ascii=False)
+
+
+def test_per_record_inspection_counts_utf16_code_units(hue_store):
+    # Each message is about 3.5 M code units but 7 MB of UTF-8: three fit the 16 MiB per-record
+    # bound only in code units, as the TypeScript SDK counts them, so the last image is found.
+    # "image" makes every message a candidate for inspection, charged to the record's bound.
+    filler = "Describe this image. " + "é" * 3_500_000
+    image = bytes([7]) * 4096
+    with client(hue_store) as hue:
+        with hue.span("utf-16 inspection") as span:
+            span.set_attribute("gen_ai.input.messages", _filler_message(filler))
+            span.set_attribute("gen_ai.output.messages", _filler_message(filler))
+            span.set_attribute("ai.prompt.messages", _filler_message(filler, image))
+        assert hue.force_flush(timeout_millis=60_000)
+    found = blobs(hue_store.span("utf-16 inspection"))
+    assert [entry["key"] for entry in found] == [
+        "gen_ai.input.messages",
+        "gen_ai.output.messages",
+        "ai.prompt.messages#/0/parts/1",
+        "ai.prompt.messages",
+    ]
+    assert found[2]["sha256"] == sha256(image)
+
+
+def test_a_message_of_8_mi_code_units_is_inspected_even_when_its_utf8_is_longer(hue_store):
+    image = bytes([9]) * 4096
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "type": "blob",
+                    "mime_type": "image/png",
+                    "content": base64.b64encode(image).decode(),
+                }
+            ],
+            "padding": "",
+        }
+    ]
+    length = len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+    messages[0]["padding"] = "é" * (MAX_INLINE_FILE_TEXT - length)
+    value = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    assert len(value) == MAX_INLINE_FILE_TEXT < len(value.encode())
+    with client(hue_store) as hue:
+        with hue.span("utf-16 message bound") as span:
+            span.set_attribute(ATTRIBUTE, value)
+        assert hue.force_flush(timeout_millis=60_000)
+    found = blobs(hue_store.span("utf-16 message bound"))
+    assert [entry["key"] for entry in found] == [f"{ATTRIBUTE}#/0/parts/0", ATTRIBUTE]
+    assert found[0]["sha256"] == sha256(image)
