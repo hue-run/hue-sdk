@@ -64,6 +64,7 @@ The shared corpus covers empty byte fields, null alternate MIME/name/inline-data
 ## Attachments placed in values
 - `py-attachment` covers the `attachments` section of the shared corpus: an `Attachment` in `set_input`/`set_output`, `model()` messages, a `metadata` attribute (whole and nested) and `log_inference()` messages, with the exact recorded JSON text (the part as `{"type":"blob","mime_type","modality","sha256","size","name"}`) and the ordered `hue.blobs` strings, for successful and refused uploads. The log case's entry sits on the log record, keyed `body#/gen_ai.input.messages/0/parts/1`. A file used twice in one trace is PUT once.
 - Also check: `path` and every `data` form give the same digest and the bytes are copied; an invalid attachment records `None` and an invalid name is omitted, each counted as an instrumentation issue, while the span exports; `capture_content=False` keeps the metadata part without its name and sends no reservations; a redacted or replaced value uploads nothing and counts nothing; a part deeper than 10 levels keeps its digest and counts one fallback; setup keys upload nothing.
+- A `span(attributes=...)` or `set_attribute` value OpenTelemetry cannot hold (a dict, a list not of one primitive type) is recorded as JSON text with or without attachments; bytes over 25 MiB are refused before they are copied. Numbers in JSON the SDK writes again are spelled as JavaScript writes them (`test_placed_json_numbers_are_written_as_javascript_writes_them` in `tests/test_inline_files.py`, and the corpus's `*-js-numbers` cases).
 - One step places a log record's files: an `Attachment` next to an inline image in one `log_inference()` body is reserved at most once, by `place_logs`, and both entries sit on the log record, the inline image's first; refused, both fall back together. A log record's message file that is not uploaded keeps the 64 KiB rule: a small image stays inline and a large one becomes its digest. A record lost while it is copied counts its attachments as not uploaded.
 
 Run from `packages/sdk-python` (about 3 s):
@@ -72,4 +73,4 @@ Run from `packages/sdk-python` (about 3 s):
 uv run --frozen --all-groups pytest tests/test_attachments.py -q
 ```
 
-Expected: `11 passed`. `tests/test_wheel.py` runs the same file against the built wheel.
+Expected: `13 passed`. `tests/test_wheel.py` runs the same file against the built wheel.
