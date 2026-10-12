@@ -85,8 +85,8 @@ characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted
 from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
 base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
 declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
-matches `span.record_file`'s digest for the same bytes. Inspection is bounded to 8 MiB of
-text per message attribute and 16 MiB per record. Longer attributes use the ordinary value limit.
+matches `span.record_file`'s digest for the same bytes. Inspection is bounded to 8 Mi UTF-16
+code units of text per message attribute and 16 Mi per record. Longer attributes use the ordinary value limit.
 With `capture_content=False`, messages are removed without inspection or uploads. See
 [Values over the inline limit](#values-over-the-inline-limit).
 
@@ -344,11 +344,10 @@ filename, content type and an optional primary flag. Managed outputs accept the 
 content types as TypeScript: PDF, DOCX, PPTX, XLSX, `application/json`, `text/plain`, `text/csv`,
 `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `image/avif`, `audio/mpeg`, `audio/wav`,
 `audio/ogg`, `audio/webm`, `audio/mp4`, `audio/flac`, `audio/opus`, `audio/aac`, `video/mp4`
-and `video/webm`. Other output types, including `audio/pcm`, are unsupported. Declare
-`audio/mp4` or `video/mp4` for `.mp4` files, and `audio/webm` or `video/webm` for `.webm`
-files; the extension alone does not distinguish audio from video. Input files still accept
-arbitrary valid MIME types. The helper claims the
-invocation, verifies files and saves the outcome without automatically rerunning
+and `video/webm`. Any other output content type, such as `audio/pcm`, records the invocation
+as an error before any upload. Give an `.mp4` file `audio/mp4` or `video/mp4`, and a `.webm` file
+`audio/webm` or `video/webm`, to match its content: the extension alone does not say which. The
+helper claims the invocation, verifies files and saves the outcome without automatically rerunning
 the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs)
 and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider
 flush callbacks and recovery. Local/CI runners remain available.

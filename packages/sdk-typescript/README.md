@@ -391,8 +391,8 @@ with a UTF-8-safe 16 KiB prefix in its content field. Its entry points to that f
 `gen_ai.input.messages#/0/parts/1/content`. Smaller text stays inline. Hue reads both these forms
 and earlier binary prefixes. If upload fails, the part keeps its digest with no blob entry.
 In resources, events, links and log records, inline media up to 64 KiB stays verbatim; larger
-inline media is replaced by its digest, preserving the 0.16 behavior. These nested values never
-upload. Ordinary hold, cut or drop rules still apply to the resulting record.
+inline media is replaced by its digest, as events, links and log records were in 0.16. These
+nested values never upload. Ordinary hold, cut or drop rules still apply to the resulting record.
 
 Entries use the recorded media type and, when valid, the filename, name or title. A valid name
 is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
@@ -400,8 +400,8 @@ characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted
 from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
 base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
 declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
-matches `hue.recordFile`'s digest for the same bytes. Inspection is bounded to 8 MiB of
-text per message attribute and 16 MiB per record. Longer attributes use the ordinary value limit.
+matches `hue.recordFile`'s digest for the same bytes. Inspection is bounded to 8 Mi UTF-16
+code units of text per message attribute and 16 Mi per record. Longer attributes use the ordinary value limit.
 With `captureContent: false`, messages are removed without inspection or uploads. See
 [Values over the inline limit](#values-over-the-inline-limit).
 
