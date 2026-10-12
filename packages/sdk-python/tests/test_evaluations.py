@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
 import gzip
+import hashlib
 import inspect
 import json
 import os
@@ -33,6 +35,7 @@ from hue_sdk import Hue
 from hue_sdk.environment import WorldCreationError
 from hue_sdk.evals import (
     MISSING,
+    CaseFileError,
     EvaluationClient,
     HueApiError,
     OutcomeSerializationError,
@@ -42,6 +45,7 @@ from hue_sdk.evals import (
     builtins,
     define_local_scorer,
     is_transient_api_error,
+    rehydrate_media,
     rescore,
     run_experiment,
     score_locally,
@@ -88,6 +92,9 @@ def evaluation_receiver():
         historical=None,
         # Further cases after ``case_id``, each with its own execution: id -> state.
         extra_cases={},
+        # The case's pinned input files (manifest entries) and the artifacts' bytes by id.
+        input_files=[],
+        artifacts={},
         lock=Lock(),
     )
     state.versions = [
@@ -199,6 +206,10 @@ def evaluation_receiver():
                 for span in spans:
                     state.held.setdefault(span.trace_id.hex(), set()).add(span.span_id.hex())
             return 200, b""
+        download = re.fullmatch(r"/api/v1/artifacts/([0-9a-f-]+)/download", path)
+        if download is not None:
+            data = state.artifacts.get(download.group(1))
+            return (404, {}) if data is None else (200, data)
         receipt = re.fullmatch(r"/api/v1/traces/([0-9a-f]{32})/receipt", path)
         if receipt is not None and method == "GET":
             held = state.held.get(receipt.group(1))
@@ -284,6 +295,7 @@ def evaluation_receiver():
                 "metadata": {},
                 "hasExpected": state.include_expected,
                 **({"expected": None} if state.include_expected else {}),
+                **({"inputFiles": state.input_files} if state.input_files else {}),
             }
         if path.endswith("/start"):
             if state.execution is None:
@@ -1848,3 +1860,106 @@ def test_tags_travel_by_name_on_creates_list_filters_updates_and_the_tag_list():
         ("PATCH", f"/api/v1/experiments/{item_id}", {"tags": ["Billing"]}),
         ("GET", "/api/v1/tags", None),
     ]
+
+
+def _pinned(role: str, filename: str, content_type: str, data: bytes) -> dict:
+    return {
+        "artifactId": str(uuid4()),
+        "role": role,
+        "filename": filename,
+        "contentType": content_type,
+        "byteSize": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def test_pinned_files_reach_the_target_and_local_scorers_verified_on_disk(
+    evaluation_receiver, tmp_path
+):
+    receiver, seen = evaluation_receiver, {}
+    chart, key = b"\x89PNG synthetic chart", b"answer key"
+    receiver.input_files = [
+        _pinned("source", "chart.png", "image/png", chart),
+        _pinned("evaluator_reference", "key.txt", "text/plain", key),
+    ]
+    receiver.artifacts = {
+        receiver.input_files[0]["artifactId"]: chart,
+        receiver.input_files[1]["artifactId"]: key,
+    }
+    digest = hashlib.sha256(chart).hexdigest()
+    receiver.inputs = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {}, "sha256": digest, "size": 20}],
+            }
+        ]
+    }
+
+    def custom_score(context):
+        seen.setdefault("scorer", []).append(
+            [(file.role, file.path.read_bytes()) for file in context["files"]]
+        )
+        return {"state": "scored", "metrics": [{"name": "seen", "value": True, "passed": True}]}
+
+    local = define_local_scorer(
+        source=inspect.getsource(custom_score),
+        entrypoint="score",
+        metrics=[{"name": "seen", "type": "boolean"}],
+        score=custom_score,
+    )
+    receiver.versions = [
+        {"id": str(uuid4()), "contentDigest": "d" * 64, "definition": local.definition}
+    ]
+
+    def target(inputs, context):
+        seen["target"] = [(f.role, f.filename, f.path.read_bytes()) for f in context.files]
+        seen["modes"] = [f.path.stat().st_mode & 0o777 for f in context.files]
+        seen["directory"] = context.files[0].path.parent.stat().st_mode & 0o777
+        seen["replayed"] = rehydrate_media(inputs, context.files).value
+        return "ok"
+
+    arguments = options(receiver, tmp_path, target)
+    arguments["scorers"] = [local]
+    try:
+        report = run_experiment(**arguments)
+        historical = arguments["client"].create_evaluation_run(
+            idempotency_key=str(uuid4()),
+            name="Rescore",
+            subject_ids=report.subject_ids,
+            scorer_version_ids=[receiver.versions[0]["id"]],
+        )
+    finally:
+        arguments["hue"].shutdown()
+    # The target receives the agent's file only; the scorer every pinned file.
+    assert seen["target"] == [("source", "chart.png", chart)]
+    assert seen["modes"] == [0o600] and seen["directory"] == 0o700
+    assert seen["scorer"] == [[("source", chart), ("evaluator_reference", key)]]
+    url = seen["replayed"]["messages"][0]["content"][0]["image_url"]["url"]
+    assert url == "data:image/png;base64," + base64.b64encode(chart).decode()
+
+    receiver.subject["files"] = receiver.input_files
+    rescore(
+        client=arguments["client"],
+        run_id=historical["id"],
+        checkpoint_directory=tmp_path / "rescore",
+        persist_result_content=True,
+        scorers=[local],
+    )
+    assert seen["scorer"][1] == [("source", chart), ("evaluator_reference", key)]
+
+
+def test_a_pinned_file_that_does_not_match_its_manifest_never_starts_the_case(
+    evaluation_receiver, tmp_path
+):
+    receiver, called = evaluation_receiver, []
+    receiver.input_files = [_pinned("source", "chart.png", "image/png", b"pinned bytes")]
+    receiver.artifacts = {receiver.input_files[0]["artifactId"]: b"other bytes!"}
+    arguments = options(receiver, tmp_path, lambda *_: called.append(1))
+    try:
+        with pytest.raises(CaseFileError) as raised:
+            run_experiment(**arguments)
+    finally:
+        arguments["hue"].shutdown()
+    assert raised.value.code == "case_file_mismatch"
+    assert receiver.starts == 0 and called == []

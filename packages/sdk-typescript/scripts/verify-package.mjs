@@ -936,6 +936,9 @@ const installedPackageTests = [
   "inline-files.test.ts",
   // Values over the inline limit uploaded to a loopback Hue implementing the upload routes.
   "blobs.test.ts",
+  // Recorded media read back by digest and files pinned on case writes, against loopback routes.
+  "media.test.ts",
+  "case-files.test.ts",
 ];
 for (const patch of [99, 100]) {
   const consumer = join(destination, `consumer-${patch}`);

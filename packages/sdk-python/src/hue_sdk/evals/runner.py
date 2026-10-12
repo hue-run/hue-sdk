@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,6 +17,7 @@ from opentelemetry.context import Context
 from ..client import Hue
 from ._checkpoint import CheckpointStore
 from ._failure import error_cause, error_type
+from ._files import TARGET_FILE_ROLES, download_case_files, download_case_inputs
 from ._json import (
     MISSING,
     VALUE_BYTES,
@@ -27,7 +29,7 @@ from ._json import (
 )
 from .client import EvaluationClient
 from .scorers import invoke, persisted_score, score_locally, validate_bindings
-from .types import LocalScorer, RunnerReport, ScoreContext, TargetContext, TraceEvidence
+from .types import LocalFile, LocalScorer, RunnerReport, ScoreContext, TargetContext, TraceEvidence
 
 
 class UncertainExecutionError(RuntimeError):
@@ -367,6 +369,24 @@ def _error_message(error: Exception) -> str:
     )
 
 
+def _code_scorer_here(versions: list[dict[str, Any]]) -> bool:
+    """Whether a pinned local code scorer grades here: every one is bound in this process."""
+    return any(version["definition"]["kind"] == "local_code" for version in versions)
+
+
+def _needed_input_files(
+    files: list[dict[str, Any]] | None, versions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Pinned inputs this process downloads: the agent-visible roles for the target, and the
+    scorer-only roles (organization templates, evaluator references) only when a local code
+    scorer grades here."""
+    if not files:
+        return []
+    if _code_scorer_here(versions):
+        return list(files)
+    return [file for file in files if file["role"] in TARGET_FILE_ROLES]
+
+
 def run_experiment(
     *,
     client: EvaluationClient,
@@ -379,11 +399,18 @@ def run_experiment(
     scorers: list[LocalScorer] | None = None,
     concurrency: int = 1,
     schema_timeout_millis: int = 2000,
+    files_directory: str | Path | None = None,
 ) -> RunnerReport:
     """Run trusted sync/async targets locally; never automatically repeat uncertain work.
 
     This synchronous entry point runs callbacks in worker threads. In an async application,
     call it with asyncio.to_thread. Custom callbacks have no claimed cancellation timeout.
+
+    A case's pinned input files are downloaded and checked against its manifest before its
+    execution starts, under ``files_directory`` (default ``<checkpoint_directory>/files``, mode
+    0700): the target receives the agent-visible ones as ``context.files`` and local scorers
+    receive every one as ``files`` in their context. A file that does not match its manifest
+    raises ``CaseFileError`` without spending the case's execution.
     """
     _settings(persist_result_content, concurrency, schema_timeout_millis)
     if not isinstance(trace_evidence, TraceEvidence) or trace_evidence.mode not in (
@@ -439,6 +466,7 @@ def run_experiment(
     )
     report = RunnerReport(experiment["evaluation"]["id"], [], [], deferred)
     report_lock = Lock()
+    files_root = Path(os.path.abspath(files_directory or Path(checkpoint_directory) / "files"))
 
     def execute(item: dict[str, Any]) -> None:
         file = f"case-{uuid(item['id'])}"
@@ -468,6 +496,14 @@ def run_experiment(
             target_inputs = copy.deepcopy(json_value(case["inputs"]))
             target_config = copy.deepcopy(configuration)
             target_case = copy.deepcopy(case)
+            # Pinned files are verified before an execution exists for the same reason.
+            needed = _needed_input_files(case.get("inputFiles"), versions)
+            score_files: list[LocalFile] = []
+            target_files: list[LocalFile] = []
+            if needed:
+                score_files, target_files = download_case_inputs(
+                    client, needed, files_root / f"case-{uuid(item['id'])}"
+                )
             sequence_before = hue.export_failure_sequence()
             with hue.span(
                 "hue.experiment.case",
@@ -493,7 +529,7 @@ def run_experiment(
                     output = invoke(
                         target,
                         target_inputs,
-                        TargetContext(target_config, target_case, span),
+                        TargetContext(target_config, target_case, span, tuple(target_files)),
                     )
                 except asyncio.CancelledError as error:
                     state = "cancelled"
@@ -530,6 +566,7 @@ def run_experiment(
                         "has_output": output is not MISSING,
                         **({"output": output} if output is not MISSING else {}),
                         "execution_state": state,
+                        **({"files": score_files} if score_files else {}),
                     },
                     local,
                     persist_result_content,
@@ -648,8 +685,14 @@ def rescore(
     scorers: list[LocalScorer] | None = None,
     concurrency: int = 1,
     schema_timeout_millis: int = 2000,
+    files_directory: str | Path | None = None,
 ) -> RunnerReport:
-    """Score existing immutable subjects. This entry point has no target callback."""
+    """Score existing immutable subjects. This entry point has no target callback.
+
+    When a local code scorer grades here, each subject's frozen input and output files are
+    downloaded, verified, under ``files_directory`` (default ``<checkpoint_directory>/files``)
+    and passed to scorers as ``files``.
+    """
     _settings(persist_result_content, concurrency, schema_timeout_millis)
     project, run = client.check_connection(), client.get_evaluation_run(run_id)
     versions, local = run["scorerVersions"], scorers or []
@@ -670,12 +713,23 @@ def rescore(
         },
     )
     report, report_lock = RunnerReport(run_id, [], [], deferred), Lock()
+    files_root = Path(os.path.abspath(files_directory or Path(checkpoint_directory) / "files"))
+    code_scorer_here = _code_scorer_here(versions)
 
     def execute(item: dict[str, Any]) -> None:
         file = f"item-{uuid(item['id'])}"
         saved = store.read(file)
         if saved is None:
             subject = client.get_subject(item["subjectId"])
+            files = (
+                download_case_files(
+                    client,
+                    subject["files"],
+                    files_root / f"subject-{uuid(item['subjectId'])}",
+                )
+                if code_scorer_here and subject.get("files")
+                else []
+            )
             scores = _scores(
                 versions,
                 {
@@ -686,6 +740,7 @@ def rescore(
                     **({"expected": subject["expected"]} if subject["hasExpected"] else {}),
                     "metadata": subject["metadata"],
                     "execution_state": subject["executionState"],
+                    **({"files": files} if files else {}),
                 },
                 local,
                 persist_result_content,

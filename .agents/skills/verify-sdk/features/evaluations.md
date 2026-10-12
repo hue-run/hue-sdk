@@ -7,6 +7,8 @@ Code runs eval sets against a local target with `@hue-run/sdk/evals` (TypeScript
 - `eval-client` creates and reads eval sets, evaluators and runs through `/api/v1` paths.
 - `eval-runner` runs targets, scores locally, checkpoints and resumes.
 - `eval-direct` runs direct cases and files (TypeScript).
+- `eval-media` reads recorded media back (`client.media.fetch`, `client.media.resolve`), rehydrates case inputs from case files (`rehydrateMedia`, `rehydrate_media`) and pins files on case writes (`CaseWrite.files`, `add_case(files=...)`).
+- `eval-files-py` hands pinned input files to Python targets and local scorers (`TargetContext.files`, `ScoreContext["files"]`).
 
 ## How to get to it (user POV)
 
@@ -35,3 +37,11 @@ The file lifecycle checks are:
 
 - **TypeScript.** From `packages/sdk-typescript`, run `bun test tests/files.test.ts -t "downloads pinned inputs, uploads generated files and grades them locally"`.
 - **Python.** From `packages/sdk-python`, run `uv run --frozen --all-groups pytest tests/test_managed.py -q -k claim_upload_checkpoint_flush_and_duplicate`.
+
+## Reading media back and case files
+
+The tests run synthetic loopback Hue and storage routes; the storage route asserts that the project key never reaches it.
+
+- **Media read-back.** TypeScript: from `packages/sdk-typescript`, `bun test tests/media.test.ts` (12 tests, about 2 s: digest verification, `digest_mismatch`, `missing` and `not_found`, one `Retry-After` retry, `forbidden`, timeout, `too_large`, snapshots, `resolve` over messages with a failure, `as: "bytes"`, `rehydrateMedia`). Python: from `packages/sdk-python`, `uv run --frozen --all-groups pytest tests/test_media.py -q -k "fetch or resolve or rehydrate or forbidden or invalid"`.
+- **Case write files.** TypeScript: `bun test tests/case-files.test.ts`. Python: `uv run --frozen --all-groups pytest tests/test_media.py -q -k add_case`. Expected: uploads reserve the declared identity, stage the exact bytes, settle `ready`, the case body carries `files: [{artifactId, role}]`, a repeated write uploads nothing, and files outside the policy are refused with no request.
+- **Python runner files.** `uv run --frozen --all-groups pytest tests/test_evaluations.py -q -k pinned`. Expected: the target sees only agent-visible files (0600 in a 0700 directory), the local scorer sees every pinned file in `run_experiment` and in `rescore`, and a mismatched download raises `CaseFileError` before any execution starts.

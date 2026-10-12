@@ -189,7 +189,51 @@ export interface CaseWrite {
   metadata?: Record<string, JsonValue>;
   /** Immutable simulated-world version selected for this case. */
   environmentVersionId?: string | null;
+  /** Input files pinned to the case, at most 32: artifacts this project already holds, or bytes
+   * the client uploads first. Roles other than `org_template` and `evaluator_reference` reach the
+   * target; those two reach only scorers. */
+  files?: CaseFileWrite[];
 }
+/** A pinned input file as the case API takes it. */
+export interface CaseFileReference {
+  /** A ready artifact of this project. */
+  artifactId: string;
+  /** Who receives the file. */
+  role: CaseFile["role"];
+}
+/**
+ * A pinned input file for {@link CaseWrite.files}: a {@link CaseFileReference}, or a file the
+ * client uploads as a verified artifact, from `bytes` or read once from `path`. An uploaded file
+ * must have one of `outputContentTypes`, a name without path separators or control characters of
+ * at most 255 characters, and 1 byte to 25 MiB.
+ */
+export type CaseFileWrite =
+  | (CaseFileReference & {
+      filename?: undefined;
+      contentType?: undefined;
+      bytes?: undefined;
+      path?: undefined;
+    })
+  | ({
+      /** Who receives the file. */
+      role: CaseFile["role"];
+      /** File name Hue stores. */
+      filename: string;
+      /** One of `outputContentTypes`, the media types Hue stores as artifacts. */
+      contentType: string;
+      artifactId?: undefined;
+    } & (
+      | {
+          /** The file's bytes. */
+          bytes: Uint8Array;
+          path?: undefined;
+        }
+      | {
+          /** Path of the file on this machine. */
+          path: string;
+          bytes?: undefined;
+        }
+    ));
 /** A typed metric a scorer declares and must report exactly once per scored result. */
 export type MetricDefinition =
   | {
