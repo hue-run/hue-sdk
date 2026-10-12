@@ -928,6 +928,8 @@ const installedPackageTests = [
   "cli-eval-direct.test.ts",
   // `hue listen` against a stand-in for the listen routes, through the installed binary and dist.
   "cli-listen.test.ts",
+  // `hue import langfuse` against stand-ins for Langfuse's API and Hue's receiver and upload routes.
+  "cli-import-langfuse.test.ts",
   // Output bounds, provider tool spans and their error-text scrubbing, and inline file digests,
   // against the packed dist.
   "evals-json.test.ts",
@@ -1057,6 +1059,11 @@ void [transition, event, options, backend];
         )
         .replaceAll('"../src/cli/eval.js"', '"../node_modules/@hue-run/sdk/dist/cli/eval.js"')
         .replaceAll('"../src/cli/listen.js"', '"../node_modules/@hue-run/sdk/dist/cli/listen.js"')
+        .replaceAll('"../src/cli/import.js"', '"../node_modules/@hue-run/sdk/dist/cli/import.js"')
+        .replaceAll(
+          '"../src/cli/langfuse.js"',
+          '"../node_modules/@hue-run/sdk/dist/cli/langfuse.js"',
+        )
         // The CLI is the installed binary, and an adapter imports the installed evals entry.
         .replaceAll('"../src/setup/cli.ts"', '"../node_modules/@hue-run/sdk/dist/setup/cli.js"')
         .replaceAll('"../src/evals.ts"', '"../node_modules/@hue-run/sdk/dist/evals.js"'),
