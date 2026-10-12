@@ -19,7 +19,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
-from threading import Event, Lock, Semaphore, Thread
+from threading import Event, Lock, Semaphore, Thread, local
 from time import monotonic, time
 from typing import Any
 from urllib.parse import urlsplit
@@ -310,6 +310,17 @@ class ExplicitFile:
     name: str | None
     role: str = "input"
     timestamp: int | None = None
+    # For an attachment placed in a value: the record's attribute (or ``body``) holding its part,
+    # and the part's JSON pointer there.
+    attribute: str | None = None
+    pointer: str | None = None
+
+    @property
+    def key(self) -> str:
+        """The file's ``hue.blobs`` key: its part's, else its ``hue.file`` event's."""
+        if self.attribute is not None and self.pointer is not None:
+            return f"{self.attribute}#{self.pointer}"
+        return f"event:hue.file:{self.digest[0]}"
 
 
 @dataclass
@@ -332,6 +343,8 @@ class Uploads:
         self._lock = Lock()
         self._staged: dict[tuple[int, int], _Staged] = {}
         self._closed = False
+        # Attachments placed in a log record's body, from ``log_inference`` to its admission.
+        self._pending_log = local()
 
     def stage(self, span: Any, file: ExplicitFile) -> bool:
         context = span.get_span_context()
@@ -361,6 +374,98 @@ class Uploads:
 
                 self._staged[key] = _Staged(held, weakref.finalize(span, abandoned))
             return True
+
+    def stage_parts(self, span: Any, attribute: str, files: list[ExplicitFile]) -> list[str]:
+        """Stage the attachments placed in a span's ``attribute``, replacing those an earlier
+        value of the attribute placed. The fallback reason of each file that cannot be held."""
+        context = span.get_span_context()
+        key = (context.trace_id, context.span_id)
+        refused: list[str] = []
+        with self._lock:
+            if self._closed:
+                return ["failed" for _ in files]
+            staged = self._staged.get(key)
+            if staged is not None:
+                held = staged.held
+                kept = []
+                for file in held.files:
+                    if file.attribute == attribute:
+                        released = held_size(file.data) + 1024
+                        held.size -= released
+                        self.held.release(released)
+                    else:
+                        kept.append(file)
+                held.files[:] = kept
+            for file in files:
+                reason = self.uploader.refusal()
+                if reason is not None or not self.uploader.available():
+                    refused.append(reason or "unsupported")
+                    continue
+                size = held_size(file.data) + 1024
+                staged = self._staged.get(key)
+                if staged is None:
+                    if len(self._staged) >= 256:
+                        refused.append("budget")
+                        continue
+                    held = Held(budget=self.held)
+                else:
+                    held = staged.held
+                if len(held.files) >= MAX_BLOB_ENTRIES or not self.held.reserve(size, held.size):
+                    refused.append("budget")
+                    continue
+                held.size += size
+                held.files.append(file)
+                if staged is None:
+                    self._staged[key] = _Staged(held, weakref.finalize(span, self._abandoned, key))
+        return refused
+
+    def _abandoned(self, key: tuple[int, int]) -> None:
+        with self._lock:
+            item = self._staged.pop(key, None)
+        if item is not None:
+            item.held.release()
+
+    def stage_log(self, body: Any, files: list[ExplicitFile]) -> list[str]:
+        """Stage the attachments placed in a log record's body until the record is emitted on
+        this thread (``take_log``). The fallback reason of each file that cannot be held."""
+        refused: list[str] = []
+        kept: list[ExplicitFile] = []
+        size = 0
+        for file in files:
+            reason = self.uploader.refusal()
+            if reason is not None or not self.uploader.available():
+                refused.append(reason or "unsupported")
+            elif len(kept) >= MAX_BLOB_ENTRIES:
+                refused.append("budget")
+            else:
+                kept.append(file)
+                size += held_size(file.data) + 1024
+        self._pending_log.value = (body, kept, size) if kept else None
+        return refused
+
+    def take_log(self, body: Any) -> Held | None:
+        """The attachments staged for a log record being admitted, held within the held-value
+        budget; those the budget refused are listed under ``cut``, once per file."""
+        pending = getattr(self._pending_log, "value", None)
+        if pending is None or not (pending[0] is body or pending[0] == body):
+            return None
+        self._pending_log.value = None
+        _, files, size = pending
+        if not self.held.reserve(size):
+            return Held(cut=["body" for _ in files])
+        return Held(budget=self.held, files=list(files), size=size)
+
+    def drop_log(self, body: Any) -> int:
+        """Drops the attachments staged for a log record lost before it was admitted: how many."""
+        pending = getattr(self._pending_log, "value", None)
+        if pending is None or not (pending[0] is body or pending[0] == body):
+            return 0
+        self._pending_log.value = None
+        return len(pending[1])
+
+    def unstage_log(self) -> None:
+        """Drops what ``stage_log`` staged and no processor of this client admitted."""
+        self._pending_log.value = None
 
     def take(self, span: Any) -> Held | None:
         context = span.context
@@ -889,7 +994,7 @@ class _Span:
                 ):
                     self.inspected.add(key)
                     inspected_units += size
-        self.candidates.extend((f"event:hue.file:{file.digest[0]}", file) for file in held.files)
+        self.candidates.extend((file.key, file) for file in held.files)
 
     def slot(self) -> bool:
         with self._lock:

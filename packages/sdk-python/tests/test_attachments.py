@@ -1,0 +1,252 @@
+"""Attachments placed in recorded values, against a synthetic loopback receiver.
+
+The wire corpus is shared with the TypeScript SDK (``fixtures/media-parts/cases.json``).
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+from typing import Any
+
+from test_blobs import attrs, blobs, client, sha256
+from test_blobs import hue_store as hue_store
+
+from hue_sdk import Attachment, Hue
+
+CORPUS = json.loads((Path(__file__).parent / "fixtures/media-parts/cases.json").read_text())[
+    "attachments"
+]
+
+
+def build(value: Any, made: dict[str, Attachment]) -> Any:
+    """The case's value with each ``{"$attachment": name}`` placeholder replaced by one
+    attachment per file, the same instance wherever the file appears."""
+    if isinstance(value, list):
+        return [build(item, made) for item in value]
+    if isinstance(value, dict):
+        named = value.get("$attachment")
+        if named is not None:
+            spec = CORPUS["files"][named]
+            if named not in made:
+                made[named] = Attachment(
+                    base64.b64decode(spec["data"]),
+                    content_type=spec["content_type"],
+                    name=spec.get("name"),
+                )
+            return made[named]
+        return {key: build(item, made) for key, item in value.items()}
+    return value
+
+
+def record(hue: Any, case: dict[str, Any]) -> None:
+    value = build(case["value"], {})
+    helper = case["helper"]
+    if helper == "model":
+        with hue.model("synthetic-model", provider="synthetic", name=case["id"]) as span:
+            span.set_input(value)
+    elif helper == "metadata":
+        with hue.span(case["id"], attributes={"metadata": value}):
+            pass
+    else:
+        with hue.span(case["id"]) as span:
+            if helper == "input":
+                span.set_input(value)
+            elif helper == "output":
+                span.set_output(value)
+            else:
+                span.log_inference(input=value)
+
+
+def any_value(value: Any) -> Any:
+    """An OTLP ``AnyValue`` as JSON."""
+    kind = value.WhichOneof("value")
+    if kind == "kvlist_value":
+        return {item.key: any_value(item.value) for item in value.kvlist_value.values}
+    if kind == "array_value":
+        return [any_value(item) for item in value.array_value.values]
+    if kind is None:
+        return None
+    return getattr(value, kind)
+
+
+def entries(record: Any) -> list[str]:
+    value = attrs(record).get("hue.blobs")
+    return [item.string_value for item in value.array_value.values] if value else []
+
+
+def test_shared_attachment_wire_success(hue_store):
+    run_corpus(hue_store, success=True)
+
+
+def test_shared_attachment_wire_failure(hue_store):
+    hue_store.reserve = lambda _: (403, {}, True)
+    run_corpus(hue_store, success=False)
+
+
+def run_corpus(hue_store, *, success: bool) -> None:
+    cases = CORPUS["cases"]
+    expected = sum(len(case["entries"]) for case in cases)
+    with client(hue_store) as hue:
+        for case in cases:
+            record(hue, case)
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+        assert status.instrumentation_failures == 0
+        assert status.uploaded_values == (expected if success else 0)
+        assert status.upload_fallbacks == (0 if success else expected)
+        for case in cases:
+            span = hue_store.span(case["id"])
+            carrier = span
+            if case["helper"] == "log":
+                (carrier,) = [log for log in hue_store.logs if log.trace_id == span.trace_id]
+                assert any_value(carrier.body) == case["recorded"], case["id"]
+            else:
+                text = attrs(span)[case["attribute"]].string_value
+                assert text == json.dumps(
+                    case["recorded"], ensure_ascii=False, separators=(",", ":")
+                ), case["id"]
+            assert entries(carrier) == (case["entries"] if success else []), case["id"]
+    if success:
+        # The same file twice in one trace is stored once.
+        stored = {(item["traceId"], item["sha256"]) for item in hue_store.reservations}
+        assert len(hue_store.puts) == len(stored)
+    else:
+        assert hue_store.puts == []
+
+
+def test_a_path_reads_the_same_bytes_as_data_and_every_string_form_decodes(tmp_path):
+    data = base64.b64decode(CORPUS["files"]["pixel"]["data"])
+    path = tmp_path / "pixel.png"
+    path.write_bytes(data)
+    encoded = CORPUS["files"]["pixel"]["data"]
+    for attachment in (
+        Attachment(path=path, content_type="image/png"),
+        Attachment(path=str(path), content_type="image/png"),
+        Attachment(data, content_type="image/png"),
+        Attachment(bytearray(data), content_type="image/png"),
+        Attachment(memoryview(data), content_type="image/png"),
+        Attachment(encoded, content_type="image/png"),
+        Attachment(f"data:image/png;base64,{encoded}", content_type="image/png"),
+    ):
+        assert attachment.sha256 == sha256(data)
+        assert attachment.size == len(data)
+    # The bytes are copied when the attachment is made.
+    buffer = bytearray(data)
+    made = Attachment(buffer, content_type="image/png")
+    buffer[:] = bytes(len(buffer))
+    assert made.sha256 == sha256(data)
+    for invalid in (
+        Attachment(content_type="image/png"),
+        Attachment(data, path=path, content_type="image/png"),
+        Attachment(path=tmp_path / "missing.png", content_type="image/png"),
+        Attachment("not base64!", content_type="image/png"),
+        Attachment(data, content_type="image png"),
+        Attachment(bytes(25 * 1024 * 1024 + 1), content_type="image/png"),
+    ):
+        assert invalid.sha256 is None
+    assert Attachment(data, content_type="image/png", name="a\tb").name is None
+
+
+def test_an_invalid_attachment_records_null_and_an_invalid_name_is_omitted_both_counted(
+    hue_store,
+):
+    data = base64.b64decode(CORPUS["files"]["pixel"]["data"])
+    with client(hue_store) as hue:
+        with hue.span(
+            "invalid",
+            attributes={"metadata": Attachment(content_type="image/png"), "plain": "kept"},
+        ) as span:
+            span.set_input(
+                {
+                    "bad": Attachment(data, content_type="not a type"),
+                    "unnamed": Attachment(data, content_type="image/png", name="bad\nname"),
+                }
+            )
+            span.set_output("kept")
+        # Instrumentation issues fail the flush; the span is exported whole all the same.
+        assert not hue.force_flush(timeout_millis=30_000)
+        assert hue.export_status.instrumentation_failures == 3
+        assert hue.export_status.failed_trace_batches == 0
+    span = hue_store.span("invalid")
+    assert json.loads(attrs(span)["input.value"].string_value) == {
+        "bad": None,
+        "unnamed": {
+            "type": "blob",
+            "mime_type": "image/png",
+            "modality": "image",
+            "sha256": sha256(data),
+            "size": len(data),
+        },
+    }
+    assert attrs(span)["output.value"].string_value == '"kept"'
+    assert attrs(span)["plain"].string_value == "kept"
+    assert "metadata" not in attrs(span)
+    assert [entry["key"] for entry in blobs(span)] == ["input.value#/unnamed"]
+
+
+def test_without_content_capture_a_metadata_attachment_is_its_digest_part_and_no_bytes_leave(
+    hue_store,
+):
+    data = base64.b64decode(CORPUS["files"]["report"]["data"])
+    attachment = Attachment(data, content_type="application/pdf", name="report.pdf")
+    with Hue(hue_store.url, "synthetic", capture_content=False, live_spans=False) as hue:
+        with hue.span("metadata only", attributes={"metadata": {"report": attachment}}) as span:
+            span.set_input({"report": attachment})
+            span.log_inference(input=[attachment])
+            span.set_attribute("metadata.extra", attachment)
+        assert hue.force_flush(timeout_millis=30_000)
+        assert hue.export_status.upload_fallbacks == 0
+    span = hue_store.span("metadata only")
+    part = {
+        "type": "blob",
+        "mime_type": "application/pdf",
+        "modality": "document",
+        "sha256": sha256(data),
+        "size": len(data),
+    }
+    assert json.loads(attrs(span)["metadata"].string_value) == {"report": part}
+    assert json.loads(attrs(span)["metadata.extra"].string_value) == part
+    assert "input.value" not in attrs(span)
+    assert "hue.blobs" not in attrs(span)
+    assert hue_store.logs == []
+    assert hue_store.reservations == []
+
+
+def test_an_attachment_the_redactor_removes_replaces_or_nests_too_deep_is_not_uploaded(
+    hue_store,
+):
+    data = base64.b64decode(CORPUS["files"]["pixel"]["data"])
+    attachment = Attachment(data, content_type="image/png")
+    deep: Any = attachment
+    for _ in range(11):
+        deep = [deep]
+
+    def redactor(key: str, value: Any) -> Any:
+        return "[redacted]" if key == "output.value" else value
+
+    with client(hue_store, redactor=redactor) as hue:
+        with hue.span("redacted") as span:
+            span.set_output([attachment])
+            span.set_input({"first": attachment})
+            # Setting the value again replaces the attachments it held.
+            span.set_input("no file now")
+        with hue.span("deep") as span:
+            span.set_input(deep)
+        assert hue.force_flush(timeout_millis=30_000)
+        # Only the part past Hue's reading depth is reported: it kept its digest.
+        assert hue.export_status.upload_fallbacks == 1
+    assert hue_store.reservations == []
+    assert "hue.blobs" not in attrs(hue_store.span("redacted"))
+    assert attrs(hue_store.span("redacted"))["output.value"].string_value == '"[redacted]"'
+    assert sha256(data) in attrs(hue_store.span("deep"))["input.value"].string_value
+
+
+def test_setup_credentials_record_the_digest_part_and_upload_nothing(hue_store):
+    with client(hue_store, api_key="hue_setup_synthetic") as hue:
+        with hue.span("setup") as span:
+            span.set_input([Attachment(b"abcd", content_type="text/plain")])
+        assert hue.force_flush(timeout_millis=30_000)
+        assert hue.export_status.upload_fallbacks == 0
+    assert hue_store.reservations == []

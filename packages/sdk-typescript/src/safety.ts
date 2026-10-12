@@ -1,5 +1,6 @@
 import { INVALID_SPAN_CONTEXT, trace, type Span } from "@opentelemetry/api";
 import { types as utilTypes } from "node:util";
+import { Attachment, pointerSegment } from "./attachment.js";
 import { MAX_CONTENT_BYTES, MAX_RECORD_NODES } from "./config.js";
 
 export function noopSpan(): Span {
@@ -124,9 +125,17 @@ export function contentLimitsOf(valueBytes: number): EncodeLimits {
   return { ...contentLimits, bytes: valueBytes };
 }
 
+/** Writes an {@link Attachment} met at `pointer`, `depth` levels deep: the JSON value written in
+ * its place. Without one, an attachment is no JSON data. */
+export type PlaceAttachment = (attachment: Attachment, pointer: string, depth: number) => unknown;
+
 /** Validate a bounded data tree without invoking toJSON or property getters. */
-export function encodeContent(value: unknown, limits: EncodeLimits = contentLimits): string {
-  const { text, truncated } = encodeBoundedContent(value, limits, false);
+export function encodeContent(
+  value: unknown,
+  limits: EncodeLimits = contentLimits,
+  place?: PlaceAttachment,
+): string {
+  const { text, truncated } = encodeBoundedContent(value, limits, false, place);
   if (truncated) throw new RangeError("Content limit exceeded");
   return text;
 }
@@ -145,12 +154,15 @@ export function encodeBoundedContent(
   value: unknown,
   limits: EncodeLimits = contentLimits,
   cut = true,
+  place?: PlaceAttachment,
 ): { text: string; truncated: boolean } {
   let nodes = 0;
   let bytes = 0;
   let truncated = false;
   const parts: string[] = [];
   const ancestors = new Set<object>();
+  // The keys from the root to the value being written, kept only to place attachments.
+  const path: string[] = [];
   const write = (text: string) => {
     parts.push(text);
     bytes += Buffer.byteLength(text);
@@ -183,6 +195,11 @@ export function encodeBoundedContent(
     // Even descriptor/prototype reads can execute application code on a Proxy.
     // The native check also handles revoked proxies without invoking their traps.
     if (utilTypes.isProxy(item)) throw new TypeError("JSON proxies are unsupported");
+    if (place && item instanceof Attachment) {
+      const pointer = path.length ? `/${path.map(pointerSegment).join("/")}` : "";
+      write(JSON.stringify(place(item, pointer, depth) ?? null));
+      return;
+    }
     const array = Array.isArray(item);
     if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(item)))
       throw new TypeError("Expected JSON data");
@@ -202,7 +219,9 @@ export function encodeBoundedContent(
         throw new TypeError("Expected JSON data property");
       write(`${first ? "" : ","}${array ? "" : `${JSON.stringify(key)}:`}`);
       first = false;
+      if (place) path.push(key);
       visit(descriptor.value, depth + 1);
+      if (place) path.pop();
     }
     write(array ? "]" : "}");
     ancestors.delete(item);

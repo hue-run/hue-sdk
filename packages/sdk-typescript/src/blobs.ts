@@ -103,6 +103,16 @@ export interface MediaAttachment {
   contentType: string;
   name?: string;
   eventTime?: HrTime;
+  /** For an attachment placed in a value: the record's attribute (or `body`) that holds its part. */
+  attribute?: string;
+  /** For a placed attachment found in its value: its `hue.blobs` key, `<attribute>#<pointer>`. */
+  key?: string;
+}
+
+/** The `hue.blobs` key of a staged file: its part's for an attachment placed in a value, else
+ * its `hue.file` event's. */
+export function mediaKey(file: MediaAttachment): string {
+  return file.key ?? `event:hue.file:${file.digest.sha256}`;
 }
 
 /** The outcome of one export's uploads, reported once the export's records are placed. */
@@ -863,7 +873,7 @@ export async function offloadAttributes(
       if (!file.bytes.byteLength) return Promise.resolve();
       const slot = slots > 0 ? (slots--, true) : false;
       return (async () => {
-        const key = `event:hue.file:${file.digest.sha256}`;
+        const key = mediaKey(file);
         const outcome: Outcome = slot
           ? await uploader.store(traceId, key, file.bytes, file.contentType, file.digest, upload)
           : { ok: false, reason: "budget" };

@@ -10,6 +10,7 @@ An application creates a client with `createHue`, records spans and tools, and r
 - `ts-lifecycle` covers `flush`, `shutdown` and the fail-open `*Safe` variants.
 - `ts-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `ts-file-upload` covers opt-in `recordFile` uploads and name validation.
+- `ts-attachment` places `Attachment` in recorded values and uploads it under `<attribute>#<pointer>` or `body#<pointer>`.
 
 ## How to get to it (user POV)
 
@@ -73,3 +74,15 @@ bun test tests/blobs.test.ts -t "recordFile uploads are opt-in"
 bun test tests/blobs.test.ts -t "concurrently within one export|repeated files share|dropped at the queue|code units|admission skipped"
 bun test tests/inline-files.test.ts -t "media digest fallback"
 ```
+
+## Attachments placed in values
+- `ts-attachment` covers the `attachments` section of the shared corpus: an `Attachment` in `setInput`/`setOutput`, `model()` input, a `metadata` attribute passed to `withSpan()` (whole and nested) and `recordMessages()` input, with the exact recorded JSON text (the part as `{"type":"blob","mime_type","modality","sha256","size","name"}`) and the ordered `hue.blobs` strings, for successful and refused uploads. The log case's entry sits on the log record, keyed `body#/gen_ai.input.messages/0/parts/1`. A file used twice in one trace is PUT once.
+- Also check: `path` and every `data` form give the same digest and the bytes are copied; an invalid attachment records `null` and an invalid name is omitted, each counted as an instrumentation failure (the flush throws, the span is accepted); `captureContent: false` keeps the metadata part without its name and sends no reservations; a redacted or replaced value uploads nothing and counts nothing; a part deeper than 10 levels keeps its digest and counts one fallback; setup credentials upload nothing.
+
+Run from `packages/sdk-typescript` (under 1 s):
+
+```sh
+bun test tests/blobs.test.ts -t "attachment"
+```
+
+Expected: `7 pass`, `0 fail`. `verify-package.mjs` runs `blobs.test.ts` against the packed tarball.
