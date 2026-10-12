@@ -17,7 +17,13 @@ from opentelemetry.context import Context
 from ..client import Hue
 from ._checkpoint import CheckpointStore
 from ._failure import error_cause, error_type
-from ._files import TARGET_FILE_ROLES, download_case_files, download_case_inputs
+from ._files import (
+    TARGET_FILE_ROLES,
+    download_case_files,
+    download_case_inputs,
+    remove_case_files,
+    verify_case_files,
+)
 from ._json import (
     MISSING,
     VALUE_BYTES,
@@ -409,8 +415,10 @@ def run_experiment(
     A case's pinned input files are downloaded and checked against its manifest before its
     execution starts, under ``files_directory`` (default ``<checkpoint_directory>/files``, mode
     0700): the target receives the agent-visible ones as ``context.files`` and local scorers
-    receive every one as ``files`` in their context. A file that does not match its manifest
-    raises ``CaseFileError`` without spending the case's execution.
+    receive every one as ``files`` in their context. Evaluator-only files are not on disk while
+    a target runs: they are checked before the execution starts without being kept, saved for
+    the scorers after the target finished and removed when the case ends. A file that does not
+    match its manifest raises ``CaseFileError`` without spending the case's execution.
     """
     _settings(persist_result_content, concurrency, schema_timeout_millis)
     if not isinstance(trace_evidence, TraceEvidence) or trace_evidence.mode not in (
@@ -469,7 +477,16 @@ def run_experiment(
     files_root = Path(os.path.abspath(files_directory or Path(checkpoint_directory) / "files"))
 
     def execute(item: dict[str, Any]) -> None:
+        # The scorers' copies of evaluator-only files go however the case ends, so no later
+        # case's target finds them; the target's own copies stay for inspection.
+        try:
+            run_case(item)
+        finally:
+            remove_case_files(files_root / f"case-{uuid(item['id'])}" / "evaluator-inputs")
+
+    def run_case(item: dict[str, Any]) -> None:
         file = f"case-{uuid(item['id'])}"
+        case_directory = files_root / file
         checkpoint = store.read(file)
         if checkpoint is not None and checkpoint["stage"] != "prepared":
             if checkpoint["stage"] == "serialization_failed":
@@ -496,14 +513,18 @@ def run_experiment(
             target_inputs = copy.deepcopy(json_value(case["inputs"]))
             target_config = copy.deepcopy(configuration)
             target_case = copy.deepcopy(case)
-            # Pinned files are verified before an execution exists for the same reason.
+            # Pinned files are verified before an execution exists for the same reason. Only the
+            # agent-visible ones are saved now: evaluator-only files a local code scorer needs are
+            # checked and dropped, and saved for scoring after the target finished, so they are
+            # not on disk while it runs.
             needed = _needed_input_files(case.get("inputFiles"), versions)
-            score_files: list[LocalFile] = []
-            target_files: list[LocalFile] = []
-            if needed:
-                score_files, target_files = download_case_inputs(
-                    client, needed, files_root / f"case-{uuid(item['id'])}"
-                )
+            agent_files = [entry for entry in needed if entry["role"] in TARGET_FILE_ROLES]
+            verify_case_files(
+                client, [entry for entry in needed if entry["role"] not in TARGET_FILE_ROLES]
+            )
+            target_files: list[LocalFile] = (
+                download_case_inputs(client, agent_files, case_directory)[1] if agent_files else []
+            )
             sequence_before = hue.export_failure_sequence()
             with hue.span(
                 "hue.experiment.case",
@@ -556,6 +577,9 @@ def run_experiment(
                         raise OutcomeSerializationError(execution["id"]) from None
                     else:
                         span.set_output(output)
+                score_files: list[LocalFile] = (
+                    download_case_inputs(client, needed, case_directory)[0] if needed else []
+                )
                 scores = _scores(
                     versions,
                     {

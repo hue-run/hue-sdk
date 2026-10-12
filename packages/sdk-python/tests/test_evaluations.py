@@ -1949,6 +1949,73 @@ def test_pinned_files_reach_the_target_and_local_scorers_verified_on_disk(
     assert seen["scorer"][1] == [("source", chart), ("evaluator_reference", key)]
 
 
+def test_evaluator_only_files_are_not_on_disk_while_any_target_runs(evaluation_receiver, tmp_path):
+    receiver, seen = evaluation_receiver, {"leaked": [], "scorer": []}
+    chart, key, template = b"\x89PNG synthetic chart", b"answer key 42", b"organization template"
+    receiver.input_files = [
+        _pinned("source", "chart.png", "image/png", chart),
+        _pinned("evaluator_reference", "key.txt", "text/plain", key),
+        _pinned("org_template", "org.txt", "text/plain", template),
+    ]
+    receiver.artifacts = {
+        entry["artifactId"]: data
+        for entry, data in zip(receiver.input_files, (chart, key, template), strict=True)
+    }
+    # A later case without files runs after the first one ended.
+    later = str(uuid4())
+    receiver.extra_cases[later] = {}
+    files_root = tmp_path / "checkpoints" / "files"
+
+    def custom_score(context):
+        seen["scorer"].append(
+            [(file.role, file.path.read_bytes()) for file in context.get("files", [])]
+        )
+        return {"state": "scored", "metrics": [{"name": "seen", "value": True, "passed": True}]}
+
+    local = define_local_scorer(
+        source=inspect.getsource(custom_score),
+        entrypoint="score",
+        metrics=[{"name": "seen", "type": "boolean"}],
+        score=custom_score,
+    )
+    receiver.versions = [
+        {"id": str(uuid4()), "contentDigest": "d" * 64, "definition": local.definition}
+    ]
+
+    def target(inputs, context):
+        seen.setdefault("roles", []).append([file.role for file in context.files])
+        # Everything on disk under the files directory while this target runs.
+        for path in files_root.rglob("*"):
+            if path.is_file() and path.read_bytes() in (key, template):
+                seen["leaked"].append((context.item["id"], path.relative_to(files_root)))
+        return "ok"
+
+    arguments = options(receiver, tmp_path, target)
+    arguments["scorers"] = [local]
+    try:
+        run_experiment(**arguments)
+    finally:
+        arguments["hue"].shutdown()
+    assert seen["roles"] == [["source"], []]
+    assert seen["leaked"] == []
+    # The scorer still grades with every pinned file, saved after the target finished.
+    assert seen["scorer"] == [
+        [("source", chart), ("evaluator_reference", key), ("org_template", template)],
+        [],
+    ]
+    downloads = [
+        path.split("/")[-2] for method, path, _ in receiver.requests if path.endswith("/download")
+    ]
+    # Evaluator-only files are checked before the execution starts, then saved for scoring.
+    assert sorted(downloads) == sorted(
+        [entry["artifactId"] for entry in receiver.input_files]
+        + [entry["artifactId"] for entry in receiver.input_files[1:]]
+    )
+    # When the case ends the evaluator-only copies are gone; the target's own stay.
+    left = [path.read_bytes() for path in files_root.rglob("*") if path.is_file()]
+    assert left == [chart]
+
+
 def test_a_pinned_file_that_does_not_match_its_manifest_never_starts_the_case(
     evaluation_receiver, tmp_path
 ):

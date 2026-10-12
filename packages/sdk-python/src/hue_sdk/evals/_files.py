@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -358,6 +360,22 @@ def _download_verified(client: EvaluationClient, file: Mapping[str, Any]) -> byt
     if len(data) != file["byteSize"] or hashlib.sha256(data).hexdigest() != file["sha256"]:
         raise mismatch
     return data
+
+
+def verify_case_files(client: EvaluationClient, files: Sequence[Mapping[str, Any]]) -> None:
+    """Check pinned files against the manifest without keeping them: nothing is written."""
+    for file in files:
+        _download_verified(client, file)
+
+
+def remove_case_files(directory: Path) -> None:
+    """Remove a directory of case files; a failure is a warning and never fails the case."""
+    try:
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        warnings.warn(f"Could not remove the case files in {directory}", stacklevel=2)
 
 
 def download_case_files(

@@ -129,7 +129,10 @@ reused. The target receives the `source`, `attached_template`, `attached_referen
 `original` files as `context.files`, a tuple of `LocalFile` (`artifact_id`, `role`, `filename`,
 `content_type`, `byte_size`, `sha256`, `path`). `org_template` and `evaluator_reference` files are
 downloaded, apart from the target's, only when a local code scorer grades the case, and reach
-scorers with the others as `context["files"]`. `rescore` passes a subject's frozen input and
+scorers with the others as `context["files"]`: they are checked with the others before the
+execution starts but not kept, saved after the target finished and removed when the case ends, so
+they are not on disk while a target runs. A target running as the same operating-system user as
+the runner can still read whatever the runner can. `rescore` passes a subject's frozen input and
 output files to local code scorers the same way.
 
 Recorded messages copied into a case's inputs keep their large files as digest parts. With each
