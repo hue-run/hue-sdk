@@ -33,6 +33,7 @@ from opentelemetry.trace import get_current_span
 from ._blobs import (
     BLOBS_KEY,
     FALLBACK_MESSAGES,
+    MAX_BLOB_ENTRIES,
     ExplicitFile,
     Held,
     Tally,
@@ -40,7 +41,6 @@ from ._blobs import (
     _blob_entry,
     held_of,
     place_spans,
-    prepare_spans,
     upload_budget_seconds,
 )
 from ._inline_files import is_media_name
@@ -424,6 +424,14 @@ class ExportIssue:
     message: str
     sequence: int
     trace_ids: tuple[str, ...] | None
+
+
+def _add_tally(total: Tally, part: Tally) -> None:
+    """Adds one placement's uploads and fallbacks to the export's."""
+    total.uploaded += part.uploaded
+    for reason, (count, traces) in part.fallbacks.items():
+        previous, named = total.fallbacks.get(reason, (0, set()))
+        total.fallbacks[reason] = (previous + count, named | traces)
 
 
 def _record_trace_id(record: Any) -> str | None:
@@ -857,85 +865,58 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         entries = [(index, span, held) for index, span, held in holding if held is not None]
         if uploads is None or not entries:
             return spans
+        deadline = monotonic() + upload_budget_seconds(uploads.timeout)
         result = list(spans)
         tally = Tally()
         try:
-            candidates = [
-                (
-                    span.attributes or {},
-                    Held(
-                        values=held.values,
-                        cut=held.cut,
-                        digests=held.digests,
-                        inspected=held.inspected,
-                        files=self._surviving_files(held.files, span, tally),
-                    ),
-                    _record_trace_id(span) or "",
-                )
-                for _, span, held in entries
-            ]
-            placements, planned, references = prepare_spans(
-                candidates,
-                uploader=uploads.uploader,
-                memo=uploads.memo,
-                value_bytes=self._limits.current.value_bytes,
-            )
-            # Fit every span's normal values, media parts and helpers before any network call.
-            for (index, span, _), placement, attributes, provisional in zip(
-                entries, placements, planned, references, strict=True
-            ):
-                fitted = self._fit(replace_span(span, attributes=attributes))
-                placement.allowed = set()
-                placement.writable = set()
-                if fitted is None:
-                    continue
-                record = fitted[0]
-                fitted_attributes = dict(record.attributes or {})
-                placement.writable = {
-                    key for key, value in attributes.items()
-                    if key in fitted_attributes and fitted_attributes[key] == value
-                }
-                listed = fitted_attributes.get(BLOBS_KEY)
-                surviving = list(listed) if isinstance(listed, (list, tuple)) else []
-                baseline_count = len(placement.existing)
-                existing = surviving[:baseline_count]
-                remaining = surviving[baseline_count:]
-                files = self._surviving_files(placement.held.files, record, Tally())
-                for identity, reference in provisional:
-                    key, candidate = placement.candidates[identity[0]]
-                    if isinstance(candidate, ExplicitFile):
-                        if candidate not in files:
-                            continue
-                        files.remove(candidate)
-                    elif key not in placement.writable:
-                        continue
-                    if reference in remaining:
-                        remaining.remove(reference)
-                        placement.allowed.add(identity)
-                if existing:
-                    fitted_attributes[BLOBS_KEY] = existing
-                else:
-                    fitted_attributes.pop(BLOBS_KEY, None)
-                placement.attributes = fitted_attributes
-                placement.existing = existing
-                result[index] = record
-            deadline = monotonic() + upload_budget_seconds(uploads.timeout)
-            placed, uploaded = place_spans(
-                candidates,
-                prepared=placements,
+            placed, placed_tally = place_spans(
+                [
+                    (
+                        span.attributes or {},
+                        Held(
+                            values=held.values,
+                            cut=held.cut,
+                            digests=held.digests,
+                            inspected=held.inspected,
+                        ),
+                        _record_trace_id(span) or "",
+                    )
+                    for _, span, held in entries
+                ],
                 uploader=uploads.uploader,
                 memo=uploads.memo,
                 value_bytes=self._limits.current.value_bytes,
                 deadline=deadline,
                 wait=self._wait_for_rate,
             )
-            for (index, _, _), attributes in zip(entries, placed, strict=True):
-                result[index] = replace_span(result[index], attributes=attributes)
-            tally.uploaded += uploaded.uploaded
-            for reason, (count, traces) in uploaded.fallbacks.items():
-                previous, named = tally.fallbacks.get(reason, (0, set()))
-                tally.fallbacks[reason] = (previous + count, named | traces)
+            _add_tally(tally, placed_tally)
+            # Every span's helper events and references are fitted before any helper file is
+            # sent; the admitted files of all spans then share the upload workers and deadline.
+            helpers: list[tuple[int, dict[str, Any], list[ExplicitFile], str]] = []
+            for (index, span, held), attributes in zip(entries, placed, strict=True):
+                record = replace_span(span, attributes=attributes)
+                result[index] = record
+                admitted = self._admit_files(record, held.files, tally)
+                if admitted is not None:
+                    result[index], fitted_attributes, files = admitted
+                    helpers.append((index, fitted_attributes, files, _record_trace_id(span) or ""))
+            if helpers:
+                uploaded, helper_tally = place_spans(
+                    [
+                        (attributes, Held(files=files, inspected=set()), trace_id)
+                        for _, attributes, files, trace_id in helpers
+                    ],
+                    uploader=uploads.uploader,
+                    memo=uploads.memo,
+                    value_bytes=self._limits.current.value_bytes,
+                    deadline=deadline,
+                    wait=self._wait_for_rate,
+                )
+                for (index, _, _, _), attributes in zip(helpers, uploaded, strict=True):
+                    result[index] = replace_span(result[index], attributes=attributes)
+                _add_tally(tally, helper_tally)
         finally:
+            # Release each queued copy once, including helper requests rejected by admission.
             for _, _, held in entries:
                 held.values.clear()
                 held.files.clear()
@@ -943,6 +924,59 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                 held.release()
         self._report_uploads(tally)
         return result
+
+    def _admit_files(
+        self, record: Any, staged: list[ExplicitFile], tally: Tally
+    ) -> tuple[Any, dict[str, Any], list[ExplicitFile]] | None:
+        """The record fitted with a provisional reference for each staged file whose ``hue.file``
+        event survived, its attributes without those references, and the files whose event and
+        reference both survived the fit: the only ones uploaded. ``None`` when no file survived
+        redaction; every file left out is counted as not uploaded."""
+        trace_id = _record_trace_id(record) or ""
+        files = self._surviving_files(staged, record, tally)
+        if not files:
+            return None
+        attributes = dict(record.attributes or {})
+        listed = attributes.get(BLOBS_KEY)
+        baseline = (
+            [item for item in listed if isinstance(item, str)]
+            if isinstance(listed, (list, tuple))
+            else []
+        )
+        slots = max(0, MAX_BLOB_ENTRIES - len(baseline))
+        for _ in files[slots:]:
+            tally.fallback("budget", trace_id)
+        files = files[:slots]
+        provisional = [self._file_entry(file) for file in files]
+        fitted = self._fit(
+            replace_span(record, attributes={**attributes, BLOBS_KEY: [*baseline, *provisional]})
+        )
+        if fitted is None:
+            for _ in files:
+                tally.fallback("budget", trace_id)
+            return None
+        record = fitted[0]
+        files = self._surviving_files(files, record, tally)
+        fitted_attributes = dict(record.attributes or {})
+        listed = fitted_attributes.get(BLOBS_KEY)
+        references = list(listed) if isinstance(listed, (list, tuple)) else []
+        admitted = []
+        for file in files:
+            entry = self._file_entry(file)
+            try:
+                position = references.index(entry, len(baseline))
+            except ValueError:
+                tally.fallback("budget", trace_id)
+            else:
+                references.pop(position)
+                admitted.append(file)
+        # Only baseline references survive until actual uploads succeed.
+        existing = references[: len(baseline)]
+        if existing:
+            fitted_attributes[BLOBS_KEY] = existing
+        else:
+            fitted_attributes.pop(BLOBS_KEY, None)
+        return record, fitted_attributes, admitted
 
     @staticmethod
     def _file_entry(file: ExplicitFile) -> str:

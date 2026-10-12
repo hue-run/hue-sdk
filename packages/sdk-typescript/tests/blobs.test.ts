@@ -1948,3 +1948,51 @@ test("media digest memo retains only trace and SHA keys with bounded digest meta
     endpoint.server.stop(true);
   }
 });
+
+test("helper uploads from several spans run concurrently within one export's upload budget", async () => {
+  // A one-second request timeout gives the export a six-second upload budget. Twelve 600 ms
+  // uploads need 7.2 s one span at a time, and about 1.8 s through the four shared workers.
+  let active = 0;
+  let peak = 0;
+  const endpoint = hue({
+    beforePut: async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      active--;
+    },
+  });
+  const files = Array.from({ length: 13 }, (_, index) => Buffer.from(`concurrent helper ${index}`));
+  const shed = sha256(files[12]!);
+  const hueClient = client(endpoint, {
+    timeoutMillis: 1000,
+    // The last span's event loses its digest, so its file has no surviving event to attach to.
+    redact: (value: string) => (value === shed ? "removed" : value),
+  });
+  try {
+    for (const [index, data] of files.entries())
+      await hueClient.withSpan(`concurrent helper ${index}`, () => {
+        hueClient.recordFile({ role: "input", mediaType: "image/png", data, upload: true });
+      });
+    const started = Date.now();
+    const report = await hueClient.flush();
+    expect(Date.now() - started).toBeLessThan(6000);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+    expect(report.uploadedValues).toBe(12);
+    expect(report.uploadFallbacks).toBe(1);
+    expect(endpoint.reservations.map((reservation) => reservation.sha256).sort()).toEqual(
+      files
+        .slice(0, 12)
+        .map((data) => sha256(data))
+        .sort(),
+    );
+    for (const [index, data] of files.entries())
+      expect(blobs(endpoint.span(`concurrent helper ${index}`)!).map((entry) => entry.key)).toEqual(
+        index < 12 ? [`event:hue.file:${sha256(data)}`] : [],
+      );
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+}, 20_000);

@@ -859,8 +859,6 @@ class _Span:
         )
         self._lock = Lock()
         self._slots = MAX_BLOB_ENTRIES - len(self.existing)
-        self.allowed: set[tuple[int, int]] | None = None
-        self.writable: set[str] | None = None
         self.cut = len(held.cut)
         # In the span's attribute order, as the TypeScript SDK places them.
         self.candidates: list[tuple[str, str | bytes | ExplicitFile]] = []
@@ -869,7 +867,7 @@ class _Span:
             if isinstance(value, (str, bytes)):
                 self.candidates.append((key, value))
         self.inspected: set[str] = set(held.inspected or ())
-        inspected_bytes = 0
+        inspected_units = 0
         for key, candidate in self.candidates:
             if (
                 held.inspected is None
@@ -879,16 +877,14 @@ class _Span:
                 size = utf16_size(candidate, MAX_INLINE_FILE_TEXT)
                 if (
                     size <= MAX_INLINE_FILE_TEXT
-                    and inspected_bytes + size <= INLINE_FILE_TEXT_PER_RECORD
+                    and inspected_units + size <= INLINE_FILE_TEXT_PER_RECORD
                 ):
                     self.inspected.add(key)
-                    inspected_bytes += size
+                    inspected_units += size
         self.candidates.extend((f"event:hue.file:{file.digest[0]}", file) for file in held.files)
 
-    def slot(self, identity: tuple[int, int]) -> bool:
+    def slot(self) -> bool:
         with self._lock:
-            if self.allowed is not None:
-                return identity in self.allowed
             if self._slots <= 0:
                 return False
             self._slots -= 1
@@ -906,17 +902,6 @@ class _Context:
     deadline: float
     wait: Callable[[float], bool]
     memo: MediaDigestMemo
-    preparing: bool = False
-
-    def store(
-        self, trace_id: str, key: str, value: str | bytes, content_type: str,
-        digest: tuple[str, int],
-    ) -> _Outcome:
-        if self.preparing:
-            return _Outcome(True, content_type=content_type)
-        return self.uploader.store(
-            trace_id, key, value, content_type, digest, self.deadline, self.wait
-        )
 
 
 def _upload_parts(
@@ -947,21 +932,19 @@ def _upload_parts(
             continue
         changed = True
         part_key = f"{key}#{file.pointer if textual else file.part_pointer}"
-        has_slot = _is_blob_key(part_key) and span.slot((index, position))
-        digest = span.held.digests.get(key, {}).get(file.pointer)
-        if digest is None:
-            digest = (
-                digest_of(decoded.data)
-                if context.preparing
-                else context.memo.digest(decoded.data, span.trace_id)
-            )
+        has_slot = _is_blob_key(part_key) and span.slot()
+        digest = span.held.digests.get(key, {}).get(file.pointer) or context.memo.digest(
+            decoded.data, span.trace_id
+        )
         outcome = (
-            context.store(
+            context.uploader.store(
                 span.trace_id,
                 part_key,
                 decoded.data,
                 content_type,
                 digest,
+                context.deadline,
+                context.wait,
             )
             if has_slot
             else _Outcome(False, "budget")
@@ -989,14 +972,16 @@ def _place(
     cap = context.value_bytes
     if isinstance(value, ExplicitFile):
         outcome = (
-            context.store(
+            context.uploader.store(
                 span.trace_id,
                 key,
                 value.data,
                 value.content_type,
                 value.digest,
+                context.deadline,
+                context.wait,
             )
-            if span.slot((index, 0))
+            if span.slot()
             else _Outcome(False, "budget")
         )
         if outcome.ok:
@@ -1027,7 +1012,7 @@ def _place(
         return cut_utf8(placed, cap) if isinstance(placed, str) else truncated_marker(size)
 
     refused = "too_large" if size > MAX_BLOB_BYTES else None
-    if refused or not span.slot((index, sys.maxsize)):
+    if refused or not span.slot():
         result.value = cut()
         result.fallbacks.append(refused or "budget")
         return result
@@ -1035,7 +1020,9 @@ def _place(
         text_content_type(value) if isinstance(value, str) else "application/octet-stream"
     )
     digest = digest or digest_of(value)
-    outcome = context.store(span.trace_id, key, value, content_type, digest)
+    outcome = context.uploader.store(
+        span.trace_id, key, value, content_type, digest, context.deadline, context.wait
+    )
     if outcome.ok:
         result.value = blob_prefix(value)
         result.entries.append(
@@ -1081,7 +1068,6 @@ def place_spans(
     deadline: float,
     wait: Callable[[float], bool],
     memo: MediaDigestMemo | None = None,
-    prepared: list[_Span] | None = None,
 ) -> tuple[list[dict[str, Any]], Tally]:
     """Each span's own attributes with its held values, and its messages holding a large inline
     file, placed: a file uploaded and replaced by its first 16 KiB (or its digest), a value still
@@ -1091,7 +1077,7 @@ def place_spans(
     by ``deadline`` falls back to the cut, and an upload still running then stops sending its body
     at that deadline; its answer goes unused."""
     context = _Context(uploader, value_bytes, deadline, wait, memo or MediaDigestMemo())
-    placements = prepared or [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans]
+    placements = [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans]
     pending = [
         (number, index, key, value)
         for number, span in enumerate(placements)
@@ -1136,20 +1122,11 @@ def place_spans(
     with lock:
         closed[0] = True
         placed = dict(results)
-    return _merge_placements(placements, placed, uploader, value_bytes)
-
-
-def _merge_placements(
-    placements: list[_Span], placed: dict[tuple[int, int], _Result],
-    uploader: BlobUploader, value_bytes: int, *, preparing: bool = False,
-) -> tuple[list[dict[str, Any]], Tally]:
     tally = Tally()
     attributes: list[dict[str, Any]] = []
     for number, span in enumerate(placements):
         for _ in range(span.cut):
-            tally.fallback(
-                "unsupported" if not preparing and uploader.unsupported() else "budget", span.trace_id
-            )
+            tally.fallback("unsupported" if uploader.unsupported() else "budget", span.trace_id)
         result_attributes = dict(span.attributes)
         listed: list[str] = []
         entries: list[tuple[tuple[int, int], str]] = []
@@ -1157,11 +1134,9 @@ def _merge_placements(
             result = placed.get((number, index)) or _fallback(
                 key, value, value_bytes, key in span.inspected
             )
-            if not isinstance(value, ExplicitFile) and (
-                span.writable is None or key in span.writable
-            ):
+            if not isinstance(value, ExplicitFile):
                 result_attributes[key] = result.value
-            if result.listed and (span.writable is None or key in span.writable):
+            if result.listed:
                 listed.append(key)
             entries.extend(result.entries)
             tally.uploaded += result.uploads
@@ -1178,23 +1153,3 @@ def _merge_placements(
             ]
         attributes.append(result_attributes)
     return attributes, tally
-
-
-def prepare_spans(
-    spans: list[tuple[Mapping[str, Any], Held, str]], *, uploader: BlobUploader,
-    value_bytes: int, memo: MediaDigestMemo,
-) -> tuple[list[_Span], list[dict[str, Any]], list[list[tuple[tuple[int, int], str]]]]:
-    """Pure placement preview for all candidates; no uploader or upload memo calls."""
-    context = _Context(uploader, value_bytes, 0, lambda _: False, memo, preparing=True)
-    placements = [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans]
-    results = {}
-    entries = []
-    for number, span in enumerate(placements):
-        references = []
-        for index, (key, value) in enumerate(span.candidates):
-            result = _place(span, index, key, value, context)
-            results[(number, index)] = result
-            references.extend(result.entries)
-        entries.append(sorted(references))
-    attributes, _ = _merge_placements(placements, results, uploader, value_bytes, preparing=True)
-    return placements, attributes, entries

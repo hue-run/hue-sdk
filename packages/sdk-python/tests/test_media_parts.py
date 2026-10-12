@@ -288,8 +288,7 @@ def test_digest_cache_is_trace_scoped_and_retains_only_digest_keys(monkeypatch):
         for trace, digest in memo._entries
     )
     assert all(
-        isinstance(digest, str) and isinstance(size, int)
-        for digest, size in memo._entries.values()
+        isinstance(digest, str) and isinstance(size, int) for digest, size in memo._entries.values()
     )
     memo.clear()
     assert memo._entries == {} and memo._size == 0
