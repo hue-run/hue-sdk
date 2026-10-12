@@ -25,4 +25,4 @@ The maintained source for proving changes to the public SDK surface. Read this i
 - [TypeScript tracing](./typescript-tracing.md): `createHue`, spans, tools, capture, redaction, flush results.
 - [Python tracing](./python-tracing.md): `Hue`, spans, models, tools, capture, `force_flush`.
 - [Evaluations](./evaluations.md): `@hue-run/sdk/evals` and `hue_sdk.evals` clients and runners.
-- [hue CLI](./hue-cli.md): `hue eval`, `login`, `mcp`, `listen`, `setup`.
+- [hue CLI](./hue-cli.md): `hue eval`, `login`, `mcp`, `listen`, `import`, `setup`.
