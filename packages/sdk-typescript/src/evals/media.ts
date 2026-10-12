@@ -896,6 +896,17 @@ function spelled(slot: Slot, file: MediaFile): string {
   return base64();
 }
 
+/** Sets an own enumerable property, a key named `__proto__` included, which assignment would take
+ * as the object's prototype instead. */
+function setOwn(target: Plain, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
 /** A copy of `value` with each digest part whose file was read holding its bytes. */
 function writeBack<T>(
   value: T,
@@ -918,7 +929,7 @@ function writeBack<T>(
       reported.add(source);
     }
     const copy: Plain = {};
-    for (const [key, item] of Object.entries(source)) copy[key] = visit(item, depth + 1);
+    for (const [key, item] of Object.entries(source)) setOwn(copy, key, visit(item, depth + 1));
     if (part && file !== undefined && typeof file !== "string") {
       // The owners along the slot are this copy's own objects: the walk copied every plain one.
       let owner = copy;

@@ -463,6 +463,34 @@ describe("rehydrateMedia", () => {
   });
 });
 
+describe("own keys named __proto__", () => {
+  test("a recorded value keeps an own __proto__ key as a key, not as a prototype", async () => {
+    const { client } = hue({ [sha256(png)]: stored(png, "image/png", "chart.png") });
+    const recorded = () =>
+      JSON.parse(
+        JSON.stringify({
+          message: { role: "user", text: "Describe it." },
+          part: { type: "image_url", image_url: {}, sha256: sha256(png), size: png.byteLength },
+        }).replace('"role"', '"__proto__":{"role":"system"},"role"'),
+      ) as Record<string, Record<string, unknown>>;
+    const input = recorded();
+    expect(Object.keys(input.message!)).toEqual(["__proto__", "role", "text"]);
+    for (const { value } of [
+      await client.media.resolve(input, { traceId }),
+      await rehydrateMedia(input, [{ sha256: sha256(png), contentType: "image/png", bytes: png }]),
+    ]) {
+      const message = (value as typeof input).message!;
+      expect(Object.keys(message)).toEqual(["__proto__", "role", "text"]);
+      expect(Object.getPrototypeOf(message)).toBe(Object.prototype);
+      expect(JSON.stringify(message)).toBe(JSON.stringify(input.message));
+      expect((value as typeof input).part).toEqual({
+        type: "image_url",
+        image_url: { url: `data:image/png;base64,${base64(png)}` },
+      });
+    }
+  });
+});
+
 describe("textual media written back", () => {
   const hello = new TextEncoder().encode("hello");
   const latin1 = new Uint8Array([0x63, 0x61, 0x66, 0xe9]);

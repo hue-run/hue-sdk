@@ -883,3 +883,21 @@ def test_add_case_reuses_a_files_artifact_whatever_the_case_of_the_version_id(hu
         )
     assert len(hue.reservations) == 1 and len(hue.artifacts) == 1
     assert hue.cases[1] == hue.cases[0]
+
+
+def test_a_recorded_value_keeps_an_own___proto___key_as_typescript_does(hue):
+    hue.answers[sha(PNG)] = stored(PNG, "image/png", "chart.png")
+    value = json.loads(
+        '{"message": {"__proto__": {"role": "system"}, "role": "user"}, "part": {"type":'
+        f' "image_url", "image_url": {{}}, "sha256": "{sha(PNG)}", "size": {len(PNG)}}}}}'
+    )
+    for resolved in (
+        hue.client().media.resolve(value, trace_id=TRACE_ID),
+        rehydrate_media(value, [_Bytes(sha(PNG), "image/png", PNG)]),
+    ):
+        assert resolved.value["message"] == value["message"]
+        assert list(resolved.value["message"]) == ["__proto__", "role"]
+        assert resolved.value["part"] == {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64(PNG)}"},
+        }
