@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import functools
 import hashlib
 import json
 import re
@@ -122,6 +123,10 @@ def hue():
         if answer["kind"] == "forbidden":
             return 403, {"error": "Use a Read or Read and write key"}, {}
         data = answer["data"]
+        # The host the link names, with the storage route's port; its own origin by default.
+        origin = state.url
+        if answer.get("link_host"):
+            origin = f"http://{answer['link_host']}:{urlsplit(state.url).port}"
         return (
             200,
             {
@@ -132,7 +137,7 @@ def hue():
                     if snapshot
                     else {"contentType": answer["content_type"], "fileName": answer["file_name"]}
                 ),
-                "url": f"{state.url}/storage/{digest}",
+                "url": f"{origin}/storage/{digest}",
                 "method": "GET",
                 "expiresAt": "2026-10-12T00:05:00Z",
             },
@@ -366,6 +371,22 @@ def test_a_redirect_is_an_unexpected_answer_failed_with_its_status_never_followe
         f"/api/v1/traces/{TRACE_ID}/blobs/{sha(PDF)}",
         f"/storage/{sha(PDF)}",
     ]
+
+
+def test_a_plain_http_link_must_write_its_loopback_host_as_localhost_127_0_0_1_or_ipv6(hue):
+    hosts = ["127.1", "0x7f.0.0.1", "2130706433", "[0::1]", "127.0.0.1.", "127.0.0.1"]
+    files = [f"file behind {host}".encode() for host in hosts]
+    for host, data in zip(hosts, files, strict=True):
+        hue.answers[sha(data)] = stored(data, "text/plain", "f.txt", link_host=host)
+    client = hue.client()
+    # The TypeScript URL parser would rewrite these hosts to 127.0.0.1 or [::1].
+    for data in files[:-1]:
+        refused = failure(
+            functools.partial(client.media.fetch, trace_id=TRACE_ID, sha256=sha(data))
+        )
+        assert (refused.reason, refused.status) == ("failed", None)
+    assert not any(item["path"].startswith("/storage/") for item in hue.seen)
+    assert client.media.fetch(trace_id=TRACE_ID, sha256=sha(files[-1])).data == files[-1]
 
 
 def test_a_key_without_content_access_is_forbidden_and_not_asked_again(hue):

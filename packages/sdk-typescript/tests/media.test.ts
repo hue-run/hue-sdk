@@ -33,6 +33,8 @@ type Answer =
       served?: Uint8Array;
       /** The storage route answers with this redirect status instead of the bytes. */
       storageRedirect?: number;
+      /** The host the link names, with the storage route's port; its own origin by default. */
+      linkHost?: string;
     }
   | { kind: "missing" }
   /** Answers the grant with a redirect to the storage route. */
@@ -133,7 +135,7 @@ function hue(answers: Record<string, Answer>, options: { timeoutMillis?: number 
         sha256: digest,
         size: answer.bytes.byteLength,
         ...(snapshot ? {} : { contentType: answer.contentType, fileName: answer.fileName }),
-        url: `${url.origin}/storage/${digest}`,
+        url: `${answer.linkHost ? `http://${answer.linkHost}:${url.port}` : url.origin}/storage/${digest}`,
         method: "GET",
         expiresAt: new Date(Date.now() + 300_000).toISOString(),
       });
@@ -269,6 +271,27 @@ describe("client.media.fetch", () => {
       `/api/v1/traces/${traceId}/blobs/${sha256(pdf)}`,
       `/storage/${sha256(pdf)}`,
     ]);
+  });
+
+  test("a plain HTTP link must write its loopback host as localhost, 127.0.0.1 or [::1]", async () => {
+    const hosts = ["127.1", "0x7f.0.0.1", "2130706433", "[0::1]", "127.0.0.1.", "127.0.0.1"];
+    const files = hosts.map((host) => new TextEncoder().encode(`file behind ${host}`));
+    const { client, seen } = hue(
+      Object.fromEntries(
+        files.map((bytes, index) => [
+          sha256(bytes),
+          { ...stored(bytes, "text/plain", "f.txt"), linkHost: hosts[index] },
+        ]),
+      ),
+    );
+    // The URL parser would rewrite these hosts to 127.0.0.1 or [::1]; Python's would not.
+    for (const bytes of files.slice(0, -1)) {
+      const refused = await failure(client.media.fetch({ traceId, sha256: sha256(bytes) }));
+      expect([refused.reason, refused.status]).toEqual(["failed", undefined]);
+    }
+    expect(seen.some((item) => item.path.startsWith("/storage/"))).toBe(false);
+    const written = await client.media.fetch({ traceId, sha256: sha256(files.at(-1)!) });
+    expect(written.bytes).toEqual(files.at(-1)!);
   });
 
   test("a key without content access is forbidden and is not asked again", async () => {

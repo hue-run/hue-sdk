@@ -252,7 +252,15 @@ function routeOf(target: MediaFetchTarget): { path: string; sha256: string } {
   return { path: `/traces/${traceId.toLowerCase()}/blobs/${sha256}${query}`, sha256 };
 }
 
-/** A download link Hue issued: HTTPS, or HTTP to loopback, without credentials or a fragment. */
+/** The host an `http:` link writes, before the URL parser rewrites it: after the authority's last
+ * `@`, up to its port, the authority ending at the first `/`, `?` or `#`, as Python splits it. */
+const WRITTEN_HTTP_HOST = /^http:\/\/(?:[^/?#]*@)?(\[[^\]/?#]*\]|[^/?#:@]*)/i;
+
+/**
+ * A download link Hue issued: HTTPS, or HTTP to a loopback host written `localhost`, `127.0.0.1`
+ * or `[::1]`, without credentials or a fragment. A host the URL parser rewrites to one of those
+ * (`127.1`, `0x7f.0.0.1`, `[0::1]`) is refused, as the Python SDK refuses it.
+ */
 function linkOf(value: unknown): string | undefined {
   // eslint-disable-next-line no-control-regex -- control characters are refused
   if (typeof value !== "string" || value.length > 8192 || /[\x00-\x20\x7f]/u.test(value))
@@ -260,7 +268,10 @@ function linkOf(value: unknown): string | undefined {
   try {
     const url = new URL(value);
     const allowed =
-      url.protocol === "https:" || (url.protocol === "http:" && isLoopbackHost(url.hostname));
+      url.protocol === "https:" ||
+      (url.protocol === "http:" &&
+        isLoopbackHost(url.hostname) &&
+        WRITTEN_HTTP_HOST.exec(value)?.[1]?.toLowerCase() === url.hostname);
     return allowed && !url.username && !url.password && !url.hash ? value : undefined;
   } catch {
     return undefined;
