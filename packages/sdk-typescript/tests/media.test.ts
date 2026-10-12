@@ -35,7 +35,9 @@ type Answer =
   | { kind: "missing" }
   | { kind: "unavailable"; times: number; retryAfter?: string; then?: Answer }
   | { kind: "forbidden" }
-  | { kind: "hang" };
+  | { kind: "hang" }
+  /** Answers the grant's headers, then breaks the connection mid-body, `times` times. */
+  | { kind: "broken"; times: number; then?: Answer };
 
 interface Seen {
   method: string;
@@ -88,6 +90,19 @@ function hue(answers: Record<string, Answer>, options: { timeoutMillis?: number 
               headers: answer.retryAfter === undefined ? {} : { "retry-after": answer.retryAfter },
             },
           );
+        }
+        answer = pending[digest] = answer.then ?? { kind: "missing" };
+      }
+      if (answer.kind === "broken") {
+        if (answer.times > 0) {
+          answer.times--;
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"sha256":"'));
+              setTimeout(() => controller.error(new Error("connection lost")), 20);
+            },
+          });
+          return new Response(body, { headers: { "content-type": "application/json" } });
         }
         answer = pending[digest] = answer.then ?? { kind: "missing" };
       }
@@ -211,6 +226,19 @@ describe("client.media.fetch", () => {
     const later = await failure(client.media.fetch({ traceId, sha256: sha256(wav) }));
     expect([later.reason, later.retryAfterSeconds]).toEqual(["unavailable", 60]);
     expect(seen.filter((item) => item.path.includes(sha256(wav))).length).toBe(1);
+  });
+
+  test("a connection lost while the grant is read is asked once more, then fails", async () => {
+    const { client, seen } = hue({
+      [sha256(png)]: { kind: "broken", times: 1, then: stored(png, "image/png", "chart.png") },
+      [sha256(pdf)]: { kind: "broken", times: 5 },
+    });
+    const file = await client.media.fetch({ traceId, sha256: sha256(png) });
+    expect(file.bytes).toEqual(png);
+    expect(seen.filter((item) => item.path.startsWith("/api/v1/")).length).toBe(2);
+    const lost = await failure(client.media.fetch({ traceId, sha256: sha256(pdf) }));
+    expect(lost.reason).toBe("failed");
+    expect(seen.filter((item) => item.path.includes(sha256(pdf))).length).toBe(2);
   });
 
   test("a key without content access is forbidden and is not asked again", async () => {

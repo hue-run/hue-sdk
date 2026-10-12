@@ -197,17 +197,19 @@ def _retry_after(response: requests.Response) -> int | None:
 
 
 def _answer(response: requests.Response) -> Any:
-    """A JSON answer read to a bound; None when it is larger or not JSON."""
+    """A JSON answer read to a bound; None when it is larger or not JSON. A connection that fails
+    while the answer is read raises ``requests.RequestException``, as one that fails before it
+    does: the caller asks once more."""
     chunks: list[bytes] = []
     size = 0
+    for chunk in response.iter_content(chunk_size=8192):
+        size += len(chunk)
+        if size > _MAX_ANSWER_BYTES:
+            return None
+        chunks.append(chunk)
     try:
-        for chunk in response.iter_content(chunk_size=8192):
-            size += len(chunk)
-            if size > _MAX_ANSWER_BYTES:
-                return None
-            chunks.append(chunk)
         return json.loads(b"".join(chunks).decode("utf-8"))
-    except (ValueError, UnicodeError, requests.RequestException):
+    except (ValueError, UnicodeError):
         return None
 
 

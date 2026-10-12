@@ -287,7 +287,11 @@ function pause(millis: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** A JSON answer read to a bound; undefined when it is larger or not JSON. */
+/** The connection failed while an answer's body was read: no answer, unlike a malformed one. */
+class AnswerReadError extends Error {}
+
+/** A JSON answer read to a bound; undefined when it is larger or not JSON. Throws
+ * {@link AnswerReadError} when the connection fails while it is read. */
 async function answerOf(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) return undefined;
@@ -295,15 +299,22 @@ async function answerOf(response: Response): Promise<unknown> {
   let size = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
+      let read: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        read = await reader.read();
+      } catch (error) {
+        throw new AnswerReadError("The answer could not be read", { cause: error });
+      }
+      if (read.done) break;
+      size += read.value.byteLength;
       if (size > MAX_ANSWER_BYTES) return undefined;
-      chunks.push(value);
+      chunks.push(read.value);
     }
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-  } catch {
-    return undefined;
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    } catch {
+      return undefined;
+    }
   } finally {
     await reader.cancel().catch(() => undefined);
   }
@@ -456,6 +467,12 @@ export class MediaClient {
    * connection. */
   async #grant(path: string, sha256: string, signal?: AbortSignal): Promise<Grant> {
     for (let attempt = 0; ; attempt++) {
+      /** A lost connection, before or while the answer is read: asked once more, then failed. */
+      const lost = async (error: unknown) => {
+        if (attempt > 0 || signal?.aborted)
+          throw new MediaFetchError("failed", undefined, undefined, { cause: error });
+        await pause(250 + Math.random() * 250, signal);
+      };
       let response: Response;
       try {
         response = await fetch(`${this.#baseUrl}/api/v1${path}`, {
@@ -467,11 +484,10 @@ export class MediaClient {
           ]),
         });
       } catch (error) {
-        if (attempt > 0 || signal?.aborted)
-          throw new MediaFetchError("failed", undefined, undefined, { cause: error });
-        await pause(250 + Math.random() * 250, signal);
+        await lost(error);
         continue;
       }
+      let answer: unknown;
       const status = response.status;
       if (status === 503 || status === 429) {
         await response.body?.cancel().catch(() => undefined);
@@ -482,8 +498,16 @@ export class MediaClient {
         await pause(wait * 1000, signal);
         continue;
       }
+      if (status === 404 || response.ok) {
+        try {
+          answer = await answerOf(response);
+        } catch (error) {
+          if (!(error instanceof AnswerReadError)) throw error;
+          await lost(error);
+          continue;
+        }
+      }
       if (status === 404) {
-        const answer = await answerOf(response);
         const missing =
           answer !== null &&
           typeof answer === "object" &&
@@ -498,7 +522,7 @@ export class MediaClient {
         await response.body?.cancel().catch(() => undefined);
         throw new MediaFetchError("failed", status);
       }
-      return grantOf(await answerOf(response), sha256);
+      return grantOf(answer, sha256);
     }
   }
 

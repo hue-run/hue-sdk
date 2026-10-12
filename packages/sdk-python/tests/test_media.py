@@ -42,6 +42,13 @@ def b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
+@dataclass(frozen=True)
+class Broken:
+    """An answer whose connection closes after ``sent``, before the body it announced."""
+
+    sent: bytes
+
+
 @dataclass
 class Hue:
     """A synthetic Hue answering the media routes, with a storage route beside it."""
@@ -100,6 +107,11 @@ def hue():
                 )
                 return 503, {"error": "Unavailable", "state": "unavailable"}, headers
             answer = state.answers[digest] = answer["then"]
+        if answer["kind"] == "broken":
+            if answer["times"] > 0:
+                answer["times"] -= 1
+                return 200, Broken(b'{"sha256":"'), {}
+            answer = state.answers[digest] = answer.get("then", {"kind": "missing"})
         if answer["kind"] == "hang":
             state.release.wait(5)
             return 500, {}, {}
@@ -202,6 +214,14 @@ def hue():
                     }
                 )
             status, value, headers = dispatch(method, parts.path, parts.query, raw)
+            if isinstance(value, Broken):
+                # The headers promise more than is sent; the connection then closes mid-body.
+                self.close_connection = True
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(value.sent) + 64))
+                self.end_headers()
+                self.wfile.write(value.sent)
+                return
             payload = value if isinstance(value, bytes) else json.dumps(value).encode()
             try:
                 self.send_response(status)
@@ -307,6 +327,22 @@ def test_fetch_asks_once_more_after_an_unavailable_answer_waiting_its_retry_afte
     later = failure(lambda: client.media.fetch(trace_id=TRACE_ID, sha256=sha(WAV)))
     assert (later.reason, later.retry_after_seconds) == ("unavailable", 60)
     assert sum(sha(WAV) in item["path"] for item in hue.seen) == 1
+
+
+def test_a_connection_lost_while_the_grant_is_read_is_asked_once_more_then_fails(hue):
+    hue.answers.update(
+        {
+            sha(PNG): {"kind": "broken", "times": 1, "then": stored(PNG, "image/png", "c.png")},
+            sha(PDF): {"kind": "broken", "times": 5},
+        }
+    )
+    client = hue.client()
+    assert client.media.fetch(trace_id=TRACE_ID, sha256=sha(PNG)).data == PNG
+    assert len([item for item in hue.seen if item["path"].startswith("/api/v1/")]) == 2
+    with pytest.raises(MediaFetchError) as lost:
+        client.media.fetch(trace_id=TRACE_ID, sha256=sha(PDF))
+    assert lost.value.reason == "failed"
+    assert len([item for item in hue.seen if sha(PDF) in item["path"]]) == 2
 
 
 def test_a_key_without_content_access_is_forbidden_and_not_asked_again(hue):
