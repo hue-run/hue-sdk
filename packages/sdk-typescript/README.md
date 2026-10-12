@@ -480,7 +480,37 @@ the recorded model call again with the real image, document or audio. See
 | `LangfuseMedia` | `Attachment` | [`Attachment`](#attach-a-file-anywhere), at the same position |
 | `resolveMediaReferences({ obj, resolveWith: "base64DataUri" })` | | `client.media.resolve(obj, { traceId })` |
 | `GET /api/public/media/{mediaId}` | `ReadonlyAttachment.data()` | `client.media.fetch({ traceId, sha256 })` |
-| Media tokens (`@@@langfuseMedia:…@@@`) | `ExternalAttachment` | Left as recorded: Hue never fetches a remote URL or a file another service holds |
+| Media tokens (`@@@langfuseMedia:…@@@`) | `ExternalAttachment` | Left as recorded: Hue never fetches a remote URL or a file another service holds. [`hue import langfuse --media`](#import-from-langfuse) copies Langfuse's files with your keys |
+
+## Import from Langfuse
+
+`hue import langfuse` copies a Langfuse project's history into Hue. It runs on your machine with
+the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and
+`LANGFUSE_BASE_URL` or `LANGFUSE_HOST`), which go only to Langfuse, and sends the spans with your
+`HUE_API_KEY`:
+
+```sh
+npx -y @hue-run/sdk import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+```
+
+- It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
+  through the v1 traces and observations API, newest first; `--from`, `--to`, `--limit` and
+  `--trace-id` select traces, and `--dry-run` counts them without sending anything.
+- Each observation becomes the span a Langfuse OpenTelemetry SDK records, with the
+  `langfuse.observation.*` and `langfuse.trace.*` attributes Hue reads, the user, session, release
+  and environment, and the model and token counts as GenAI attributes. Hex ids are kept and other
+  ids derived from them, so running the same command again resumes an import without duplicates.
+- Spans are exported by the SDK's transport with its content-capture default; `--no-content`
+  sends metadata only.
+- With `--media`, files that Langfuse media references point to are downloaded and uploaded under
+  the trace in the [digest form](#automatically-captured-media) the SDK writes, listed in
+  `hue.blobs`; a reference Langfuse holds no bytes for stays as recorded.
+- Langfuse's rate limits are waited out for as long as `Retry-After` asks.
+
+The command has no Python counterpart; it runs with `npx` for an application in any language. See
+[Import traces from Langfuse](CLI.md#import-traces-from-langfuse) for every option, the attribute
+mapping, media handling, limits and exit codes.
 
 ## Vercel AI SDK 6
 
