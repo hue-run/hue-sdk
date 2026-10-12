@@ -236,6 +236,35 @@ def test_deprecated_genai_event_keys_its_message_parts_from_the_body(hue_store):
     assert [entry["key"] for entry in blobs(log)] == ["body#/content/1"]
 
 
+def test_a_log_bodys_file_the_queue_cut_is_exported_cut_and_never_uploaded(hue_store):
+    """Over the per-attribute inspection limit, the base64 is not held whole: the queue cuts it,
+    and its cut (a multiple of four characters) still reads as base64, which must not upload."""
+    data = "A" * (8 * 1024 * 1024 + 4)
+    with client(hue_store) as hue:
+        with hue.span("cut log body"):
+            hue._logger.emit(
+                event_name="gen_ai.user.message",
+                body={
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": data},
+                        }
+                    ]
+                },
+            )
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+    (log,) = hue_store.logs
+    # Cut, the body is still over the value limit: it is replaced by the receiver's marker, as
+    # before log records uploaded, and nothing of the image is stored or listed.
+    assert "sha256" not in json.dumps(json_of(log.body))
+    assert listed(log) == ["body"]
+    assert blobs(log) == []
+    assert hue_store.reservations == []
+    assert status.uploaded_values == 0
+
+
 def test_inference_log_over_the_cap_is_recorded_when_its_files_account_for_it(hue_store):
     image = os.urandom(2 * 1024 * 1024)
     part = {"type": "blob", "mime_type": "image/png", "content": base64.b64encode(image).decode()}

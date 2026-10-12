@@ -285,7 +285,10 @@ function redactValue(
     // the bytes, and listed either way.
     if (!budget.truncated.includes(listAs)) budget.truncated.push(listAs);
     budget.bytes += cap;
-    return truncateUtf8(result, cap);
+    const cut = truncateUtf8(result, cap);
+    // A log body's string the queue cut is no whole file: the upload step leaves it as cut.
+    if (whole && cutWhenQueued && budget.offload) (budget.offload.bodyCut ??= new Set()).add(cut);
+    return cut;
   }
   // A value the queue replaced by the receiver's marker (a tool definition or recorded request
   // too long to scrub when it was queued) is listed as cut.

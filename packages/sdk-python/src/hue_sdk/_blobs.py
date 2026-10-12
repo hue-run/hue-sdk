@@ -294,6 +294,8 @@ class Held:
     # held whole by their JSON pointer in the body.
     body: bool = False
     body_values: dict[str, str] = field(default_factory=dict)
+    # The JSON pointers of the body's strings its copy cut and did not hold: never read as files.
+    body_cut: set[str] = field(default_factory=set)
     _released: bool = False
 
     def release(self) -> None:
@@ -1007,12 +1009,16 @@ class _Span:
         if log and held.body:
             self.candidates.append(("body", body))
             # A body's files count toward the record's inspection bounds first, each by its
-            # content, as an attribute counts by its text.
+            # content, as an attribute counts by its text. The upload threads place them in a copy
+            # of the body, so the body itself stays intact for the fallback.
             try:
-                self.body_media = media_in(body)
+                self.body_media = media_in(_containers_copied(body))
             except (ValueError, RecursionError):
                 self.body_media = None
             for file in self.body_media.files if self.body_media else ():
+                # A string the queue cut holds only the start of its file: it stays as cut.
+                if file.pointer in held.body_cut:
+                    continue
                 units = utf16_size(file.content, MAX_INLINE_FILE_TEXT)
                 if (
                     units <= MAX_INLINE_FILE_TEXT
@@ -1151,6 +1157,15 @@ def _upload_parts(
         if _place_files(span, index, key, media.files, context, result)
         else text
     )
+
+
+def _containers_copied(value: Any) -> Any:
+    """A JSON-like value with its dicts and lists copied (strings are shared)."""
+    if isinstance(value, dict):
+        return {key: _containers_copied(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_containers_copied(item) for item in value]
+    return value
 
 
 def _cap_body(body: Any, cap: int) -> tuple[Any, bool]:

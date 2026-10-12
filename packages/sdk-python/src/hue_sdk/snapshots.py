@@ -529,6 +529,9 @@ class _ValueBudget:
                     self.held.size += held_size(item)
                     self.held.body_values[pointer] = str.__str__(item)
                     return self.value(cut_utf8(item, hold.value_bytes), depth)
+                if over:
+                    # Cut below and not held: export must not read the cut as a whole file.
+                    self.held.body_cut.add(pointer)
                 return self.value(item, depth, cut=True)
             if isinstance(item, Mapping):
                 self.consume(8)
@@ -866,12 +869,6 @@ def snapshot_log(
     holding = (
         hold if hold is not None and hold.active and capture_content and record.trace_id else None
     )
-    # The attachments its body holds, staged by ``log_inference`` for this record.
-    staged = (
-        hold.uploads.take_log(log_record.log_record.body)
-        if hold is not None and hold.uploads is not None and capture_content
-        else None
-    )
     budget = _ValueBudget(
         capture_content,
         record_bytes=record_bytes,
@@ -904,10 +901,15 @@ def snapshot_log(
         )
     except BaseException:
         budget.held.release()
-        if staged is not None:
-            staged.release()
         raise
     held = budget.held
+    # The attachments its body holds, staged by ``log_inference`` for this record, are taken once
+    # the record is copied: a record lost before then still holds them, and its loss counts them.
+    staged = (
+        hold.uploads.take_log(log_record.log_record.body)
+        if hold is not None and hold.uploads is not None and capture_content
+        else None
+    )
     if staged is not None:
         # One held copy per log record: the attachments join the media its copy holds, and
         # export places them all in one step.

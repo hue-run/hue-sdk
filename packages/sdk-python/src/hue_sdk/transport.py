@@ -1242,14 +1242,21 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         result = list(records)
         try:
             logs = []
+            refused = Tally()
             for _, record, held in entries:
                 log = record.log_record
+                trace_id = _record_trace_id(record) or ""
                 body = _restored_body(log.body, held.body_values) if held.body else None
-                # An attachment uploads while its own part is still where it was placed.
+                # An attachment uploads while its own part is still where it was placed, under
+                # the record's trace: a record that names none uploads none.
                 held.files[:] = self._surviving_files(
                     held.files, log.body if body is None else body
                 )
-                logs.append((log.attributes or {}, held, _record_trace_id(record) or "", body))
+                if not trace_id:
+                    for _ in held.files:
+                        refused.fallback("budget", trace_id)
+                    held.files.clear()
+                logs.append((log.attributes or {}, held, trace_id, body))
             placed, bodies, tally = place_logs(
                 logs,
                 uploader=uploads.uploader,
@@ -1272,6 +1279,7 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
                 held.body_values.clear()
                 held.files.clear()
                 held.release()
+        _add_tally(tally, refused)
         self._report_uploads(tally)
         return result
 

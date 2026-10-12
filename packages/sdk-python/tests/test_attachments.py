@@ -362,3 +362,26 @@ def test_a_log_records_message_file_not_uploaded_keeps_the_nested_rule(hue_store
     assert entries(log) == []
     assert 1 <= len(hue_store.reservations) <= 2
     assert status.upload_fallbacks == 2
+
+
+def test_a_log_record_lost_while_it_is_copied_counts_its_attachments(hue_store, monkeypatch):
+    from hue_sdk import snapshots
+
+    def fail(self: Any, scope: Any) -> Any:
+        raise ValueError("synthetic copy failure")
+
+    with client(hue_store) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            monkeypatch.setattr(snapshots._ValueBudget, "scope", fail)
+            span.log_inference(
+                input=[{"role": "user", "parts": [Attachment(PDF, content_type="application/pdf")]}]
+            )
+            monkeypatch.undo()
+        hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+    # The record was dropped while it was copied: its attachment is counted as not uploaded and
+    # the bytes it held are released.
+    assert hue_store.logs == []
+    assert hue_store.reservations == []
+    assert status.upload_fallbacks == 1
+    assert hue._uploads is not None and hue._uploads.held.held == 0

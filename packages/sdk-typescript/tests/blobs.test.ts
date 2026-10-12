@@ -2901,3 +2901,34 @@ describe("one upload step for a log record's files", () => {
     }
   });
 });
+
+test("a log body's file the queue cut is exported cut, never uploaded as a shorter file", async () => {
+  // Over the per-attribute inspection limit, the base64 is not held whole: the queue cuts it, and
+  // its cut (a multiple of four characters) still reads as base64, which must not upload.
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const data = "A".repeat(8 * MiB + 4);
+  try {
+    await hueClient.withSpan("cut log body", ({ span }) => {
+      (hueClient as unknown as { logger: { emit(record: unknown): void } }).logger.emit({
+        eventName: "gen_ai.user.message",
+        body: {
+          content: [{ type: "image", source: { type: "base64", media_type: "image/png", data } }],
+        },
+        context: trace.setSpan(ROOT_CONTEXT, span),
+      });
+    });
+    const report = await hueClient.flush();
+    const [log] = endpoint.logs();
+    // Cut, the body is still over the value limit: it is replaced by the receiver's marker, as
+    // before log records uploaded, and nothing of the image is stored or listed.
+    expect(JSON.stringify(jsonOf(log!.body))).not.toContain("sha256");
+    expect(strings(attr(log!, "hue.truncated"))).toEqual(["body"]);
+    expect(attr(log!, "hue.blobs")).toBeUndefined();
+    expect(endpoint.reservations).toEqual([]);
+    expect(report.uploadedValues).toBe(0);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});

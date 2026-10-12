@@ -110,6 +110,9 @@ export interface OffloadCollector {
   log?: boolean;
   /** A log record's structured body, redacted whole, whose media upload under `body#<pointer>`. */
   body?: { value: unknown };
+  /** The strings of a log record's body the queue cut when the record was admitted: never read
+   * as files, since their bytes are not the file's. */
+  bodyCut?: Set<string>;
 }
 
 export interface MediaAttachment {
@@ -886,6 +889,8 @@ export async function offloadRecord(
       return body;
     }
     const files = media.files.filter((file) => {
+      // A string the queue cut holds only the start of its file: it stays as cut.
+      if (collector.bodyCut?.has(file.content)) return false;
       const units = file.content.length;
       if (units > MAX_INLINE_FILE_TEXT || inspected + units > INLINE_FILE_TEXT_PER_RECORD)
         return false;

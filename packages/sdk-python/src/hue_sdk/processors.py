@@ -578,9 +578,10 @@ class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
             held = held_of(item)
             record = getattr(item, "log_record", None)
             trace_id = _record_trace_id(item) or ""
-            # A record lost before its copy was made still holds what log_inference staged.
+            # A record lost before its copy was made still holds what log_inference staged; a
+            # copy lists the attachments the held-value budget refused under ``cut``.
             dropped = (
-                len(held.files)
+                len(held.files) + len(held.cut)
                 if held is not None
                 else uploads.drop_log(record.body)
                 if record is not None
@@ -592,6 +593,7 @@ class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
                 held.values.clear()
                 held.body_values.clear()
                 held.files.clear()
+                held.cut.clear()
                 held.release()
         report = getattr(self._exporter, "_report_uploads", None)
         if tally.fallbacks and report is not None:
