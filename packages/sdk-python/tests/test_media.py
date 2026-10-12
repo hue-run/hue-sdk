@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+import hue_sdk.evals._media as media_module
 from hue_sdk._inline_files import content_path, media_bytes
 from hue_sdk.evals import (
     CaseFileWrite,
@@ -48,6 +49,17 @@ class Broken:
     """An answer whose connection closes after ``sent``, before the body it announced."""
 
     sent: bytes
+
+
+@dataclass(frozen=True)
+class Trickle:
+    """Bytes sent in ``pieces``, one every ``every`` seconds; with ``stall_after`` no more are
+    sent after that many."""
+
+    data: bytes
+    pieces: int
+    every: float
+    stall_after: int | None = None
 
 
 @dataclass
@@ -150,6 +162,9 @@ def hue():
             answer = state.answers.get(stored.group(1)) or {}
             if answer.get("kind") != "stored":
                 return 404, b"", {}
+            if answer.get("trickle"):
+                pieces, every, stall_after = answer["trickle"]
+                return 200, Trickle(answer["data"], pieces, every, stall_after), {}
             if answer.get("storage_redirect"):
                 location = f"{state.url}/api/v1/projects/current"
                 return answer["storage_redirect"], b"", {"Location": location}
@@ -232,6 +247,22 @@ def hue():
                 self.send_header("Content-Length", str(len(value.sent) + 64))
                 self.end_headers()
                 self.wfile.write(value.sent)
+                return
+            if isinstance(value, Trickle):
+                size = -(-len(value.data) // value.pieces)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Length", str(len(value.data)))
+                    self.end_headers()
+                    for index in range(value.pieces):
+                        if value.stall_after is not None and index >= value.stall_after:
+                            state.release.wait(5)
+                            return
+                        time.sleep(value.every)
+                        self.wfile.write(value.data[index * size : (index + 1) * size])
+                        self.wfile.flush()
+                except OSError:
+                    pass
                 return
             payload = value if isinstance(value, bytes) else json.dumps(value).encode()
             try:
@@ -402,6 +433,24 @@ def test_a_request_that_never_answers_times_out_once_more_then_fails(hue):
     timed_out = failure(lambda: client.media.fetch(trace_id=TRACE_ID, sha256=sha(PNG)))
     assert (timed_out.reason, timed_out.status) == ("failed", None)
     assert len(hue.seen) == 2
+
+
+def test_a_download_ends_when_no_byte_arrives_in_time_not_while_bytes_keep_arriving(
+    hue, monkeypatch
+):
+    monkeypatch.setattr(media_module, "_MIN_DOWNLOAD_IDLE_SECONDS", 0.4)
+    steady = bytes([7]) * 4096
+    # Two seconds in all, a piece every 200 ms: longer than the bound, never idle as long.
+    hue.answers[sha(steady)] = stored(
+        steady, "application/octet-stream", "s", trickle=(10, 0.2, None)
+    )
+    hue.answers[sha(PDF)] = stored(PDF, "application/pdf", "r.pdf", trickle=(3, 0.01, 1))
+    client = hue.client(timeout_seconds=0.1)
+    assert client.media.fetch(trace_id=TRACE_ID, sha256=sha(steady)).data == steady
+    started = time.monotonic()
+    stalled = failure(lambda: client.media.fetch(trace_id=TRACE_ID, sha256=sha(PDF)))
+    assert (stalled.reason, stalled.status) == ("failed", None)
+    assert time.monotonic() - started < 3
 
 
 def test_a_file_over_max_bytes_is_refused_before_any_byte_is_downloaded(hue):

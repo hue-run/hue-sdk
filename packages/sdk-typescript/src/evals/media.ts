@@ -202,6 +202,8 @@ const MEDIA_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9!#$&^_.+-]+$/;
 /** The default and largest `maxBytes`: Hue keeps values of up to 1 GB. */
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const MAX_BYTES = 1_000_000_000;
+/** @internal The least time a download may go without a byte before it ends: two minutes. */
+export const mediaDownload = { minIdleMillis: 120_000 };
 /** The longest `Retry-After` the one retry of an unavailable read waits. */
 const MAX_RETRY_AFTER_SECONDS = 10;
 /** Bytes of a JSON answer read: a link answer or an error body. */
@@ -540,47 +542,63 @@ export class MediaClient {
   }
 
   /** The bytes behind a link, fetched without the key, stopped one byte past the reported size
-   * and checked against the digest. */
+   * and checked against the digest. The download ends once no byte has arrived for the client's
+   * timeout, at least two minutes; a large file that keeps arriving is never cut off. */
   async #download(grant: Grant, sha256: string, signal?: AbortSignal): Promise<Uint8Array> {
-    let response: Response;
+    const idleMillis = Math.max(this.#timeoutMillis, mediaDownload.minIdleMillis);
+    const idle = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const restart = () => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => idle.abort(new DOMException("No byte arrived in time", "TimeoutError")),
+        idleMillis,
+      );
+    };
+    restart();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
-      response = await fetch(grant.url, {
-        redirect: "manual",
-        signal: AbortSignal.any([
-          AbortSignal.timeout(Math.max(this.#timeoutMillis, 120_000)),
-          ...(signal ? [signal] : []),
-        ]),
-      });
-    } catch (error) {
-      throw new MediaFetchError("failed", undefined, undefined, { cause: error });
-    }
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new MediaFetchError("failed", response.status);
-    }
-    const reader = response.body?.getReader();
-    const hash = createHash("sha256");
-    const bytes = new Uint8Array(grant.size);
-    let size = 0;
-    try {
-      if (reader)
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (size + value.byteLength > grant.size) throw new MediaFetchError("digest_mismatch");
-          bytes.set(value, size);
-          hash.update(value);
-          size += value.byteLength;
-        }
-    } catch (error) {
-      if (error instanceof MediaFetchError) throw error;
-      throw new MediaFetchError("failed", undefined, undefined, { cause: error });
+      let response: Response;
+      try {
+        response = await fetch(grant.url, {
+          redirect: "manual",
+          signal: AbortSignal.any([idle.signal, ...(signal ? [signal] : [])]),
+        });
+      } catch (error) {
+        throw new MediaFetchError("failed", undefined, undefined, { cause: error });
+      }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new MediaFetchError("failed", response.status);
+      }
+      // The answer arrived: its body has the same time again for each piece.
+      restart();
+      reader = response.body?.getReader();
+      const hash = createHash("sha256");
+      const bytes = new Uint8Array(grant.size);
+      let size = 0;
+      try {
+        if (reader)
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            restart();
+            if (size + value.byteLength > grant.size) throw new MediaFetchError("digest_mismatch");
+            bytes.set(value, size);
+            hash.update(value);
+            size += value.byteLength;
+          }
+      } catch (error) {
+        if (error instanceof MediaFetchError) throw error;
+        throw new MediaFetchError("failed", undefined, undefined, { cause: error });
+      }
+      if (size !== grant.size || hash.digest("hex") !== sha256)
+        throw new MediaFetchError("digest_mismatch");
+      return bytes;
     } finally {
+      clearTimeout(timer);
       await reader?.cancel().catch(() => undefined);
     }
-    if (size !== grant.size || hash.digest("hex") !== sha256)
-      throw new MediaFetchError("digest_mismatch");
-    return bytes;
   }
 }
 

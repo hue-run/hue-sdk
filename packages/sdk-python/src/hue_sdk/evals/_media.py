@@ -121,6 +121,8 @@ _MEDIA_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9!#$&^_.+-]
 # The default and largest ``max_bytes``: Hue keeps values of up to 1 GB.
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _MAX_BYTES = 1_000_000_000
+# The least time a download may go without a byte before it ends: two minutes.
+_MIN_DOWNLOAD_IDLE_SECONDS: float = 120
 # The longest ``Retry-After`` the one retry of an unavailable read waits.
 _MAX_RETRY_AFTER_SECONDS = 10
 # Bytes of a JSON answer read: a link answer or an error body.
@@ -400,14 +402,16 @@ class MediaClient:
 
     def _download(self, grant: _Grant, sha256: str) -> bytes:
         """The bytes behind a link, fetched without the key, stopped past the reported size and
-        checked against the digest."""
+        checked against the digest. The download ends once no byte has arrived for the client's
+        timeout, at least two minutes; a large file that keeps arriving is never cut off."""
         hasher = hashlib.sha256()
         data = bytearray()
         try:
             with requests.get(
                 grant.url,
                 auth=_no_auth,
-                timeout=max(self._timeout, 120),
+                # A read timeout bounds each wait for bytes, not the whole download.
+                timeout=max(self._timeout, _MIN_DOWNLOAD_IDLE_SECONDS),
                 allow_redirects=False,
                 stream=True,
             ) as response:

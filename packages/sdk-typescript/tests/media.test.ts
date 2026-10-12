@@ -10,6 +10,7 @@ import {
   type JsonValue,
   type LocalFile,
 } from "../src/evals.js";
+import { mediaDownload } from "../src/evals/media.js";
 import { contentPath, mediaBytes } from "../src/inline-files.js";
 
 const key = "synthetic-media-key";
@@ -35,6 +36,9 @@ type Answer =
       storageRedirect?: number;
       /** The host the link names, with the storage route's port; its own origin by default. */
       linkHost?: string;
+      /** The storage route sends the bytes in `pieces`, one every `everyMillis`; with `stallAfter`
+       * it sends no more after that many. */
+      trickle?: { pieces: number; everyMillis: number; stallAfter?: number };
     }
   | { kind: "missing" }
   /** Answers the grant with a redirect to the storage route. */
@@ -80,7 +84,24 @@ function hue(answers: Record<string, Answer>, options: { timeoutMillis?: number 
             status: answer.storageRedirect,
             headers: { location: `${url.origin}/api/v1/projects/current` },
           });
-        return new Response((answer.served ?? answer.bytes) as Uint8Array<ArrayBuffer>);
+        const served = answer.served ?? answer.bytes;
+        const trickle = answer.trickle;
+        if (trickle) {
+          const size = Math.ceil(served.byteLength / trickle.pieces);
+          let sent = 0;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              async pull(controller) {
+                if (trickle.stallAfter !== undefined && sent >= trickle.stallAfter)
+                  return new Promise<void>(() => {});
+                await Bun.sleep(trickle.everyMillis);
+                controller.enqueue(served.slice(sent * size, (sent + 1) * size));
+                if (++sent * size >= served.byteLength) controller.close();
+              },
+            }),
+          );
+        }
+        return new Response(served as Uint8Array<ArrayBuffer>);
       }
       const route =
         /^\/api\/v1\/(?:traces\/[0-9a-f-]+|trace-snapshots\/([0-9a-f-]+))\/blobs\/([0-9a-f]{64})$/.exec(
@@ -306,6 +327,36 @@ describe("client.media.fetch", () => {
     const timedOut = await failure(client.media.fetch({ traceId, sha256: sha256(png) }));
     expect([timedOut.reason, timedOut.status]).toEqual(["failed", undefined]);
     expect(seen).toHaveLength(2);
+  });
+
+  test("a download ends when no byte arrives in time, not while bytes keep arriving", async () => {
+    const minIdle = mediaDownload.minIdleMillis;
+    mediaDownload.minIdleMillis = 400;
+    try {
+      const steady = new Uint8Array(4096).fill(7);
+      const { client } = hue(
+        {
+          // Two seconds in all, a piece every 200 ms: longer than the bound, never idle as long.
+          [sha256(steady)]: {
+            ...stored(steady, "application/octet-stream", "steady.bin"),
+            trickle: { pieces: 10, everyMillis: 200 },
+          },
+          [sha256(pdf)]: {
+            ...stored(pdf, "application/pdf", "r.pdf"),
+            trickle: { pieces: 3, everyMillis: 10, stallAfter: 1 },
+          },
+        },
+        { timeoutMillis: 100 },
+      );
+      const file = await client.media.fetch({ traceId, sha256: sha256(steady) });
+      expect(file.bytes).toEqual(steady);
+      const started = performance.now();
+      const stalled = await failure(client.media.fetch({ traceId, sha256: sha256(pdf) }));
+      expect([stalled.reason, stalled.status]).toEqual(["failed", undefined]);
+      expect(performance.now() - started).toBeLessThan(3000);
+    } finally {
+      mediaDownload.minIdleMillis = minIdle;
+    }
   });
 
   test("a file over maxBytes is refused before any byte is downloaded", async () => {
