@@ -118,7 +118,7 @@ separators or control characters, and 1 byte to 25 MiB. Every file, and the case
 be sent (its revision, key, values and size), is checked before the first upload; a file outside
 that policy or a case Hue would refuse raises `ValueError` without a request. The reservation key names the version, the case's `external_key`, the role, the bytes, the
 name and the content type, so sending the same case again reuses its artifacts and a corrected name
-or type reserves a new one. The client also exposes the artifact API it uses: `reserve_artifact`,
+or type reserves a new one; a reference to the artifact a file uploads as pins it once. The client also exposes the artifact API it uses: `reserve_artifact`,
 `request_artifact_upload`, `upload_artifact_bytes`, `complete_artifact`, `get_artifact` and
 `download_artifact`.
 

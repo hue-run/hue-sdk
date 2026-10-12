@@ -201,7 +201,8 @@ def case_file_references(
     policy (role, name, one of the artifact content types, 1 byte to 25 MiB) and uploaded as a
     verified artifact. Every file is checked, and then ``before_upload`` is given the references
     with a stand-in ID for each upload, before the first upload. The reservation key names the
-    version, the case's ``external_key``, the role and the bytes.
+    version, the case's ``external_key``, the role and the bytes. Each artifact is pinned once
+    with a role, even when a reference names the artifact a file was uploaded as.
     """
     # The artifact content types, shared with managed outputs; imported here because the managed
     # module imports the evaluation package.
@@ -275,9 +276,19 @@ def case_file_references(
         )
     case_key = hashlib.sha256(str(external_key).encode()).hexdigest()[:16]
     references: list[dict[str, str]] = []
+    # A reference and an upload that settle on the same artifact are pinned once: Hue refuses an
+    # artifact pinned twice with one role.
+    pins: set[tuple[str, str]] = set()
+
+    def pin(reference: dict[str, str]) -> None:
+        identity = (reference["artifactId"].lower(), reference["role"])
+        if identity not in pins:
+            pins.add(identity)
+            references.append(reference)
+
     for item in prepared:
         if "artifactId" in item:
-            references.append(item)
+            pin(item)
             continue
         name_key = hashlib.sha256(item["filename"].encode()).hexdigest()[:16]
         type_key = hashlib.sha256(item["contentType"].encode()).hexdigest()[:16]
@@ -295,7 +306,7 @@ def case_file_references(
             label=f"Case file {item['filename']}",
             timing=timing,
         )
-        references.append({"artifactId": artifact_id, "role": item["role"]})
+        pin({"artifactId": artifact_id, "role": item["role"]})
     return references
 
 

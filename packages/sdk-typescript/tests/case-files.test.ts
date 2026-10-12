@@ -295,3 +295,27 @@ test("addCase checks the case itself before uploading any file", async () => {
     await expect(write(fields)).rejects.toBeInstanceOf(kind);
   expect(calls.requests).toEqual([]);
 });
+
+test("addCase pins an artifact once when a reference names the artifact a file uploads as", async () => {
+  const { client, versionId, calls } = receiver();
+  const upload = {
+    role: "source" as const,
+    filename: "chart.png",
+    contentType: "image/png",
+    bytes: png,
+  };
+  const write = (files: CaseFileWrite[]) =>
+    client.addCase(versionId, { expectedRevision: 1, externalKey: "chart", inputs: {}, files });
+  await write([upload]);
+  const [{ artifactId }] = calls.cases[0]!.files as { artifactId: string }[];
+  // The same artifact pinned with another role is a second pin, as Hue takes it.
+  await write([
+    { artifactId: artifactId!.toUpperCase(), role: "source" },
+    upload,
+    { artifactId: artifactId!, role: "evaluator_reference" },
+  ]);
+  expect(calls.cases[1]!.files).toEqual([
+    { artifactId, role: "source" },
+    { artifactId, role: "evaluator_reference" },
+  ]);
+});

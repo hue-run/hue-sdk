@@ -833,3 +833,30 @@ def test_add_case_checks_the_case_itself_before_uploading_any_file(hue, fields):
     with pytest.raises(ValueError):
         hue.client().add_case(str(uuid4()), **arguments)
     assert hue.seen == []
+
+
+def test_add_case_pins_an_artifact_once_when_a_reference_names_the_artifact_a_file_uploads_as(
+    hue,
+):
+    client, version_id = hue.client(), str(uuid4())
+    upload = CaseFileWrite(role="source", filename="chart.png", content_type="image/png", data=PNG)
+
+    def write(files: list[CaseFileWrite | dict[str, str]]) -> None:
+        client.add_case(
+            version_id, expected_revision=1, external_key="chart", inputs={}, files=files
+        )
+
+    write([upload])
+    artifact_id = hue.cases[0]["files"][0]["artifactId"]
+    # The same artifact pinned with another role is a second pin, as Hue takes it.
+    write(
+        [
+            {"artifactId": artifact_id.upper(), "role": "source"},
+            upload,
+            {"artifactId": artifact_id, "role": "evaluator_reference"},
+        ]
+    )
+    assert hue.cases[1]["files"] == [
+        {"artifactId": artifact_id, "role": "source"},
+        {"artifactId": artifact_id, "role": "evaluator_reference"},
+    ]

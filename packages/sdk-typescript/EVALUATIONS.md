@@ -320,7 +320,7 @@ size), is checked before the first upload; a file outside that policy or a case 
 throws `TypeError` or `RangeError` without a request. The
 reservation key names the version, the case's `externalKey`, the role, the bytes, the name and the
 content type, so sending the same case again reuses its artifacts and a corrected name or type
-reserves a new one. `source`, `attached_template`, `attached_reference` and `original` files reach
+reserves a new one; a reference to the artifact a file uploads as pins it once. `source`, `attached_template`, `attached_reference` and `original` files reach
 the target as `context.files`; `org_template` and `evaluator_reference` files reach only scorers.
 
 Recorded messages copied into a case's inputs keep their large files as digest parts. Pin each file
