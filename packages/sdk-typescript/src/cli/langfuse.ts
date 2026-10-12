@@ -13,9 +13,8 @@ import {
   BLOBS_KEY,
   MAX_BLOB_ENTRIES,
   blobEntry,
-  blobPrefix,
-  digestOf,
-  textContentType,
+  newTally,
+  offloadAttributes,
   type BlobUploader,
   type FallbackReason,
   type UploadContext,
@@ -23,13 +22,13 @@ import {
 import {
   digestPart,
   isMediaContentType,
+  mayInlineFiles,
   mediaIn,
   placedMediaText,
   readerParses,
   type InlineFilePart,
   type MediaValue,
 } from "../inline-files.js";
-import { TRUNCATED_KEY, withTruncatedKeys } from "../privacy.js";
 import { sdkVersion } from "../version.js";
 
 /**
@@ -1279,46 +1278,41 @@ export class TraceMedia {
 }
 
 /**
- * A span's text values over Hue's inline limit (1 MiB of UTF-8, the limit Hue advertises) stored
- * as the SDK's transport stores them: each uploaded whole under the span's trace, replaced by its
- * first 16 KiB, listed in `hue.blobs` under the attribute's key and in `hue.truncated`. Done
- * before export, so a value that cannot be stored now holds its span back rather than being cut,
- * and every run sends the same span. Values past the span's 64 `hue.blobs` entries are left for
- * the transport, which cuts them alike on every run. Resolves to the reason when a value could
- * not be stored.
+ * The rest of a span's content stored as the SDK's exporter stores it, but before the span is
+ * sent: files inline in the attributes Hue reads files from (a `data:` URL or base64 a provider
+ * part holds) uploaded and placed in their digest form, and text values still over Hue's inline
+ * limit (1 MiB of UTF-8, the limit Hue advertises) uploaded whole and replaced by their first
+ * 16 KiB, each listed in `hue.blobs` (and a whole value in `hue.truncated`). This is the
+ * exporter's own placement (`offloadAttributes`), run here so that a file or value that cannot be
+ * stored now holds its span back rather than being kept inline or cut, and every run sends the
+ * same span. A file or value over a limit (Hue's size limit, the span's 64 entries) is placed
+ * alike on every run and only counted. Resolves to the reason the span is held back, if it is.
  */
-export async function storeLargeValues(
+export async function storeSpanContent(
   span: ImportSpan,
   uploader: BlobUploader,
-  upload: () => UploadContext,
-): Promise<string | undefined> {
-  const listed = span.attributes[BLOBS_KEY];
-  const entries = Array.isArray(listed) ? listed.filter((item) => typeof item === "string") : [];
-  const truncated: string[] = [];
-  for (const [key, value] of Object.entries(span.attributes)) {
-    if (typeof value !== "string" || Buffer.byteLength(value, "utf8") <= MAX_CONTENT_BYTES)
-      continue;
-    if (entries.length >= MAX_BLOB_ENTRIES) break;
-    const digest = await digestOf(value);
-    const stored = await uploader.store(
-      span.traceId,
-      key,
-      value,
-      textContentType(value),
-      digest,
-      upload(),
-    );
-    if (!stored.ok)
-      return `a value over Hue's inline limit could not be stored: ${FALLBACK_REASONS[stored.reason]}`;
-    span.attributes[key] = blobPrefix(value);
-    entries.push(blobEntry(key, digest.sha256, digest.size, stored.contentType));
-    truncated.push(key);
-  }
-  if (truncated.length) {
-    span.attributes[BLOBS_KEY] = entries;
-    span.attributes[TRUNCATED_KEY] = withTruncatedKeys(span.attributes[TRUNCATED_KEY], truncated);
-  }
-  return undefined;
+  upload: UploadContext,
+): Promise<{ heldBack?: string; stored: number; overLimits: number }> {
+  const candidates = Object.entries(span.attributes).flatMap(([key, value]) =>
+    typeof value === "string" &&
+    (mayInlineFiles(key, value) || Buffer.byteLength(value, "utf8") > MAX_CONTENT_BYTES)
+      ? [{ key, value }]
+      : [],
+  );
+  if (!candidates.length) return { stored: 0, overLimits: 0 };
+  const tally = newTally();
+  const placed = await offloadAttributes(
+    span.attributes,
+    { candidates, cut: [] },
+    { uploader, traceId: span.traceId, valueBytes: MAX_CONTENT_BYTES, upload, tally },
+  );
+  for (const reason of ["unsupported", "failed"] as const)
+    if (tally.fallbacks.has(reason))
+      return { heldBack: FALLBACK_REASONS[reason], stored: 0, overLimits: 0 };
+  span.attributes = placed as Record<string, AttributeValue>;
+  let overLimits = 0;
+  for (const { count } of tally.fallbacks.values()) overLimits += count;
+  return { stored: tally.uploaded, overLimits };
 }
 
 const FALLBACK_REASONS: Record<FallbackReason, string> = {

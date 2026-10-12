@@ -19,7 +19,7 @@ import {
   placeMedia,
   readableSpan,
   spanMedia,
-  storeLargeValues,
+  storeSpanContent,
   traceContext,
   TraceMedia,
   traceSpan,
@@ -229,15 +229,22 @@ async function withEnvFile(
   return { ...parseEnv(content), ...env };
 }
 
-/** The environment with the named env file loaded, then `./.env.hue` (where `hue login` stores
- * the Hue key) when neither set `HUE_API_KEY`: the Langfuse keys can sit in a file of their own. */
+/** The environment with the named env file loaded, then, when the Hue key is needed and neither
+ * set `HUE_API_KEY`, `./.env.hue` (where `hue login` stores it): the Langfuse keys can sit in a
+ * file of their own. A dry run needs no Hue key and reads no `./.env.hue` beside a named file. */
 async function loadEnv(
   env: NodeJS.ProcessEnv,
   cwd: string,
   file: string | undefined,
+  needsHueKey: boolean,
 ): Promise<NodeJS.ProcessEnv> {
   const named = file ? await withEnvFile(env, cwd, file) : env;
-  if (named.HUE_API_KEY?.trim() || !existsSync(resolve(cwd, DEFAULT_ENV_FILE))) return named;
+  if (
+    named.HUE_API_KEY?.trim() ||
+    (file && !needsHueKey) ||
+    !existsSync(resolve(cwd, DEFAULT_ENV_FILE))
+  )
+    return named;
   return withEnvFile(named, cwd, DEFAULT_ENV_FILE);
 }
 
@@ -342,7 +349,7 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     } catch (error) {
       throw new UsageError((error as Error).message);
     }
-    const env = await loadEnv(io.env ?? process.env, cwd, envFile);
+    const env = await loadEnv(io.env ?? process.env, cwd, envFile, !values["dry-run"]);
     langfuseHost = parseLangfuseHost(
       values["langfuse-host"] ??
         (env.LANGFUSE_BASE_URL?.trim() || env.LANGFUSE_HOST?.trim() || DEFAULT_LANGFUSE),
@@ -503,6 +510,8 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       uploaded: 0,
       kept: 0,
       fileFailures: 0,
+      stored: 0,
+      overLimits: 0,
     };
     // Traces not fully imported: counted, the first few kept to list, the newest remembered so
     // Hue's export issues do not name one twice.
@@ -560,8 +569,9 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       if (report.pendingSpans >= DRAIN_SPANS || report.pendingBytes >= DRAIN_BYTES) await drain();
       progress();
     };
-    /** Places a span's media files, then stores its values over Hue's inline limit; the reason
-     * when a file or value could not be read or stored now, so the span is not sent. */
+    /** Places a span's Langfuse media files, then stores the rest of its content as the
+     * exporter would; the reason when a file or value could not be read or stored now, so the
+     * span is not sent. */
     const prepare = async (
       span: ImportSpan,
       files: TraceMedia | undefined,
@@ -569,25 +579,28 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       const found = spanMedia(span);
       const located = found.attributes.reduce((sum, item) => sum + item.uses.length, 0);
       stats.references += located + found.kept;
-      if (!files) {
-        stats.kept += located + found.kept;
-        return uploader ? storeLargeValues(span, uploader, uploadContext) : undefined;
-      }
-      const { uses, kept } = uploadableUses(found);
-      const placed = new Map<MediaUse, UploadedMedia>();
-      let left = found.kept + kept;
-      for (const use of uses) {
-        const outcome = await files.file(use);
-        if (outcome.kind === "uploaded") placed.set(use, outcome.file);
-        else if (outcome.kind === "kept") left++;
-        else {
-          stats.fileFailures++;
-          return `a media file could not be copied: ${outcome.reason}`;
+      if (files) {
+        const { uses, kept } = uploadableUses(found);
+        const placed = new Map<MediaUse, UploadedMedia>();
+        let left = found.kept + kept;
+        for (const use of uses) {
+          const outcome = await files.file(use);
+          if (outcome.kind === "uploaded") placed.set(use, outcome.file);
+          else if (outcome.kind === "kept") left++;
+          else {
+            stats.fileFailures++;
+            return `a media file could not be copied: ${outcome.reason}`;
+          }
         }
-      }
-      stats.uploaded += placeMedia(span, found, placed);
-      stats.kept += left;
-      return storeLargeValues(span, uploader!, uploadContext);
+        stats.uploaded += placeMedia(span, found, placed);
+        stats.kept += left;
+      } else stats.kept += located + found.kept;
+      if (!uploader) return undefined;
+      const content = await storeSpanContent(span, uploader, uploadContext());
+      if (content.heldBack) return `a file or value could not be stored: ${content.heldBack}`;
+      stats.stored += content.stored;
+      stats.overLimits += content.overLimits;
+      return undefined;
     };
     const importTrace = async (id: string, trace: LangfuseTrace | undefined) => {
       const context: TraceContext = trace ? traceContext(trace) : { langfuseTraceId: id };
@@ -708,6 +721,10 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     if (lost)
       warn(
         `Hue did not accept ${plural(lost, "span")} (${report.rejectedSpans} rejected, ${report.failedSpans} not delivered, ${report.droppedSpans} dropped).`,
+      );
+    if (stats.stored || stats.overLimits)
+      out(
+        `Stored apart from their spans: ${plural(stats.stored, "inline file or large value", "inline files and large values")}${stats.overLimits ? `; ${stats.overLimits} over Hue's limits kept inline or cut` : ""}.`,
       );
     if (lost && unnamedRefusals)
       warn("Some spans Hue did not accept could not be tied to a trace.");

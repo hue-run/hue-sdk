@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -350,11 +350,13 @@ async function run(
   args: string[],
   env: Record<string, string>,
   io: Partial<ImportCommandIo> = {},
-  files: Record<string, string> = {},
+  files: Record<string, string | null> = {},
 ): Promise<{ code: number; stdout: string; stderr: string; sleeps: number[] }> {
   const cwd = await mkdtemp(join(tmpdir(), "hue-import-"));
   directories.push(cwd);
-  for (const [name, content] of Object.entries(files)) await writeFile(join(cwd, name), content);
+  // A null content makes a directory, which no env file read can open.
+  for (const [name, content] of Object.entries(files))
+    await (content === null ? mkdir(join(cwd, name)) : writeFile(join(cwd, name), content));
   let stdout = "";
   let stderr = "";
   const sleeps: number[] = [];
@@ -1051,7 +1053,7 @@ describe("hue import langfuse resumes", () => {
     const args = ["langfuse", "--trace-id", "6666666666666666666666666666666b", "--yes"];
     const first = await run(args, environment(lf.url, target.url));
     expect(first.code).toBe(1);
-    expect(first.stderr).toContain("a value over Hue's inline limit could not be stored");
+    expect(first.stderr).toContain("a file or value could not be stored");
     expect(target.all()).toEqual([]);
     refuse = false;
     const second = await run(args, environment(lf.url, target.url));
@@ -1074,6 +1076,82 @@ describe("hue import langfuse resumes", () => {
     expect(
       target.store.get(`6666666666666666666666666666666b/${sha256(Buffer.from(big))}`)?.toString(),
     ).toBe(big);
+  });
+
+  test("inline files in a value over Hue's inline limit are stored before the value", async () => {
+    const png = Buffer.from("89504e470d0a1a0a-inline-image-bytes", "utf8");
+    const input = JSON.stringify([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "y".repeat(1_200_000) },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${png.toString("base64")}` },
+          },
+        ],
+      },
+    ]);
+    const traceId = "7777777777777777777777777777777c";
+    const lf = langfuse({
+      v2: [
+        {
+          id: "a7a6a5a4a3a2a1a0",
+          traceId,
+          type: "GENERATION",
+          name: "with an image",
+          startTime: "2026-03-12T00:00:00.000Z",
+          endTime: "2026-03-12T00:00:01.000Z",
+          parentObservationId: null,
+          input,
+        },
+      ],
+    });
+    const target = hue();
+    const result = await run(
+      ["langfuse", "--trace-id", traceId, "--yes"],
+      environment(lf.url, target.url),
+    );
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      "Stored apart from their spans: 2 inline files and large values.",
+    );
+    const span = target.span(traceId, "a7a6a5a4a3a2a1a0")!;
+    const entries = attr(span, "hue.blobs")!.arrayValue!.values.map(
+      (item) => JSON.parse(item.stringValue!) as { key: string; sha256: string },
+    );
+    expect(entries.map((entry) => entry.key)).toEqual([
+      "langfuse.observation.input#/0/content/1",
+      "langfuse.observation.input",
+    ]);
+    expect(entries[0]!.sha256).toBe(sha256(png));
+    expect(target.store.get(`${traceId}/${sha256(png)}`)).toEqual(png);
+    // The whole value was stored with the image in its digest form, not its base64.
+    const whole = JSON.parse(target.store.get(`${traceId}/${entries[1]!.sha256}`)!.toString());
+    expect(whole[0].content[1]).toEqual({
+      type: "image_url",
+      image_url: {},
+      sha256: sha256(png),
+      size: png.byteLength,
+    });
+    expect(str(span, "langfuse.observation.input")!.length).toBe(16 * 1024);
+  });
+
+  test("a dry run beside a Langfuse env file never reads ./.env.hue", async () => {
+    const lf = langfuse({ v2: v2Data() });
+    const result = await run(
+      ["langfuse", "--env-path", ".env.langfuse", "--trace-id", TRACE_A, "--dry-run"],
+      {},
+      {},
+      {
+        ".env.hue": null,
+        ".env.langfuse": `LANGFUSE_PUBLIC_KEY=${PUBLIC_KEY}\nLANGFUSE_SECRET_KEY=${SECRET_KEY}\nLANGFUSE_BASE_URL=${lf.url}\n`,
+      },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Dry run: 1 trace, 3 spans");
   });
 
   test("reads the Hue key from ./.env.hue beside a Langfuse env file", async () => {

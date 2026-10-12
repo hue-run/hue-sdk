@@ -391,7 +391,7 @@ never taken from it, where other local processes and shell history can read it. 
 use your region's host or your self-hosted URL, over HTTPS (plain HTTP only on this machine). A
 request carrying the keys follows no redirect. `HUE_API_KEY` is the Hue project key the spans are
 sent with, from the environment, the env file, or `./.env.hue` (where `hue login` stores it) when
-neither sets it; `--origin` (default `HUE_BASE_URL`, then `https://app.hue.run`) is checked with
+neither sets it (a dry run, which needs no Hue key, reads no `./.env.hue` beside a named file); `--origin` (default `HUE_BASE_URL`, then `https://app.hue.run`) is checked with
 `GET /api/v1/projects/current` before Langfuse is read. Keys are never printed.
 
 **What is read.** The command first asks for `GET /api/public/v2/observations`, which Langfuse Cloud
@@ -437,19 +437,22 @@ failed import is resumed by running it again. Hue refuses a different payload fo
 holds: keep `--media`, `--no-content` and `--service-name` the same when resuming, and expect a span
 whose Langfuse data changed after it was imported to be refused. For the same reason the import
 sends nothing that depends on the run: a trace's root never carries `hue.sdk.dropped_records`, and
-values and files are stored before their span is sent. Leave out of the window any traces that
+files and large values are stored before their span is sent. Leave out of the window any traces that
 already reached Hue through OpenTelemetry.
 
 **Export and content.** Spans go through the SDK's own exporter, as `createHue` sends them: batched,
-compressed, retried, within the limits Hue advertises, with inline media (such as a `data:` URL
-Langfuse kept in place) uploaded as the SDK uploads what it records. A text value over Hue's inline
-limit (1 MiB) is stored as the exporter stores one, uploaded whole and replaced by its first 16 KiB,
-listed in `hue.blobs` under the attribute's name and in `hue.truncated`, but before its span is
-sent: a value that cannot be stored right now holds its span back for the next run instead of being
-cut. Content is captured, the SDK's default; `--no-content` sends metadata only, as
-`captureContent: false` does (no inputs, outputs, status messages or model parameters; metadata,
-model names and usage stay, and nothing is uploaded). The import waits for its queue to be sent
-every 1,024 spans or 32 MiB, so its memory stays bounded whatever the project's size.
+compressed, retried and within the limits Hue advertises. Before a span is sent, its content is
+stored as that exporter stores it, with the exporter's own placement: a file inline in an attribute
+Hue reads files from (a `data:` URL, or the bytes of a provider part, that Langfuse kept in place) is
+uploaded and placed in its digest form, and a text value still over Hue's inline limit (1 MiB) is
+uploaded whole and replaced by its first 16 KiB, each listed in `hue.blobs` (a whole value also in
+`hue.truncated`). Doing this first means a file or value that cannot be stored right now holds its
+span back for the next run instead of being kept inline or cut; one over a limit (Hue's size limit,
+or a span's 64 entries) is placed the same way on every run and counted in the summary. Content is
+captured, the SDK's default; `--no-content` sends metadata only, as `captureContent: false` does (no
+inputs, outputs, status messages or model parameters; metadata, model names and usage stay, and
+nothing is uploaded). The import waits for its queue to be sent every 1,024 spans or 32 MiB, so its
+memory stays bounded whatever the project's size.
 
 **Media.** Langfuse's SDKs replace a file in an input, output or metadata value with a reference,
 `@@@langfuseMedia:type=<media type>|id=<id>|source=<source>@@@`. Without `--media`, references are
