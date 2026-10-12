@@ -269,7 +269,11 @@ def hue():
             try:
                 self.send_response(status)
                 for name, header in headers.items():
-                    self.send_header(name, header)
+                    # Test data only; a line break would split the response.
+                    self.send_header(
+                        name.replace("\r", "").replace("\n", ""),
+                        str(header).replace("\r", "").replace("\n", ""),
+                    )
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
