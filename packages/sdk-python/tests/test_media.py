@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 
+from hue_sdk._inline_files import content_path, media_bytes
 from hue_sdk.evals import (
     CaseFileWrite,
     EvaluationClient,
@@ -539,6 +540,71 @@ def test_rehydrate_media_writes_a_cases_local_files_back_into_its_inputs(tmp_pat
         "file_data": f"data:application/pdf;base64,{b64(PDF)}",
     }
     assert content[3] == before["messages"][0]["content"][3]
+
+
+HELLO = b"hello"
+LATIN1 = bytes([0x63, 0x61, 0x66, 0xE9])
+LOOKS_LIKE_URL = b"data:,not a url"
+MARKDOWN = "\ufeff# Notes\n".encode()
+
+
+@dataclass(frozen=True)
+class _Bytes:
+    sha256: str
+    content_type: str
+    data: bytes
+
+
+TEXT_FILES = [
+    _Bytes(sha(HELLO), "text/plain", HELLO),
+    _Bytes(sha(LATIN1), "text/csv", LATIN1),
+    _Bytes(sha(LOOKS_LIKE_URL), "text/plain", LOOKS_LIKE_URL),
+    _Bytes(sha(MARKDOWN), "text/markdown", MARKDOWN),
+    _Bytes(sha(PDF), "application/pdf", PDF),
+]
+
+
+def text_parts() -> list[dict[str, Any]]:
+    def blob(data: bytes, mime: str, kind: str = "blob") -> dict[str, Any]:
+        return {"type": kind, "mime_type": mime, "sha256": sha(data), "size": len(data)}
+
+    return [
+        blob(HELLO, "text/plain"),
+        blob(LATIN1, "text/csv"),
+        blob(LOOKS_LIKE_URL, "text/plain"),
+        blob(MARKDOWN, "text/markdown", "media"),
+        blob(PDF, "application/pdf"),
+    ]
+
+
+def assert_written_back(value: list[dict[str, Any]]) -> None:
+    # Text is written as its UTF-8, a byte order mark included; bytes that are no UTF-8, or text
+    # that would read as a data: URL, as a typed data: URL; binary media as base64.
+    assert [part.get("content", part.get("data")) for part in value] == [
+        "hello",
+        f"data:text/csv;base64,{b64(LATIN1)}",
+        f"data:text/plain;base64,{b64(LOOKS_LIKE_URL)}",
+        "\ufeff# Notes\n",
+        b64(PDF),
+    ]
+    # Recorded again, every part reads as the same bytes.
+    for part, file in zip(value, TEXT_FILES, strict=True):
+        assert sha(media_bytes(content_path(part)).data) == file.sha256
+
+
+def test_rehydrate_media_writes_textual_blobs_as_the_text_hue_reads_them_as():
+    resolved = rehydrate_media(text_parts(), TEXT_FILES)
+    assert resolved.resolved == 5
+    assert_written_back(resolved.value)
+
+
+def test_resolve_writes_textual_blobs_as_the_text_hue_reads_them_as(hue):
+    hue.answers.update(
+        {file.sha256: stored(file.data, file.content_type, "file") for file in TEXT_FILES}
+    )
+    resolved = hue.client().media.resolve(text_parts(), trace_id=TRACE_ID)
+    assert resolved.resolved == 5
+    assert_written_back(resolved.value)
 
 
 CSV = b"question,answer\nsynthetic,yes\n"

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isLoopbackHost } from "../config.js";
+import { isMediaContentType, isTextMediaType } from "../inline-files.js";
 import { uuid } from "./json.js";
 
 /**
@@ -611,6 +612,9 @@ interface Slot {
   key: string;
   encoding: "base64" | "dataUrl";
   mediaType?: string;
+  /** Set for a field read as raw UTF-8 text when its part declares a textual media type (a GenAI
+   * `blob`'s `content`, a Vertex `media`'s `data`), as Hue and the SDK's capture read it. */
+  text?: boolean;
 }
 interface DigestPart {
   pointer: string;
@@ -679,7 +683,13 @@ function slotOf(part: Plain): Slot | undefined {
   const reference = typeof part.file_id === "string";
   switch (type) {
     case "blob":
-      return { owner: [], key: "content", encoding: "base64", mediaType: declaredType(part) };
+      return {
+        owner: [],
+        key: "content",
+        encoding: "base64",
+        mediaType: declaredType(part),
+        text: true,
+      };
     case "file": {
       const file = plain(part.file);
       if (file)
@@ -741,7 +751,13 @@ function slotOf(part: Plain): Slot | undefined {
         ? undefined
         : { owner: [], key: "file_data", encoding: "dataUrl", mediaType: declaredType(part) };
     case "media":
-      return { owner: [], key: "data", encoding: "base64", mediaType: declaredType(part) };
+      return {
+        owner: [],
+        key: "data",
+        encoding: "base64",
+        mediaType: declaredType(part),
+        text: true,
+      };
     case undefined: {
       for (const key of ["inlineData", "inline_data"]) {
         const data = plain(part[key]);
@@ -830,6 +846,32 @@ function dataUrlType(slot: Slot, file: MediaFile): string {
   return "application/octet-stream";
 }
 
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/**
+ * A file's bytes as a slot's convention spells them. A field read as raw text when its part
+ * declares a textual media type receives the bytes' UTF-8 text, so recording the value again
+ * keeps the same bytes; bytes that are no UTF-8, or text that would read as a `data:` URL, take a
+ * typed `data:` URL instead, which the field also reads. Other fields take bare base64 or a
+ * `data:` URL as their convention requires.
+ */
+function spelled(slot: Slot, file: MediaFile): string {
+  const base64 = () => Buffer.from(file.bytes).toString("base64");
+  const dataUrl = () => `data:${dataUrlType(slot, file)};base64,${base64()}`;
+  if (slot.encoding === "dataUrl") return dataUrl();
+  const declared = slot.mediaType;
+  if (slot.text && isMediaContentType(declared) && isTextMediaType(declared)) {
+    let text: string | undefined;
+    try {
+      text = utf8.decode(file.bytes);
+    } catch {
+      text = undefined;
+    }
+    return text !== undefined && !text.startsWith("data:") ? text : dataUrl();
+  }
+  return base64();
+}
+
 /** A copy of `value` with each digest part whose file was read holding its bytes. */
 function writeBack<T>(
   value: T,
@@ -857,13 +899,7 @@ function writeBack<T>(
       // The owners along the slot are this copy's own objects: the walk copied every plain one.
       let owner = copy;
       for (const segment of part.slot.owner) owner = owner[segment] as Plain;
-      const base64 = () => Buffer.from(file.bytes).toString("base64");
-      owner[part.slot.key] =
-        as === "bytes"
-          ? file.bytes
-          : part.slot.encoding === "base64"
-            ? base64()
-            : `data:${dataUrlType(part.slot, file)};base64,${base64()}`;
+      owner[part.slot.key] = as === "bytes" ? file.bytes : spelled(part.slot, file);
       delete copy.sha256;
       delete copy.size;
       resolved++;

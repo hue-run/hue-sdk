@@ -24,6 +24,8 @@ from urllib.parse import urlsplit
 
 import requests
 
+from .._inline_files import is_media_content_type, is_text_media_type
+
 MediaFetchErrorReason = Literal[
     "not_found", "missing", "unavailable", "forbidden", "too_large", "digest_mismatch", "failed"
 ]
@@ -485,6 +487,9 @@ class _Slot:
     key: str
     encoding: Literal["base64", "data_url"]
     media_type: str | None
+    # Set for a field read as raw UTF-8 text when its part declares a textual media type (a GenAI
+    # ``blob``'s ``content``, a Vertex ``media``'s ``data``), as Hue and the SDK's capture read it.
+    text: bool = False
 
 
 @dataclass(frozen=True)
@@ -556,7 +561,7 @@ def _slot(part: dict[str, Any]) -> _Slot | None:
     reference = isinstance(part.get("file_id"), str)
     declared = _declared(part)
     if kind == "blob":
-        return _Slot((), "content", "base64", declared)
+        return _Slot((), "content", "base64", declared, text=True)
     if kind == "file":
         nested = part.get("file")
         if isinstance(nested, dict):
@@ -587,7 +592,7 @@ def _slot(part: dict[str, Any]) -> _Slot | None:
             return None
         return _Slot((), "file_data", "data_url", declared)
     if kind == "media":
-        return _Slot((), "data", "base64", declared)
+        return _Slot((), "data", "base64", declared, text=True)
     if kind is None:
         for key in ("inlineData", "inline_data"):
             data = part.get(key)
@@ -664,6 +669,26 @@ def _data_url_type(slot: _Slot, file: MediaFile) -> str:
     return "application/octet-stream"
 
 
+def _spelled(slot: _Slot, file: MediaFile) -> str:
+    """A file's bytes as a slot's convention spells them. A field read as raw text when its part
+    declares a textual media type receives the bytes' UTF-8 text, so recording the value again
+    keeps the same bytes; bytes that are no UTF-8, or text that would read as a ``data:`` URL,
+    take a typed ``data:`` URL instead, which the field also reads. Other fields take bare base64
+    or a ``data:`` URL as their convention requires."""
+    encoded = base64.b64encode(file.data).decode("ascii")
+    data_url = f"data:{_data_url_type(slot, file)};base64,{encoded}"
+    if slot.encoding == "data_url":
+        return data_url
+    declared = slot.media_type
+    if slot.text and is_media_content_type(declared) and is_text_media_type(declared or ""):
+        try:
+            text = file.data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data_url
+        return data_url if text.startswith("data:") else text
+    return encoded
+
+
 def _write_back(
     value: Any,
     parts: dict[int, _DigestPart],
@@ -696,15 +721,7 @@ def _write_back(
             owner = copy
             for segment in part.slot.owner:
                 owner = owner[segment]
-            if mode == "bytes":
-                owner[part.slot.key] = file.data
-            else:
-                encoded = base64.b64encode(file.data).decode("ascii")
-                owner[part.slot.key] = (
-                    encoded
-                    if part.slot.encoding == "base64"
-                    else f"data:{_data_url_type(part.slot, file)};base64,{encoded}"
-                )
+            owner[part.slot.key] = file.data if mode == "bytes" else _spelled(part.slot, file)
             copy.pop("sha256", None)
             copy.pop("size", None)
             resolved += 1

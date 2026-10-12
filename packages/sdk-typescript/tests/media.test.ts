@@ -10,6 +10,7 @@ import {
   type JsonValue,
   type LocalFile,
 } from "../src/evals.js";
+import { contentPath, mediaBytes } from "../src/inline-files.js";
 
 const key = "synthetic-media-key";
 const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -431,5 +432,72 @@ describe("rehydrateMedia", () => {
     expect(content[3]).toEqual(
       (before as typeof inputs & { messages: { content: JsonValue[] }[] }).messages[0]!.content[3]!,
     );
+  });
+});
+
+describe("textual media written back", () => {
+  const hello = new TextEncoder().encode("hello");
+  const latin1 = new Uint8Array([0x63, 0x61, 0x66, 0xe9]);
+  const looksLikeUrl = new TextEncoder().encode("data:,not a url");
+  const markdown = new TextEncoder().encode("\ufeff# Notes\n");
+  /** The bytes the SDK's capture, as Hue, reads from a part as it is written back. */
+  const reread = (part: JsonValue) =>
+    mediaBytes(contentPath(part as Record<string, unknown>)!).bytes;
+  const parts = (): JsonValue[] => [
+    { type: "blob", mime_type: "text/plain", modality: "document", sha256: sha256(hello), size: 5 },
+    { type: "blob", mime_type: "text/csv", modality: "document", sha256: sha256(latin1), size: 4 },
+    {
+      type: "blob",
+      mime_type: "text/plain",
+      modality: "document",
+      sha256: sha256(looksLikeUrl),
+      size: looksLikeUrl.byteLength,
+    },
+    {
+      type: "media",
+      mime_type: "text/markdown",
+      sha256: sha256(markdown),
+      size: markdown.byteLength,
+    },
+    { type: "blob", mime_type: "application/pdf", sha256: sha256(pdf), size: pdf.byteLength },
+  ];
+  const files = [
+    { sha256: sha256(hello), contentType: "text/plain", bytes: hello },
+    { sha256: sha256(latin1), contentType: "text/csv", bytes: latin1 },
+    { sha256: sha256(looksLikeUrl), contentType: "text/plain", bytes: looksLikeUrl },
+    { sha256: sha256(markdown), contentType: "text/markdown", bytes: markdown },
+    { sha256: sha256(pdf), contentType: "application/pdf", bytes: pdf },
+  ];
+  const expectWrittenBack = (value: JsonValue) => {
+    const written = value as Record<string, unknown>[];
+    // Text is written as its UTF-8, a byte order mark included; bytes that are no UTF-8, or text
+    // that would read as a data: URL, as a typed data: URL; binary media as base64.
+    expect(written.map((part) => part.content ?? part.data)).toEqual([
+      "hello",
+      `data:text/csv;base64,${base64(latin1)}`,
+      `data:text/plain;base64,${base64(looksLikeUrl)}`,
+      "\ufeff# Notes\n",
+      base64(pdf),
+    ]);
+    // Recorded again, every part reads as the same bytes.
+    for (const [index, part] of written.entries())
+      expect(sha256(reread(part as JsonValue))).toBe(files[index]!.sha256);
+  };
+
+  test("rehydrateMedia writes textual blobs as the text Hue reads them as", async () => {
+    const { value, resolved } = await rehydrateMedia(parts(), files);
+    expect(resolved).toBe(5);
+    expectWrittenBack(value);
+  });
+
+  test("client.media.resolve writes textual blobs as the text Hue reads them as", async () => {
+    const { client } = hue(
+      Object.fromEntries(
+        files.map((file) => [file.sha256, stored(file.bytes, file.contentType, "file")]),
+      ),
+    );
+    const { value, resolved } = await client.media.resolve(parts(), { traceId });
+    expect(resolved).toBe(5);
+    expectWrittenBack(value);
   });
 });

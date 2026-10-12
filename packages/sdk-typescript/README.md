@@ -419,15 +419,18 @@ answer, retried once). `{ snapshotId, sha256 }` reads a trace snapshot's pinned 
 
 `resolve` downloads each distinct digest once, four at a time (`concurrency`, up to 16), and returns
 a new value; the input is not changed. With `as: "dataUrl"` (the default) each part receives a
-`data:` URL where its field takes one (OpenAI `image_url` and `file_data`, Responses
-`input_image`, `input_file` and `computer_screenshot`, AI SDK `image` and `file`) and bare base64
-where its convention requires it (GenAI `blob`, OpenAI `input_audio` and assistant `audio`,
-Anthropic `source.data`, Gemini `inlineData`, Vertex `media`, Bedrock `source.bytes`), so the
-messages can be sent to the provider again; `as: "bytes"` writes a `Uint8Array`. A resolved part
-no longer carries `sha256` and `size`. A part whose file cannot be read stays as it is and is
-listed in `failures` with its JSON pointer and reason. Parts inside JSON-encoded strings, such as
-tool-call arguments, and Langfuse media tokens, which name files Langfuse holds, are left as they
-are; `fetch` reads the former by the digest the part carries.
+`data:` URL where its field takes one (OpenAI `image_url` and `file_data`, Responses `input_image`,
+`input_file` and `computer_screenshot`, AI SDK `image` and `file`) and bare base64 where its
+convention requires it (GenAI `blob`, OpenAI `input_audio` and assistant `audio`, Anthropic
+`source.data`, Gemini `inlineData`, Vertex `media`, Bedrock `source.bytes`), so the messages can be
+sent to the provider again. A GenAI `blob` or Vertex `media` part that declares a textual media type
+(`text/*`, JSON, XML, YAML and the like) receives the file's UTF-8 text, as Hue reads that field, or
+a typed `data:` URL when the bytes are no UTF-8, so recording the value again keeps the same bytes;
+`as: "bytes"` writes a `Uint8Array`. A resolved part no longer carries `sha256` and `size`. A part
+whose file cannot be read stays as it is and is listed in `failures` with its JSON pointer and
+reason. Parts inside JSON-encoded strings, such as tool-call arguments, and Langfuse media tokens,
+which name files Langfuse holds, are left as they are; `fetch` reads the former by the digest the
+part carries.
 
 ### Files in evaluation cases
 
