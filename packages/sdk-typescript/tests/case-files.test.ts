@@ -30,9 +30,21 @@ interface Artifact {
 }
 
 const servers: { stop(force?: boolean): unknown }[] = [];
-afterEach(() => {
+/** Directories a test wrote files to, removed once it ends, whether or not it passed. */
+const directories: string[] = [];
+afterEach(async () => {
   for (const server of servers.splice(0)) void server.stop(true);
+  await Promise.all(
+    directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
+  );
 });
+
+/** A new directory for a test's files, removed after the test. */
+async function testDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "hue-case-files-"));
+  directories.push(directory);
+  return directory;
+}
 
 /** A synthetic Hue; `onReserve` runs when a file's artifact is reserved, before its upload. */
 function receiver(onReserve?: (declared: Record<string, unknown>) => Promise<void> | void) {
@@ -155,7 +167,7 @@ function receiver(onReserve?: (declared: Record<string, unknown>) => Promise<voi
 
 test("addCase uploads files given as bytes or a path and pins every file by artifact and role", async () => {
   const { client, versionId, artifacts, calls } = receiver();
-  const directory = await mkdtemp(join(tmpdir(), "hue-case-files-"));
+  const directory = await testDirectory();
   const path = join(directory, "answers.csv");
   await writeFile(path, csv);
   const existing = randomUUID();
@@ -361,7 +373,7 @@ test("addCase reuses a file's artifact whatever the case of the version ID", asy
 
 test("addCase hashes and uploads a file given by path at most 1 MiB at a time", async () => {
   const { client, versionId, artifacts, calls } = receiver();
-  const directory = await mkdtemp(join(tmpdir(), "hue-case-files-"));
+  const directory = await testDirectory();
   // Each file spans several slices and ends partway through one.
   const contents = [0, 1, 2].map((index) => randomBytes(3 * 1024 * 1024 + 7 + index));
   const paths = contents.map((_, index) => join(directory, `${index}.pdf`));
@@ -402,7 +414,7 @@ test("addCase hashes and uploads a file given by path at most 1 MiB at a time", 
 });
 
 test("addCase refuses a file given by path that changed after it was checked, without staging it", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hue-case-files-"));
+  const directory = await testDirectory();
   const path = join(directory, "report.pdf");
   // Past two slices: the slices before the last are sent before the change is found.
   const original = randomBytes(2.5 * 1024 * 1024);
