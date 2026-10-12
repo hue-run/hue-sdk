@@ -639,7 +639,9 @@ export async function caseFileReferences(
     const artifactId = await publishArtifact(
       client,
       {
-        idempotencyKey: `hue-sdk:case:${versionId}:${caseKey}:${item.role}:${item.sha256}:${sha256(Buffer.from(item.filename)).slice(0, 16)}`,
+        // The key names everything the reservation declares, so a corrected name or type reserves
+        // a new artifact instead of colliding with the earlier one.
+        idempotencyKey: `hue-sdk:case:${versionId}:${caseKey}:${item.role}:${item.sha256}:${sha256(Buffer.from(item.filename)).slice(0, 16)}:${sha256(Buffer.from(item.contentType)).slice(0, 16)}`,
         filename: item.filename,
         contentType: item.contentType,
         byteSize: item.bytes.byteLength,

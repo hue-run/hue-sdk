@@ -316,10 +316,10 @@ await client.addEvalSetCase(versionId, {
 An uploaded file needs one of `outputContentTypes`, a name of 1–255 characters without path
 separators or control characters, and 1 byte to 25 MiB. Every file is checked before the first
 upload; one outside that policy throws `TypeError` or `RangeError` without a request. The
-reservation key names the version, the case's `externalKey`, the role and the bytes, so sending the
-same case again reuses its artifacts. `source`, `attached_template`, `attached_reference` and
-`original` files reach the target as `context.files`; `org_template` and `evaluator_reference`
-files reach only scorers.
+reservation key names the version, the case's `externalKey`, the role, the bytes, the name and the
+content type, so sending the same case again reuses its artifacts and a corrected name or type
+reserves a new one. `source`, `attached_template`, `attached_reference` and `original` files reach
+the target as `context.files`; `org_template` and `evaluator_reference` files reach only scorers.
 
 Recorded messages copied into a case's inputs keep their large files as digest parts. Pin each file
 to the case, and the target can send the recorded model call again with the real image, document

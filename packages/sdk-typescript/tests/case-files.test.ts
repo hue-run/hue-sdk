@@ -70,6 +70,18 @@ function receiver() {
       if (path === "/artifacts") {
         calls.reserves.push(body);
         let id = reservations.get(String(body.idempotencyKey));
+        // As Hue does, a key already naming an artifact with other declarations is refused.
+        const named = id ? artifacts.get(id)! : undefined;
+        if (
+          named &&
+          (named.filename !== body.filename ||
+            named.contentType !== body.contentType ||
+            named.sha256 !== body.sha256)
+        )
+          return Response.json(
+            { error: "Idempotency key already identifies a different artifact" },
+            { status: 409 },
+          );
         if (!id) {
           id = randomUUID();
           reservations.set(String(body.idempotencyKey), id);
@@ -172,6 +184,28 @@ test("addCase uploads files given as bytes or a path and pins every file by arti
   expect(calls.puts).toBe(2);
   expect(artifacts.size).toBe(2);
   expect(calls.cases[1]).toEqual(calls.cases[0]!);
+});
+
+test("addCase with a corrected content type reserves a new artifact for it", async () => {
+  const { client, versionId, artifacts, calls } = receiver();
+  const write = (contentType: "text/plain" | "text/csv") =>
+    client.addCase(versionId, {
+      expectedRevision: 1,
+      externalKey: "answers",
+      inputs: {},
+      files: [{ role: "evaluator_reference", filename: "answers.csv", contentType, bytes: csv }],
+    });
+  await write("text/plain");
+  await write("text/csv");
+  const keys = calls.reserves.map((reserve) => String(reserve.idempotencyKey));
+  expect(new Set(keys).size).toBe(2);
+  expect(keys.every((item) => item.length <= 200)).toBe(true);
+  expect([...artifacts.values()].map((item) => [item.contentType, item.state])).toEqual([
+    ["text/plain", "ready"],
+    ["text/csv", "ready"],
+  ]);
+  const pinned = (calls.cases[1]!.files as { artifactId: string }[])[0]!.artifactId;
+  expect(artifacts.get(pinned)!.contentType).toBe("text/csv");
 });
 
 test("addCase refuses files outside the artifact policy before any request", async () => {

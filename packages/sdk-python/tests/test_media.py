@@ -140,6 +140,12 @@ def hue():
         body = json.loads(raw) if raw else {}
         if path == "/api/v1/artifacts" and method == "POST":
             identifier = state.reservations.get(body["idempotencyKey"])
+            # As Hue does, a key already naming an artifact with other declarations is refused.
+            named = state.artifacts.get(identifier) if identifier is not None else None
+            if named is not None and any(
+                named[key] != body[key] for key in ("filename", "contentType", "sha256")
+            ):
+                return 409, {"error": "Idempotency key already identifies a different artifact"}, {}
             if identifier is None:
                 identifier = state.reservations[body["idempotencyKey"]] = str(uuid4())
                 state.artifacts[identifier] = {
@@ -653,6 +659,38 @@ def test_add_case_uploads_files_given_as_data_or_a_path_and_pins_every_file(hue,
     write()
     assert hue.puts == 2 and len(hue.artifacts) == 2
     assert hue.cases[1] == hue.cases[0]
+
+
+def test_add_case_with_a_corrected_content_type_reserves_a_new_artifact_for_it(hue):
+    client = hue.client()
+    version_id = str(uuid4())
+
+    def write(content_type: str) -> None:
+        client.add_case(
+            version_id,
+            expected_revision=1,
+            external_key="answers",
+            inputs={},
+            files=[
+                CaseFileWrite(
+                    role="evaluator_reference",
+                    filename="answers.csv",
+                    content_type=content_type,
+                    data=CSV,
+                )
+            ],
+        )
+
+    write("text/plain")
+    write("text/csv")
+    assert len(hue.reservations) == 2
+    assert all(len(key) <= 200 for key in hue.reservations)
+    assert [(a["contentType"], a["state"]) for a in hue.artifacts.values()] == [
+        ("text/plain", "ready"),
+        ("text/csv", "ready"),
+    ]
+    pinned = hue.cases[1]["files"][0]["artifactId"]
+    assert hue.artifacts[pinned]["contentType"] == "text/csv"
 
 
 @pytest.mark.parametrize(

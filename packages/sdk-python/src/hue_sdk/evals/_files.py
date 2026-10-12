@@ -261,10 +261,14 @@ def case_file_references(
             references.append(item)
             continue
         name_key = hashlib.sha256(item["filename"].encode()).hexdigest()[:16]
+        type_key = hashlib.sha256(item["contentType"].encode()).hexdigest()[:16]
         artifact_id = publish_artifact(
             client,
+            # The key names everything the reservation declares, so a corrected name or type
+            # reserves a new artifact instead of colliding with the earlier one.
             idempotency_key=(
-                f"hue-sdk:case:{version_id}:{case_key}:{item['role']}:{item['sha256']}:{name_key}"
+                f"hue-sdk:case:{version_id}:{case_key}:{item['role']}:{item['sha256']}"
+                f":{name_key}:{type_key}"
             ),
             filename=item["filename"],
             content_type=item["contentType"],
