@@ -984,7 +984,7 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("nested legacy: a 5 MiB event inline file exports as its digest alongside span-own media", async () => {
+  test("a 5 MiB inline file exports as its digest within the default queue budget", async () => {
     // Both paths digest large inline media before the ordinary value cap can cut the JSON.
     const endpoint = receiver();
     const hue = createHue({

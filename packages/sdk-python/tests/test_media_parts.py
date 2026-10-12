@@ -1438,6 +1438,39 @@ def test_inspection_allowance_from_unheld_value_limits_export_eligibility(hue_st
     )
 
 
+def test_large_nested_media_exports_as_its_digest(hue_store):
+    """As in 0.9: a 100 KiB image in an event, link, log record or resource exports as its
+    digest instead of 136 KB of base64, and never uploads. The span's own copy uploads."""
+    data = bytes(index * 7 % 256 for index in range(100 * 1024))
+    message = message_with_image(data)
+    context = SpanContext(1, 2, False, TraceFlags(TraceFlags.SAMPLED))
+    with client(hue_store) as hue:
+        with hue.span("large nested") as span:
+            span.set_attribute(ATTRIBUTE, message)
+            span.otel_span.add_event("provider.event", {ATTRIBUTE: message})
+            span.otel_span.add_link(context, {ATTRIBUTE: message})
+            hue._logger.emit(body="large nested", attributes={ATTRIBUTE: message})
+        assert hue.force_flush()
+    record = hue_store.span("large nested")
+    (log,) = [log for log in hue_store.logs if log.body.string_value == "large nested"]
+    for copied in (record, record.events[0], record.links[0], log):
+        assert_image_digest(attrs(copied)[ATTRIBUTE].string_value, data)
+    assert blobs(record) == [
+        {
+            "key": f"{ATTRIBUTE}#/0/parts/1",
+            "sha256": sha256(data),
+            "size": len(data),
+            "content_type": "image/png",
+        }
+    ]
+    assert listed(record) == [] and entries(log) == []
+    assert [request["key"] for request in hue_store.reservations] == [f"{ATTRIBUTE}#/0/parts/1"]
+    resource = snapshot_span(
+        external_span(resource=Resource({ATTRIBUTE: message})), value_bytes=64 * 1024
+    ).resource
+    assert_image_digest(resource.attributes[ATTRIBUTE], data)
+
+
 def test_requested_uploads_of_spans_dropped_at_the_queue_are_counted(hue_store):
     # The first span's export is held, so the one-record queue is full while six more end.
     hue_store.release_traces.clear()
