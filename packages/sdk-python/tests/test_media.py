@@ -801,3 +801,35 @@ def test_add_case_counts_a_file_name_in_utf16_code_units_as_hue_does_before_any_
     longest = "\U0001f600" * 127 + "x"
     write(longest)
     assert [artifact["filename"] for artifact in hue.artifacts.values()] == ["chart.png", longest]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"inputs": {"x": float("nan")}},
+        {"inputs": {"when": object()}},
+        {"expected": {"x": float("inf")}},
+        {"inputs": "x" * 200_000},
+        {"metadata": ["not", "a", "dict"]},
+        {"external_key": ""},
+        {"external_key": "k" * 201},
+        {"external_key": "key\ud800"},
+        {"expected_revision": 0},
+        {"expected_revision": True},
+        # Each value fits on its own, but the case as sent has more than 20,000 JSON values.
+        {"inputs": [1] * 10_500, "expected": [1] * 10_500},
+    ],
+)
+def test_add_case_checks_the_case_itself_before_uploading_any_file(hue, fields):
+    arguments: dict[str, Any] = {
+        "expected_revision": 1,
+        "external_key": "checked",
+        "inputs": {},
+        "files": [
+            CaseFileWrite(role="source", filename="chart.png", content_type="image/png", data=PNG)
+        ],
+        **fields,
+    }
+    with pytest.raises(ValueError):
+        hue.client().add_case(str(uuid4()), **arguments)
+    assert hue.seen == []

@@ -8,7 +8,7 @@ import os
 import shutil
 import stat
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
@@ -182,19 +182,26 @@ def _case_file_bytes(path: object, label: str) -> bytes:
     return file.read_bytes()
 
 
+# A stand-in for an artifact a case file is uploaded as, the length of a real ID.
+_STAND_IN_ID = "00000000-0000-4000-8000-000000000000"
+
+
 def case_file_references(
     client: EvaluationClient,
     version_id: str,
     external_key: object,
     files: Sequence[CaseFileWrite | Mapping[str, Any]],
     timing: _Settling = ARTIFACT_SETTLING,
+    *,
+    before_upload: Callable[[list[dict[str, str]]], object] | None = None,
 ) -> list[dict[str, str]]:
     """The ``files`` of a case write as the case API takes them.
 
     References are kept; each file given as data or a path is checked against the artifact
     policy (role, name, one of the artifact content types, 1 byte to 25 MiB) and uploaded as a
-    verified artifact. Every file is checked before the first upload. The reservation key names
-    the version, the case's ``external_key``, the role and the bytes.
+    verified artifact. Every file is checked, and then ``before_upload`` is given the references
+    with a stand-in ID for each upload, before the first upload. The reservation key names the
+    version, the case's ``external_key``, the role and the bytes.
     """
     # The artifact content types, shared with managed outputs; imported here because the managed
     # module imports the evaluation package.
@@ -259,6 +266,13 @@ def case_file_references(
         if pinned in seen:
             raise ValueError(f"{label} is pinned twice with the role {file.role}.")
         seen.add(pinned)
+    if before_upload is not None:
+        before_upload(
+            [
+                item if "artifactId" in item else {"artifactId": _STAND_IN_ID, "role": item["role"]}
+                for item in prepared
+            ]
+        )
     case_key = hashlib.sha256(str(external_key).encode()).hexdigest()[:16]
     references: list[dict[str, str]] = []
     for item in prepared:

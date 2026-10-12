@@ -230,6 +230,48 @@ function productRunFields<T>(value: unknown, kind: "run" | "scoring" | "result")
     result.scoring = result.evaluation;
   return result as T;
 }
+/** The bounds of a request body as a whole: 1 MiB, with each value's node and depth bounds. */
+const REQUEST_BOUNDS = { ...valueBounds, bytes: 1024 * 1024 };
+/** A request body as it is sent: checked as JSON within `bounds`. Optional top-level fields are
+ * omitted intentionally; nested undefined remains invalid. */
+function payloadOf(body: object, bounds: typeof REQUEST_BOUNDS): string {
+  return JSON.stringify(
+    json(
+      Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined)),
+      bounds,
+    ),
+  );
+}
+/**
+ * Checks what a case write's fields can be checked for here, as Hue checks them: a positive
+ * integer `expectedRevision`, an `externalKey` of 1–200 UTF-16 code units of well-formed text
+ * without NUL, `inputs`, `expected` and an object `metadata` within one value's JSON bounds, and an
+ * `environmentVersionId` that is a UUID or null.
+ */
+function checkCaseWrite(input: CaseWrite): void {
+  if (!input || typeof input !== "object") throw new TypeError("A case write must be an object");
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)
+    throw new TypeError("expectedRevision must be a positive integer");
+  const key: unknown = input.externalKey;
+  if (
+    typeof key !== "string" ||
+    !key.length ||
+    key.length > 200 ||
+    !key.isWellFormed() ||
+    key.includes("\u0000")
+  )
+    throw new TypeError("externalKey must be 1–200 UTF-16 code units of well-formed text");
+  json(input.inputs, valueBounds);
+  if (input.expected !== undefined) json(input.expected, valueBounds);
+  if (input.metadata !== undefined) {
+    if (!input.metadata || typeof input.metadata !== "object" || Array.isArray(input.metadata))
+      throw new TypeError("metadata must be an object");
+    json(input.metadata, valueBounds);
+  }
+  if (input.environmentVersionId !== undefined && input.environmentVersionId !== null)
+    uuid(input.environmentVersionId);
+}
+
 /** Times a refused request is sent again before its refusal is the caller's error. */
 const REFUSAL_RETRIES = 4;
 /** A refusal asking for a longer wait fails at once rather than holding the caller. */
@@ -327,25 +369,14 @@ export class EvaluationClient {
     method: string,
     path: string,
     body?: unknown,
-    bounds = { ...valueBounds, bytes: 1024 * 1024 },
+    bounds = REQUEST_BOUNDS,
     signal?: AbortSignal,
     /** Overrides the retry decision `retryable` takes from the method and body. */
     idempotent?: boolean,
   ): Promise<T> {
     // Serialized once, outside the attempts: a body this client cannot encode is a caller error
-    // no attempt fixes. Optional top-level fields are omitted intentionally; nested undefined
-    // remains invalid.
-    const payload =
-      body === undefined
-        ? undefined
-        : JSON.stringify(
-            json(
-              Object.fromEntries(
-                Object.entries(body as object).filter(([, value]) => value !== undefined),
-              ),
-              bounds,
-            ),
-          );
+    // no attempt fixes.
+    const payload = body === undefined ? undefined : payloadOf(body as object, bounds);
     const attempts = retryable(method, body, idempotent) ? this.maxAttempts : 1;
     for (let attempt = 1; ; attempt++) {
       try {
@@ -552,17 +583,26 @@ export class EvaluationClient {
    * Adds a case to a draft version using optimistic concurrency on `expectedRevision`. Each of
    * `files` given as bytes or a path is checked against the artifact policy and uploaded as a
    * verified artifact first, under a key derived from the version, the case's `externalKey`, the
-   * role and the bytes, so sending the same case again reuses the artifact.
+   * role and the bytes, so sending the same case again reuses the artifact. Every file and the
+   * case itself are checked before the first upload.
    *
-   * @throws TypeError or RangeError for `files` outside the artifact policy, before any request.
+   * @throws TypeError or RangeError for `files` outside the artifact policy, or a case Hue would
+   * refuse for its fields or size, before any request.
    */
   async addCase(id: string, input: CaseWrite) {
     const versionId = uuid(id);
+    checkCaseWrite(input);
     let body: CaseWrite | (Omit<CaseWrite, "files"> & { files: CaseFileReference[] }) = input;
-    if (input?.files !== undefined) {
+    if (input.files !== undefined) {
       // Loaded on use: the artifact helpers import this client.
       const { caseFileReferences } = await import("./files.js");
-      body = { ...input, files: await caseFileReferences(this, versionId, input) };
+      body = {
+        ...input,
+        // The case is checked as it will be sent, with a stand-in for each upload's artifact.
+        files: await caseFileReferences(this, versionId, input, (files) =>
+          payloadOf({ ...input, files }, REQUEST_BOUNDS),
+        ),
+      };
     }
     return this.request<{
       /** The stored case. */

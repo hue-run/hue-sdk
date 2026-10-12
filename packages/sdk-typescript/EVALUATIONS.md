@@ -315,8 +315,9 @@ await client.addEvalSetCase(versionId, {
 
 An uploaded file needs one of `outputContentTypes`, a well-formed name of 1–255 UTF-16 code units
 (as JavaScript counts a string's `length`) without path separators or control characters, and 1
-byte to 25 MiB. Every file is checked before the first
-upload; one outside that policy throws `TypeError` or `RangeError` without a request. The
+byte to 25 MiB. Every file, and the case itself as it will be sent (its revision, key, values and
+size), is checked before the first upload; a file outside that policy or a case Hue would refuse
+throws `TypeError` or `RangeError` without a request. The
 reservation key names the version, the case's `externalKey`, the role, the bytes, the name and the
 content type, so sending the same case again reuses its artifacts and a corrected name or type
 reserves a new one. `source`, `attached_template`, `attached_reference` and `original` files reach

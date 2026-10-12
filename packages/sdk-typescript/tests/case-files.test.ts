@@ -266,3 +266,32 @@ test("addCase counts a file name in UTF-16 code units, as Hue does, before any u
   await write(longest);
   expect(calls.reserves.map((reserve) => reserve.filename)).toEqual(["chart.png", longest]);
 });
+
+test("addCase checks the case itself before uploading any file", async () => {
+  const { client, versionId, calls } = receiver();
+  const write = (fields: Record<string, unknown>) =>
+    client.addCase(versionId, {
+      expectedRevision: 1,
+      externalKey: "checked",
+      inputs: {},
+      files: [{ role: "source", filename: "chart.png", contentType: "image/png", bytes: png }],
+      ...fields,
+    } as never);
+  const values = (count: number) => Array.from({ length: count }, () => 1);
+  for (const [fields, kind] of [
+    [{ inputs: { x: Number.NaN } }, TypeError],
+    [{ inputs: undefined }, TypeError],
+    [{ expected: { bad: undefined } }, TypeError],
+    [{ inputs: "x".repeat(200_000) }, RangeError],
+    [{ metadata: ["not", "an", "object"] }, TypeError],
+    [{ externalKey: "" }, TypeError],
+    [{ externalKey: "k".repeat(201) }, TypeError],
+    [{ externalKey: "key\ud800" }, TypeError],
+    [{ expectedRevision: 0 }, TypeError],
+    [{ environmentVersionId: "not-a-uuid" }, TypeError],
+    // Each value fits on its own, but the case as sent has more than 20,000 JSON values.
+    [{ inputs: values(10_500), expected: values(10_500) }, RangeError],
+  ] as const)
+    await expect(write(fields)).rejects.toBeInstanceOf(kind);
+  expect(calls.requests).toEqual([]);
+});

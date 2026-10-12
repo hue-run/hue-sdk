@@ -563,17 +563,22 @@ async function caseFileBytes(path: unknown, label: string): Promise<Uint8Array> 
   return readFile(path);
 }
 
+/** A stand-in for an artifact a case file is uploaded as, the length of a real ID. */
+const STAND_IN_ID = "00000000-0000-4000-8000-000000000000";
+
 /**
  * The `files` of a case write as the case API takes them: references kept, and each file given
  * as bytes or a path checked against the artifact policy (role, name, one of
  * `outputContentTypes`, 1 byte to 25 MiB) and uploaded as a verified artifact. Every file is
- * checked before the first upload. The reservation key names the version, the case's
- * `externalKey`, the role and the bytes, so the same write sent again reuses its artifacts.
+ * checked, and then `beforeUpload` is given the references with a stand-in ID for each upload,
+ * before the first upload. The reservation key names the version, the case's `externalKey`, the
+ * role and the bytes, so the same write sent again reuses its artifacts.
  */
 export async function caseFileReferences(
   client: EvaluationClient,
   versionId: string,
   input: CaseWrite,
+  beforeUpload: (references: CaseFileReference[]) => void = () => undefined,
   timing: typeof artifactSettling = artifactSettling,
 ): Promise<CaseFileReference[]> {
   const files: unknown = input.files;
@@ -630,6 +635,11 @@ export async function caseFileReferences(
       throw new TypeError(`${label} is pinned twice with the role ${file.role}`);
     seen.add(pinned);
   }
+  beforeUpload(
+    prepared.map((item) =>
+      "artifactId" in item ? item : { artifactId: STAND_IN_ID, role: item.role },
+    ),
+  );
   const caseKey = sha256(Buffer.from(String(input.externalKey))).slice(0, 16);
   const references: CaseFileReference[] = [];
   for (const item of prepared) {

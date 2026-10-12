@@ -180,6 +180,40 @@ def _product_run_fields(value: Any, kind: str) -> Any:
     return result
 
 
+# The bound of a request body as a whole.
+_REQUEST_BYTES = 1024 * 1024
+
+
+def _check_case_write(
+    expected_revision: object, external_key: object, inputs: Any, expected: Any, metadata: object
+) -> None:
+    """Check what a case write's fields can be checked for here, as Hue checks them: a positive
+    integer ``expected_revision``, an ``external_key`` of 1–200 UTF-16 code units of well-formed
+    text without NUL, and ``inputs``, ``expected`` and a dict ``metadata`` within one value's JSON
+    bounds."""
+    if (
+        isinstance(expected_revision, bool)
+        or type(expected_revision) is not int
+        or expected_revision < 1
+    ):
+        raise ValueError("expected_revision must be a positive integer.")
+    if (
+        not isinstance(external_key, str)
+        or not external_key
+        or "\0" in external_key
+        or any(0xD800 <= ord(c) <= 0xDFFF for c in external_key)
+        or len(external_key.encode("utf-16-le")) // 2 > 200
+    ):
+        raise ValueError("external_key must be 1–200 UTF-16 code units of well-formed text.")
+    json_value(inputs)
+    if expected is not MISSING:
+        json_value(expected)
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dict.")
+        json_value(metadata)
+
+
 # Times a refused request is sent again before its refusal is the caller's error.
 _REFUSAL_RETRIES = 4
 # A refusal asking for a longer wait fails at once rather than holding the caller.
@@ -269,7 +303,7 @@ class EvaluationClient:
     def _request(
         self, method: str, path: str, body: Any = MISSING, *, idempotent: bool = False
     ) -> Any:
-        payload = None if body is MISSING else encode(json_value(body, 1024 * 1024))
+        payload = None if body is MISSING else encode(json_value(body, _REQUEST_BYTES))
         attempts = self._max_attempts if _retryable(method, body, idempotent) else 1
         attempt = 1
         while True:
@@ -425,29 +459,35 @@ class EvaluationClient:
         a file the client uploads first as a verified artifact, from ``data`` or read once from
         ``path``. An uploaded file must have one of the artifact content types, a name of 1–255
         UTF-16 code units (a character above U+FFFF counts twice) without surrogates, path
-        separators or control characters, and 1 byte to 25 MiB; every
-        file is checked before the first upload, which raises ``ValueError`` without a request.
-        The reservation key names the version, ``external_key``, the role and the bytes, so the
-        same case sent again reuses its artifacts.
+        separators or control characters, and 1 byte to 25 MiB. Every file and the case itself
+        (its revision, key, values and size) are checked before the first upload; a case Hue
+        would refuse raises ``ValueError`` without a request. The reservation key names the
+        version, ``external_key``, the role and the bytes, so the same case sent again reuses its
+        artifacts.
         """
         version_id = uuid(version_id)
-        references = None
+        _check_case_write(expected_revision, external_key, inputs, expected, metadata)
+        body: dict[str, Any] = {
+            "expectedRevision": expected_revision,
+            "externalKey": external_key,
+            "inputs": inputs,
+            **({"expected": expected} if expected is not MISSING else {}),
+            **({"metadata": metadata} if metadata is not None else {}),
+        }
         if files is not None:
             from ._files import case_file_references
 
-            references = case_file_references(self, version_id, external_key, files)
-        return self._request(
-            "POST",
-            f"/dataset-versions/{version_id}/cases",
-            {
-                "expectedRevision": expected_revision,
-                "externalKey": external_key,
-                "inputs": inputs,
-                **({"expected": expected} if expected is not MISSING else {}),
-                **({"metadata": metadata} if metadata is not None else {}),
-                **({"files": references} if references is not None else {}),
-            },
-        )
+            # The case is checked as it will be sent, with a stand-in for each upload's artifact.
+            body["files"] = case_file_references(
+                self,
+                version_id,
+                external_key,
+                files,
+                before_upload=lambda stand_ins: json_value(
+                    {**body, "files": stand_ins}, _REQUEST_BYTES
+                ),
+            )
+        return self._request("POST", f"/dataset-versions/{version_id}/cases", body)
 
     def freeze_dataset_version(self, version_id: str, expected_revision: int) -> dict[str, Any]:
         return self._request(
