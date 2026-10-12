@@ -465,7 +465,8 @@ class EvaluationClient:
         version, ``external_key``, the role and the bytes, so the same case sent again reuses its
         artifacts.
         """
-        version_id = uuid(version_id)
+        # The canonical spelling: the reservation keys of uploaded files name the version.
+        version_id = uuid(version_id).lower()
         _check_case_write(expected_revision, external_key, inputs, expected, metadata)
         body: dict[str, Any] = {
             "expectedRevision": expected_revision,

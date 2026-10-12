@@ -590,7 +590,8 @@ export class EvaluationClient {
    * refuse for its fields or size, before any request.
    */
   async addCase(id: string, input: CaseWrite) {
-    const versionId = uuid(id);
+    // The canonical spelling: the reservation keys of uploaded files name the version.
+    const versionId = uuid(id).toLowerCase();
     checkCaseWrite(input);
     let body: CaseWrite | (Omit<CaseWrite, "files"> & { files: CaseFileReference[] }) = input;
     if (input.files !== undefined) {

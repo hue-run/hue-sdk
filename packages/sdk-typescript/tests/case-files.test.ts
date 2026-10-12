@@ -115,7 +115,8 @@ function receiver() {
         stored.copyState = "acknowledged";
         return Response.json(view(stored));
       }
-      if (path === `/dataset-versions/${versionId}/cases`) {
+      // As Hue does, a version ID is read in either case.
+      if (path.toLowerCase() === `/dataset-versions/${versionId}/cases`) {
         calls.cases.push(body);
         return Response.json({
           item: { id: randomUUID(), datasetVersionId: versionId, ...body },
@@ -318,4 +319,18 @@ test("addCase pins an artifact once when a reference names the artifact a file u
     { artifactId, role: "source" },
     { artifactId, role: "evaluator_reference" },
   ]);
+});
+
+test("addCase reuses a file's artifact whatever the case of the version ID", async () => {
+  const { client, versionId, artifacts, calls } = receiver();
+  for (const id of [versionId, versionId.toUpperCase()])
+    await client.addCase(id, {
+      expectedRevision: 1,
+      externalKey: "chart",
+      inputs: {},
+      files: [{ role: "source", filename: "chart.png", contentType: "image/png", bytes: png }],
+    });
+  expect(new Set(calls.reserves.map((reserve) => reserve.idempotencyKey)).size).toBe(1);
+  expect(artifacts.size).toBe(1);
+  expect(calls.cases[1]).toEqual(calls.cases[0]!);
 });

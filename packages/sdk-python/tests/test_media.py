@@ -186,7 +186,8 @@ def hue():
                 return 409, {"error": "mismatch"}, {}
             stored_artifact["state"], stored_artifact["copyState"] = "ready", "acknowledged"
             return 200, view(stored_artifact), {}
-        if re.fullmatch(r"/api/v1/dataset-versions/[0-9a-f-]+/cases", path):
+        # As Hue does, a version ID is read in either case.
+        if re.fullmatch(r"/api/v1/dataset-versions/[0-9a-fA-F-]+/cases", path):
             state.cases.append(body)
             return 200, {"item": {"id": str(uuid4()), **body}, "version": {"revision": 2}}, {}
         return media(path, query)
@@ -860,3 +861,21 @@ def test_add_case_pins_an_artifact_once_when_a_reference_names_the_artifact_a_fi
         {"artifactId": artifact_id, "role": "source"},
         {"artifactId": artifact_id, "role": "evaluator_reference"},
     ]
+
+
+def test_add_case_reuses_a_files_artifact_whatever_the_case_of_the_version_id(hue):
+    client, version_id = hue.client(), str(uuid4())
+    for spelled in (version_id, version_id.upper()):
+        client.add_case(
+            spelled,
+            expected_revision=1,
+            external_key="chart",
+            inputs={},
+            files=[
+                CaseFileWrite(
+                    role="source", filename="chart.png", content_type="image/png", data=PNG
+                )
+            ],
+        )
+    assert len(hue.reservations) == 1 and len(hue.artifacts) == 1
+    assert hue.cases[1] == hue.cases[0]
