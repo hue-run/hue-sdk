@@ -233,6 +233,9 @@ test("addCase refuses files outside the artifact policy before any request", asy
     [png({ role: "output" })],
     [png({ bytes: "AQID" })],
     [png({ artifactId: randomUUID() })],
+    // A reference takes only its artifact and role; a name or type beside it is refused.
+    [{ artifactId: randomUUID(), role: "source", filename: "renamed.png" }],
+    [{ artifactId: randomUUID(), role: "source", contentType: "image/png" }],
     [png(), png()],
   ])
     await expect(write(files)).rejects.toBeInstanceOf(TypeError);

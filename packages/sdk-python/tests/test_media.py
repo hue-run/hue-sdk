@@ -756,6 +756,10 @@ def test_add_case_with_a_corrected_content_type_reserves_a_new_artifact_for_it(h
                 artifact_id=str(uuid4()),
             )
         ],
+        # A reference takes only its artifact and role; a name or type beside it is refused.
+        [CaseFileWrite(role="source", artifact_id=str(uuid4()), filename="renamed.png")],
+        [CaseFileWrite(role="source", artifact_id=str(uuid4()), content_type="image/png")],
+        [{"artifactId": str(uuid4()), "role": "source", "filename": "renamed.png"}],
         [CaseFileWrite(role="source", filename="a.png", content_type="image/png", data=b"1")] * 2,
         [
             CaseFileWrite(

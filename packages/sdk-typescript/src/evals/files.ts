@@ -604,7 +604,17 @@ export async function caseFileReferences(
       throw new TypeError(`${label} has an unsupported role ${String(file.role)}`);
     let identity: string;
     if (file.artifactId !== undefined) {
-      if (file.bytes !== undefined || file.path !== undefined)
+      // A reference keeps the artifact's own name and type; a file field beside it is refused
+      // rather than ignored.
+      const fields = file as Partial<
+        Record<"filename" | "contentType" | "bytes" | "path", unknown>
+      >;
+      if (
+        fields.filename !== undefined ||
+        fields.contentType !== undefined ||
+        fields.bytes !== undefined ||
+        fields.path !== undefined
+      )
         throw new TypeError(`${label} names an artifactId and a file; give one`);
       const reference = { artifactId: uuid(file.artifactId).toLowerCase(), role: file.role };
       prepared.push(reference);
