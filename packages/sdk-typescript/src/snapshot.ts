@@ -11,6 +11,7 @@ import {
   MAX_INLINE_FILE_TEXT,
   isMediaKey,
   isMessageKey,
+  literalKeys,
   mayInlineFiles,
   readingOf,
 } from "./inline-files.js";
@@ -120,6 +121,8 @@ class Snapshot {
   held = 0;
   /** Set while the span's own attributes are copied: only they may be held for upload. */
   private own = false;
+  /** The own attributes holding literal text, while they are copied. */
+  private literal: ReadonlySet<string> = new Set();
   /** Set for a log record: only its inspected attributes' media and its body's are held. */
   log = false;
   /** Set while a GenAI log record's structured body is copied: a long string that may be a
@@ -165,7 +168,8 @@ class Snapshot {
    * cut and its inline media shrink to their digest, as before uploads existed.
    */
   private heldValue(key: string, value: unknown): { value: unknown } | undefined {
-    if (!this.hold || !this.own) return undefined;
+    // Literal text (`input.value` declared `text/plain`) is no JSON Hue reads files from.
+    if (!this.hold || !this.own || this.literal.has(key)) return undefined;
     if (typeof value === "string") {
       // A log record's value is never uploaded whole: only the media in its inspected attributes.
       if (this.log && !isMediaKey(key)) return undefined;
@@ -279,10 +283,12 @@ class Snapshot {
   /** The span's own attribute map, whose values over the cap may be held whole for upload. */
   ownAttributes<T>(value: T): T {
     this.own = true;
+    this.literal = literalKeys(value);
     try {
       return this.attributes(value);
     } finally {
       this.own = false;
+      this.literal = new Set();
     }
   }
 

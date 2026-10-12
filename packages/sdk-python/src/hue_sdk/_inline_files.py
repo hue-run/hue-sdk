@@ -669,6 +669,19 @@ def _encoded_json_value(text: str) -> Any:
 MAX_MEDIA_DEPTH = 10
 
 
+def literal_keys(attributes: Any) -> frozenset[str]:
+    """The attributes of a record that hold literal text: OpenInference's ``input.value`` and
+    ``output.value`` when the record declares ``input.mime_type`` / ``output.mime_type`` as
+    ``text/plain``. Hue reads no JSON, and so no file, in them; neither does the SDK."""
+    if not isinstance(attributes, Mapping):
+        return frozenset()
+    return frozenset(
+        f"{side}.value"
+        for side in ("input", "output")
+        if attributes.get(f"{side}.mime_type") == "text/plain"
+    )
+
+
 def reader_parses(value: Any) -> bool:
     """Whether Hue's reader reads JSON text as the value it encodes, and so reads files in it:
     nested at most 32 levels, with no number JavaScript cannot hold exactly (an integer past 2^53,

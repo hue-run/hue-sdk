@@ -2985,3 +2985,29 @@ test("span attributes OpenTelemetry cannot hold are recorded as JSON text, as at
     endpoint.server.stop(true);
   }
 });
+
+test("input.value declared text/plain stays literal text; a JSON one is read for files", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const value = JSON.stringify({ image: `data:image/png;base64,${png.toString("base64")}` });
+  try {
+    await hueClient.withSpan("literal", ({ span }) => {
+      span.setAttribute("input.mime_type", "text/plain");
+      span.setAttribute("input.value", value);
+      span.setAttribute("output.mime_type", "application/json");
+      span.setAttribute("output.value", value);
+    });
+    await hueClient.flush();
+    const record = endpoint.span("literal")!;
+    // OpenInference's text/plain value is literal text to Hue, so it is left as recorded.
+    expect(attr(record, "input.value")!.stringValue).toBe(value);
+    expect(blobs(record).map(({ key }) => key)).toEqual(["output.value#/image"]);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});

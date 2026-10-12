@@ -11,6 +11,7 @@ import {
   INLINE_FILE_TEXT_PER_RECORD,
   isMessageKey,
   keepsPrefix,
+  literalKeys,
   mediaBytes,
   mediaContentType,
   mediaIn,
@@ -859,9 +860,11 @@ export async function offloadRecord(
     return changed;
   };
 
+  const literal = literalKeys(attributes);
   const parts = async (index: number, key: string, text: string): Promise<string> => {
-    // Both bounds count UTF-16 code units, as admission does.
-    if (!mayInlineFiles(key, text) || text.length > MAX_INLINE_FILE_TEXT) return text;
+    // Both bounds count UTF-16 code units, as admission does. Literal text holds no file.
+    if (!mayInlineFiles(key, text) || text.length > MAX_INLINE_FILE_TEXT || literal.has(key))
+      return text;
     if (collector.inspected) {
       // A value admission skipped stays as recorded.
       if (!collector.inspected.has(key)) return text;

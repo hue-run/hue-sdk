@@ -32,6 +32,7 @@ from ._inline_files import (
     hash_inline_files_counted,
     is_media_key,
     is_message_key,
+    literal_keys,
     may_inline_files,
     utf16_size,
 )
@@ -569,11 +570,13 @@ class _ValueBudget:
         if not isinstance(source, Mapping):
             return self.value(source)
         copied: dict[str, Any] = {}
+        # Literal text (``input.value`` declared ``text/plain``) is no JSON Hue reads files from.
+        literal = literal_keys(source) if holding else frozenset()
         for key, item in source.items():
             if not isinstance(key, str):
                 raise ValueError("Telemetry mapping keys must be strings.")
             listed = f"{prefix}{key}"
-            if holding:
+            if holding and key not in literal:
                 # Unheld binary and large textual inline files shrink to digests.
                 kept, item = self._held_value(key, item)
                 if kept:

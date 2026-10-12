@@ -76,6 +76,22 @@ export function readingOf(key: string): MediaReading | undefined {
   return undefined;
 }
 
+/**
+ * The attributes of a record that hold literal text: OpenInference's `input.value` and
+ * `output.value` when the record declares `input.mime_type` / `output.mime_type` as `text/plain`.
+ * Hue reads no JSON, and so no file, in them; neither does the SDK.
+ */
+export function literalKeys(attributes: unknown): ReadonlySet<string> {
+  const keys = new Set<string>();
+  if (attributes === null || typeof attributes !== "object") return keys;
+  for (const side of ["input", "output"]) {
+    const declared = Object.getOwnPropertyDescriptor(attributes, `${side}.mime_type`);
+    if (declared && "value" in declared && declared.value === "text/plain")
+      keys.add(`${side}.value`);
+  }
+  return keys;
+}
+
 /** Whether a span attribute is one whose value the SDK inspects for inline media: the attributes
  * Hue's reader reads files from. */
 export function isMediaKey(key: string): boolean {

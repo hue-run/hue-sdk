@@ -39,6 +39,7 @@ from ._inline_files import (
     is_message_key,
     is_text_media_type,
     keeps_prefix,
+    literal_keys,
     may_inline_files,
     media_bytes,
     media_content_type,
@@ -125,9 +126,11 @@ def is_blob_content_type(value: Any) -> bool:
 
 
 def _is_blob_key(key: str) -> bool:
+    """A key Hue accepts: 1 to 256 UTF-16 code units, as Hue and the TypeScript SDK count them,
+    with no C0 control or DEL."""
     return (
         isinstance(key, str)
-        and 1 <= len(key) <= _MAX_BLOB_KEY_LENGTH
+        and 1 <= utf16_size(key, _MAX_BLOB_KEY_LENGTH) <= _MAX_BLOB_KEY_LENGTH
         and not any(ord(char) < 0x20 or ord(char) == 0x7F for char in key)
     )
 
@@ -1033,10 +1036,12 @@ class _Span:
         # A span's export inspects only what admission inspected; a log record's within its own
         # allowance, its body's files first.
         self.inspected: set[str] = set(() if log else held.inspected or ())
+        literal = literal_keys(attributes)
         for key, candidate in self.candidates:
             if (
                 (log or held.inspected is None)
                 and isinstance(candidate, str)
+                and key not in literal
                 and may_inline_files(key, candidate)
             ):
                 size = utf16_size(candidate, MAX_INLINE_FILE_TEXT)

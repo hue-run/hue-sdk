@@ -1806,3 +1806,39 @@ def test_a_message_of_8_mi_code_units_is_inspected_even_when_its_utf8_is_longer(
     found = blobs(hue_store.span("utf-16 message bound"))
     assert [entry["key"] for entry in found] == [f"{ATTRIBUTE}#/0/parts/0", ATTRIBUTE]
     assert found[0]["sha256"] == sha256(image)
+
+
+def test_input_value_declared_text_plain_stays_literal_text(hue_store):
+    data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+    )
+    value = json.dumps({"image": "data:image/png;base64," + base64.b64encode(data).decode()})
+    with client(hue_store) as hue:
+        with hue.span("literal") as span:
+            span.set_attribute("input.mime_type", "text/plain")
+            span.set_attribute("input.value", value)
+            span.set_attribute("output.mime_type", "application/json")
+            span.set_attribute("output.value", value)
+        assert hue.force_flush(timeout_millis=30_000)
+    record = hue_store.span("literal")
+    # OpenInference's text/plain value is literal text to Hue, so it is left as recorded.
+    assert attrs(record)["input.value"].string_value == value
+    assert [entry["key"] for entry in blobs(record)] == ["output.value#/image"]
+
+
+def test_a_blob_key_over_256_utf16_units_is_not_reserved(hue_store):
+    # 130 emoji are 130 code points but 260 UTF-16 units, past the key limit Hue counts in units.
+    data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+    )
+    url = "data:image/png;base64," + base64.b64encode(data).decode()
+    value = json.dumps({"\U0001f600" * 130: url}, ensure_ascii=False)
+    with client(hue_store) as hue:
+        with hue.span("long key") as span:
+            span.set_attribute("input.value", value)
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+    record = hue_store.span("long key")
+    assert attrs(record)["input.value"].string_value == value
+    assert hue_store.reservations == []
+    assert status.upload_fallbacks == 1
