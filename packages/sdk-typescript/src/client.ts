@@ -17,7 +17,7 @@ import {
 } from "@opentelemetry/api";
 import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { isAttributeValue, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
@@ -283,6 +283,17 @@ const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, dept
  * through global OpenTelemetry registration, and they fail open: capture problems are counted in
  * the export report while application code runs and returns unchanged.
  */
+/** Whether a span attribute passed to a helper is recorded as JSON text: an attachment, a value
+ * holding one, or JSON data OpenTelemetry cannot hold as an attribute (a plain object, or an array
+ * that is not of one primitive type). */
+function recordedAsJson(value: unknown): boolean {
+  if (holdsAttachment(value)) return true;
+  if (value === null || typeof value !== "object" || isAttributeValue(value)) return false;
+  if (Array.isArray(value)) return true;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 export class HueClient {
   /** Export pipeline: counters, issue history and the processors that feed Hue. */
   readonly transport: HueTransport;
@@ -799,9 +810,10 @@ export class HueClient {
   }
 
   /**
-   * Span attributes as recorded: a value that is an {@link Attachment}, or an object or array
-   * holding one, becomes its JSON text with each attachment as its digest part (an invalid
-   * attachment alone is omitted); every other value is left to OpenTelemetry as given.
+   * Span attributes as recorded: a value that is an {@link Attachment}, an object or array holding
+   * one, or JSON data OpenTelemetry cannot hold as an attribute (an object, or an array that is not
+   * of one primitive type), becomes its JSON text with each attachment as its digest part (an
+   * invalid attachment alone is omitted); every other value is left to OpenTelemetry as given.
    */
   private attributeValues(input: SpanOptions["attributes"]): {
     attributes: Attributes | undefined;
@@ -811,7 +823,7 @@ export class HueClient {
     if (!input || typeof input !== "object") return { attributes: input as undefined, placed };
     let attributes: Attributes | undefined;
     for (const [key, value] of Object.entries(input)) {
-      if (!holdsAttachment(value)) continue;
+      if (!recordedAsJson(value)) continue;
       attributes ??= { ...input } as Attributes;
       const found: PlacedAttachment[] = [];
       try {

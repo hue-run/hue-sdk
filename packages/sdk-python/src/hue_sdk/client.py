@@ -71,6 +71,31 @@ from .transport import (
 Redactor = Callable[[str, Any], Any]
 # A span attribute value that may hold an ``Attachment`` anywhere: recorded as JSON text.
 AttachmentValue: TypeAlias = Attachment | Mapping[str, Any] | Sequence[Any]
+
+
+def _recorded_as_json(value: Any) -> bool:
+    """Whether a span attribute passed to a helper is recorded as JSON text: an attachment, a
+    value holding one, or JSON data OpenTelemetry cannot hold as an attribute (a dict, or a list
+    or tuple that is not of one primitive type), as the TypeScript SDK records it."""
+    if holds_attachment(value):
+        return True
+    if isinstance(value, Mapping):
+        return True
+    if not isinstance(value, (list, tuple)):
+        return False
+    first: type | None = None
+    for item in value:
+        if item is None:
+            continue
+        if type(item) not in (bool, str, int, float):
+            return True
+        if first is None:
+            first = type(item)
+        elif not isinstance(item, first):
+            return True
+    return False
+
+
 _MISSING = object()
 _FILE_ROLES = frozenset({"input", "attachment", "output"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -206,9 +231,10 @@ class HueSpan:
     def set_attribute(self, name: str, value: AttributeValue | AttachmentValue) -> None:
         """Custom metadata is caller-owned and may contain sensitive data.
 
-        A value that is an ``Attachment``, or a dict or list holding one, is recorded as JSON text
-        with each attachment as its digest part and its bytes uploaded."""
-        if not holds_attachment(value):
+        A value that is a dict, a list OpenTelemetry cannot hold (not of one primitive type) or an
+        ``Attachment`` is recorded as JSON text, with each attachment as its digest part and its
+        bytes uploaded."""
+        if not _recorded_as_json(value):
             plain = cast(AttributeValue, value)
             self._client._instrument(lambda: self.otel_span.set_attribute(name, plain))
             return
@@ -992,13 +1018,15 @@ class Hue:
     def _attribute_values(
         self, attributes: Mapping[str, Any]
     ) -> tuple[dict[str, Any], list[tuple[str, list[PlacedAttachment], Any]]]:
-        """Span attributes as recorded: a value that is an ``Attachment``, or a dict or list
-        holding one, becomes its JSON text with each attachment as its digest part (an invalid
-        attachment alone is omitted); every other value is left to OpenTelemetry as given."""
+        """Span attributes as recorded: a value that is an ``Attachment``, a dict or list holding
+        one, or JSON data OpenTelemetry cannot hold as an attribute (a dict, or a list that is not
+        of one primitive type), becomes its JSON text with each attachment as its digest part (an
+        invalid attachment alone is omitted); every other value is left to OpenTelemetry as
+        given."""
         result = dict(attributes)
         placed: list[tuple[str, list[PlacedAttachment], Any]] = []
         for key, value in attributes.items():
-            if not holds_attachment(value):
+            if not _recorded_as_json(value):
                 continue
             found: list[PlacedAttachment] = []
             try:

@@ -344,8 +344,9 @@ Export uploads the bytes and lists them under the record's `hue.blobs`, keyed
 `<attribute>#<JSON pointer to the part>`: `input.value#/contract` above, `metadata#/scan` for the
 attribute, and `body#/gen_ai.input.messages/0/parts/1` for a part in a `recordMessages()` log
 record, which uploads with the other media in the body. An attribute value that is an attachment,
-or an object or array holding one, is recorded as JSON text; put files under `metadata` for Hue to
-list them as the span's metadata files.
+a JSON object or an array OpenTelemetry cannot hold (not of one primitive type), with or without
+attachments, is recorded as JSON text; put files under `metadata` for Hue to list them as the
+span's metadata files.
 
 With `captureContent: false` or a setup credential no bytes leave the process: a metadata
 attribute still records the part, without its name, and content values are not recorded at all. A

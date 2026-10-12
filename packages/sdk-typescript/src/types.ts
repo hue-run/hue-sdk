@@ -185,9 +185,10 @@ export interface SpanOptions {
   /** OpenTelemetry span kind; `INTERNAL` by default. */
   kind?: SpanKind;
   /**
-   * Attributes set when the span starts. A value that is an {@link Attachment}, or a JSON object or
-   * array holding one, is recorded as JSON text with each attachment as its digest part and its
-   * bytes uploaded; put files under `metadata` for Hue to list them as the span's metadata files.
+   * Attributes set when the span starts. A value that is a JSON object, an array OpenTelemetry
+   * cannot hold (not of one primitive type) or an {@link Attachment} is recorded as JSON text, with
+   * each attachment as its digest part and its bytes uploaded; put files under `metadata` for Hue to
+   * list them as the span's metadata files.
    */
   attributes?: { [key: string]: AttributeValue | AttachmentJson | undefined };
   /** Recorded as `gen_ai.conversation.id` on this span and inherited by nested helper spans. */

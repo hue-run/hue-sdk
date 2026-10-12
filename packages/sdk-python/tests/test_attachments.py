@@ -385,3 +385,30 @@ def test_a_log_record_lost_while_it_is_copied_counts_its_attachments(hue_store, 
     assert hue_store.reservations == []
     assert status.upload_fallbacks == 1
     assert hue._uploads is not None and hue._uploads.held.held == 0
+
+
+def test_span_attributes_opentelemetry_cannot_hold_are_recorded_as_json_text(hue_store):
+    with client(hue_store) as hue:
+        with hue.span(
+            "json attributes",
+            attributes={
+                "metadata": {"customer": "acme", "plan": {"seats": 3}},
+                "records": [{"id": 1}, {"id": 2}],
+                "mixed": [1, "two"],
+                "tags": ["a", "b"],
+                "count": 2,
+            },
+        ) as span:
+            span.set_attribute("later", {"step": "review"})
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+    recorded = attrs(hue_store.span("json attributes"))
+    assert recorded["metadata"].string_value == '{"customer":"acme","plan":{"seats":3}}'
+    assert recorded["records"].string_value == '[{"id":1},{"id":2}]'
+    assert recorded["mixed"].string_value == '[1,"two"]'
+    assert recorded["later"].string_value == '{"step":"review"}'
+    # Values OpenTelemetry holds stay as they are.
+    assert [item.string_value for item in recorded["tags"].array_value.values] == ["a", "b"]
+    assert recorded["count"].int_value == 2
+    assert hue_store.reservations == []
+    assert status.instrumentation_failures == 0

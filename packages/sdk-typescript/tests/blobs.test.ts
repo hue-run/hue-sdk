@@ -2932,3 +2932,31 @@ test("a log body's file the queue cut is exported cut, never uploaded as a short
     endpoint.server.stop(true);
   }
 });
+
+test("span attributes OpenTelemetry cannot hold are recorded as JSON text, as attachments are", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  try {
+    await hueClient.withSpan("json attributes", () => undefined, {
+      attributes: {
+        metadata: { customer: "acme", plan: { seats: 3 } },
+        records: [{ id: 1 }, { id: 2 }],
+        mixed: [1, "two"],
+        tags: ["a", "b"],
+        count: 2,
+      },
+    });
+    await hueClient.flush();
+    const record = endpoint.span("json attributes")!;
+    expect(attr(record, "metadata")!.stringValue).toBe('{"customer":"acme","plan":{"seats":3}}');
+    expect(attr(record, "records")!.stringValue).toBe('[{"id":1},{"id":2}]');
+    expect(attr(record, "mixed")!.stringValue).toBe('[1,"two"]');
+    // Values OpenTelemetry holds stay as they are.
+    expect(strings(attr(record, "tags"))).toEqual(["a", "b"]);
+    expect(Number(attr(record, "count")!.intValue)).toBe(2);
+    expect(endpoint.reservations).toEqual([]);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
