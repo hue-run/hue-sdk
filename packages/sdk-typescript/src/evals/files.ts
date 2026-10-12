@@ -557,10 +557,17 @@ function caseFileName(name: unknown): string {
 /** The bytes of a case file given by path: a regular file within the size limit, read once. */
 async function caseFileBytes(path: unknown, label: string): Promise<Uint8Array> {
   if (typeof path !== "string" || !path) throw new TypeError(`${label} needs bytes or a path`);
-  const info = await stat(path);
+  // A path with no file behind it, or one that cannot be read, is refused as any invalid file.
+  const unreadable = (error: unknown) =>
+    new TypeError(`${label} could not be read`, { cause: error });
+  const info = await stat(path).catch((error: unknown) => {
+    throw unreadable(error);
+  });
   if (!info.isFile()) throw new TypeError(`${label} is not a regular file`);
   if (info.size > outputFileLimits.bytes) throw new RangeError(`${label} exceeds 25 MiB`);
-  return readFile(path);
+  return readFile(path).catch((error: unknown) => {
+    throw unreadable(error);
+  });
 }
 
 /** A stand-in for an artifact a case file is uploaded as, the length of a real ID. */

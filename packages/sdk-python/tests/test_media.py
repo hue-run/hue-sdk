@@ -850,6 +850,15 @@ def test_add_case_with_a_corrected_content_type_reserves_a_new_artifact_for_it(h
         [CaseFileWrite(role="source", artifact_id=str(uuid4()), content_type="image/png")],
         [{"artifactId": str(uuid4()), "role": "source", "filename": "renamed.png"}],
         [CaseFileWrite(role="source", filename="a.png", content_type="image/png", data=b"1")] * 2,
+        # A path with no file behind it is refused as any other file that cannot be read.
+        [
+            CaseFileWrite(
+                role="source",
+                filename="a.png",
+                content_type="image/png",
+                path=f"/nonexistent-{uuid4()}/a.png",
+            )
+        ],
         [
             CaseFileWrite(
                 role="source", filename=f"{index}.png", content_type="image/png", data=b"1"

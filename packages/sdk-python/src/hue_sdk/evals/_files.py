@@ -174,12 +174,19 @@ def _case_file_bytes(path: object, label: str) -> bytes:
     if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
         raise ValueError(f"{label} needs data or a path.")
     file = Path(path)
-    info = file.stat()
+    # A path with no file behind it, or one that cannot be read, is refused as any invalid file.
+    try:
+        info = file.stat()
+    except OSError as error:
+        raise ValueError(f"{label} could not be read.") from error
     if not stat.S_ISREG(info.st_mode):
         raise ValueError(f"{label} is not a regular file.")
     if info.st_size > _MAX_FILE_BYTES:
         raise ValueError(f"{label} exceeds 25 MiB.")
-    return file.read_bytes()
+    try:
+        return file.read_bytes()
+    except OSError as error:
+        raise ValueError(f"{label} could not be read.") from error
 
 
 # A stand-in for an artifact a case file is uploaded as, the length of a real ID.

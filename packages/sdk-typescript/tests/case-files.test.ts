@@ -237,6 +237,8 @@ test("addCase refuses files outside the artifact policy before any request", asy
     [{ artifactId: randomUUID(), role: "source", filename: "renamed.png" }],
     [{ artifactId: randomUUID(), role: "source", contentType: "image/png" }],
     [png(), png()],
+    // A path with no file behind it is refused as any other file that cannot be read.
+    [png({ bytes: undefined, path: join(tmpdir(), `hue-missing-${randomUUID()}.png`) })],
   ])
     await expect(write(files)).rejects.toBeInstanceOf(TypeError);
   for (const files of [
