@@ -8,17 +8,25 @@ import {
   hashInlineFiles,
   INLINE_FILE_LIMIT,
   INLINE_FILE_TEXT_PER_RECORD,
+  isMessageKey,
+  keepsPrefix,
   mediaBytes,
   mediaContentType,
+  mediaIn,
   isTextMediaType,
+  type InlineFilePart,
   type MediaDigestMemo,
   type FileDigest,
   mayInlineFiles,
   isMediaContentType,
-  largeInlineFileParts,
   MAX_INLINE_FILE_TEXT,
+  placeable,
+  placedMediaText,
+  prefixPart,
+  readMediaText,
+  reencodeMedia,
 } from "./inline-files.js";
-import { TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
+import { capLogBody, TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
 import { truncateUtf8 } from "./safety.js";
 
 /**
@@ -91,6 +99,11 @@ export interface OffloadCollector {
   candidates: OffloadCandidate[];
   cut: string[];
   attachments?: MediaAttachment[];
+  /** Set for a log record: its values over the inline limit are cut, never uploaded whole; only
+   * the media in its inspected attributes and its body upload. */
+  log?: boolean;
+  /** A log record's structured body, redacted whole, whose media upload under `body#<pointer>`. */
+  body?: { value: unknown };
 }
 
 export interface MediaAttachment {
@@ -738,6 +751,23 @@ export async function offloadAttributes(
   collector: OffloadCollector,
   options: OffloadOptions,
 ): Promise<Record<string, unknown>> {
+  return (await offloadRecord(attributes, collector, options)).attributes;
+}
+
+/**
+ * A record's own attributes, and a log record's body, with each candidate placed (see
+ * {@link offloadAttributes}). A file is uploaded and placed in its digest form (a text file in a
+ * provider part keeps a 16 KiB prefix), its `hue.blobs` entry keyed `<attribute>#<pointer>` or, in
+ * a log record's body, `body#<pointer>`. A file that is not uploaded keeps its bytes inline, except
+ * in a span's own recorded messages, where it keeps its digest as before. A log record's values
+ * over the inline limit are cut, never uploaded whole, and a body still over it is replaced by the
+ * receiver's marker, as before.
+ */
+export async function offloadRecord(
+  attributes: Record<string, unknown>,
+  collector: OffloadCollector,
+  options: OffloadOptions,
+): Promise<{ attributes: Record<string, unknown>; body?: unknown }> {
   const { uploader, traceId, valueBytes, upload, tally } = options;
   const result: Record<string, unknown> = { ...attributes };
   const existing = Array.isArray(attributes[BLOBS_KEY])
@@ -756,33 +786,26 @@ export async function offloadAttributes(
     fallback(uploader.unsupported() ? "unsupported" : "budget");
   let inspected = 0;
 
-  const parts = async (index: number, key: string, text: string): Promise<string> => {
-    if (!mayInlineFiles(key, text)) return text;
-    const bytes = Buffer.byteLength(text, "utf8");
-    if (bytes > MAX_INLINE_FILE_TEXT) return text;
-    if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
-    inspected += text.length;
-    let parsed: unknown;
-    let found: ReturnType<typeof largeInlineFileParts>;
-    try {
-      parsed = JSON.parse(text);
-      found = largeInlineFileParts(parsed);
-    } catch {
-      return text;
-    }
-    if (!found.length) return text;
+  /** Uploads each file of a value and places it; whether any was placed. Only a span's own
+   * recorded message shrinks a file that is not uploaded to its digest. */
+  const placeFiles = async (
+    index: number,
+    key: string,
+    files: readonly InlineFilePart[],
+  ): Promise<boolean> => {
+    const shrinks = !collector.log && isMessageKey(key);
     let changed = false;
     await Promise.all(
-      found.map((file, position) => {
+      files.map((file, position) => {
         const decoded = mediaBytes(file);
-        if (!decoded.bytes.byteLength) return Promise.resolve();
+        if (!placeable(file, decoded)) return Promise.resolve();
         const contentType = mediaContentType(file, decoded);
         const textual = isTextMediaType(contentType);
         if (textual && decoded.bytes.byteLength <= INLINE_FILE_LIMIT) return Promise.resolve();
-        const partKey = `${key}#${textual ? file.pointer : file.partPointer}`;
+        const prefix = keepsPrefix(file, textual);
+        const partKey = `${key}#${prefix ? file.pointer : file.partPointer}`;
         const slot = slots > 0 && isBlobKey(partKey) ? (slots--, true) : false;
         return uploader.limit(async () => {
-          changed = true;
           const digest = options.memo
             ? options.memo.digest(file, decoded, traceId)
             : await digestOf(decoded.bytes);
@@ -790,21 +813,61 @@ export async function offloadAttributes(
             ? await uploader.store(traceId, partKey, decoded.bytes, contentType, digest, upload)
             : { ok: false, reason: "budget" };
           if (outcome.ok) {
-            if (textual) file.owner[file.key] = blobPrefix(file.content);
+            if (prefix) prefixPart(file, blobPrefix(file.content));
             else digestPart(file, digest);
+            changed = true;
             entries.push({
               order: [index, position],
               entry: blobEntry(partKey, digest.sha256, digest.size, outcome.contentType, file.name),
             });
             tally.uploaded++;
           } else {
-            digestPart(file, digest);
+            if (shrinks) {
+              digestPart(file, digest);
+              changed = true;
+            }
             fallback(outcome.reason);
           }
         });
       }),
     );
-    return changed ? JSON.stringify(parsed) : text;
+    return changed;
+  };
+
+  const parts = async (index: number, key: string, text: string): Promise<string> => {
+    if (!mayInlineFiles(key, text)) return text;
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > MAX_INLINE_FILE_TEXT) return text;
+    if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
+    inspected += text.length;
+    let media: ReturnType<typeof readMediaText>;
+    try {
+      media = readMediaText(key, text);
+    } catch {
+      return text;
+    }
+    if (!media?.files.length) return text;
+    return (await placeFiles(index, key, media.files)) ? placedMediaText(media) : text;
+  };
+
+  /** A log record's body with its files placed. Each file's content counts toward the record's
+   * inspection bounds, as an attribute's text does. */
+  const placeBody = async (body: unknown): Promise<unknown> => {
+    let media: ReturnType<typeof mediaIn>;
+    try {
+      media = mediaIn(body);
+    } catch {
+      return body;
+    }
+    const files = media.files.filter((file) => {
+      const units = file.content.length;
+      if (units > MAX_INLINE_FILE_TEXT || inspected + units > INLINE_FILE_TEXT_PER_RECORD)
+        return false;
+      inspected += units;
+      return true;
+    });
+    if (await placeFiles(-1, "body", files)) reencodeMedia(media);
+    return media.box.value;
   };
 
   const place = async (index: number, { key, value }: OffloadCandidate): Promise<void> => {
@@ -817,6 +880,11 @@ export async function offloadAttributes(
     listed.push({ order: index, key });
     const cut = () =>
       typeof placed === "string" ? truncateUtf8(placed, valueBytes) : truncatedMarker(size);
+    // A log record's value is cut, as no log reader pages an uploaded text value.
+    if (collector.log) {
+      result[key] = cut();
+      return;
+    }
     if (slots <= 0) {
       result[key] = cut();
       fallback("budget");
@@ -844,6 +912,7 @@ export async function offloadAttributes(
     }
   };
 
+  const body = collector.body ? placeBody(collector.body.value) : undefined;
   await Promise.all(collector.candidates.map((candidate, index) => place(index, candidate)));
   await Promise.all(
     (collector.attachments ?? []).map((file, position) => {
@@ -870,6 +939,12 @@ export async function offloadAttributes(
       });
     }),
   );
+  let placedBody: unknown;
+  if (body) {
+    const capped = capLogBody(await body, valueBytes);
+    placedBody = capped.body;
+    if (capped.cut) listed.push({ order: -1, key: "body" });
+  }
   if (listed.length)
     result[TRUNCATED_KEY] = withTruncatedKeys(
       result[TRUNCATED_KEY],
@@ -879,7 +954,7 @@ export async function offloadAttributes(
     entries.sort((a, b) => a.order[0]! - b.order[0]! || a.order[1]! - b.order[1]!);
     result[BLOBS_KEY] = [...existing, ...entries.map(({ entry }) => entry)];
   }
-  return result;
+  return { attributes: result, ...(collector.body ? { body: placedBody } : {}) };
 }
 
 /**
@@ -896,8 +971,28 @@ export function fallbackAttributes(
   traceId: string,
   memo?: MediaDigestMemo,
 ): Record<string, unknown> {
+  return fallbackRecord(attributes, collector, valueBytes, tally, traceId, memo).attributes;
+}
+
+/** A record's attributes, and a log record's body, placed as {@link fallbackAttributes} places
+ * them: a log record's files keep their bytes inline, and its body over the inline limit is
+ * replaced by the receiver's marker, as before. */
+export function fallbackRecord(
+  attributes: Record<string, unknown>,
+  collector: OffloadCollector,
+  valueBytes: number,
+  tally: OffloadTally,
+  traceId: string,
+  memo?: MediaDigestMemo,
+): { attributes: Record<string, unknown>; body?: unknown } {
   const result: Record<string, unknown> = { ...attributes };
   const listed: string[] = [];
+  let body: unknown;
+  if (collector.body) {
+    const capped = capLogBody(collector.body.value, valueBytes);
+    body = capped.body;
+    if (capped.cut) listed.push("body");
+  }
   for (const _file of collector.attachments ?? []) countFallback(tally, "failed", traceId);
   for (let index = 0; index < collector.cut.length; index++)
     countFallback(tally, "failed", traceId);
@@ -906,24 +1001,25 @@ export function fallbackAttributes(
     // Each large inline file is reported as a value not uploaded, as the upload step reports it.
     const count = { files: 0 };
     try {
-      placed = hashInlineFiles(key, value, count, memo, traceId);
+      if (!collector.log) placed = hashInlineFiles(key, value, count, memo, traceId);
     } catch {
       // Left as it is: cut below when over the limit.
     }
     for (let file = 0; file < count.files; file++) countFallback(tally, "failed", traceId);
+    // A log record's value over the limit is cut whether or not uploads work.
     if (typeof placed === "string") {
       if (Buffer.byteLength(placed, "utf8") > valueBytes) {
         placed = truncateUtf8(placed, valueBytes);
         listed.push(key);
-        countFallback(tally, "failed", traceId);
+        if (!collector.log) countFallback(tally, "failed", traceId);
       }
     } else if (placed instanceof Uint8Array && placed.byteLength > valueBytes) {
       placed = truncatedMarker(placed.byteLength);
       listed.push(key);
-      countFallback(tally, "failed", traceId);
+      if (!collector.log) countFallback(tally, "failed", traceId);
     }
     result[key] = placed;
   }
   if (listed.length) result[TRUNCATED_KEY] = withTruncatedKeys(result[TRUNCATED_KEY], listed);
-  return result;
+  return { attributes: result, ...(collector.body ? { body } : {}) };
 }

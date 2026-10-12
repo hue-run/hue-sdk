@@ -39,6 +39,7 @@ from ._blobs import (
     Uploads,
     _blob_entry,
     held_of,
+    place_logs,
     place_spans,
     prepare_spans,
     upload_budget_seconds,
@@ -53,7 +54,7 @@ from ._limits import MAX_REQUEST_BYTES as MAX_REQUEST_BYTES
 from ._limits import TRUNCATED_KEY as TRUNCATED_KEY
 from ._limits import AdvertisedLimits, fits_without_compression, gzip_size
 from ._otel_compat import encode_logs, export_context
-from ._records import replace_span, shed_content, sheddable_content
+from ._records import replace_log, replace_span, shed_content, sheddable_content
 from ._version import __version__
 
 # In-progress span placeholders, which are small, stay 1 KiB short of the default wire limit.
@@ -892,7 +893,8 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                 record = fitted[0]
                 fitted_attributes = dict(record.attributes or {})
                 placement.writable = {
-                    key for key, value in attributes.items()
+                    key
+                    for key, value in attributes.items()
                     if key in fitted_attributes and fitted_attributes[key] == value
                 }
                 listed = fitted_attributes.get(BLOBS_KEY)
@@ -975,7 +977,7 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                 tally.fallback("budget", _record_trace_id(span) or "")
         return surviving
 
-    def _report_uploads(self, tally: Tally) -> None:
+    def _report_uploads(self, tally: Tally, signal: str = "traces") -> None:
         fallbacks = sum(count for count, _ in tally.fallbacks.values())
         with self._lock:
             self._uploaded += tally.uploaded
@@ -983,7 +985,7 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         for reason, (count, traces) in tally.fallbacks.items():
             named = tuple(trace for trace in traces if trace)
             self._ledger.record(
-                "traces",
+                signal,
                 "warning",
                 count,
                 FALLBACK_MESSAGES[reason],
@@ -1075,6 +1077,36 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         self._delegate.shutdown()
 
 
+def _restored_body(body: Any, held: Mapping[str, str]) -> Any:
+    """A log record's queued body as JSON values (lists for its sequences), with each string its
+    copy held whole put back at its JSON pointer."""
+
+    def copied(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: copied(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [copied(item) for item in value]
+        return value
+
+    result = copied(body)
+    for pointer, text in held.items():
+        segments = [
+            segment.replace("~1", "/").replace("~0", "~") for segment in pointer.split("/")[1:]
+        ]
+        if not segments:
+            result = text
+            continue
+        owner = result
+        for segment in segments[:-1]:
+            owner = owner[int(segment)] if isinstance(owner, list) else owner[segment]
+        last = segments[-1]
+        if isinstance(owner, list):
+            owner[int(last)] = text
+        else:
+            owner[last] = text
+    return result
+
+
 class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
     signal = "logs"
 
@@ -1087,8 +1119,14 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         *,
         limits: AdvertisedLimits | None = None,
         dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
+        report_uploads: Callable[[Tally, str], None] | None = None,
     ) -> None:
         self._setup(ledger, limits, dropped_records)
+        # Uploads of correlated GenAI log records' media; None when the client uploads none. Their
+        # outcomes are counted with the span exporter's.
+        self._uploads = uploads
+        self._report = report_uploads
         self._session = SafeSession("logs", limits=self._limits)
         self._delegate = OTLPLogExporter(
             endpoint=endpoint,
@@ -1102,10 +1140,66 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
     def _delegate_export(self, batch: Sequence[Any]) -> bool:
         return self._delegate.export(batch) is LogRecordExportResult.SUCCESS
 
+    def _wait_for_rate(self, seconds: float) -> bool:
+        """Waits out a rate-limited reservation within the export's hold; False when the hold
+        may not take ``seconds`` more."""
+        with self._lock:
+            if self._held + seconds > MAX_RATE_LIMIT_HOLD_SECONDS:
+                return False
+            self._held += seconds
+        Event().wait(seconds)
+        return True
+
+    def _place_held(self, records: list[Any]) -> list[Any]:
+        """The log records with the media their copies held placed: each file uploaded under the
+        record's trace and listed in its own ``hue.blobs``, or kept inline; what is left over the
+        cap cut as before. Every fallback is counted and reported as a warning naming its traces."""
+        uploads = self._uploads
+        entries = [
+            (index, record, held)
+            for index, record in enumerate(records)
+            if (held := held_of(record)) is not None
+        ]
+        if uploads is None or not entries:
+            return records
+        result = list(records)
+        try:
+            logs = []
+            for _, record, held in entries:
+                log = record.log_record
+                body = _restored_body(log.body, held.body_values) if held.body else None
+                logs.append((log.attributes or {}, held, _record_trace_id(record) or "", body))
+            placed, bodies, tally = place_logs(
+                logs,
+                uploader=uploads.uploader,
+                memo=uploads.memo,
+                value_bytes=self._limits.current.value_bytes,
+                deadline=monotonic() + upload_budget_seconds(uploads.timeout),
+                wait=self._wait_for_rate,
+            )
+            for (index, record, held), attributes, body in zip(
+                entries, placed, bodies, strict=True
+            ):
+                result[index] = (
+                    replace_log(record, attributes=attributes, body=body)
+                    if held.body
+                    else replace_log(record, attributes=attributes)
+                )
+        finally:
+            for _, _, held in entries:
+                held.values.clear()
+                held.body_values.clear()
+                held.release()
+        if self._report is not None:
+            self._report(tally, "logs")
+        return result
+
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         failed = False
         self._held = 0.0
         try:
+            # A correlated GenAI record's media are uploaded before any record is measured.
+            batch = self._place_held(list(batch))
             entries: list[tuple[Any, int]] = []
             for record in batch:
                 entry = self._fit(record)

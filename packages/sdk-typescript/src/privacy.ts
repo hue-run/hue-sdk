@@ -5,7 +5,7 @@ import { resourceFromAttributes, type Resource } from "@opentelemetry/resources"
 import type { HueOptions } from "./types.js";
 import { MAX_CONTENT_BYTES, MAX_RECORD_NODES, REDACTION_CONTEXT_UNITS } from "./config.js";
 import { scrubToolCredentials, withToolCatalogSummary } from "./tool-definitions.js";
-import { hashInlineFiles, mayInlineFiles } from "./inline-files.js";
+import { hashInlineFiles, isMediaKey, mayInlineFiles } from "./inline-files.js";
 import { truncateUtf8 } from "./safety.js";
 import type { OffloadCollector } from "./blobs.js";
 import type { DigestedMessage } from "./snapshot.js";
@@ -208,6 +208,10 @@ function offloadValue(
   budget: RedactionBudget,
 ): unknown {
   const collector = budget.offload!;
+  // A log record uploads only the media in its inspected attributes: anything else is redacted
+  // and cut as before.
+  if (collector.log && (typeof value !== "string" || !isMediaKey(key) || budget.cut?.has(value)))
+    return NOT_HELD;
   if (value instanceof Uint8Array) {
     if (value.byteLength <= budget.valueBytes) return NOT_HELD;
     if (++budget.nodes > MAX_RECORD_NODES)
@@ -230,6 +234,11 @@ function offloadValue(
   if (++budget.nodes > MAX_RECORD_NODES)
     throw new Error("Telemetry value exceeds the supported nesting limit");
   const result = redactedText(scrubbed, path, options, budget.valueBytes);
+  if (collector.log && !mayInlineFiles(key, result)) {
+    if (Buffer.byteLength(result) <= budget.valueBytes) return result;
+    if (!budget.truncated.includes(key)) budget.truncated.push(key);
+    return truncateUtf8(result, budget.valueBytes);
+  }
   if (
     mayInlineFiles(key, result) ||
     (result.length * 3 > budget.valueBytes && Buffer.byteLength(result) > budget.valueBytes)
@@ -252,18 +261,20 @@ function redactValue(
   budget: RedactionBudget,
   depth = 0,
   listAs = path,
+  whole = false,
 ): unknown {
   if (++budget.nodes > MAX_RECORD_NODES || depth > 32)
     throw new Error("Telemetry value exceeds the supported nesting limit");
   if (typeof value === "string") {
-    const cap = budget.valueBytes;
+    // `whole`: a log record's body left for the upload step, which cuts what it does not upload.
+    const cap = whole && budget.cut?.has(value) !== true ? Infinity : budget.valueBytes;
     // The redactor sees the recorded text past the cap, so a secret that crosses the cap is still
     // its to recognize; what it returns is cut to the cap afterwards. Text the queue cut when the
     // record was admitted (far past the cap) reached the redactor without its continuation, so
     // the end of the answer, which may hold the start of a secret it could not recognize, is
     // never exported.
     const cutWhenQueued = budget.cut?.has(value) === true;
-    let result = redactedText(value, path, options, cap);
+    let result = redactedText(value, path, options, Math.min(cap, budget.valueBytes));
     if (cutWhenQueued && options.redact) result = withoutTail(result, REDACTION_CONTEXT_UNITS);
     const bytes = Buffer.byteLength(result);
     if (bytes <= cap && !cutWhenQueued) {
@@ -286,7 +297,7 @@ function redactValue(
     if (value.length > MAX_RECORD_NODES)
       throw new Error("Telemetry array exceeds the complexity limit");
     return value.map((item, index) =>
-      redactValue(item, `${path}.${index}`, options, budget, depth + 1, listAs),
+      redactValue(item, `${path}.${index}`, options, budget, depth + 1, listAs, whole),
     );
   }
   if (value instanceof Uint8Array) {
@@ -302,10 +313,51 @@ function redactValue(
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        redactValue(item, `${path}.${key}`, options, budget, depth + 1, listAs),
+        redactValue(item, `${path}.${key}`, options, budget, depth + 1, listAs, whole),
       ]),
     );
   return value;
+}
+
+/**
+ * A log record's body, placed by the upload step, cut as {@link redactLog} cuts one: each string
+ * over the cap cut to it and bytes over it replaced by the receiver's marker, and a structured
+ * body still over the cap replaced by the marker. Whether anything was cut, for `hue.truncated`.
+ */
+export function capLogBody(body: unknown, valueBytes: number): { body: unknown; cut: boolean } {
+  let cut = false;
+  const visit = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value) <= valueBytes) return value;
+      cut = true;
+      return truncateUtf8(value, valueBytes);
+    }
+    if (value instanceof Uint8Array) {
+      if (value.byteLength <= valueBytes) return value;
+      cut = true;
+      return truncatedMarker(value.byteLength);
+    }
+    if (Array.isArray(value)) return value.map(visit);
+    if (value !== null && typeof value === "object")
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, visit(item)]));
+    return value;
+  };
+  const size = structuredBytes(body);
+  const result = visit(body);
+  if (result !== null && typeof result === "object" && structuredBytes(result) > valueBytes)
+    return { body: truncatedMarker(size), cut: true };
+  return { body: result, cut };
+}
+
+/** Whether a log record is a GenAI event, whose structured body carries messages. */
+export function isGenAiLog(log: ReadableLogRecord): boolean {
+  const name = log.eventName ?? log.attributes["event.name"];
+  return typeof name === "string" && name.startsWith("gen_ai.");
+}
+
+/** Whether a log body is structured (an object or array), so a pointer can address inside it. */
+export function isStructuredBody(body: unknown): boolean {
+  return body !== null && typeof body === "object" && !(body instanceof Uint8Array);
 }
 
 /**
@@ -319,7 +371,7 @@ function attributes<T extends Record<string, unknown>>(
   path: string,
   budget: RedactionBudget,
   listPrefix = "",
-  own = false,
+  own: boolean | "log" = false,
 ): T {
   // Metadata-only export summarizes the tool definitions it removes by name and digest.
   const summarized = options.captureContent ? source : withToolCatalogSummary(source);
@@ -335,7 +387,7 @@ function attributes<T extends Record<string, unknown>>(
         [
           key,
           redactValue(
-            scrubToolCredentials(key, own ? hashInlineFiles(key, value) : value),
+            scrubToolCredentials(key, own === true ? hashInlineFiles(key, value) : value),
             `${path}.${key}`,
             options,
             budget,
@@ -487,16 +539,32 @@ export function redactLog(
   limits: RedactionLimits = {},
 ): ReadableLogRecord {
   const budget = budgetOf(limits);
-  let body = options.captureContent ? redactValue(log.body, "body", options, budget) : undefined;
-  if (body !== undefined && typeof body !== "string") {
-    // A structured body over the cap is replaced by the receiver's marker, as the receiver would
-    // replace it; the marker names the body's size as recorded, before any text part was cut.
-    if (Buffer.byteLength(JSON.stringify(body)) > budget.valueBytes) {
-      body = truncatedMarker(structuredBytes(log.body));
-      if (!budget.truncated.includes("body")) budget.truncated.push("body");
+  const offload = limits.offload;
+  let body: unknown;
+  if (offload && options.captureContent && isGenAiLog(log) && isStructuredBody(log.body)) {
+    // Left whole for the upload step, which uploads its media and cuts what is left over the cap.
+    body = redactValue(log.body, "body", options, budget, 0, "body", true);
+    offload.body = { value: body };
+  } else {
+    body = options.captureContent ? redactValue(log.body, "body", options, budget) : undefined;
+    if (body !== undefined && typeof body !== "string") {
+      // A structured body over the cap is replaced by the receiver's marker, as the receiver
+      // would replace it; the marker names the body's size as recorded, before any text part
+      // was cut.
+      if (Buffer.byteLength(JSON.stringify(body)) > budget.valueBytes) {
+        body = truncatedMarker(structuredBytes(log.body));
+        if (!budget.truncated.includes("body")) budget.truncated.push("body");
+      }
     }
   }
-  const redactedAttributes = attributes(log.attributes, options, "attributes", budget);
+  const redactedAttributes = attributes(
+    log.attributes,
+    options,
+    "attributes",
+    budget,
+    "",
+    offload ? "log" : false,
+  );
   const resource = redactResource(log.resource, options, cache, budget);
   const scopeAttributes = log.instrumentationScope.attributes
     ? attributes(log.instrumentationScope.attributes, options, "scope.attributes", budget, "scope.")

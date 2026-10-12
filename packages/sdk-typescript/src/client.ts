@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
-import { isMediaName } from "./inline-files.js";
+import { digestFormBytes, INLINE_FILE_TEXT_PER_RECORD, isMediaName } from "./inline-files.js";
 import {
   context,
   isSpanContextValid,
@@ -685,12 +685,29 @@ export class HueClient {
       stamp("gen_ai.provider.name", messages.provider, enclosing?.model?.provider);
       stamp("gen_ai.request.model", messages.model, enclosing?.model?.requestModel);
       stamp("gen_ai.conversation.id", undefined, enclosing?.sessionId);
+      // While media may be uploaded, the body may hold files past the value cap: it is emitted
+      // when it fits the cap with each file as its digest, and export uploads the files (under
+      // `body#<pointer>` keys) or cuts the body as before. Otherwise a body over the cap is
+      // refused, as before.
+      const limits = this.contentLimits();
+      let text: string;
+      if (this.transport.holdsValues()) {
+        text = encodeContent(body, {
+          ...limits,
+          bytes: limits.bytes + INLINE_FILE_TEXT_PER_RECORD,
+        });
+        if (
+          Buffer.byteLength(text) > limits.bytes &&
+          digestFormBytes(JSON.parse(text)) > limits.bytes
+        )
+          throw new RangeError("Content limit exceeded");
+      } else text = encodeContent(body, limits);
       this.logger.emit({
         context: active,
         severityNumber: SeverityNumber.INFO,
         eventName: "gen_ai.client.inference.operation.details",
         attributes,
-        body: JSON.parse(encodeContent(body, this.contentLimits())),
+        body: JSON.parse(text),
       });
     } catch {
       this.instrumentationFailed("logs");

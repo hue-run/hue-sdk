@@ -376,35 +376,6 @@ definition list. The digest is the same in both SDKs and does not change when a 
 rotates. Only definitions another integration recorded can be summarized: `hueTelemetry(hue)` with
 `captureContent: false` records none, whereas an application whose AI SDK integration records
 inputs and exports through Hue's attached processors gets the summary.
-Recorded messages can contain images, documents and audio. Hue inspects
-`gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`, including `parts`
-and OpenAI `content` arrays. Supported byte shapes include GenAI `blob`, AI SDK `file` and
-`image`, OpenAI Chat and Responses image, file and audio parts, Anthropic base64 sources, Gemini
-`inlineData` and `inline_data`, Vertex `media`, and Bedrock image and document sources.
-Remote URLs, provider file IDs and S3 references stay unchanged. Hue never fetches them.
-
-Nonempty binary media in a span's own message attributes is eligible for upload at every size
-within the inspection limits. Empty byte fields stay recorded and do not upload. The byte field is
-removed and the part carries `sha256` and `size`; the span's `hue.blobs` entry points to the part,
-for example `gen_ai.input.messages#/0/parts/1`. Text media over 64 KiB of decoded bytes uploads
-with a UTF-8-safe 16 KiB prefix in its content field. Its entry points to that field, for example
-`gen_ai.input.messages#/0/parts/1/content`. Smaller text stays inline. Hue reads both these forms
-and earlier binary prefixes. If upload fails, the part keeps its digest with no blob entry.
-In resources, events, links and log records, inline media up to 64 KiB stays verbatim; larger
-inline media is replaced by its digest, preserving the 0.16 behavior. These nested values never
-upload. Ordinary hold, cut or drop rules still apply to the resulting record.
-
-Entries use the recorded media type and, when valid, the filename, name or title. A valid name
-is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
-characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted
-from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
-base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
-declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
-matches `hue.recordFile`'s digest for the same bytes. Inspection is bounded to 8 MiB of
-text per message attribute and 16 MiB per record. Longer attributes use the ordinary value limit.
-With `captureContent: false`, messages are removed without inspection or uploads. See
-[Values over the inline limit](#values-over-the-inline-limit).
-
 Manual helpers encode JSON values without converting null into absence. Unknown
 outputs and usage remain absent. This SDK does not estimate tokens or cost. A thrown
 application error marks the span with `error.type` (the error's `name`), an ERROR status and an
@@ -418,6 +389,87 @@ the active span, with the messages in its body. The record also carries `gen_ai.
 `hue.model()` span or passed as `operation`, `provider` and `model`, and `gen_ai.conversation.id`
 from the active session, when those values are known. Use `recordMessages` inside `hue.model()` or
 supply `operation` and `provider` explicitly to include the required inference context.
+
+### What the SDK uploads automatically
+
+Recorded content can carry images, documents and audio inline. With `captureContent: true` and a
+project key, the SDK finds them in the attributes Hue reads files from, uploads each file's bytes to Hue
+under the record's trace, and leaves the file's digest in its place. On a span's own attributes:
+
+- Messages and values: `gen_ai.input.messages`, `gen_ai.output.messages`, `ai.prompt.messages`,
+  the AI SDK's `ai.prompt`, `input.value` and `output.value` (what `withSpan` and OpenInference
+  record), `traceloop.entity.input` and `traceloop.entity.output`, and Langfuse's
+  `langfuse.observation.input`, `langfuse.observation.output`, `langfuse.trace.input` and
+  `langfuse.trace.output`.
+- Tool arguments and results: `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`,
+  `ai.toolCall.args`, `ai.toolCall.result`, `tool.parameters`, `tool_arguments` and
+  `tool_response`.
+- Metadata: `metadata`, `langfuse.observation.metadata` and `langfuse.trace.metadata` (whole, or
+  one `.<key>` per attribute) and `ai.telemetry.metadata.<key>`. A metadata value is read as JSON
+  when it is an object or array; otherwise it is a file only when the whole value is a `data:` URL.
+- Indexed messages: OpenLLMetry's `gen_ai.prompt.<n>.content` and `gen_ai.completion.<n>.content`
+  when the value is the JSON of a parts list (any other content stays text), and OpenInference's
+  flattened `llm.input_messages.<n>.message.contents.<m>.message_content.image.image.url` (and
+  `llm.output_messages.…`), whose value is the image's URL.
+
+Inside those values a file is found by its shape: GenAI `blob`, AI SDK `file` and `image`, OpenAI
+Chat image, file and audio parts and an assistant message's `audio`, Responses `input_image`,
+`input_file` and `computer_screenshot`, Anthropic base64 sources, Gemini `inlineData` and
+`inline_data`, Vertex `media`, Bedrock image and document sources, and any whole string that is a
+`data:` URL declaring a media type. A tool call's `arguments` and a tool result (a `tool`
+message's `content`, `tool_result`, `function_call_output`, `tool_call_response`) are JSON in a
+string by convention, so the files inside them are uploaded too and the string is encoded again;
+a message's own text is never parsed as JSON. Remote URLs, provider file IDs, S3 references and
+Langfuse media tokens stay unchanged, and Hue never fetches them.
+
+Each uploaded file is listed in the record's `hue.blobs`, keyed `<attribute>#<JSON pointer>`:
+
+- A provider part loses its byte field and carries `sha256` and `size`; the key names the part,
+  for example `gen_ai.input.messages#/0/parts/1`.
+- An OpenAI assistant message's `audio` loses `audio.data` and the message carries `sha256` and
+  `size` (`gen_ai.output.messages#/0`). Its media type comes from `audio.format`, else from the
+  bytes' WAV, MP3, AAC, FLAC or Ogg signature, else `application/octet-stream`.
+- A whole `data:` URL string becomes a GenAI `blob` part,
+  `{"type":"blob","mime_type":"image/png","modality":"image","sha256":"…","size":68}`, keyed at
+  the string (`input.value#/image`). A value that is entirely one, such as a metadata attribute,
+  becomes that part's JSON text, keyed `<attribute>#`.
+- A file inside a JSON-encoded tool string takes the digest form inside the string. Its key goes
+  on through the string, which no JSON pointer can address, so Hue matches it by its digest.
+- Text media over 64 KiB of decoded bytes in a provider part keeps a UTF-8-safe 16 KiB prefix in
+  its content field instead, and its key names that field
+  (`gen_ai.input.messages#/0/parts/1/content`). Smaller text and empty fields stay inline.
+
+Entries use the recorded media type and, when valid, the filename, name or title. A valid name
+is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
+characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted
+from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
+base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
+declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
+matches `hue.recordFile`'s digest for the same bytes.
+
+A file that is not uploaded (the upload failed, the receiver has no upload route, or a budget ran
+out) keeps its digest without an entry in the recorded messages (`gen_ai.input.messages`,
+`gen_ai.output.messages`, `ai.prompt.messages`), as before; in every other attribute it keeps its
+bytes inline under the ordinary value limit.
+
+Log records upload their media the same way when they are correlated with a span: `recordMessages`'s
+`gen_ai.client.inference.operation.details` record and any `gen_ai.*` event with a structured
+body. The bytes upload under the log record's own trace and the log record lists them in its own
+`hue.blobs`, keyed `body#<JSON pointer>` into the body (`body#/gen_ai.input.messages/0/parts/1`, or
+`body#/content/1` for a deprecated `gen_ai.user.message` event) or `<attribute>#<JSON pointer>`
+for the attributes above. A body recorded as JSON text stays as it is. A log file that is not
+uploaded stays inline, text still over the value limit is cut inline and listed under
+`hue.truncated`, and no log value is uploaded whole. While uploads are available, `recordMessages`
+records a body over the value limit when it fits the limit with its files as their digest.
+
+Inspection is bounded to 8 MiB of text per attribute and 16 MiB per record, a log body's file
+contents included; a longer value uses the ordinary value limit. The bound stays at 8 MiB because
+inspection parses the value and decodes each file while the record is queued and again when it
+is exported, holding several copies of the value at once; files larger than that belong in
+`hue.recordFile` with `upload` set, whose bytes are not parsed out of text. Resources, links and
+span events never upload inline media: in their recorded messages, media up to 64 KiB stays
+verbatim and larger media is replaced by its digest, as in 0.16. With `captureContent: false`,
+nothing is inspected or uploaded. See [Values over the inline limit](#values-over-the-inline-limit).
 
 ## Existing OpenTelemetry providers
 
@@ -592,8 +644,8 @@ is held while nothing else is. While values can be uploaded, helpers encode cont
 upload limit and 1,048,576 values, rather than cutting it to the value limit as they record it.
 
 Nothing is uploaded with `captureContent: false` or a setup credential (`hue_setup_…`), nor from
-log records (Hue does not read a log record's uploaded values yet), links, resources
-or in-progress placeholders. Span events upload only through explicit `recordFile({ upload: true, ... })`;
+links, resources, log records not correlated with a span or in-progress placeholders; a log record
+uploads only its files (see [What the SDK uploads automatically](#what-the-sdk-uploads-automatically)). Span events upload only through explicit `recordFile({ upload: true, ... })`;
 other event values are cut as before. `redact` and the credential scrub of
 tool definitions and recorded requests run on the whole value before it is hashed, so a value they
 rewrite is uploaded as rewritten.

@@ -27,8 +27,8 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from opentelemetry.util.types import AttributeValue
 
 from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Tally, Uploads
-from ._inline_files import is_media_name
-from ._limits import AdvertisedLimits, cut_utf8
+from ._inline_files import INLINE_FILE_TEXT_PER_RECORD, digest_form_size, is_media_name
+from ._limits import AdvertisedLimits, cut_utf8, over_utf8
 from ._otel_compat import encode_logs
 from ._provider_tools import (
     ABSENT,
@@ -569,7 +569,8 @@ class HueSpan:
         ):
             if value is not _MISSING:
                 # Bound and redact each field as JSON, then send the structure rather than its text.
-                body[key] = json.loads(self._client._content(key, value))
+                # While media may be uploaded, a field's files may take it past the cap.
+                body[key] = json.loads(self._client._content(key, value, media=True))
         self._client._logger.emit(
             timestamp=time_ns(),
             context=trace.set_span_in_context(self.otel_span),
@@ -758,6 +759,8 @@ class Hue:
             self._ledger,
             limits=self._limits,
             dropped_records=dropped_records,
+            uploads=self._uploads,
+            report_uploads=self._span_exporter._report_uploads,
         )
         self._span_processor = BoundedSpanProcessor(
             self._span_exporter,
@@ -778,6 +781,7 @@ class Hue:
             capture_content=self.capture_content,
             limits=self._limits,
             dropped_records=dropped_records,
+            uploads=self._uploads,
         )
         sdk_tracer_provider.add_span_processor(self._span_processor)
         sdk_logger_provider.add_log_record_processor(self._log_processor)
@@ -834,15 +838,30 @@ class Hue:
             self._record_issue()
             return None
 
-    def _content(self, key: str, value: Any) -> str:
+    def _content(self, key: str, value: Any, *, media: bool = False) -> str:
         """The value as JSON text within the cap, for a caller that parses it back (an inference
-        log's body): a value the cap would cut is omitted instead, since its prefix is no JSON."""
+        log's body): a value the cap would cut is omitted instead, since its prefix is no JSON.
+
+        With ``media``, while values may be uploaded, a value over the cap is kept whole when it
+        fits the cap with each file it holds as its digest: export uploads the files."""
+        cap = self._limits.current.value_bytes
+        if media and self._uploads is not None and self._uploads.holds():
+            content, truncated = self._bounded_content(
+                key, value, whole=True, bound=cap + INLINE_FILE_TEXT_PER_RECORD
+            )
+            if not truncated and (
+                not over_utf8(content, cap) or digest_form_size(json.loads(content)) <= cap
+            ):
+                return content
+            raise ValueError("Captured content exceeds Hue's value cap.")
         content, truncated = self._bounded_content(key, value)
         if truncated:
             raise ValueError("Captured content exceeds Hue's value cap.")
         return content
 
-    def _bounded_content(self, key: str, value: Any, *, whole: bool = False) -> tuple[str, bool]:
+    def _bounded_content(
+        self, key: str, value: Any, *, whole: bool = False, bound: int | None = None
+    ) -> tuple[str, bool]:
         """The value as JSON text within Hue's value cap (1 MiB unless the receiver advertises
         another), and whether it was cut to fit.
 
@@ -855,7 +874,7 @@ class Hue:
         """
         cap = self._limits.current.value_bytes
         whole = whole and self._uploads is not None and self._uploads.holds()
-        bound = MAX_BLOB_BYTES if whole else cap
+        bound = cap if not whole else MAX_BLOB_BYTES if bound is None else bound
         # Redact before serialization, before queues and before any exporter receives content.
         try:
             # A redactor may mutate its argument before returning or raising.

@@ -890,19 +890,32 @@ describe("values over the inline limit", () => {
   });
 });
 
-for (const item of corpus.fixtures) {
+/** A corpus case's attribute text: its JSON `messages`, or its raw `value`. */
+type CorpusCase = {
+  id: string;
+  attribute: string;
+  messages?: unknown;
+  value?: string;
+  success: { messages?: unknown; value?: string; entries: string[] };
+  failure: { messages?: unknown; value?: string; entries: string[] };
+};
+const fixtures = corpus.fixtures as CorpusCase[];
+
+for (const item of fixtures) {
   for (const mode of ["success", "failure"] as const) {
     test(`media wire ${mode}: ${item.id}`, async () => {
       const endpoint = hue(mode === "failure" ? { reserve: () => ({ status: 403 }) } : {});
       const hueClient = client(endpoint);
       try {
         await hueClient.withSpan(item.id, ({ span }) => {
-          span.setAttribute(item.attribute, JSON.stringify(item.messages));
+          span.setAttribute(item.attribute, item.value ?? JSON.stringify(item.messages));
         });
         const report = await hueClient.flush();
         expect(report.acceptedSpans).toBe(1);
         const record = endpoint.span(item.id)!;
-        expect(JSON.parse(attr(record, item.attribute)!.stringValue!)).toEqual(item[mode].messages);
+        const exported = attr(record, item.attribute)!.stringValue!;
+        if (item.value === undefined) expect(JSON.parse(exported)).toEqual(item[mode].messages);
+        else expect(exported).toBe(item[mode].value!);
         expect(strings(attr(record, "hue.blobs")) ?? []).toEqual(item[mode].entries);
         expect(
           endpoint.reservations.every(
@@ -1947,4 +1960,241 @@ test("media digest memo retains only trace and SHA keys with bounded digest meta
     await hueClient.shutdown();
     endpoint.server.stop(true);
   }
+});
+
+/** An OTLP value as the JSON it carries (a kvlist as an object). */
+function jsonOf(value: Value | undefined): unknown {
+  if (!value) return null;
+  if (value.stringValue !== undefined) return value.stringValue;
+  if (value.boolValue !== undefined) return value.boolValue;
+  if (value.intValue !== undefined) return Number(value.intValue);
+  const double = (value as { doubleValue?: number }).doubleValue;
+  if (double !== undefined) return double;
+  if (value.kvlistValue)
+    return Object.fromEntries(
+      (value.kvlistValue.values ?? []).map(({ key, value: item }) => [key, jsonOf(item)]),
+    );
+  if (value.arrayValue) return (value.arrayValue.values ?? []).map(jsonOf);
+  return null;
+}
+
+type LogCase = {
+  id: string;
+  input?: unknown;
+  output?: unknown;
+  success: { body: unknown; entries: string[] };
+  failure: { body: unknown; entries: string[] };
+};
+
+const hex = (base64: string) => Buffer.from(base64, "base64").toString("hex");
+
+for (const item of (corpus as unknown as { logs: LogCase[] }).logs) {
+  for (const mode of ["success", "failure"] as const) {
+    test(`log media wire ${mode}: ${item.id}`, async () => {
+      const endpoint = hue(mode === "failure" ? { reserve: () => ({ status: 403 }) } : {});
+      const hueClient = client(endpoint);
+      try {
+        let traceId = "";
+        await hueClient.withSpan(item.id, ({ span }) => {
+          traceId = span.spanContext().traceId;
+          hueClient.recordMessages({
+            ...(item.input !== undefined ? { input: item.input } : {}),
+            ...(item.output !== undefined ? { output: item.output } : {}),
+            operation: "chat",
+            provider: "openai",
+            model: item.id,
+          });
+        });
+        const report = await hueClient.flush();
+        const [log] = endpoint.logs();
+        expect(hex(log!.traceId)).toBe(traceId);
+        expect(jsonOf(log!.body)).toEqual(item[mode].body);
+        expect(strings(attr(log!, "hue.blobs")) ?? []).toEqual(item[mode].entries);
+        expect(attr(endpoint.span(item.id)!, "hue.blobs")).toBeUndefined();
+        if (mode === "success") {
+          expect(report.uploadedValues).toBe(item.success.entries.length);
+          // Each file's bytes are stored under the log record's own trace.
+          for (const entry of item.success.entries) {
+            const { sha256: digest } = JSON.parse(entry) as { sha256: string };
+            expect(sha256(endpoint.store.get(`${traceId}/${digest}`)!.bytes)).toBe(digest);
+          }
+          expect(
+            endpoint.reservations.every((reservation) => reservation.traceId === traceId),
+          ).toBe(true);
+        } else expect(report.uploadFallbacks).toBe(item.success.entries.length);
+      } finally {
+        await hueClient.shutdown();
+        endpoint.server.stop(true);
+      }
+    });
+  }
+}
+
+describe("media beyond the recorded messages", () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const dataUrl = (bytes: Buffer, type = "image/png") =>
+    `data:${type};base64,${bytes.toString("base64")}`;
+  /** A log record emitted through the client's logger, correlated with `span`. */
+  const emit = (
+    hueClient: ReturnType<typeof client>,
+    span: Span,
+    record: { body?: unknown; attributes?: Record<string, string>; eventName?: string },
+  ) =>
+    (hueClient as unknown as { logger: { emit(record: unknown): void } }).logger.emit({
+      ...record,
+      context: trace.setSpan(ROOT_CONTEXT, span),
+    });
+
+  test("metadata-only export inspects and uploads nothing, and records no inference log", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint, { captureContent: false });
+    try {
+      await hueClient.withSpan("metadata only", ({ span }) => {
+        span.setAttribute("metadata", dataUrl(png));
+        span.setAttribute("input.value", JSON.stringify({ image: dataUrl(png) }));
+        hueClient.recordMessages({ input: [{ role: "user", content: dataUrl(png) }] });
+      });
+      await hueClient.flush();
+      const record = endpoint.span("metadata only")!;
+      expect(attr(record, "metadata")!.stringValue).toBe(dataUrl(png));
+      expect(attr(record, "input.value")).toBeUndefined();
+      expect(attr(record, "hue.blobs")).toBeUndefined();
+      expect(endpoint.logs()).toEqual([]);
+      expect(endpoint.reservations).toEqual([]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("a value past the per-attribute inspection limit is not walked for media", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const large = Buffer.alloc(6 * MiB + 1, 7);
+    try {
+      await hueClient.withSpan("over inspection", ({ span }) => {
+        span.setAttribute("input.value", JSON.stringify({ image: dataUrl(large) }));
+      });
+      await hueClient.flush();
+      const record = endpoint.span("over inspection")!;
+      // Over 8 MiB of text: uploaded whole as before, its image never parsed out of it.
+      expect(blobs(record).map(({ key, content_type }) => [key, content_type])).toEqual([
+        ["input.value", "application/json"],
+      ]);
+      expect(
+        attr(record, "hue.truncated")!.arrayValue!.values.map((item) => item.stringValue),
+      ).toEqual(["input.value"]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("a correlated log record uploads its inspected attributes' and GenAI body's media", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const messages = messageWithImage(png);
+    try {
+      let traceId = "";
+      await hueClient.withSpan("correlated", ({ span }) => {
+        traceId = span.spanContext().traceId;
+        emit(hueClient, span, {
+          body: messages,
+          attributes: { "gen_ai.input.messages": messages, "custom.messages": messages },
+        });
+        // A deprecated GenAI event names its one message's parts from the body.
+        emit(hueClient, span, {
+          eventName: "gen_ai.user.message",
+          body: {
+            content: [
+              { type: "text", text: "Look." },
+              { type: "image_url", image_url: { url: dataUrl(png) } },
+            ],
+          },
+        });
+      });
+      await hueClient.flush();
+      const [attributeLog, eventLog] = endpoint.logs();
+      // A body that is JSON text, and an attribute Hue does not read files from, stay as recorded.
+      expect(attributeLog!.body!.stringValue).toBe(messages);
+      expect(attr(attributeLog!, "custom.messages")!.stringValue).toBe(messages);
+      expect(
+        JSON.parse(attr(attributeLog!, "gen_ai.input.messages")!.stringValue!)[0].parts[1],
+      ).toEqual({
+        type: "blob",
+        modality: "image",
+        mime_type: "image/png",
+        sha256: sha256(png),
+        size: png.byteLength,
+      });
+      expect(blobs(attributeLog!)).toEqual([
+        {
+          key: "gen_ai.input.messages#/0/parts/1",
+          sha256: sha256(png),
+          size: png.byteLength,
+          content_type: "image/png",
+        },
+      ]);
+      expect(jsonOf(eventLog!.body)).toEqual({
+        content: [
+          { type: "text", text: "Look." },
+          { type: "image_url", image_url: {}, sha256: sha256(png), size: png.byteLength },
+        ],
+      });
+      expect(blobs(eventLog!).map(({ key }) => key)).toEqual(["body#/content/1"]);
+      expect(endpoint.store.has(`${traceId}/${sha256(png)}`)).toBe(true);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("an inference log over the value cap is recorded when its files account for the excess", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const image = randomBytes(2 * MiB);
+    try {
+      await hueClient.withSpan("large inference log", () => {
+        hueClient.recordMessages({
+          input: [
+            {
+              role: "user",
+              parts: [{ type: "blob", mime_type: "image/png", content: image.toString("base64") }],
+            },
+          ],
+          operation: "chat",
+          provider: "openai",
+        });
+        // Text past the cap with no file to upload is refused, as before.
+        hueClient.recordMessages({ input: [{ role: "user", content: "t".repeat(2 * MiB) }] });
+      });
+      await hueClient.flush().catch(() => undefined);
+      expect(hueClient.transport.getReport().instrumentationFailures).toBe(1);
+      const [log] = endpoint.logs();
+      expect(endpoint.logs()).toHaveLength(1);
+      expect(jsonOf(log!.body)).toEqual({
+        "gen_ai.input.messages": [
+          {
+            role: "user",
+            parts: [
+              {
+                type: "blob",
+                mime_type: "image/png",
+                sha256: sha256(image),
+                size: image.byteLength,
+              },
+            ],
+          },
+        ],
+      });
+      expect(blobs(log!).map(({ key }) => key)).toEqual(["body#/gen_ai.input.messages/0/parts/0"]);
+      expect(attr(log!, "hue.truncated")).toBeUndefined();
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
 });

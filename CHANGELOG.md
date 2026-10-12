@@ -10,6 +10,15 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### 0.18.0 (unreleased)
+
+#### Breaking
+
+- **Wire** Inline media is found and uploaded beyond the three recorded message attributes. On a span's own attributes the SDK now also reads the AI SDK's `ai.prompt`, `input.value` and `output.value` (what `withSpan` records), `traceloop.entity.input`/`output`, Langfuse's `langfuse.observation.input`/`output` and `langfuse.trace.input`/`output`, the tool keys `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `ai.toolCall.args`, `ai.toolCall.result`, `tool.parameters`, `tool_arguments` and `tool_response`, the metadata keys `metadata`, `langfuse.observation.metadata[.<key>]`, `langfuse.trace.metadata[.<key>]` and `ai.telemetry.metadata.<key>`, OpenLLMetry's `gen_ai.prompt.<n>.content` and `gen_ai.completion.<n>.content` parts lists, and OpenInference's flattened `llm.input_messages.<n>.message.contents.<m>.message_content.image.image.url` (and output). An uploaded file takes the digest form in place, listed in `hue.blobs` under `<attribute>#<JSON pointer>`. Migration: a reader of these attributes finds `sha256` and `size` where inline bytes were, and resolves the bytes through the entry; Hue reads every form. A file in one of these attributes that is not uploaded keeps its bytes inline, as before.
+- **Wire** A whole string that is a `data:` URL declaring a media type, anywhere inside an inspected value, is uploaded and replaced by a GenAI `blob` part, `{"type":"blob","mime_type":…,"modality":…,"sha256":…,"size":…}`, keyed at the string's pointer; a metadata value that is entirely one becomes the part's JSON text, keyed `<attribute>#`. Text data URLs up to 64 KiB stay inline. Migration: read the part, or the entry, for the file.
+- **Wire** New provider shapes upload: an OpenAI Chat assistant message's `audio` (the message carries `sha256` and `size`, `audio.data` is removed, the entry is keyed at the message, typed by `audio.format` or the bytes' signature) and a Responses `computer_screenshot`. Files inside a tool call's `arguments` or a tool result's JSON-encoded string are uploaded and the string is encoded again with the file in digest form; Hue matches them by digest. In the recorded messages, such files keep their digest without an entry when they are not uploaded, as other message parts do.
+- **Wire** Log records correlated with a span upload their media: `recordMessages`' `gen_ai.client.inference.operation.details` record and any `gen_ai.*` event with a structured body, under the log record's trace, listed in the log record's own `hue.blobs` with keys `body#<JSON pointer>` (for example `body#/gen_ai.input.messages/0/parts/1`) or `<attribute>#<JSON pointer>` for the attributes above. A log file that is not uploaded stays inline; text over the value limit is still cut inline and listed under `hue.truncated`. `recordMessages` records a body over the value limit when, with its files as their digest, it fits the limit while uploads are available; before, such a body was refused. Migration: a log reader that takes a body's inline bytes reads the digest form and the entry instead.
+
 ### [0.17.0] - 2026-10-10
 
 #### Breaking
@@ -1446,6 +1455,14 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### 0.11.0 (unreleased)
+
+#### Breaking
+
+- **Wire** Inline media is found and uploaded beyond the three recorded message attributes, as in the TypeScript SDK 0.18.0: `ai.prompt`, `input.value` and `output.value` (what `span()` records), `traceloop.entity.input`/`output`, Langfuse observation and trace inputs and outputs, tool arguments and results (`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `ai.toolCall.args`, `ai.toolCall.result`, `tool.parameters`, `tool_arguments`, `tool_response`), metadata (`metadata`, `langfuse.observation.metadata[.<key>]`, `langfuse.trace.metadata[.<key>]`, `ai.telemetry.metadata.<key>`), OpenLLMetry's `gen_ai.prompt.<n>.content` and `gen_ai.completion.<n>.content` parts lists, and OpenInference's flattened image URLs. An uploaded file takes the digest form in place, listed in `hue.blobs` under `<attribute>#<JSON pointer>`. A file in one of these attributes that is not uploaded keeps its bytes inline. Migration: a reader of these attributes finds `sha256` and `size` where inline bytes were; Hue reads every form.
+- **Wire** A whole `data:` URL string declaring a media type is uploaded and replaced by a GenAI `blob` part keyed at its pointer (a metadata value that is entirely one becomes the part's JSON text, keyed `<attribute>#`); OpenAI Chat assistant `audio` and Responses `computer_screenshot` upload; files inside JSON-encoded tool arguments and results upload and the string is encoded again. The shared corpus pins byte-identical entries and values with the TypeScript SDK.
+- **Wire** Log records correlated with a span upload their media: `log_inference`'s `gen_ai.client.inference.operation.details` record and any `gen_ai.*` event with a structured body, under the log record's trace, listed in its own `hue.blobs` with keys `body#<JSON pointer>` or `<attribute>#<JSON pointer>`. A log file that is not uploaded stays inline and text over the value limit is still cut inline. `log_inference` records a field over the value limit when, with its files as their digest, it fits the limit while uploads are available; before, the field was omitted. Migration: a log reader that takes a body's inline bytes reads the digest form and the entry instead.
 
 ### [0.10.0] - 2026-10-10
 

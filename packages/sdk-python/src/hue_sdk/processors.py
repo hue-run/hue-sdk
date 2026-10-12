@@ -524,5 +524,44 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
 class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
     _copy = staticmethod(snapshot_log)
 
+    def __init__(
+        self,
+        exporter: Any,
+        encode: Callable[[Any], Any],
+        max_records: int,
+        max_bytes: int,
+        capture_content: bool = True,
+        *,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
+    ) -> None:
+        # Set before the worker starts; admission reads it.
+        self._uploads = uploads
+        super().__init__(
+            exporter,
+            encode,
+            max_records,
+            max_bytes,
+            capture_content,
+            limits=limits,
+            dropped_records=dropped_records,
+        )
+
+    def _hold(self, value_bytes: int) -> Hold | None:
+        """A correlated log record's media are held for upload like a span's."""
+        uploads = self._uploads
+        if uploads is None:
+            return None
+        return Hold(uploads.held, value_bytes, uploads.holds(), uploads)
+
+    def _discard(self, *items: Any) -> None:
+        for item in items:
+            held = held_of(item)
+            if held is not None:
+                held.values.clear()
+                held.body_values.clear()
+                held.release()
+
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
         self._enqueue(log_record)
