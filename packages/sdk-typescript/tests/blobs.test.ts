@@ -1209,6 +1209,45 @@ for (const liveSpans of [false, true]) {
   });
 }
 
+test("recordFile uploads through an API-only span wrapper that does not expose its events", async () => {
+  const endpoint = hue();
+  const attached = attachedMediaClient(endpoint, false);
+  const { hueClient } = attached;
+  const bytes = Buffer.from("wrapped file");
+  try {
+    const inner = hueClient.tracer.startSpan("api-only wrapper");
+    // The OpenTelemetry API contract only: everything forwards, nothing exposes `events`.
+    const wrapper: Span = {
+      spanContext: () => inner.spanContext(),
+      setAttribute: (key, value) => (inner.setAttribute(key, value), wrapper),
+      setAttributes: (attributes) => (inner.setAttributes(attributes), wrapper),
+      addEvent: (name, attributes, time) => (inner.addEvent(name, attributes, time), wrapper),
+      addLink: (link) => (inner.addLink(link), wrapper),
+      addLinks: (links) => (inner.addLinks(links), wrapper),
+      setStatus: (status) => (inner.setStatus(status), wrapper),
+      updateName: (name) => (inner.updateName(name), wrapper),
+      end: (time) => inner.end(time),
+      isRecording: () => inner.isRecording(),
+      recordException: (exception, time) => inner.recordException(exception, time),
+    };
+    hueClient.recordFile(
+      { role: "input", mediaType: "image/png", data: bytes, upload: true },
+      trace.setSpan(ROOT_CONTEXT, wrapper),
+    );
+    wrapper.end();
+    const report = await hueClient.flush();
+    expect(report.instrumentationFailures).toBe(0);
+    expect(report.uploadFallbacks).toBe(0);
+    expect(report.uploadedValues).toBe(1);
+    const record = endpoint.span("api-only wrapper")!;
+    expect(record.events?.map((event) => event.name)).toEqual(["hue.file"]);
+    expect(blobs(record).map((entry) => entry.key)).toEqual([`event:hue.file:${sha256(bytes)}`]);
+  } finally {
+    await attached.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
 test("untracked media follows provider span lifetime when its safe wrapper is collected", async () => {
   const endpoint = hue();
   const attached = attachedMediaClient(endpoint, false, false);

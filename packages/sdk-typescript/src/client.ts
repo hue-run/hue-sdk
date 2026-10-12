@@ -886,23 +886,33 @@ export class HueClient {
       // Let OpenTelemetry use the span's wall-clock anchor, then keep this event's exact
       // timestamp for upload admission. A dropped event cannot authorize an upload.
       const source = spanSource(span) as Span & Partial<Pick<ReadableSpan, "events">>;
-      const previousEvent = source.events?.at(-1);
-      span.addEvent("hue.file", attributes);
-      const event = source.events?.at(-1);
-      const eventTime = event && event !== previousEvent ? event.time : undefined;
       const previous = this.fileEventTimes.get(source);
-      if (
-        eventTime &&
-        previous &&
-        (eventTime[0] < previous[0] ||
-          (eventTime[0] === previous[0] && eventTime[1] <= previous[1]))
-      ) {
-        eventTime[0] = previous[0];
-        eventTime[1] = previous[1] + 1;
-        if (eventTime[1] === 1_000_000_000) {
-          eventTime[0]++;
-          eventTime[1] = 0;
+      const after = (time: HrTime) => {
+        if (
+          previous &&
+          (time[0] < previous[0] || (time[0] === previous[0] && time[1] <= previous[1]))
+        ) {
+          time[0] = previous[0];
+          time[1] = previous[1] + 1;
+          if (time[1] === 1_000_000_000) {
+            time[0]++;
+            time[1] = 0;
+          }
         }
+        return time;
+      };
+      let eventTime: HrTime | undefined;
+      if (Array.isArray(source.events)) {
+        const previousEvent = source.events.at(-1);
+        span.addEvent("hue.file", attributes);
+        const event = source.events.at(-1);
+        eventTime = event && event !== previousEvent ? after(event.time) : undefined;
+      } else {
+        // A span that does not expose its events (an API-only wrapper in attach mode): stamp the
+        // event with the wall clock and keep that exact time for upload admission.
+        const now = Date.now();
+        eventTime = after([Math.floor(now / 1000), (now % 1000) * 1_000_000]);
+        span.addEvent("hue.file", attributes, [eventTime[0], eventTime[1]]);
       }
       if (eventTime) this.fileEventTimes.set(source, eventTime);
       if (file.upload === true && this.transport.offloadsValues()) {
