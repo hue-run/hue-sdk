@@ -5,6 +5,7 @@ An application creates a client with `createHue`, records spans and tools, and r
 ## Sub-features
 
 - `ts-span` records `withSpan`, `tool` and `model` spans with input and output.
+- `ts-subagent` records `subagent()` as an `invoke_agent {name}` span (`gen_ai.agent.name`, `hue.agent.role` `subagent`) under the active tool span, or under `parentContext` from `extract()` in another process.
 - `ts-capture` honors `captureContent` and redaction before export.
 - `ts-ack` reports accepted, rejected and failed records truthfully from the receiver's acknowledgement.
 - `ts-lifecycle` covers `flush`, `shutdown` and the fail-open `*Safe` variants.
@@ -45,6 +46,7 @@ Preconditions:
 
   Expected: `project 00000000-0000-4000-8000-000000000001`, a trace ID, and `flush {"acceptedSpans":2,...,"failedSpans":0,...}`. The stub log gains `GET /api/v1/projects/current` and `POST /api/v1/otlp/v1/traces` with status 200.
 - **Behavior test.** `cd packages/sdk-typescript && bun test tests/sdk.test.ts -t "redaction happens before export"`. Expected: `1 pass`, `0 fail` in under 1 s. Swap the pattern for the behavior you changed (`grep -n 'test(' tests/sdk.test.ts`).
+- **Sub-agents (`ts-subagent`).** `cd packages/sdk-typescript && bun test tests/sdk.test.ts -t subagent`. Expected: `3 pass`, `0 fail`: attributes, kind, parentage, nesting, error status, metadata-only mode and continuation from W3C headers through a second client.
 
 ## Gotchas
 

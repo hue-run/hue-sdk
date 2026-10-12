@@ -184,7 +184,8 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
         text=True,
     )
 
-    # Run the constructor-default regression against this wheel, outside the checkout.
+    # Run the constructor-default and sub-agent regressions against this wheel, outside the
+    # checkout.
     default_tests = receipt_tests / "test_sdk.py"
     shutil.copyfile(package / "tests/test_sdk.py", default_tests)
     subprocess.run(
@@ -195,7 +196,7 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
             "-q",
             str(default_tests),
             "-k",
-            "content_is_captured_by_default_and_redacted",
+            "content_is_captured_by_default_and_redacted or subagent",
         ],
         env=environment,
         cwd=tmp_path,
