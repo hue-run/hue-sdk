@@ -58,6 +58,7 @@ See [compatibility](https://docs.hue.run/sdks/compatibility) before adding Hue t
 
 - Record requests, model calls, tools, errors and sessions using standard OTLP.
 - Record full traces with content capture, or choose metadata only, and inspect export failures.
+- Store the images, documents and audio a trace records (found automatically, placed with `Attachment` or recorded as files), read them back by digest and pin them to evaluation cases.
 - Preserve an existing OpenTelemetry provider and its other exporters.
 - Confirm stored traces, known child spans, and required field presence after export.
 - Run local evaluation targets and scorers against frozen datasets.
@@ -177,7 +178,7 @@ Hue's SDKs are deliberately small. The following are design choices, not missing
 
 - No bundled provider auto-instrumentation and no per-framework adapters beyond the AI SDK 7 helper. Use the provider's or framework's own OpenTelemetry export (OpenInference, OpenLLMetry, native OTel) and configure its content controls; Hue recognizes those conventions.
 - No native SDKs beyond TypeScript and Python. Other languages use the official OpenTelemetry SDK pointed at Hue's OTLP endpoints.
-- No proprietary event protocol, live token streaming, attachments or feature-flag API. Spans are exported when they complete, and a Hue or AI span that is still running is announced with a standard OTLP placeholder span so Hue can show it live; use standard attributes and span events.
+- No proprietary event protocol, live token streaming or feature-flag API. Spans are exported when they complete, and a Hue or AI span that is still running is announced with a standard OTLP placeholder span so Hue can show it live; use standard attributes and span events.
 - No browser or edge builds: the project service key is a server-side credential. There is no separate CommonJS build; Node.js 22.12 or later loads the ESM build from `require()`.
 - Constructors never read Hue settings (key, endpoint, capture policy, budgets) from environment variables, and the TypeScript SDK does not read `OTEL_RESOURCE_ATTRIBUTES` either. No token-cost estimation, no prompt management, no built-in PII pattern presets and no local trace viewer. Redaction is a hook you supply; an OpenTelemetry Collector covers organization-wide redaction, buffering and local viewing.
 - Project service keys are preset-scoped. Use **Read and write** for development and evaluation: it sends telemetry, reads delivery receipts, authorizes the evaluation, artifact and simulation APIs used by the optional clients and connects the [Hue MCP server](https://docs.hue.run/agents/mcp-server). **Tracing only** sends telemetry and reads delivery receipts, nothing more; use it as a production server's `HUE_API_KEY` and keep **Read and write** off production servers. **Read** reads the project through the MCP server and cannot send telemetry. The SDK clients do not browse stored traces; use the Hue app or the MCP server. These SDKs do not attach feedback or scores to stored traces. TypeScript's explicit `runSimulation()` helper orchestrates versioned simulation resources; it does not grant general read access or hide provider execution.
