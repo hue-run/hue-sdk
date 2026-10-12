@@ -2142,3 +2142,65 @@ test("a message of 8 Mi code units is inspected even when its UTF-8 is longer", 
     endpoint.server.stop(true);
   }
 });
+
+test("export leaves uninspected the messages admission skipped", async () => {
+  // The held-value budget is full, so the first two ~6 Mi-unit messages are inspected and shrink
+  // to digests when queued. The third is past the 16 Mi per-record allowance and is queued as
+  // recorded; export must not inspect it either, though the first two are now short.
+  const endpoint = hue();
+  const hueClient = client(endpoint, { maxQueueBytes: 64 * MiB });
+  const state = mediaState(hueClient);
+  const transport = hueClient.transport as unknown as {
+    limits: { decodedBytes: number; requestBytes: number; valueBytes: number };
+  };
+  transport.limits = {
+    ...transport.limits,
+    decodedBytes: 64 * MiB,
+    requestBytes: 64 * MiB,
+    valueBytes: 16 * MiB,
+  };
+  // The first two messages are mostly a 4.5 MiB image (6 Mi base64 characters); the third is
+  // 6 Mi characters of text and a small image.
+  const images = [Buffer.alloc(4.5 * MiB, 1), Buffer.alloc(4.5 * MiB, 2), Buffer.alloc(4096, 3)];
+  const message = (image: Buffer, index: number) =>
+    JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: index === 2 ? "x".repeat(6 * MiB) : "Describe this image." },
+          {
+            type: "blob",
+            modality: "image",
+            mime_type: "image/png",
+            content: image.toString("base64"),
+          },
+        ],
+      },
+    ]);
+  const keys = ["gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"];
+  const messages = images.map(message);
+  state.heldBytes = 128 * MiB;
+  try {
+    await hueClient.withSpan("skipped at admission", ({ span }) => {
+      for (const [index, key] of keys.entries()) span.setAttribute(key, messages[index]!);
+    });
+    state.heldBytes = 0;
+    await hueClient.flush();
+    const record = endpoint.span("skipped at admission")!;
+    for (const index of [0, 1])
+      expect(JSON.parse(attr(record, keys[index]!)!.stringValue!)[0].parts[1]).toEqual({
+        type: "blob",
+        modality: "image",
+        mime_type: "image/png",
+        sha256: sha256(images[index]!),
+        size: images[index]!.length,
+      });
+    expect(attr(record, "ai.prompt.messages")!.stringValue).toBe(messages[2]);
+    expect(blobs(record)).toEqual([]);
+    expect(endpoint.reservations).toHaveLength(0);
+  } finally {
+    state.heldBytes = 0;
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});

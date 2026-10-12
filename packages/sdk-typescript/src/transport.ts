@@ -284,6 +284,8 @@ export class HueTransport {
   private admissionCuts = new WeakMap<RecordValue, ReadonlySet<string>>();
   // The span's own messages whose large inline files each admitted span shrank to their digest.
   private admissionDigests = new WeakMap<RecordValue, ReadonlyMap<string, DigestedMessage>>();
+  // The span's own messages each admitted span inspected, or left to export to inspect.
+  private admissionInspected = new WeakMap<RecordValue, ReadonlySet<string>>();
   /** Uploads values over the inline limit apart from their spans; absent when disabled. */
   private uploader?: BlobUploader;
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
@@ -313,13 +315,16 @@ export class HueTransport {
       "traces",
       ProtobufTraceSerializer,
       TraceExporterMetricsHelper,
-      (span, cache, offload) =>
-        redactSpan(span, this.options, cache, {
+      (span, cache, offload) => {
+        // Export inspects only the messages admission inspected within the record's allowance.
+        if (offload) offload.inspected = this.admissionInspected.get(span);
+        return redactSpan(span, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
           digested: this.admissionDigests.get(span),
           ...(offload ? { offload } : {}),
-        }),
+        });
+      },
     );
     this.logExporter = new ReportingExporter(
       this,
@@ -495,6 +500,7 @@ export class HueTransport {
             );
       if (snapshot.cut.size) this.admissionCuts.set(snapshot.record, snapshot.cut);
       if (snapshot.digested.size) this.admissionDigests.set(snapshot.record, snapshot.digested);
+      if (signal === "traces") this.admissionInspected.set(snapshot.record, snapshot.inspected);
       if (snapshot.held) {
         this.heldBytes += snapshot.held;
         this.held.set(snapshot.record, snapshot.held);

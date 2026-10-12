@@ -91,6 +91,10 @@ export interface OffloadCollector {
   candidates: OffloadCandidate[];
   cut: string[];
   attachments?: MediaAttachment[];
+  /** The span's own message attributes admission inspected within the record's allowance:
+   * export inspects only these. Absent for a record admission did not copy, which export
+   * inspects within its own allowance. */
+  inspected?: ReadonlySet<string> | undefined;
 }
 
 export interface MediaAttachment {
@@ -759,8 +763,13 @@ export async function offloadAttributes(
   const parts = async (index: number, key: string, text: string): Promise<string> => {
     // Both bounds count UTF-16 code units, as admission does.
     if (!mayInlineFiles(key, text) || text.length > MAX_INLINE_FILE_TEXT) return text;
-    if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
-    inspected += text.length;
+    if (collector.inspected) {
+      // A message admission skipped stays as recorded.
+      if (!collector.inspected.has(key)) return text;
+    } else {
+      if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
+      inspected += text.length;
+    }
     let parsed: unknown;
     let found: ReturnType<typeof largeInlineFileParts>;
     try {
@@ -905,7 +914,8 @@ export function fallbackAttributes(
     // Each large inline file is reported as a value not uploaded, as the upload step reports it.
     const count = { files: 0 };
     try {
-      placed = hashInlineFiles(key, value, count, memo, traceId);
+      if (!collector.inspected || collector.inspected.has(key))
+        placed = hashInlineFiles(key, value, count, memo, traceId);
     } catch {
       // Left as it is: cut below when over the limit.
     }

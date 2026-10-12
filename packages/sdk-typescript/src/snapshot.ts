@@ -95,6 +95,9 @@ class Snapshot {
   digested = new Map<string, DigestedMessage>();
   /** How many files each message text {@link inlineFiles} hashed replaced by their digest. */
   private hashedFiles = new Map<string, number>();
+  /** The span's own message attributes inspected within the record's allowance, whether here or
+   * left to export for a message held whole: export inspects only these. */
+  inspectedKeys = new Set<string>();
 
   /**
    * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
@@ -134,6 +137,15 @@ class Snapshot {
         const fallback = this.valueUnits * 2 + 16;
         if (this.bytes + fallback > this.limit || !this.holds(value.length * 2)) return undefined;
         this.charge(fallback);
+        // Export parses the held message; its inspection allowance is taken here, in order.
+        if (
+          value.length <= MAX_INLINE_FILE_TEXT &&
+          mayInlineFiles(key, value) &&
+          this.inspected + value.length <= INLINE_FILE_TEXT_PER_RECORD
+        ) {
+          this.inspected += value.length;
+          this.inspectedKeys.add(key);
+        }
         return { value };
       }
       // Within the queued length: a recorded message holding an inline media part is held whole
@@ -245,9 +257,13 @@ class Snapshot {
     )
       return value;
     const hashed = this.own ? this.hashed : this.nestedHashed;
-    if (hashed.has(value)) return hashed.get(value);
+    if (hashed.has(value)) {
+      if (this.own) this.inspectedKeys.add(key);
+      return hashed.get(value);
+    }
     if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
     this.inspected += value.length;
+    if (this.own) this.inspectedKeys.add(key);
     const count = { files: 0 };
     const result = this.own
       ? hashInlineFiles(key, value, count, this.memo, this.traceId)
@@ -465,6 +481,8 @@ export interface RecordSnapshot<T> {
   cut: ReadonlySet<string>;
   held: number;
   digested: ReadonlyMap<string, DigestedMessage>;
+  /** The span's own message attributes admission inspected or left to export to inspect. */
+  inspected: ReadonlySet<string>;
 }
 
 export function snapshotSpan(
@@ -531,6 +549,7 @@ export function snapshotSpan(
     cut: snapshot.cut,
     held: snapshot.held,
     digested: snapshot.digested,
+    inspected: snapshot.inspectedKeys,
   };
 }
 
@@ -583,5 +602,6 @@ export function snapshotLog(
     cut: snapshot.cut,
     held: 0,
     digested: new Map(),
+    inspected: new Set(),
   };
 }
