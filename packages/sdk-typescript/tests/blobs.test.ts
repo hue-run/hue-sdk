@@ -2361,6 +2361,31 @@ describe("attachments", () => {
       }
     });
 
+  test("bytes over 25 MiB are refused before they are copied", () => {
+    const large = new Uint8Array(25 * MiB + 1);
+    const copies = { view: 0, buffer: 0 };
+    const viewSlice = Uint8Array.prototype.slice;
+    const bufferSlice = ArrayBuffer.prototype.slice;
+    Uint8Array.prototype.slice = function (this: Uint8Array, ...args: [number?, number?]) {
+      copies.view++;
+      return viewSlice.apply(this, args);
+    } as typeof viewSlice;
+    ArrayBuffer.prototype.slice = function (this: ArrayBuffer, begin: number, end?: number) {
+      copies.buffer++;
+      return bufferSlice.call(this, begin, end);
+    } as typeof bufferSlice;
+    try {
+      for (const data of [large, large.buffer, new DataView(large.buffer)]) {
+        const attachment = new Attachment({ data, contentType: "application/pdf" });
+        expect(attachment.sha256).toBeUndefined();
+      }
+    } finally {
+      Uint8Array.prototype.slice = viewSlice;
+      ArrayBuffer.prototype.slice = bufferSlice;
+    }
+    expect(copies).toEqual({ view: 0, buffer: 0 });
+  });
+
   test("a path reads the same bytes as data, and every string form decodes", () => {
     const bytes = Buffer.from(files.pixel.data, "base64");
     const directory = mkdtempSync(join(tmpdir(), "hue-attachment-"));

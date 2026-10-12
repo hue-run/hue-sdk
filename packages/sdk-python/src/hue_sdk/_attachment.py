@@ -59,8 +59,12 @@ def _attachment_bytes(data: Any, path: Any) -> bytes | None:
             return None
         content = _string_bytes(data)
     elif isinstance(data, (bytes, bytearray, memoryview)):
+        view = memoryview(data)
+        # Bytes over the limit are refused before anything is copied.
+        if view.nbytes > MAX_ATTACHMENT_BYTES:
+            return None
         # A copy, so a later change to the caller's buffer cannot change what the digest describes.
-        content = memoryview(data).tobytes()
+        content = data if type(data) is bytes else view.tobytes()
     else:
         return None
     return content if content is not None and len(content) <= MAX_ATTACHMENT_BYTES else None

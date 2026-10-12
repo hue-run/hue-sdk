@@ -80,10 +80,15 @@ function attachmentBytes(options: AttachmentOptions): Uint8Array | undefined {
     if (data.length > 4 * MAX_FILE_DATA_BYTES) return undefined;
     bytes = stringBytes(data);
   }
-  // A copy, so a later change to the caller's buffer cannot change what the digest describes.
-  else if (ArrayBuffer.isView(data))
+  // A copy, so a later change to the caller's buffer cannot change what the digest describes;
+  // bytes over the limit are refused before anything is copied.
+  else if (ArrayBuffer.isView(data)) {
+    if (data.byteLength > MAX_FILE_DATA_BYTES) return undefined;
     bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice();
-  else if (data instanceof ArrayBuffer) bytes = new Uint8Array(data.slice(0));
+  } else if (data instanceof ArrayBuffer) {
+    if (data.byteLength > MAX_FILE_DATA_BYTES) return undefined;
+    bytes = new Uint8Array(data.slice(0));
+  }
   return bytes && bytes.byteLength <= MAX_FILE_DATA_BYTES ? bytes : undefined;
 }
 

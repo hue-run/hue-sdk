@@ -412,3 +412,19 @@ def test_span_attributes_opentelemetry_cannot_hold_are_recorded_as_json_text(hue
     assert recorded["count"].int_value == 2
     assert hue_store.reservations == []
     assert status.instrumentation_failures == 0
+
+
+def test_bytes_over_25_mib_are_refused_before_they_are_copied():
+    import tracemalloc
+
+    large = bytearray(25 * 1024 * 1024 + 1)
+    tracemalloc.start()
+    try:
+        for data in (large, memoryview(large)):
+            attachment = Attachment(data, content_type="application/pdf")
+            assert attachment.sha256 is None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Refusing the bytes allocates nothing near their size.
+    assert peak < 1024 * 1024
