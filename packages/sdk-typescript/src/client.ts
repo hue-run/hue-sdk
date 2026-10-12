@@ -278,11 +278,6 @@ const OWNED_SPAN_LIMITS = {
  * 65,536 values, as the Python SDK's content snapshot. */
 const catalogLimits: EncodeLimits = { bytes: MAX_BODY_BYTES, nodes: 65_536, depth: 64 };
 
-/**
- * Hue tracing client. Helpers create spans through a private tracer and local async context, never
- * through global OpenTelemetry registration, and they fail open: capture problems are counted in
- * the export report while application code runs and returns unchanged.
- */
 /** Whether a span attribute passed to a helper is recorded as JSON text: an attachment, a value
  * holding one, or JSON data OpenTelemetry cannot hold as an attribute (a plain object, or an array
  * that is not of one primitive type). */
@@ -294,6 +289,11 @@ function recordedAsJson(value: unknown): boolean {
   return prototype === Object.prototype || prototype === null;
 }
 
+/**
+ * Hue tracing client. Helpers create spans through a private tracer and local async context, never
+ * through global OpenTelemetry registration, and they fail open: capture problems are counted in
+ * the export report while application code runs and returns unchanged.
+ */
 export class HueClient {
   /** Export pipeline: counters, issue history and the processors that feed Hue. */
   readonly transport: HueTransport;
