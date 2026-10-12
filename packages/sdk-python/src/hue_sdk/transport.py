@@ -872,7 +872,7 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         result = list(spans)
         tally = Tally()
         try:
-            placed, placed_tally, wholes = place_spans(
+            placed, placed_tally = place_spans(
                 [
                     (
                         span.attributes or {},
@@ -896,21 +896,17 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
             # Every span's helper events and references are fitted before any helper file is
             # sent; the admitted files of all spans then share the upload workers and deadline.
             helpers: list[tuple[int, dict[str, Any], list[ExplicitFile], str]] = []
-            for (index, span, held), attributes, whole in zip(entries, placed, wholes, strict=True):
+            for (index, span, held), attributes in zip(entries, placed, strict=True):
                 record = replace_span(span, attributes=attributes)
                 result[index] = record
-                # An attachment in a value uploaded whole or cut sits where no reader finds it, in
-                # the value's uploaded bytes past its inline prefix: its file is not uploaded, and
-                # counts as a fallback.
-                files = [file for file in held.files if file.attribute not in whole]
-                for _ in range(len(held.files) - len(files)):
-                    tally.fallback("budget", _record_trace_id(span) or "")
-                admitted = self._admit_files(record, files, tally, source=span, values=held.values)
+                admitted = self._admit_files(
+                    record, held.files, tally, source=span, values=held.values
+                )
                 if admitted is not None:
                     result[index], fitted_attributes, files = admitted
                     helpers.append((index, fitted_attributes, files, _record_trace_id(span) or ""))
             if helpers:
-                uploaded, helper_tally, _ = place_spans(
+                uploaded, helper_tally = place_spans(
                     [
                         (attributes, Held(files=files, inspected=set()), trace_id)
                         for _, attributes, files, trace_id in helpers

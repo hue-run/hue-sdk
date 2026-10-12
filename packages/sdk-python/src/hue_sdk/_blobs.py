@@ -1333,7 +1333,7 @@ def place_spans(
     deadline: float,
     wait: Callable[[float], bool],
     memo: MediaDigestMemo | None = None,
-) -> tuple[list[dict[str, Any]], Tally, list[set[str]]]:
+) -> tuple[list[dict[str, Any]], Tally]:
     """Each span's own attributes with its held values, and its messages holding a large inline
     file, placed: a file uploaded and replaced by its first 16 KiB (or its digest), a value still
     over the inline limit uploaded and replaced by its first 16 KiB (or cut to the limit), each
@@ -1342,8 +1342,7 @@ def place_spans(
     waiting for another reference's upload of the same bytes is replaced meanwhile, so repeated
     files never hold the places new files need; one not placed by ``deadline`` falls back to the
     cut, and an upload still running then stops sending its body at that deadline; its answer goes
-    unused. Also returns each span's keys whose values were uploaded whole or cut: their inline
-    text holds no part a reader can find."""
+    unused."""
     return _place_all(
         [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans],
         uploader=uploader,
@@ -1362,7 +1361,7 @@ def _place_all(
     deadline: float,
     wait: Callable[[float], bool],
     memo: MediaDigestMemo | None,
-) -> tuple[list[dict[str, Any]], Tally, list[set[str]]]:
+) -> tuple[list[dict[str, Any]], Tally]:
     """The records' candidates placed on the shared upload threads (see ``place_spans``)."""
     pending = [
         (number, index, key, value)
@@ -1447,7 +1446,6 @@ def _place_all(
         context.sharing = nullcontext
     tally = Tally()
     attributes: list[dict[str, Any]] = []
-    wholes: list[set[str]] = []
     for number, span in enumerate(placements):
         for _ in range(span.cut):
             tally.fallback("unsupported" if uploader.unsupported() else "budget", span.trace_id)
@@ -1478,8 +1476,7 @@ def _place_all(
                 *(entry for _, entry in sorted(entries)),
             ]
         attributes.append(result_attributes)
-        wholes.append(set(listed))
-    return attributes, tally, wholes
+    return attributes, tally
 
 
 def place_logs(
@@ -1503,7 +1500,7 @@ def place_logs(
         _Span(attributes, replace(held, files=[]), trace_id, log=True, body=body)
         for attributes, held, trace_id, body in logs
     ]
-    attributes, tally, _ = _place_all(
+    attributes, tally = _place_all(
         placements,
         uploader=uploader,
         value_bytes=value_bytes,
@@ -1517,7 +1514,7 @@ def place_logs(
         if held.files
     ]
     if attaching:
-        placed, attached, _ = _place_all(
+        placed, attached = _place_all(
             [span for _, span in attaching],
             uploader=uploader,
             value_bytes=value_bytes,

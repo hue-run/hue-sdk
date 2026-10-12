@@ -365,9 +365,11 @@ With `captureContent: false` or a setup credential no bytes leave the process: a
 attribute still records the part, without its name, and content values are not recorded at all. A
 part the redactor removes or rewrites is not uploaded. A part that cannot be uploaded keeps its
 digest and is counted in `report.uploadFallbacks`, as is one nested more than 10 levels deep in its
-value, where Hue does not read parts, or one in a value cut to the value limit or still over it
-with its files as digest parts: such a value uploads whole and keeps only its first 16 KiB inline,
-where no reader finds the part, so the file is not uploaded or listed. Creating an
+value, where Hue does not read parts, or one in a value cut to the value limit. An attachment in a
+value that is still over the value limit with its files as digest parts is uploaded and listed as
+usual, and `client.media.fetch({ traceId, sha256 })` and Hue's span read reach it by digest; the
+value itself uploads whole and keeps only its first 16 KiB inline, so readers do not place the file
+at its position in the value. Creating an
 attachment never throws: one without exactly one of `data` and `path`, with unreadable or larger
 data or an invalid content type is recorded as `null` and counted as an instrumentation failure;
 an invalid name alone is omitted and counted.

@@ -1575,7 +1575,6 @@ class ReportingExporter<T extends RecordValue> {
       markers?: Attributes;
       files: MediaAttachment[];
       redacted: T | Promise<T>;
-      offload?: OffloadCollector;
     }[] = [];
     for (const { record, markers } of this.ordered(records)) {
       try {
@@ -1644,7 +1643,6 @@ class ReportingExporter<T extends RecordValue> {
           files,
           ...(markers ? { markers } : {}),
           redacted: offloaded ?? redacted,
-          ...(offloaded ? { offload } : {}),
         });
       } catch {
         if (!markers && this.transport.offloadsValues()) {
@@ -1659,23 +1657,10 @@ class ReportingExporter<T extends RecordValue> {
         );
       }
     }
-    for (const { record, markers, files: located, redacted: placing, offload } of placed) {
-      let files = located;
+    for (const { record, markers, files, redacted: placing } of placed) {
       let retained = files;
       try {
         let redacted = await placing;
-        // An attachment in a value the upload step uploaded whole or cut sits where no reader
-        // finds it, in the value's uploaded bytes past its inline prefix: its file is not
-        // uploaded, and counts as a fallback.
-        const whole = offload?.whole;
-        if (whole?.size && files.some((file) => file.attribute !== undefined)) {
-          files = files.filter((file) => {
-            if (file.attribute === undefined || !whole.has(file.attribute)) return true;
-            countFallback(tally, "budget", recordTraceId(redacted));
-            return false;
-          });
-          retained = files;
-        }
         // Added after redaction, so a redactor cannot alter the markers or the parent identity.
         if (markers)
           redacted = {
