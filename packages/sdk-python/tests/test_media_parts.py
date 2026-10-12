@@ -1200,6 +1200,59 @@ def test_helpers_across_spans_share_concurrent_upload_budget(hue_store, monkeypa
         assert len(record.events) == (1 if index < 8 else 0)
 
 
+def test_repeated_helpers_share_one_upload_without_holding_new_files_back(hue_store, monkeypatch):
+    """Eight spans each record four copies of their own file. With 0.3 s uploads, the copies
+    waiting for their first upload would fill the four placement threads span by span (2.4 s);
+    replaced while they wait, the eight uploads run four at a time (0.6 s), each once."""
+    import hue_sdk.transport as transport
+
+    budget_seconds = 1.5
+    monkeypatch.setattr(transport, "upload_budget_seconds", lambda _: budget_seconds)
+    lock = Lock()
+    active = peak = 0
+    original_headers = BaseHTTPRequestHandler.end_headers
+
+    def delayed_headers(handler):
+        nonlocal active, peak
+        if handler.command != "PUT":
+            return original_headers(handler)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.3)
+            return original_headers(handler)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", delayed_headers)
+    data = [f"repeated helper {index}".encode() for index in range(8)]
+    with client(hue_store) as hue:
+        exporter = hue._span_exporter
+        staged = [
+            staged_helpers(
+                hue,
+                [helper(item, timestamp=copy) for copy in range(1, 5)],
+                attributes={"case": index},
+            )
+            for index, item in enumerate(data)
+        ]
+        started = time.monotonic()
+        assert exporter.export([span for span, _ in staged]) is SpanExportResult.SUCCESS
+        assert time.monotonic() - started < budget_seconds
+        assert 1 < peak <= 4 and active == 0
+        assert hue.export_status.uploaded_values == 32
+        assert hue.export_status.upload_fallbacks == 0
+    assert len(hue_store.reservations) == len(hue_store.puts) == 8
+    assert sorted(request["sha256"] for request in hue_store.reservations) == sorted(
+        sha256(item) for item in data
+    )
+    for record in hue_store.spans:
+        item = data[attrs(record)["case"].int_value]
+        assert entries(record) == [exporter._file_entry(helper(item))] * 4
+
+
 @pytest.mark.parametrize(
     "mismatch", ["missing", "event_name", "timestamp", "sha256", "size", "media_type", "role"]
 )

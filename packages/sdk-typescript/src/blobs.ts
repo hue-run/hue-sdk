@@ -347,7 +347,9 @@ export class BlobUploader {
 
   /**
    * Stores `value` under `key` of the trace: reserved, uploaded unless Hue already holds it, and
-   * completed. The caller holds a {@link limit} slot.
+   * completed. Only a fresh upload takes a {@link limit} slot: another reference to bytes the
+   * trace is already storing shares that upload's outcome without one, so repeated files never
+   * hold the slots new files need. The caller must not hold a slot.
    */
   async store(
     traceId: string,
@@ -383,7 +385,9 @@ export class BlobUploader {
       settled: false,
     };
     this.outcomes.set(identity, item);
-    item.promise = this.storeFresh(traceId, key, value, contentType, digest, upload)
+    item.promise = this.limit(() =>
+      this.storeFresh(traceId, key, value, contentType, digest, upload),
+    )
       .catch((): Outcome => ({ ok: false, reason: "failed" }))
       .then((outcome) => {
         item.settled = true;
@@ -789,7 +793,7 @@ export async function offloadAttributes(
         if (textual && decoded.bytes.byteLength <= INLINE_FILE_LIMIT) return Promise.resolve();
         const partKey = `${key}#${textual ? file.pointer : file.partPointer}`;
         const slot = slots > 0 && isBlobKey(partKey) ? (slots--, true) : false;
-        return uploader.limit(async () => {
+        return (async () => {
           changed = true;
           const digest = options.memo
             ? options.memo.digest(file, decoded, traceId)
@@ -809,7 +813,7 @@ export async function offloadAttributes(
             digestPart(file, digest);
             fallback(outcome.reason);
           }
-        });
+        })();
       }),
     );
     return changed ? JSON.stringify(parsed) : text;
@@ -831,14 +835,15 @@ export async function offloadAttributes(
       return;
     }
     slots--;
-    const stored = await uploader.limit(async () => {
+    const stored = await (async () => {
       if (size > MAX_BLOB_BYTES) return { ok: false as const, reason: "tooLarge" as const };
-      const digest = await digestOf(placed);
+      // Hashing a large value takes a slot as its upload does; the upload takes its own.
+      const digest = await uploader.limit(() => digestOf(placed));
       const contentType =
         typeof placed === "string" ? textContentType(placed) : "application/octet-stream";
       const outcome = await uploader.store(traceId, key, placed, contentType, digest, upload);
       return outcome.ok ? { ...outcome, digest } : outcome;
-    });
+    })();
     if (stored.ok) {
       result[key] = typeof placed === "string" ? blobPrefix(placed) : blobPrefix(placed);
       entries.push({
@@ -857,7 +862,7 @@ export async function offloadAttributes(
     (collector.attachments ?? []).map((file, position) => {
       if (!file.bytes.byteLength) return Promise.resolve();
       const slot = slots > 0 ? (slots--, true) : false;
-      return uploader.limit(async () => {
+      return (async () => {
         const key = `event:hue.file:${file.digest.sha256}`;
         const outcome: Outcome = slot
           ? await uploader.store(traceId, key, file.bytes, file.contentType, file.digest, upload)
@@ -875,7 +880,7 @@ export async function offloadAttributes(
           });
           tally.uploaded++;
         } else fallback(outcome.reason);
-      });
+      })();
     }),
   );
   if (listed.length)

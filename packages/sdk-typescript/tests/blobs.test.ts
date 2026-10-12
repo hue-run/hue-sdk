@@ -2204,3 +2204,46 @@ test("export leaves uninspected the messages admission skipped", async () => {
     endpoint.server.stop(true);
   }
 });
+
+test("repeated files share one upload without holding the slots new files need", async () => {
+  // Twelve spans each record four copies of their own file. A one-second request timeout gives
+  // a six-second upload budget: 600 ms uploads take 7.2 s when each span's copies fill the four
+  // slots, and about 1.8 s when only each file's first reference takes one.
+  let active = 0;
+  let peak = 0;
+  const endpoint = hue({
+    beforePut: async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      active--;
+    },
+  });
+  const files = Array.from({ length: 12 }, (_, index) => Buffer.from(`repeated file ${index}`));
+  const hueClient = client(endpoint, { timeoutMillis: 1000 });
+  try {
+    for (const [index, data] of files.entries())
+      await hueClient.withSpan(`repeated file ${index}`, () => {
+        for (let copy = 0; copy < 4; copy++)
+          hueClient.recordFile({ role: "input", mediaType: "image/png", data, upload: true });
+      });
+    const started = Date.now();
+    const report = await hueClient.flush();
+    expect(Date.now() - started).toBeLessThan(6000);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+    expect(report.uploadFallbacks).toBe(0);
+    expect(report.uploadedValues).toBe(48);
+    expect(endpoint.reservations.map((reservation) => reservation.sha256).sort()).toEqual(
+      files.map((data) => sha256(data)).sort(),
+    );
+    expect(endpoint.puts).toHaveLength(12);
+    for (const [index, data] of files.entries())
+      expect(blobs(endpoint.span(`repeated file ${index}`)!).map((entry) => entry.key)).toEqual(
+        Array(4).fill(`event:hue.file:${sha256(data)}`),
+      );
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+}, 20_000);

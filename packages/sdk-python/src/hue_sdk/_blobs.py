@@ -17,6 +17,7 @@ import sys
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from threading import Event, Lock, Semaphore, Thread
 from time import monotonic, time
@@ -63,6 +64,9 @@ _MAX_BLOB_KEY_LENGTH = 256
 MAX_HELD_BLOB_BYTES = 128 * 1024 * 1024
 # Uploads in flight at once for one exporter.
 UPLOAD_CONCURRENCY = 4
+# Placement threads at once, counting those waiting for another reference's upload of the same
+# bytes, for which another thread starts so waiting never holds a place a new file needs.
+_MAX_PLACEMENT_THREADS = 64
 # How long a receiver without the upload route is believed to stay without it.
 UNSUPPORTED_PAUSE_SECONDS = 600.0
 # How long uploads pause after one failed for a transient reason (a 5xx, the network, a timeout),
@@ -521,9 +525,12 @@ class BlobUploader:
         digest: tuple[str, int],
         deadline: float,
         wait: Callable[[float], bool],
+        sharing: Callable[[], AbstractContextManager[None]] = nullcontext,
     ) -> _Outcome:
         """Stores ``value`` under ``key`` of the trace: reserved, uploaded unless Hue already
-        holds it, and completed. Holds an upload slot meanwhile."""
+        holds it, and completed. Holds an upload slot meanwhile. Another reference to bytes the
+        trace is already storing waits for that upload's outcome, within ``sharing``, without a
+        slot."""
         sha256, size = digest
         if size <= 0:
             return _Outcome(False, "failed")
@@ -552,9 +559,10 @@ class BlobUploader:
                 self._outcomes[identity] = known
         event, outcomes = known
         if not owner:
-            if event.wait(max(0.0, deadline - monotonic())):
-                return outcomes[0]
-            return _Outcome(False, "failed")
+            if not event.is_set():
+                with sharing():
+                    event.wait(max(0.0, deadline - monotonic()))
+            return outcomes[0] if event.is_set() else _Outcome(False, "failed")
         outcome = _Outcome(False, "failed")
         try:
             refused = self.refusal()
@@ -902,6 +910,8 @@ class _Context:
     deadline: float
     wait: Callable[[float], bool]
     memo: MediaDigestMemo
+    # Entered while waiting for another reference's upload of the same bytes.
+    sharing: Callable[[], AbstractContextManager[None]] = nullcontext
 
 
 def _upload_parts(
@@ -945,6 +955,7 @@ def _upload_parts(
                 digest,
                 context.deadline,
                 context.wait,
+                context.sharing,
             )
             if has_slot
             else _Outcome(False, "budget")
@@ -980,6 +991,7 @@ def _place(
                 value.digest,
                 context.deadline,
                 context.wait,
+                context.sharing,
             )
             if span.slot()
             else _Outcome(False, "budget")
@@ -1021,7 +1033,14 @@ def _place(
     )
     digest = digest or digest_of(value)
     outcome = context.uploader.store(
-        span.trace_id, key, value, content_type, digest, context.deadline, context.wait
+        span.trace_id,
+        key,
+        value,
+        content_type,
+        digest,
+        context.deadline,
+        context.wait,
+        context.sharing,
     )
     if outcome.ok:
         result.value = blob_prefix(value)
@@ -1073,10 +1092,11 @@ def place_spans(
     file, placed: a file uploaded and replaced by its first 16 KiB (or its digest), a value still
     over the inline limit uploaded and replaced by its first 16 KiB (or cut to the limit), each
     upload listed under ``hue.blobs`` and each whole value cut or uploaded listed under
-    ``hue.truncated``. Values are placed on up to ``UPLOAD_CONCURRENCY`` threads; one not placed
-    by ``deadline`` falls back to the cut, and an upload still running then stops sending its body
-    at that deadline; its answer goes unused."""
-    context = _Context(uploader, value_bytes, deadline, wait, memo or MediaDigestMemo())
+    ``hue.truncated``. Values are placed on up to ``UPLOAD_CONCURRENCY`` threads, and a thread
+    waiting for another reference's upload of the same bytes is replaced meanwhile, so repeated
+    files never hold the places new files need; one not placed by ``deadline`` falls back to the
+    cut, and an upload still running then stops sending its body at that deadline; its answer goes
+    unused."""
     placements = [_Span(attributes, held, trace_id) for attributes, held, trace_id in spans]
     pending = [
         (number, index, key, value)
@@ -1088,6 +1108,33 @@ def place_spans(
     lock = Lock()
     done = Event()
     closed = [False]
+    # Placement threads started and still running, and how many of them wait for an upload
+    # another reference started.
+    threads = {"running": 0, "sharing": 0}
+
+    def start() -> None:
+        """Starts a placement thread. Called under the lock."""
+        threads["running"] += 1
+        Thread(target=work, name="hue-upload", daemon=True).start()
+
+    @contextmanager
+    def sharing() -> Iterator[None]:
+        with lock:
+            threads["sharing"] += 1
+            if (
+                not closed[0]
+                and pending
+                and threads["running"] - threads["sharing"] < UPLOAD_CONCURRENCY
+                and threads["running"] < _MAX_PLACEMENT_THREADS
+            ):
+                start()
+        try:
+            yield
+        finally:
+            with lock:
+                threads["sharing"] -= 1
+
+    context = _Context(uploader, value_bytes, deadline, wait, memo or MediaDigestMemo(), sharing)
 
     def work() -> None:
         token = attach(export_context())
@@ -1113,15 +1160,21 @@ def place_spans(
                     if len(results) == total:
                         done.set()
         finally:
+            with lock:
+                threads["running"] -= 1
             detach(token)
 
     if total:
-        for _ in range(min(UPLOAD_CONCURRENCY, total)):
-            Thread(target=work, name="hue-upload", daemon=True).start()
+        with lock:
+            for _ in range(min(UPLOAD_CONCURRENCY, total)):
+                start()
         done.wait(max(0.0, deadline - monotonic()) + 1)
     with lock:
         closed[0] = True
         placed = dict(results)
+        # The context refers to the threads' work through ``sharing``: break that cycle so the
+        # held values go as soon as the threads do, without waiting for a collection.
+        context.sharing = nullcontext
     tally = Tally()
     attributes: list[dict[str, Any]] = []
     for number, span in enumerate(placements):
