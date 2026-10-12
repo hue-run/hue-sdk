@@ -500,6 +500,52 @@ describe("client.media.resolve", () => {
     expect(reads.every((item) => item.spanId === spanId)).toBe(true);
   });
 
+  test("a snapshot's parts that declare no type take it from the record's hue.blobs", async () => {
+    const snapshotId = randomUUID();
+    const { client } = hue({
+      [sha256(png)]: stored(png, "image/png", "chart.png"),
+      [sha256(pdf)]: stored(pdf, "application/pdf", "r.pdf"),
+      [sha256(wav)]: stored(wav, "audio/wav", "reply.wav"),
+    });
+    const parts = [
+      { type: "image_url", image_url: {}, sha256: sha256(png), size: png.byteLength },
+      { type: "input_file", filename: "r.pdf", sha256: sha256(pdf), size: pdf.byteLength },
+      // A part's own type comes first.
+      { type: "file", mediaType: "audio/x-wav", sha256: sha256(wav), size: wav.byteLength },
+    ];
+    const entry = (index: number, bytes: Uint8Array, contentType: string) =>
+      JSON.stringify({
+        key: `gen_ai.input.messages#/0/content/${index}`,
+        sha256: sha256(bytes),
+        size: bytes.byteLength,
+        content_type: contentType,
+      });
+    const blobs = [
+      "not an entry",
+      entry(0, png, "image/png"),
+      entry(1, pdf, "application/pdf"),
+      entry(2, wav, "audio/wav"),
+    ];
+    const { value } = await client.media.resolve(parts, { snapshotId, blobs });
+    expect(value as unknown).toEqual([
+      { type: "image_url", image_url: { url: `data:image/png;base64,${base64(png)}` } },
+      {
+        type: "input_file",
+        filename: "r.pdf",
+        file_data: `data:application/pdf;base64,${base64(pdf)}`,
+      },
+      { type: "file", mediaType: "audio/x-wav", data: `data:audio/x-wav;base64,${base64(wav)}` },
+    ]);
+    // Without the entries, a snapshot's copy names no type.
+    const bare = await client.media.resolve(parts.slice(0, 1), { snapshotId });
+    expect(
+      (bare.value as unknown as { image_url: { url: string } }[])[0]!.image_url.url,
+    ).toStartWith("data:application/octet-stream;base64,");
+    await expect(
+      client.media.resolve(parts, { snapshotId, blobs: "entries" as never }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
   test("as bytes writes the bytes themselves", async () => {
     const { client } = hue({ [sha256(png)]: stored(png, "image/png", "chart.png") });
     const parts = [

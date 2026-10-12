@@ -129,6 +129,11 @@ export type MediaResolveOptions = (
     }
 ) &
   MediaWriteOptions & {
+    /** The `hue.blobs` entries of the record the value was read from, as the attribute holds
+     * them: JSON object strings. A part that declares no media type, read from a copy that carries
+     * none (a snapshot's), takes the type of the entry with its SHA-256 for its `data:` URL, rather
+     * than `application/octet-stream`. Entries that do not parse are ignored. */
+    blobs?: readonly string[];
     /** Files downloaded at once, 1–16. Default 4. */
     concurrency?: number;
     /** Largest file read, as in {@link MediaFetchOptions.maxBytes}. */
@@ -423,7 +428,8 @@ export class MediaClient {
    * the SDK's media capture: each distinct digest is downloaded once with {@link fetch}, at most
    * `concurrency` at a time. Returns a new value; a part whose file cannot be read stays as it is
    * and is reported in `failures`. Parse attributes recorded as JSON text (such as
-   * `gen_ai.input.messages`) before passing them.
+   * `gen_ai.input.messages`) before passing them; pass the record's `hue.blobs` as `blobs` when
+   * reading a snapshot, whose copies carry no media type.
    *
    * @throws TypeError for invalid identifiers or options; never for one file's failure.
    */
@@ -431,6 +437,7 @@ export class MediaClient {
     if (!options || typeof options !== "object")
       throw new TypeError("Name a traceId or snapshotId");
     const as = writeModeOf(options.as);
+    const listed = listedTypes(options.blobs);
     const concurrency = options.concurrency ?? 4;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
       throw new RangeError("concurrency must be 1–16");
@@ -453,7 +460,9 @@ export class MediaClient {
       for (let index = next++; index < digests.length; index = next++) {
         const sha256 = digests[index]!;
         try {
-          files.set(sha256, await this.fetch(target(sha256), { maxBytes, signal: options.signal }));
+          const file = await this.fetch(target(sha256), { maxBytes, signal: options.signal });
+          const listedType = file.contentType === undefined ? listed.get(sha256) : undefined;
+          files.set(sha256, listedType === undefined ? file : { ...file, contentType: listedType });
         } catch (error) {
           files.set(
             sha256,
@@ -600,6 +609,34 @@ export class MediaClient {
       await reader?.cancel().catch(() => undefined);
     }
   }
+}
+
+/** The media type each digest has in a record's `hue.blobs` entries, the first valid one of a
+ * digest; an entry that does not parse, or names no valid digest or type, is ignored. */
+function listedTypes(entries: unknown): Map<string, string> {
+  const types = new Map<string, string>();
+  if (entries === undefined) return types;
+  if (!Array.isArray(entries)) throw new TypeError("blobs must be the record's hue.blobs entries");
+  for (const entry of entries as unknown[]) {
+    if (typeof entry !== "string" || entry.length > 2048) continue;
+    let fields: Plain | undefined;
+    try {
+      fields = plain(JSON.parse(entry));
+    } catch {
+      continue;
+    }
+    const sha256 = typeof fields?.sha256 === "string" ? fields.sha256.toLowerCase() : "";
+    const type: unknown = fields?.content_type ?? fields?.contentType;
+    if (
+      SHA256.test(sha256) &&
+      !types.has(sha256) &&
+      typeof type === "string" &&
+      type.length <= 255 &&
+      MEDIA_TYPE.test(type.split(";")[0]!.trim())
+    )
+      types.set(sha256, type);
+  }
+  return types;
 }
 
 function writeModeOf(value: unknown): "dataUrl" | "bytes" {

@@ -15,9 +15,9 @@ import json
 import random
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -307,6 +307,7 @@ class MediaClient:
         as_: Literal["data_url", "bytes"] = "data_url",
         concurrency: int = 4,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        blobs: Sequence[str] | None = None,
     ) -> ResolvedMedia:
         """Write the bytes of every digest part in ``value`` back into its content field.
 
@@ -322,9 +323,16 @@ class MediaClient:
         is and is reported in ``failures``. Parse attributes recorded as JSON text (such as
         ``gen_ai.input.messages``) before passing them.
 
+        ``blobs`` takes the ``hue.blobs`` entries of the record the value was read from, as the
+        attribute holds them: JSON object strings. A part that declares no media type, read from
+        a copy that carries none (a snapshot's), takes the type of the entry with its SHA-256 for
+        its ``data:`` URL, rather than ``application/octet-stream``. Entries that do not parse are
+        ignored.
+
         Raises ``ValueError`` for invalid identifiers or options; never for one file's failure.
         """
         mode = _mode(as_)
+        listed = _listed_types(blobs)
         if (
             isinstance(concurrency, bool)
             or type(concurrency) is not int
@@ -339,13 +347,15 @@ class MediaClient:
 
         def read(digest: str) -> MediaFile | MediaFetchError:
             try:
-                return self.fetch(
+                file = self.fetch(
                     sha256=digest,
                     trace_id=trace_id,
                     span_id=span_id,
                     snapshot_id=snapshot_id,
                     max_bytes=limit,
                 )
+                listed_type = listed.get(digest) if file.content_type is None else None
+                return file if listed_type is None else replace(file, content_type=listed_type)
             except MediaFetchError as error:
                 return error
             except Exception:
@@ -427,6 +437,39 @@ class MediaClient:
         if len(data) != grant.size or hasher.hexdigest() != sha256:
             raise MediaFetchError("digest_mismatch")
         return bytes(data)
+
+
+def _listed_types(entries: object) -> dict[str, str]:
+    """The media type each digest has in a record's ``hue.blobs`` entries, the first valid one of
+    a digest; an entry that does not parse, or names no valid digest or type, is ignored."""
+    types: dict[str, str] = {}
+    if entries is None:
+        return types
+    if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
+        raise ValueError("blobs must be the record's hue.blobs entries.")
+    for entry in entries:
+        if not isinstance(entry, str) or len(entry) > 2048:
+            continue
+        try:
+            fields = json.loads(entry)
+        except ValueError:
+            continue
+        if not isinstance(fields, dict):
+            continue
+        digest = fields.get("sha256")
+        digest = digest.lower() if isinstance(digest, str) else ""
+        kind = fields.get("content_type")
+        if kind is None:
+            kind = fields.get("contentType")
+        if (
+            _SHA256.fullmatch(digest)
+            and digest not in types
+            and isinstance(kind, str)
+            and len(kind) <= 255
+            and _MEDIA_TYPE.fullmatch(kind.split(";")[0].strip())
+        ):
+            types[digest] = kind
+    return types
 
 
 def _mode(value: object) -> Literal["data_url", "bytes"]:

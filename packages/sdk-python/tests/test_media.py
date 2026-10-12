@@ -1013,3 +1013,53 @@ def test_an_anthropic_source_whose_type_is_absent_or_null_takes_base64_a_url_one
         {"type": "image", "source": {"media_type": "image/png", "type": None, "data": b64(PNG)}},
         block(type="url"),
     ]
+
+
+def test_a_snapshots_parts_that_declare_no_type_take_it_from_the_records_hue_blobs(hue):
+    snapshot_id = str(uuid4())
+    hue.answers.update(
+        {
+            sha(PNG): stored(PNG, "image/png", "chart.png"),
+            sha(PDF): stored(PDF, "application/pdf", "r.pdf"),
+            sha(WAV): stored(WAV, "audio/wav", "reply.wav"),
+        }
+    )
+    parts = [
+        {"type": "image_url", "image_url": {}, "sha256": sha(PNG), "size": len(PNG)},
+        {"type": "input_file", "filename": "r.pdf", "sha256": sha(PDF), "size": len(PDF)},
+        # A part's own type comes first.
+        {"type": "file", "mediaType": "audio/x-wav", "sha256": sha(WAV), "size": len(WAV)},
+    ]
+
+    def entry(index: int, data: bytes, content_type: str) -> str:
+        return json.dumps(
+            {
+                "key": f"gen_ai.input.messages#/0/content/{index}",
+                "sha256": sha(data),
+                "size": len(data),
+                "content_type": content_type,
+            }
+        )
+
+    blobs = [
+        "not an entry",
+        entry(0, PNG, "image/png"),
+        entry(1, PDF, "application/pdf"),
+        entry(2, WAV, "audio/wav"),
+    ]
+    client = hue.client()
+    resolved = client.media.resolve(parts, snapshot_id=snapshot_id, blobs=blobs)
+    assert resolved.value == [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64(PNG)}"}},
+        {
+            "type": "input_file",
+            "filename": "r.pdf",
+            "file_data": f"data:application/pdf;base64,{b64(PDF)}",
+        },
+        {"type": "file", "mediaType": "audio/x-wav", "data": f"data:audio/x-wav;base64,{b64(WAV)}"},
+    ]
+    # Without the entries, a snapshot's copy names no type.
+    bare = client.media.resolve(parts[:1], snapshot_id=snapshot_id)
+    assert bare.value[0]["image_url"]["url"].startswith("data:application/octet-stream;base64,")
+    with pytest.raises(ValueError):
+        client.media.resolve(parts, snapshot_id=snapshot_id, blobs="entries")  # type: ignore[arg-type]
