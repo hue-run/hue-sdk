@@ -31,8 +31,12 @@ type Answer =
       contentType: string;
       fileName: string;
       served?: Uint8Array;
+      /** The storage route answers with this redirect status instead of the bytes. */
+      storageRedirect?: number;
     }
   | { kind: "missing" }
+  /** Answers the grant with a redirect to the storage route. */
+  | { kind: "redirect"; status: number }
   | { kind: "unavailable"; times: number; retryAfter?: string; then?: Answer }
   | { kind: "forbidden" }
   | { kind: "hang" }
@@ -69,6 +73,11 @@ function hue(answers: Record<string, Answer>, options: { timeoutMillis?: number 
       if (stored) {
         const answer = pending[stored[1]!];
         if (answer?.kind !== "stored") return new Response(null, { status: 404 });
+        if (answer.storageRedirect)
+          return new Response(null, {
+            status: answer.storageRedirect,
+            headers: { location: `${url.origin}/api/v1/projects/current` },
+          });
         return new Response((answer.served ?? answer.bytes) as Uint8Array<ArrayBuffer>);
       }
       const route =
@@ -107,6 +116,11 @@ function hue(answers: Record<string, Answer>, options: { timeoutMillis?: number 
         answer = pending[digest] = answer.then ?? { kind: "missing" };
       }
       if (answer.kind === "hang") return new Promise<Response>(() => {});
+      if (answer.kind === "redirect")
+        return new Response(null, {
+          status: answer.status,
+          headers: { location: `${url.origin}/storage/${digest}` },
+        });
       if (answer.kind === "missing")
         return Response.json(
           { error: "The trace lists this file, but it was never uploaded", state: "missing" },
@@ -239,6 +253,22 @@ describe("client.media.fetch", () => {
     const lost = await failure(client.media.fetch({ traceId, sha256: sha256(pdf) }));
     expect(lost.reason).toBe("failed");
     expect(seen.filter((item) => item.path.includes(sha256(pdf))).length).toBe(2);
+  });
+
+  test("a redirect is an unexpected answer: failed with its status, never followed or asked again", async () => {
+    const { client, seen } = hue({
+      [sha256(png)]: { kind: "redirect", status: 302 },
+      [sha256(pdf)]: { ...stored(pdf, "application/pdf", "r.pdf"), storageRedirect: 307 },
+    });
+    const grant = await failure(client.media.fetch({ traceId, sha256: sha256(png) }));
+    expect([grant.reason, grant.status]).toEqual(["failed", 302]);
+    const download = await failure(client.media.fetch({ traceId, sha256: sha256(pdf) }));
+    expect([download.reason, download.status]).toEqual(["failed", 307]);
+    expect(seen.map((item) => item.path)).toEqual([
+      `/api/v1/traces/${traceId}/blobs/${sha256(png)}`,
+      `/api/v1/traces/${traceId}/blobs/${sha256(pdf)}`,
+      `/storage/${sha256(pdf)}`,
+    ]);
   });
 
   test("a key without content access is forbidden and is not asked again", async () => {

@@ -115,6 +115,8 @@ def hue():
         if answer["kind"] == "hang":
             state.release.wait(5)
             return 500, {}, {}
+        if answer["kind"] == "redirect":
+            return answer["status"], b"", {"Location": f"{state.url}/storage/{digest}"}
         if answer["kind"] == "missing":
             return 404, {"error": "Never uploaded", "state": "missing"}, {}
         if answer["kind"] == "forbidden":
@@ -143,6 +145,9 @@ def hue():
             answer = state.answers.get(stored.group(1)) or {}
             if answer.get("kind") != "stored":
                 return 404, b"", {}
+            if answer.get("storage_redirect"):
+                location = f"{state.url}/api/v1/projects/current"
+                return answer["storage_redirect"], b"", {"Location": location}
             return 200, answer.get("served", answer["data"]), {}
         blob = re.fullmatch(r"/blob/([0-9a-f-]+)", path)
         if blob and method == "PUT":
@@ -344,6 +349,23 @@ def test_a_connection_lost_while_the_grant_is_read_is_asked_once_more_then_fails
         client.media.fetch(trace_id=TRACE_ID, sha256=sha(PDF))
     assert lost.value.reason == "failed"
     assert len([item for item in hue.seen if sha(PDF) in item["path"]]) == 2
+
+
+def test_a_redirect_is_an_unexpected_answer_failed_with_its_status_never_followed_or_asked_again(
+    hue,
+):
+    hue.answers[sha(PNG)] = {"kind": "redirect", "status": 302}
+    hue.answers[sha(PDF)] = stored(PDF, "application/pdf", "r.pdf", storage_redirect=307)
+    client = hue.client()
+    grant = failure(lambda: client.media.fetch(trace_id=TRACE_ID, sha256=sha(PNG)))
+    assert (grant.reason, grant.status) == ("failed", 302)
+    download = failure(lambda: client.media.fetch(trace_id=TRACE_ID, sha256=sha(PDF)))
+    assert (download.reason, download.status) == ("failed", 307)
+    assert [item["path"] for item in hue.seen] == [
+        f"/api/v1/traces/{TRACE_ID}/blobs/{sha(PNG)}",
+        f"/api/v1/traces/{TRACE_ID}/blobs/{sha(PDF)}",
+        f"/storage/{sha(PDF)}",
+    ]
 
 
 def test_a_key_without_content_access_is_forbidden_and_not_asked_again(hue):

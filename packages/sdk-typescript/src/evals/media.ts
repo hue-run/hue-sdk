@@ -477,7 +477,9 @@ export class MediaClient {
       try {
         response = await fetch(`${this.#baseUrl}/api/v1${path}`, {
           headers: { Authorization: `Bearer ${this.#apiKey}` },
-          redirect: "error",
+          // A redirect is never followed: it is an unexpected answer, failed with its status
+          // and not asked again, as a lost connection is.
+          redirect: "manual",
           signal: AbortSignal.any([
             AbortSignal.timeout(this.#timeoutMillis),
             ...(signal ? [signal] : []),
@@ -532,7 +534,7 @@ export class MediaClient {
     let response: Response;
     try {
       response = await fetch(grant.url, {
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.any([
           AbortSignal.timeout(Math.max(this.#timeoutMillis, 120_000)),
           ...(signal ? [signal] : []),
