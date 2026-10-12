@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -64,12 +64,21 @@ function str(span: WireSpan, key: string): string | undefined {
 }
 
 /** A loopback Hue: the project route, the OTLP traces receiver and the upload routes. */
-function hue(options: { key?: string; reserve?: () => number; otlpStatus?: number } = {}) {
+function hue(
+  options: {
+    key?: string;
+    reserve?: () => number;
+    otlpStatus?: number;
+    /** Answers the n-th OTLP request (from 1) instead of the receiver, when it returns one. */
+    otlp?: (index: number) => Response | Promise<Response | undefined> | undefined;
+  } = {},
+) {
   const spans = new Map<string, { span: WireSpan; canonical: string }>();
   const store = new Map<string, Buffer>();
   const reservations: Record<string, unknown>[] = [];
   const requests: string[] = [];
   let rejected = 0;
+  let exports = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -120,6 +129,8 @@ function hue(options: { key?: string; reserve?: () => number; otlpStatus?: numbe
       if (url.pathname !== "/api/v1/otlp/v1/traces") return new Response(null, { status: 404 });
       if (options.otlpStatus)
         return Response.json({ error: "Synthetic refusal." }, { status: options.otlpStatus });
+      const answer = await options.otlp?.(++exports);
+      if (answer) return answer;
       let bytes = Buffer.from(await request.arrayBuffer());
       if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
       const type = root.lookupType(
@@ -208,8 +219,10 @@ function langfuse(
     v1?: V1Trace[];
     media?: Record<string, { bytes: Uint8Array; contentType: string } | "fails">;
     pageCap?: number;
+    /** Media links that redirect to the store, as an S3-compatible store may. */
+    redirectMedia?: boolean;
   },
-  hooks: { before?: (url: URL) => Response | undefined } = {},
+  hooks: { before?: (url: URL) => Response | undefined | Promise<Response | undefined> } = {},
 ) {
   const requests: URL[] = [];
   const downloads: { id: string; authorization: string | null }[] = [];
@@ -217,8 +230,13 @@ function langfuse(
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch(request: Request): Response {
+    async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
+      if (url.pathname.startsWith("/redirect/"))
+        return new Response(null, {
+          status: 302,
+          headers: { location: `/s3/${url.pathname.slice("/redirect/".length)}` },
+        });
       if (url.pathname.startsWith("/s3/")) {
         const id = url.pathname.slice(4);
         downloads.push({ id, authorization: request.headers.get("authorization") });
@@ -229,7 +247,7 @@ function langfuse(
           : new Response(null, { status: 404 });
       }
       requests.push(url);
-      const hooked = hooks.before?.(url);
+      const hooked = await hooks.before?.(url);
       if (hooked) return hooked;
       const expected = `Basic ${Buffer.from(`${PUBLIC_KEY}:${SECRET_KEY}`).toString("base64")}`;
       if (request.headers.get("authorization") !== expected)
@@ -316,7 +334,7 @@ function langfuse(
           contentType: file === "fails" ? "image/png" : file.contentType,
           contentLength: file === "fails" ? 4 : file.bytes.byteLength,
           uploadedAt: "2026-03-01T00:00:00.000Z",
-          url: `http://127.0.0.1:${server.port}/s3/${id}`,
+          url: `http://127.0.0.1:${server.port}/${data.redirectMedia ? "redirect" : "s3"}/${id}`,
           urlExpiry: "2026-03-01T01:00:00.000Z",
         });
       }
@@ -332,9 +350,11 @@ async function run(
   args: string[],
   env: Record<string, string>,
   io: Partial<ImportCommandIo> = {},
+  files: Record<string, string> = {},
 ): Promise<{ code: number; stdout: string; stderr: string; sleeps: number[] }> {
   const cwd = await mkdtemp(join(tmpdir(), "hue-import-"));
   directories.push(cwd);
+  for (const [name, content] of Object.entries(files)) await writeFile(join(cwd, name), content);
   let stdout = "";
   let stderr = "";
   const sleeps: number[] = [];
@@ -648,6 +668,7 @@ describe("hue import langfuse through the v2 API", () => {
       environment(lf.url, target.url),
     );
     expect(result.code).toBe(1);
+    expect(result.stdout).toContain("Imported 0 traces of 1 (3 spans sent, 0 accepted)");
     expect(result.stderr).toContain("Hue did not accept 3 spans");
     expect(result.stderr).toContain(`${TRACE_A}: Hue did not accept all of its spans`);
   });
@@ -706,17 +727,24 @@ describe("hue import langfuse through the v2 API", () => {
       { v2: v2Data() },
       {
         before: (url) =>
-          url.searchParams.get("traceId") === TRACE_A && url.searchParams.get("limit") === "100"
+          (url.searchParams.get("traceId") === TRACE_A &&
+            url.searchParams.get("limit") === "100") ||
+          (url.searchParams.get("isRootObservation") && url.searchParams.get("limit") === "1000")
             ? new Response("Payload Too Large", { status: 413 })
             : undefined,
       },
     );
     const target = hue();
     const result = await run(
-      ["langfuse", "--trace-id", TRACE_A, "--yes"],
+      ["langfuse", "--from", "2026-03-02", "--to", "2026-03-03", "--yes"],
       environment(lf.url, target.url),
     );
     expect(result.code).toBe(0);
+    expect(
+      lf.requests
+        .filter((url) => url.searchParams.get("isRootObservation"))
+        .map((url) => url.searchParams.get("limit")),
+    ).toEqual(["1000", "100"]);
     expect(
       lf.requests
         .filter((url) => url.searchParams.get("traceId") === TRACE_A)
@@ -798,6 +826,7 @@ describe("hue import langfuse --media", () => {
   test("uploads the referenced files under the trace and places them in digest form", async () => {
     const lf = langfuse({
       v2: observations(),
+      redirectMedia: true,
       media: {
         img001: { bytes: png, contentType: "image/png" },
         aud001: { bytes: wav, contentType: "audio/wav" },
@@ -941,6 +970,157 @@ describe("hue import langfuse --media", () => {
   });
 });
 
+describe("hue import langfuse resumes", () => {
+  test("after Hue refused a request for its rate, sending each root as it was first sent", async () => {
+    const trace = "5555555555555555555555555555555a";
+    const root = "aaaaaaaaaaaaaaa1";
+    const rows: V2Observation[] = [
+      {
+        id: root,
+        traceId: trace,
+        type: "SPAN",
+        name: "root",
+        startTime: "2026-03-10T00:00:00.000Z",
+        endTime: "2026-03-10T01:00:00.000Z",
+        parentObservationId: null,
+      },
+    ];
+    for (let index = 0; index < 260; index++) {
+      const start = Date.parse("2026-03-10T00:00:01.000Z") + index * 1000;
+      rows.push({
+        id: `b${index.toString(16).padStart(15, "0")}`,
+        traceId: trace,
+        type: "SPAN",
+        name: `child-${index}`,
+        startTime: new Date(start).toISOString(),
+        endTime: new Date(start + 500).toISOString(),
+        parentObservationId: root,
+      });
+    }
+    // The root, the oldest observation, comes last; its page waits until the first export,
+    // refused past the SDK's hold, has been counted lost.
+    const lf = langfuse(
+      { v2: rows },
+      {
+        before: async (url) => {
+          if (
+            url.searchParams.get("cursor") &&
+            Number(atob(url.searchParams.get("cursor")!)) >= 200
+          )
+            await Bun.sleep(300);
+          return undefined;
+        },
+      },
+    );
+    const target = hue({
+      otlp: (index) =>
+        index === 1
+          ? new Response("Slow down", { status: 429, headers: { "Retry-After": "120" } })
+          : undefined,
+    });
+    const args = ["langfuse", "--trace-id", trace, "--yes"];
+    const first = await run(args, environment(lf.url, target.url));
+    expect(first.code).toBe(1);
+    expect(first.stderr).toContain("Hue did not accept 128 spans");
+    const sent = target.span(trace, root)!;
+    expect(attr(sent, "hue.sdk.dropped_records")).toBeUndefined();
+    expect(target.all()).toHaveLength(133);
+    const second = await run(args, environment(lf.url, target.url));
+    expect(second.code).toBe(0);
+    expect(target.rejected()).toBe(0);
+    expect(target.all()).toHaveLength(261);
+  });
+
+  test("a value over Hue's inline limit is stored before export, its span held back until it is", async () => {
+    const big = JSON.stringify({ text: "x".repeat(1_300_000) });
+    const rows: V2Observation[] = [
+      {
+        id: "f9f8f7f6f5f4f3f2",
+        traceId: "6666666666666666666666666666666b",
+        type: "SPAN",
+        name: "large",
+        startTime: "2026-03-11T00:00:00.000Z",
+        endTime: "2026-03-11T00:00:01.000Z",
+        parentObservationId: null,
+        input: big,
+      },
+    ];
+    let refuse = true;
+    const lf = langfuse({ v2: rows });
+    const target = hue({ reserve: () => (refuse ? 400 : 200) });
+    const args = ["langfuse", "--trace-id", "6666666666666666666666666666666b", "--yes"];
+    const first = await run(args, environment(lf.url, target.url));
+    expect(first.code).toBe(1);
+    expect(first.stderr).toContain("a value over Hue's inline limit could not be stored");
+    expect(target.all()).toEqual([]);
+    refuse = false;
+    const second = await run(args, environment(lf.url, target.url));
+    expect(second.code).toBe(0);
+    const span = target.span("6666666666666666666666666666666b", "f9f8f7f6f5f4f3f2")!;
+    expect(str(span, "langfuse.observation.input")).toBe(big.slice(0, 16 * 1024));
+    expect(
+      attr(span, "hue.blobs")!.arrayValue!.values.map((item) => JSON.parse(item.stringValue!)),
+    ).toEqual([
+      {
+        key: "langfuse.observation.input",
+        sha256: sha256(Buffer.from(big)),
+        size: Buffer.byteLength(big),
+        content_type: "application/json",
+      },
+    ]);
+    expect(attr(span, "hue.truncated")?.arrayValue?.values.map((v) => v.stringValue)).toEqual([
+      "langfuse.observation.input",
+    ]);
+    expect(
+      target.store.get(`6666666666666666666666666666666b/${sha256(Buffer.from(big))}`)?.toString(),
+    ).toBe(big);
+  });
+
+  test("reads the Hue key from ./.env.hue beside a Langfuse env file", async () => {
+    const lf = langfuse({ v2: v2Data() });
+    const target = hue();
+    const result = await run(
+      ["langfuse", "--env-path", ".env.langfuse", "--trace-id", TRACE_A, "--yes"],
+      {},
+      {},
+      {
+        ".env.hue": `HUE_API_KEY=${HUE_KEY}\nHUE_BASE_URL=${target.url}\n`,
+        ".env.langfuse": `LANGFUSE_PUBLIC_KEY=${PUBLIC_KEY}\nLANGFUSE_SECRET_KEY=${SECRET_KEY}\nLANGFUSE_BASE_URL=${lf.url}\n`,
+      },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(target.all()).toHaveLength(3);
+  });
+
+  test("a second stop request a second later ends the wait for Hue at once", async () => {
+    let stop = () => {};
+    const exits: number[] = [];
+    const lf = langfuse({ v2: v2Data() });
+    const target = hue({
+      otlp: async () => {
+        stop();
+        setTimeout(() => stop(), 1_100);
+        await Bun.sleep(8_000);
+        return undefined;
+      },
+    });
+    const started = performance.now();
+    const result = await run(
+      ["langfuse", "--trace-id", TRACE_A, "--yes"],
+      environment(lf.url, target.url),
+      {
+        onInterrupt: (listener) => ((stop = listener), () => {}),
+        exit: (code) => void exits.push(code),
+      },
+    );
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(result.code).toBe(130);
+    expect(exits).toEqual([130]);
+    expect(result.stderr).toContain("Stopping at once");
+  }, 15_000);
+});
+
 describe("hue import langfuse through the v1 API", () => {
   const TRACE = "7c1d9e2a-4b3f-4e5d-8a6b-0c1d2e3f4a5b";
   const v1: V1Trace[] = [
@@ -1010,7 +1190,8 @@ describe("hue import langfuse through the v1 API", () => {
     expect(result.stdout).toContain("Imported 1 trace of 1 (3 spans sent, 3 accepted)");
     const listing = lf.requests.find((url) => url.pathname === "/api/public/traces")!;
     expect(listing.searchParams.get("fromTimestamp")).toBe("2026-03-01T00:00:00.000Z");
-    expect(listing.searchParams.get("toTimestamp")).toBe("2026-04-01T00:00:00.000Z");
+    // Without --to, the window ends an hour before the command started.
+    expect(listing.searchParams.get("toTimestamp")).toBe("2026-03-31T23:00:00.000Z");
     // Observations came one per page.
     expect(
       lf.requests

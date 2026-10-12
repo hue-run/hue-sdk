@@ -322,6 +322,9 @@ export class HueTransport {
    * over the request limit), reported on the trace's root span as `hue.sdk.dropped_records` when
    * the root is exported, so Hue reads the trace as incomplete by that many records. */
   private droppedByTrace = new Map<string, number>();
+  /** Whether a trace's root carries `hue.sdk.dropped_records`; off for a replay of recorded
+   * spans, which must send the same root on every run. */
+  private marksDroppedRecords = true;
   private instrumentationFailures = 0;
   private diagnosticPending = false;
   private lastDiagnosticAt = -Infinity;
@@ -1061,10 +1064,18 @@ export class HueTransport {
    * (`consumeDroppedRecords`): a root written again under retry says the same, and a root whose
    * request failed has not told Hue, so its count is not forgotten with it. */
   withDroppedRecords(span: ReadableSpan): ReadableSpan {
-    if (span.parentSpanContext) return span;
+    if (span.parentSpanContext || !this.marksDroppedRecords) return span;
     const count = this.droppedByTrace.get(span.spanContext().traceId);
     if (!count) return span;
     return { ...span, attributes: { ...span.attributes, [DROPPED_RECORDS_KEY]: count } };
+  }
+
+  /** @internal For an import that replays recorded spans: roots never carry the count of
+   * records this run did not deliver, so a later run that delivers them sends each root as it
+   * was first sent, which Hue keeps as an exact replay. The losses are still counted and
+   * reported. */
+  omitDroppedRecords(): void {
+    this.marksDroppedRecords = false;
   }
 
   /** @internal Exporter callback: these counts reached Hue on their traces' roots. Only what a

@@ -19,6 +19,7 @@ import {
   placeMedia,
   readableSpan,
   spanMedia,
+  storeLargeValues,
   traceContext,
   TraceMedia,
   traceSpan,
@@ -59,6 +60,9 @@ export interface ImportCommandIo {
   onInterrupt?: (listener: () => void) => () => void;
   /** The current time, for the default end of the window. */
   now?: () => Date;
+  /** Ends the process after a second stop request (`process.exit` by default), so exports still
+   * in flight do not hold it until their requests time out. */
+  exit?: (code: number) => void;
 }
 
 const DEFAULT_ORIGIN = "https://app.hue.run";
@@ -82,6 +86,12 @@ const PROGRESS_EVERY_MS = 10_000;
 /** A stop request this soon after the first is the same one: `npx` forwards the terminal's
  * SIGINT to a process group that already received it. */
 const REPEATED_STOP_MS = 1_000;
+/** How long before the command starts the default window ends: a trace still running, or still
+ * arriving in Langfuse, is left for a later run rather than sent half recorded (Hue would then
+ * refuse its finished spans). */
+const SETTLE_MS = 60 * 60_000;
+/** How long one value's upload may take: up to 25 MiB over a slow link. */
+const UPLOAD_DEADLINE_MS = 300_000;
 
 export const IMPORT_USAGE = `Usage: hue import langfuse [options]
 
@@ -105,7 +115,8 @@ Hue:
 Selection (newest first):
   --from TIME            Traces that started at or after TIME: an ISO 8601 date (midnight UTC)
                          or a date and time with a zone, such as 2026-01-01T09:00:00Z
-  --to TIME              Traces that started before TIME (default: when the command starts)
+  --to TIME              Traces that started before TIME (default: an hour before the command
+                         starts, so traces still running are left for a later run)
   --limit N              At most N traces
   --trace-id ID          This Langfuse trace (repeatable); not with --from, --to or --limit
 
@@ -200,28 +211,34 @@ export function parseLangfuseHost(value: string): string {
   return `${url.origin}${url.pathname.replace(/\/+$/u, "")}`;
 }
 
+/** A dotenv file's variables under `env`'s: as Node's --env-file does, a variable already set
+ * keeps its value. */
+async function withEnvFile(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  file: string,
+): Promise<NodeJS.ProcessEnv> {
+  let content: string;
+  try {
+    content = await readFile(resolve(cwd, file), "utf8");
+  } catch (error) {
+    throw new UsageError(
+      `Unable to load ${file}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
+    );
+  }
+  return { ...parseEnv(content), ...env };
+}
+
+/** The environment with the named env file loaded, then `./.env.hue` (where `hue login` stores
+ * the Hue key) when neither set `HUE_API_KEY`: the Langfuse keys can sit in a file of their own. */
 async function loadEnv(
   env: NodeJS.ProcessEnv,
   cwd: string,
   file: string | undefined,
 ): Promise<NodeJS.ProcessEnv> {
-  // As `hue eval` does: the checkout's .env.hue supplies the Hue key only when none is set.
-  const named =
-    file ??
-    (!env.HUE_API_KEY?.trim() && existsSync(resolve(cwd, DEFAULT_ENV_FILE))
-      ? DEFAULT_ENV_FILE
-      : undefined);
-  if (!named) return env;
-  let content: string;
-  try {
-    content = await readFile(resolve(cwd, named), "utf8");
-  } catch (error) {
-    throw new UsageError(
-      `Unable to load ${named}: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}`,
-    );
-  }
-  // As Node's --env-file does, a variable already in the environment keeps its value.
-  return { ...parseEnv(content), ...env };
+  const named = file ? await withEnvFile(env, cwd, file) : env;
+  if (named.HUE_API_KEY?.trim() || !existsSync(resolve(cwd, DEFAULT_ENV_FILE))) return named;
+  return withEnvFile(named, cwd, DEFAULT_ENV_FILE);
 }
 
 function defaultOnInterrupt(listener: () => void): () => void {
@@ -306,7 +323,7 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     traceIds = [...new Set(traceIds)];
     const to = values.to
       ? parseInstant("--to", values.to)
-      : (io.now?.() ?? new Date()).toISOString();
+      : new Date((io.now?.() ?? new Date()).getTime() - SETTLE_MS).toISOString();
     window = { ...(values.from ? { from: parseInstant("--from", values.from) } : {}), to };
     if (window.from && window.from >= to) throw new UsageError("--from must be before --to");
     if (values.limit !== undefined) {
@@ -377,11 +394,26 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       stoppedAt = performance.now();
       stopping.abort();
       warn("Stopping: sending what was read (press Ctrl+C again to stop at once).");
-    } else if (performance.now() - stoppedAt >= REPEATED_STOP_MS) forced.abort();
+    } else if (performance.now() - stoppedAt >= REPEATED_STOP_MS && !forced.signal.aborted) {
+      warn("Stopping at once; run the same command again to resume.");
+      forced.abort();
+    }
   });
   const sleep = (ms: number) => (io.sleep ?? defaultSleep)(ms, stopping.signal);
   let hue: HueClient | undefined;
   let uploader: BlobUploader | undefined;
+  // A second stop request ends every wait for Hue at once: uploads in flight are closed and the
+  // queue is left unsent.
+  const forcedStop = new Promise<void>((done) =>
+    forced.signal.addEventListener(
+      "abort",
+      () => {
+        uploader?.close();
+        done();
+      },
+      { once: true },
+    ),
+  );
   try {
     const api = new LangfuseApi({
       baseUrl: langfuseHost,
@@ -442,8 +474,12 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     out(`Reading ${scope} from ${langfuseHost} (Langfuse API ${version}).`);
 
     const transport = hue?.transport;
+    // A replay sends the same spans on every run: no trace's root records this run's losses.
+    transport?.omitDroppedRecords();
     const resource = resourceFromAttributes({ "service.name": serviceName });
-    if (values.media && hue)
+    // Media and values over Hue's inline limit are stored before export, so a span is sent only
+    // once its files are; with --no-content the transport sends metadata only and stores nothing.
+    if (hue && !values["no-content"])
       uploader = new BlobUploader({
         baseUrl: origin,
         apiKey,
@@ -452,7 +488,9 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
         userAgent: `hue-sdk-typescript/${sdkVersion} hue-import`,
       });
     const uploadContext = (): UploadContext => ({
-      deadline: Date.now() + uploadBudgetMillis(hue!.transport.options.timeoutMillis),
+      deadline:
+        Date.now() +
+        Math.max(UPLOAD_DEADLINE_MS, uploadBudgetMillis(hue!.transport.options.timeoutMillis)),
       wait: async (ms) => {
         await sleep(ms);
         return !stopping.signal.aborted;
@@ -460,7 +498,6 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     });
     const stats = {
       traces: 0,
-      imported: 0,
       spans: 0,
       references: 0,
       uploaded: 0,
@@ -474,12 +511,14 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       listed: [] as { id: string; reason: string }[],
       ids: new Set<string>(),
     };
+    /** Records a trace not fully imported; false when it already was. */
     const fail = (id: string, reason: string) => {
-      if (failed.ids.has(id)) return;
+      if (failed.ids.has(id)) return false;
       failed.count++;
       if (failed.listed.length < LISTED_FAILURES) failed.listed.push({ id, reason });
       failed.ids.add(id);
       if (failed.ids.size > REMEMBERED_TRACES) failed.ids.delete(failed.ids.values().next().value!);
+      return true;
     };
     // Hue's export issues name traces by their OpenTelemetry id; the newest are remembered.
     const langfuseIds = new Map<string, string>();
@@ -487,14 +526,31 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     let lastProgress = Date.now();
     let progressAt = 0;
 
+    // Hue's refusals, read from the transport's issues after every drain: the traces they name
+    // were not imported, and a refusal that names none (or rolled out of the history) is noted.
+    let issueSequence = 0;
+    let unnamedRefusals = false;
+    const collectIssues = () => {
+      if (!transport) return;
+      const issues = transport.getIssues();
+      if (issues.length && issues[0]!.sequence > issueSequence + 1) unnamedRefusals = true;
+      for (const issue of issues) {
+        if (issue.sequence <= issueSequence) continue;
+        issueSequence = issue.sequence;
+        if (issue.kind === "warning") continue;
+        const ids = (issue.traceIds ?? []).flatMap((traceId) => langfuseIds.get(traceId) ?? []);
+        if (!ids.length) unnamedRefusals = true;
+        for (const id of ids) fail(id, "Hue did not accept all of its spans");
+      }
+    };
     const drain = async () => {
       if (!transport) return;
-      try {
-        await transport.flush();
-      } catch (error) {
+      const flushed = transport.flush().catch((error: unknown) => {
         // Counted in the transport's report and named in its issues; the import continues.
         if (!(error instanceof HueExportError)) throw error;
-      }
+      });
+      await Promise.race([flushed, forcedStop]);
+      collectIssues();
     };
     const send = async (span: ImportSpan) => {
       stats.spans++;
@@ -502,10 +558,11 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       transport.spanProcessor.onEnd(readableSpan(span, resource, SCOPE));
       const report = transport.getReport();
       if (report.pendingSpans >= DRAIN_SPANS || report.pendingBytes >= DRAIN_BYTES) await drain();
+      progress();
     };
-    /** Places a span's media files; the reason when one could not be read or stored now, so the
-     * span is not sent. */
-    const media = async (
+    /** Places a span's media files, then stores its values over Hue's inline limit; the reason
+     * when a file or value could not be read or stored now, so the span is not sent. */
+    const prepare = async (
       span: ImportSpan,
       files: TraceMedia | undefined,
     ): Promise<string | undefined> => {
@@ -514,7 +571,7 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       stats.references += located + found.kept;
       if (!files) {
         stats.kept += located + found.kept;
-        return undefined;
+        return uploader ? storeLargeValues(span, uploader, uploadContext) : undefined;
       }
       const { uses, kept } = uploadableUses(found);
       const placed = new Map<MediaUse, UploadedMedia>();
@@ -530,7 +587,7 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       }
       stats.uploaded += placeMedia(span, found, placed);
       stats.kept += left;
-      return undefined;
+      return storeLargeValues(span, uploader!, uploadContext);
     };
     const importTrace = async (id: string, trace: LangfuseTrace | undefined) => {
       const context: TraceContext = trace ? traceContext(trace) : { langfuseTraceId: id };
@@ -539,7 +596,10 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       if (langfuseIds.size > REMEMBERED_TRACES)
         langfuseIds.delete(langfuseIds.keys().next().value!);
       // Files are read and uploaded only with --media, and never in a dry run.
-      const files = uploader ? new TraceMedia(api, uploader, traceId, uploadContext) : undefined;
+      const files =
+        values.media && uploader
+          ? new TraceMedia(api, uploader, traceId, uploadContext)
+          : undefined;
       let reason: string | undefined;
       let observations = 0;
       let observed: TimeBounds | undefined;
@@ -556,7 +616,7 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
             continue;
           }
           observed = widen(observed, span);
-          const refused = await media(span, files);
+          const refused = await prepare(span, files);
           if (refused) {
             reason ??= refused;
             continue;
@@ -566,7 +626,7 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       }
       if (trace) {
         const root = traceSpan(trace, observed);
-        const refused = await media(root, files);
+        const refused = await prepare(root, files);
         if (refused) reason ??= refused;
         else await send(root);
       } else if (observations === 0) reason = "Langfuse holds no observations for it";
@@ -591,9 +651,12 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       else for await (const trace of api.v1Traces(window)) yield { id: trace.id, trace };
     }
 
+    // The trace being read, when the import stops before it is read whole.
+    let reading: string | undefined;
     try {
       for await (const { id, trace } of selected()) {
         stats.traces++;
+        reading = id;
         let reason: string | undefined;
         try {
           const read = trace ?? (version === "v1" ? await api.v1Trace(id) : undefined);
@@ -605,10 +668,11 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
           if (!(error instanceof LangfuseError) || error.fatal) throw error;
           reason = error.message;
         }
+        reading = undefined;
         if (reason) {
           fail(id, reason);
           warn(`Trace ${id} was not fully imported: ${reason}.`);
-        } else stats.imported++;
+        }
         progress();
         if (stopping.signal.aborted) throw new ImportStopped();
         if (limit !== undefined && stats.traces >= limit) break;
@@ -617,6 +681,7 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       if (error instanceof ImportStopped) ending = { kind: "stopped" };
       else if (error instanceof LangfuseError) ending = { kind: "failed", message: error.message };
       else throw error;
+      if (reading) fail(reading, "the import ended before it was read whole");
     }
 
     if (dryRun) {
@@ -628,25 +693,13 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     }
 
     // Everything read is sent before the summary, unless a second stop request ends the wait.
-    await Promise.race([
-      drain(),
-      new Promise<void>((done) =>
-        forced.signal.addEventListener("abort", () => done(), { once: true }),
-      ),
-    ]);
+    await drain();
     const report = transport!.getReport();
     const lost = report.rejectedSpans + report.failedSpans + report.droppedSpans;
-    const issueTraces = new Set<string>();
-    for (const issue of transport!.getIssues())
-      if (issue.kind !== "warning")
-        for (const traceId of issue.traceIds ?? []) issueTraces.add(traceId);
-    for (const traceId of issueTraces) {
-      const id = langfuseIds.get(traceId);
-      if (id) fail(id, "Hue did not accept all of its spans");
-    }
-
+    // Every trace read is imported unless it was recorded as not fully imported.
+    const imported = Math.max(0, stats.traces - failed.count);
     out(
-      `Imported ${plural(stats.imported, "trace")} of ${stats.traces} (${plural(stats.spans, "span")} sent, ${report.acceptedSpans} accepted) into the Hue project "${projectName}".`,
+      `Imported ${plural(imported, "trace")} of ${stats.traces} (${plural(stats.spans, "span")} sent, ${report.acceptedSpans} accepted) into the Hue project "${projectName}".`,
     );
     if (stats.references)
       out(
@@ -656,9 +709,11 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
       warn(
         `Hue did not accept ${plural(lost, "span")} (${report.rejectedSpans} rejected, ${report.failedSpans} not delivered, ${report.droppedSpans} dropped).`,
       );
+    if (lost && unnamedRefusals)
+      warn("Some spans Hue did not accept could not be tied to a trace.");
     if (report.uploadFallbacks)
       warn(
-        `${plural(report.uploadFallbacks, "value")} over Hue's inline limit could not be uploaded and ${report.uploadFallbacks === 1 ? "was" : "were"} cut.`,
+        `${plural(report.uploadFallbacks, "inline file or value", "inline files or values")} could not be uploaded and kept the SDK's inline fallback; Hue keeps the first copy of a span, so a later run does not change ${report.uploadFallbacks === 1 ? "it" : "them"}.`,
       );
     if (failed.count) {
       warn(`${plural(failed.count, "trace was", "traces were")} not fully imported:`);
@@ -667,15 +722,9 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
         warn(`  … and ${failed.count - failed.listed.length} more`);
     }
     if (ending?.kind === "failed") warn(`The import stopped: ${ending.message}.`);
-    if (
-      ending?.kind === "stopped" ||
-      ending?.kind === "failed" ||
-      failed.count ||
-      lost ||
-      report.uploadFallbacks
-    )
+    if (ending || failed.count || lost || stopping.signal.aborted)
       warn("Run the same command again to resume; spans Hue already holds are not duplicated.");
-    if (ending?.kind === "stopped") return 130;
+    if (ending?.kind === "stopped" || stopping.signal.aborted) return 130;
     return ending || failed.count || lost || report.uploadFallbacks ? 1 : 0;
   } catch (error) {
     warn(`The import failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -684,6 +733,8 @@ export async function runImportCommand(argv: string[], io: ImportCommandIo = {})
     removeInterrupt();
     uploader?.close();
     if (hue) await hue.shutdownSafe({ timeoutMillis: forced.signal.aborted ? 100 : 5_000 });
+    // Exports still in flight are abandoned: a later run sends them again.
+    if (forced.signal.aborted) (io.exit ?? process.exit)(130);
   }
 }
 

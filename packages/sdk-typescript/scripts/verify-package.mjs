@@ -89,6 +89,7 @@ if (!values.archive && !values["registry-version"]) {
     "sendsPlaceholders",
     "rejectPlaceholders",
     "withDroppedRecords",
+    "omitDroppedRecords",
     "consumeDroppedRecords",
     "countUndelivered",
     "holdForRateLimit",

@@ -388,11 +388,11 @@ npx -y @hue-run/sdk import langfuse --env-path .env.langfuse --from 2026-01-01 -
 value. `--langfuse-public-key` replaces the public key on the command line, but the secret key is
 never taken from it, where other local processes and shell history can read it. The host is
 `--langfuse-host`, then `LANGFUSE_BASE_URL`, then `LANGFUSE_HOST`, then `https://cloud.langfuse.com`:
-use your region's host or your self-hosted URL, over HTTPS (plain HTTP only on this machine). No
-redirect is followed. `HUE_API_KEY` is the Hue project key the spans are sent with, from the
-environment, the env file, or `./.env.hue` when it is not set; `--origin` (default `HUE_BASE_URL`,
-then `https://app.hue.run`) is checked with `GET /api/v1/projects/current` before Langfuse is read.
-Keys are never printed.
+use your region's host or your self-hosted URL, over HTTPS (plain HTTP only on this machine). A
+request carrying the keys follows no redirect. `HUE_API_KEY` is the Hue project key the spans are
+sent with, from the environment, the env file, or `./.env.hue` (where `hue login` stores it) when
+neither sets it; `--origin` (default `HUE_BASE_URL`, then `https://app.hue.run`) is checked with
+`GET /api/v1/projects/current` before Langfuse is read. Keys are never printed.
 
 **What is read.** The command first asks for `GET /api/public/v2/observations`, which Langfuse Cloud
 and self-hosted Langfuse v4 answer. The traces are then the root observations
@@ -406,8 +406,9 @@ pages. An answer over 32 MiB, or a `413`, is asked for again in smaller pages.
 
 **Selection.** `--from` and `--to` take an ISO 8601 date (midnight UTC) or a date and time with a time
 zone. A trace is selected by when it started, its root observation's start time or a v1 trace's
-timestamp, `--from` inclusive and `--to` exclusive. Without `--to` the window ends when the command
-starts, so traces recorded during the import are left for the next run. `--limit N` imports the N
+timestamp, `--from` inclusive and `--to` exclusive. Without `--to` the window ends an hour before the
+command starts, so a trace still running, or still arriving in Langfuse, is left for a later run
+rather than sent half recorded. `--limit N` imports the N
 newest traces; `--trace-id ID` (repeatable, up to 1,000) imports those traces only and is not combined
 with the window or the limit.
 
@@ -434,24 +435,29 @@ such as an older SDK's UUID, becomes one derived from it with SHA-256. The origi
 spans, and Hue keeps one copy of an exact replay of a completed span, so an interrupted or partly
 failed import is resumed by running it again. Hue refuses a different payload for a span it already
 holds: keep `--media`, `--no-content` and `--service-name` the same when resuming, and expect a span
-whose Langfuse data changed after it was imported to be refused. Leave out of the window any traces
-that already reached Hue through OpenTelemetry.
+whose Langfuse data changed after it was imported to be refused. For the same reason the import
+sends nothing that depends on the run: a trace's root never carries `hue.sdk.dropped_records`, and
+values and files are stored before their span is sent. Leave out of the window any traces that
+already reached Hue through OpenTelemetry.
 
 **Export and content.** Spans go through the SDK's own exporter, as `createHue` sends them: batched,
-compressed, retried, within the limits Hue advertises, and with values over Hue's inline limit and
-inline media (such as a `data:` URL Langfuse kept in place) uploaded as the SDK uploads what it
-records. Content is captured, the SDK's default; `--no-content` sends metadata only, as
+compressed, retried, within the limits Hue advertises, with inline media (such as a `data:` URL
+Langfuse kept in place) uploaded as the SDK uploads what it records. A text value over Hue's inline
+limit (1 MiB) is stored as the exporter stores one, uploaded whole and replaced by its first 16 KiB,
+listed in `hue.blobs` under the attribute's name and in `hue.truncated`, but before its span is
+sent: a value that cannot be stored right now holds its span back for the next run instead of being
+cut. Content is captured, the SDK's default; `--no-content` sends metadata only, as
 `captureContent: false` does (no inputs, outputs, status messages or model parameters; metadata,
-model names and usage stay). The import waits for its queue to be sent every 1,024 spans or 32 MiB,
-so its memory stays bounded whatever the project's size.
+model names and usage stay, and nothing is uploaded). The import waits for its queue to be sent
+every 1,024 spans or 32 MiB, so its memory stays bounded whatever the project's size.
 
 **Media.** Langfuse's SDKs replace a file in an input, output or metadata value with a reference,
 `@@@langfuseMedia:type=<media type>|id=<id>|source=<source>@@@`. Without `--media`, references are
 sent as recorded, and Hue shows them as files held in Langfuse. With `--media`, each reference where
 Hue reads a file (a whole string, or the content of a provider part such as an OpenAI `image_url` or
 `input_audio`, an Anthropic `source` or a GenAI `blob`, no deeper than ten levels) is looked up with
-`GET /api/public/media/{id}`. The file is downloaded from the link Langfuse answers, without the
-Langfuse keys, uploaded under the span's trace through Hue's upload route (reservation, presigned
+`GET /api/public/media/{id}`. The file is downloaded from the link Langfuse answers (following its
+store's redirects, without the Langfuse keys), uploaded under the span's trace through Hue's upload route (reservation, presigned
 `PUT`, completion), and placed in the digest form the SDK writes for media it records: a whole string
 becomes `{"type":"blob","mime_type":…,"modality":…,"sha256":…,"size":…}` and a provider part loses its
 bytes and gains `sha256` and `size`, every other byte of the value's text kept, each file listed in
@@ -469,13 +475,14 @@ or of `HUE_API_KEY` stops the import before anything is sent; a trace Langfuse c
 reported and the import goes on.
 
 **Output and exit codes.** `--dry-run` reads and counts traces, spans and media references, needs no
-Hue key and sends nothing. Without `--yes` the command asks for confirmation in a terminal, and
-refuses to start without one. Progress is printed every 100 traces or 10 seconds, then a summary of
-the traces imported, the spans sent and accepted, and the media files uploaded and left in Langfuse;
-each trace not fully imported is named with the reason. Ctrl+C or `SIGTERM` stops reading, sends what
-was read and exits `130`; a second Ctrl+C a second or more later stops at once. Exit codes: `0` every
-selected trace was imported, `1` a trace, span or file was not (or a key was refused), `2` usage
-error, `130` stopped.
+Hue key and sends nothing. Without `--yes` the command asks for confirmation in a terminal (declining
+exits `1`) and refuses to start without one. Progress is printed every 100 traces or 10 seconds, then
+a summary of the traces imported, the spans sent and accepted, and the media files uploaded and left
+in Langfuse; each trace not fully imported is named with the reason. Ctrl+C or `SIGTERM` stops
+reading, sends what was read and exits `130`; a second Ctrl+C a second or more later exits `130` at
+once, abandoning exports still in flight for the next run to send. Exit codes: `0` every selected
+trace was imported, `1` a trace, span or file was not (or a key was refused), `2` usage error, `130`
+stopped.
 
 ## Local state and conflicts
 

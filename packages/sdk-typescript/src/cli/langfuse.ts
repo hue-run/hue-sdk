@@ -8,11 +8,14 @@ import {
 } from "@opentelemetry/api";
 import type { Resource } from "@opentelemetry/resources";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
-import { MAX_FILE_DATA_BYTES } from "../config.js";
+import { MAX_CONTENT_BYTES, MAX_FILE_DATA_BYTES } from "../config.js";
 import {
   BLOBS_KEY,
   MAX_BLOB_ENTRIES,
   blobEntry,
+  blobPrefix,
+  digestOf,
+  textContentType,
   type BlobUploader,
   type FallbackReason,
   type UploadContext,
@@ -26,6 +29,7 @@ import {
   type InlineFilePart,
   type MediaValue,
 } from "../inline-files.js";
+import { TRUNCATED_KEY, withTruncatedKeys } from "../privacy.js";
 import { sdkVersion } from "../version.js";
 
 /**
@@ -51,11 +55,13 @@ const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
 const MAX_RATE_LIMITED = 10;
 /** The longest `Retry-After` honoured; Langfuse's buckets are per minute or per hour. */
 const MAX_RETRY_AFTER_MS = 15 * 60_000;
-/** Page sizes, each dividing the one before, so a page-numbered listing keeps its offset when
+/** Page sizes, each dividing the one before, so a page-numbered listing keeps its place when
  * its page size shrinks after an answer too large to read. */
 const PAGE_SIZES = [100, 50, 25, 5, 1];
-/** Root observations listed per page: the core fields only. */
-const ROOT_PAGE_SIZE = 1000;
+/** How many pages of the next size one page of each size holds. */
+const PAGE_SPLITS = [2, 2, 5, 5];
+/** Root observations read per page when the answer is too large: the core fields only. */
+const ROOT_PAGE_SIZES = [1000, 100, 10, 1];
 /** Observation fields read for each trace through the v2 API. */
 const V2_FIELDS = "core,basic,time,io,metadata,model,usage,prompt,trace_context";
 /** Langfuse cuts metadata values at 200 characters unless their keys are expanded. */
@@ -317,9 +323,9 @@ export class LangfuseApi {
   /**
    * One GET with retries: a rate limit (HTTP 429) is waited out for as long as its `Retry-After`
    * asks (up to 15 minutes, ten times in a row), and a connection failure, a timeout or a 5xx is
-   * tried again after 1, 2, 4, 8 and 16 seconds (or its `Retry-After`, up to a minute). A redirect
-   * is never followed, so the keys go only to the configured host. `authenticated` is false for a
-   * presigned media download, which carries no Langfuse credentials.
+   * tried again after 1, 2, 4, 8 and 16 seconds (or its `Retry-After`, up to a minute). An
+   * authenticated request never follows a redirect, so the keys go only to the configured host;
+   * `authenticated` is false for a presigned media download, which carries no Langfuse keys.
    */
   async get(
     url: URL,
@@ -339,7 +345,9 @@ export class LangfuseApi {
             "user-agent": `hue-sdk-typescript/${sdkVersion} hue-import`,
             ...(authenticated ? { authorization: this.authorization } : {}),
           },
-          redirect: "manual",
+          // The keys go only to the configured host; a presigned download carries none and may
+          // be redirected by its store.
+          redirect: authenticated ? "manual" : "follow",
           signal: AbortSignal.any([this.connection.signal, AbortSignal.timeout(timeoutMs)]),
         });
       } catch {
@@ -436,22 +444,30 @@ export class LangfuseApi {
   /** The ids of the traces whose root observations started in the window, newest first. */
   async *rootTraceIds(window: ImportWindow): AsyncGenerator<string> {
     let cursor: string | undefined;
-    do {
+    let size = 0;
+    for (;;) {
       const answer = await this.json("/api/public/v2/observations", {
         isRootObservation: "true",
         fields: "core",
-        limit: String(ROOT_PAGE_SIZE),
+        limit: String(ROOT_PAGE_SIZES[size]),
         fromStartTime: window.from,
         toStartTime: window.to,
         cursor,
       });
+      if (answer.tooLarge || answer.status === 413) {
+        if (size === ROOT_PAGE_SIZES.length - 1)
+          throw new LangfuseError("Langfuse's list of traces is too large to read");
+        size++;
+        continue;
+      }
       const page = this.page(answer, "observations");
       for (const item of page.data) {
         const traceId = text(object(item)?.traceId);
         if (traceId && this.first(traceId)) yield traceId;
       }
       cursor = nextCursor(page, cursor);
-    } while (cursor);
+      if (!cursor) return;
+    }
   }
 
   /** A trace's observations through the v2 API, a page at a time. */
@@ -499,12 +515,12 @@ export class LangfuseApi {
 
   /** The v1 traces whose timestamp falls in the window, newest first. */
   async *v1Traces(window: ImportWindow): AsyncGenerator<LangfuseTrace> {
-    let offset = 0;
+    let number = 1;
     let size = 1;
     for (;;) {
       const limit = PAGE_SIZES[size]!;
       const answer = await this.json("/api/public/traces", {
-        page: String(offset / limit + 1),
+        page: String(number),
         limit: String(limit),
         fromTimestamp: window.from,
         toTimestamp: window.to,
@@ -514,7 +530,7 @@ export class LangfuseApi {
       if (answer.tooLarge || answer.status === 413) {
         if (size === PAGE_SIZES.length - 1)
           throw new LangfuseError("A trace is too large to read from Langfuse");
-        size++;
+        number = (number - 1) * PAGE_SPLITS[size++]! + 1;
         continue;
       }
       const page = this.page(answer, "traces");
@@ -523,8 +539,8 @@ export class LangfuseApi {
         if (!trace) throw new LangfuseError("Langfuse listed a trace without an id or timestamp");
         if (this.first(trace.id)) yield trace;
       }
-      if (!morePages(page, offset / limit + 1, limit)) return;
-      offset += limit;
+      if (!morePages(page, number, limit)) return;
+      number++;
     }
   }
 
@@ -543,25 +559,25 @@ export class LangfuseApi {
 
   /** A trace's observations through the v1 API, a page at a time. */
   async *v1Observations(traceId: string): AsyncGenerator<LangfuseObservation[]> {
-    let offset = 0;
+    let number = 1;
     let size = 0;
     for (;;) {
       const limit = PAGE_SIZES[size]!;
       const answer = await this.json("/api/public/observations", {
         traceId,
-        page: String(offset / limit + 1),
+        page: String(number),
         limit: String(limit),
       });
       if (answer.tooLarge || answer.status === 413) {
         if (size === PAGE_SIZES.length - 1)
           throw new LangfuseError("An observation is too large to read from Langfuse");
-        size++;
+        number = (number - 1) * PAGE_SPLITS[size++]! + 1;
         continue;
       }
       const page = this.page(answer, "observations");
       yield this.observations(page.data);
-      if (!morePages(page, offset / limit + 1, limit)) return;
-      offset += limit;
+      if (!morePages(page, number, limit)) return;
+      number++;
     }
   }
 
@@ -1260,6 +1276,49 @@ export class TraceMedia {
     if (stored.reason === "tooLarge") return { kind: "kept" };
     return { kind: "failed", reason: FALLBACK_REASONS[stored.reason] };
   }
+}
+
+/**
+ * A span's text values over Hue's inline limit (1 MiB of UTF-8, the limit Hue advertises) stored
+ * as the SDK's transport stores them: each uploaded whole under the span's trace, replaced by its
+ * first 16 KiB, listed in `hue.blobs` under the attribute's key and in `hue.truncated`. Done
+ * before export, so a value that cannot be stored now holds its span back rather than being cut,
+ * and every run sends the same span. Values past the span's 64 `hue.blobs` entries are left for
+ * the transport, which cuts them alike on every run. Resolves to the reason when a value could
+ * not be stored.
+ */
+export async function storeLargeValues(
+  span: ImportSpan,
+  uploader: BlobUploader,
+  upload: () => UploadContext,
+): Promise<string | undefined> {
+  const listed = span.attributes[BLOBS_KEY];
+  const entries = Array.isArray(listed) ? listed.filter((item) => typeof item === "string") : [];
+  const truncated: string[] = [];
+  for (const [key, value] of Object.entries(span.attributes)) {
+    if (typeof value !== "string" || Buffer.byteLength(value, "utf8") <= MAX_CONTENT_BYTES)
+      continue;
+    if (entries.length >= MAX_BLOB_ENTRIES) break;
+    const digest = await digestOf(value);
+    const stored = await uploader.store(
+      span.traceId,
+      key,
+      value,
+      textContentType(value),
+      digest,
+      upload(),
+    );
+    if (!stored.ok)
+      return `a value over Hue's inline limit could not be stored: ${FALLBACK_REASONS[stored.reason]}`;
+    span.attributes[key] = blobPrefix(value);
+    entries.push(blobEntry(key, digest.sha256, digest.size, stored.contentType));
+    truncated.push(key);
+  }
+  if (truncated.length) {
+    span.attributes[BLOBS_KEY] = entries;
+    span.attributes[TRUNCATED_KEY] = withTruncatedKeys(span.attributes[TRUNCATED_KEY], truncated);
+  }
+  return undefined;
 }
 
 const FALLBACK_REASONS: Record<FallbackReason, string> = {
