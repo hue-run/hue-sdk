@@ -71,6 +71,8 @@ function hue(
     otlpStatus?: number;
     /** Answers the n-th OTLP request (from 1) instead of the receiver, when it returns one. */
     otlp?: (index: number) => Response | Promise<Response | undefined> | undefined;
+    /** Milliseconds a store PUT of these bytes waits before it is answered. */
+    putDelay?: (bytes: Buffer) => number;
   } = {},
 ) {
   const spans = new Map<string, { span: WireSpan; canonical: string }>();
@@ -88,6 +90,8 @@ function hue(
       if (url.pathname.startsWith("/store/")) {
         const bytes = Buffer.from(await request.arrayBuffer());
         expect(request.headers.get("authorization")).toBeNull();
+        const delay = options.putDelay?.(bytes) ?? 0;
+        if (delay) await Bun.sleep(delay);
         const key = url.pathname.slice("/store/".length);
         if (sha256(bytes) !== key.split("/")[1]) return new Response(null, { status: 400 });
         store.set(key, bytes);
@@ -1136,6 +1140,64 @@ describe("hue import langfuse resumes", () => {
       size: png.byteLength,
     });
     expect(str(span, "langfuse.observation.input")!.length).toBe(16 * 1024);
+  });
+
+  test("the span's last hue.blobs places go to its attributes in order, whatever finishes first", async () => {
+    // 62 images in the input and one in the output, both values still over the inline limit
+    // once their images are placed: 65 places for 64. The input's uploads are the slow ones.
+    const image = (label: string) =>
+      ({
+        type: "image_url",
+        image_url: { url: `data:image/png;base64,${Buffer.from(label).toString("base64")}` },
+      }) as const;
+    const input = JSON.stringify([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "i".repeat(1_100_000) },
+          ...Array.from({ length: 62 }, (_, index) => image(`input-image-${index}`)),
+        ],
+      },
+    ]);
+    const output = JSON.stringify({
+      role: "assistant",
+      content: [{ type: "text", text: "o".repeat(1_100_000) }, image("output-image")],
+    });
+    const traceId = "8888888888888888888888888888888d";
+    const lf = langfuse({
+      v2: [
+        {
+          id: "b8b7b6b5b4b3b2b1",
+          traceId,
+          type: "GENERATION",
+          name: "many images",
+          startTime: "2026-03-13T00:00:00.000Z",
+          endTime: "2026-03-13T00:00:01.000Z",
+          parentObservationId: null,
+          input,
+          output,
+        },
+      ],
+    });
+    const target = hue({
+      putDelay: (bytes) => (bytes.toString().startsWith("input-image") ? 50 : 0),
+    });
+    const result = await run(
+      ["langfuse", "--trace-id", traceId, "--yes"],
+      environment(lf.url, target.url),
+    );
+    expect(result.code).toBe(0);
+    const span = target.span(traceId, "b8b7b6b5b4b3b2b1")!;
+    const keys = attr(span, "hue.blobs")!.arrayValue!.values.map(
+      (item) => (JSON.parse(item.stringValue!) as { key: string }).key,
+    );
+    expect(keys).toHaveLength(64);
+    // The input, first in the span, is stored whole; the output's image takes the last place
+    // and its value is cut, on every run.
+    expect(keys).toContain("langfuse.observation.input");
+    expect(keys).toContain("langfuse.observation.output#/content/1");
+    expect(keys).not.toContain("langfuse.observation.output");
+    expect(result.stdout).toContain("1 over Hue's limits kept inline or cut");
   });
 
   test("a dry run beside a Langfuse env file never reads ./.env.hue", async () => {

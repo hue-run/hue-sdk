@@ -1301,14 +1301,20 @@ export async function storeSpanContent(
   );
   if (!candidates.length) return { stored: 0, overLimits: 0 };
   const tally = newTally();
-  const placed = await offloadAttributes(
-    span.attributes,
-    { candidates, cut: [] },
-    { uploader, traceId: span.traceId, valueBytes: MAX_CONTENT_BYTES, upload, tally },
-  );
-  for (const reason of ["unsupported", "failed"] as const)
-    if (tally.fallbacks.has(reason))
-      return { heldBack: FALLBACK_REASONS[reason], stored: 0, overLimits: 0 };
+  // One attribute at a time, in the span's order: the exporter places a value's files and then
+  // the value itself, so values placed together would take the span's last `hue.blobs` places in
+  // the order their uploads finish, which a later run could reverse.
+  let placed: Record<string, unknown> = span.attributes;
+  for (const candidate of candidates) {
+    placed = await offloadAttributes(
+      placed,
+      { candidates: [candidate], cut: [] },
+      { uploader, traceId: span.traceId, valueBytes: MAX_CONTENT_BYTES, upload, tally },
+    );
+    for (const reason of ["unsupported", "failed"] as const)
+      if (tally.fallbacks.has(reason))
+        return { heldBack: FALLBACK_REASONS[reason], stored: 0, overLimits: 0 };
+  }
   span.attributes = placed as Record<string, AttributeValue>;
   let overLimits = 0;
   for (const { count } of tally.fallbacks.values()) overLimits += count;
