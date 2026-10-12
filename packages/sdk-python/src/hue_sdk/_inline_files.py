@@ -153,15 +153,18 @@ class InlineFile:
     data: bytes
     decoded: bool
     url_media_type: str | None
+    # The bytes were decoded from text that reads as base64 by its alphabet alone, not from a
+    # data: URL or a field its convention declares base64.
+    bare_base64: bool = False
 
 
 def inline_file(content: str) -> InlineFile:
-    """Decode content without a declared media type or provider encoding contract.
+    """Decode content without a provider encoding contract.
 
     A data: URL is decoded by its own encoding (base64 with ``;base64``, percent-escapes
     otherwise), content in the base64 alphabet is decoded, and anything else, such as a text
     file's own text, is UTF-8. A data: URL whose data does not decode is taken as UTF-8 too.
-    ``media_bytes`` handles declared textual content and provider-specific base64 fields.
+    ``media_bytes`` handles provider-specific base64 fields.
     """
     content = _well_formed(content)
     match = _DATA_URL.match(content)
@@ -179,6 +182,7 @@ def inline_file(content: str) -> InlineFile:
         content.encode("utf-8") if decoded is None else decoded,
         decoded is not None,
         media_type or None,
+        decoded is not None and match is None,
     )
 
 
@@ -881,22 +885,23 @@ def placeable(file: InlineFilePart, decoded: InlineFile) -> bool:
     return bool(decoded.data) and (not file.whole or decoded.decoded)
 
 
-def keeps_prefix(file: InlineFilePart, textual: bool) -> bool:
+def keeps_prefix(file: InlineFilePart, textual: bool, decoded: InlineFile) -> bool:
     """Whether an uploaded file keeps a 16 KiB prefix of its content in place (text media in a
-    provider part, whose entry names the content) rather than its digest. A whole string and a
-    file inside a JSON-encoded string always take the digest form."""
-    return textual and not file.whole and not file.encoded
+    provider part, whose entry names the content) rather than its digest. A whole string, a file
+    inside a JSON-encoded string, and a text file a part holds as bare base64 (a GenAI ``blob``,
+    Vertex ``media`` or AI SDK part, whose content is not the text itself) take the digest
+    form."""
+    return textual and not file.whole and not file.encoded and not decoded.bare_base64
 
 
 def media_bytes(file: InlineFilePart) -> InlineFile:
+    """A file's bytes: a field its convention declares base64 decoded, any other content read as
+    Hue's reader reads it, whatever the part's media type (``inline_file``): a data: URL by its
+    own encoding, text that reads as base64 decoded (what the GenAI conventions, and
+    ``client.media.resolve``, write in a ``blob`` or ``media`` part for every media type),
+    anything else as its UTF-8."""
     if file.base64:
         return InlineFile(base64.b64decode(file.content, validate=True), True, None)
-    if (
-        is_media_content_type(file.content_type)
-        and is_text_media_type(file.content_type or "")
-        and not file.content.startswith("data:")
-    ):
-        return InlineFile(_well_formed(file.content).encode("utf-8"), False, None)
     return inline_file(file.content)
 
 

@@ -15,6 +15,7 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from threading import Event, Lock
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -52,6 +53,7 @@ from hue_sdk._inline_files import (
 )
 from hue_sdk._limits import cut_utf8
 from hue_sdk._records import replace_span
+from hue_sdk.evals import rehydrate_media
 from hue_sdk.snapshots import Hold, _ValueBudget, snapshot_log, snapshot_span
 
 ATTRIBUTE = "gen_ai.input.messages"
@@ -180,6 +182,47 @@ def test_shared_log_media_wire_corpus(hue_store, outcome):
             assert sha256(hue_store.objects[f"{traces[case['id']]}/{digest}"][0]) == digest
     if outcome == "failure":
         assert hue_store.puts == []
+
+
+def test_a_resolved_text_file_over_64_kib_records_again_as_the_same_file(hue_store):
+    notes = b"Quarterly notes, line 1\n" * 3000
+    digest = sha256(notes)
+    recorded = [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "type": "blob",
+                    "mime_type": "text/plain",
+                    "name": "notes.txt",
+                    "sha256": digest,
+                    "size": 72_000,
+                }
+            ],
+        }
+    ]
+    # The bytes are written back as Hue and the GenAI conventions read a ``blob`` part: base64.
+    resolved = rehydrate_media(recorded, [SimpleNamespace(sha256=digest, data=notes)])
+    assert resolved.failures == []
+    assert resolved.value[0]["parts"][0]["content"] == base64.b64encode(notes).decode()
+    with client(hue_store) as hue:
+        with hue.span("resolved again") as span:
+            span.set_attribute(ATTRIBUTE, json.dumps(resolved.value))
+        assert hue.force_flush()
+        status = hue.export_status
+        assert (status.uploaded_values, status.upload_fallbacks) == (1, 0)
+    record = hue_store.span("resolved again")
+    assert json.loads(attrs(record)[ATTRIBUTE].string_value) == recorded
+    assert blobs(record) == [
+        {
+            "key": f"{ATTRIBUTE}#/0/parts/0",
+            "sha256": digest,
+            "size": 72_000,
+            "content_type": "text/plain",
+            "name": "notes.txt",
+        }
+    ]
+    assert [data for data, _ in hue_store.objects.values()] == [notes]
 
 
 def test_metadata_only_inspects_and_uploads_nothing(hue_store):

@@ -17,6 +17,7 @@ import {
   type HueTransport,
 } from "../src/index.js";
 import { fallbackAttributes, newTally } from "../src/blobs.js";
+import { rehydrateMedia } from "../src/evals.js";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
@@ -934,6 +935,47 @@ for (const item of fixtures) {
     });
   }
 }
+
+test("a resolved text file over 64 KiB records again as the same file, not its base64", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const notes = Buffer.from("Quarterly notes, line 1\n".repeat(3000), "utf8");
+  const digest = sha256(notes);
+  const recorded = [
+    {
+      role: "user",
+      parts: [
+        { type: "blob", mime_type: "text/plain", name: "notes.txt", sha256: digest, size: 72_000 },
+      ],
+    },
+  ];
+  try {
+    // The bytes are written back as Hue and the GenAI conventions read a `blob` part: base64.
+    const { value, failures } = await rehydrateMedia(recorded, [{ sha256: digest, bytes: notes }]);
+    expect(failures).toEqual([]);
+    expect(value[0]!.parts[0]).toMatchObject({ content: notes.toString("base64") });
+    await hueClient.withSpan("resolved again", ({ span }) => {
+      span.setAttribute("gen_ai.input.messages", JSON.stringify(value));
+    });
+    const report = await hueClient.flush();
+    expect([report.uploadedValues, report.uploadFallbacks]).toEqual([1, 0]);
+    const record = endpoint.span("resolved again")!;
+    expect(JSON.parse(attr(record, "gen_ai.input.messages")!.stringValue!)).toEqual(recorded);
+    expect(blobs(record)).toEqual([
+      {
+        key: "gen_ai.input.messages#/0/parts/0",
+        sha256: digest,
+        size: 72_000,
+        content_type: "text/plain",
+        name: "notes.txt",
+      },
+    ]);
+    expect([...endpoint.store.values()].map((object) => object.bytes)).toEqual([notes]);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
 
 test("recordFile uploads are opt-in, copied, and share inline reservations on the same trace", async () => {
   const endpoint = hue();

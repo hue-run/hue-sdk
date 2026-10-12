@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
+import digests from "./fixtures/inline-file-digests.json" with { type: "json" };
 import {
   hashInlineFiles,
   hashNestedInlineFiles,
@@ -84,6 +85,42 @@ for (const item of corpus.fixtures as {
       expect(JSON.parse(placed as string)).toEqual(item.failure.messages);
     else expect(placed).toBe(item.failure.value!);
   });
+
+// The Python suite reads the same file; each digest is of the bytes the case was built from.
+// Content that reads as base64 is the file's base64 whatever the part's media type, as Hue's
+// reader reads it: a text file's bytes, not the base64 text.
+for (const item of digests.cases as {
+  name: string;
+  part: Record<string, unknown>;
+  key: string;
+  content: { prefix: string; unit: string; times: number; suffix: string };
+  expected: { sha256: string; size: number } | null;
+}[])
+  test(`inline file digest: ${item.name}`, () => {
+    const { prefix, unit, times, suffix } = item.content;
+    const part = { ...item.part, [item.key]: `${prefix}${unit.repeat(times)}${suffix}` };
+    const file = item.part.type === "file";
+    const value = JSON.stringify([
+      file ? { role: "user", content: [part] } : { role: "user", parts: [part] },
+    ]);
+    const result = hashInlineFiles(file ? "ai.prompt.messages" : "gen_ai.input.messages", value);
+    let expected = item.expected;
+    // Binary media takes its digest at every size in a recorded message since 0.17.0.
+    if (expected === null && prefix.startsWith("data:application/octet-stream")) {
+      const bytes = Buffer.from(suffix.slice(";base64,".length), "base64");
+      expected = { sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length };
+    }
+    if (expected === null) {
+      expect(result).toBe(value);
+      return;
+    }
+    const [exported] = JSON.parse(result as string) as Record<string, unknown[]>[];
+    expect((file ? exported!.content : exported!.parts)![0]).toEqual({ ...item.part, ...expected });
+  });
+
+test("the shared digest fixture uses the SDK's inline file limit", () => {
+  expect(digests.limit).toBe(INLINE_FILE_LIMIT);
+});
 
 test("media names use UTF-16 limits and reject invalid labels", () => {
   expect(INLINE_FILE_LIMIT).toBe(65536);

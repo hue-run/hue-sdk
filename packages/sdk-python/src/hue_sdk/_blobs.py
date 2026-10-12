@@ -1103,7 +1103,7 @@ def _place_files(
         textual = is_text_media_type(content_type)
         if textual and len(decoded.data) <= INLINE_FILE_LIMIT:
             continue
-        prefix = keeps_prefix(file, textual)
+        prefix = keeps_prefix(file, textual, decoded)
         part_key = f"{key}#{file.pointer if prefix else file.part_pointer}"
         has_slot = _is_blob_key(part_key) and span.slot()
         digest = span.held.digests.get(key, {}).get(file.pointer) or context.memo.digest(
