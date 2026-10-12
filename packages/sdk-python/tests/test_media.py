@@ -1038,7 +1038,7 @@ def test_add_case_reuses_a_files_artifact_whatever_the_case_of_the_version_id(hu
     assert hue.cases[1] == hue.cases[0]
 
 
-def test_add_case_hashes_and_uploads_files_given_by_path_without_holding_one_whole(hue, tmp_path):
+def test_add_case_holds_at_most_one_file_given_by_path_at_a_time(hue, tmp_path):
     hue.hash_uploads = True
     size = 8 * 1024 * 1024
     digests = []
@@ -1067,8 +1067,9 @@ def test_add_case_hashes_and_uploads_files_given_by_path_without_holding_one_who
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    # The four files come to 32 MiB; what the write allocated never reached one file's size.
-    assert peak < size
+    # The four files come to 32 MiB: each is hashed a slice at a time and read again only to be
+    # uploaded, one after the other, so the write never held two of them at once.
+    assert peak < 2 * size
     assert [artifact["bytes"] for artifact in hue.artifacts.values()] == digests
     assert all(artifact["state"] == "ready" for artifact in hue.artifacts.values())
 
@@ -1090,7 +1091,7 @@ def test_add_case_refuses_a_file_given_by_path_that_changed_after_it_was_checked
     hue, tmp_path, change, reason
 ):
     path = tmp_path / "report.pdf"
-    # Past two slices: the slices before the last are sent before the change is found.
+    # Several slices long: the check hashes it in pieces, the upload reads it again whole.
     original = os.urandom(2 * 1024 * 1024 + 512 * 1024)
     path.write_bytes(original)
 
@@ -1116,11 +1117,13 @@ def test_add_case_refuses_a_file_given_by_path_that_changed_after_it_was_checked
             ],
         )
     assert str(raised.value) == f"Case file 2 {reason}."
-    # The report is never staged whole nor completed, and no case is written.
+    # None of the report's bytes are sent: no upload is asked for, nothing is staged or completed,
+    # and no case is written.
     report = next(item for item in hue.artifacts.values() if item["filename"] == "report.pdf")
     assert report["state"] == "reserved"
-    assert len(report.get("bytes", b"")) < len(original)
-    assert f"/api/v1/artifacts/{report['id']}/complete" not in [seen["path"] for seen in hue.seen]
+    assert "bytes" not in report
+    requested = [seen["path"] for seen in hue.seen if report["id"] in seen["path"]]
+    assert requested == []
     assert hue.cases == []
 
 

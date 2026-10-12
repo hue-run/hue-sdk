@@ -513,15 +513,25 @@ async function publishArtifact(
   if (state !== "ready") {
     // A verification already running holds the uploaded bytes; Hue refuses another upload then.
     if (reserved.copyState !== "acknowledged" && state !== "verifying") {
-      if (body instanceof Uint8Array) {
-        const upload = await client.requestArtifactUpload(reserved.id);
-        try {
-          await client.uploadArtifactBytes(upload, body, declared.contentType);
-        } catch {
-          // A lost staging acknowledgement or an immutable object already present can only be
-          // settled by verified completion; never rewrite a final object here.
-        }
-      } else await uploadCheckedFile(client, reserved.id, body, declared.contentType);
+      // A checked file is read again, whole, only now and only if it still has the bytes its
+      // check hashed: a file that changed sends nothing.
+      const bytes = body instanceof Uint8Array ? body : await checkedBytes(body);
+      const upload = await client.requestArtifactUpload(reserved.id);
+      try {
+        if (body instanceof Uint8Array)
+          await client.uploadArtifactBytes(upload, bytes, declared.contentType);
+        // Sent from the write's own buffer a slice at a time, never copied whole.
+        else
+          await client.uploadArtifactStream(
+            upload,
+            slicesOf(bytes),
+            bytes.byteLength,
+            declared.contentType,
+          );
+      } catch {
+        // A lost staging acknowledgement or an immutable object already present can only be
+        // settled by verified completion; never rewrite a final object here.
+      }
     }
     state = await settleArtifact(client, reserved.id, timing);
   }
@@ -529,8 +539,7 @@ async function publishArtifact(
   return reserved.id;
 }
 
-/** The most of a case file given by path held at once: it is hashed when it is checked, and read
- * again when it is uploaded, this many bytes at a time. */
+/** How much of a case file given by path its check reads at once, to hash it. */
 const CASE_FILE_SLICE = 1024 * 1024;
 
 /** A case file given by path, as it was checked. */
@@ -540,68 +549,59 @@ interface CheckedFile {
   label: string;
   byteSize: number;
   sha256: string;
+  /** The buffer the files of one case write are read into to be uploaded, one after another. */
+  scratch: { buffer?: Buffer };
 }
-const changed = (file: CheckedFile) => new TypeError(`${file.label} changed after it was checked`);
+
+/** Bytes as a stream of 1 MiB views of them, made as the request reads them. */
+function slicesOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (offset >= bytes.byteLength) return controller.close();
+        const end = Math.min(bytes.byteLength, offset + CASE_FILE_SLICE);
+        controller.enqueue(bytes.subarray(offset, end));
+        offset = end;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
 
 /**
- * Upload a case file given by path, read again from disk a slice at a time while it is sent. Each
- * slice is sent once the next one is read, and the last only once the file ended at its checked
- * size with its checked SHA-256, so a file that changed after it was checked is never staged
- * whole: its upload is abandoned and a `TypeError` thrown, as for a file that cannot be read.
+ * The bytes of a checked case file, read whole when it is uploaded: case files are uploaded one
+ * at a time, into one buffer the write reuses, so no more than one is held in memory. Only bytes
+ * with the checked size and SHA-256 are returned, so the bytes sent are the bytes the check
+ * hashed; a file that changed after its check, or can no longer be read, is refused with a
+ * `TypeError` before anything is sent. The bytes are valid until the next file is read.
  */
-async function uploadCheckedFile(
-  client: EvaluationClient,
-  artifactId: string,
-  file: CheckedFile,
-  contentType: string,
-): Promise<void> {
+async function checkedBytes(file: CheckedFile): Promise<Uint8Array> {
+  const changed = () => new TypeError(`${file.label} changed after it was checked`);
   const unreadable = (error: unknown) =>
     new TypeError(`${file.label} could not be read`, { cause: error });
   const handle = await open(file.path, "r").catch((error: unknown) => {
     throw unreadable(error);
   });
-  // Set when the body refused the file: the upload then failed for the file, not for storage.
-  let refusal: TypeError | undefined;
   try {
-    const hash = createHash("sha256");
-    let read = 0;
-    let held: Uint8Array | undefined;
-    const body = new ReadableStream<Uint8Array>(
-      {
-        // Each pull sends a slice or ends the body: a pull that sent nothing would stall it.
-        async pull(controller) {
-          for (;;) {
-            // One byte past the checked size: a file that grew is refused, not read whole.
-            const slice = Buffer.allocUnsafe(Math.min(CASE_FILE_SLICE, file.byteSize - read + 1));
-            let bytesRead: number;
-            try {
-              ({ bytesRead } = await handle.read(slice, 0, slice.byteLength, null));
-            } catch (error) {
-              throw (refusal = unreadable(error));
-            }
-            if (!bytesRead) break;
-            read += bytesRead;
-            if (read > file.byteSize) throw (refusal = changed(file));
-            hash.update(slice.subarray(0, bytesRead));
-            const previous = held;
-            held = slice.subarray(0, bytesRead);
-            if (previous) return controller.enqueue(previous);
-          }
-          if (read !== file.byteSize || hash.digest("hex") !== file.sha256)
-            throw (refusal = changed(file));
-          if (held) controller.enqueue(held);
-          controller.close();
-        },
-      },
-      { highWaterMark: 0 },
-    );
-    const upload = await client.requestArtifactUpload(artifactId);
-    try {
-      await client.uploadArtifactStream(upload, body, file.byteSize, contentType);
-    } catch {
-      // As for bytes: settled by verified completion, unless the file itself was refused.
+    const read = (buffer: Buffer, offset: number) =>
+      handle
+        .read(buffer, offset, buffer.byteLength - offset, null)
+        .then(({ bytesRead }) => bytesRead)
+        .catch((error: unknown) => {
+          throw unreadable(error);
+        });
+    // Never more than its checked size and one byte, the byte that shows it grew.
+    if ((file.scratch.buffer?.byteLength ?? 0) < file.byteSize)
+      file.scratch.buffer = Buffer.allocUnsafe(file.byteSize);
+    const bytes = file.scratch.buffer!.subarray(0, file.byteSize);
+    for (let offset = 0; offset < bytes.byteLength; ) {
+      const bytesRead = await read(bytes, offset);
+      if (!bytesRead) throw changed();
+      offset += bytesRead;
     }
-    if (refusal) throw refusal;
+    if ((await read(Buffer.alloc(1), 0)) || sha256(bytes) !== file.sha256) throw changed();
+    return bytes;
   } finally {
     await handle.close().catch(() => undefined);
   }
@@ -636,7 +636,11 @@ function caseFileName(name: unknown): string {
 
 /** A case file given by path, checked: a regular file within the size limit, hashed a slice at a
  * time so it is never held whole. Its emptiness is the caller's check, as for bytes. */
-async function checkedFile(path: unknown, label: string): Promise<CheckedFile> {
+async function checkedFile(
+  path: unknown,
+  label: string,
+  scratch: CheckedFile["scratch"],
+): Promise<CheckedFile> {
   if (typeof path !== "string" || !path) throw new TypeError(`${label} needs bytes or a path`);
   // A path with no file behind it, or one that cannot be read, is refused as any invalid file.
   const unreadable = (error: unknown) =>
@@ -665,7 +669,7 @@ async function checkedFile(path: unknown, label: string): Promise<CheckedFile> {
       if (byteSize > outputFileLimits.bytes) throw new RangeError(`${label} exceeds 25 MiB`);
       hash.update(slice.subarray(0, bytesRead));
     }
-    return { path, label, byteSize, sha256: hash.digest("hex") };
+    return { path, label, byteSize, sha256: hash.digest("hex"), scratch };
   } finally {
     await handle.close().catch(() => undefined);
   }
@@ -707,6 +711,7 @@ export async function caseFileReferences(
       };
   const prepared: Prepared[] = [];
   const seen = new Set<string>();
+  const scratch: CheckedFile["scratch"] = {};
   for (const [index, file] of (files as CaseFileWrite[]).entries()) {
     const label = `Case file ${index + 1}`;
     if (!file || typeof file !== "object") throw new TypeError(`${label} is not a file`);
@@ -738,7 +743,7 @@ export async function caseFileReferences(
       if (file.bytes !== undefined && !(file.bytes instanceof Uint8Array))
         throw new TypeError(`${label} bytes must be a Uint8Array`);
       // Bytes are kept as given; a path is kept as its size and digest, and read again to upload.
-      const body = file.bytes ?? (await checkedFile(file.path, label));
+      const body = file.bytes ?? (await checkedFile(file.path, label, scratch));
       const byteSize = body instanceof Uint8Array ? body.byteLength : body.byteSize;
       if (!byteSize) throw new RangeError(`${label} is empty`);
       if (byteSize > outputFileLimits.bytes) throw new RangeError(`${label} exceeds 25 MiB`);

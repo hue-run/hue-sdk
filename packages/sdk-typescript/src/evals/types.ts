@@ -203,7 +203,8 @@ export interface CaseFileReference {
 }
 /**
  * A pinned input file for {@link CaseWrite.files}: a {@link CaseFileReference}, or a file the
- * client uploads as a verified artifact, from `bytes` or read from `path` a slice at a time. An
+ * client uploads as a verified artifact, from `bytes` or read from `path`: hashed a slice at a
+ * time when the case is checked, then read again as it is uploaded, one file at a time. An
  * uploaded file must have one of `outputContentTypes`, a well-formed name of 1–255 UTF-16 code
  * units without path separators or control characters, and 1 byte to 25 MiB.
  */

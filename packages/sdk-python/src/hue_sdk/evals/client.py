@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import json
 import math
 import random
@@ -458,16 +457,17 @@ class EvaluationClient:
         ``files`` pins up to 32 input files: an artifact this project holds
         (``CaseFileWrite(role=..., artifact_id=...)`` or ``{"artifactId": ..., "role": ...}``), or
         a file the client uploads first as a verified artifact, from ``data`` or read from
-        ``path`` a slice at a time, never held whole: hashed when it is checked and read again as
-        it is uploaded. An uploaded file must have one of the artifact content types, a name of
-        1–255 UTF-16 code units (a character above U+FFFF counts twice) without surrogates, path
-        separators or control characters, and 1 byte to 25 MiB. Every file and the case itself
-        (its revision, key, values and size) are checked before the first upload; a case Hue
-        would refuse raises ``ValueError`` without a request. A file given by ``path`` that
-        changed after it was checked, or can no longer be read, raises ``ValueError`` as it is
-        uploaded: it is not staged and the case is not written. The reservation key names the
-        version, ``external_key``, the role and the bytes, so the same case sent again reuses its
-        artifacts.
+        ``path``: hashed a slice at a time when the case is checked, then read again as it is
+        uploaded, one file at a time, so no more than one file is held in memory; only bytes that
+        match the checked SHA-256 are sent. An uploaded file must have one of the artifact content
+        types, a name of 1–255 UTF-16 code units (a character above U+FFFF counts twice) without
+        surrogates, path separators or control characters, and 1 byte to 25 MiB. Every file and the
+        case itself (its revision, key, values and size) are checked before the first upload; a
+        case Hue would refuse raises ``ValueError`` without a request. A file given by ``path``
+        that changed after it was checked, or can no longer be read, raises ``ValueError`` before
+        any of its bytes are sent: it is not staged and the case is not written. The reservation
+        key names the version, ``external_key``, the role and the bytes, so the same case sent
+        again reuses its artifacts.
         """
         # The canonical spelling: the reservation keys of uploaded files name the version.
         version_id = uuid(version_id).lower()
@@ -998,13 +998,6 @@ class EvaluationClient:
 
     def upload_artifact_bytes(self, upload: dict[str, Any], data: bytes, content_type: str) -> None:
         """Stage bytes at the storage capability Hue issued; the Hue key is never sent there."""
-        self._upload_artifact(upload, data, content_type)
-
-    def _upload_artifact(
-        self, upload: dict[str, Any], data: bytes | io.RawIOBase, content_type: str
-    ) -> None:
-        """Stage ``data``: bytes, or a body read a slice at a time whose ``len`` is its size, sent
-        with that ``Content-Length`` as bytes are."""
         from ..managed import _upload_headers, _upload_url
 
         try:

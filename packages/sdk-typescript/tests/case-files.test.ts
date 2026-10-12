@@ -79,6 +79,12 @@ function receiver(onReserve?: (declared: Record<string, unknown>) => Promise<voi
       calls.requests.push(`${request.method} ${url.pathname}`);
       if (url.pathname.startsWith("/blob/")) {
         expect(request.headers.get("authorization")).toBeNull();
+        // As storage does, a body sent without its length is refused.
+        if (
+          request.headers.get("transfer-encoding") !== null ||
+          request.headers.get("content-length") === null
+        )
+          return new Response(null, { status: 411 });
         const stored = artifacts.get(url.pathname.slice("/blob/".length))!;
         let bytes: ArrayBuffer;
         try {
@@ -371,7 +377,7 @@ test("addCase reuses a file's artifact whatever the case of the version ID", asy
   expect(calls.cases[1]).toEqual(calls.cases[0]!);
 });
 
-test("addCase hashes and uploads a file given by path at most 1 MiB at a time", async () => {
+test("addCase hashes a file given by path in slices and holds at most one file at a time", async () => {
   const { client, versionId, artifacts, calls } = receiver();
   const directory = await testDirectory();
   // Each file spans several slices and ends partway through one.
@@ -379,9 +385,18 @@ test("addCase hashes and uploads a file given by path at most 1 MiB at a time", 
   const paths = contents.map((_, index) => join(directory, `${index}.pdf`));
   for (const [index, path] of paths.entries()) await writeFile(path, contents[index]!);
   const probe = await open(paths[0]!, "r");
-  const spy = spyOn(Object.getPrototypeOf(probe) as FileHandle, "read");
+  const prototype = Object.getPrototypeOf(probe) as FileHandle;
   await probe.close();
-  let reads: { length: number; read: Promise<{ bytesRead: number }> }[];
+  // Each read: how much it asked for, and how many files had been uploaded when it was made.
+  const reads: { length: number; uploaded: number }[] = [];
+  const read = prototype.read;
+  const spy = spyOn(prototype, "read").mockImplementation(function (
+    this: FileHandle,
+    ...args: unknown[]
+  ) {
+    reads.push({ length: Number(args[2]), uploaded: calls.puts });
+    return (read as (...args: unknown[]) => unknown).apply(this, args) as never;
+  });
   try {
     await client.addCase(versionId, {
       expectedRevision: 1,
@@ -394,20 +409,17 @@ test("addCase hashes and uploads a file given by path at most 1 MiB at a time", 
         path,
       })),
     });
-    reads = spy.mock.calls.map((call, index) => ({
-      length: Number((call as unknown[])[2]),
-      read: spy.mock.results[index]!.value as Promise<{ bytesRead: number }>,
-    }));
   } finally {
     spy.mockRestore();
   }
-  // No read asks for more than 1 MiB, and each file is read whole twice: hashed when it is
-  // checked, then read again as it is sent.
-  expect(reads.length).toBeGreaterThan(0);
-  expect(reads.every(({ length }) => length <= 1024 * 1024)).toBe(true);
-  const bytesRead = await Promise.all(reads.map(async ({ read }) => (await read).bytesRead));
-  expect(bytesRead.reduce((total, size) => total + size, 0)).toBe(
-    2 * contents.reduce((total, bytes) => total + bytes.byteLength, 0),
+  // The check hashes every file at most 1 MiB at a time before anything is uploaded; each file
+  // is then read whole only once the one before it was sent, so no two are held at once.
+  const checked = reads.filter(({ length }) => length <= 1024 * 1024 && length > 1);
+  expect(checked.length).toBeGreaterThan(0);
+  expect(checked.every(({ uploaded }) => uploaded === 0)).toBe(true);
+  const whole = reads.filter(({ length }) => length > 1024 * 1024);
+  expect(whole).toEqual(
+    contents.map((bytes, index) => ({ length: bytes.byteLength, uploaded: index })),
   );
   expect(calls.puts).toBe(3);
   expect([...artifacts.values()].map((item) => sha256(item.bytes!))).toEqual(contents.map(sha256));
@@ -416,7 +428,7 @@ test("addCase hashes and uploads a file given by path at most 1 MiB at a time", 
 test("addCase refuses a file given by path that changed after it was checked, without staging it", async () => {
   const directory = await testDirectory();
   const path = join(directory, "report.pdf");
-  // Past two slices: the slices before the last are sent before the change is found.
+  // Several slices long: the check hashes it in pieces, the upload reads it again whole.
   const original = randomBytes(2.5 * 1024 * 1024);
   const rewritten = Buffer.from(original);
   rewritten[rewritten.byteLength - 1]! ^= 1;
@@ -445,11 +457,13 @@ test("addCase refuses a file given by path that changed after it was checked, wi
       .catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(TypeError);
     expect((error as TypeError).message).toBe(message);
-    // The report is never staged whole nor completed, and no case is written.
+    // None of the report's bytes are sent: no upload is asked for, nothing is staged or
+    // completed, and no case is written.
     const report = [...artifacts.values()].find((item) => item.filename === "report.pdf")!;
     expect(report.state).toBe("reserved");
-    expect(report.bytes?.byteLength ?? 0).toBeLessThan(original.byteLength);
-    expect(calls.requests).not.toContain(`POST /api/v1/artifacts/${report.id}/complete`);
+    expect(report.bytes).toBeUndefined();
+    expect(calls.abandoned).toBe(0);
+    expect(calls.requests.filter((request) => request.includes(report.id))).toEqual([]);
     expect(calls.cases).toEqual([]);
   }
 });

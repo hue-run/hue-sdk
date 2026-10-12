@@ -501,8 +501,8 @@ export class EvaluationClient {
   ): Promise<void> {
     return this.putArtifact(upload, contentType, bytes as Uint8Array<ArrayBuffer>);
   }
-  /** @internal Stage `byteSize` bytes read from `body` a slice at a time, as a file read from disk
-   * while it is sent; the request declares their length, as it does for bytes. */
+  /** @internal Stage `byteSize` bytes read from `body` a slice at a time, without the copy a
+   * byte body is given; the request declares their length, as it does for bytes. */
   uploadArtifactStream(
     upload: ArtifactUpload,
     body: ReadableStream<Uint8Array>,
@@ -605,13 +605,14 @@ export class EvaluationClient {
    * `files` given as bytes or a path is checked against the artifact policy and uploaded as a
    * verified artifact first, under a key derived from the version, the case's `externalKey`, the
    * role and the bytes, so sending the same case again reuses the artifact. Every file and the
-   * case itself are checked before the first upload. A file given by `path` is read a slice at a
-   * time, never held whole: hashed when it is checked and read again as it is uploaded.
+   * case itself are checked before the first upload. A file given by `path` is hashed a slice at
+   * a time when it is checked and read again when it is uploaded, one file at a time, so no more
+   * than one file is held in memory; only bytes that match the checked SHA-256 are sent.
    *
    * @throws TypeError or RangeError for `files` outside the artifact policy, or a case Hue would
    * refuse for its fields or size, before any request. TypeError when a file given by `path`
-   * changed after it was checked, or can no longer be read, as it is uploaded: it is not staged
-   * and the case is not written.
+   * changed after it was checked, or can no longer be read, before any of its bytes are sent: it
+   * is not staged and the case is not written.
    */
   async addCase(id: string, input: CaseWrite) {
     // The canonical spelling: the reservation keys of uploaded files name the version.
