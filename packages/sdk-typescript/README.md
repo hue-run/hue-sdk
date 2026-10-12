@@ -249,11 +249,15 @@ Inside those values a file is found by its shape: GenAI `blob`, AI SDK `file` an
 Chat image, file and audio parts and an assistant message's `audio`, Responses `input_image`,
 `input_file` and `computer_screenshot`, Anthropic base64 sources, Gemini `inlineData` and
 `inline_data`, Vertex `media`, Bedrock image and document sources, and any whole string that is a
-`data:` URL declaring a media type. A tool call's `arguments` and a tool result (a `tool`
-message's `content`, `tool_result`, `function_call_output`, `tool_call_response`) are JSON in a
-string by convention, so the files inside them are uploaded too and the string is encoded again;
-a message's own text is never parsed as JSON. Remote URLs, provider file IDs, S3 references and
-Langfuse media tokens stay unchanged, and Hue never fetches them.
+`data:` URL declaring a media type. A tool call's `arguments` and a tool result (a `tool` message's
+`content`, `tool_result`, `function_call_output`, `tool_call_response`) are JSON in a string by
+convention, so the files inside them are uploaded too; a message's own text is never parsed as JSON.
+Hue's reader looks for files no deeper than ten levels below a value's root (an encoded string's
+JSON counting as a level), and the SDK inspects no deeper. Hue keeps attribute JSON nested past 32
+levels, or holding an integer past 2^53, as text, and an OpenInference `input.value` or
+`output.value` whose record declares `input.mime_type` or `output.mime_type` as `text/plain` is
+literal text: the SDK leaves such values as recorded. Remote URLs, provider file IDs, S3 references
+and Langfuse media tokens stay unchanged, and Hue never fetches them.
 
 Each uploaded file is listed in the record's `hue.blobs`, keyed `<attribute>#<JSON pointer>`:
 
@@ -266,11 +270,17 @@ Each uploaded file is listed in the record's `hue.blobs`, keyed `<attribute>#<JS
   `{"type":"blob","mime_type":"image/png","modality":"image","sha256":"…","size":68}`, keyed at
   the string (`input.value#/image`). A value that is entirely one, such as a metadata attribute,
   becomes that part's JSON text, keyed `<attribute>#`.
-- A file inside a JSON-encoded tool string takes the digest form inside the string. Its key goes
-  on through the string, which no JSON pointer can address, so Hue matches it by its digest.
+- A file inside a JSON-encoded tool string takes the digest form inside the string. Its key goes on
+  through the string, which no JSON pointer can address, so Hue matches it by its digest.
 - Text media over 64 KiB of decoded bytes in a provider part keeps a UTF-8-safe 16 KiB prefix in
   its content field instead, and its key names that field
   (`gen_ai.input.messages#/0/parts/1/content`). Smaller text and empty fields stay inline.
+
+Only the file's own value, or the members of the part that held it, change: every other byte of the
+recorded text, its key order, number spellings, escapes and spacing included, is kept, in an encoded
+string as in the attribute itself, so both SDKs write the same bytes. A record has 64 `hue.blobs`
+places: the media inline in its values take them first, in reading order, then its attachments and
+the files recorded with `upload`.
 
 Entries use the recorded media type and, when valid, the filename, name or title. A valid name
 is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
