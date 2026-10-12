@@ -4,6 +4,7 @@ to targets and scorers, as the TypeScript SDK's ``evals/files.ts`` does."""
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import shutil
 import stat
@@ -12,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
-from typing import Any
+from typing import Any, BinaryIO
 from uuid import uuid4
 
 from ._json import uuid
@@ -122,35 +123,148 @@ def publish_artifact(
     idempotency_key: str,
     filename: str,
     content_type: str,
-    data: bytes,
+    data: bytes | _CheckedFile,
     label: str,
     timing: _Settling = ARTIFACT_SETTLING,
 ) -> str:
     """Reserve, stage and verify one artifact; its ID once Hue verified it. Replaying the key
-    settles on the same artifact, including one Hue finished verifying earlier."""
+    settles on the same artifact, including one Hue finished verifying earlier. ``data`` is the
+    bytes, or a checked file read again from disk while it is uploaded."""
+    if isinstance(data, bytes):
+        byte_size, digest = len(data), hashlib.sha256(data).hexdigest()
+    else:
+        byte_size, digest = data.byte_size, data.sha256
     reserved = client.reserve_artifact(
         idempotency_key=idempotency_key,
         filename=filename,
         content_type=content_type,
-        byte_size=len(data),
-        sha256=hashlib.sha256(data).hexdigest(),
+        byte_size=byte_size,
+        sha256=digest,
     )
     artifact_id = uuid(reserved["id"])
     state = reserved.get("state")
     if state != "ready":
         # A verification already running holds the uploaded bytes; Hue refuses another upload.
         if reserved.get("copyState") != "acknowledged" and state != "verifying":
-            upload = client.request_artifact_upload(artifact_id)
-            try:
-                client.upload_artifact_bytes(upload, data, content_type)
-            except HueApiError:
-                # A lost staging acknowledgement or an immutable object already present can only
-                # be settled by verified completion; never rewrite a final object here.
-                pass
+            if isinstance(data, bytes):
+                upload = client.request_artifact_upload(artifact_id)
+                try:
+                    client.upload_artifact_bytes(upload, data, content_type)
+                except HueApiError:
+                    # A lost staging acknowledgement or an immutable object already present can
+                    # only be settled by verified completion; never rewrite a final object here.
+                    pass
+            else:
+                _upload_checked_file(client, artifact_id, data, content_type)
         state = _settle_artifact(client, artifact_id, timing)
     if state != "ready":
         raise RuntimeError(f"{label} was not verified by Hue ({state}).")
     return artifact_id
+
+
+# The most of a case file given by path held at once: it is hashed when it is checked, and read
+# again when it is uploaded, this many bytes at a time.
+_SLICE_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _CheckedFile:
+    """A case file given by path, as it was checked."""
+
+    path: Path
+    # Names the file in an error, as its check did.
+    label: str
+    byte_size: int
+    sha256: str
+
+
+class _CheckedBody(io.RawIOBase):
+    """A checked file's upload body, read again from disk a slice at a time. Each slice is sent
+    once the next one is read, and the last only once the file ended at its checked size with its
+    checked SHA-256, so a file that changed after it was checked is never sent whole: the read
+    raises ``refusal`` instead and the upload is abandoned."""
+
+    def __init__(self, stream: BinaryIO, file: _CheckedFile) -> None:
+        super().__init__()
+        self._stream = stream
+        self._file = file
+        self._digest = hashlib.sha256()
+        self._read = 0
+        self._held = b""
+        self._ready = b""
+        self._offset = 0
+        self._ended = False
+        self._position = 0
+        self.refusal: ValueError | None = None
+
+    def __len__(self) -> int:
+        return self._file.byte_size
+
+    def tell(self) -> int:
+        # Without a position, an HTTP client measures the body as unknown and sends it chunked,
+        # beside its Content-Length: a request the store refuses.
+        return self._position
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int | None = -1) -> bytes:
+        while self._offset >= len(self._ready) and not self._ended:
+            self._ready, self._offset = self._next(), 0
+        if size is None or size < 0:
+            size = len(self._ready) - self._offset
+        # Only what is read is copied, never the rest of the slice.
+        result = self._ready[self._offset : self._offset + size]
+        self._offset += len(result)
+        self._position += len(result)
+        return result
+
+    def _next(self) -> bytes:
+        """The slice read before the one read now; at the end of the file, the last slice."""
+        file = self._file
+        try:
+            # One byte past the checked size: a file that grew is refused, not read whole.
+            chunk = self._stream.read(min(_SLICE_BYTES, file.byte_size - self._read + 1))
+        except OSError as error:
+            raise self._refuse("could not be read", error) from error
+        if chunk:
+            self._read += len(chunk)
+            if self._read > file.byte_size:
+                raise self._refuse("changed after it was checked")
+            self._digest.update(chunk)
+            previous, self._held = self._held, chunk
+            return previous
+        if self._read != file.byte_size or self._digest.hexdigest() != file.sha256:
+            raise self._refuse("changed after it was checked")
+        self._ended = True
+        previous, self._held = self._held, b""
+        return previous
+
+    def _refuse(self, reason: str, cause: BaseException | None = None) -> ValueError:
+        self.refusal = ValueError(f"{self._file.label} {reason}.")
+        self.refusal.__cause__ = cause
+        return self.refusal
+
+
+def _upload_checked_file(
+    client: EvaluationClient, artifact_id: str, file: _CheckedFile, content_type: str
+) -> None:
+    """Upload a case file given by path, read again from disk while it is sent. A file that
+    changed after it was checked is refused with ``ValueError``, as one that cannot be read."""
+    try:
+        stream = file.path.open("rb", buffering=0)
+    except OSError as error:
+        raise ValueError(f"{file.label} could not be read.") from error
+    with stream:
+        body = _CheckedBody(stream, file)
+        upload = client.request_artifact_upload(artifact_id)
+        try:
+            client._upload_artifact(upload, body, content_type)
+        except HueApiError:
+            # As for bytes: settled by verified completion, unless the file itself was refused.
+            pass
+        if body.refusal is not None:
+            raise body.refusal
 
 
 def _case_file_name(name: object) -> str:
@@ -170,7 +284,9 @@ def _case_file_name(name: object) -> str:
     return name
 
 
-def _case_file_bytes(path: object, label: str) -> bytes:
+def _checked_file(path: object, label: str) -> _CheckedFile:
+    """A case file given by path, checked: a regular file within the size limit, hashed a slice
+    at a time so it is never held whole. Its emptiness is the caller's check, as for data."""
     if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
         raise ValueError(f"{label} needs data or a path.")
     file = Path(path)
@@ -183,10 +299,19 @@ def _case_file_bytes(path: object, label: str) -> bytes:
         raise ValueError(f"{label} is not a regular file.")
     if info.st_size > _MAX_FILE_BYTES:
         raise ValueError(f"{label} exceeds 25 MiB.")
+    digest, byte_size = hashlib.sha256(), 0
     try:
-        return file.read_bytes()
+        with file.open("rb", buffering=0) as stream:
+            while chunk := stream.read(_SLICE_BYTES):
+                byte_size += len(chunk)
+                # A file that grew past the limit since its size was read is refused, not read
+                # whole.
+                if byte_size > _MAX_FILE_BYTES:
+                    raise ValueError(f"{label} exceeds 25 MiB.")
+                digest.update(chunk)
     except OSError as error:
         raise ValueError(f"{label} could not be read.") from error
+    return _CheckedFile(file, label, byte_size, digest.hexdigest())
 
 
 # A stand-in for an artifact a case file is uploaded as, the length of a real ID.
@@ -254,12 +379,15 @@ def case_file_references(
                 raise ValueError(f"{label} names data and a path; give one.")
             if file.data is not None and not isinstance(file.data, bytes):
                 raise ValueError(f"{label} data must be bytes.")
-            data = file.data if file.data is not None else _case_file_bytes(file.path, label)
-            if not data:
+            # Data is kept as given; a path is kept as its size and digest, and read again to
+            # upload.
+            data = file.data if file.data is not None else _checked_file(file.path, label)
+            byte_size = len(data) if isinstance(data, bytes) else data.byte_size
+            if not byte_size:
                 raise ValueError(f"{label} is empty.")
-            if len(data) > _MAX_FILE_BYTES:
+            if byte_size > _MAX_FILE_BYTES:
                 raise ValueError(f"{label} exceeds 25 MiB.")
-            digest = hashlib.sha256(data).hexdigest()
+            digest = hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else data.sha256
             prepared.append(
                 {
                     "role": file.role,

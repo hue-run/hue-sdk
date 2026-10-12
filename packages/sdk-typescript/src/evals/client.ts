@@ -494,20 +494,41 @@ export class EvaluationClient {
     }
   }
   /** Stage bytes at the storage capability Hue issued. The Hue key is never sent to storage. */
-  async uploadArtifactBytes(
+  uploadArtifactBytes(
     upload: ArtifactUpload,
     bytes: Uint8Array,
     contentType: string,
   ): Promise<void> {
+    return this.putArtifact(upload, contentType, bytes as Uint8Array<ArrayBuffer>);
+  }
+  /** @internal Stage `byteSize` bytes read from `body` a slice at a time, as a file read from disk
+   * while it is sent; the request declares their length, as it does for bytes. */
+  uploadArtifactStream(
+    upload: ArtifactUpload,
+    body: ReadableStream<Uint8Array>,
+    byteSize: number,
+    contentType: string,
+  ): Promise<void> {
+    return this.putArtifact(upload, contentType, body, byteSize);
+  }
+  private async putArtifact(
+    upload: ArtifactUpload,
+    contentType: string,
+    body: Uint8Array<ArrayBuffer> | ReadableStream<Uint8Array>,
+    byteSize?: number,
+  ): Promise<void> {
     const uploadUrl = signedUploadUrl(upload.uploadUrl);
     if (upload.method !== "PUT") throw new HueApiError();
     const headers = signedUploadHeaders(upload.headers, contentType);
+    // Storage refuses a body of unknown length, which a stream would otherwise be sent as.
+    if (byteSize !== undefined) headers["content-length"] = String(byteSize);
     let response: Response;
     try {
       response = await fetch(uploadUrl, {
         method: "PUT",
         headers,
-        body: bytes as Uint8Array<ArrayBuffer>,
+        body,
+        ...(byteSize !== undefined ? { duplex: "half" } : {}),
         redirect: "error",
         signal: AbortSignal.timeout(Math.max(this.timeoutMillis, 120_000)),
       });
@@ -584,10 +605,13 @@ export class EvaluationClient {
    * `files` given as bytes or a path is checked against the artifact policy and uploaded as a
    * verified artifact first, under a key derived from the version, the case's `externalKey`, the
    * role and the bytes, so sending the same case again reuses the artifact. Every file and the
-   * case itself are checked before the first upload.
+   * case itself are checked before the first upload. A file given by `path` is read a slice at a
+   * time, never held whole: hashed when it is checked and read again as it is uploaded.
    *
    * @throws TypeError or RangeError for `files` outside the artifact policy, or a case Hue would
-   * refuse for its fields or size, before any request.
+   * refuse for its fields or size, before any request. TypeError when a file given by `path`
+   * changed after it was checked, or can no longer be read, as it is uploaded: it is not staged
+   * and the case is not written.
    */
   async addCase(id: string, input: CaseWrite) {
     // The canonical spelling: the reservation keys of uploaded files name the version.

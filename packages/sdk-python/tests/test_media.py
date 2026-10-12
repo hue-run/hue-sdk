@@ -5,8 +5,11 @@ import copy
 import functools
 import hashlib
 import json
+import os
 import re
 import time
+import tracemalloc
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Lock, Thread
@@ -63,6 +66,14 @@ class Trickle:
     stall_after: int | None = None
 
 
+@dataclass(frozen=True)
+class Hashed:
+    """An upload the receiver hashed as it arrived instead of keeping: its SHA-256 and size."""
+
+    sha256: str
+    size: int
+
+
 @dataclass
 class Hue:
     """A synthetic Hue answering the media routes, with a storage route beside it."""
@@ -76,6 +87,10 @@ class Hue:
     puts: int = 0
     release: Event = field(default_factory=Event)
     lock: Lock = field(default_factory=Lock)
+    # Uploads are hashed as they arrive and kept as ``Hashed``, so the receiver holds none whole.
+    hash_uploads: bool = False
+    # Called with a reservation's body before it is answered.
+    on_reserve: Callable[[dict[str, Any]], object] | None = None
 
     def client(self, **options: Any) -> EvaluationClient:
         return EvaluationClient(self.url, KEY, **options)
@@ -157,7 +172,9 @@ def hue():
             {},
         )
 
-    def dispatch(method: str, path: str, query: str, raw: bytes) -> tuple[int, Any, dict[str, str]]:
+    def dispatch(
+        method: str, path: str, query: str, raw: bytes | Hashed
+    ) -> tuple[int, Any, dict[str, str]]:
         stored = re.fullmatch(r"/storage/([0-9a-f]{64})", path)
         if stored:
             answer = state.answers.get(stored.group(1)) or {}
@@ -177,6 +194,8 @@ def hue():
             return 200, b"", {}
         body = json.loads(raw) if raw else {}
         if path == "/api/v1/artifacts" and method == "POST":
+            if state.on_reserve is not None:
+                state.on_reserve(body)
             identifier = state.reservations.get(body["idempotencyKey"])
             # As Hue does, a key already naming an artifact with other declarations is refused.
             named = state.artifacts.get(identifier) if identifier is not None else None
@@ -208,7 +227,9 @@ def hue():
                     },
                     {},
                 )
-            if sha(stored_artifact.get("bytes", b"")) != stored_artifact["sha256"]:
+            received = stored_artifact.get("bytes", b"")
+            digest = received.sha256 if isinstance(received, Hashed) else sha(received)
+            if digest != stored_artifact["sha256"]:
                 return 409, {"error": "mismatch"}, {}
             stored_artifact["state"], stored_artifact["copyState"] = "ready", "acknowledged"
             return 200, view(stored_artifact), {}
@@ -230,7 +251,16 @@ def hue():
 
         def respond(self, method: str) -> None:
             parts = urlsplit(self.path)
-            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            length = int(self.headers.get("Content-Length", "0"))
+            raw: bytes | Hashed
+            if method == "PUT" and state.hash_uploads:
+                digest, size = hashlib.sha256(), 0
+                while size < length and (piece := self.rfile.read(min(length - size, 65536))):
+                    digest.update(piece)
+                    size += len(piece)
+                raw = Hashed(digest.hexdigest(), size)
+            else:
+                raw = self.rfile.read(length)
             with state.lock:
                 state.seen.append(
                     {
@@ -1006,6 +1036,92 @@ def test_add_case_reuses_a_files_artifact_whatever_the_case_of_the_version_id(hu
         )
     assert len(hue.reservations) == 1 and len(hue.artifacts) == 1
     assert hue.cases[1] == hue.cases[0]
+
+
+def test_add_case_hashes_and_uploads_files_given_by_path_without_holding_one_whole(hue, tmp_path):
+    hue.hash_uploads = True
+    size = 8 * 1024 * 1024
+    digests = []
+    for index in range(4):
+        data = os.urandom(size + index)
+        (tmp_path / f"{index}.pdf").write_bytes(data)
+        digests.append(Hashed(sha(data), len(data)))
+    del data
+    tracemalloc.start()
+    try:
+        hue.client().add_case(
+            str(uuid4()),
+            expected_revision=1,
+            external_key="large-files",
+            inputs={},
+            files=[
+                CaseFileWrite(
+                    role="source",
+                    filename=f"{index}.pdf",
+                    content_type="application/pdf",
+                    path=tmp_path / f"{index}.pdf",
+                )
+                for index in range(4)
+            ],
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # The four files come to 32 MiB; what the write allocated never reached one file's size.
+    assert peak < size
+    assert [artifact["bytes"] for artifact in hue.artifacts.values()] == digests
+    assert all(artifact["state"] == "ready" for artifact in hue.artifacts.values())
+
+
+CHANGED = "changed after it was checked"
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda path, data: path.write_bytes(data[:-1] + bytes([data[-1] ^ 1])), CHANGED),
+        (lambda path, data: path.write_bytes(data + b"x"), CHANGED),
+        (lambda path, data: path.write_bytes(data[:-1]), CHANGED),
+        (lambda path, data: path.unlink(), "could not be read"),
+    ],
+    ids=["rewritten", "grown", "shrunk", "removed"],
+)
+def test_add_case_refuses_a_file_given_by_path_that_changed_after_it_was_checked(
+    hue, tmp_path, change, reason
+):
+    path = tmp_path / "report.pdf"
+    # Past two slices: the slices before the last are sent before the change is found.
+    original = os.urandom(2 * 1024 * 1024 + 512 * 1024)
+    path.write_bytes(original)
+
+    # The file changes once its reservation, made from the checked size and SHA-256, arrives.
+    def reserved(declared: dict[str, Any]) -> None:
+        if declared["filename"] == "report.pdf":
+            change(path, original)
+
+    hue.on_reserve = reserved
+    with pytest.raises(ValueError) as raised:
+        hue.client().add_case(
+            str(uuid4()),
+            expected_revision=1,
+            external_key="changed",
+            inputs={},
+            files=[
+                CaseFileWrite(
+                    role="source", filename="chart.png", content_type="image/png", data=PNG
+                ),
+                CaseFileWrite(
+                    role="source", filename="report.pdf", content_type="application/pdf", path=path
+                ),
+            ],
+        )
+    assert str(raised.value) == f"Case file 2 {reason}."
+    # The report is never staged whole nor completed, and no case is written.
+    report = next(item for item in hue.artifacts.values() if item["filename"] == "report.pdf")
+    assert report["state"] == "reserved"
+    assert len(report.get("bytes", b"")) < len(original)
+    assert f"/api/v1/artifacts/{report['id']}/complete" not in [seen["path"] for seen in hue.seen]
+    assert hue.cases == []
 
 
 def test_a_recorded_value_keeps_an_own___proto___key_as_typescript_does(hue):

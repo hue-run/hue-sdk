@@ -116,7 +116,7 @@ An uploaded file needs one of the artifact content types (the 22 types managed o
 name of 1–255 UTF-16 code units (a character above U+FFFF counts twice) without surrogates, path
 separators or control characters, and 1 byte to 25 MiB. Every file, and the case itself as it will
 be sent (its revision, key, values and size), is checked before the first upload; a file outside
-that policy, a `path` that cannot be read, or a case Hue would refuse raises `ValueError` without a request. The reservation key names the version, the case's `external_key`, the role, the bytes, the
+that policy, a `path` that cannot be read, or a case Hue would refuse raises `ValueError` without a request. A `path` is read a slice at a time, never held in memory: hashed when it is checked and read again as it is uploaded. A file that changed in between, or can no longer be read, is not staged: the write raises `ValueError` and the case is not written. The reservation key names the version, the case's `external_key`, the role, the bytes, the
 name and the content type, so sending the same case again reuses its artifacts and a corrected name
 or type reserves a new one; a reference to the artifact a file uploads as pins it once. The client also exposes the artifact API it uses: `reserve_artifact`,
 `request_artifact_upload`, `upload_artifact_bytes`, `complete_artifact`, `get_artifact` and
