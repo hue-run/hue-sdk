@@ -23,6 +23,7 @@ const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
 const wav = new TextEncoder().encode("RIFF....WAVEfmt synthetic");
 const pdf = new TextEncoder().encode("%PDF-1.7 synthetic");
 const lost = new TextEncoder().encode("never uploaded");
+const lost16k = new TextEncoder().encode("never uploaded text ".repeat(4000));
 
 /** What the synthetic Hue answers for one digest. */
 type Answer =
@@ -46,8 +47,8 @@ type Answer =
   | { kind: "unavailable"; times: number; retryAfter?: string; then?: Answer }
   | { kind: "forbidden" }
   | { kind: "hang" }
-  /** Answers the grant's headers, then breaks the connection mid-body, `times` times. */
-  | { kind: "broken"; times: number; then?: Answer };
+  /** Answers the grant's headers and `sent`, then breaks the connection mid-body, `times` times. */
+  | { kind: "broken"; times: number; sent?: string; then?: Answer };
 
 interface Seen {
   method: string;
@@ -128,9 +129,10 @@ function hue(answers: Record<string, Answer>, options: { timeoutMillis?: number 
       if (answer.kind === "broken") {
         if (answer.times > 0) {
           answer.times--;
+          const sent = answer.sent ?? '{"sha256":"';
           const body = new ReadableStream<Uint8Array>({
             start(controller) {
-              controller.enqueue(new TextEncoder().encode('{"sha256":"'));
+              controller.enqueue(new TextEncoder().encode(sent));
               setTimeout(() => controller.error(new Error("connection lost")), 20);
             },
           });
@@ -276,6 +278,17 @@ describe("client.media.fetch", () => {
     const lost = await failure(client.media.fetch({ traceId, sha256: sha256(pdf) }));
     expect(lost.reason).toBe("failed");
     expect(seen.filter((item) => item.path.includes(sha256(pdf))).length).toBe(2);
+  });
+
+  test("an answer past its bound cut mid-body is refused, not asked again", async () => {
+    // The connection closes after 66,000 bytes of an answer longer than any grant: it is no grant
+    // whether or not the rest arrives, so it fails at once, as the Python SDK fails it.
+    const { client, seen } = hue({
+      [sha256(png)]: { kind: "broken", times: 5, sent: `{"sha256":"${"a".repeat(65_989)}` },
+    });
+    const cut = await failure(client.media.fetch({ traceId, sha256: sha256(png) }));
+    expect(cut.reason).toBe("failed");
+    expect(seen.filter((item) => item.path.includes(sha256(png))).length).toBe(1);
   });
 
   test("a redirect is an unexpected answer: failed with its status, never followed or asked again", async () => {
@@ -541,9 +554,64 @@ describe("client.media.resolve", () => {
     expect(
       (bare.value as unknown as { image_url: { url: string } }[])[0]!.image_url.url,
     ).toStartWith("data:application/octet-stream;base64,");
-    await expect(
-      client.media.resolve(parts, { snapshotId, blobs: "entries" as never }),
-    ).rejects.toBeInstanceOf(TypeError);
+    // Every form Hue reads hue.blobs in gives the same types: one string holding the JSON array,
+    // and an array of objects; anything else is no list of entries and is ignored.
+    const objects = blobs.slice(1).map((item) => JSON.parse(item) as Record<string, unknown>);
+    for (const form of [JSON.stringify(blobs.slice(1)), objects]) {
+      const read = await client.media.resolve(parts, { snapshotId, blobs: form });
+      expect(read.value).toEqual(value);
+    }
+    const ignored = await client.media.resolve(parts.slice(0, 1), {
+      snapshotId,
+      blobs: "entries",
+    });
+    expect(
+      (ignored.value as unknown as { image_url: { url: string } }[])[0]!.image_url.url,
+    ).toStartWith("data:application/octet-stream;base64,");
+  });
+
+  test("text kept as its first 16 KiB is written back whole from the entry naming its field", async () => {
+    const text = new TextEncoder().encode("A long report. ".repeat(6000));
+    const prefix = Buffer.from(text.subarray(0, 16 * 1024)).toString("utf8");
+    const other = new TextEncoder().encode("another attribute's file");
+    const { client } = hue({
+      [sha256(text)]: stored(text, "text/plain", "report.txt"),
+      [sha256(other)]: stored(other, "text/plain", "other.txt"),
+    });
+    const recorded = [
+      { role: "user", parts: [{ type: "blob", mime_type: "text/plain", content: prefix }] },
+      { role: "user", parts: [{ type: "blob", mime_type: "text/plain", content: "short" }] },
+    ];
+    const entry = (key: string, bytes: Uint8Array) =>
+      JSON.stringify({
+        key,
+        sha256: sha256(bytes),
+        size: bytes.byteLength,
+        content_type: "text/plain",
+      });
+    const { value, resolved, failures } = await client.media.resolve(recorded, {
+      traceId,
+      blobs: [
+        entry("gen_ai.input.messages#/0/parts/0/content", text),
+        // Another attribute's entry at the same kind of pointer: its file does not begin with the
+        // text recorded here, so it is not written in.
+        entry("gen_ai.output.messages#/1/parts/0/content", other),
+      ],
+    });
+    expect(resolved).toBe(1);
+    expect(failures).toEqual([]);
+    expect(value).toEqual([
+      { role: "user", parts: [{ type: "blob", mime_type: "text/plain", content: base64(text) }] },
+      recorded[1]!,
+    ]);
+    // A prefix whose file cannot be read is reported with its reason.
+    const lost = await client.media.resolve(recorded.slice(0, 1), {
+      traceId,
+      blobs: [entry("gen_ai.input.messages#/0/parts/0/content", lost16k)],
+    });
+    expect(lost.failures).toEqual([
+      { pointer: "/0/parts/0", sha256: sha256(lost16k), reason: "not_found" },
+    ]);
   });
 
   test("as bytes writes the bytes themselves", async () => {

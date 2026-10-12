@@ -15,7 +15,7 @@ import json
 import random
 import re
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,6 +23,9 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import requests
+import urllib3
+
+from .._inline_files import loads_message
 
 MediaFetchErrorReason = Literal[
     "not_found", "missing", "unavailable", "forbidden", "too_large", "digest_mismatch", "failed"
@@ -200,14 +203,23 @@ def _retry_after(response: requests.Response) -> int | None:
 def _answer(response: requests.Response) -> Any:
     """A JSON answer read to a bound; None when it is larger or not JSON. A connection that fails
     while the answer is read raises ``requests.RequestException``, as one that fails before it
-    does: the caller asks once more."""
+    does: the caller asks once more. An answer past the bound is refused even when its connection
+    then fails, as the TypeScript SDK refuses it."""
     chunks: list[bytes] = []
     size = 0
-    for chunk in response.iter_content(chunk_size=8192):
-        size += len(chunk)
-        if size > _MAX_ANSWER_BYTES:
-            return None
-        chunks.append(chunk)
+    try:
+        while True:
+            # Never asks for more than one byte past the bound: a read that fails loses the bytes
+            # it gathered, and those past the bound must refuse the answer, not ask again.
+            chunk = response.raw.read(min(8192, _MAX_ANSWER_BYTES + 1 - size), decode_content=True)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _MAX_ANSWER_BYTES:
+                return None
+            chunks.append(chunk)
+    except urllib3.exceptions.HTTPError as error:
+        raise requests.ConnectionError(error) from None
     try:
         return json.loads(b"".join(chunks).decode("utf-8"))
     except (ValueError, UnicodeError):
@@ -306,7 +318,7 @@ class MediaClient:
         as_: Literal["data_url", "bytes"] = "data_url",
         concurrency: int = 4,
         max_bytes: int = DEFAULT_MAX_BYTES,
-        blobs: Sequence[str] | None = None,
+        blobs: Sequence[str | Mapping[str, Any]] | str | None = None,
     ) -> ResolvedMedia:
         """Write the bytes of every digest part in ``value`` back into its content field.
 
@@ -322,16 +334,19 @@ class MediaClient:
         is and is reported in ``failures``. Parse attributes recorded as JSON text (such as
         ``gen_ai.input.messages``) before passing them.
 
-        ``blobs`` takes the ``hue.blobs`` entries of the record the value was read from, as the
-        attribute holds them: JSON object strings. A part that declares no media type, read from
+        ``blobs`` takes the ``hue.blobs`` entries of the record the value was read from, in any
+        form Hue reads: a list of compact JSON object strings (what the SDKs write), a list of
+        dicts, or one string holding the JSON array. A part that declares no media type, read from
         a copy that carries none (a snapshot's), takes the type of the entry with its SHA-256 for
-        its ``data:`` URL, rather than ``application/octet-stream``. Entries that do not parse are
+        its ``data:`` URL, rather than ``application/octet-stream``; text kept as its first 16 KiB,
+        whose entry names its content field, is written back whole. Entries that do not parse are
         ignored.
 
         Raises ``ValueError`` for invalid identifiers or options; never for one file's failure.
         """
         mode = _mode(as_)
-        listed = _listed_types(blobs)
+        refs = _blob_refs(blobs)
+        listed = _listed_types(refs)
         if (
             isinstance(concurrency, bool)
             or type(concurrency) is not int
@@ -342,6 +357,7 @@ class MediaClient:
         # Identifiers are checked once, before any request.
         _route("0" * 64, trace_id, span_id, snapshot_id)
         parts = _digest_parts(value)
+        _prefix_parts(value, refs, parts)
         digests = list(dict.fromkeys(part.sha256 for part in parts.values()))
 
         def read(digest: str) -> MediaFile | MediaFetchError:
@@ -438,37 +454,132 @@ class MediaClient:
         return bytes(data)
 
 
-def _listed_types(entries: object) -> dict[str, str]:
-    """The media type each digest has in a record's ``hue.blobs`` entries, the first valid one of
-    a digest; an entry that does not parse, or names no valid digest or type, is ignored."""
-    types: dict[str, str] = {}
-    if entries is None:
-        return types
-    if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
-        raise ValueError("blobs must be the record's hue.blobs entries.")
-    for entry in entries:
-        if not isinstance(entry, str) or len(entry) > 2048:
-            continue
+@dataclass(frozen=True)
+class _BlobRef:
+    key: str
+    sha256: str
+    content_type: str | None
+
+
+_BLOB_CONTENT_TYPE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9!#$&^_.+-]+(?: *;[ -~]*)?"
+)
+
+
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _blob_refs(listed: object) -> list[_BlobRef]:
+    """The entries a record's ``hue.blobs`` lists, read as Hue's reader reads them
+    (``blobRefsOf``): a list of compact JSON object strings, of dicts, or one string holding the
+    JSON array; at most 64, one per key, the first winning. An entry without a valid key, digest
+    and size is ignored, and so is anything that is no list."""
+    entries: object = listed
+    if isinstance(entries, str):
         try:
-            fields = json.loads(entry)
+            entries = loads_message(entries)
         except ValueError:
+            return []
+    if not isinstance(entries, (list, tuple)):
+        return []
+    refs: list[_BlobRef] = []
+    keys: set[str] = set()
+    for item in list(entries)[:64]:
+        entry: object = item
+        if isinstance(entry, str):
+            if _utf16_length(entry) > 2048:
+                continue
+            try:
+                entry = loads_message(entry)
+            except ValueError:
+                continue
+        if not isinstance(entry, Mapping):
             continue
-        if not isinstance(fields, dict):
-            continue
-        digest = fields.get("sha256")
+        key = entry.get("key")
+        digest = entry.get("sha256")
         digest = digest.lower() if isinstance(digest, str) else ""
-        kind = fields.get("content_type")
-        if kind is None:
-            kind = fields.get("contentType")
+        size = entry.get("size")
+        if isinstance(size, str) and re.fullmatch(r"[0-9]{1,10}", size):
+            size = int(size)
         if (
-            _SHA256.fullmatch(digest)
-            and digest not in types
-            and isinstance(kind, str)
-            and len(kind) <= 255
-            and _MEDIA_TYPE.fullmatch(kind.split(";")[0].strip())
+            not isinstance(key, str)
+            or not 1 <= _utf16_length(key) <= 256
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in key)
+            or key in keys
+            or not _SHA256.fullmatch(digest)
+            or isinstance(size, bool)
+            or not isinstance(size, (int, float))
+            or not float(size).is_integer()
+            or not 1 <= size <= 1_000_000_000
         ):
-            types[digest] = kind
+            continue
+        keys.add(key)
+        kind = entry.get("content_type")
+        if kind is None:
+            kind = entry.get("contentType")
+        typed = (
+            isinstance(kind, str)
+            and 3 <= len(kind) <= 255
+            and _BLOB_CONTENT_TYPE.fullmatch(kind) is not None
+        )
+        refs.append(_BlobRef(key, digest, kind if typed else None))
+    return refs
+
+
+def _listed_types(refs: list[_BlobRef]) -> dict[str, str]:
+    """The media type each digest has in a record's ``hue.blobs`` entries, the first typed one of
+    a digest."""
+    types: dict[str, str] = {}
+    for ref in refs:
+        if ref.content_type is not None and ref.sha256 not in types:
+            types[ref.sha256] = ref.content_type
     return types
+
+
+def _prefix_parts(value: Any, refs: list[_BlobRef], parts: dict[int, _DigestPart]) -> None:
+    """The parts of ``value`` whose text media was kept as its first 16 KiB, found by the
+    ``hue.blobs`` entries that name their content field (``<attribute>#<pointer to the field>``),
+    added to ``parts`` with the prefix their file must begin with. A part whose field holds no
+    text, or that is already in digest form, is left out."""
+    for ref in refs:
+        _, hashed, pointer = ref.key.partition("#")
+        if not hashed or not pointer.startswith("/"):
+            continue
+        segments = [
+            segment.replace("~1", "/").replace("~0", "~") for segment in pointer[1:].split("/")
+        ]
+        nodes: list[Any] = [value]
+        for segment in segments:
+            node = nodes[-1]
+            if isinstance(node, (list, tuple)):
+                if not re.fullmatch(r"[0-9]+", segment) or int(segment) >= len(node):
+                    break
+                nodes.append(node[int(segment)])
+            elif isinstance(node, dict) and segment in node:
+                nodes.append(node[segment])
+            else:
+                break
+        recorded = nodes[-1]
+        if len(nodes) != len(segments) + 1 or not isinstance(recorded, str) or not recorded:
+            continue
+        # The part is a few levels above its content field, as the field's slot names it.
+        for up in range(1, min(3, len(segments)) + 1):
+            part = nodes[len(nodes) - 1 - up]
+            if (
+                not isinstance(part, dict)
+                or id(part) in parts
+                or isinstance(part.get("sha256"), str)
+            ):
+                continue
+            slot = _slot(part)
+            if slot is None or [*slot.owner, slot.key] != segments[len(segments) - up :]:
+                continue
+            part_pointer = "".join(
+                f"/{_escape(segment)}" for segment in segments[: len(segments) - up]
+            )
+            parts[id(part)] = _DigestPart(part_pointer, ref.sha256, slot, recorded)
+            break
 
 
 def _mode(value: object) -> Literal["data_url", "bytes"]:
@@ -542,6 +653,8 @@ class _DigestPart:
     pointer: str
     sha256: str
     slot: _Slot
+    # For text kept as its first 16 KiB: that prefix, the content its file must begin with.
+    prefix: str | None = None
 
 
 def _text(value: object) -> str | None:
@@ -752,7 +865,19 @@ def _write_back(
             failures.append(MediaResolveFailure(part.pointer, part.sha256, file))
             reported.add(id(node))
         copy = {key: visit(item, depth + 1) for key, item in node.items()}
-        if part is not None and isinstance(file, MediaFile):
+        # Text kept as its prefix is written back only from the file that prefix begins.
+        whole = (
+            part is None
+            or part.prefix is None
+            or (
+                isinstance(file, MediaFile)
+                and (
+                    file.data.decode("utf-8", "replace").startswith(part.prefix)
+                    or _spelled(part.slot, file).startswith(part.prefix)
+                )
+            )
+        )
+        if part is not None and whole and isinstance(file, MediaFile):
             # The owners along the slot are this copy's own objects: the walk copied every one.
             owner = copy
             for segment in part.slot.owner:

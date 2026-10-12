@@ -24,6 +24,7 @@ from hue_sdk.evals import (
     LocalFile,
     MediaFetchError,
     MediaFile,
+    MediaResolveFailure,
     rehydrate_media,
 )
 
@@ -123,7 +124,7 @@ def hue():
         if answer["kind"] == "broken":
             if answer["times"] > 0:
                 answer["times"] -= 1
-                return 200, Broken(b'{"sha256":"'), {}
+                return 200, Broken(answer.get("sent", b'{"sha256":"')), {}
             answer = state.answers[digest] = answer.get("then", {"kind": "missing"})
         if answer["kind"] == "hang":
             state.release.wait(5)
@@ -385,6 +386,16 @@ def test_a_connection_lost_while_the_grant_is_read_is_asked_once_more_then_fails
         client.media.fetch(trace_id=TRACE_ID, sha256=sha(PDF))
     assert lost.value.reason == "failed"
     assert len([item for item in hue.seen if sha(PDF) in item["path"]]) == 2
+
+
+def test_an_answer_over_its_bound_cut_mid_body_is_refused_not_asked_again(hue):
+    # The connection closes after 66,000 bytes of an answer longer than any grant: it is no grant
+    # whether or not the rest arrives, so it fails at once, as the TypeScript SDK fails it.
+    hue.answers[sha(PNG)] = {"kind": "broken", "times": 5, "sent": b'{"sha256":"' + b"a" * 65_989}
+    with pytest.raises(MediaFetchError) as cut:
+        hue.client().media.fetch(trace_id=TRACE_ID, sha256=sha(PNG))
+    assert cut.value.reason == "failed"
+    assert len([item for item in hue.seen if sha(PNG) in item["path"]]) == 1
 
 
 def test_a_redirect_is_an_unexpected_answer_failed_with_its_status_never_followed_or_asked_again(
@@ -1067,5 +1078,59 @@ def test_a_snapshots_parts_that_declare_no_type_take_it_from_the_records_hue_blo
     # Without the entries, a snapshot's copy names no type.
     bare = client.media.resolve(parts[:1], snapshot_id=snapshot_id)
     assert bare.value[0]["image_url"]["url"].startswith("data:application/octet-stream;base64,")
-    with pytest.raises(ValueError):
-        client.media.resolve(parts, snapshot_id=snapshot_id, blobs="entries")  # type: ignore[arg-type]
+    # Every form Hue reads hue.blobs in gives the same types: one string holding the JSON array,
+    # and a list of dicts; anything else is no list of entries and is ignored.
+    objects = [json.loads(item) for item in blobs[1:]]
+    for form in (json.dumps(blobs[1:]), objects):
+        read = client.media.resolve(parts, snapshot_id=snapshot_id, blobs=form)
+        assert read.value == resolved.value
+    ignored = client.media.resolve(parts[:1], snapshot_id=snapshot_id, blobs="entries")
+    assert ignored.value[0]["image_url"]["url"].startswith("data:application/octet-stream;base64,")
+
+
+def test_text_kept_as_its_first_16_kib_is_written_back_whole_from_the_entry_naming_its_field(hue):
+    text = b"A long report. " * 6000
+    prefix = text[: 16 * 1024].decode()
+    other = b"another attribute's file"
+    lost = b"never uploaded text " * 4000
+    hue.answers.update(
+        {
+            sha(text): stored(text, "text/plain", "report.txt"),
+            sha(other): stored(other, "text/plain", "other.txt"),
+        }
+    )
+
+    def message(content: str) -> dict[str, Any]:
+        return {
+            "role": "user",
+            "parts": [{"type": "blob", "mime_type": "text/plain", "content": content}],
+        }
+
+    recorded = [message(prefix), message("short")]
+
+    def entry(key: str, data: bytes) -> str:
+        return json.dumps(
+            {"key": key, "sha256": sha(data), "size": len(data), "content_type": "text/plain"}
+        )
+
+    client = hue.client()
+    resolved = client.media.resolve(
+        recorded,
+        trace_id=TRACE_ID,
+        blobs=[
+            entry("gen_ai.input.messages#/0/parts/0/content", text),
+            # Another attribute's entry at the same kind of pointer: its file does not begin with
+            # the text recorded here, so it is not written in.
+            entry("gen_ai.output.messages#/1/parts/0/content", other),
+        ],
+    )
+    assert resolved.resolved == 1
+    assert resolved.failures == []
+    assert resolved.value == [message(b64(text)), recorded[1]]
+    # A prefix whose file cannot be read is reported with its reason.
+    missing = client.media.resolve(
+        recorded[:1],
+        trace_id=TRACE_ID,
+        blobs=[entry("gen_ai.input.messages#/0/parts/0/content", lost)],
+    )
+    assert missing.failures == [MediaResolveFailure("/0/parts/0", sha(lost), "not_found")]

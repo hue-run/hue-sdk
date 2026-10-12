@@ -131,11 +131,13 @@ export type MediaResolveOptions = (
     }
 ) &
   MediaWriteOptions & {
-    /** The `hue.blobs` entries of the record the value was read from, as the attribute holds
-     * them: JSON object strings. A part that declares no media type, read from a copy that carries
-     * none (a snapshot's), takes the type of the entry with its SHA-256 for its `data:` URL, rather
-     * than `application/octet-stream`. Entries that do not parse are ignored. */
-    blobs?: readonly string[];
+    /** The `hue.blobs` entries of the record the value was read from, in any form Hue reads: an
+     * array of compact JSON object strings (what the SDKs write), an array of objects, or one
+     * string holding the JSON array. A part that declares no media type, read from a copy that
+     * carries none (a snapshot's), takes the type of the entry with its SHA-256 for its `data:`
+     * URL, rather than `application/octet-stream`; text kept as its first 16 KiB, whose entry
+     * names its content field, is written back whole. Entries that do not parse are ignored. */
+    blobs?: readonly (string | Readonly<Record<string, unknown>>)[] | string;
     /** Files downloaded at once, 1–16. Default 4. */
     concurrency?: number;
     /** Largest file read, as in {@link MediaFetchOptions.maxBytes}. */
@@ -440,7 +442,8 @@ export class MediaClient {
     if (!options || typeof options !== "object")
       throw new TypeError("Name a traceId or snapshotId");
     const as = writeModeOf(options.as);
-    const listed = listedTypes(options.blobs);
+    const refs = blobRefsOf(options.blobs);
+    const listed = listedTypes(refs);
     const concurrency = options.concurrency ?? 4;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
       throw new RangeError("concurrency must be 1–16");
@@ -456,6 +459,7 @@ export class MediaClient {
     // Identifiers are checked once, before any request.
     routeOf(target("0".repeat(64)));
     const parts = digestParts(value);
+    prefixParts(value, refs, parts);
     const digests = [...new Set([...parts.values()].map((part) => part.sha256))];
     const files = new Map<string, MediaFile | MediaFetchError>();
     let next = 0;
@@ -614,32 +618,145 @@ export class MediaClient {
   }
 }
 
-/** The media type each digest has in a record's `hue.blobs` entries, the first valid one of a
- * digest; an entry that does not parse, or names no valid digest or type, is ignored. */
-function listedTypes(entries: unknown): Map<string, string> {
-  const types = new Map<string, string>();
-  if (entries === undefined) return types;
-  if (!Array.isArray(entries)) throw new TypeError("blobs must be the record's hue.blobs entries");
-  for (const entry of entries as unknown[]) {
-    if (typeof entry !== "string" || entry.length > 2048) continue;
-    let fields: Plain | undefined;
+/** One `hue.blobs` entry, as Hue's reader reads it. */
+interface BlobRef {
+  key: string;
+  sha256: string;
+  contentType?: string;
+}
+
+const BLOB_CONTENT_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9!#$&^_.+-]+(?: *;[ -~]*)?$/;
+
+/**
+ * The entries a record's `hue.blobs` lists, read as Hue's reader reads them (`blobRefsOf`): an
+ * array of compact JSON object strings, of objects, or one string holding the JSON array; at most
+ * 64, one per key, the first winning. An entry without a valid key, digest and size is ignored, and
+ * so is anything that is no list.
+ */
+function blobRefsOf(listed: unknown): BlobRef[] {
+  let entries = listed;
+  if (typeof entries === "string") {
     try {
-      fields = plain(JSON.parse(entry));
+      entries = JSON.parse(entries);
     } catch {
-      continue;
+      return [];
     }
-    const sha256 = typeof fields?.sha256 === "string" ? fields.sha256.toLowerCase() : "";
-    const type: unknown = fields?.content_type ?? fields?.contentType;
-    if (
-      SHA256.test(sha256) &&
-      !types.has(sha256) &&
-      typeof type === "string" &&
-      type.length <= 255 &&
-      MEDIA_TYPE.test(type.split(";")[0]!.trim())
-    )
-      types.set(sha256, type);
   }
+  if (!Array.isArray(entries)) return [];
+  const refs: BlobRef[] = [];
+  const keys = new Set<string>();
+  for (const item of (entries as unknown[]).slice(0, 64)) {
+    let entry: unknown = item;
+    if (typeof entry === "string") {
+      if (entry.length > 2048) continue;
+      try {
+        entry = JSON.parse(entry);
+      } catch {
+        continue;
+      }
+    }
+    const fields =
+      entry !== null && typeof entry === "object" && !Array.isArray(entry)
+        ? (entry as Record<string, unknown>)
+        : undefined;
+    if (!fields) continue;
+    const key = fields.key;
+    const sha256 = typeof fields.sha256 === "string" ? fields.sha256.toLowerCase() : "";
+    const size =
+      typeof fields.size === "number"
+        ? fields.size
+        : typeof fields.size === "string" && /^\d{1,10}$/.test(fields.size)
+          ? Number(fields.size)
+          : NaN;
+    if (
+      typeof key !== "string" ||
+      key.length < 1 ||
+      key.length > 256 ||
+      // eslint-disable-next-line no-control-regex -- control characters are refused
+      /[\u0000-\u001f\u007f]/.test(key) ||
+      keys.has(key) ||
+      !SHA256.test(sha256) ||
+      !Number.isSafeInteger(size) ||
+      size < 1 ||
+      size > 1_000_000_000
+    )
+      continue;
+    keys.add(key);
+    const type: unknown = fields.content_type ?? fields.contentType;
+    refs.push({
+      key,
+      sha256,
+      ...(typeof type === "string" &&
+      type.length >= 3 &&
+      type.length <= 255 &&
+      BLOB_CONTENT_TYPE.test(type)
+        ? { contentType: type }
+        : {}),
+    });
+  }
+  return refs;
+}
+
+/** The media type each digest has in a record's `hue.blobs` entries, the first typed one of a
+ * digest. */
+function listedTypes(refs: readonly BlobRef[]): Map<string, string> {
+  const types = new Map<string, string>();
+  for (const ref of refs)
+    if (ref.contentType !== undefined && !types.has(ref.sha256))
+      types.set(ref.sha256, ref.contentType);
   return types;
+}
+
+/**
+ * The parts of `value` whose text media was kept as its first 16 KiB, found by the `hue.blobs`
+ * entries that name their content field (`<attribute>#<pointer to the field>`), added to `parts`
+ * with the prefix their file must begin with. A part whose field holds no text, or that is already
+ * in digest form, is left out.
+ */
+function prefixParts(value: unknown, refs: readonly BlobRef[], parts: Map<object, DigestPart>) {
+  for (const ref of refs) {
+    const at = ref.key.indexOf("#");
+    const pointer = at === -1 ? "" : ref.key.slice(at + 1);
+    if (!pointer.startsWith("/")) continue;
+    const segments = pointer
+      .slice(1)
+      .split("/")
+      .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"));
+    const nodes: unknown[] = [value];
+    for (const segment of segments) {
+      const node = nodes.at(-1);
+      const next = Array.isArray(node)
+        ? /^\d+$/.test(segment)
+          ? node[Number(segment)]
+          : undefined
+        : plain(node) && Object.hasOwn(node as Plain, segment)
+          ? (node as Plain)[segment]
+          : undefined;
+      if (next === undefined) break;
+      nodes.push(next);
+    }
+    const recorded = nodes.at(-1);
+    if (nodes.length !== segments.length + 1 || typeof recorded !== "string" || !recorded) continue;
+    // The part is a few levels above its content field, as the field's slot names it.
+    for (let up = 1; up <= Math.min(3, segments.length); up++) {
+      const part = plain(nodes[nodes.length - 1 - up]);
+      const slot = part && slotOf(part);
+      if (!part || !slot || parts.has(part) || typeof part.sha256 === "string") continue;
+      const path = [...slot.owner, slot.key];
+      if (path.join("/") !== segments.slice(-up).join("/")) continue;
+      const partPointer = segments
+        .slice(0, segments.length - up)
+        .map((segment) => `/${segment.replaceAll("~", "~0").replaceAll("/", "~1")}`)
+        .join("");
+      parts.set(part, {
+        pointer: partPointer,
+        sha256: ref.sha256,
+        slot,
+        prefix: recorded,
+      });
+      break;
+    }
+  }
 }
 
 function writeModeOf(value: unknown): "dataUrl" | "bytes" {
@@ -712,6 +829,8 @@ interface DigestPart {
   pointer: string;
   sha256: string;
   slot: Slot;
+  /** For text kept as its first 16 KiB: that prefix, the content its file must begin with. */
+  prefix?: string;
 }
 
 type Plain = Record<string, unknown>;
@@ -982,7 +1101,14 @@ function writeBack<T>(
     }
     const copy: Plain = {};
     for (const [key, item] of Object.entries(source)) setOwn(copy, key, visit(item, depth + 1));
-    if (part && file !== undefined && typeof file !== "string") {
+    // Text kept as its prefix is written back only from the file that prefix begins.
+    const whole =
+      part?.prefix === undefined ||
+      (file !== undefined &&
+        typeof file !== "string" &&
+        (Buffer.from(file.bytes).toString("utf8").startsWith(part.prefix) ||
+          spelled(part.slot, file).startsWith(part.prefix)));
+    if (part && whole && file !== undefined && typeof file !== "string") {
       // The owners along the slot are this copy's own objects: the walk copied every plain one.
       let owner = copy;
       for (const segment of part.slot.owner) owner = owner[segment] as Plain;
