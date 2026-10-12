@@ -428,3 +428,36 @@ def test_bytes_over_25_mib_are_refused_before_they_are_copied():
         tracemalloc.stop()
     # Refusing the bytes allocates nothing near their size.
     assert peak < 1024 * 1024
+
+
+def test_a_log_bodys_inline_media_take_hue_blobs_places_before_its_attachments(hue_store):
+    images = [bytes([0x89, 0x50, 0x4E, 0x47, index & 255, index >> 8]) for index in range(66)]
+    with client(hue_store) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            span.log_inference(
+                input=[
+                    {
+                        "role": "user",
+                        "parts": [
+                            *(
+                                {
+                                    "type": "blob",
+                                    "mime_type": "image/png",
+                                    "content": base64.b64encode(data).decode(),
+                                }
+                                for data in images
+                            ),
+                            Attachment(b"%PDF-1.4 extra", content_type="application/pdf"),
+                        ],
+                    }
+                ]
+            )
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+    (log,) = hue_store.logs
+    # As on a span: the 64 places go to the inline media in reading order; the attachment and the
+    # inline media past them stay as they are, counted as not uploaded.
+    assert [json.loads(entry)["key"] for entry in entries(log)] == [
+        f"body#/gen_ai.input.messages/0/parts/{index}" for index in range(64)
+    ]
+    assert status.upload_fallbacks == 3

@@ -18,7 +18,7 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Event, Lock, Semaphore, Thread, local
 from time import monotonic, time
 from typing import Any
@@ -1491,12 +1491,12 @@ def place_logs(
     uploaded under the log record's trace and listed in its own ``hue.blobs``, keyed
     ``<attribute>#<pointer>`` or ``body#<pointer>``, or kept inline when it is not uploaded (a
     message's file over the inline limit as its digest); what is left over the inline limit is cut
-    as before. The attachments a body holds (``held.files``, keyed ``body#<pointer>``) upload in
-    the same placement, on the same threads and deadline. ``logs`` holds each record's
-    attributes, held values, trace id and body (a JSON-like copy, with the strings its copy held
-    whole restored)."""
+    as before. The attachments a body holds (``held.files``, keyed ``body#<pointer>``) then take
+    the ``hue.blobs`` places left, as a span's helper files follow its values, on the same threads
+    and deadline. ``logs`` holds each record's attributes, held values, trace id and body (a
+    JSON-like copy, with the strings its copy held whole restored)."""
     placements = [
-        _Span(attributes, held, trace_id, log=True, body=body)
+        _Span(attributes, replace(held, files=[]), trace_id, log=True, body=body)
         for attributes, held, trace_id, body in logs
     ]
     attributes, tally = _place_all(
@@ -1507,4 +1507,24 @@ def place_logs(
         wait=wait,
         memo=memo,
     )
+    attaching = [
+        (number, _Span(attributes[number], Held(files=list(held.files), inspected=set()), trace_id))
+        for number, (_, held, trace_id, _) in enumerate(logs)
+        if held.files
+    ]
+    if attaching:
+        placed, attached = _place_all(
+            [span for _, span in attaching],
+            uploader=uploader,
+            value_bytes=value_bytes,
+            deadline=deadline,
+            wait=wait,
+            memo=memo,
+        )
+        for (number, _), result in zip(attaching, placed, strict=True):
+            attributes[number] = result
+        tally.uploaded += attached.uploaded
+        for reason, (count, traces) in attached.fallbacks.items():
+            previous, named = tally.fallbacks.get(reason, (0, set()))
+            tally.fallbacks[reason] = (previous + count, named | traces)
     return attributes, [placement.placed_body for placement in placements], tally

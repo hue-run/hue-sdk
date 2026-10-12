@@ -3011,3 +3011,46 @@ test("input.value declared text/plain stays literal text; a JSON one is read for
     endpoint.server.stop(true);
   }
 });
+
+test("a log body's inline media take hue.blobs places before its attachments, in order", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const images = Array.from({ length: 66 }, (_, index) =>
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, index, index >> 8]),
+  );
+  try {
+    await hueClient.withSpan("many files", () => {
+      hueClient.recordMessages({
+        input: [
+          {
+            role: "user",
+            parts: [
+              ...images.map((bytes) => ({
+                type: "blob",
+                mime_type: "image/png",
+                content: bytes.toString("base64"),
+              })),
+              new Attachment({
+                data: Buffer.from("%PDF-1.4 extra"),
+                contentType: "application/pdf",
+              }),
+            ],
+          },
+        ],
+        operation: "chat",
+        provider: "openai",
+      });
+    });
+    const report = await hueClient.flush();
+    const [log] = endpoint.logs();
+    // As on a span: the 64 places go to the inline media in reading order; the attachment and
+    // the inline media past them stay as they are, counted as not uploaded.
+    expect(blobs(log!).map(({ key }) => key)).toEqual(
+      Array.from({ length: 64 }, (_, index) => `body#/gen_ai.input.messages/0/parts/${index}`),
+    );
+    expect(report.uploadFallbacks).toBe(3);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
