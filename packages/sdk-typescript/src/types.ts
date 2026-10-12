@@ -142,11 +142,11 @@ export interface ExportReport {
   pendingBytes: number;
   /** Helper capture or instrumentation failures that omitted telemetry while preserving application results. */
   instrumentationFailures: number;
-  /** Span values over Hue's inline limit uploaded apart from their spans (or already stored by
-   * Hue), each listed under the span's `hue.blobs` with its first 16 KiB kept inline. */
+  /** Whole span attributes, inline media, and opted-in file helper uploads stored apart from
+   * their spans (or already held by Hue), each listed under the span's `hue.blobs`. */
   uploadedValues: number;
-  /** Span values over Hue's inline limit that could not be uploaded and were exported cut to the
-   * limit (an inline file as its digest), each reported in a warning issue. */
+  /** Whole-attribute, inline-media, and opted-in file helper uploads that could not be attached.
+   * Content falls back to truncation, media digests, or file metadata, with a warning issue. */
   uploadFallbacks: number;
 }
 
@@ -264,7 +264,9 @@ export interface FileRecord {
   mediaType: string;
   /** Hex SHA-256 of the file's bytes; computed from `data` when omitted. */
   sha256?: string;
-  /** The file's bytes, only hashed and measured, never exported; a string is hashed as UTF-8.
+  /** Upload supplied bytes on this span when content capture is enabled. Defaults to false. */
+  upload?: boolean;
+  /** The file's bytes, hashed and measured locally by default; a string is hashed as UTF-8.
    * Data larger than 25 MiB is omitted and counted as an instrumentation failure. */
   data?: Uint8Array | string;
   /** Size in bytes; computed from `data` when omitted. */

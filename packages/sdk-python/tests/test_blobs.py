@@ -326,7 +326,7 @@ def test_values_over_the_limit_are_uploaded_and_replaced_by_their_first_16_kib(h
             "content_type": "text/plain; charset=utf-8",
         },
         {
-            "key": "gen_ai.input.messages#/0/parts/1/content",
+            "key": "gen_ai.input.messages#/0/parts/1",
             "sha256": sha256(image),
             "size": len(image),
             "content_type": "image/png",
@@ -355,7 +355,8 @@ def test_values_over_the_limit_are_uploaded_and_replaced_by_their_first_16_kib(h
         "type": "blob",
         "modality": "image",
         "mime_type": "image/png",
-        "content": base64.b64encode(image).decode()[: 16 * KIB],
+        "sha256": sha256(image),
+        "size": len(image),
     }
     # The whole values are listed as cut inline; a part is listed in hue.blobs alone.
     assert listed(record) == ["custom.document", "output.value"]
@@ -380,7 +381,7 @@ def test_a_value_hue_already_stores_under_the_trace_is_not_uploaded_again(hue_st
         assert hue.force_flush()
         assert hue.export_status.uploaded_values == 2
     assert len(hue_store.puts) == 1
-    assert len(hue_store.reservations) == 2
+    assert len(hue_store.reservations) == 1
     assert len(hue_store.completions) == 1
     for name in ("first", "second"):
         record = hue_store.span(name)
@@ -493,8 +494,7 @@ def test_hue_s_own_404_is_a_failure_not_a_receiver_without_uploads(hue_store):
             assert attrs(hue_store.span(name))["custom.document"].string_value == "a" * MIB
         warnings = [issue for issue in hue.export_issues() if issue.kind == "warning"]
         assert [
-            issue.message.startswith("Values over Hue's inline limit could not")
-            for issue in warnings
+            issue.message.startswith("Content could not be uploaded") for issue in warnings
         ] == [True, True]
     # The refusal paused uploads, so the next value met no request; it was not taken for a
     # receiver without the route, whose values are cut when queued.
@@ -555,7 +555,7 @@ def test_a_message_s_large_inline_file_is_held_apart_from_the_queue_budget(hue_s
         status = hue.export_status
         assert status.dropped_trace_records == 0 and status.uploaded_values == 1
     (entry,) = blobs(hue_store.span("small queue"))
-    assert entry["key"] == "gen_ai.input.messages#/0/parts/1/content"
+    assert entry["key"] == "gen_ai.input.messages#/0/parts/1"
     assert entry["sha256"] == sha256(image)
 
 

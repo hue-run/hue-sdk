@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { isMediaName } from "./inline-files.js";
 import {
   context,
   isSpanContextValid,
@@ -9,6 +10,7 @@ import {
   trace,
   type Attributes,
   type Context,
+  type HrTime,
   type Span,
   type SpanOptions as OtelSpanOptions,
   type Tracer,
@@ -17,7 +19,7 @@ import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
-import { TracerProvider } from "@opentelemetry/sdk-trace";
+import { TracerProvider, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
 import { HUE_SCOPE } from "./config.js";
 import {
@@ -33,6 +35,7 @@ import {
   encodeContent,
   noopSpan,
   safeSpan,
+  spanSource,
   type EncodeLimits,
 } from "./safety.js";
 import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
@@ -814,7 +817,7 @@ export class HueClient {
    * Adds a `hue.file` event to the active (or given) span for a file the work read, received or
    * produced: `hue.file.sha256`, `hue.file.role`, `hue.file.media_type`, `hue.file.size` when known
    * and, when `captureContent` is true, `hue.file.name`. `data` is hashed and measured locally and
-   * never exported. The event is metadata, so it is recorded in both capture modes. An invalid
+   * uploaded only with `upload: true`. The event is metadata, so it is recorded in both capture modes. An invalid
    * record, or one without an active span, is omitted and counted, never thrown; an invalid name
    * alone is omitted and counted while the rest is recorded.
    */
@@ -831,8 +834,9 @@ export class HueClient {
       if (!isLabel(mediaType)) throw new TypeError("Invalid media type");
       let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
       let byteSize = file.byteSize;
+      let bytes: Uint8Array | undefined;
       if (data !== undefined) {
-        const bytes =
+        bytes =
           typeof data === "string"
             ? (() => {
                 // Buffer.byteLength measures UTF-8 without allocating the copy that hashing would
@@ -852,7 +856,10 @@ export class HueClient {
                   })()
               : undefined;
         if (!bytes) throw new TypeError("File data must be bytes or a string");
-        const digest = createHash("sha256").update(bytes).digest("hex");
+        const digest =
+          bytes.byteLength > 0 && file.upload === true && this.transport.holdsValues()
+            ? this.transport.digestMedia(bytes, span.spanContext().traceId).sha256
+            : createHash("sha256").update(bytes).digest("hex");
         // A caller-supplied digest or size must describe the same bytes.
         if (
           (sha256 !== undefined && sha256 !== digest) ||
@@ -873,10 +880,58 @@ export class HueClient {
       };
       if (byteSize !== undefined) attributes["hue.file.size"] = byteSize;
       if (this.captureContent && name !== undefined) {
-        if (isLabel(name)) attributes["hue.file.name"] = name;
+        if (isMediaName(name)) attributes["hue.file.name"] = name;
         else this.instrumentationFailed();
       }
-      span.addEvent("hue.file", attributes);
+      // Let OpenTelemetry use the span's wall-clock anchor, then keep this event's exact
+      // timestamp for upload admission. A dropped event cannot authorize an upload.
+      const source = spanSource(span) as Span & Partial<Pick<ReadableSpan, "events">>;
+      const previous = this.fileEventTimes.get(source);
+      const after = (time: HrTime) => {
+        if (
+          previous &&
+          (time[0] < previous[0] || (time[0] === previous[0] && time[1] <= previous[1]))
+        ) {
+          time[0] = previous[0];
+          time[1] = previous[1] + 1;
+          if (time[1] === 1_000_000_000) {
+            time[0]++;
+            time[1] = 0;
+          }
+        }
+        return time;
+      };
+      let eventTime: HrTime | undefined;
+      if (Array.isArray(source.events)) {
+        const previousEvent = source.events.at(-1);
+        span.addEvent("hue.file", attributes);
+        const event = source.events.at(-1);
+        eventTime = event && event !== previousEvent ? after(event.time) : undefined;
+      } else {
+        // A span that does not expose its events (an API-only wrapper in attach mode): stamp the
+        // event with the wall clock and keep that exact time for upload admission.
+        const now = Date.now();
+        eventTime = after([Math.floor(now / 1000), (now % 1000) * 1_000_000]);
+        span.addEvent("hue.file", attributes, [eventTime[0], eventTime[1]]);
+      }
+      if (eventTime) this.fileEventTimes.set(source, eventTime);
+      if (file.upload === true && this.transport.offloadsValues()) {
+        if (
+          !this.transport.stageMedia(
+            span,
+            bytes && eventTime
+              ? {
+                  bytes,
+                  digest: { sha256, size: bytes.byteLength },
+                  contentType: mediaType,
+                  eventTime,
+                  ...(isMediaName(name) ? { name } : {}),
+                }
+              : undefined,
+          )
+        )
+          this.instrumentationFailed();
+      }
     } catch {
       this.instrumentationFailed();
     }
@@ -884,6 +939,9 @@ export class HueClient {
 
   /** The keys of each span's content values that were cut to Hue's value cap, for `hue.truncated`. */
   private truncatedKeys = new WeakMap<Span, string[]>();
+
+  /** Distinguishes requests whose helper events otherwise have identical metadata. */
+  private fileEventTimes = new WeakMap<Span, HrTime>();
 
   /** A content value's bounds: Hue's value cap as the receiver last advertised it. */
   private contentLimits() {

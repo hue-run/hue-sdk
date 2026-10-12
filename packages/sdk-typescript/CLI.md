@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.16.0`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.17.0`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -469,7 +469,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.16.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.17.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -480,7 +480,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.16.0.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.17.0.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -522,10 +522,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.16.0 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.16.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.16.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.16.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.17.0 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.17.0 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.17.0 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.17.0 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -563,7 +563,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.16.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.17.0 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.
@@ -757,13 +757,20 @@ minutes, so a completion that cannot reach Hue takes that long to fail; a reserv
 that cannot reach Hue still fails at once.
 
 Every regular file the command leaves under `output/` is uploaded as a generated document
-(accepted: `.pdf .docx .pptx .xlsx .json .txt .csv .png .jpg .jpeg .webp`; another extension or an
-empty file is the case's error). Optional helpers: `manifest.json` (`{"primary": "<filename>",
-"output": <json>}`) names the primary document and the JSON output; `result.json` is the JSON
+(accepted: `.pdf .docx .pptx .xlsx .json .txt .csv .png .jpg .jpeg .webp .gif .avif .mp3 .mpeg
+.wav .ogg .m4a .flac .opus .aac .mp4 .webm`; another extension or an empty file is the case's
+error). Optional helpers: `manifest.json` (`{"primary": "<filename>", "output": <json>,
+"contentTypes": {"<path>": "<MIME>"}}`) names the primary document, the JSON output and declared
+content types; `result.json` is the JSON
 output; `summary.txt` or `summary.md` is recorded as `{"summary": "..."}`. When none is written,
 the command's stdout is the output (JSON when it parses). A single generated file is the primary
 document by default. Model and provider credentials stay in the command's own environment; the
 scoped case files are copies under `--checkpoint-dir` (default `.hue/eval/<agent-key>/<project>/direct/<experiment>`).
+
+For `.mp4` and `.webm` files, `manifest.json.contentTypes` must declare the matching audio or
+video MIME type: `audio/mp4` or `video/mp4`, and `audio/webm` or `video/webm`. Each key must match
+the actual relative path under `output/`, including case. For example,
+`{"contentTypes":{"nested/clip.MP4":"video/mp4"}}` declares `output/nested/clip.MP4`.
 
 The same collection serves world cases, and it does not trust paths the agent controls. `output/`
 must be a real directory, and a helper name, when present, a regular file; a symlink, FIFO or

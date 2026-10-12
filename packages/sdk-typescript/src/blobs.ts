@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
-import { context } from "@opentelemetry/api";
+import { context, type HrTime } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
 import { isLoopbackHost } from "./config.js";
 import {
@@ -8,26 +8,28 @@ import {
   hashInlineFiles,
   INLINE_FILE_LIMIT,
   INLINE_FILE_TEXT_PER_RECORD,
-  inlineFileBytes,
-  isMessageKey,
+  mediaBytes,
+  mediaContentType,
+  isTextMediaType,
+  type MediaDigestMemo,
+  type FileDigest,
+  mayInlineFiles,
+  isMediaContentType,
   largeInlineFileParts,
   MAX_INLINE_FILE_TEXT,
-  type InlineFileBytes,
 } from "./inline-files.js";
 import { TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
 import { truncateUtf8 } from "./safety.js";
 
 /**
- * Values larger than Hue's inline limit travel apart from their span: the SDK uploads the value's
- * bytes straight to the project's evidence store through a presigned PUT that Hue answers at
- * `POST /api/v1/otlp/blobs`, keeps the value's first 16 KiB in the attribute it replaced, and
- * lists the value in the span attribute `hue.blobs`. A value that cannot be uploaded is exported
- * as it was before uploads existed: cut to the inline limit and listed under `hue.truncated` (an
- * inline file as its digest), reported as a warning and counted.
+ * Large values and binary media travel apart from their span through reservation, presigned PUT,
+ * and completion. Text keeps a 16 KiB prefix. Binary media keeps digest metadata on its part.
+ * Successful uploads are listed in `hue.blobs`; failures keep inline fallback or file metadata,
+ * are reported as warnings, and are counted.
  */
 
 /** The span attribute listing the values the SDK uploaded apart from the span: one compact JSON
- * object per value, `{"key", "sha256", "size", "content_type"}`, as Hue reads it. */
+ * object per value, `{"key", "sha256", "size", "content_type"}`, with an optional `name`. */
 export const BLOBS_KEY = "hue.blobs";
 /** The largest value one upload may hold (`Hue-Max-Blob-Bytes`): a larger value is cut inline. */
 export const MAX_BLOB_BYTES = 1_000_000_000;
@@ -63,18 +65,18 @@ export function uploadBudgetMillis(timeoutMillis: number): number {
   return timeoutMillis * 6;
 }
 
-/** Why a value over the inline limit was exported cut instead of uploaded. */
+/** Why content kept its fallback instead of being uploaded. */
 export type FallbackReason = "unsupported" | "failed" | "tooLarge" | "budget";
 
 /** The fixed description of each fallback, as an export issue reports it. */
 export const FALLBACK_MESSAGES: Record<FallbackReason, string> = {
   unsupported:
-    "This Hue server does not accept uploaded values; values over its inline limit were exported cut to it (inline files as their digest)",
+    "This Hue server does not accept uploaded values; large values were cut inline and media kept digest metadata",
   failed:
-    "Values over Hue's inline limit could not be uploaded; they were exported cut to it (inline files as their digest)",
-  tooLarge: "Values over Hue's 1 GB upload limit were exported cut to the inline limit",
+    "Content could not be uploaded; large values were cut inline and media kept digest metadata",
+  tooLarge: "Content over its upload limit kept inline fallback or file metadata",
   budget:
-    "Values over Hue's inline limit did not fit the SDK's upload budget; they were exported cut to it (inline files as their digest)",
+    "Content did not fit the SDK's upload budget; large values were cut inline and media kept digest metadata",
 };
 
 /** A span's own attribute value the redaction left whole for the upload step to place. */
@@ -88,6 +90,19 @@ export interface OffloadCandidate {
 export interface OffloadCollector {
   candidates: OffloadCandidate[];
   cut: string[];
+  attachments?: MediaAttachment[];
+  /** The span's own message attributes admission inspected within the record's allowance:
+   * export inspects only these. Absent for a record admission did not copy, which export
+   * inspects within its own allowance. */
+  inspected?: ReadonlySet<string> | undefined;
+}
+
+export interface MediaAttachment {
+  bytes: Uint8Array;
+  digest: FileDigest;
+  contentType: string;
+  name?: string;
+  eventTime?: HrTime;
 }
 
 /** The outcome of one export's uploads, reported once the export's records are placed. */
@@ -100,24 +115,16 @@ export function newTally(): OffloadTally {
   return { uploaded: 0, fallbacks: new Map() };
 }
 
-function countFallback(tally: OffloadTally, reason: FallbackReason, traceId: string): void {
+export function countFallback(tally: OffloadTally, reason: FallbackReason, traceId: string): void {
   const entry = tally.fallbacks.get(reason) ?? { count: 0, traceIds: new Set<string>() };
   entry.count++;
   entry.traceIds.add(traceId);
   tally.fallbacks.set(reason, entry);
 }
 
-/** A media type Hue accepts for a value: `type/subtype` with optional parameters, 3 to 255
- * printable ASCII characters. */
-const CONTENT_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9!#$&^_.+-]+(?: *;[ -~]*)?$/;
-
+/** A media type accepted by the upload contract. */
 export function isBlobContentType(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length >= 3 &&
-    value.length <= 255 &&
-    CONTENT_TYPE.test(value)
-  );
+  return isMediaContentType(value);
 }
 
 function isBlobKey(key: string): boolean {
@@ -138,15 +145,6 @@ export function textContentType(text: string): string {
     (head.startsWith("[") && tail.endsWith("]"))
     ? "application/json"
     : "text/plain; charset=utf-8";
-}
-
-/** The media type an inline file is stored under: the part's own (`mime_type`, `mediaType`), its
- * `data:` URL's, or else bytes, or UTF-8 text for content that was not encoded. */
-function fileContentType(part: Record<string, unknown>, file: InlineFileBytes): string {
-  for (const declared of [part.mime_type, part.mimeType, part.mediaType, part.media_type])
-    if (isBlobContentType(declared)) return declared;
-  if (isBlobContentType(file.urlMediaType)) return file.urlMediaType;
-  return file.decoded ? "application/octet-stream" : "text/plain; charset=utf-8";
 }
 
 /** What an uploaded value keeps inline: its first 16 KiB (text cut back to a character), held
@@ -205,8 +203,20 @@ export async function digestOf(
 }
 
 /** The `hue.blobs` element for one uploaded value. */
-function blobEntry(key: string, sha256: string, size: number, contentType: string): string {
-  return JSON.stringify({ key, sha256, size, content_type: contentType });
+export function blobEntry(
+  key: string,
+  sha256: string,
+  size: number,
+  contentType: string,
+  name?: string,
+): string {
+  return JSON.stringify({
+    key,
+    sha256,
+    size,
+    content_type: contentType,
+    ...(name ? { name } : {}),
+  });
 }
 
 /** What one export's uploads share: their deadline, and the export's hold for a receiver that
@@ -282,6 +292,7 @@ export class BlobUploader {
   private running = 0;
   private waiting: (() => void)[] = [];
   private requests = new Set<ClientRequest>();
+  private outcomes = new Map<string, { promise: Promise<Outcome>; settled: boolean }>();
 
   constructor(private readonly options: UploaderOptions) {}
 
@@ -300,6 +311,7 @@ export class BlobUploader {
     this.closed = true;
     for (const request of this.requests) request.destroy();
     this.requests.clear();
+    this.outcomes.clear();
     for (const run of this.waiting.splice(0)) {
       this.running++;
       run();
@@ -335,14 +347,62 @@ export class BlobUploader {
 
   /**
    * Stores `value` under `key` of the trace: reserved, uploaded unless Hue already holds it, and
-   * completed. The caller holds a {@link limit} slot.
+   * completed. Only a fresh upload takes a {@link limit} slot: another reference to bytes the
+   * trace is already storing shares that upload's outcome without one, so repeated files never
+   * hold the slots new files need. The caller must not hold a slot.
    */
   async store(
     traceId: string,
     key: string,
     value: string | Uint8Array,
     contentType: string,
-    digest: { sha256: string; size: number },
+    digest: FileDigest,
+    upload: UploadContext,
+  ): Promise<Outcome> {
+    // Every occurrence is validated even when a previous occurrence already uploaded the bytes.
+    if (
+      !isBlobKey(key) ||
+      !isBlobContentType(contentType) ||
+      !/^[0-9a-f]{32}$/.test(traceId) ||
+      /^0+$/.test(traceId) ||
+      !/^[0-9a-f]{64}$/.test(digest.sha256) ||
+      !Number.isSafeInteger(digest.size) ||
+      digest.size <= 0 ||
+      digest.size !== sizeOf(value)
+    )
+      return { ok: false, reason: "failed" };
+    if (digest.size > MAX_BLOB_BYTES) return { ok: false, reason: "tooLarge" };
+    const identity = `${traceId}:${digest.sha256}`;
+    const known = this.outcomes.get(identity);
+    if (known) return known.promise;
+    if (this.outcomes.size >= 4096) {
+      const oldest = [...this.outcomes].find(([, item]) => item.settled)?.[0];
+      if (oldest === undefined) return { ok: false, reason: "budget" };
+      this.outcomes.delete(oldest);
+    }
+    const item = {
+      promise: Promise.resolve<Outcome>({ ok: false, reason: "failed" }),
+      settled: false,
+    };
+    this.outcomes.set(identity, item);
+    item.promise = this.limit(() =>
+      this.storeFresh(traceId, key, value, contentType, digest, upload),
+    )
+      .catch((): Outcome => ({ ok: false, reason: "failed" }))
+      .then((outcome) => {
+        item.settled = true;
+        if (!outcome.ok && this.outcomes.get(identity) === item) this.outcomes.delete(identity);
+        return outcome;
+      });
+    return item.promise;
+  }
+
+  private async storeFresh(
+    traceId: string,
+    key: string,
+    value: string | Uint8Array,
+    contentType: string,
+    digest: FileDigest,
     upload: UploadContext,
   ): Promise<Outcome> {
     const refused = this.refusal();
@@ -387,10 +447,10 @@ export class BlobUploader {
       reservation = await this.reserve(body, digest.size, upload);
     }
     if ("fallback" in reservation) return { ok: false, reason: reservation.fallback };
-    if (!reservation.exists)
+    if (!reservation.exists) {
       // For Hue's accounting only: a value is read whether or not it was completed, so a failed
       // completion is not retried.
-      await this.request(
+      const completion = await this.request(
         "POST",
         new URL("/api/v1/otlp/blobs/complete", this.options.baseUrl),
         this.jsonHeaders(),
@@ -398,6 +458,8 @@ export class BlobUploader {
         Math.min(upload.deadline, Date.now() + this.options.timeoutMillis),
         MAX_JSON_RESPONSE_BYTES,
       );
+      if (!completion || completion.status >= 500 || completion.status === 429) this.pause();
+    }
     return { ok: true, contentType: reservation.contentType };
   }
 
@@ -429,7 +491,8 @@ export class BlobUploader {
         return { fallback: "failed" };
       }
       const { status } = reply;
-      const answer = status === 200 || status === 404 ? parseJson(reply.body) : undefined;
+      const answer =
+        status === 200 || status === 404 || status === 409 ? parseJson(reply.body) : undefined;
       // A receiver without the route answers its framework's not-found (Hue's own 404, an
       // archived project, is JSON with an `error`), refuses the method, or answers something
       // that is no reservation at all: it is not asked again for a while.
@@ -449,10 +512,13 @@ export class BlobUploader {
         if ("fallback" in reservation) this.pause();
         return reservation;
       }
+      if (status === 409 && isObject(answer) && answer.status === "exists")
+        return this.reservation(answer, size);
       if (status === 413) return { fallback: "tooLarge" };
       if (status === 429) {
         const wait = retryAfterMillis(reply.headers) ?? RETRY_DELAY_MILLIS;
         if (Date.now() + wait < upload.deadline && (await upload.wait(wait))) continue;
+        this.pause();
         return { fallback: "failed" };
       }
       if (status >= 500) {
@@ -462,12 +528,11 @@ export class BlobUploader {
         this.pause();
         return { fallback: "failed" };
       }
-      // A conflict over this value alone (409) fails only it. Any other refusal (a refused key,
-      // an archived project, a request Hue could not read, a redirect) would meet every value
-      // alike, so uploads pause; the export's own requests report a key problem.
-      if (status !== 409) this.pause();
+      // Bad values and conflicts refuse only this value. Transient service failures pause uploads.
+      if (status !== 400 && status !== 409) this.pause();
       return { fallback: "failed" };
     }
+    this.pause();
     return { fallback: "failed" };
   }
 
@@ -547,7 +612,7 @@ export class BlobUploader {
     if ((reply.status >= 200 && reply.status < 300) || reply.status === 412) return "stored";
     if (reply.status === 403)
       return reply.body.toString("utf8").includes("Request has expired") ? "expired" : "failed";
-    if (reply.status >= 500 || reply.status === 408) return "transient";
+    if (reply.status >= 500 || reply.status === 408 || reply.status === 429) return "transient";
     return "failed";
   }
 
@@ -666,12 +731,13 @@ export interface OffloadOptions {
   valueBytes: number;
   upload: UploadContext;
   tally: OffloadTally;
+  memo?: MediaDigestMemo;
 }
 
 /**
- * A span's own attributes with each candidate placed: an inline file part over 64 KiB in a
- * recorded message uploaded and replaced by its first 16 KiB (or by its digest, as before, when
- * it could not be), and a value still over the inline limit uploaded and replaced by its first
+ * A span's own attributes with each candidate placed: binary media becomes a digest, while
+ * text media over 64 KiB retains a 16 KiB prefix after upload or a digest on failure.
+ * A value still over the inline limit is uploaded and replaced by its first
  * 16 KiB (or cut to the limit), each upload listed under `hue.blobs`, each whole value cut or
  * uploaded listed under `hue.truncated`. Every fallback is counted in the tally.
  */
@@ -699,16 +765,15 @@ export async function offloadAttributes(
   let inspected = 0;
 
   const parts = async (index: number, key: string, text: string): Promise<string> => {
-    if (
-      !isMessageKey(key) ||
-      text.length * 3 <= INLINE_FILE_LIMIT ||
-      !(text.includes('"blob"') || text.includes('"file"'))
-    )
-      return text;
-    const bytes = Buffer.byteLength(text, "utf8");
-    if (bytes <= INLINE_FILE_LIMIT || bytes > MAX_INLINE_FILE_TEXT) return text;
-    if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
-    inspected += text.length;
+    // Both bounds count UTF-16 code units, as admission does.
+    if (!mayInlineFiles(key, text) || text.length > MAX_INLINE_FILE_TEXT) return text;
+    if (collector.inspected) {
+      // A message admission skipped stays as recorded.
+      if (!collector.inspected.has(key)) return text;
+    } else {
+      if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
+      inspected += text.length;
+    }
     let parsed: unknown;
     let found: ReturnType<typeof largeInlineFileParts>;
     try {
@@ -721,38 +786,34 @@ export async function offloadAttributes(
     let changed = false;
     await Promise.all(
       found.map((file, position) => {
-        const partKey = `${key}#${file.pointer}`;
+        const decoded = mediaBytes(file);
+        if (!decoded.bytes.byteLength) return Promise.resolve();
+        const contentType = mediaContentType(file, decoded);
+        const textual = isTextMediaType(contentType);
+        if (textual && decoded.bytes.byteLength <= INLINE_FILE_LIMIT) return Promise.resolve();
+        const partKey = `${key}#${textual ? file.pointer : file.partPointer}`;
         const slot = slots > 0 && isBlobKey(partKey) ? (slots--, true) : false;
-        return uploader.limit(async () => {
-          const decoded = inlineFileBytes(file.content);
-          if (decoded.bytes.byteLength <= INLINE_FILE_LIMIT) {
-            if (slot) slots++;
-            return;
-          }
+        return (async () => {
           changed = true;
-          const digest = await digestOf(decoded.bytes);
+          const digest = options.memo
+            ? options.memo.digest(file, decoded, traceId)
+            : await digestOf(decoded.bytes);
           const outcome: Outcome = slot
-            ? await uploader.store(
-                traceId,
-                partKey,
-                decoded.bytes,
-                fileContentType(file.part, decoded),
-                digest,
-                upload,
-              )
+            ? await uploader.store(traceId, partKey, decoded.bytes, contentType, digest, upload)
             : { ok: false, reason: "budget" };
           if (outcome.ok) {
-            file.part[file.key] = blobPrefix(file.content);
+            if (textual) file.owner[file.key] = blobPrefix(file.content);
+            else digestPart(file, digest);
             entries.push({
               order: [index, position],
-              entry: blobEntry(partKey, digest.sha256, digest.size, outcome.contentType),
+              entry: blobEntry(partKey, digest.sha256, digest.size, outcome.contentType, file.name),
             });
             tally.uploaded++;
           } else {
-            digestPart(file.part, file.key, digest);
+            digestPart(file, digest);
             fallback(outcome.reason);
           }
-        });
+        })();
       }),
     );
     return changed ? JSON.stringify(parsed) : text;
@@ -774,16 +835,15 @@ export async function offloadAttributes(
       return;
     }
     slots--;
-    const stored = await uploader.limit(async () => {
+    const stored = await (async () => {
       if (size > MAX_BLOB_BYTES) return { ok: false as const, reason: "tooLarge" as const };
-      const refused = uploader.refusal();
-      if (refused) return { ok: false as const, reason: refused };
-      const digest = await digestOf(placed);
+      // Hashing a large value takes a slot as its upload does; the upload takes its own.
+      const digest = await uploader.limit(() => digestOf(placed));
       const contentType =
         typeof placed === "string" ? textContentType(placed) : "application/octet-stream";
       const outcome = await uploader.store(traceId, key, placed, contentType, digest, upload);
       return outcome.ok ? { ...outcome, digest } : outcome;
-    });
+    })();
     if (stored.ok) {
       result[key] = typeof placed === "string" ? blobPrefix(placed) : blobPrefix(placed);
       entries.push({
@@ -798,6 +858,31 @@ export async function offloadAttributes(
   };
 
   await Promise.all(collector.candidates.map((candidate, index) => place(index, candidate)));
+  await Promise.all(
+    (collector.attachments ?? []).map((file, position) => {
+      if (!file.bytes.byteLength) return Promise.resolve();
+      const slot = slots > 0 ? (slots--, true) : false;
+      return (async () => {
+        const key = `event:hue.file:${file.digest.sha256}`;
+        const outcome: Outcome = slot
+          ? await uploader.store(traceId, key, file.bytes, file.contentType, file.digest, upload)
+          : { ok: false, reason: "budget" };
+        if (outcome.ok) {
+          entries.push({
+            order: [collector.candidates.length, position],
+            entry: blobEntry(
+              key,
+              file.digest.sha256,
+              file.digest.size,
+              outcome.contentType,
+              file.name,
+            ),
+          });
+          tally.uploaded++;
+        } else fallback(outcome.reason);
+      })();
+    }),
+  );
   if (listed.length)
     result[TRUNCATED_KEY] = withTruncatedKeys(
       result[TRUNCATED_KEY],
@@ -822,9 +907,11 @@ export function fallbackAttributes(
   valueBytes: number,
   tally: OffloadTally,
   traceId: string,
+  memo?: MediaDigestMemo,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = { ...attributes };
   const listed: string[] = [];
+  for (const _file of collector.attachments ?? []) countFallback(tally, "failed", traceId);
   for (let index = 0; index < collector.cut.length; index++)
     countFallback(tally, "failed", traceId);
   for (const { key, value } of collector.candidates) {
@@ -832,7 +919,8 @@ export function fallbackAttributes(
     // Each large inline file is reported as a value not uploaded, as the upload step reports it.
     const count = { files: 0 };
     try {
-      placed = hashInlineFiles(key, value, count);
+      if (!collector.inspected || collector.inspected.has(key))
+        placed = hashInlineFiles(key, value, count, memo, traceId);
     } catch {
       // Left as it is: cut below when over the limit.
     }

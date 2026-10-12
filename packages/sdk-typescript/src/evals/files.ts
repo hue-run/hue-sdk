@@ -32,6 +32,18 @@ export const outputContentTypes: readonly string[] = [
   "image/png",
   "image/jpeg",
   "image/webp",
+  "image/gif",
+  "image/avif",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/ogg",
+  "audio/webm",
+  "audio/mp4",
+  "audio/flac",
+  "audio/opus",
+  "audio/aac",
+  "video/mp4",
+  "video/webm",
 ];
 
 /** A generated file the runner copied next to its checkpoint before uploading it. */

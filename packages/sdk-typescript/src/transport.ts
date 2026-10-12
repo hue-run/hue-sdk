@@ -1,6 +1,6 @@
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
-import type { Attributes } from "@opentelemetry/api";
+import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import {
   createOtlpNetworkExportDelegate,
@@ -31,6 +31,10 @@ import {
 } from "@opentelemetry/sdk-logs";
 import { isInsecureOrigin, REDACTION_CONTEXT_UNITS, validateOptions } from "./config.js";
 import {
+  BLOBS_KEY,
+  MAX_BLOB_ENTRIES,
+  blobEntry,
+  countFallback,
   BlobUploader,
   FALLBACK_MESSAGES,
   fallbackAttributes,
@@ -39,6 +43,7 @@ import {
   offloadAttributes,
   uploadBudgetMillis,
   type OffloadCollector,
+  type MediaAttachment,
   type OffloadTally,
   type UploadContext,
 } from "./blobs.js";
@@ -57,7 +62,8 @@ import {
   PLACEHOLDERS_HEADER,
   withoutPlaceholderMarkers,
 } from "./live-spans.js";
-import { estimateRecordBytes } from "./safety.js";
+import { estimateRecordBytes, spanSource } from "./safety.js";
+import { MediaDigestMemo, isMediaName } from "./inline-files.js";
 import { snapshotLog, snapshotSpan, type DigestedMessage } from "./snapshot.js";
 import {
   DROPPED_RECORDS_KEY,
@@ -107,6 +113,7 @@ interface ExportSink {
   receiverLimits(): ReceiverLimits;
   adoptLimits(headers: IncomingHttpHeaders): void;
   offloadsValues(): boolean;
+  mediaAttachments(record: RecordValue): MediaAttachment[];
   offloadSpan(
     span: ReadableSpan,
     collector: OffloadCollector,
@@ -114,6 +121,53 @@ interface ExportSink {
     tally: OffloadTally,
   ): Promise<ReadableSpan>;
   reportOffload(tally: OffloadTally): void;
+}
+
+/** Each surviving event authorizes one staged request, including repeated digests. */
+function survivingMedia(
+  files: readonly MediaAttachment[],
+  span: ReadableSpan,
+  tally: OffloadTally,
+): MediaAttachment[] {
+  const consumed = new Set<number>();
+  const traceId = span.spanContext().traceId;
+  return files.flatMap((file) => {
+    const index = span.events.findIndex(
+      (event, index) =>
+        !consumed.has(index) &&
+        event.name === "hue.file" &&
+        (!file.eventTime ||
+          (event.time[0] === file.eventTime[0] && event.time[1] === file.eventTime[1])) &&
+        event.attributes?.["hue.file.sha256"] === file.digest.sha256 &&
+        event.attributes?.["hue.file.size"] === file.digest.size &&
+        event.attributes?.["hue.file.media_type"] === file.contentType,
+    );
+    if (index < 0) {
+      countFallback(tally, "budget", traceId);
+      return [];
+    }
+    consumed.add(index);
+    const name = span.events[index]!.attributes?.["hue.file.name"];
+    return [
+      {
+        bytes: file.bytes,
+        digest: file.digest,
+        contentType: file.contentType,
+        ...(file.eventTime ? { eventTime: file.eventTime } : {}),
+        ...(isMediaName(name) ? { name } : {}),
+      },
+    ];
+  });
+}
+
+function mediaEntry(file: MediaAttachment): string {
+  return blobEntry(
+    `event:hue.file:${file.digest.sha256}`,
+    file.digest.sha256,
+    file.digest.size,
+    file.contentType,
+    file.name,
+  );
 }
 
 /**
@@ -230,11 +284,24 @@ export class HueTransport {
   private admissionCuts = new WeakMap<RecordValue, ReadonlySet<string>>();
   // The span's own messages whose large inline files each admitted span shrank to their digest.
   private admissionDigests = new WeakMap<RecordValue, ReadonlyMap<string, DigestedMessage>>();
+  // The span's own messages each admitted span inspected, or left to export to inspect.
+  private admissionInspected = new WeakMap<RecordValue, ReadonlySet<string>>();
   /** Uploads values over the inline limit apart from their spans; absent when disabled. */
   private uploader?: BlobUploader;
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
   private heldBytes = 0;
   private held = new WeakMap<RecordValue, number>();
+  private mediaMemo = new MediaDigestMemo();
+  // Context identity also matches safe API wrappers to the provider's ended span. Abandoned
+  // spans retain no span objects, and share the 2048-span / 128 MiB holding bounds.
+  private media = new Map<string, MediaAttachment[]>();
+  private mediaOwners = new Map<string, { source: WeakRef<ApiSpan>; token: object }>();
+  private mediaTimer?: ReturnType<typeof setInterval>;
+  private mediaFinalizer = new FinalizationRegistry<{ identity: string; token: object }>(
+    ({ identity, token }) => {
+      if (this.mediaOwners.get(identity)?.token === token) this.releaseMediaIdentity(identity);
+    },
+  );
   private uploaded = 0;
   private uploadFallbacks = 0;
 
@@ -248,13 +315,16 @@ export class HueTransport {
       "traces",
       ProtobufTraceSerializer,
       TraceExporterMetricsHelper,
-      (span, cache, offload) =>
-        redactSpan(span, this.options, cache, {
+      (span, cache, offload) => {
+        // Export inspects only the messages admission inspected within the record's allowance.
+        if (offload) offload.inspected = this.admissionInspected.get(span);
+        return redactSpan(span, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
           digested: this.admissionDigests.get(span),
           ...(offload ? { offload } : {}),
-        }),
+        });
+      },
     );
     this.logExporter = new ReportingExporter(
       this,
@@ -310,14 +380,26 @@ export class HueTransport {
         if (this.live.delete(span) && !this.live.size) this.stopLiveTimer();
         let admitted: ReadableSpan | undefined;
         try {
-          if (!(span.spanContext().traceFlags & 1)) return;
+          if (!(span.spanContext().traceFlags & 1)) {
+            this.releaseMedia(span);
+            return;
+          }
           const queued = this.enqueue("traces", span);
-          if (!queued) return;
+          if (!queued) {
+            const tally = newTally();
+            for (const file of this.mediaAttachments(span))
+              if (file.bytes.byteLength) countFallback(tally, "budget", span.spanContext().traceId);
+            this.reportOffload(tally);
+            this.releaseMedia(span);
+            return;
+          }
           admitted = queued as ReadableSpan;
+          this.protectMedia(admitted);
           this.countEnded(admitted);
           spans.onEnd(admitted);
         } catch {
           if (admitted) this.finish("traces", [admitted]);
+          else this.releaseMedia(span);
           this.issue(
             "traces",
             "invalid",
@@ -408,6 +490,7 @@ export class HueTransport {
               this.options.captureContent,
               valueUnits,
               hold,
+              this.mediaMemo,
             )
           : snapshotLog(
               record as ReadableLogRecord,
@@ -417,6 +500,7 @@ export class HueTransport {
             );
       if (snapshot.cut.size) this.admissionCuts.set(snapshot.record, snapshot.cut);
       if (snapshot.digested.size) this.admissionDigests.set(snapshot.record, snapshot.digested);
+      if (signal === "traces") this.admissionInspected.set(snapshot.record, snapshot.inspected);
       if (snapshot.held) {
         this.heldBytes += snapshot.held;
         this.held.set(snapshot.record, snapshot.held);
@@ -468,7 +552,11 @@ export class HueTransport {
       this.live.delete(span);
       try {
         // Ended without reaching onEnd: a wrapping processor filtered it, so no real span follows.
-        if (!this.liveSpans || span.ended || !this.batchSpans) continue;
+        if (span.ended) {
+          this.releaseMedia(span);
+          continue;
+        }
+        if (!this.liveSpans || !this.batchSpans) continue;
         const { record, markers } = pendingPlaceholder(span);
         const admitted = this.enqueue("traces", record, true) as ReadableSpan | undefined;
         if (!admitted) continue;
@@ -536,6 +624,7 @@ export class HueTransport {
   /** @internal Exporter callback: releases queued records after an export attempt settles. */
   finish(signal: Signal, records: RecordValue[]): void {
     for (const record of records) {
+      this.releaseMedia(record);
       const pending = signal === "traces" ? this.spans : this.logs;
       this.pendingBytes -= pending.get(record as ReadableSpan & ReadableLogRecord) ?? 0;
       pending.delete(record as ReadableSpan & ReadableLogRecord);
@@ -547,7 +636,129 @@ export class HueTransport {
     }
   }
 
-  /** @internal Whether spans' values over the inline limit are uploaded: content is captured and
+  /** @internal The same bounded digest memo is used by explicit and inline media. */
+  digestMedia(bytes: Uint8Array, traceId: string) {
+    return this.mediaMemo.bytes(bytes, traceId);
+  }
+
+  /** @internal Retain a defensive copy within the existing held-value budget. */
+  stageMedia(span: ApiSpan, file?: MediaAttachment): boolean {
+    if (this.closed || !this.offloadsValues() || file?.bytes.byteLength === 0) return true;
+    if (!file) {
+      const tally = newTally();
+      countFallback(tally, "budget", span.spanContext().traceId);
+      this.reportOffload(tally);
+      return false;
+    }
+    if (!this.holdsValues()) {
+      this.uploadFallbacks++;
+      this.issue(
+        "traces",
+        "warning",
+        1,
+        "File bytes could not be uploaded while the upload service was unavailable; their hue.file metadata was recorded",
+        undefined,
+        [span.spanContext().traceId],
+      );
+      return false;
+    }
+    const identity = this.mediaIdentity(span)!;
+    this.sweepMedia();
+    const files = this.media.get(identity) ?? [];
+    if (
+      files.length >= 64 ||
+      (!this.media.has(identity) && this.media.size >= 2048) ||
+      this.heldBytes + file.bytes.byteLength > MAX_HELD_BLOB_BYTES
+    ) {
+      this.uploadFallbacks++;
+      this.issue(
+        "traces",
+        "warning",
+        1,
+        "File bytes did not fit the SDK's upload budget; their hue.file metadata was recorded",
+        undefined,
+        [span.spanContext().traceId],
+      );
+      return false;
+    }
+    const bytes = Uint8Array.from(file.bytes);
+    files.push({ ...file, bytes });
+    this.media.set(identity, files);
+    if (!this.mediaOwners.has(identity)) {
+      const source = spanSource(span);
+      const token = {};
+      this.mediaOwners.set(identity, { source: new WeakRef(source), token });
+      this.mediaFinalizer.register(source, { identity, token }, token);
+      if (!this.mediaTimer) {
+        this.mediaTimer = setInterval(() => this.sweepMedia(), LIVE_SPAN_INTERVAL_MILLIS);
+        this.mediaTimer.unref();
+      }
+    }
+    this.heldBytes += bytes.byteLength;
+    return true;
+  }
+
+  private mediaIdentity(record: object): string | undefined {
+    if (!("spanContext" in record) || typeof record.spanContext !== "function") return undefined;
+    const { traceId, spanId } = record.spanContext();
+    return `${traceId}:${spanId}`;
+  }
+
+  private releaseMedia(record: object): void {
+    const identity = this.mediaIdentity(record);
+    if (!identity) return;
+    this.releaseMediaIdentity(identity);
+  }
+
+  private protectMedia(record: object): void {
+    const identity = this.mediaIdentity(record);
+    if (!identity) return;
+    const owner = this.mediaOwners.get(identity);
+    if (owner) this.mediaFinalizer.unregister(owner.token);
+    this.mediaOwners.delete(identity);
+    if (!this.mediaOwners.size) {
+      clearInterval(this.mediaTimer);
+      this.mediaTimer = undefined;
+    }
+  }
+
+  private releaseMediaIdentity(identity: string): void {
+    const owner = this.mediaOwners.get(identity);
+    if (owner) this.mediaFinalizer.unregister(owner.token);
+    this.mediaOwners.delete(identity);
+    if (!this.mediaOwners.size) {
+      clearInterval(this.mediaTimer);
+      this.mediaTimer = undefined;
+    }
+    const files = this.media.get(identity);
+    if (!files) return;
+    for (const file of files) this.heldBytes -= file.bytes.byteLength;
+    this.media.delete(identity);
+  }
+
+  private sweepMedia(): void {
+    for (const [identity, owner] of this.mediaOwners) {
+      try {
+        const source = owner.source.deref();
+        if (
+          !source ||
+          (source as ApiSpan & { ended?: boolean }).ended === true ||
+          source.isRecording?.() === false
+        )
+          this.releaseMediaIdentity(identity);
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  /** @internal Staged requests are matched against surviving events before upload. */
+  mediaAttachments(record: RecordValue): MediaAttachment[] {
+    const identity = this.mediaIdentity(record);
+    return identity ? (this.media.get(identity) ?? []) : [];
+  }
+
+  /** @internal Whether spans' content and media may be uploaded: content is captured and
    * the key is a project key (setup credentials send metadata only). A value that then cannot be
    * uploaded is cut, reported and counted. */
   offloadsValues(): boolean {
@@ -558,7 +769,7 @@ export class HueTransport {
     );
   }
 
-  /** @internal Whether values over the inline limit are worth holding whole for upload now: they
+  /** @internal Whether content and media are worth holding whole for upload now: they
    * are uploaded, and the receiver has not shown it lacks the upload route. */
   holdsValues(): boolean {
     return this.offloadsValues() && this.uploader?.available() === true;
@@ -587,6 +798,7 @@ export class HueTransport {
         valueBytes,
         upload,
         tally,
+        memo: this.mediaMemo,
       });
       return { ...span, attributes: attributes as Attributes };
     } catch {
@@ -598,6 +810,7 @@ export class HueTransport {
           valueBytes,
           tally,
           traceId,
+          this.mediaMemo,
         ) as Attributes,
       };
     }
@@ -873,6 +1086,10 @@ export class HueTransport {
           this.spanProcessor.shutdown(),
           this.logRecordProcessor.shutdown(),
         ]);
+        await Promise.allSettled([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+        this.uploader?.close();
+        for (const identity of this.media.keys()) this.releaseMediaIdentity(identity);
+        this.mediaMemo.clear();
       }
     })();
     return this.shutdownPromise;
@@ -1118,7 +1335,13 @@ class ReportingExporter<T extends RecordValue> {
       },
     };
     const tally = newTally();
-    const placed: { record: T; markers?: Attributes; redacted: T | Promise<T> }[] = [];
+    const helpers = new Map<T, { files: MediaAttachment[]; baseline: string[] }>();
+    const placed: {
+      record: T;
+      markers?: Attributes;
+      files: MediaAttachment[];
+      redacted: T | Promise<T>;
+    }[] = [];
     for (const { record, markers } of this.ordered(records)) {
       try {
         const ready = record.resource.waitForAsyncAttributes?.();
@@ -1143,8 +1366,12 @@ class ReportingExporter<T extends RecordValue> {
             ? { candidates: [], cut: [] }
             : undefined;
         const redacted = this.redact(record, cache, offload);
+        const files = offload
+          ? survivingMedia(this.transport.mediaAttachments(record), redacted as ReadableSpan, tally)
+          : [];
         placed.push({
           record,
+          files,
           ...(markers ? { markers } : {}),
           redacted:
             offload && (offload.candidates.length || offload.cut.length)
@@ -1157,6 +1384,11 @@ class ReportingExporter<T extends RecordValue> {
               : redacted,
         });
       } catch {
+        if (!markers && this.signal === "traces" && this.transport.offloadsValues()) {
+          const files = this.transport.mediaAttachments(record);
+          for (let index = 0; index < files.length; index++)
+            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
+        }
         invalid(
           markers !== undefined,
           "Telemetry record could not be redacted or exceeds supported content limits",
@@ -1164,7 +1396,8 @@ class ReportingExporter<T extends RecordValue> {
         );
       }
     }
-    for (const { record, markers, redacted: placing } of placed) {
+    for (const { record, markers, files, redacted: placing } of placed) {
+      let retained = files;
       try {
         let redacted = await placing;
         // Added after redaction, so a redactor cannot alter the markers or the parent identity.
@@ -1178,6 +1411,27 @@ class ReportingExporter<T extends RecordValue> {
           const kept = withoutPlaceholderMarkers(attributes);
           if (kept !== attributes) redacted = { ...redacted, attributes: kept };
         }
+        if (files.length) {
+          const span = redacted as ReadableSpan;
+          const listed = span.attributes[BLOBS_KEY];
+          const baseline = Array.isArray(listed)
+            ? listed.filter((entry): entry is string => typeof entry === "string")
+            : [];
+          retained = files.slice(0, Math.max(0, MAX_BLOB_ENTRIES - baseline.length));
+          for (let index = retained.length; index < files.length; index++)
+            countFallback(tally, "budget", span.spanContext().traceId);
+          if (retained.length) {
+            // Fit the event and its reference together before sending customer bytes.
+            redacted = {
+              ...redacted,
+              attributes: {
+                ...span.attributes,
+                [BLOBS_KEY]: [...baseline, ...retained.map(mediaEntry)],
+              },
+            };
+            helpers.set(redacted, { files: retained, baseline });
+          }
+        }
         const bytes =
           512 +
           estimateRecordBytes(
@@ -1189,6 +1443,8 @@ class ReportingExporter<T extends RecordValue> {
         redactedBytes += bytes;
         (markers ? pending : real).push(redacted);
       } catch {
+        for (let index = 0; index < retained.length; index++)
+          countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
         invalid(
           markers !== undefined,
           "Telemetry record could not be redacted or exceeds supported content limits",
@@ -1269,7 +1525,6 @@ class ReportingExporter<T extends RecordValue> {
       // export may have adopted lower ones meanwhile, and each attempt checks them again.
       return fitsLimits(body, this.transport.receiverLimits()) ? body : undefined;
     };
-    this.transport.reportOffload(tally);
     /** Sends one kind of record (completed records, or placeholders alone: `advisory`) in one
      * request, or in halves when it is over the receiver's limits. A trace's root among completed
      * records carries the trace's dropped-record count as it stands when its request is made, so
@@ -1338,24 +1593,89 @@ class ReportingExporter<T extends RecordValue> {
     const pack = async (accepted: T[], advisory: boolean) => {
       // Every record is measured, shed and, where it cannot be sent, counted lost before any root
       // is written, so a root carries the losses of children that ended after it.
-      const prepared: { record: T; bytes: number }[] = [];
+      const admitted: {
+        fitted: { record: T; bytes: number };
+        attachments?: { span: ReadableSpan; files: MediaAttachment[] };
+      }[] = [];
       for (const record of accepted) {
         let fitted: { record: T; bytes: number } | undefined;
+        let attachments: { span: ReadableSpan; files: MediaAttachment[] } | undefined;
+        const helper = helpers.get(record);
+        let remaining = helper?.files ?? [];
         try {
           fitted = await fit(record);
+          if (fitted && helper) {
+            const span = fitted.record as ReadableSpan;
+            const matched = survivingMedia(remaining, span, tally);
+            remaining = matched;
+            const listed = span.attributes[BLOBS_KEY];
+            const entries = Array.isArray(listed) ? [...listed] : [];
+            const files = matched.filter((file) => {
+              const index = entries.indexOf(mediaEntry(file), helper.baseline.length);
+              if (index < 0) {
+                countFallback(tally, "budget", span.spanContext().traceId);
+                return false;
+              }
+              entries.splice(index, 1);
+              return true;
+            });
+            remaining = files;
+            // Drop provisional entries, retaining only the original references after fitting.
+            const attributes = { ...span.attributes };
+            if (Array.isArray(listed)) {
+              const baseline = listed.slice(0, helper.baseline.length);
+              if (baseline.length) attributes[BLOBS_KEY] = baseline;
+              else delete attributes[BLOBS_KEY];
+            }
+            attachments = { span: { ...span, attributes }, files };
+            remaining = [];
+          }
         } catch {
+          for (let index = 0; index < remaining.length; index++)
+            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
           invalid(advisory, "Telemetry record could not be serialized", record);
           continue;
         }
         if (!fitted) {
+          for (let index = 0; index < remaining.length; index++)
+            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
           invalid(advisory, OVER_REQUEST_LIMIT, record);
           continue;
         }
-        prepared.push(fitted);
+        admitted.push({ fitted, attachments });
       }
+      // Decide every event/reference admission before starting helper uploads. The shared
+      // uploader's four workers place files across spans under the same upload deadline.
+      const placed = await Promise.all(
+        admitted.map(async ({ fitted, attachments }) => {
+          if (!attachments) return fitted;
+          try {
+            const uploaded = await this.transport.offloadSpan(
+              attachments.span,
+              { candidates: [], cut: [], attachments: attachments.files },
+              upload,
+              tally,
+            );
+            measured.delete(fitted.record);
+            // Actual references can differ when an existing object supplies its media type.
+            const final = await probe(uploaded as T);
+            if (final?.request) measured.set(final.record, final.request);
+            if (!final) invalid(advisory, OVER_REQUEST_LIMIT, fitted.record);
+            return final;
+          } catch {
+            invalid(advisory, "Telemetry record could not be serialized", fitted.record);
+            return undefined;
+          }
+        }),
+      );
+      // Preparation includes explicit file uploads. Report their outcome once, before delivery
+      // failures can consume the diagnostic callback's rate-limit slot. Placeholders never upload.
+      if (!advisory) this.transport.reportOffload(tally);
       let batch: T[] = [];
       let batchBytes = 0;
-      for (const { record, bytes: recordBytes } of prepared) {
+      for (const fitted of placed) {
+        if (!fitted) continue;
+        const { record, bytes: recordBytes } = fitted;
         const framedBytes = recordBytes + RECORD_FRAMING_BYTES;
         const target = Math.min(this.transport.receiverLimits().decodedBytes, BATCH_TARGET_BYTES);
         if (batch.length && batchBytes + framedBytes > target) {

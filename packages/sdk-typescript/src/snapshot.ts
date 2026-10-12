@@ -5,9 +5,12 @@ import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import type { ReadableLogRecord, ReadWriteLogRecord } from "@opentelemetry/sdk-logs";
 import {
   hashInlineFiles,
-  INLINE_FILE_LIMIT,
+  hashNestedInlineFiles,
+  type MediaDigestMemo,
   INLINE_FILE_TEXT_PER_RECORD,
+  MAX_INLINE_FILE_TEXT,
   isMessageKey,
+  mayInlineFiles,
 } from "./inline-files.js";
 import { scrubsToolCredentials, scrubToolCredentials } from "./tool-definitions.js";
 import { MAX_RECORD_NODES } from "./config.js";
@@ -53,7 +56,7 @@ export interface HoldLimits {
   first: boolean;
 }
 
-/** A span's own message whose large inline files shrank to their digest when it was queued: the
+/** A span's own message whose inline media shrank to their digest when it was queued: the
  * text queued, and how many files it lost. */
 export interface DigestedMessage {
   text: string;
@@ -65,6 +68,7 @@ interface Mark {
   bytes: number;
   nodes: number;
   copied: number;
+  attributesCopied: number;
 }
 
 /** Copies only exported data, with the same finite budget used for admission. */
@@ -77,17 +81,23 @@ class Snapshot {
   private nodes = 0;
   private ancestors = new Set<object>();
   private copied = new Map<object, unknown>();
+  private attributesCopied = new Map<object, unknown>();
+  private ownAttributesCopied = new Map<object, unknown>();
   private hashed = new Map<string, unknown>();
+  private nestedHashed = new Map<string, unknown>();
   private inspected = 0;
   /** Bytes of values held whole for upload, charged to the held-value budget. */
   held = 0;
   /** Set while the span's own attributes are copied: only they may be held for upload. */
   private own = false;
-  /** The span's own messages whose large inline files shrank to their digest when queued, by
+  /** The span's own messages whose inline media shrank to their digest when queued, by
    * attribute: the text queued (cut or not), and how many files it lost. */
   digested = new Map<string, DigestedMessage>();
   /** How many files each message text {@link inlineFiles} hashed replaced by their digest. */
   private hashedFiles = new Map<string, number>();
+  /** The span's own message attributes inspected within the record's allowance, whether here or
+   * left to export for a message held whole: export inspects only these. */
+  inspectedKeys = new Set<string>();
 
   /**
    * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
@@ -100,6 +110,8 @@ class Snapshot {
     private captureContent = true,
     private valueUnits = Infinity,
     private hold?: HoldLimits,
+    private memo?: MediaDigestMemo,
+    private traceId = "",
   ) {}
 
   /** Whether the held-value budget takes `bytes` more, charging them when it does. */
@@ -115,7 +127,7 @@ class Snapshot {
    * longer than the queued value length or bytes over the cap, within the held-value budget, and
    * a recorded message that may inline a large file kept as it is (export uploads the file).
    * Undefined for a value copied as before; text over the length the budget cannot hold is then
-   * cut and its large inline files shrink to their digest, as before uploads existed.
+   * cut and its inline media shrink to their digest, as before uploads existed.
    */
   private heldValue(key: string, value: unknown): { value: unknown } | undefined {
     if (!this.hold || !this.own) return undefined;
@@ -125,9 +137,18 @@ class Snapshot {
         const fallback = this.valueUnits * 2 + 16;
         if (this.bytes + fallback > this.limit || !this.holds(value.length * 2)) return undefined;
         this.charge(fallback);
+        // Export parses the held message; its inspection allowance is taken here, in order.
+        if (
+          value.length <= MAX_INLINE_FILE_TEXT &&
+          mayInlineFiles(key, value) &&
+          this.inspected + value.length <= INLINE_FILE_TEXT_PER_RECORD
+        ) {
+          this.inspected += value.length;
+          this.inspectedKeys.add(key);
+        }
         return { value };
       }
-      // Within the queued length: a recorded message holding a large inline file is held whole
+      // Within the queued length: a recorded message holding an inline media part is held whole
       // for export to upload the file, within the held-value budget, and the queue is charged
       // its copy with the files as their digest, as before. Past the budget, the files shrink to
       // their digest when queued, as before uploads existed.
@@ -156,7 +177,12 @@ class Snapshot {
   }
 
   private mark(): Mark {
-    return { bytes: this.bytes, nodes: this.nodes, copied: this.copied.size };
+    return {
+      bytes: this.bytes,
+      nodes: this.nodes,
+      copied: this.copied.size,
+      attributesCopied: this.attributesCopied.size,
+    };
   }
 
   /** Back to `mark`, forgetting the values copied since: a later copy must not reuse a partial
@@ -167,6 +193,9 @@ class Snapshot {
     this.ancestors.clear();
     let index = 0;
     for (const key of [...this.copied.keys()]) if (index++ >= mark.copied) this.copied.delete(key);
+    index = 0;
+    for (const key of [...this.attributesCopied.keys()])
+      if (index++ >= mark.attributesCopied) this.attributesCopied.delete(key);
   }
 
   /**
@@ -199,7 +228,7 @@ class Snapshot {
   }
 
   /**
-   * An attribute map. A large inline file in a message attribute shrinks to its digest before it
+   * An attribute map. A inline media part in a message attribute shrinks to its digest before it
    * is charged: export replaces it anyway, and charging the file could drop the whole record.
    */
   attributes<T>(value: T): T {
@@ -216,20 +245,31 @@ class Snapshot {
     }
   }
 
-  /** A message attribute with its large inline files hashed. The same text is hashed once per
-   * record, and a record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} of it in all;
-   * beyond that, messages are charged as recorded. */
+  /** A message attribute with its inline media hashed. Own and nested attributes cache
+   * separately because small binary media stays inline only in nested attributes. A record
+   * inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} code units in all; beyond that,
+   * messages are charged as recorded. */
   private inlineFiles(key: string, value: unknown): unknown {
-    // A UTF-16 unit is at most three UTF-8 bytes, so shorter text cannot hold a file to hash.
-    if (typeof value !== "string" || !isMessageKey(key) || value.length * 3 <= INLINE_FILE_LIMIT)
+    if (
+      typeof value !== "string" ||
+      value.length > MAX_INLINE_FILE_TEXT ||
+      !mayInlineFiles(key, value)
+    )
       return value;
-    if (this.hashed.has(value)) return this.hashed.get(value);
+    const hashed = this.own ? this.hashed : this.nestedHashed;
+    if (hashed.has(value)) {
+      if (this.own) this.inspectedKeys.add(key);
+      return hashed.get(value);
+    }
     if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
     this.inspected += value.length;
+    if (this.own) this.inspectedKeys.add(key);
     const count = { files: 0 };
-    const result = hashInlineFiles(key, value, count);
-    this.hashed.set(value, result);
-    if (count.files) this.hashedFiles.set(value, count.files);
+    const result = this.own
+      ? hashInlineFiles(key, value, count, this.memo, this.traceId)
+      : hashNestedInlineFiles(key, value);
+    hashed.set(value, result);
+    if (this.own && count.files) this.hashedFiles.set(value, count.files);
     return result;
   }
 
@@ -311,7 +351,15 @@ class Snapshot {
     if (typeof value !== "object") throw new TypeError("Unsupported telemetry value");
     if (utilTypes.isProxy(value)) throw new TypeError("Telemetry proxies are unsupported");
     if (this.ancestors.has(value)) throw new TypeError("Cyclic telemetry value");
-    if (this.copied.has(value)) return this.copied.get(value) as T;
+    // One object can be reused as own attributes, nested attributes and an ordinary log body.
+    // Their copies differ: only attributes inspect media, and only own attributes upload it.
+    const copies =
+      shape === "attributes"
+        ? this.own
+          ? this.ownAttributesCopied
+          : this.attributesCopied
+        : this.copied;
+    if (copies.has(value)) return copies.get(value) as T;
     if (utilTypes.isUint8Array(value)) {
       // Own accessors/subclasses cannot disguise the retained byte count.
       // A length-tracking SharedArrayBuffer view can grow on another thread
@@ -321,14 +369,14 @@ class Snapshot {
       this.charge(length);
       const copy = new Uint8Array(length);
       typedArraySet.call(copy, value);
-      this.copied.set(value, copy);
+      copies.set(value, copy);
       return copy as T;
     }
     const array = Array.isArray(value);
     if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(value)))
       throw new TypeError("Telemetry must contain data objects");
     const copy: unknown[] | Record<string, unknown> = array ? [] : Object.create(null);
-    this.copied.set(value, copy);
+    copies.set(value, copy);
     this.ancestors.add(value);
     if (array) {
       if (value.length > MAX_RECORD_NODES)
@@ -364,7 +412,7 @@ class Snapshot {
           content || shape === "attributes",
         );
         (copy as Record<string, unknown>)[key] = copied;
-        // A span's own message whose large inline files shrank to their digest is named as it
+        // A span's own message whose inline media shrank to their digest is named as it
         // was queued, cut or not, so export reports each file as not uploaded.
         const files =
           this.own && shape === "attributes" && typeof source === "string"
@@ -408,7 +456,7 @@ class Snapshot {
       if (value == null || Object.hasOwn(attributes, key)) continue;
       this.charge(key.length * 2 + 16);
       attributes[key] = this.copy(
-        this.scrubbedBeforeCut(key, value),
+        this.scrubbedBeforeCut(key, this.inlineFiles(key, value)),
         0,
         "value",
         true,
@@ -424,7 +472,7 @@ function contextReader(context: SpanContext): () => SpanContext {
 
 /** What admission keeps of a record: its copy, the bytes charged for it, whether resource
  * attributes were still unresolved, the value strings it cut, the bytes of the values it held
- * whole for upload, and the span's own messages whose large inline files it shrank to their
+ * whole for upload, and the span's own messages whose inline media it shrank to their
  * digest (with how many files each). */
 export interface RecordSnapshot<T> {
   record: T;
@@ -433,6 +481,8 @@ export interface RecordSnapshot<T> {
   cut: ReadonlySet<string>;
   held: number;
   digested: ReadonlyMap<string, DigestedMessage>;
+  /** The span's own message attributes admission inspected or left to export to inspect. */
+  inspected: ReadonlySet<string>;
 }
 
 export function snapshotSpan(
@@ -441,8 +491,16 @@ export function snapshotSpan(
   captureContent = true,
   valueUnits = Infinity,
   hold?: HoldLimits,
+  memo?: MediaDigestMemo,
 ): RecordSnapshot<ReadableSpan> {
-  const snapshot = new Snapshot(limit, captureContent, valueUnits, hold);
+  const snapshot = new Snapshot(
+    limit,
+    captureContent,
+    valueUnits,
+    hold,
+    memo,
+    source.spanContext().traceId,
+  );
   const context = snapshot.context(source.spanContext())!;
   const fields = snapshot.copy({
     name: source.name,
@@ -491,6 +549,7 @@ export function snapshotSpan(
     cut: snapshot.cut,
     held: snapshot.held,
     digested: snapshot.digested,
+    inspected: snapshot.inspectedKeys,
   };
 }
 
@@ -543,5 +602,6 @@ export function snapshotLog(
     cut: snapshot.cut,
     held: 0,
     digested: new Map(),
+    inspected: new Set(),
   };
 }

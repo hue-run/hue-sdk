@@ -21,12 +21,37 @@ from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from ._inline_files import is_media_content_type
 from .evals._json import MISSING, encode, json_value, uuid
 from .transport import DEFAULT_BASE_URL, normalize_base_url
 
 _MIB = 1024 * 1024
 _MAX_FILE = 25 * _MIB
 _MAX_TOTAL = 64 * _MIB
+_OUTPUT_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/json",
+    "text/plain",
+    "text/csv",
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/avif",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/ogg",
+    "audio/webm",
+    "audio/mp4",
+    "audio/flac",
+    "audio/opus",
+    "audio/aac",
+    "video/mp4",
+    "video/webm",
+}
 _STATES = {
     "queued",
     "dispatched",
@@ -535,7 +560,8 @@ def _invocation(value: Any) -> dict[str, Any]:
             raise ValueError()
         ids.add(identifier)
         _filename(item["filename"])
-        _string(item["contentType"])
+        if not is_media_content_type(item["contentType"]):
+            raise ValueError()
         _string(item["role"], 64)
         total += _integer(item["byteSize"], 0, _MAX_FILE)
         if not isinstance(item["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]):
@@ -567,7 +593,8 @@ def _result(value: ManagedTargetResult) -> None:
     total = primary = 0
     for file in value.files:
         _filename(file.filename)
-        _string(file.content_type)
+        if file.content_type not in _OUTPUT_TYPES:
+            raise ValueError()
         if not isinstance(file.data, bytes) or type(file.primary) is not bool:
             raise ValueError()
         total += _integer(len(file.data), 0, _MAX_FILE)

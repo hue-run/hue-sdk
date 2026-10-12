@@ -10,6 +10,25 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.17.0] - 2026-10-10
+
+#### Breaking
+
+- **Wire** Nonempty binary media in a span's own recorded message attributes is now eligible for upload at every size within the media inspection limits and exports as the part's `sha256` and `size`. The `hue.blobs` key points to the part, for example `gen_ai.input.messages#/0/parts/1`. Successful uploads previously kept a 16 KiB prefix in the byte field and pointed to that field. Text media over 64 KiB still keeps a 16 KiB UTF-8 prefix and a content-field entry. Upload failures retain the digest without a blob entry. Migration: readers must resolve the part-level entry for binary media. Hue reads both forms.
+- `hue.file.name` now uses the same rule as blob names: nonblank after trimming, at most 256 UTF-16 code units, well-formed Unicode, and no C0 characters (U+0000–U+001F) or DEL (U+007F). Migration: remove tabs, newlines and DEL from names, and limit astral characters to 128 when the name contains only those characters. An invalid `recordFile` name is omitted and counted as an instrumentation failure; the otherwise valid `hue.file` event remains. Existing role, media-type, digest and size validation is preserved.
+
+#### Added
+
+- Recorded media supports GenAI, AI SDK, OpenAI Chat and Responses, Anthropic, Gemini, Vertex and Bedrock shapes, including OpenAI content arrays. The three inspected attributes remain `gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`. Remote URLs and file IDs stay unchanged; the SDK never fetches them.
+- Blob entries preserve a valid recorded filename, name or title. Names must be nonblank after trimming, contain at most 256 UTF-16 code units, be well-formed Unicode and contain no C0 characters (U+0000–U+001F) or DEL (U+007F).
+- `recordFile({ upload: true, ... })` uploads supplied file data up to 25 MiB and adds a `hue.blobs` entry to the same span, keyed `event:hue.file:<sha256>`. The existing `hue.file` event remains. Upload defaults to false and is disabled by `captureContent: false` or setup credentials. A requested upload that is not made, for example because its event was redacted or its span was dropped, counts in `uploadFallbacks`. An export uploads the files of all its spans together, four at a time, within one upload budget; copies of one file in a trace share a single upload and never hold a place another file needs.
+- **Wire** Generated evaluation files now accept `image/gif`, `image/avif`, `audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/opus`, `audio/webm`, `audio/mp4`, `audio/aac`, `audio/flac`, `video/mp4` and `video/webm` in addition to the existing content types: the same 22 types Hue stores as artifacts. `hue eval --command` collects `.gif .avif .mp3 .mpeg .wav .ogg .m4a .flac .opus .aac .mp4 .webm` outputs. An `.mp4` or `.webm` output needs its type declared in `manifest.json` `contentTypes` (`audio/mp4` or `video/mp4`, `audio/webm` or `video/webm`); the extension alone does not distinguish audio from video.
+
+#### Changed
+
+- The 8 Mi bound on one inspected message attribute counts UTF-16 code units, like the 16 Mi per-record bound, instead of UTF-8 bytes.
+- **Wire** Recorded message attributes on resources follow the rule events, links and log records keep from 0.16: inline media up to 64 KiB stays verbatim and larger media becomes its `sha256` and `size`, as in the Python SDK. These nested values never upload.
+
 ### [0.16.0] - 2026-10-08
 
 #### Added
@@ -1062,7 +1081,6 @@ This release changes a default of the `hue` binary (see Breaking), so it is a `0
   carrying only placeholders never fails `flush()`. **Wire**
 - `liveSpans` option (default `true`; always off for setup credentials).
 
-
 ### [0.6.0] - 2026-09-23
 
 #### Added
@@ -1433,6 +1451,25 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### [0.10.0] - 2026-10-10
+
+#### Breaking
+
+- **Wire** Nonempty binary media in a span's own recorded message attributes is now eligible for upload at every size within the media inspection limits and exports as the part's `sha256` and `size`. The `hue.blobs` key points to the part, for example `gen_ai.input.messages#/0/parts/1`. Successful uploads previously kept a 16 KiB prefix in the byte field and pointed to that field. Text media over 64 KiB still keeps a 16 KiB UTF-8 prefix and a content-field entry. Upload failures retain the digest without a blob entry. Migration: readers must resolve the part-level entry for binary media. Hue reads both forms.
+- `hue.file.name` now uses the same rule as blob names: nonblank after trimming, at most 256 UTF-16 code units, well-formed Unicode, and no C0 characters (U+0000–U+001F) or DEL (U+007F). Migration: remove tabs, newlines and DEL from names, and limit astral characters to 128 when the name contains only those characters. An invalid `record_file` name is omitted and counted as an instrumentation failure; the otherwise valid `hue.file` event remains. Existing role, media-type, digest and size validation is preserved.
+- **Wire** Managed evaluation outputs now accept only the same 22 content types as TypeScript: PDF, DOCX, PPTX, XLSX, JSON, plain text, CSV, PNG, JPEG, WebP, GIF, AVIF, MPEG audio, WAV, Ogg, WebM audio, MP4 audio, FLAC, Opus, AAC, MP4 video and WebM video. Previously, Python accepted arbitrary valid output MIME types. Migration: return a supported type that matches the actual bytes or convert the file to a supported format. `audio/pcm` outputs are unsupported. Give an `.mp4` file `audio/mp4` or `video/mp4`, and a `.webm` file `audio/webm` or `video/webm`, to match its content. Input file validation is unchanged.
+
+#### Added
+
+- Recorded media supports GenAI, AI SDK, OpenAI Chat and Responses, Anthropic, Gemini, Vertex and Bedrock shapes, including OpenAI content arrays. The three inspected attributes remain `gen_ai.input.messages`, `gen_ai.output.messages` and `ai.prompt.messages`. Remote URLs and file IDs stay unchanged; the SDK never fetches them.
+- Blob entries preserve a valid recorded filename, name or title. Names must be nonblank after trimming, contain at most 256 UTF-16 code units, be well-formed Unicode and contain no C0 characters (U+0000–U+001F) or DEL (U+007F).
+- `record_file(upload=True, ...)` uploads supplied file data up to 25 MiB and adds a `hue.blobs` entry to the same span, keyed `event:hue.file:<sha256>`. The existing `hue.file` event remains. Upload defaults to false and is disabled by `capture_content=False` or setup credentials. A requested upload that is not made, for example because its event was redacted or its span was dropped at the queue, counts in `export_status.upload_fallbacks`. An export uploads the files of all its spans together, four at a time, within one upload budget; copies of one file in a trace share a single upload and never hold a place another file needs.
+- Documented the shared 22-type allowlist for generated evaluation files, including GIF, audio and video.
+
+#### Changed
+
+- Media inspection is bounded as in TypeScript: at most 8 Mi UTF-16 code units per message attribute (previously 8 MiB of UTF-8) and, newly, 16 Mi per record. Recorded message attributes on resources, events, links and log records keep the 0.9 rule: inline media up to 64 KiB stays verbatim and larger media becomes its `sha256` and `size`, without upload.
 
 ### [0.9.1] - 2026-10-07
 
@@ -1969,6 +2006,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.7.1 (2026-10-11): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.17.0` instead of 0.16.0. The registry availability check before installation is unchanged.
 - 0.7.0 (2026-10-08): evals run through `hue eval` with SDK 0.16.0: `--check` first, one command is one run, never a custom harness or tool stand-ins; an interrupted run stays open and the identical command resumes it.
 - 0.6.9 (2026-10-08): link the skill and SDK guides to the consolidated Quickstart, production setup, and MCP recipes pages.
 - 0.6.3 (2026-10-05): align the evaluation procedure and verification checklist with answer-only cases: either execution or world token marks an eval, answer paths skip app clients, and required app connections still fail without a world. Direct adapters pass their execution marker to the helper; one-shot direct commands use an absolute entry path. The **Answers the task** judge in the **Answer outcome** evaluator is required for answer-only cases; worker exit codes do not report run verdicts.

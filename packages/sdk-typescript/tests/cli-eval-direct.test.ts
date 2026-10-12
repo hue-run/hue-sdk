@@ -24,6 +24,124 @@ const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const SPAWN_TIMEOUT = 90_000;
 
+test("collectDirectOutputs uses declared MP4/WebM types and infers other media extensions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hue-direct-media-"));
+  const outputs = [
+    ["animation.gif", "image/gif"],
+    ["image.avif", "image/avif"],
+    ["reply.mp3", "audio/mpeg"],
+    ["reply.mpeg", "audio/mpeg"],
+    ["reply.wav", "audio/wav"],
+    ["reply.ogg", "audio/ogg"],
+    ["reply.webm", "audio/webm"],
+    ["reply.mp4", "audio/mp4"],
+    ["reply.m4a", "audio/mp4"],
+    ["reply.flac", "audio/flac"],
+    ["reply.opus", "audio/opus"],
+    ["reply.aac", "audio/aac"],
+    ["clip.mp4", "video/mp4"],
+    ["clip.webm", "video/webm"],
+  ] as const;
+  const bytes = Buffer.from([0, 1, 128, 255]);
+  try {
+    const layout = await stageDirectCase(join(root, "scratch"), {
+      inputs: {},
+      config: {},
+      item: { id: "case-id", externalKey: "case-key" },
+      executionId: "exec-1",
+      files: [],
+    });
+    for (const [filename] of outputs)
+      await writeFile(join(layout.outputDirectory, filename), bytes);
+    await writeFile(
+      join(layout.outputDirectory, "manifest.json"),
+      JSON.stringify({
+        contentTypes: {
+          "reply.mp4": "audio/mp4",
+          "reply.webm": "audio/webm",
+          "clip.mp4": "video/mp4",
+          "clip.webm": "video/webm",
+        },
+      }),
+    );
+    const result = await collectDirectOutputs(layout.outputDirectory);
+    expect(result.files).toHaveLength(outputs.length);
+    for (const [filename, contentType] of outputs) {
+      const file = result.files.find((item) => item.filename === filename)!;
+      expect(file.contentType).toBe(contentType);
+      expect(Buffer.from(file.bytes!)).toEqual(bytes);
+    }
+    await writeFile(join(layout.outputDirectory, "program.exe"), bytes);
+    await expect(collectDirectOutputs(layout.outputDirectory)).rejects.toThrow(
+      "The agent wrote files Hue does not accept as generated documents",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each(["mp4", "webm"])(
+  "collectDirectOutputs requires a declared audio or video type for .%s",
+  async (extension) => {
+    const root = await mkdtemp(join(tmpdir(), "hue-direct-ambiguous-"));
+    try {
+      await writeFile(join(root, `reply.${extension}`), Buffer.from([0, 128, 255]));
+      await expect(collectDirectOutputs(root)).rejects.toThrow(
+        `Declare reply.${extension} as audio/${extension} or video/${extension} in manifest.json contentTypes`,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("collectDirectOutputs declares nested paths and preserves primary and JSON output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hue-direct-declared-"));
+  const bytes = Buffer.from([0, 128, 255]);
+  try {
+    await mkdir(join(root, "nested"));
+    await writeFile(join(root, "nested/clip.MP4"), bytes);
+    await writeFile(
+      join(root, "manifest.json"),
+      JSON.stringify({
+        primary: "nested/clip.MP4",
+        output: { summary: "generated video" },
+        contentTypes: { "nested/clip.MP4": "video/mp4" },
+      }),
+    );
+    const result = await collectDirectOutputs(root, "fallback");
+    expect(result.output).toEqual({ summary: "generated video" });
+    expect(result.files).toEqual([
+      { filename: "nested%2Fclip.MP4", contentType: "video/mp4", bytes, primary: true },
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  [null, "must map output paths"],
+  [[], "must map output paths"],
+  ["video/mp4", "must map output paths"],
+  [{ "clip.mp4": 7 }, "unsupported content type"],
+  [{ "clip.mp4": "application/x-msdownload" }, "unsupported content type"],
+  [{ "clip.mp4": "video/webm" }, "must be audio/mp4 or video/mp4"],
+  [{ "clip.mp4": "audio/mp4", "missing.mp4": "video/mp4" }, "file that was not written"],
+  [{ "clip.mp4": "audio/mp4", "manifest.json": "application/json" }, "file that was not written"],
+])(
+  "collectDirectOutputs rejects invalid contentTypes declaration %j",
+  async (contentTypes, message) => {
+    const root = await mkdtemp(join(tmpdir(), "hue-direct-invalid-type-"));
+    try {
+      await writeFile(join(root, "clip.mp4"), Buffer.from([0, 128, 255]));
+      await writeFile(join(root, "manifest.json"), JSON.stringify({ contentTypes }));
+      await expect(collectDirectOutputs(root)).rejects.toThrow(message as string);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 type Stored = {
   id: string;
   filename: string;

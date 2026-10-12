@@ -77,7 +77,7 @@ def managed():
                 files=(
                     ManagedOutputFile(
                         "answer.docx",
-                        "application/octet-stream",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         DATA,
                         primary=True,
                     ),
@@ -262,7 +262,13 @@ def test_error_still_uploads_secondary(managed):
         return ManagedTargetResult(
             state="error",
             error={"type": "missing_artifact"},
-            files=(ManagedOutputFile("secondary.pptx", "application/zip", DATA),),
+            files=(
+                ManagedOutputFile(
+                    "secondary.pptx",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    DATA,
+                ),
+            ),
         )
 
     assert managed.handler(target=target).handle(invocation(), HEADERS).status_code == 200
@@ -363,3 +369,114 @@ def test_raw_target_exception_is_not_recorded_or_returned(managed):
     span = managed.exporter.get_finished_spans()[0]
     assert span.status.description is None
     assert not span.events
+
+
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/json",
+        "text/plain",
+        "text/csv",
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/ogg",
+        "audio/webm",
+        "audio/mp4",
+        "audio/flac",
+        "audio/opus",
+        "audio/aac",
+        "video/mp4",
+        "video/webm",
+    ],
+)
+def test_managed_allowed_output_mime_uploads(managed, mime):
+    def target(_context):
+        return ManagedTargetResult(output="media", files=(ManagedOutputFile("media", mime, DATA),))
+
+    response = managed.handler(target=target).handle(invocation(), HEADERS)
+    assert response.status_code == 200
+    assert managed.outcomes[0]["state"] == "succeeded"
+    assert managed.outcomes[0]["artifactIds"] == [FILE]
+    reservation = next(
+        json.loads(body) for path, _, body in managed.requests if path.endswith("/files")
+    )
+    assert reservation["contentType"] == mime and reservation["byteSize"] == len(DATA)
+    assert managed.uploaded == DATA
+
+
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "invalid",
+        " ",
+        "image/png\n",
+        "image/é",
+        "image/" + "x" * 250,
+        "audio/pcm",
+        "application/zip",
+        "application/octet-stream",
+        "Image/png",
+        "image/png; charset=utf-8",
+    ],
+)
+def test_managed_invalid_mime_fails_before_file_reservation(managed, mime):
+    def target(_context):
+        return ManagedTargetResult(output="media", files=(ManagedOutputFile("media", mime, DATA),))
+
+    response = managed.handler(target=target).handle(invocation(), HEADERS)
+    assert response.status_code == 200
+    assert managed.outcomes[0]["state"] == "error"
+    assert managed.outcomes[0]["error"] == {
+        "type": "target_error",
+        "message": "The target or input validation failed.",
+    }
+    assert not any(path.endswith("/files") or path == "/upload" for path, _, _ in managed.requests)
+    assert managed.uploaded is None
+
+
+def test_managed_output_allowlist_is_hue_artifact_allowlist():
+    from hue_sdk.managed import _OUTPUT_TYPES
+
+    assert _OUTPUT_TYPES == {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/json",
+        "text/plain",
+        "text/csv",
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/ogg",
+        "audio/opus",
+        "audio/webm",
+        "audio/mp4",
+        "audio/aac",
+        "audio/flac",
+        "video/mp4",
+        "video/webm",
+    }
+
+
+@pytest.mark.parametrize("mime", ["application/zip", "application/x-custom"])
+def test_managed_input_validation_is_unchanged_by_the_output_allowlist(managed, mime):
+    body = with_file()
+    body["inputFiles"][0]["contentType"] = mime
+    response = managed.handler().handle(body, HEADERS)
+    assert response.status_code == 200
+    assert managed.target_calls == 1
+    assert managed.outcomes[0]["state"] == "succeeded"

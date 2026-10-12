@@ -218,11 +218,11 @@ const options = {
 try {
   // Node's strict unhandled-rejection mode used by the parent catches the
   // original asynchronous diagnostic callback process-crash regression.
-  let diagnostics = 0;
+  const diagnostics = [];
   const hue = createHue({
     ...options,
-    onExportIssue: async () => {
-      diagnostics++;
+    onExportIssue: async (issue) => {
+      diagnostics.push(issue);
       throw new Error("private diagnostic failure");
     },
   });
@@ -238,9 +238,17 @@ try {
   assert.equal(sideEffects, 1);
   assert.equal((await hue.flushSafe()).ok, false);
   await new Promise((resolve) => setTimeout(resolve, 30));
-  // One warning (the receiver refused to reserve the input over the cap for upload) and one
+  // One warning (the receiver refused to reserve the input and result over the cap for upload) and one
   // failure (it refused the export): each reaches the throwing callback without a crash.
-  assert.equal(diagnostics, 2);
+  assert.equal(diagnostics.length, 2);
+  assert.deepEqual(
+    diagnostics.map((issue) => issue.kind),
+    ["warning", "failed"],
+  );
+  assert.equal(diagnostics[0].count, 2);
+  assert.equal(diagnostics[1].status, 401);
+  assert.equal(hue.transport.getReport().uploadFallbacks, 2);
+  assert.equal(hue.transport.getReport().uploadedValues, 0);
   // The 1 MiB input and result are cut to the cap and listed under `hue.truncated`, never
   // omitted or counted as failures; the side effect ran once all the same.
   assert.equal(hue.transport.getReport().instrumentationFailures, 0);
