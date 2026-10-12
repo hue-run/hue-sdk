@@ -210,7 +210,8 @@ const MEDIA_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9!#$&^_.+-]+$/;
 /** The default and largest `maxBytes`: Hue keeps values of up to 1 GB. */
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const MAX_BYTES = 1_000_000_000;
-/** @internal The least time a download may go without a byte before it ends: two minutes. */
+/** The least time a download may go without a byte before it ends: two minutes. Tests shorten it;
+ * it is not exported from the package. */
 export const mediaDownload = { minIdleMillis: 120_000 };
 /** The longest `Retry-After` the one retry of an unavailable read waits. */
 const MAX_RETRY_AFTER_SECONDS = 10;
