@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { MAX_BODY_BYTES } from "./config.js";
+import { applyJsonEdits, type JsonEdit } from "./json-edits.js";
 
 /** Text media above this decoded byte limit is offloaded; binary media always uses a digest. */
 export const INLINE_FILE_LIMIT = 64 * 1024;
@@ -146,13 +147,25 @@ export function inlineFileBytes(content: string): InlineFileBytes {
   };
 }
 
+/** JSON text a placed file sits in: its edits, at JSON pointers relative to `at`, the pointer of
+ * the text in the recorded value ("" for the value itself). */
+export interface MediaDocument {
+  at: string;
+  edits: JsonEdit[];
+}
+
 /** A string inside a recorded value whose JSON the walk read (a tool call's arguments, a tool
- * result): re-encoded once a file inside it is placed. */
-export interface EncodedValue {
+ * result): written again once a file inside it is placed, every byte the placement does not
+ * change kept as recorded. */
+export interface EncodedValue extends MediaDocument {
   owner: Record<string, unknown>;
   key: string;
   value: unknown;
   dirty: boolean;
+  /** The string as recorded. */
+  text: string;
+  /** The JSON text the string sits in: an encoded string's, else the recorded value's. */
+  parent: MediaDocument;
 }
 
 /** A part and the exact leaf that contains its bytes. Nested provider metadata stays in place. */
@@ -173,6 +186,8 @@ export interface InlineFilePart {
   /** The JSON-encoded strings the file sits in, outermost first: no `hue.blobs` key can address
    * inside a string, so such a file is placed by its digest. */
   encoded?: EncodedValue[];
+  /** The JSON text the file sits in, which records its placement as edits. */
+  document?: MediaDocument;
 }
 
 const audioTypes: Record<string, string> = {
@@ -554,13 +569,42 @@ function encodedJsonValue(text: string): unknown {
   }
 }
 
+/** How deep Hue's reader looks for files in a recorded value: a part more than ten levels below
+ * the value's root (an encoded string's JSON counting as a level) is not read as a file, so it is
+ * not inspected either. */
+export const MAX_MEDIA_DEPTH = 10;
+
+/**
+ * Whether Hue's reader reads JSON text as the value it encodes, and so reads files in it: nested
+ * at most 32 levels, with no number JavaScript cannot hold exactly (an integer past 2^53, or one
+ * past the double range). Hue keeps any other text as it is, so the SDK leaves it as recorded.
+ */
+export function readerParses(value: unknown): boolean {
+  const stack: [unknown, number][] = [[value, 0]];
+  while (stack.length) {
+    const [item, depth] = stack.pop()!;
+    if (depth > 32) return false;
+    if (
+      typeof item === "number" &&
+      (!Number.isFinite(item) || (Number.isInteger(item) && !Number.isSafeInteger(item)))
+    )
+      return false;
+    if (item !== null && typeof item === "object")
+      for (const child of Object.values(item)) stack.push([child, depth + 1]);
+  }
+  return true;
+}
+
 /** The files a recorded value holds, the box holding the value (so a whole-string file at its
- * root can be replaced), and the JSON-encoded strings the walk read, innermost first, to encode
- * again once a file inside one is placed. */
+ * root can be replaced), the JSON-encoded strings the walk read, innermost first, to write again
+ * once a file inside one is placed, and the value's own JSON text when it was read from text. */
 export interface MediaValue {
   box: { value: unknown };
   files: InlineFilePart[];
   encoded: EncodedValue[];
+  /** The value's JSON text as recorded, edited in place when its files are placed. */
+  source?: string;
+  document: MediaDocument;
 }
 
 /**
@@ -570,10 +614,11 @@ export interface MediaValue {
  * JSON-encoded string. A part whose bytes are not inline (a remote URL, a file id) is left whole.
  * The caller applies the decoded text threshold.
  */
-export function mediaIn(value: unknown): MediaValue {
+export function mediaIn(value: unknown, source?: string): MediaValue {
   const box = { value };
   const files: InlineFilePart[] = [];
   const encoded: EncodedValue[] = [];
+  const document: MediaDocument = { at: "", edits: [] };
   const visit = (
     node: unknown,
     pointer: string,
@@ -582,9 +627,13 @@ export function mediaIn(value: unknown): MediaValue {
     key: string | number,
     within: EncodedValue[],
   ): void => {
-    if (depth > 256) throw new Error("Message exceeds the supported nesting limit");
+    if (depth > MAX_MEDIA_DEPTH) return;
     const add = (file: InlineFilePart) =>
-      files.push(within.length ? { ...file, encoded: within } : file);
+      files.push({
+        ...file,
+        ...(within.length ? { encoded: within } : {}),
+        document: within.at(-1) ?? document,
+      });
     if (typeof node === "string") {
       const type = dataUrlType(node);
       if (type !== undefined)
@@ -644,7 +693,16 @@ export function mediaIn(value: unknown): MediaValue {
       const inner =
         typeof item === "string" && encodedKeys.includes(name) ? encodedJsonValue(item) : undefined;
       if (inner !== undefined) {
-        const holder: EncodedValue = { owner: part, key: name, value: inner, dirty: false };
+        const holder: EncodedValue = {
+          owner: part,
+          key: name,
+          value: inner,
+          dirty: false,
+          text: item as string,
+          at,
+          edits: [],
+          parent: within.at(-1) ?? document,
+        };
         const before = files.length;
         visit(inner, at, depth + 1, holder as unknown as Record<string, unknown>, "value", [
           ...within,
@@ -657,7 +715,7 @@ export function mediaIn(value: unknown): MediaValue {
     }
   };
   visit(value, "", 0, box, "value", []);
-  return { box, files, encoded };
+  return { box, files, encoded, document, ...(source !== undefined ? { source } : {}) };
 }
 
 /**
@@ -668,18 +726,20 @@ export function mediaIn(value: unknown): MediaValue {
  * Throws for JSON that does not parse or nests too deep.
  */
 export function readMediaText(key: string, text: string): MediaValue | undefined {
+  /** JSON text read as Hue's reader reads it: text it keeps as text holds no file. */
+  const json = (parsed: unknown) => (readerParses(parsed) ? mediaIn(parsed, text) : undefined);
   switch (readingOf(key)) {
     case "json":
-      return mediaIn(JSON.parse(text));
+      return json(JSON.parse(text));
     case "metadata":
-      return mediaIn(/^\s*[[{]/.test(text) ? JSON.parse(text) : text);
+      return /^\s*[[{]/.test(text) ? json(JSON.parse(text)) : mediaIn(text);
     case "parts": {
       if (!/^\s*\[/.test(text)) return undefined;
       const parsed: unknown = JSON.parse(text);
       return Array.isArray(parsed) &&
         parsed.length > 0 &&
         parsed.every((part) => typeof object(part)?.type === "string")
-        ? mediaIn(parsed)
+        ? json(parsed)
         : undefined;
     }
     case "url":
@@ -689,17 +749,29 @@ export function readMediaText(key: string, text: string): MediaValue | undefined
   }
 }
 
-/** The recorded value's text once its files are placed, re-encoding each JSON-encoded string a
- * placed file sits in, innermost first. */
+/** The recorded value's text once its files are placed: its JSON text as recorded with only the
+ * placed files' values (or their parts' members) replaced, each JSON-encoded string a placed file
+ * sits in written again the same way, innermost first. */
 export function placedMediaText(media: MediaValue): string {
   reencodeMedia(media);
-  return JSON.stringify(media.box.value);
+  return media.source !== undefined
+    ? applyJsonEdits(media.source, media.document.edits)
+    : JSON.stringify(media.box.value);
 }
 
-/** Each JSON-encoded string a placed file sits in, encoded again, innermost first. */
+/** Each JSON-encoded string a placed file sits in, written again, innermost first: the string as
+ * recorded with only its placed files changed. */
 export function reencodeMedia(media: MediaValue): void {
-  for (const holder of media.encoded)
-    if (holder.dirty) holder.owner[holder.key] = JSON.stringify(holder.value);
+  for (const holder of media.encoded) {
+    if (!holder.dirty) continue;
+    const text = applyJsonEdits(holder.text, holder.edits);
+    holder.owner[holder.key] = text;
+    holder.dirty = false;
+    holder.parent.edits.push({
+      pointer: holder.at.slice(holder.parent.at.length),
+      value: JSON.stringify(text),
+    });
+  }
 }
 
 /** Whether a found file has bytes to place: nonempty, and a whole string's `data:` URL decodes. */
@@ -783,11 +855,29 @@ function blobPart(contentType: string, digest: FileDigest): Record<string, unkno
  * for OpenAI assistant audio); a whole string becomes a GenAI `blob` part in digest form. */
 export function digestPart(file: InlineFilePart, digest: FileDigest): void {
   const owner = file.owner as Record<string | number, unknown>;
-  if (file.whole) owner[file.key] = blobPart(file.contentType!, digest);
-  else {
+  const document = file.document;
+  const at = (pointer: string) => pointer.slice(document!.at.length);
+  if (file.whole) {
+    const part = blobPart(file.contentType!, digest);
+    owner[file.key] = part;
+    document?.edits.push({ pointer: at(file.pointer), value: JSON.stringify(part) });
+  } else {
     delete owner[file.key];
     file.part.sha256 = digest.sha256;
     file.part.size = digest.size;
+    if (document) {
+      const set: [string, string][] = [
+        ["sha256", JSON.stringify(digest.sha256)],
+        ["size", String(digest.size)],
+      ];
+      const ownerPointer = file.pointer.slice(0, file.pointer.lastIndexOf("/"));
+      if (ownerPointer === file.partPointer)
+        document.edits.push({ pointer: at(ownerPointer), remove: String(file.key), set });
+      else {
+        document.edits.push({ pointer: at(ownerPointer), remove: String(file.key) });
+        document.edits.push({ pointer: at(file.partPointer), set });
+      }
+    }
   }
   for (const holder of file.encoded ?? []) holder.dirty = true;
 }
@@ -795,6 +885,10 @@ export function digestPart(file: InlineFilePart, digest: FileDigest): void {
 /** Prefix placement keeps the first 16 KiB of a text file's content in place. */
 export function prefixPart(file: InlineFilePart, prefix: string): void {
   (file.owner as Record<string | number, unknown>)[file.key] = prefix;
+  file.document?.edits.push({
+    pointer: file.pointer.slice(file.document.at.length),
+    value: JSON.stringify(prefix),
+  });
   for (const holder of file.encoded ?? []) holder.dirty = true;
 }
 
@@ -902,7 +996,7 @@ function hashFiles(
   try {
     const media = readMediaText(key, value);
     if (!media || !digestMedia(media, nested, count, memo, traceId)) return value;
-    return JSON.stringify(media.box.value);
+    return placedMediaText(media);
   } catch {
     return value;
   }

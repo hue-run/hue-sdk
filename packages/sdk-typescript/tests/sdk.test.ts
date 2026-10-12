@@ -861,19 +861,12 @@ describe("Hue SDK contract", () => {
     };
     const memo = new MediaDigestMemo();
     const digest = spyOn(memo, "bytes");
-    const expected = JSON.stringify([
-      {
-        role: "user",
-        parts: [
-          {
-            type: "blob",
-            mime_type: "image/png",
-            sha256: createHash("sha256").update(Buffer.alloc(65537, 11)).digest("hex"),
-            size: 65537,
-          },
-        ],
-      },
-    ]);
+    // The digest replaces only the part's content; the rest of the recorded text is kept.
+    const expected = large.replace(
+      /,\n\s*"content": "[A-Za-z0-9+/=]*"/,
+      `,"sha256":"${createHash("sha256").update(Buffer.alloc(65537, 11)).digest("hex")}","size":65537`,
+    );
+    expect(expected).not.toBe(large);
     try {
       const snapshot = snapshotSpan(source, 4 * 1024 * 1024, true, 1024 * 1024, undefined, memo);
       expect(digest).not.toHaveBeenCalled();

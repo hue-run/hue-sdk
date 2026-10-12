@@ -45,6 +45,7 @@ from hue_sdk._inline_files import (
     MAX_INLINE_FILE_TEXT,
     MediaDigestMemo,
     content_path,
+    dumps_message,
     is_media_name,
     may_inline_files,
     utf16_size,
@@ -108,8 +109,9 @@ def json_of(value: Any) -> Any:
 
 
 def corpus_text(case: dict[str, Any]) -> str:
-    """A corpus case's attribute text: its raw ``value``, or its ``messages`` as JSON."""
-    return case["value"] if "value" in case else json.dumps(case["messages"], ensure_ascii=False)
+    """A corpus case's attribute text: its raw ``value``, or its ``messages`` as JSON written as
+    the TypeScript suite writes them (``JSON.stringify``), so both SDKs read the same bytes."""
+    return case["value"] if "value" in case else dumps_message(case["messages"])
 
 
 def entries(record: Any) -> list[str]:

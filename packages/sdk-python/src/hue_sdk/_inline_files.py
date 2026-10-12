@@ -13,11 +13,12 @@ import re
 import sys
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from threading import Lock
 from typing import Any
 
+from ._json_edits import JsonEdit, apply_json_edits
 from ._limits import MAX_REQUEST_BYTES
 
 # Textual file content over this decoded byte limit is exported as a digest; binary always is.
@@ -76,7 +77,6 @@ _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
 # in code, as the TypeScript SDK reads them.
 _DATA_URL = re.compile(r"data:([^,]*),")
 _HEX = frozenset("0123456789abcdefABCDEF")
-_MAX_DEPTH = 256
 _MEDIA_MARKERS = (
     "blob",
     "file",
@@ -286,14 +286,27 @@ _REMOTE = re.compile(r"(?:https?:|s3:|gs:|file:|blob:)", re.IGNORECASE)
 
 
 @dataclass
-class EncodedValue:
-    """A string inside a recorded value whose JSON the walk read (a tool call's arguments, a tool
-    result): encoded again once a file inside it is placed."""
+class MediaDocument:
+    """JSON text a placed file sits in: its edits, at JSON pointers relative to ``at``, the pointer
+    of the text in the recorded value ("" for the value itself)."""
 
-    owner: dict[str, Any]
-    key: str
-    value: Any
+    at: str = ""
+    edits: list[JsonEdit] = field(default_factory=list)
+
+
+@dataclass
+class EncodedValue(MediaDocument):
+    """A string inside a recorded value whose JSON the walk read (a tool call's arguments, a tool
+    result): written again once a file inside it is placed, every byte the placement does not
+    change kept as recorded."""
+
+    owner: dict[str, Any] = field(default_factory=dict)
+    key: str = ""
+    value: Any = None
     dirty: bool = False
+    # The string as recorded, and the JSON text it sits in.
+    text: str = ""
+    parent: MediaDocument | None = None
 
 
 @dataclass
@@ -317,6 +330,8 @@ class InlineFilePart:
     base64: bool = False
     whole: bool = False
     encoded: list[EncodedValue] | None = None
+    # The JSON text the file sits in, which records its placement as edits.
+    document: MediaDocument | None = None
 
 
 def _object(value: Any) -> dict[str, Any] | None:
@@ -648,18 +663,55 @@ def _encoded_json_value(text: str) -> Any:
     return parsed if isinstance(parsed, (dict, list)) else None
 
 
+# How deep Hue's reader looks for files in a recorded value: a part more than ten levels below the
+# value's root (an encoded string's JSON counting as a level) is not read as a file, so it is not
+# inspected either.
+MAX_MEDIA_DEPTH = 10
+
+
+def reader_parses(value: Any) -> bool:
+    """Whether Hue's reader reads JSON text as the value it encodes, and so reads files in it:
+    nested at most 32 levels, with no number JavaScript cannot hold exactly (an integer past 2^53,
+    or one past the double range). Hue keeps any other text as it is, so the SDK leaves it as
+    recorded."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > 32:
+            return False
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            if abs(item) > _MAX_SAFE_INTEGER:
+                return False
+        elif isinstance(item, float):
+            if not isfinite(item) or (item.is_integer() and abs(item) > _MAX_SAFE_INTEGER):
+                return False
+        elif isinstance(item, dict):
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+    return True
+
+
+_MAX_SAFE_INTEGER = 2**53 - 1
+
+
 @dataclass
 class MediaValue:
     """The files a recorded value holds, the box holding the value (so a whole-string file at its
-    root can be replaced), and the JSON-encoded strings the walk read, innermost first, to encode
-    again once a file inside one is placed."""
+    root can be replaced), the JSON-encoded strings the walk read, innermost first, to write again
+    once a file inside one is placed, and the value's own JSON text when it was read from text."""
 
     box: dict[str, Any]
     files: list[InlineFilePart]
     encoded: list[EncodedValue]
+    document: MediaDocument = field(default_factory=MediaDocument)
+    # The value's JSON text as recorded, edited in place when its files are placed.
+    source: str | None = None
 
 
-def media_in(value: Any) -> MediaValue:
+def media_in(value: Any, source: str | None = None) -> MediaValue:
     """Every file a recorded value carries for upload, in reading order, as Hue's reader finds
     them: a provider part with inline bytes, an OpenAI assistant message's audio, a whole string
     that is a typed data: URL, and the files inside a tool call's or tool result's JSON-encoded
@@ -668,16 +720,18 @@ def media_in(value: Any) -> MediaValue:
     box: dict[str, Any] = {"value": value}
     files: list[InlineFilePart] = []
     encoded: list[EncodedValue] = []
+    document = MediaDocument()
 
     def visit(
         node: Any, pointer: str, depth: int, owner: Any, key: Any, within: list[EncodedValue]
     ) -> None:
-        if depth > _MAX_DEPTH:
-            raise ValueError("Message exceeds its nesting limit.")
+        if depth > MAX_MEDIA_DEPTH:
+            return
 
         def add(file: InlineFilePart) -> None:
             if within:
                 file.encoded = within
+            file.document = within[-1] if within else document
             files.append(file)
 
         if isinstance(node, str):
@@ -730,7 +784,14 @@ def media_in(value: Any) -> MediaValue:
                 else None
             )
             if inner is not None:
-                holder = EncodedValue(node, name, inner)
+                holder = EncodedValue(
+                    at=at,
+                    owner=node,
+                    key=name,
+                    value=inner,
+                    text=item,
+                    parent=within[-1] if within else document,
+                )
                 before = len(files)
                 visit(inner, at, depth + 1, holder, "value", [*within, holder])
                 if len(files) > before:
@@ -739,7 +800,7 @@ def media_in(value: Any) -> MediaValue:
             visit(item, at, depth + 1, node, name, within)
 
     visit(value, "", 0, box, "value", [])
-    return MediaValue(box, files, encoded)
+    return MediaValue(box, files, encoded, document, source)
 
 
 _JSON_OBJECT_TEXT = re.compile(r"\s*[\[{]")
@@ -753,10 +814,15 @@ def read_media_text(key: str, text: str) -> MediaValue | None:
     OpenInference image URL as the text itself. None for text that reading finds nothing in.
     Raises ValueError for JSON that does not parse or nests too deep."""
     reading = reading_of(key)
+
+    def json_text(parsed: Any) -> MediaValue | None:
+        # JSON text read as Hue's reader reads it: text it keeps as text holds no file.
+        return media_in(parsed, text) if reader_parses(parsed) else None
+
     if reading == "json":
-        return media_in(loads_message(text))
+        return json_text(loads_message(text))
     if reading == "metadata":
-        return media_in(loads_message(text) if _JSON_OBJECT_TEXT.match(text) else text)
+        return json_text(loads_message(text)) if _JSON_OBJECT_TEXT.match(text) else media_in(text)
     if reading == "parts":
         if not _JSON_ARRAY_TEXT.match(text):
             return None
@@ -766,7 +832,7 @@ def read_media_text(key: str, text: str) -> MediaValue | None:
             and parsed
             and all(isinstance(part, dict) and isinstance(part.get("type"), str) for part in parsed)
         ):
-            return media_in(parsed)
+            return json_text(parsed)
         return None
     if reading == "url":
         return media_in(text)
@@ -774,15 +840,25 @@ def read_media_text(key: str, text: str) -> MediaValue | None:
 
 
 def reencode_media(media: MediaValue) -> None:
-    """Each JSON-encoded string a placed file sits in, encoded again, innermost first."""
+    """Each JSON-encoded string a placed file sits in, written again, innermost first: the string
+    as recorded with only its placed files changed."""
     for holder in media.encoded:
-        if holder.dirty:
-            holder.owner[holder.key] = dumps_message(holder.value)
+        if not holder.dirty:
+            continue
+        text = apply_json_edits(holder.text, holder.edits)
+        holder.owner[holder.key] = text
+        holder.dirty = False
+        parent = holder.parent or media.document
+        parent.edits.append(JsonEdit(holder.at[len(parent.at) :], value=dumps_message(text)))
 
 
 def placed_media_text(media: MediaValue) -> str:
-    """The recorded value's text once its files are placed."""
+    """The recorded value's text once its files are placed: its JSON text as recorded with only
+    the placed files' values (or their parts' members) replaced, each JSON-encoded string a placed
+    file sits in written again the same way, innermost first."""
     reencode_media(media)
+    if media.source is not None:
+        return apply_json_edits(media.source, media.document.edits)
     return dumps_message(media.box["value"])
 
 
@@ -866,12 +942,30 @@ def _blob_part(content_type: str, sha256: str, size: int) -> dict[str, Any]:
 def digest_part(file: InlineFilePart, sha256: str, size: int) -> None:
     """Digest placement removes only the leaf and adds identity to the provider part (the message,
     for OpenAI assistant audio); a whole string becomes a GenAI ``blob`` part in digest form."""
+    document = file.document
+
+    def at(pointer: str) -> str:
+        return pointer[len(document.at) :] if document else pointer
+
     if file.whole:
-        file.owner[file.key] = _blob_part(file.content_type or "", sha256, size)
+        part = _blob_part(file.content_type or "", sha256, size)
+        file.owner[file.key] = part
+        if document is not None:
+            document.edits.append(JsonEdit(at(file.pointer), value=dumps_message(part)))
     else:
         file.owner.pop(file.key, None)
         file.part["sha256"] = sha256
         file.part["size"] = size
+        if document is not None:
+            members = (("sha256", json.dumps(sha256)), ("size", str(size)))
+            owner_pointer = file.pointer[: file.pointer.rfind("/")]
+            if owner_pointer == file.part_pointer:
+                document.edits.append(
+                    JsonEdit(at(owner_pointer), remove=str(file.key), set=members)
+                )
+            else:
+                document.edits.append(JsonEdit(at(owner_pointer), remove=str(file.key)))
+                document.edits.append(JsonEdit(at(file.part_pointer), set=members))
     for holder in file.encoded or ():
         holder.dirty = True
 
@@ -879,6 +973,10 @@ def digest_part(file: InlineFilePart, sha256: str, size: int) -> None:
 def prefix_part(file: InlineFilePart, prefix: str) -> None:
     """Prefix placement keeps the first 16 KiB of a text file's content in place."""
     file.owner[file.key] = prefix
+    if file.document is not None:
+        file.document.edits.append(
+            JsonEdit(file.pointer[len(file.document.at) :], value=dumps_message(prefix))
+        )
     for holder in file.encoded or ():
         holder.dirty = True
 
@@ -970,18 +1068,16 @@ def hash_inline_files_counted(
         count = digest_media(
             media, memo, receipts, trace_id, preserve_small_binary=preserve_small_binary
         )
-        return (dumps_message(media.box["value"]), count) if count else (value, 0)
+        return (placed_media_text(media), count) if count else (value, 0)
     except (ValueError, RecursionError):
         return value, 0
 
 
 def _js_number(text: str) -> Any:
-    """A JSON number as JavaScript reads and writes it again: an integral value as an integer
-    (``1.0`` is written ``1``) and one past the double range as ``null``."""
+    """A JSON number as JavaScript reads it: a double, kept as an integer while it holds one
+    exactly (``1.0`` is ``1``), and infinite past the double range."""
     number = float(text)
-    if not isfinite(number):
-        return None
-    return int(number) if number.is_integer() and abs(number) < 1e21 else number
+    return int(number) if number.is_integer() and abs(number) <= _MAX_SAFE_INTEGER else number
 
 
 def _no_constant(text: str) -> Any:
