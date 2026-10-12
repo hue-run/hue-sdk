@@ -1031,6 +1031,7 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/evals/environment-target.js"',
         )
         .replaceAll('"../src/evals/files.js"', '"../node_modules/@hue-run/sdk/dist/evals/files.js"')
+        .replaceAll('"../src/evals/media.js"', '"../node_modules/@hue-run/sdk/dist/evals/media.js"')
         .replaceAll('"../src/evals/json.js"', '"../node_modules/@hue-run/sdk/dist/evals/json.js"')
         .replaceAll(
           '"../src/provider-tools.js"',
