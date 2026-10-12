@@ -139,6 +139,56 @@ Tool/model metadata accepts plain strings; invalid values use stable fallback la
 
 Hue helpers implement the model/tool metadata and inference-message subset of the Development GenAI conventions. They accept caller-supplied JSON without full schema validation. For model helpers, pass the message representation produced by your integration. When authoring your own messages, prefer the shape defined by the GenAI semantic conventions' [input messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-input-messages.json) and [output messages](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-output-messages.json) JSON schemas. Use either span content or correlated logs for a given input/output, avoiding duplicate copies. Call `log_inference` inside `model(..., provider=...)`, or pass `operation=` and `provider=` explicitly, to include the required inference metadata. `log_inference` sends a structured body (an explicit `None` field keeps its key with an empty value, distinct from an absent field) and copies `gen_ai.operation.name`, `gen_ai.provider.name` and `gen_ai.request.model` from the enclosing `model()` block, or from its `operation=`, `provider=` and `model=` keywords, plus `gen_ai.conversation.id` from `context()`, onto the record's attributes when known. A blank or over-long keyword is omitted and counted as an instrumentation failure.
 
+## Attach a file anywhere
+
+Wrap a file in an `Attachment` and put it anywhere in a value Hue records: a `span()` input or
+output, `model()` messages, a tool's arguments or result, `log_inference()` messages, or a span
+attribute passed to `span(attributes=...)` or `set_attribute`. It replaces Langfuse's
+`LangfuseMedia` and Braintrust's `Attachment`: put it where you put those.
+
+```python
+from pathlib import Path
+
+from hue_sdk import Attachment
+
+png = Path("scan.png").read_bytes()
+with hue.span(
+    "review contract",
+    attributes={"metadata": {"scan": Attachment(png, content_type="image/png")}},
+) as span:
+    span.set_input(
+        {
+            "question": "Which clauses changed?",
+            "contract": Attachment(path="contract.pdf", content_type="application/pdf"),
+        }
+    )
+```
+
+Give exactly one of `data` (bytes, or a base64 string or `data:` URL) and `path` (read when the
+attachment is created), a `content_type` and optionally a `name`. The bytes are read and hashed
+when the attachment is created and are limited to 25 MiB, the `record_file` limit: they are held in
+memory from then until export, within the 128 MiB budget that queued spans share for values
+awaiting upload.
+
+At its position the attachment is recorded as a GenAI `blob` part that names the file by digest,
+`{"type":"blob","mime_type":"application/pdf","modality":"document","sha256":"<64 hex>","size":48213,"name":"contract.pdf"}`,
+with `modality` read from the content type (`image`, `audio`, `video`, `document` or `file`).
+Export uploads the bytes as it uploads inline media and lists them under the record's `hue.blobs`,
+keyed `<attribute>#<JSON pointer to the part>`: `input.value#/contract` above, `metadata#/scan`
+for the attribute, and `body#/gen_ai.input.messages/0/parts/1` for a part in a `log_inference()`
+log record. An attribute value that is an attachment, or a dict or list holding one, is recorded
+as JSON text; put files under `metadata` for Hue to list them as the span's metadata files. A file
+used twice in one trace is stored once.
+
+Attachments follow the rules of other media. With `capture_content=False` or a setup key no bytes
+leave the process: a metadata attribute still records the part, without its name, and content
+values are not recorded at all. A part the redactor removes or rewrites is not uploaded. A part
+that cannot be uploaded keeps its digest and is counted in `export_status.upload_fallbacks`, as is
+one nested more than 10 levels deep in its value, where Hue does not read parts, or one in a value
+cut to the value limit. Creating an attachment never raises: one without exactly one of `data` and
+`path`, with unreadable or larger data or an invalid content type is recorded as `None` and
+counted as an instrumentation issue; an invalid name alone is omitted and counted.
+
 ## Existing instrumentation
 
 Pass an existing `opentelemetry.sdk.trace.TracerProvider` through `tracer_provider=provider` to add Hue's exporter, and an existing `opentelemetry.sdk._logs.LoggerProvider` through `logger_provider=` when the application already owns one. A provider Hue creates for the other signal reuses the borrowed provider's resource, so spans and correlated logs report the same `service.name`; `service_name` applies only when Hue creates both providers. Hue's processor then exports every span that ends on that provider, the same default as other OpenTelemetry exporters, plus [placeholders](#live-spans) for its running Hue and AI spans; wrap the processor if only part of the provider's spans should reach Hue, and forward `on_start` only for spans whose `on_end` the wrapper forwards unchanged. Session/user identifiers from `hue.context()` are stamped on Hue helper spans only. Hue does not call `set_tracer_provider`. It exposes `hue.tracer_provider`, `hue.tracer` and `hue.logger_provider` for explicit integration. `shutdown()` closes Hue's processors; borrowed providers and their other processors stay usable. Finish traced work before shutting Hue down: spans ending or external records emitted afterward increment Hue's dropped-record counters, including emissions through a borrowed provider. New Hue helpers after shutdown are no-ops. Do not repeatedly attach Hue clients to one long-lived provider: OTel has no public processor-removal API. Create one client per provider lifecycle.
@@ -173,11 +223,11 @@ Hue keeps a value inline up to its value limit (1 MiB unless the receiver advert
 
 Hue stores the value under the trace, so the trace's retention, deletion and erasure cover it. Uploads run on the export worker, never on the application's thread: at most four at a time on daemon threads, each request within `export_timeout_seconds`, and all of one export's uploads within six of them; a transient failure is retried once, and a rate-limited reservation (429) waits out its `Retry-After` within the export's 60-second hold. A value not uploaded in time falls back; its upload, if still running, stops sending at the same deadline and its answer goes unused.
 
-A value that cannot be uploaded (Hue or the store refused it or failed, the network or a deadline did, the receiver has no upload route, or the value is over 1 GB) falls back according to its form: whole attributes keep a prefix up to the cap and are listed under `hue.truncated`; media parts keep their digest without a blob entry; failed opt-in `record_file` uploads preserve the file event. The explicit helper limit is 25 MiB; whole attributes retain their 1 GB limit. Each export records such values in a `warning` export issue per cause, whose `count` is the values and `trace_ids` their traces, and counts them in `export_status.upload_fallbacks`; successful uploads are counted in `export_status.uploaded_values`. Both counters include whole attributes, eligible binary or large text media, and opt-in `record_file` uploads. A warning is not a failure: it does not affect `export_status.ok`, `force_flush()` or `export_failure_sequence()`. After a transient failure, or a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm. An upload still sending when its export's upload budget ends stops there.
+A value that cannot be uploaded (Hue or the store refused it or failed, the network or a deadline did, the receiver has no upload route, or the value is over 1 GB) falls back according to its form: whole attributes keep a prefix up to the cap and are listed under `hue.truncated`; media parts keep their digest without a blob entry; failed opt-in `record_file` uploads preserve the file event. The explicit helper limit is 25 MiB; whole attributes retain their 1 GB limit. Each export records such values in a `warning` export issue per cause, whose `count` is the values and `trace_ids` their traces, and counts them in `export_status.upload_fallbacks`; successful uploads are counted in `export_status.uploaded_values`. Both counters include whole attributes, eligible binary or large text media, attachments, and opt-in `record_file` uploads. A warning is not a failure: it does not affect `export_status.ok`, `force_flush()` or `export_failure_sequence()`. After a transient failure, or a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm. An upload still sending when its export's upload budget ends stops there.
 
 To upload a value whole, the queued copy of its span holds it until export apart from `max_queue_bytes`, within a 128 MiB budget of held values (each charged as the interpreter holds it); a recorded message holding eligible media is held the same way, while the queue is charged its copy with the files as their digest. A value the budget cannot hold, or one queued while the receiver is known to lack the upload route, is cut (its files digested) when it is queued, as before, and reported as not uploaded, once per file; a single value larger than the whole budget is held while nothing else is. The queued copy lets go of its held values once export has placed them.
 
-Nothing is uploaded with `capture_content=False` or a setup key (`hue_setup_…`), nor from log records (Hue does not read a log record's uploaded values yet), links, resources or in-progress placeholders. Span events upload only through explicit `record_file(upload=True, ...)`; other event values are cut as before. The redactor runs on helper content before it is queued, and the credential scrub of tool definitions and recorded requests runs on the whole value before it is hashed, so a value they rewrite is uploaded as rewritten.
+Nothing is uploaded with `capture_content=False` or a setup key (`hue_setup_…`), nor from links, resources or in-progress placeholders. Log records upload only the attachments their body holds ([Attach a file anywhere](#attach-a-file-anywhere)). Span events upload only through explicit `record_file(upload=True, ...)`; other event values are cut as before. The redactor runs on helper content before it is queued, and the credential scrub of tool definitions and recorded requests runs on the whole value before it is hashed, so a value they rewrite is uploaded as rewritten.
 
 ## Live spans
 

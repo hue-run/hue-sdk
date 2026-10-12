@@ -10,6 +10,12 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### 0.18.0 (unreleased)
+
+#### Added
+
+- **Wire** `Attachment` places a file anywhere in a recorded value, the equivalent of Langfuse's `LangfuseMedia` and Braintrust's `Attachment`: `new Attachment({ data | path, contentType, name })` in a `withSpan()` input or output, `model()` messages, a tool's arguments or result, `recordMessages()` messages, or a `withSpan()` attribute (`SpanOptions.attributes` accepts an attachment, or an object or array holding one, recorded as JSON text). It is recorded at its position as a GenAI `blob` part in digest form, `{"type":"blob","mime_type","modality","sha256","size","name"}`, and its bytes are uploaded during export and listed under the record's `hue.blobs` as `<attribute>#<JSON pointer>`, or `body#<JSON pointer>` on a `recordMessages()` log record. `data` accepts bytes or a base64 string or `data:` URL; `path` is read when the attachment is created; both are limited to 25 MiB. Uploads follow `captureContent`, setup credentials, `redact`, the upload budget and fallback counting of other media; a part nested more than 10 levels deep keeps its digest without an upload. An invalid attachment is recorded as `null` and counted as an instrumentation failure; an invalid name alone is omitted and counted.
+
 ### [0.17.0] - 2026-10-10
 
 #### Breaking
@@ -1446,6 +1452,12 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### 0.11.0 (unreleased)
+
+#### Added
+
+- **Wire** `hue_sdk.Attachment` places a file anywhere in a recorded value, the equivalent of Langfuse's `LangfuseMedia` and Braintrust's `Attachment`: `Attachment(data, path=..., content_type=..., name=...)` in a `span()` input or output, `model()` messages, a tool's arguments or result, `log_inference()` messages, or a span attribute passed to `span(attributes=...)` or `set_attribute` (an attachment, or a dict or list holding one, recorded as JSON text). It is recorded at its position as a GenAI `blob` part in digest form, `{"type":"blob","mime_type","modality","sha256","size","name"}`, and its bytes are uploaded during export and listed under the record's `hue.blobs` as `<attribute>#<JSON pointer>`, or `body#<JSON pointer>` on a `log_inference()` log record. `data` accepts bytes or a base64 string or `data:` URL; `path` is read when the attachment is created; both are limited to 25 MiB. Uploads follow `capture_content`, setup keys, the redactor, the upload budget and fallback counting of other media; a part nested more than 10 levels deep keeps its digest without an upload. An invalid attachment is recorded as `None` and counted as an instrumentation issue; an invalid name alone is omitted and counted.
 
 ### [0.10.0] - 2026-10-10
 

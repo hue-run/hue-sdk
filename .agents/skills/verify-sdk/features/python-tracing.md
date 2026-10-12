@@ -9,6 +9,7 @@ An application opens `Hue(base_url, api_key, ...)`, records spans, model calls a
 - `py-ack` returns `force_flush()` and receipt results that match the receiver.
 - `py-media` inspects bounded, nonempty media and exports exact digests and blob entries.
 - `py-file-upload` covers opt-in `record_file` uploads and name validation.
+- `py-attachment` places `hue_sdk.Attachment` in recorded values and uploads it under `<attribute>#<pointer>` or `body#<pointer>`.
 
 ## How to get to it (user POV)
 
@@ -58,3 +59,15 @@ Run `uv run --frozen --all-groups pytest tests/test_media_parts.py -q` for inspe
 Use a loopback receiver that implements blob reservation, byte upload and completion for the success path, then refuse reservation or upload for the fallback path. The generic `stub-hue.py` returns 404 for blobs and proves only fallback. Repeat the helper upload and privacy checks from an installed wheel and inspect the decoded OTLP payload and received bytes.
 
 The shared corpus covers empty byte fields, null alternate MIME/name/inline-data selectors, a valid 128-astral-character name (256 UTF-16 units), invalid 129- and 256-astral-character names, blank names, C0, DEL and lone surrogates. Keep both fixture files byte-identical.
+
+## Attachments placed in values
+- `py-attachment` covers the `attachments` section of the shared corpus: an `Attachment` in `set_input`/`set_output`, `model()` messages, a `metadata` attribute (whole and nested) and `log_inference()` messages, with the exact recorded JSON text (the part as `{"type":"blob","mime_type","modality","sha256","size","name"}`) and the ordered `hue.blobs` strings, for successful and refused uploads. The log case's entry sits on the log record, keyed `body#/gen_ai.input.messages/0/parts/1`. A file used twice in one trace is PUT once.
+- Also check: `path` and every `data` form give the same digest and the bytes are copied; an invalid attachment records `None` and an invalid name is omitted, each counted as an instrumentation issue, while the span exports; `capture_content=False` keeps the metadata part without its name and sends no reservations; a redacted or replaced value uploads nothing and counts nothing; a part deeper than 10 levels keeps its digest and counts one fallback; setup keys upload nothing.
+
+Run from `packages/sdk-python` (about 3 s):
+
+```sh
+uv run --frozen --all-groups pytest tests/test_attachments.py -q
+```
+
+Expected: `7 passed`. `tests/test_wheel.py` runs the same file against the built wheel.

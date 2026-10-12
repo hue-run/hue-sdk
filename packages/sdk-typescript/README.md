@@ -233,6 +233,55 @@ Tabs, newlines, DEL and lone surrogates make a name invalid. An invalid name is 
 counted as an instrumentation failure; the otherwise valid event remains. Invalid records and
 records without an active span count as instrumentation failures.
 
+## Attach a file anywhere
+
+Wrap a file in an `Attachment` and put it anywhere in a value Hue records: a `withSpan()` input or
+output, `model()` messages, a tool's arguments or result, `recordMessages()` messages or a span
+attribute passed to `withSpan()`. It replaces Langfuse's `LangfuseMedia` and Braintrust's
+`Attachment`: put it where you put those.
+
+```ts
+import { readFile } from "node:fs/promises";
+import { Attachment } from "@hue-run/sdk";
+
+const png = await readFile("scan.png");
+await hue.withSpan(
+  "review contract",
+  (span) => {
+    span.setInput({
+      question: "Which clauses changed?",
+      contract: new Attachment({ path: "contract.pdf", contentType: "application/pdf" }),
+    });
+  },
+  { attributes: { metadata: { scan: new Attachment({ data: png, contentType: "image/png" }) } } },
+);
+```
+
+Give exactly one of `data` (a `Buffer`, typed array, `ArrayBuffer`, or a base64 string or `data:`
+URL) and `path` (read from the file system when the attachment is created), a `contentType` and
+optionally a `name`. The bytes are read and hashed when the attachment is created and are limited
+to 25 MiB, the `recordFile` limit: they are held in memory from then until export, within the
+128 MiB budget that queued spans share for values awaiting upload.
+
+At its position the attachment is recorded as a GenAI `blob` part that names the file by digest,
+`{"type":"blob","mime_type":"application/pdf","modality":"document","sha256":"<64 hex>","size":48213,"name":"contract.pdf"}`,
+with `modality` read from the content type (`image`, `audio`, `video`, `document` or `file`).
+Export uploads the bytes as it uploads inline media and lists them under the record's `hue.blobs`,
+keyed `<attribute>#<JSON pointer to the part>`: `input.value#/contract` above,
+`metadata#/scan` for the attribute, and `body#/gen_ai.input.messages/0/parts/1` for a part in a
+`recordMessages()` log record. An attribute value that is an attachment, or an object or array
+holding one, is recorded as JSON text; put files under `metadata` for Hue to list them as the
+span's metadata files. A file used twice in one trace is stored once.
+
+Attachments follow the rules of other media. With `captureContent: false` or a setup credential
+no bytes leave the process: a metadata attribute still records the part, without its name, and
+content values are not recorded at all. A part the redactor removes or rewrites is not uploaded.
+A part that cannot be uploaded keeps its digest and is counted in `report.uploadFallbacks`, as is
+one nested more than 10 levels deep in its value, where Hue does not read parts, or one in a value
+cut to the value limit. Creating an attachment never throws: one without exactly one of `data`
+and `path`, with unreadable or larger data or an invalid content type is recorded as `null` and
+counted as an instrumentation failure; an invalid name alone is omitted and counted.
+
 ## Vercel AI SDK 6
 
 AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass
@@ -575,8 +624,8 @@ media parts keep their digest without a blob entry; failed opt-in `recordFile` u
 the file event. The explicit helper limit is 25 MiB; whole attributes retain their 1 GB limit. Each
 export reports such values in a `warning` issue per cause, whose `count` is the values and
 `traceIds` their traces, and counts them in `report.uploadFallbacks`; successful uploads are counted
-in `report.uploadedValues`. Both counters include whole attributes, eligible media and opt-in
-`recordFile` uploads. A warning never makes `flush()` throw. After a transient failure, or
+in `report.uploadedValues`. Both counters include whole attributes, eligible media, attachments
+and opt-in `recordFile` uploads. A warning never makes `flush()` throw. After a transient failure, or
 a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without
 the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not
 asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm.
@@ -592,9 +641,9 @@ is held while nothing else is. While values can be uploaded, helpers encode cont
 upload limit and 1,048,576 values, rather than cutting it to the value limit as they record it.
 
 Nothing is uploaded with `captureContent: false` or a setup credential (`hue_setup_…`), nor from
-log records (Hue does not read a log record's uploaded values yet), links, resources
-or in-progress placeholders. Span events upload only through explicit `recordFile({ upload: true, ... })`;
-other event values are cut as before. `redact` and the credential scrub of
+links, resources or in-progress placeholders. Log records upload only the attachments their body
+holds ([Attach a file anywhere](#attach-a-file-anywhere)). Span events upload only through
+explicit `recordFile({ upload: true, ... })`; other event values are cut as before. `redact` and the credential scrub of
 tool definitions and recorded requests run on the whole value before it is hashed, so a value they
 rewrite is uploaded as rewritten.
 

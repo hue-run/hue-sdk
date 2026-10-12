@@ -5,6 +5,7 @@ export {
   HueConnectionError,
   type ExistingHueProviders,
 } from "./client.js";
+export { Attachment, type AttachmentOptions } from "./attachment.js";
 export { createHueTransport, HueTransport, HueExportError } from "./transport.js";
 export type { RecordValue } from "./transport.js";
 export { hueExperimentalTelemetry } from "./experimental-telemetry.js";

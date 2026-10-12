@@ -26,7 +26,13 @@ from ._blobs import Tally, Uploads, held_of
 from ._limits import AdvertisedLimits
 from ._otel_compat import export_context, instrumentation_suppressed
 from .snapshots import Hold, snapshot_log, snapshot_pending_span, snapshot_span
-from .transport import BATCH_TARGET_BYTES, MAX_BATCH_BYTES, DroppedRecords, PendingSpan
+from .transport import (
+    BATCH_TARGET_BYTES,
+    MAX_BATCH_BYTES,
+    DroppedRecords,
+    PendingSpan,
+    _record_trace_id,
+)
 
 # The instrumentation scope of ``Hue.tracer``; its spans are always announced while open.
 HUE_TRACER_SCOPE = "hue-run"
@@ -523,6 +529,42 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
 
 class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
     _copy = staticmethod(snapshot_log)
+
+    def __init__(self, *args: Any, uploads: Uploads | None = None, **kwargs: Any) -> None:
+        # Set before the worker starts.
+        self._uploads = uploads
+        super().__init__(*args, **kwargs)
+
+    def _hold(self, value_bytes: int) -> Hold | None:
+        """Log records hold only the attachments ``log_inference`` staged for them."""
+        uploads = self._uploads
+        if uploads is None:
+            return None
+        return Hold(uploads.held, value_bytes, uploads.holds(), uploads)
+
+    def _discard(self, *items: Any) -> None:
+        uploads = self._uploads
+        if uploads is None:
+            return
+        tally = Tally()
+        for item in items:
+            record = getattr(item, "log_record", None)
+            held = held_of(record)
+            trace_id = _record_trace_id(item) or ""
+            # A record lost before its copy was made still holds what log_inference staged.
+            dropped = (
+                len(held.files)
+                if held is not None
+                else uploads.drop_log(record.body)
+                if record is not None
+                else 0
+            )
+            for _ in range(dropped):
+                tally.fallback("budget", trace_id)
+            if held is not None:
+                held.files.clear()
+                held.release()
+        self._exporter._report_uploads(tally)
 
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
         self._enqueue(log_record)

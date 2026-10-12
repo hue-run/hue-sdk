@@ -4895,5 +4895,311 @@
         "entries": []
       }
     }
-  ]
+  ],
+  "attachments": {
+    "files": {
+      "pixel": {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+        "content_type": "image/png",
+        "name": "pixel.png"
+      },
+      "report": {
+        "data": "JVBERi0xLjQKJXN5bnRoZXRpYyBhdHRhY2htZW50CiUlRU9GCg==",
+        "content_type": "application/pdf",
+        "name": "résumé report.pdf"
+      },
+      "clip": {
+        "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=",
+        "content_type": "audio/wav",
+        "name": "clip.wav"
+      },
+      "table": {
+        "data": "YSxiCjEsMgo=",
+        "content_type": "text/csv; charset=utf-8",
+        "name": "data.csv"
+      },
+      "video": {
+        "data": "AAAAGGZ0eXBtcDQyc3ludGhldGlj",
+        "content_type": "video/mp4"
+      },
+      "archive": {
+        "data": "UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==",
+        "content_type": "application/zip",
+        "name": "bundle.zip"
+      }
+    },
+    "cases": [
+      {
+        "id": "attachment-input-nested",
+        "helper": "input",
+        "attribute": "input.value",
+        "value": {
+          "question": "What is in this image?",
+          "image": {
+            "$attachment": "pixel"
+          }
+        },
+        "recorded": {
+          "question": "What is in this image?",
+          "image": {
+            "type": "blob",
+            "mime_type": "image/png",
+            "modality": "image",
+            "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+            "size": 68,
+            "name": "pixel.png"
+          }
+        },
+        "entries": [
+          "{\"key\":\"input.value#/image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\",\"name\":\"pixel.png\"}"
+        ]
+      },
+      {
+        "id": "attachment-output-array",
+        "helper": "output",
+        "attribute": "output.value",
+        "value": [
+          "Here is the report.",
+          {
+            "$attachment": "report"
+          },
+          {
+            "$attachment": "archive"
+          }
+        ],
+        "recorded": [
+          "Here is the report.",
+          {
+            "type": "blob",
+            "mime_type": "application/pdf",
+            "modality": "document",
+            "sha256": "e1bb7f2240c6d80ae0449f3ab34337e8f62414ab9da9414ccbaaaee2a358d0e5",
+            "size": 37,
+            "name": "résumé report.pdf"
+          },
+          {
+            "type": "blob",
+            "mime_type": "application/zip",
+            "modality": "file",
+            "sha256": "8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85",
+            "size": 22,
+            "name": "bundle.zip"
+          }
+        ],
+        "entries": [
+          "{\"key\":\"output.value#/1\",\"sha256\":\"e1bb7f2240c6d80ae0449f3ab34337e8f62414ab9da9414ccbaaaee2a358d0e5\",\"size\":37,\"content_type\":\"application/pdf\",\"name\":\"résumé report.pdf\"}",
+          "{\"key\":\"output.value#/2\",\"sha256\":\"8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85\",\"size\":22,\"content_type\":\"application/zip\",\"name\":\"bundle.zip\"}"
+        ]
+      },
+      {
+        "id": "attachment-model-message",
+        "helper": "model",
+        "attribute": "gen_ai.input.messages",
+        "value": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Transcribe this."
+              },
+              {
+                "$attachment": "clip"
+              }
+            ]
+          }
+        ],
+        "recorded": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Transcribe this."
+              },
+              {
+                "type": "blob",
+                "mime_type": "audio/wav",
+                "modality": "audio",
+                "sha256": "8b8fbafe8679076454429756fa72f11d5f442c87381cc6a4285451d826a9e629",
+                "size": 44,
+                "name": "clip.wav"
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/1\",\"sha256\":\"8b8fbafe8679076454429756fa72f11d5f442c87381cc6a4285451d826a9e629\",\"size\":44,\"content_type\":\"audio/wav\",\"name\":\"clip.wav\"}"
+        ]
+      },
+      {
+        "id": "attachment-metadata-whole",
+        "helper": "metadata",
+        "attribute": "metadata",
+        "value": {
+          "$attachment": "table"
+        },
+        "recorded": {
+          "type": "blob",
+          "mime_type": "text/csv; charset=utf-8",
+          "modality": "document",
+          "sha256": "492d5ea496056f1a6a6592241032fab764c321596317930b4fa0e1e8bc3b7470",
+          "size": 8,
+          "name": "data.csv"
+        },
+        "entries": [
+          "{\"key\":\"metadata#\",\"sha256\":\"492d5ea496056f1a6a6592241032fab764c321596317930b4fa0e1e8bc3b7470\",\"size\":8,\"content_type\":\"text/csv; charset=utf-8\",\"name\":\"data.csv\"}"
+        ]
+      },
+      {
+        "id": "attachment-metadata-nested",
+        "helper": "metadata",
+        "attribute": "metadata",
+        "value": {
+          "customer": "acme",
+          "invoice": {
+            "$attachment": "report"
+          },
+          "frames": [
+            {
+              "$attachment": "video"
+            }
+          ]
+        },
+        "recorded": {
+          "customer": "acme",
+          "invoice": {
+            "type": "blob",
+            "mime_type": "application/pdf",
+            "modality": "document",
+            "sha256": "e1bb7f2240c6d80ae0449f3ab34337e8f62414ab9da9414ccbaaaee2a358d0e5",
+            "size": 37,
+            "name": "résumé report.pdf"
+          },
+          "frames": [
+            {
+              "type": "blob",
+              "mime_type": "video/mp4",
+              "modality": "video",
+              "sha256": "2d2af8a647d543b5aa6abf5397e6a4166825226bc2210affaac9fe9402ff863d",
+              "size": 21
+            }
+          ]
+        },
+        "entries": [
+          "{\"key\":\"metadata#/invoice\",\"sha256\":\"e1bb7f2240c6d80ae0449f3ab34337e8f62414ab9da9414ccbaaaee2a358d0e5\",\"size\":37,\"content_type\":\"application/pdf\",\"name\":\"résumé report.pdf\"}",
+          "{\"key\":\"metadata#/frames/0\",\"sha256\":\"2d2af8a647d543b5aa6abf5397e6a4166825226bc2210affaac9fe9402ff863d\",\"size\":21,\"content_type\":\"video/mp4\"}"
+        ]
+      },
+      {
+        "id": "attachment-log-body",
+        "helper": "log",
+        "attribute": "body",
+        "value": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "What is this?"
+              },
+              {
+                "$attachment": "pixel"
+              }
+            ]
+          }
+        ],
+        "recorded": {
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "What is this?"
+                },
+                {
+                  "type": "blob",
+                  "mime_type": "image/png",
+                  "modality": "image",
+                  "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                  "size": 68,
+                  "name": "pixel.png"
+                }
+              ]
+            }
+          ]
+        },
+        "entries": [
+          "{\"key\":\"body#/gen_ai.input.messages/0/parts/1\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\",\"name\":\"pixel.png\"}"
+        ]
+      },
+      {
+        "id": "attachment-pointer-escaping",
+        "helper": "input",
+        "attribute": "input.value",
+        "value": {
+          "a/b": {
+            "c~d": {
+              "$attachment": "pixel"
+            }
+          }
+        },
+        "recorded": {
+          "a/b": {
+            "c~d": {
+              "type": "blob",
+              "mime_type": "image/png",
+              "modality": "image",
+              "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+              "size": 68,
+              "name": "pixel.png"
+            }
+          }
+        },
+        "entries": [
+          "{\"key\":\"input.value#/a~1b/c~0d\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\",\"name\":\"pixel.png\"}"
+        ]
+      },
+      {
+        "id": "attachment-same-file-twice",
+        "helper": "output",
+        "attribute": "output.value",
+        "value": [
+          {
+            "$attachment": "pixel"
+          },
+          {
+            "again": {
+              "$attachment": "pixel"
+            }
+          }
+        ],
+        "recorded": [
+          {
+            "type": "blob",
+            "mime_type": "image/png",
+            "modality": "image",
+            "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+            "size": 68,
+            "name": "pixel.png"
+          },
+          {
+            "again": {
+              "type": "blob",
+              "mime_type": "image/png",
+              "modality": "image",
+              "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+              "size": 68,
+              "name": "pixel.png"
+            }
+          }
+        ],
+        "entries": [
+          "{\"key\":\"output.value#/0\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\",\"name\":\"pixel.png\"}",
+          "{\"key\":\"output.value#/1/again\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\",\"name\":\"pixel.png\"}"
+        ]
+      }
+    ]
+  }
 }

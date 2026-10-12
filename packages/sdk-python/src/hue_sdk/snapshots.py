@@ -23,6 +23,7 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, Status, format_span_id
 
+from ._attachment import Attachment, PlacedAttachment, attachment_part
 from ._blobs import MAX_BLOB_BYTES, Held, HeldValues, Uploads, attach_held, held_size
 from ._inline_files import (
     INLINE_FILE_TEXT_PER_RECORD,
@@ -77,10 +78,15 @@ class _ContentBudget:
         self,
         max_bytes: int = MAX_CONTENT_SNAPSHOT_BYTES,
         max_nodes: int = MAX_CONTENT_SNAPSHOT_NODES,
+        attachments: list[PlacedAttachment] | None = None,
+        capture_content: bool = True,
     ) -> None:
         self.remaining_bytes = max_bytes
         self.remaining_nodes = max_nodes
         self.active: set[int] = set()
+        # Where attachments are placed: each becomes its digest part (None when invalid).
+        self.attachments = attachments
+        self.capture_content = capture_content
 
     def consume(self, size: int) -> None:
         self.remaining_bytes -= size
@@ -111,6 +117,10 @@ class _ContentBudget:
         if kind is float and isfinite(value):
             self.consume(24)
             return value
+        if kind is Attachment and self.attachments is not None:
+            part = attachment_part(value, self.capture_content)
+            self.attachments.append(PlacedAttachment(value, part, depth))
+            return None if part is None else self.value(part, depth)
         if kind is not dict and kind is not list and kind is not tuple:
             raise ValueError("Content must contain only built-in JSON values.")
         identity = id(value)
@@ -138,12 +148,21 @@ class _ContentBudget:
             self.active.remove(identity)
 
 
-def snapshot_content(value: Any, *, whole: bool = False) -> Any:
+def snapshot_content(
+    value: Any,
+    *,
+    whole: bool = False,
+    attachments: list[PlacedAttachment] | None = None,
+    capture_content: bool = True,
+) -> Any:
     """Detach nested mutable content before exposing it to a user redactor. ``whole`` bounds it
-    by Hue's upload limit instead of four value caps, for content export may upload."""
+    by Hue's upload limit instead of four value caps, for content export may upload. With
+    ``attachments``, each ``Attachment`` is copied as its digest part and listed there."""
     if whole:
-        return _ContentBudget(MAX_BLOB_BYTES, MAX_WHOLE_CONTENT_NODES).value(value)
-    return _ContentBudget().value(value)
+        return _ContentBudget(
+            MAX_BLOB_BYTES, MAX_WHOLE_CONTENT_NODES, attachments, capture_content
+        ).value(value)
+    return _ContentBudget(attachments=attachments, capture_content=capture_content).value(value)
 
 
 _LEGACY_CONTENT_EVENTS = (
@@ -701,18 +720,34 @@ def snapshot_log(
     value_bytes: int | None = None,
     hold: Hold | None = None,
 ) -> ReadableLogRecord:
-    # Log records are never uploaded: Hue reads no log record's uploaded values yet.
-    del hold
-    budget = _ValueBudget(capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
-    record = copy(log_record.log_record)
-    record.context = Context()
-    record.body = budget.content(record.body, "body") if capture_content else None
-    resource = budget.resource(log_record.resource)
-    record.attributes = budget.listed(
-        budget.attributes(record.attributes, log_record.dropped_attributes)
+    # A log record's values are not held for upload; the attachments its body holds are, staged
+    # by ``log_inference`` for this record.
+    held = (
+        hold.uploads.take_log(log_record.log_record.body)
+        if hold is not None and hold.uploads is not None and capture_content
+        else None
     )
-    record.event_name = budget.value(record.event_name)
-    record.severity_text = budget.value(record.severity_text)
+    budget = _ValueBudget(capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
+    try:
+        record = copy(log_record.log_record)
+        record.context = Context()
+        record.body = budget.content(record.body, "body") if capture_content else None
+        resource = budget.resource(log_record.resource)
+        record.attributes = budget.listed(
+            budget.attributes(record.attributes, log_record.dropped_attributes)
+        )
+        record.event_name = budget.value(record.event_name)
+        record.severity_text = budget.value(record.severity_text)
+    except BaseException:
+        if held is not None:
+            held.release()
+        raise
+    if held is not None:
+        try:
+            attach_held(record, held)
+        except Exception:
+            # A log record that keeps no attributes of its own uploads no attachments.
+            held.release()
     return ReadableLogRecord(
         log_record=record,
         resource=resource,
