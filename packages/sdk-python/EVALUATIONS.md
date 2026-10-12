@@ -113,7 +113,8 @@ client.add_eval_set_case(
 ```
 
 An uploaded file needs one of the artifact content types (the 22 types managed outputs accept), a
-name of 1–255 characters without path separators or control characters, and 1 byte to 25 MiB. Every
+name of 1–255 UTF-16 code units (a character above U+FFFF counts twice) without surrogates, path
+separators or control characters, and 1 byte to 25 MiB. Every
 file is checked before the first upload; one outside that policy raises `ValueError` without a
 request. The reservation key names the version, the case's `external_key`, the role, the bytes, the
 name and the content type, so sending the same case again reuses its artifacts and a corrected name

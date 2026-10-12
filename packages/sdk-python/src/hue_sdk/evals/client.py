@@ -424,7 +424,8 @@ class EvaluationClient:
         (``CaseFileWrite(role=..., artifact_id=...)`` or ``{"artifactId": ..., "role": ...}``), or
         a file the client uploads first as a verified artifact, from ``data`` or read once from
         ``path``. An uploaded file must have one of the artifact content types, a name of 1–255
-        characters without path separators or control characters, and 1 byte to 25 MiB; every
+        UTF-16 code units (a character above U+FFFF counts twice) without surrogates, path
+        separators or control characters, and 1 byte to 25 MiB; every
         file is checked before the first upload, which raises ``ValueError`` without a request.
         The reservation key names the version, ``external_key``, the role and the bytes, so the
         same case sent again reuses its artifacts.

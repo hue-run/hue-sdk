@@ -243,3 +243,26 @@ test("addCase refuses files outside the artifact policy before any request", asy
     await expect(write(files)).rejects.toBeInstanceOf(RangeError);
   expect(calls.requests).toEqual([]);
 });
+
+test("addCase counts a file name in UTF-16 code units, as Hue does, before any upload", async () => {
+  const { client, versionId, calls } = receiver();
+  const write = (filename: string) =>
+    client.addCase(versionId, {
+      expectedRevision: 1,
+      externalKey: "names",
+      inputs: {},
+      files: [
+        { role: "source", filename: "chart.png", contentType: "image/png", bytes: png },
+        { role: "evaluator_reference", filename, contentType: "text/csv", bytes: csv },
+      ],
+    });
+  // 128 emoji are 128 code points but 256 UTF-16 code units, one past Hue's limit; Hue refuses
+  // a name with an unpaired surrogate too.
+  for (const filename of ["😀".repeat(128), "answers\ud800.csv", "\udc00"])
+    await expect(write(filename)).rejects.toBeInstanceOf(TypeError);
+  expect(calls.requests).toEqual([]);
+  // 127 emoji and one letter are 255 code units.
+  const longest = `${"😀".repeat(127)}x`;
+  await write(longest);
+  expect(calls.reserves.map((reserve) => reserve.filename)).toEqual(["chart.png", longest]);
+});

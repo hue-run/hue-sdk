@@ -313,8 +313,9 @@ await client.addEvalSetCase(versionId, {
 });
 ```
 
-An uploaded file needs one of `outputContentTypes`, a name of 1–255 characters without path
-separators or control characters, and 1 byte to 25 MiB. Every file is checked before the first
+An uploaded file needs one of `outputContentTypes`, a well-formed name of 1–255 UTF-16 code units
+(as JavaScript counts a string's `length`) without path separators or control characters, and 1
+byte to 25 MiB. Every file is checked before the first
 upload; one outside that policy throws `TypeError` or `RangeError` without a request. The
 reservation key names the version, the case's `externalKey`, the role, the bytes, the name and the
 content type, so sending the same case again reuses its artifacts and a corrected name or type

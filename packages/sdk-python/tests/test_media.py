@@ -770,3 +770,34 @@ def test_add_case_refuses_files_outside_the_artifact_policy_before_any_request(h
             str(uuid4()), expected_revision=1, external_key="refused", inputs={}, files=files
         )
     assert hue.seen == []
+
+
+def test_add_case_counts_a_file_name_in_utf16_code_units_as_hue_does_before_any_upload(hue):
+    client, version_id = hue.client(), str(uuid4())
+
+    def write(filename: str) -> None:
+        client.add_case(
+            version_id,
+            expected_revision=1,
+            external_key="names",
+            inputs={},
+            files=[
+                CaseFileWrite(
+                    role="source", filename="chart.png", content_type="image/png", data=PNG
+                ),
+                CaseFileWrite(
+                    role="evaluator_reference", filename=filename, content_type="text/csv", data=CSV
+                ),
+            ],
+        )
+
+    # 128 emoji are 128 code points but 256 UTF-16 code units, one past Hue's limit; Hue refuses
+    # a name with an unpaired surrogate too.
+    for filename in ("\U0001f600" * 128, "answers\ud800.csv", "\udc00"):
+        with pytest.raises(ValueError):
+            write(filename)
+    assert hue.seen == []
+    # 127 emoji and one letter are 255 code units.
+    longest = "\U0001f600" * 127 + "x"
+    write(longest)
+    assert [artifact["filename"] for artifact in hue.artifacts.values()] == ["chart.png", longest]

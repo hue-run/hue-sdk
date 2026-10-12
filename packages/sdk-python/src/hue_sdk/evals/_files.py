@@ -154,15 +154,18 @@ def publish_artifact(
 
 
 def _case_file_name(name: object) -> str:
+    """A case file name as the artifact API takes it: well-formed Unicode of 1–255 UTF-16 code
+    units, as Hue counts them, without a control character or a path separator."""
     if (
         not isinstance(name, str)
         or not name
-        or len(name) > 255
+        or any(0xD800 <= ord(c) <= 0xDFFF for c in name)
+        or len(name.encode("utf-16-le")) // 2 > 255
         or any(ord(c) < 32 or ord(c) == 127 or c in "/\\" for c in name)
     ):
         raise ValueError(
-            "A case file needs a filename of 1–255 characters without path separators "
-            "or control characters."
+            "A case file needs a well-formed filename of 1–255 UTF-16 code units without path "
+            "separators or control characters."
         )
     return name
 

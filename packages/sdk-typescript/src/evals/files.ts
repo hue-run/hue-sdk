@@ -536,19 +536,20 @@ const caseFileRoles: readonly CaseFile["role"][] = [
 /** The most input files one case pins. */
 const MAX_CASE_FILES = 32;
 
-/** A case file name as the artifact API takes it: 1–255 characters, no control character and no
- * path separator. */
+/** A case file name as the artifact API takes it: well-formed Unicode of 1–255 UTF-16 code units,
+ * as Hue counts them, without a control character or a path separator. */
 function caseFileName(name: unknown): string {
   if (
     typeof name !== "string" ||
     !name.length ||
     name.length > 255 ||
+    !name.isWellFormed() ||
     [...name].some(
       (c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127 || c === "/" || c === "\\",
     )
   )
     throw new TypeError(
-      "A case file needs a filename of 1–255 characters without path separators or control characters",
+      "A case file needs a well-formed filename of 1–255 UTF-16 code units without path separators or control characters",
     );
   return name;
 }
