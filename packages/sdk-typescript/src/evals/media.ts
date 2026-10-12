@@ -745,8 +745,9 @@ function slotOf(part: Plain): Slot | undefined {
     case "image":
     case "document": {
       const source = plain(part.source);
+      // A source without a type, absent or null, is read as base64, as Hue reads it.
       if (source)
-        return source.type === undefined || source.type === "base64"
+        return source.type === undefined || source.type === null || source.type === "base64"
           ? {
               owner: ["source"],
               key: "data",

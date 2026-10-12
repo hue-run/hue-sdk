@@ -944,3 +944,23 @@ def test_a_recorded_value_keeps_an_own___proto___key_as_typescript_does(hue):
             "type": "image_url",
             "image_url": {"url": f"data:image/png;base64,{b64(PNG)}"},
         }
+
+
+def test_an_anthropic_source_whose_type_is_absent_or_null_takes_base64_a_url_one_is_left():
+    def block(**source: Any) -> dict[str, Any]:
+        return {
+            "type": "image",
+            "source": {"media_type": "image/png", **source},
+            "sha256": sha(PNG),
+            "size": len(PNG),
+        }
+
+    resolved = rehydrate_media(
+        [block(), block(type=None), block(type="url")], [_Bytes(sha(PNG), "image/png", PNG)]
+    )
+    assert resolved.resolved == 2
+    assert resolved.value == [
+        {"type": "image", "source": {"media_type": "image/png", "data": b64(PNG)}},
+        {"type": "image", "source": {"media_type": "image/png", "type": None, "data": b64(PNG)}},
+        block(type="url"),
+    ]

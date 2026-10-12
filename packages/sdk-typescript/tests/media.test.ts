@@ -516,6 +516,27 @@ describe("rehydrateMedia", () => {
   });
 });
 
+describe("Anthropic sources", () => {
+  test("a source whose type is absent or null takes base64; a URL source is left as it is", async () => {
+    const block = (source: Record<string, unknown>) => ({
+      type: "image",
+      source: { media_type: "image/png", ...source },
+      sha256: sha256(png),
+      size: png.byteLength,
+    });
+    const { value, resolved } = await rehydrateMedia(
+      [block({}), block({ type: null }), block({ type: "url" })],
+      [{ sha256: sha256(png), bytes: png }],
+    );
+    expect(resolved).toBe(2);
+    expect(value as unknown).toEqual([
+      { type: "image", source: { media_type: "image/png", data: base64(png) } },
+      { type: "image", source: { media_type: "image/png", type: null, data: base64(png) } },
+      block({ type: "url" }),
+    ]);
+  });
+});
+
 describe("own keys named __proto__", () => {
   test("a recorded value keeps an own __proto__ key as a key, not as a prototype", async () => {
     const { client } = hue({ [sha256(png)]: stored(png, "image/png", "chart.png") });
