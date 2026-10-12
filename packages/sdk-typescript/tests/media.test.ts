@@ -335,6 +335,21 @@ describe("client.media.fetch", () => {
     expect(seen).toHaveLength(1);
   });
 
+  test("a refused key is told the key its target needs: Read for a trace, Read and write for a snapshot", async () => {
+    const { client } = hue({ [sha256(png)]: { kind: "forbidden" } });
+    const trace = await failure(client.media.fetch({ traceId, sha256: sha256(png) }));
+    expect(trace.message).toBe(
+      "The key cannot read recorded content; use a Read or Read and write key",
+    );
+    const snapshot = await failure(
+      client.media.fetch({ snapshotId: randomUUID(), sha256: sha256(png) }),
+    );
+    expect([snapshot.reason, snapshot.status]).toEqual(["forbidden", 403]);
+    expect(snapshot.message).toBe(
+      "The key cannot read a snapshot's files; use a Read and write key",
+    );
+  });
+
   test("a request that never answers times out, once more, then fails", async () => {
     const { client, seen } = hue({ [sha256(png)]: { kind: "hang" } }, { timeoutMillis: 100 });
     const timedOut = await failure(client.media.fetch({ traceId, sha256: sha256(png) }));

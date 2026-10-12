@@ -442,6 +442,16 @@ def test_a_key_without_content_access_is_forbidden_and_not_asked_again(hue):
     assert len(hue.seen) == 1
 
 
+def test_a_refused_key_is_told_the_key_its_target_needs(hue):
+    hue.answers[sha(PNG)] = {"kind": "forbidden"}
+    client = hue.client()
+    trace = failure(lambda: client.media.fetch(trace_id=TRACE_ID, sha256=sha(PNG)))
+    assert str(trace) == "The key cannot read recorded content; use a Read or Read and write key."
+    snapshot = failure(lambda: client.media.fetch(snapshot_id=str(uuid4()), sha256=sha(PNG)))
+    assert (snapshot.reason, snapshot.status) == ("forbidden", 403)
+    assert str(snapshot) == "The key cannot read a snapshot's files; use a Read and write key."
+
+
 def test_a_request_that_never_answers_times_out_once_more_then_fails(hue):
     hue.answers[sha(PNG)] = {"kind": "hang"}
     client = hue.client(timeout_seconds=0.2)
