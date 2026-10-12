@@ -34,8 +34,13 @@ from ._attachment import (
     locate_parts,
 )
 from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Tally, Uploads
-from ._inline_files import dumps_message, is_media_name
-from ._limits import AdvertisedLimits, cut_utf8
+from ._inline_files import (
+    INLINE_FILE_TEXT_PER_RECORD,
+    digest_form_size,
+    dumps_message,
+    is_media_name,
+)
+from ._limits import AdvertisedLimits, cut_utf8, over_utf8
 from ._otel_compat import encode_logs
 from ._provider_tools import (
     ABSENT,
@@ -624,11 +629,13 @@ class HueSpan:
         ):
             if value is not _MISSING:
                 # Bound and redact each field as JSON, then send the structure rather than its text.
+                # While media may be uploaded, a field's files may take it past the cap.
                 found: list[PlacedAttachment] = []
-                body[key] = json.loads(self._client._content(key, value, placed=found))
+                body[key] = json.loads(self._client._content(key, value, media=True, placed=found))
                 # A field's attachments sit one level below the body's root.
                 placed.extend(replace(item, depth=item.depth + 1) for item in found)
-        # Attachments in the body are staged with it until this client's processor admits it.
+        # Attachments in the body are staged with it until this client's processor admits it;
+        # export uploads them with the media the body holds.
         uploads = self._client._uploads
         files = self._client._attachment_files(
             placed, body, "body", self.trace_id, False, True, "logs"
@@ -911,10 +918,28 @@ class Hue:
             return None
 
     def _content(
-        self, key: str, value: Any, *, placed: list[PlacedAttachment] | None = None
+        self,
+        key: str,
+        value: Any,
+        *,
+        media: bool = False,
+        placed: list[PlacedAttachment] | None = None,
     ) -> str:
         """The value as JSON text within the cap, for a caller that parses it back (an inference
-        log's body): a value the cap would cut is omitted instead, since its prefix is no JSON."""
+        log's body): a value the cap would cut is omitted instead, since its prefix is no JSON.
+
+        With ``media``, while values may be uploaded, a value over the cap is kept whole when it
+        fits the cap with each file it holds as its digest: export uploads the files."""
+        cap = self._limits.current.value_bytes
+        if media and self._uploads is not None and self._uploads.holds():
+            content, truncated = self._bounded_content(
+                key, value, whole=True, bound=cap + INLINE_FILE_TEXT_PER_RECORD, placed=placed
+            )
+            if not truncated and (
+                not over_utf8(content, cap) or digest_form_size(json.loads(content)) <= cap
+            ):
+                return content
+            raise ValueError("Captured content exceeds Hue's value cap.")
         content, truncated = self._bounded_content(key, value, placed=placed)
         if truncated:
             raise ValueError("Captured content exceeds Hue's value cap.")
@@ -1001,6 +1026,7 @@ class Hue:
         value: Any,
         *,
         whole: bool = False,
+        bound: int | None = None,
         placed: list[PlacedAttachment] | None = None,
         final: list[Any] | None = None,
     ) -> tuple[str, bool]:
@@ -1016,7 +1042,7 @@ class Hue:
         """
         cap = self._limits.current.value_bytes
         whole = whole and self._uploads is not None and self._uploads.holds()
-        bound = MAX_BLOB_BYTES if whole else cap
+        bound = cap if not whole else MAX_BLOB_BYTES if bound is None else bound
         # Redact before serialization, before queues and before any exporter receives content.
         try:
             # A redactor may mutate its argument before returning or raising.

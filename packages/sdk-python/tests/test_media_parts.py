@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -94,6 +95,23 @@ def uploads(hue_store):
         value.close()
 
 
+def json_of(value: Any) -> Any:
+    """An OTLP value as the JSON it carries (a kvlist as an object)."""
+    kind = value.WhichOneof("value")
+    if kind is None:
+        return None
+    if kind == "kvlist_value":
+        return {item.key: json_of(item.value) for item in value.kvlist_value.values}
+    if kind == "array_value":
+        return [json_of(item) for item in value.array_value.values]
+    return getattr(value, kind)
+
+
+def corpus_text(case: dict[str, Any]) -> str:
+    """A corpus case's attribute text: its raw ``value``, or its ``messages`` as JSON."""
+    return case["value"] if "value" in case else json.dumps(case["messages"], ensure_ascii=False)
+
+
 def entries(record: Any) -> list[str]:
     value = attrs(record).get("hue.blobs")
     return [item.string_value for item in value.array_value.values] if value else []
@@ -109,20 +127,143 @@ def test_shared_media_wire_corpus(hue_store, outcome):
     with client(hue_store, max_queue_size=512) as hue:
         for case in cases:
             with hue.span(case["id"]) as span:
-                span.set_attribute(
-                    case["attribute"], json.dumps(case["messages"], ensure_ascii=False)
-                )
+                span.set_attribute(case["attribute"], corpus_text(case))
         assert hue.force_flush(timeout_millis=30_000)
         for case in cases:
             record = hue_store.span(case["id"])
-            assert (
-                json.loads(attrs(record)[case["attribute"]].string_value)
-                == case[outcome]["messages"]
-            ), case["id"]
+            exported = attrs(record)[case["attribute"]].string_value
+            if "value" in case:
+                assert exported == case[outcome]["value"], case["id"]
+            else:
+                assert json.loads(exported) == case[outcome]["messages"], case["id"]
             assert entries(record) == case[outcome]["entries"], case["id"]
     assert all(put["status"] == 200 for put in hue_store.puts)
     if outcome == "failure":
         assert hue_store.puts == []
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_shared_log_media_wire_corpus(hue_store, outcome):
+    cases = json.loads((Path(__file__).parent / "fixtures/media-parts/cases.json").read_text())[
+        "logs"
+    ]
+    if outcome == "failure":
+        hue_store.reserve = lambda _: (409, {}, True)
+    traces = {}
+    with client(hue_store) as hue:
+        for case in cases:
+            with hue.span(case["id"]) as span:
+                traces[case["id"]] = span.trace_id
+                messages = {key: case[key] for key in ("input", "output") if key in case}
+                span.log_inference(
+                    **messages, operation="chat", provider="openai", model=case["id"]
+                )
+        assert hue.force_flush(timeout_millis=30_000)
+        uploaded, fallbacks = hue._span_exporter.uploads
+    expected = sum(len(case["success"]["entries"]) for case in cases)
+    assert (uploaded, fallbacks) == ((expected, 0) if outcome == "success" else (0, expected))
+    for case in cases:
+        (log,) = [
+            log
+            for log in hue_store.logs
+            if attrs(log)["gen_ai.request.model"].string_value == case["id"]
+        ]
+        assert log.trace_id.hex() == traces[case["id"]]
+        assert json_of(log.body) == case[outcome]["body"], case["id"]
+        assert entries(log) == case[outcome]["entries"], case["id"]
+        assert entries(hue_store.span(case["id"])) == []
+        # Each file's bytes are stored under the log record's own trace.
+        for entry in case[outcome]["entries"]:
+            digest = json.loads(entry)["sha256"]
+            assert sha256(hue_store.objects[f"{traces[case['id']]}/{digest}"][0]) == digest
+    if outcome == "failure":
+        assert hue_store.puts == []
+
+
+def test_metadata_only_inspects_and_uploads_nothing(hue_store):
+    url = "data:image/png;base64," + base64.b64encode(b"metadata-only image").decode()
+    with Hue(hue_store.url, KEY, capture_content=False, live_spans=False) as hue:
+        with hue.span("metadata only") as span:
+            span.set_attribute("metadata", url)
+            span.set_attribute("input.value", json.dumps({"image": url}))
+            span.log_inference(input=[{"role": "user", "content": url}])
+        assert hue.force_flush()
+    record = hue_store.span("metadata only")
+    assert attrs(record)["metadata"].string_value == url
+    assert "input.value" not in attrs(record)
+    assert entries(record) == []
+    assert hue_store.logs == []
+    assert hue_store.reservations == []
+
+
+def test_value_past_the_inspection_limit_is_not_walked_for_media(hue_store):
+    image = bytes(6 * 1024 * 1024 + 1)
+    url = "data:image/png;base64," + base64.b64encode(image).decode()
+    with client(hue_store) as hue:
+        with hue.span("over inspection") as span:
+            span.set_attribute("input.value", json.dumps({"image": url}))
+        assert hue.force_flush(timeout_millis=30_000)
+    record = hue_store.span("over inspection")
+    # Over 8 MiB of text: uploaded whole as before, its image never parsed out of it.
+    assert [(entry["key"], entry["content_type"]) for entry in blobs(record)] == [
+        ("input.value", "application/json")
+    ]
+    assert listed(record) == ["input.value"]
+
+
+def test_deprecated_genai_event_keys_its_message_parts_from_the_body(hue_store):
+    data = b"deprecated event image"
+    url = "data:image/png;base64," + base64.b64encode(data).decode()
+    with client(hue_store) as hue:
+        with hue.span("event"):
+            hue._logger.emit(
+                event_name="gen_ai.user.message",
+                body={
+                    "content": [
+                        {"type": "text", "text": "Look."},
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ]
+                },
+            )
+        assert hue.force_flush()
+    (log,) = hue_store.logs
+    assert json_of(log.body) == {
+        "content": [
+            {"type": "text", "text": "Look."},
+            {"type": "image_url", "image_url": {}, "sha256": sha256(data), "size": len(data)},
+        ]
+    }
+    assert [entry["key"] for entry in blobs(log)] == ["body#/content/1"]
+
+
+def test_inference_log_over_the_cap_is_recorded_when_its_files_account_for_it(hue_store):
+    image = os.urandom(2 * 1024 * 1024)
+    part = {"type": "blob", "mime_type": "image/png", "content": base64.b64encode(image).decode()}
+    with client(hue_store) as hue:
+        with hue.span("large inference log") as span:
+            span.log_inference(input=[{"role": "user", "parts": [part]}])
+            # Text past the cap with no file to upload is omitted, as before.
+            span.log_inference(input=[{"role": "user", "content": "t" * (2 * 1024 * 1024)}])
+        hue.force_flush(timeout_millis=30_000)
+        assert hue.export_status.instrumentation_failures == 1
+    (log,) = hue_store.logs
+    assert json_of(log.body) == {
+        "gen_ai.input.messages": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "blob",
+                        "mime_type": "image/png",
+                        "sha256": sha256(image),
+                        "size": len(image),
+                    }
+                ],
+            }
+        ]
+    }
+    assert [entry["key"] for entry in blobs(log)] == ["body#/gen_ai.input.messages/0/parts/0"]
+    assert listed(log) == []
 
 
 def test_explicit_upload_preserves_event_and_uses_exact_entry(hue_store):
@@ -314,7 +455,7 @@ def test_disabled_capture_and_setup_never_upload(hue_store, capture, credential)
         assert "hue.file.name" not in attrs(events[0])
 
 
-def test_only_own_message_attributes_upload(hue_store):
+def test_own_inspected_attributes_and_correlated_logs_upload(hue_store):
     data = b"private nested provider media"
     message = message_with_image(data)
     provider = TracerProvider(
@@ -324,6 +465,7 @@ def test_only_own_message_attributes_upload(hue_store):
     try:
         with client(hue_store, tracer_provider=provider) as hue:
             with hue.span("ownership") as span:
+                trace_id = span.trace_id
                 span.set_attribute("custom.message", message)
                 span.otel_span.add_event("provider.event", {ATTRIBUTE: message})
                 span.otel_span.add_link(context, {ATTRIBUTE: message})
@@ -331,14 +473,30 @@ def test_only_own_message_attributes_upload(hue_store):
                 hue._logger.emit(body=message, attributes={ATTRIBUTE: message})
             assert hue.force_flush()
         record = hue_store.span("ownership")
+        # A span's attribute Hue reads no files from, its events, links and resource keep their
+        # media as recorded.
         assert attrs(record)["custom.message"].string_value == message
         assert attrs(record.events[0])[ATTRIBUTE].string_value == message
         assert attrs(record.links[0])[ATTRIBUTE].string_value == message
+        assert entries(record) == []
         assert len(hue_store.logs) == 2
-        (log,) = [log for log in hue_store.logs if log.body.string_value == message]
-        assert attrs(log)[ATTRIBUTE].string_value == message
-        assert entries(record) == [] and all(entries(log) == [] for log in hue_store.logs)
-        assert hue_store.reservations == hue_store.puts == hue_store.completions == []
+        # A correlated log record's inspected attribute uploads its file under the log's trace;
+        # its body, JSON text rather than a structure, stays as recorded.
+        (emitted,) = [log for log in hue_store.logs if log.body.string_value == message]
+        assert_image_digest(attrs(emitted)[ATTRIBUTE].string_value, data)
+        assert [entry["key"] for entry in blobs(emitted)] == [f"{ATTRIBUTE}#/0/parts/1"]
+        # The inference log's structured body uploads its file, keyed into the body.
+        (inference,) = [log for log in hue_store.logs if log is not emitted]
+        assert json_of(inference.body)[ATTRIBUTE][0]["parts"][1] == {
+            "type": "blob",
+            "modality": "image",
+            "mime_type": "image/png",
+            "sha256": sha256(data),
+            "size": len(data),
+        }
+        assert [entry["key"] for entry in blobs(inference)] == [f"body#/{ATTRIBUTE}/0/parts/1"]
+        assert {inference.trace_id.hex(), emitted.trace_id.hex()} == {trace_id}
+        assert set(hue_store.objects) == {f"{trace_id}/{sha256(data)}"}
     finally:
         provider.shutdown()
 
@@ -806,16 +964,13 @@ def test_shared_media_corpus_admission_without_hold():
         "fixtures"
     ]
     for case in cases:
-        copied = snapshot_span(
-            external_span(
-                attributes={
-                    case["attribute"]: json.dumps(case["messages"], ensure_ascii=False),
-                }
-            )
-        )
-        assert json.loads(copied.attributes[case["attribute"]]) == case["failure"]["messages"], (
-            case["id"]
-        )
+        copied = snapshot_span(external_span(attributes={case["attribute"]: corpus_text(case)}))
+        if "value" in case:
+            assert copied.attributes[case["attribute"]] == case["failure"]["value"], case["id"]
+        else:
+            assert (
+                json.loads(copied.attributes[case["attribute"]]) == case["failure"]["messages"]
+            ), case["id"]
         assert "hue.blobs" not in copied.attributes, case["id"]
 
 
@@ -1493,7 +1648,9 @@ def test_inspection_allowance_from_unheld_value_limits_export_eligibility(hue_st
 
 def test_large_nested_media_exports_as_its_digest(hue_store):
     """As in 0.9: a 100 KiB image in an event, link, log record or resource exports as its
-    digest instead of 136 KB of base64, and never uploads. The span's own copy uploads."""
+    digest instead of 136 KB of base64. The span's own copy uploads, and since 0.11 so does a
+    correlated log record's, listed in the log record's own ``hue.blobs``; the event, link and
+    resource never upload."""
     data = bytes(index * 7 % 256 for index in range(100 * 1024))
     message = message_with_image(data)
     context = SpanContext(1, 2, False, TraceFlags(TraceFlags.SAMPLED))
@@ -1516,7 +1673,9 @@ def test_large_nested_media_exports_as_its_digest(hue_store):
             "content_type": "image/png",
         }
     ]
-    assert listed(record) == [] and entries(log) == []
+    assert listed(record) == []
+    assert [json.loads(entry) for entry in entries(log)] == blobs(record)
+    # The log record's copy of the same bytes in the trace shares the span's upload.
     assert [request["key"] for request in hue_store.reservations] == [f"{ATTRIBUTE}#/0/parts/1"]
     resource = snapshot_span(
         external_span(resource=Resource({ATTRIBUTE: message})), value_bytes=64 * 1024

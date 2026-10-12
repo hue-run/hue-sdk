@@ -71,11 +71,18 @@ test("nested legacy inspection uses the UTF-16 MAX guard", () => {
   expect(hashNestedInlineFiles("gen_ai.input.messages", `${value} `)).toBe(`${value} `);
 });
 
-for (const item of corpus.fixtures)
+for (const item of corpus.fixtures as {
+  id: string;
+  attribute: string;
+  messages?: unknown;
+  value?: string;
+  failure: { messages?: unknown; value?: string };
+}[])
   test(`media digest fallback: ${item.id}`, () => {
-    expect(
-      JSON.parse(hashInlineFiles(item.attribute, JSON.stringify(item.messages)) as string),
-    ).toEqual(item.failure.messages);
+    const placed = hashInlineFiles(item.attribute, item.value ?? JSON.stringify(item.messages));
+    if (item.value === undefined)
+      expect(JSON.parse(placed as string)).toEqual(item.failure.messages);
+    else expect(placed).toBe(item.failure.value!);
   });
 
 test("media names use UTF-16 limits and reject invalid labels", () => {

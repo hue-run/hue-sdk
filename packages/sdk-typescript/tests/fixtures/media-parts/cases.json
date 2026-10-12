@@ -4894,6 +4894,1430 @@
         ],
         "entries": []
       }
+    },
+    {
+      "id": "input-value-object-data-url",
+      "attribute": "input.value",
+      "messages": {
+        "question": "What is in this image?",
+        "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+      },
+      "success": {
+        "messages": {
+          "question": "What is in this image?",
+          "image": {
+            "type": "blob",
+            "mime_type": "image/png",
+            "modality": "image",
+            "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+            "size": 68
+          }
+        },
+        "entries": [
+          "{\"key\":\"input.value#/image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "question": "What is in this image?",
+          "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "input-value-whole-data-url",
+      "attribute": "input.value",
+      "messages": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+      "success": {
+        "messages": {
+          "type": "blob",
+          "mime_type": "image/png",
+          "modality": "image",
+          "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+          "size": 68
+        },
+        "entries": [
+          "{\"key\":\"input.value#\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+        "entries": []
+      }
+    },
+    {
+      "id": "output-value-genai-message",
+      "attribute": "output.value",
+      "messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "content": "Here it is."
+            },
+            {
+              "type": "blob",
+              "modality": "image",
+              "mime_type": "image/png",
+              "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Here it is."
+              },
+              {
+                "type": "blob",
+                "modality": "image",
+                "mime_type": "image/png",
+                "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                "size": 68
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"output.value#/0/parts/1\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Here it is."
+              },
+              {
+                "type": "blob",
+                "modality": "image",
+                "mime_type": "image/png",
+                "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "ai-prompt-object",
+      "attribute": "ai.prompt",
+      "messages": {
+        "system": "Be brief.",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Describe."
+              },
+              {
+                "type": "image",
+                "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+                "mediaType": "image/png"
+              }
+            ]
+          }
+        ]
+      },
+      "success": {
+        "messages": {
+          "system": "Be brief.",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Describe."
+                },
+                {
+                  "type": "image",
+                  "mediaType": "image/png",
+                  "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                  "size": 68
+                }
+              ]
+            }
+          ]
+        },
+        "entries": [
+          "{\"key\":\"ai.prompt#/messages/0/content/1\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "system": "Be brief.",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Describe."
+                },
+                {
+                  "type": "image",
+                  "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+                  "mediaType": "image/png"
+                }
+              ]
+            }
+          ]
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "tool-call-result-object",
+      "attribute": "gen_ai.tool.call.result",
+      "messages": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Captured."
+          }
+        ],
+        "screenshot": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+      },
+      "success": {
+        "messages": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Captured."
+            }
+          ],
+          "screenshot": {
+            "type": "blob",
+            "mime_type": "image/png",
+            "modality": "image",
+            "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+            "size": 68
+          }
+        },
+        "entries": [
+          "{\"key\":\"gen_ai.tool.call.result#/screenshot\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Captured."
+            }
+          ],
+          "screenshot": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "tool-call-arguments-genai-blob",
+      "attribute": "gen_ai.tool.call.arguments",
+      "messages": {
+        "file": {
+          "type": "blob",
+          "mime_type": "application/pdf",
+          "content": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+          "name": "report.pdf"
+        }
+      },
+      "success": {
+        "messages": {
+          "file": {
+            "type": "blob",
+            "mime_type": "application/pdf",
+            "name": "report.pdf",
+            "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+            "size": 21
+          }
+        },
+        "entries": [
+          "{\"key\":\"gen_ai.tool.call.arguments#/file\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\",\"name\":\"report.pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "file": {
+            "type": "blob",
+            "mime_type": "application/pdf",
+            "content": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+            "name": "report.pdf"
+          }
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "traceloop-entity-input",
+      "attribute": "traceloop.entity.input",
+      "messages": {
+        "inputs": {
+          "photo": "data:image/jpeg;base64,/9j/4AAQSkZJRiBzeW50aGV0aWMganBlZw=="
+        }
+      },
+      "success": {
+        "messages": {
+          "inputs": {
+            "photo": {
+              "type": "blob",
+              "mime_type": "image/jpeg",
+              "modality": "image",
+              "sha256": "7918168cd4a4fbbd2f218b4f37fbe374556ae341dd60803d102ab52eb0f36bb8",
+              "size": 25
+            }
+          }
+        },
+        "entries": [
+          "{\"key\":\"traceloop.entity.input#/inputs/photo\",\"sha256\":\"7918168cd4a4fbbd2f218b4f37fbe374556ae341dd60803d102ab52eb0f36bb8\",\"size\":25,\"content_type\":\"image/jpeg\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "inputs": {
+            "photo": "data:image/jpeg;base64,/9j/4AAQSkZJRiBzeW50aGV0aWMganBlZw=="
+          }
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "langfuse-observation-input-chat",
+      "attribute": "langfuse.observation.input",
+      "messages": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "success": {
+        "messages": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "image_url",
+                  "image_url": {},
+                  "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                  "size": 68
+                }
+              ]
+            }
+          ]
+        },
+        "entries": [
+          "{\"key\":\"langfuse.observation.input#/messages/0/content/0\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "langfuse-observation-output-whole",
+      "attribute": "langfuse.observation.output",
+      "messages": "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAc3ludGhldGlj",
+      "success": {
+        "messages": {
+          "type": "blob",
+          "mime_type": "audio/wav",
+          "modality": "audio",
+          "sha256": "4dc14a7b6da6359ebb275c72d435c7d5c0de52772e1c3f11172900b3e692b045",
+          "size": 33
+        },
+        "entries": [
+          "{\"key\":\"langfuse.observation.output#\",\"sha256\":\"4dc14a7b6da6359ebb275c72d435c7d5c0de52772e1c3f11172900b3e692b045\",\"size\":33,\"content_type\":\"audio/wav\"}"
+        ]
+      },
+      "failure": {
+        "messages": "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAc3ludGhldGlj",
+        "entries": []
+      }
+    },
+    {
+      "id": "langfuse-observation-metadata",
+      "attribute": "langfuse.observation.metadata",
+      "messages": {
+        "screenshot": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+        "step": 2
+      },
+      "success": {
+        "messages": {
+          "screenshot": {
+            "type": "blob",
+            "mime_type": "image/png",
+            "modality": "image",
+            "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+            "size": 68
+          },
+          "step": 2
+        },
+        "entries": [
+          "{\"key\":\"langfuse.observation.metadata#/screenshot\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "screenshot": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+          "step": 2
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "langfuse-trace-metadata-key-raw",
+      "attribute": "langfuse.trace.metadata.attachment",
+      "value": "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+      "success": {
+        "value": "{\"type\":\"blob\",\"mime_type\":\"application/pdf\",\"modality\":\"document\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21}",
+        "entries": [
+          "{\"key\":\"langfuse.trace.metadata.attachment#\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "value": "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+        "entries": []
+      }
+    },
+    {
+      "id": "metadata-raw-data-url",
+      "attribute": "metadata",
+      "value": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+      "success": {
+        "value": "{\"type\":\"blob\",\"mime_type\":\"image/png\",\"modality\":\"image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68}",
+        "entries": [
+          "{\"key\":\"metadata#\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "value": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+        "entries": []
+      }
+    },
+    {
+      "id": "ai-telemetry-metadata-raw",
+      "attribute": "ai.telemetry.metadata.image",
+      "value": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+      "success": {
+        "value": "{\"type\":\"blob\",\"mime_type\":\"image/png\",\"modality\":\"image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68}",
+        "entries": [
+          "{\"key\":\"ai.telemetry.metadata.image#\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "value": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+        "entries": []
+      }
+    },
+    {
+      "id": "metadata-langfuse-token-untouched",
+      "attribute": "metadata",
+      "value": "@@@langfuseMedia:type=image/png|id=abc123|source=bytes@@@",
+      "success": {
+        "value": "@@@langfuseMedia:type=image/png|id=abc123|source=bytes@@@",
+        "entries": []
+      },
+      "failure": {
+        "value": "@@@langfuseMedia:type=image/png|id=abc123|source=bytes@@@",
+        "entries": []
+      }
+    },
+    {
+      "id": "openinference-input-image-data-url",
+      "attribute": "llm.input_messages.0.message.contents.1.message_content.image.image.url",
+      "value": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+      "success": {
+        "value": "{\"type\":\"blob\",\"mime_type\":\"image/png\",\"modality\":\"image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68}",
+        "entries": [
+          "{\"key\":\"llm.input_messages.0.message.contents.1.message_content.image.image.url#\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "value": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+        "entries": []
+      }
+    },
+    {
+      "id": "openinference-output-image-data-url",
+      "attribute": "llm.output_messages.0.message.contents.0.message_content.image.image.url",
+      "value": "data:image/jpeg;base64,/9j/4AAQSkZJRiBzeW50aGV0aWMganBlZw==",
+      "success": {
+        "value": "{\"type\":\"blob\",\"mime_type\":\"image/jpeg\",\"modality\":\"image\",\"sha256\":\"7918168cd4a4fbbd2f218b4f37fbe374556ae341dd60803d102ab52eb0f36bb8\",\"size\":25}",
+        "entries": [
+          "{\"key\":\"llm.output_messages.0.message.contents.0.message_content.image.image.url#\",\"sha256\":\"7918168cd4a4fbbd2f218b4f37fbe374556ae341dd60803d102ab52eb0f36bb8\",\"size\":25,\"content_type\":\"image/jpeg\"}"
+        ]
+      },
+      "failure": {
+        "value": "data:image/jpeg;base64,/9j/4AAQSkZJRiBzeW50aGV0aWMganBlZw==",
+        "entries": []
+      }
+    },
+    {
+      "id": "openinference-image-https-untouched",
+      "attribute": "llm.input_messages.0.message.contents.1.message_content.image.image.url",
+      "value": "https://example.com/cat.png",
+      "success": {
+        "value": "https://example.com/cat.png",
+        "entries": []
+      },
+      "failure": {
+        "value": "https://example.com/cat.png",
+        "entries": []
+      }
+    },
+    {
+      "id": "openllmetry-prompt-content-parts",
+      "attribute": "gen_ai.prompt.0.content",
+      "messages": [
+        {
+          "type": "text",
+          "text": "What is this?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+          }
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "type": "text",
+            "text": "What is this?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {},
+            "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+            "size": 68
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.prompt.0.content#/1\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "type": "text",
+            "text": "What is this?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+            }
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "openllmetry-completion-content-parts",
+      "attribute": "gen_ai.completion.0.content",
+      "messages": [
+        {
+          "type": "text",
+          "text": "Done."
+        },
+        {
+          "type": "image",
+          "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+          "mediaType": "image/png"
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "type": "text",
+            "text": "Done."
+          },
+          {
+            "type": "image",
+            "mediaType": "image/png",
+            "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+            "size": 68
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.completion.0.content#/1\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "type": "text",
+            "text": "Done."
+          },
+          {
+            "type": "image",
+            "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+            "mediaType": "image/png"
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "openllmetry-content-object-text-untouched",
+      "attribute": "gen_ai.prompt.0.content",
+      "messages": {
+        "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+      },
+      "success": {
+        "messages": {
+          "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+        },
+        "entries": []
+      },
+      "failure": {
+        "messages": {
+          "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "openai-output-audio-format",
+      "attribute": "gen_ai.output.messages",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": null,
+          "audio": {
+            "id": "audio_abc",
+            "data": "SUQzBAAAAAAAAHN5bnRoZXRpYyBtcDM=",
+            "expires_at": 1700000000,
+            "transcript": "Hello.",
+            "format": "mp3"
+          }
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "audio": {
+              "id": "audio_abc",
+              "expires_at": 1700000000,
+              "transcript": "Hello.",
+              "format": "mp3"
+            },
+            "sha256": "57c51c205615e77a16849bab0c9f3dd91a8fb1f7e41d087dc21c12794076ba39",
+            "size": 23
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.output.messages#/0\",\"sha256\":\"57c51c205615e77a16849bab0c9f3dd91a8fb1f7e41d087dc21c12794076ba39\",\"size\":23,\"content_type\":\"audio/mpeg\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "audio": {
+              "id": "audio_abc",
+              "expires_at": 1700000000,
+              "transcript": "Hello.",
+              "format": "mp3"
+            },
+            "sha256": "57c51c205615e77a16849bab0c9f3dd91a8fb1f7e41d087dc21c12794076ba39",
+            "size": 23
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "openai-output-audio-signature",
+      "attribute": "gen_ai.output.messages",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": null,
+          "audio": {
+            "id": "audio_abc",
+            "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAc3ludGhldGlj",
+            "expires_at": 1700000000,
+            "transcript": "Hello."
+          }
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "audio": {
+              "id": "audio_abc",
+              "expires_at": 1700000000,
+              "transcript": "Hello."
+            },
+            "sha256": "4dc14a7b6da6359ebb275c72d435c7d5c0de52772e1c3f11172900b3e692b045",
+            "size": 33
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.output.messages#/0\",\"sha256\":\"4dc14a7b6da6359ebb275c72d435c7d5c0de52772e1c3f11172900b3e692b045\",\"size\":33,\"content_type\":\"audio/wav\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "audio": {
+              "id": "audio_abc",
+              "expires_at": 1700000000,
+              "transcript": "Hello."
+            },
+            "sha256": "4dc14a7b6da6359ebb275c72d435c7d5c0de52772e1c3f11172900b3e692b045",
+            "size": 33
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "openai-output-audio-pcm",
+      "attribute": "gen_ai.output.messages",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": null,
+          "audio": {
+            "id": "audio_abc",
+            "data": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+            "expires_at": 1700000000,
+            "transcript": "Hello."
+          }
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "audio": {
+              "id": "audio_abc",
+              "expires_at": 1700000000,
+              "transcript": "Hello."
+            },
+            "sha256": "4dbdc2b2b62cb00749785bc84202236dbc3777d74660611b8e58812f0cfde6c3",
+            "size": 48
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.output.messages#/0\",\"sha256\":\"4dbdc2b2b62cb00749785bc84202236dbc3777d74660611b8e58812f0cfde6c3\",\"size\":48,\"content_type\":\"application/octet-stream\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "audio": {
+              "id": "audio_abc",
+              "expires_at": 1700000000,
+              "transcript": "Hello."
+            },
+            "sha256": "4dbdc2b2b62cb00749785bc84202236dbc3777d74660611b8e58812f0cfde6c3",
+            "size": 48
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "responses-computer-screenshot",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "type": "computer_call_output",
+          "call_id": "call_1",
+          "output": {
+            "type": "computer_screenshot",
+            "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+          }
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "type": "computer_call_output",
+            "call_id": "call_1",
+            "output": {
+              "type": "computer_screenshot",
+              "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+              "size": 68
+            }
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/output\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "type": "computer_call_output",
+            "call_id": "call_1",
+            "output": {
+              "type": "computer_screenshot",
+              "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+              "size": 68
+            }
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "tool-message-encoded-image",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_1",
+          "content": "{\"image\":{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}}}"
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "{\"image\":{\"type\":\"image_url\",\"image_url\":{},\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68}}"
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/content/image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "{\"image\":{\"type\":\"image_url\",\"image_url\":{},\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68}}"
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "tool-call-arguments-encoded",
+      "attribute": "gen_ai.output.messages",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "save_file",
+                "arguments": "{\"file\":\"data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKJSVFT0YK\"}"
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "save_file",
+                  "arguments": "{\"file\":{\"type\":\"blob\",\"mime_type\":\"application/pdf\",\"modality\":\"document\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21}}"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.output.messages#/0/tool_calls/0/function/arguments/file\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "save_file",
+                  "arguments": "{\"file\":{\"type\":\"blob\",\"mime_type\":\"application/pdf\",\"modality\":\"document\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21}}"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "user-text-json-not-parsed",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "{\"image\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "{\"image\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "{\"image\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "genai-text-part-whole-data-url",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": {
+                  "type": "blob",
+                  "mime_type": "image/png",
+                  "modality": "image",
+                  "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                  "size": 68
+                }
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0/content\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": {
+                  "type": "blob",
+                  "mime_type": "image/png",
+                  "modality": "image",
+                  "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                  "size": 68
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "genai-uri-part-data-url-untouched",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "uri",
+              "modality": "image",
+              "mime_type": "image/png",
+              "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "uri",
+                "modality": "image",
+                "mime_type": "image/png",
+                "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "uri",
+                "modality": "image",
+                "mime_type": "image/png",
+                "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "data-url-small-text-stays",
+      "attribute": "input.value",
+      "messages": {
+        "note": "data:text/plain;base64,aGVsbG8="
+      },
+      "success": {
+        "messages": {
+          "note": "data:text/plain;base64,aGVsbG8="
+        },
+        "entries": []
+      },
+      "failure": {
+        "messages": {
+          "note": "data:text/plain;base64,aGVsbG8="
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "data-url-without-type-stays",
+      "attribute": "input.value",
+      "messages": {
+        "note": "data:,hello"
+      },
+      "success": {
+        "messages": {
+          "note": "data:,hello"
+        },
+        "entries": []
+      },
+      "failure": {
+        "messages": {
+          "note": "data:,hello"
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "data-url-invalid-base64-stays",
+      "attribute": "input.value",
+      "messages": {
+        "image": "data:image/png;base64,@@@="
+      },
+      "success": {
+        "messages": {
+          "image": "data:image/png;base64,@@@="
+        },
+        "entries": []
+      },
+      "failure": {
+        "messages": {
+          "image": "data:image/png;base64,@@@="
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "remote-url-untouched",
+      "attribute": "input.value",
+      "messages": {
+        "image": "https://example.com/cat.png"
+      },
+      "success": {
+        "messages": {
+          "image": "https://example.com/cat.png"
+        },
+        "entries": []
+      },
+      "failure": {
+        "messages": {
+          "image": "https://example.com/cat.png"
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "input-value-request-numbers",
+      "attribute": "input.value",
+      "value": "{\"model\":\"gpt-4o\",\"temperature\":1.0,\"top_p\":0.5,\"input\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}]}",
+      "success": {
+        "value": "{\"model\":\"gpt-4o\",\"temperature\":1,\"top_p\":0.5,\"input\":[{\"type\":\"input_image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68}]}",
+        "entries": [
+          "{\"key\":\"input.value#/input/0\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "value": "{\"model\":\"gpt-4o\",\"temperature\":1.0,\"top_p\":0.5,\"input\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}]}",
+        "entries": []
+      }
+    },
+    {
+      "id": "data-url-percent-binary",
+      "attribute": "input.value",
+      "messages": {
+        "bytes": "data:application/octet-stream,%00%01%02%FF"
+      },
+      "success": {
+        "messages": {
+          "bytes": {
+            "type": "blob",
+            "mime_type": "application/octet-stream",
+            "modality": "file",
+            "sha256": "3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56",
+            "size": 4
+          }
+        },
+        "entries": [
+          "{\"key\":\"input.value#/bytes\",\"sha256\":\"3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56\",\"size\":4,\"content_type\":\"application/octet-stream\"}"
+        ]
+      },
+      "failure": {
+        "messages": {
+          "bytes": "data:application/octet-stream,%00%01%02%FF"
+        },
+        "entries": []
+      }
+    }
+  ],
+  "logs": [
+    {
+      "id": "log-input-genai-blob",
+      "input": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "Describe."
+            },
+            {
+              "type": "blob",
+              "modality": "image",
+              "mime_type": "image/png",
+              "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+            }
+          ]
+        }
+      ],
+      "success": {
+        "body": {
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Describe."
+                },
+                {
+                  "type": "blob",
+                  "modality": "image",
+                  "mime_type": "image/png",
+                  "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                  "size": 68
+                }
+              ]
+            }
+          ]
+        },
+        "entries": [
+          "{\"key\":\"body#/gen_ai.input.messages/0/parts/1\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "body": {
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Describe."
+                },
+                {
+                  "type": "blob",
+                  "modality": "image",
+                  "mime_type": "image/png",
+                  "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+                }
+              ]
+            }
+          ]
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "log-output-audio",
+      "output": [
+        {
+          "role": "assistant",
+          "content": null,
+          "audio": {
+            "id": "audio_abc",
+            "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAc3ludGhldGlj",
+            "expires_at": 1700000000,
+            "transcript": "Hello."
+          }
+        }
+      ],
+      "success": {
+        "body": {
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "content": null,
+              "audio": {
+                "id": "audio_abc",
+                "expires_at": 1700000000,
+                "transcript": "Hello."
+              },
+              "sha256": "4dc14a7b6da6359ebb275c72d435c7d5c0de52772e1c3f11172900b3e692b045",
+              "size": 33
+            }
+          ]
+        },
+        "entries": [
+          "{\"key\":\"body#/gen_ai.output.messages/0\",\"sha256\":\"4dc14a7b6da6359ebb275c72d435c7d5c0de52772e1c3f11172900b3e692b045\",\"size\":33,\"content_type\":\"audio/wav\"}"
+        ]
+      },
+      "failure": {
+        "body": {
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "content": null,
+              "audio": {
+                "id": "audio_abc",
+                "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAc3ludGhldGlj",
+                "expires_at": 1700000000,
+                "transcript": "Hello."
+              }
+            }
+          ]
+        },
+        "entries": []
+      }
+    },
+    {
+      "id": "log-input-chat-remote-and-data-url",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.com/cat.png"
+              }
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+              }
+            },
+            {
+              "type": "text",
+              "text": "Compare them."
+            }
+          ]
+        }
+      ],
+      "output": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKJSVFT0YK"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "body": {
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "https://example.com/cat.png"
+                  }
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {},
+                  "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                  "size": 68
+                },
+                {
+                  "type": "text",
+                  "text": "Compare them."
+                }
+              ]
+            }
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": {
+                    "type": "blob",
+                    "mime_type": "application/pdf",
+                    "modality": "document",
+                    "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                    "size": 21
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "entries": [
+          "{\"key\":\"body#/gen_ai.input.messages/0/content/1\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}",
+          "{\"key\":\"body#/gen_ai.output.messages/0/content/0/text\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "body": {
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "https://example.com/cat.png"
+                  }
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": "Compare them."
+                }
+              ]
+            }
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKJSVFT0YK"
+                }
+              ]
+            }
+          ]
+        },
+        "entries": []
+      }
     }
   ],
   "attachments": {

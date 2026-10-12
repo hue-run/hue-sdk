@@ -535,26 +535,48 @@ class BoundedSpanProcessor(_BoundedProcessor, SpanProcessor):
 class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
     _copy = staticmethod(snapshot_log)
 
-    def __init__(self, *args: Any, uploads: Uploads | None = None, **kwargs: Any) -> None:
-        # Set before the worker starts.
+    def __init__(
+        self,
+        exporter: Any,
+        encode: Callable[[Any], Any],
+        max_records: int,
+        max_bytes: int,
+        capture_content: bool = True,
+        *,
+        limits: AdvertisedLimits | None = None,
+        dropped_records: DroppedRecords | None = None,
+        uploads: Uploads | None = None,
+    ) -> None:
+        # Set before the worker starts; admission reads it.
         self._uploads = uploads
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            exporter,
+            encode,
+            max_records,
+            max_bytes,
+            capture_content,
+            limits=limits,
+            dropped_records=dropped_records,
+        )
 
     def _hold(self, value_bytes: int) -> Hold | None:
-        """Log records hold only the attachments ``log_inference`` staged for them."""
+        """A correlated log record's media are held for upload like a span's, with the
+        attachments ``log_inference`` staged for it."""
         uploads = self._uploads
         if uploads is None:
             return None
         return Hold(uploads.held, value_bytes, uploads.holds(), uploads)
 
     def _discard(self, *items: Any) -> None:
+        """A dropped record's held media are released, and the attachments ``log_inference``
+        staged for it are counted as not uploaded."""
         uploads = self._uploads
         if uploads is None:
             return
         tally = Tally()
         for item in items:
+            held = held_of(item)
             record = getattr(item, "log_record", None)
-            held = held_of(record)
             trace_id = _record_trace_id(item) or ""
             # A record lost before its copy was made still holds what log_inference staged.
             dropped = (
@@ -567,9 +589,13 @@ class BoundedLogProcessor(_BoundedProcessor, LogRecordProcessor):
             for _ in range(dropped):
                 tally.fallback("budget", trace_id)
             if held is not None:
+                held.values.clear()
+                held.body_values.clear()
                 held.files.clear()
                 held.release()
-        self._exporter._report_uploads(tally)
+        report = getattr(self._exporter, "_report_uploads", None)
+        if tally.fallbacks and report is not None:
+            report(tally)
 
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
         self._enqueue(log_record)

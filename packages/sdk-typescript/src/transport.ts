@@ -38,10 +38,12 @@ import {
   BlobUploader,
   FALLBACK_MESSAGES,
   fallbackAttributes,
+  fallbackRecord,
   MAX_HELD_BLOB_BYTES,
   newTally,
   mediaKey,
   offloadAttributes,
+  offloadRecord,
   uploadBudgetMillis,
   type OffloadCollector,
   type MediaAttachment,
@@ -122,6 +124,12 @@ interface ExportSink {
     upload: UploadContext,
     tally: OffloadTally,
   ): Promise<T>;
+  offloadLog(
+    log: ReadableLogRecord,
+    collector: OffloadCollector,
+    upload: UploadContext,
+    tally: OffloadTally,
+  ): Promise<ReadableLogRecord>;
   reportOffload(tally: OffloadTally, signal?: Signal): void;
 }
 
@@ -394,10 +402,11 @@ export class HueTransport {
       "logs",
       ProtobufLogsSerializer,
       LogsExporterMetricsHelper,
-      (log, cache) =>
+      (log, cache, offload) =>
         redactLog(log, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(log),
+          ...(offload ? { offload } : {}),
         }),
     );
     if (this.options.enabled !== false)
@@ -551,7 +560,7 @@ export class HueTransport {
       // that export may upload is held whole instead, within the held-value budget.
       const valueUnits = this.limits.valueBytes + REDACTION_CONTEXT_UNITS;
       const hold =
-        signal === "traces" && !advisory && this.holdsValues()
+        !advisory && this.holdsValues()
           ? {
               valueBytes: this.limits.valueBytes,
               budget: Math.max(0, MAX_HELD_BLOB_BYTES - this.heldBytes),
@@ -573,6 +582,8 @@ export class HueTransport {
               remaining,
               this.options.captureContent,
               valueUnits,
+              hold,
+              this.mediaMemo,
             );
       if (snapshot.cut.size) this.admissionCuts.set(snapshot.record, snapshot.cut);
       if (snapshot.digested.size) this.admissionDigests.set(snapshot.record, snapshot.digested);
@@ -983,6 +994,42 @@ export class HueTransport {
           this.mediaMemo,
         ) as Attributes,
       };
+    }
+  }
+
+  /** @internal Exporter callback: a redacted log record with the media its redaction left to
+   * the upload step placed: its attributes' and its body's files uploaded and listed under its own
+   * `hue.blobs` (keys `<attribute>#<pointer>`, `body#<pointer>`), under the log record's trace;
+   * a file not uploaded keeps its bytes inline, and the record is cut as before. Never rejects. */
+  async offloadLog(
+    log: ReadableLogRecord,
+    collector: OffloadCollector,
+    upload: UploadContext,
+    tally: OffloadTally,
+  ): Promise<ReadableLogRecord> {
+    const traceId = log.spanContext?.traceId ?? "";
+    const valueBytes = this.limits.valueBytes;
+    const placed = (result: { attributes: Record<string, unknown>; body?: unknown }) => ({
+      ...log,
+      attributes: result.attributes as ReadableLogRecord["attributes"],
+      ...(collector.body ? { body: result.body as ReadableLogRecord["body"] } : {}),
+    });
+    try {
+      if (!this.uploader) throw new Error("Uploads are unavailable");
+      return placed(
+        await offloadRecord(log.attributes, collector, {
+          uploader: this.uploader,
+          traceId,
+          valueBytes,
+          upload,
+          tally,
+          memo: this.mediaMemo,
+        }),
+      );
+    } catch {
+      return placed(
+        fallbackRecord(log.attributes, collector, valueBytes, tally, traceId, this.mediaMemo),
+      );
     }
   }
 
@@ -1407,6 +1454,11 @@ function shedContent(record: RecordValue, signal: Signal, shed: readonly Sheddab
   } as ReadableSpan;
 }
 
+/** Whether a trace id can name an upload's trace: 32 lowercase hex digits, not all zero. */
+function isUploadTraceId(traceId: unknown): boolean {
+  return typeof traceId === "string" && /^[0-9a-f]{32}$/.test(traceId) && !/^0+$/.test(traceId);
+}
+
 class ReportingExporter<T extends RecordValue> {
   private pending = new Set<Promise<void>>();
   constructor(
@@ -1533,25 +1585,53 @@ class ReportingExporter<T extends RecordValue> {
           }
         }
         const uploads = !markers && this.transport.offloadsValues();
+        // A log record's media upload under its own trace: one without a trace is not offered.
         const offload: OffloadCollector | undefined =
-          uploads && this.signal === "traces" ? { candidates: [], cut: [] } : undefined;
+          uploads &&
+          (this.signal === "traces" ||
+            isUploadTraceId((record as ReadableLogRecord).spanContext?.traceId))
+            ? this.signal === "traces"
+              ? { candidates: [], cut: [] }
+              : { candidates: [], cut: [], log: true }
+            : undefined;
         const redacted = this.redact(record, cache, offload);
-        const files = uploads
+        let files = uploads
           ? survivingMedia(this.transport.mediaAttachments(record), redacted, tally)
           : [];
-        placed.push({
-          record,
-          files,
-          ...(markers ? { markers } : {}),
-          redacted:
-            offload && (offload.candidates.length || offload.cut.length)
+        if (this.signal === "logs" && files.length) {
+          // A log record's attachments upload with the media its body holds, in the one step
+          // that places a log record's files; a record without a trace uploads none.
+          if (offload) offload.attachments = files;
+          else
+            for (let index = 0; index < files.length; index++)
+              countFallback(tally, "budget", recordTraceId(record));
+          files = [];
+        }
+        const offloaded =
+          offload &&
+          (offload.candidates.length ||
+            offload.cut.length ||
+            offload.body ||
+            offload.attachments?.length)
+            ? this.signal === "traces"
               ? (this.transport.offloadSpan(
                   redacted as ReadableSpan,
                   offload,
                   upload,
                   tally,
                 ) as Promise<T>)
-              : redacted,
+              : (this.transport.offloadLog(
+                  redacted as ReadableLogRecord,
+                  offload,
+                  upload,
+                  tally,
+                ) as Promise<T>)
+            : undefined;
+        placed.push({
+          record,
+          files,
+          ...(markers ? { markers } : {}),
+          redacted: offloaded ?? redacted,
         });
       } catch {
         if (!markers && this.transport.offloadsValues()) {

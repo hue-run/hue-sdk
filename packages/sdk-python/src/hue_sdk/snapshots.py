@@ -8,6 +8,7 @@ owned record, so later changes by a caller or another processor cannot grow it.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from collections.abc import Mapping, Sequence
 from copy import copy
@@ -29,6 +30,8 @@ from ._inline_files import (
     INLINE_FILE_TEXT_PER_RECORD,
     MAX_INLINE_FILE_TEXT,
     hash_inline_files_counted,
+    is_media_key,
+    is_message_key,
     may_inline_files,
     utf16_size,
 )
@@ -202,6 +205,32 @@ class Hold:
         self.uploads = uploads
 
 
+def _may_be_file_content(text: str) -> bool:
+    """Whether a long string may be a file's inline content: a data: URL or base64 text."""
+    return text.startswith("data:") or (len(text) % 4 == 0 and bool(_BASE64_TEXT.match(text)))
+
+
+_BASE64_TEXT = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
+
+
+def _pointer_segment(segment: str) -> str:
+    return segment.replace("~", "~0").replace("/", "~1")
+
+
+def _offloads_body(record: Any) -> bool:
+    """Whether a log record is a correlated GenAI event with a structured body, whose media may be
+    uploaded under its trace."""
+    attributes = record.attributes or {}
+    name = getattr(record, "event_name", None) or attributes.get("event.name")
+    body = record.body
+    return (
+        isinstance(name, str)
+        and name.startswith("gen_ai.")
+        and isinstance(body, (Mapping, list, tuple))
+        and bool(record.trace_id)
+    )
+
+
 class _BudgetExceeded(ValueError):
     """The record's copy outgrew its budget: a span's events and links past it are left out and
     counted as dropped, where anything else loses the record."""
@@ -222,8 +251,12 @@ class _ValueBudget:
         value_bytes: int | None = None,
         hold: Hold | None = None,
         trace_id: str = "",
+        log: bool = False,
     ) -> None:
         self.trace_id = trace_id
+        # A log record holds only its inspected attributes' media and its GenAI body's, and
+        # uploads nothing whole.
+        self.log = log
         self.media_remaining = INLINE_FILE_TEXT_PER_RECORD
         self.remaining = record_bytes
         self.capture_content = capture_content
@@ -352,9 +385,23 @@ class _ValueBudget:
         return source
 
     def _media(
-        self, key: str, value: Any, *, collect_upload_state: bool = False, nested: bool = False
+        self,
+        key: str,
+        value: Any,
+        *,
+        collect_upload_state: bool = False,
+        nested: bool = False,
+        any_key: bool = False,
     ) -> tuple[Any, int]:
-        if not may_inline_files(key, value):
+        """A value with its inline media as their digest, and how many. As queued, only a
+        recorded message shrinks (``nested`` keeping small binary media); ``any_key`` gives any
+        inspected attribute's digest form, what the queue is charged for a value held whole for
+        upload. Nothing is inspected in metadata-only mode."""
+        if (
+            not self.capture_content
+            or not may_inline_files(key, value)
+            or not (any_key or is_message_key(key))
+        ):
             return value, 0
         size = utf16_size(value, MAX_INLINE_FILE_TEXT)
         if size > MAX_INLINE_FILE_TEXT or size > self.media_remaining:
@@ -370,7 +417,13 @@ class _ValueBudget:
             else None
         )
         result = hash_inline_files_counted(
-            key, value, memo, receipts, self.trace_id, preserve_small_binary=nested
+            key,
+            value,
+            memo,
+            receipts,
+            self.trace_id,
+            preserve_small_binary=nested,
+            any_key=any_key,
         )
         if collect_upload_state and receipts:
             self.held.digests[key] = receipts
@@ -387,20 +440,28 @@ class _ValueBudget:
         listed in ``held.cut`` (once per file), so export counts them as not uploaded."""
         hold = self.hold
         assert hold is not None
-        digested, files = self._media(key, item, collect_upload_state=True)
+        if self.log:
+            return self._held_log_value(key, item)
+        # Only a recorded message shrinks its files when it is not held; any other inspected
+        # attribute is queued as it is.
+        message = is_message_key(key)
+        digested, files = self._media(key, item, collect_upload_state=True, any_key=True)
+        queued = digested if message else item
         if isinstance(item, str):
             try:
                 over = over_utf8(item, hold.value_bytes)
             except UnicodeEncodeError:
-                return False, digested
+                return False, queued
             if not over and not files:
-                return False, digested
+                return False, queued
             if not isinstance(digested, str):
-                return False, digested
+                return False, queued
             value: str | bytes = str.__str__(item)
             # What is not uploaded if the value is not held: each file, and the value itself
             # when it is still over the cap with its files as their digest.
-            lost = files + (1 if over and over_utf8(digested, hold.value_bytes) else 0)
+            lost = (files if message else 0) + (
+                1 if over and over_utf8(digested if message else item, hold.value_bytes) else 0
+            )
         elif isinstance(item, bytes) and len(item) > hold.value_bytes:
             value = item if type(item) is bytes else memoryview(item).tobytes()
             over, lost = True, 1
@@ -408,14 +469,94 @@ class _ValueBudget:
             return False, digested
         size = held_size(value)
         if not hold.active or not hold.budget.reserve(size, self.held.size):
-            # Cut, or its files digested, when queued, as before uploads existed.
+            # Cut, or a message's files digested, when queued, as before uploads existed.
             self.held.cut.extend([key] * lost)
-            return False, digested
+            return False, queued
         self.held.size += size
         self.held.values[key] = value
         # The copy carries what the queue is charged: the receiver's marker for a value over the
-        # cap, a message within it with its files as their digest.
+        # cap, a value within it with its files as their digest.
         return True, self.value(truncated_marker(len(value)) if over else digested)
+
+    def _held_log_value(self, key: str, item: Any) -> tuple[bool, Any]:
+        """A log record's attribute held whole for export to upload its media, within the
+        held-value budget: text in an inspected attribute that may hold media, within the
+        inspection limit. The copy carries the receiver's marker for a value over the cap and
+        the value itself otherwise. Any other value is queued as before: a recorded message
+        keeps small binary media and shrinks larger media to its digest."""
+        hold = self.hold
+        assert hold is not None
+        if (
+            not isinstance(item, str)
+            or not is_media_key(key)
+            or not may_inline_files(key, item)
+            or utf16_size(item, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
+        ):
+            return False, self._media(key, item, nested=True)[0]
+        try:
+            over = over_utf8(item, hold.value_bytes)
+        except UnicodeEncodeError:
+            return False, item
+        value = str.__str__(item)
+        size = held_size(value)
+        if not hold.active or not hold.budget.reserve(size, self.held.size):
+            return False, self._media(key, item, nested=True)[0]
+        self.held.size += size
+        self.held.values[key] = value
+        return True, self.value(truncated_marker(len(value)) if over else value)
+
+    def held_body(self, value: Any) -> Any:
+        """A GenAI log record's structured body, copied as ``content`` copies one, except that a
+        string over the cap that may be a file's content (a data: URL or base64) within the
+        inspection limit is held whole for export to upload, by its JSON pointer, within the
+        held-value budget: the copy carries its cut, unlisted, until export places it."""
+        hold = self.hold
+        assert hold is not None
+        self._cut = False
+
+        def copy_value(item: Any, pointer: str, depth: int) -> Any:
+            if isinstance(item, str) and depth <= 64:
+                try:
+                    over = over_utf8(item, hold.value_bytes)
+                except UnicodeEncodeError:
+                    over = False
+                if (
+                    over
+                    and _may_be_file_content(item)
+                    and utf16_size(item, MAX_INLINE_FILE_TEXT) <= MAX_INLINE_FILE_TEXT
+                    and hold.budget.reserve(held_size(item), self.held.size)
+                ):
+                    self.held.size += held_size(item)
+                    self.held.body_values[pointer] = str.__str__(item)
+                    return self.value(cut_utf8(item, hold.value_bytes), depth)
+                return self.value(item, depth, cut=True)
+            if isinstance(item, Mapping):
+                self.consume(8)
+                if depth > 64:
+                    raise ValueError("Telemetry snapshot exceeds its nesting limit.")
+                result = {}
+                for key, entry in item.items():
+                    if not isinstance(key, str):
+                        raise ValueError("Telemetry mapping keys must be strings.")
+                    result[self.value(key, depth + 1)] = copy_value(
+                        entry, f"{pointer}/{_pointer_segment(key)}", depth + 1
+                    )
+                return result
+            if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+                self.consume(8)
+                if depth > 64:
+                    raise ValueError("Telemetry snapshot exceeds its nesting limit.")
+                return tuple(
+                    copy_value(entry, f"{pointer}/{index}", depth + 1)
+                    for index, entry in enumerate(item)
+                )
+            return self.value(item, depth, cut=True)
+
+        result = copy_value(value, "", 0)
+        if self._cut and "body" not in self.truncated:
+            self.truncated.append("body")
+        self.held.body = True
+        return result
 
     def copied_attributes(self, values: Any, prefix: str = "", own: bool = False) -> Any:
         """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key. A
@@ -720,37 +861,62 @@ def snapshot_log(
     value_bytes: int | None = None,
     hold: Hold | None = None,
 ) -> ReadableLogRecord:
-    # A log record's values are not held for upload; the attachments its body holds are, staged
-    # by ``log_inference`` for this record.
-    held = (
+    record = copy(log_record.log_record)
+    # A log record's media upload under its own trace: an uncorrelated record holds none.
+    holding = (
+        hold if hold is not None and hold.active and capture_content and record.trace_id else None
+    )
+    # The attachments its body holds, staged by ``log_inference`` for this record.
+    staged = (
         hold.uploads.take_log(log_record.log_record.body)
         if hold is not None and hold.uploads is not None and capture_content
         else None
     )
-    budget = _ValueBudget(capture_content, record_bytes=record_bytes, value_bytes=value_bytes)
+    budget = _ValueBudget(
+        capture_content,
+        record_bytes=record_bytes,
+        value_bytes=value_bytes,
+        hold=holding,
+        trace_id=format(record.trace_id, "032x") if record.trace_id else "",
+        log=True,
+    )
     try:
-        record = copy(log_record.log_record)
         record.context = Context()
-        record.body = budget.content(record.body, "body") if capture_content else None
+        if not capture_content:
+            record.body = None
+        elif holding is not None and _offloads_body(record):
+            record.body = budget.held_body(record.body)
+        else:
+            record.body = budget.content(record.body, "body")
         resource = budget.resource(log_record.resource)
         record.attributes = budget.listed(
-            budget.attributes(record.attributes, log_record.dropped_attributes)
+            budget.attributes(
+                record.attributes, log_record.dropped_attributes, own=holding is not None
+            )
         )
         record.event_name = budget.value(record.event_name)
         record.severity_text = budget.value(record.severity_text)
+        result = ReadableLogRecord(
+            log_record=record,
+            resource=resource,
+            instrumentation_scope=budget.scope(log_record.instrumentation_scope),
+            limits=log_record.limits,
+        )
     except BaseException:
-        if held is not None:
-            held.release()
+        budget.held.release()
+        if staged is not None:
+            staged.release()
         raise
-    if held is not None:
-        try:
-            attach_held(record, held)
-        except Exception:
-            # A log record that keeps no attributes of its own uploads no attachments.
-            held.release()
-    return ReadableLogRecord(
-        log_record=record,
-        resource=resource,
-        instrumentation_scope=budget.scope(log_record.instrumentation_scope),
-        limits=log_record.limits,
-    )
+    held = budget.held
+    if staged is not None:
+        # One held copy per log record: the attachments join the media its copy holds, and
+        # export places them all in one step.
+        held.files.extend(staged.files)
+        held.cut.extend(staged.cut)
+        if held.budget is None:
+            held.budget = staged.budget
+        held.size += staged.size
+        staged.size = 0
+    if held.values or held.body or held.files or held.cut:
+        attach_held(result, held)
+    return result

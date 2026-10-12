@@ -9,8 +9,10 @@ import {
   type MediaDigestMemo,
   INLINE_FILE_TEXT_PER_RECORD,
   MAX_INLINE_FILE_TEXT,
+  isMediaKey,
   isMessageKey,
   mayInlineFiles,
+  readingOf,
 } from "./inline-files.js";
 import { scrubsToolCredentials, scrubToolCredentials } from "./tool-definitions.js";
 import { MAX_RECORD_NODES } from "./config.js";
@@ -37,6 +39,29 @@ function cutToUnits(value: string, units: number): string {
   const end = /[\uD800-\uDBFF]/.test(value[units - 1] ?? "") ? units - 1 : units;
   // A slice can keep the whole original string alive; the copy holds only what is kept.
   return Buffer.from(value.slice(0, end), "utf16le").toString("utf16le");
+}
+
+/** Whether a long string may be a file's inline content: a `data:` URL or base64 text. */
+function mayBeFileContent(text: string): boolean {
+  return text.startsWith("data:") || (text.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(text));
+}
+
+/** Whether a log record is a correlated GenAI event with a structured body, whose media may be
+ * uploaded under its trace. */
+function offloadsLogBody(source: ReadableLogRecord): boolean {
+  const name = source.eventName ?? source.attributes?.["event.name"];
+  const body = source.body;
+  const traceId = source.spanContext?.traceId;
+  return (
+    typeof name === "string" &&
+    name.startsWith("gen_ai.") &&
+    body !== null &&
+    typeof body === "object" &&
+    !utilTypes.isUint8Array(body) &&
+    typeof traceId === "string" &&
+    /^[0-9a-f]{32}$/.test(traceId) &&
+    !/^0+$/.test(traceId)
+  );
 }
 
 /** The record's byte or value budget ran out: a span's events and links past it are left out and
@@ -83,13 +108,23 @@ class Snapshot {
   private copied = new Map<object, unknown>();
   private attributesCopied = new Map<object, unknown>();
   private ownAttributesCopied = new Map<object, unknown>();
+  /** Message texts as the queue copies them, their media as their digest: a span's own, and
+   * nested or a log record's (small binary media kept). */
   private hashed = new Map<string, unknown>();
   private nestedHashed = new Map<string, unknown>();
+  /** Inspected texts as they would be exported with every file as its digest, by how their
+   * attribute is read: what the queue is charged for a value held whole for upload. */
+  private charged = new Map<string, Map<string, unknown>>();
   private inspected = 0;
   /** Bytes of values held whole for upload, charged to the held-value budget. */
   held = 0;
   /** Set while the span's own attributes are copied: only they may be held for upload. */
   private own = false;
+  /** Set for a log record: only its inspected attributes' media and its body's are held. */
+  log = false;
+  /** Set while a GenAI log record's structured body is copied: a long string that may be a
+   * file's content is held whole for upload. */
+  private holdingBody = false;
   /** The span's own messages whose inline media shrank to their digest when queued, by
    * attribute: the text queued (cut or not), and how many files it lost. */
   digested = new Map<string, DigestedMessage>();
@@ -132,13 +167,19 @@ class Snapshot {
   private heldValue(key: string, value: unknown): { value: unknown } | undefined {
     if (!this.hold || !this.own) return undefined;
     if (typeof value === "string") {
+      // A log record's value is never uploaded whole: only the media in its inspected attributes.
+      if (this.log && !isMediaKey(key)) return undefined;
       if (value.length > this.valueUnits) {
+        if (this.log && (value.length > MAX_INLINE_FILE_TEXT || !mayInlineFiles(key, value)))
+          return undefined;
         // The queue must take the cut the value falls back to, as it would have taken it before.
         const fallback = this.valueUnits * 2 + 16;
         if (this.bytes + fallback > this.limit || !this.holds(value.length * 2)) return undefined;
         this.charge(fallback);
-        // Export parses the held message; its inspection allowance is taken here, in order.
+        // Export parses the held message; its inspection allowance is taken here, in order. A
+        // log record's export inspects within its own allowance.
         if (
+          !this.log &&
           value.length <= MAX_INLINE_FILE_TEXT &&
           mayInlineFiles(key, value) &&
           this.inspected + value.length <= INLINE_FILE_TEXT_PER_RECORD
@@ -148,17 +189,17 @@ class Snapshot {
         }
         return { value };
       }
-      // Within the queued length: a recorded message holding an inline media part is held whole
-      // for export to upload the file, within the held-value budget, and the queue is charged
-      // its copy with the files as their digest, as before. Past the budget, the files shrink to
-      // their digest when queued, as before uploads existed.
-      if (!isMessageKey(key)) return undefined;
-      const digested = this.inlineFiles(key, value);
+      // Within the queued length: an inspected attribute holding inline media is held whole for
+      // export to upload the files, within the held-value budget, and the queue is charged its
+      // copy with the files as their digest. Past the budget, a recorded message's files shrink to
+      // their digest when queued, as before uploads existed; any other value is queued as it is.
+      if (!isMediaKey(key)) return undefined;
+      const digested = this.inlineFiles(key, value, true);
       if (digested === value || !this.holds(value.length * 2)) return undefined;
       this.copy(digested, 1, "value", true);
       return { value };
     }
-    if (!utilTypes.isUint8Array(value)) return undefined;
+    if (this.log || !utilTypes.isUint8Array(value)) return undefined;
     const length = typedArrayByteLength.call(value);
     // Bytes over Hue's upload limit could only be exported cut: not copied whole for that.
     if (length <= this.hold.valueBytes || length > MAX_BLOB_BYTES || !this.holds(length))
@@ -245,31 +286,47 @@ class Snapshot {
     }
   }
 
-  /** A message attribute with its inline media hashed. Own and nested attributes cache
-   * separately because small binary media stays inline only in nested attributes. A record
-   * inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} code units in all; beyond that,
-   * messages are charged as recorded. */
-  private inlineFiles(key: string, value: unknown): unknown {
+  /**
+   * An attribute with its inline media hashed. As queued (`charge` false), only a recorded message
+   * shrinks: a span's own with every binary file and text file over the inline limit as its
+   * digest, a nested one's or a log record's keeping small binary media. With `charge`, any
+   * inspected attribute as export would place it with every file as its digest, what the queue is
+   * charged for a value held whole for upload. Own, nested and charged copies cache separately. A
+   * record inspects at most {@link INLINE_FILE_TEXT_PER_RECORD} code units in all; beyond that,
+   * values are charged as recorded. Nothing is inspected in metadata-only mode.
+   */
+  private inlineFiles(key: string, value: unknown, charge = false): unknown {
     if (
+      !this.captureContent ||
       typeof value !== "string" ||
       value.length > MAX_INLINE_FILE_TEXT ||
-      !mayInlineFiles(key, value)
+      !mayInlineFiles(key, value) ||
+      (!charge && !isMessageKey(key))
     )
       return value;
-    const hashed = this.own ? this.hashed : this.nestedHashed;
+    const own = this.own && !this.log;
+    // A span's own message is queued as it is charged: one copy serves both.
+    const shared = own && isMessageKey(key);
+    let hashed: Map<string, unknown>;
+    if (charge && !shared) {
+      const reading = readingOf(key)!;
+      hashed = this.charged.get(reading) ?? new Map<string, unknown>();
+      this.charged.set(reading, hashed);
+    } else hashed = own ? this.hashed : this.nestedHashed;
     if (hashed.has(value)) {
-      if (this.own) this.inspectedKeys.add(key);
+      if (own) this.inspectedKeys.add(key);
       return hashed.get(value);
     }
     if (this.inspected + value.length > INLINE_FILE_TEXT_PER_RECORD) return value;
     this.inspected += value.length;
-    if (this.own) this.inspectedKeys.add(key);
+    if (own) this.inspectedKeys.add(key);
     const count = { files: 0 };
-    const result = this.own
-      ? hashInlineFiles(key, value, count, this.memo, this.traceId)
-      : hashNestedInlineFiles(key, value);
+    const result =
+      charge || own
+        ? hashInlineFiles(key, value, count, this.memo, this.traceId, true)
+        : hashNestedInlineFiles(key, value);
     hashed.set(value, result);
-    if (this.own && count.files) this.hashedFiles.set(value, count.files);
+    if (shared && count.files) this.hashedFiles.set(value, count.files);
     return result;
   }
 
@@ -327,6 +384,19 @@ class Snapshot {
     return this.copy(value, depth, "value", true);
   }
 
+  /** A GenAI log record's structured body: strings are cut to the queued value length as in
+   * {@link value}, except that a longer string that may be a file's content (a `data:` URL or
+   * base64) within the inspection limit is held whole for export to upload, within the
+   * held-value budget, the queue charged what its cut would have cost. */
+  heldBody<T>(value: T): T {
+    this.holdingBody = this.hold !== undefined;
+    try {
+      return this.copy(value, 1, "value", true);
+    } finally {
+      this.holdingBody = false;
+    }
+  }
+
   copy<T>(value: T, depth = 0, shape: Shape = "value", content = false): T {
     if (++this.nodes > MAX_RECORD_NODES)
       throw new BudgetExceeded("Telemetry complexity limit exceeded");
@@ -335,6 +405,13 @@ class Snapshot {
     if (typeof value === "string") {
       let text: string = value;
       if (content && text.length > this.valueUnits) {
+        if (this.holdingBody && text.length <= MAX_INLINE_FILE_TEXT && mayBeFileContent(text)) {
+          const fallback = this.valueUnits * 2 + 16;
+          if (this.bytes + fallback <= this.limit && this.holds(text.length * 2)) {
+            this.charge(fallback);
+            return text as T;
+          }
+        }
         text = cutToUnits(text, this.valueUnits);
         this.cut.add(text);
       }
@@ -415,7 +492,11 @@ class Snapshot {
         // A span's own message whose inline media shrank to their digest is named as it
         // was queued, cut or not, so export reports each file as not uploaded.
         const files =
-          this.own && shape === "attributes" && typeof source === "string"
+          this.own &&
+          !this.log &&
+          shape === "attributes" &&
+          typeof source === "string" &&
+          isMessageKey(key)
             ? this.hashedFiles.get(source)
             : undefined;
         if (files && typeof copied === "string") this.digested.set(key, { text: copied, files });
@@ -558,8 +639,16 @@ export function snapshotLog(
   limit: number,
   captureContent = true,
   valueUnits = Infinity,
+  hold?: HoldLimits,
+  memo?: MediaDigestMemo,
 ): RecordSnapshot<ReadWriteLogRecord> {
-  const snapshot = new Snapshot(limit, captureContent, valueUnits);
+  // A log record's media upload under its own trace: an uncorrelated record holds none.
+  const traceId = source.spanContext?.traceId;
+  const correlated =
+    typeof traceId === "string" && /^[0-9a-f]{32}$/.test(traceId) && !/^0+$/.test(traceId);
+  const holding = correlated ? hold : undefined;
+  const snapshot = new Snapshot(limit, captureContent, valueUnits, holding, memo, traceId ?? "");
+  snapshot.log = true;
   // Only our batching processor sees this copy. Its writer methods deliberately
   // cannot mutate the admitted snapshot or invalidate its charged byte count.
   const record: ReadWriteLogRecord = {
@@ -572,8 +661,13 @@ export function snapshotLog(
       instrumentationScope: source.instrumentationScope,
       droppedAttributesCount: source.droppedAttributesCount,
     }),
-    body: snapshot.value(source.body),
-    attributes: snapshot.attributes(source.attributes),
+    body:
+      holding && captureContent && offloadsLogBody(source)
+        ? snapshot.heldBody(source.body)
+        : snapshot.value(source.body),
+    attributes: holding
+      ? snapshot.ownAttributes(source.attributes)
+      : snapshot.attributes(source.attributes),
     spanContext: snapshot.context(source.spanContext),
     resource: snapshot.resource(source.resource),
     setAttribute() {
@@ -600,7 +694,7 @@ export function snapshotLog(
     bytes: snapshot.bytes,
     unresolvedResource: snapshot.unresolvedResource,
     cut: snapshot.cut,
-    held: 0,
+    held: snapshot.held,
     digested: new Map(),
     inspected: new Set(),
   };

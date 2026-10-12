@@ -20,6 +20,67 @@ export function isMessageKey(key: string): boolean {
   return messageKeys.has(key);
 }
 
+/** Attributes whose value is JSON text by its convention, read for files anywhere in it: message
+ * sources (GenAI, AI SDK, OpenInference `input.value`/`output.value`, OpenLLMetry entities,
+ * Langfuse observations and traces) and tool arguments and results. */
+const jsonMediaKeys = new Set([
+  "gen_ai.input.messages",
+  "gen_ai.output.messages",
+  "ai.prompt.messages",
+  "ai.prompt",
+  "input.value",
+  "output.value",
+  "traceloop.entity.input",
+  "traceloop.entity.output",
+  "langfuse.observation.input",
+  "langfuse.observation.output",
+  "langfuse.trace.input",
+  "langfuse.trace.output",
+  "gen_ai.tool.call.arguments",
+  "gen_ai.tool.call.result",
+  "ai.toolCall.args",
+  "ai.toolCall.result",
+  "tool.parameters",
+  "tool_arguments",
+  "tool_response",
+]);
+/** Recorded metadata: JSON text when it reads as an object or array, otherwise the text itself. */
+const metadataKeys = new Set([
+  "metadata",
+  "langfuse.observation.metadata",
+  "langfuse.trace.metadata",
+]);
+const metadataPrefixes = [
+  "langfuse.observation.metadata.",
+  "langfuse.trace.metadata.",
+  "ai.telemetry.metadata.",
+];
+/** OpenLLMetry's indexed message content: the JSON text of a parts list. */
+const indexedContentKey = /^gen_ai\.(?:prompt|completion)\.\d{1,9}\.content$/;
+/** OpenInference's flattened image content: the image's URL. */
+const openInferenceImageKey =
+  /^llm\.(?:input|output)_messages\.\d{1,9}\.message\.contents\.\d{1,9}\.message_content\.image\.image\.url$/;
+
+/** How an attribute's text is read for files: JSON by convention, metadata, an OpenLLMetry parts
+ * list, or a URL that is the file. */
+export type MediaReading = "json" | "metadata" | "parts" | "url";
+
+/** How an attribute's text is read for files, when it is read at all. */
+export function readingOf(key: string): MediaReading | undefined {
+  if (jsonMediaKeys.has(key)) return "json";
+  if (metadataKeys.has(key) || metadataPrefixes.some((prefix) => key.startsWith(prefix)))
+    return "metadata";
+  if (indexedContentKey.test(key)) return "parts";
+  if (openInferenceImageKey.test(key)) return "url";
+  return undefined;
+}
+
+/** Whether a span attribute is one whose value the SDK inspects for inline media: the attributes
+ * Hue's reader reads files from. */
+export function isMediaKey(key: string): boolean {
+  return readingOf(key) !== undefined;
+}
+
 /** Strict base64: alphabet characters only, padded to a multiple of four. */
 const base64 = /^[A-Za-z0-9+/]*={0,2}$/;
 /** An RFC 2397 `data:` URL's header, up to the comma before its data. Its `;` parameters are read
@@ -85,17 +146,33 @@ export function inlineFileBytes(content: string): InlineFileBytes {
   };
 }
 
-/** A part and the exact leaf that contains its bytes. Nested provider metadata stays in place. */
-export interface InlineFilePart {
-  part: Record<string, unknown>;
+/** A string inside a recorded value whose JSON the walk read (a tool call's arguments, a tool
+ * result): re-encoded once a file inside it is placed. */
+export interface EncodedValue {
   owner: Record<string, unknown>;
   key: string;
+  value: unknown;
+  dirty: boolean;
+}
+
+/** A part and the exact leaf that contains its bytes. Nested provider metadata stays in place. */
+export interface InlineFilePart {
+  /** The part that carries the digest: the provider part, or for OpenAI assistant audio the
+   * message. Unused for a whole string. */
+  part: Record<string, unknown>;
+  owner: Record<string, unknown> | unknown[];
+  key: string | number;
   content: string;
   pointer: string;
   partPointer: string;
   contentType?: string;
   name?: string;
   base64?: boolean;
+  /** A whole string that is a `data:` URL: replaced by a GenAI `blob` part in digest form. */
+  whole?: boolean;
+  /** The JSON-encoded strings the file sits in, outermost first: no `hue.blobs` key can address
+   * inside a string, so such a file is placed by its digest. */
+  encoded?: EncodedValue[];
 }
 
 const audioTypes: Record<string, string> = {
@@ -159,10 +236,14 @@ export function isTextMediaType(contentType: string): boolean {
     type === "application/x-www-form-urlencoded"
   );
 }
-/** Cheap shared prefilter before bounded parsing of span message attributes. */
+/** Cheap shared prefilter before bounded parsing of the attributes inspected for media. */
 export function mayInlineFiles(key: string, value: unknown): boolean {
+  return isMediaKey(key) && mayHoldMedia(value);
+}
+
+/** Whether text may hold inline media at all: cheap, before it is parsed or walked. */
+export function mayHoldMedia(value: unknown): value is string {
   return (
-    isMessageKey(key) &&
     typeof value === "string" &&
     [
       "blob",
@@ -172,7 +253,8 @@ export function mayInlineFiles(key: string, value: unknown): boolean {
       "media",
       "inlineData",
       "inline_data",
-      "input_audio",
+      "audio",
+      "data:",
       "\\u",
     ].some((marker) => value.includes(marker))
   );
@@ -253,7 +335,7 @@ export function contentPath(
     contentType = undefined;
     name = undefined;
     dataUrlOnly = true;
-  } else if (part.type === "input_image") {
+  } else if (part.type === "input_image" || part.type === "computer_screenshot") {
     key = "image_url";
     contentType = undefined;
     name = undefined;
@@ -290,28 +372,348 @@ export function contentPath(
   };
 }
 
-/** Inline media in document order. The caller applies the decoded text threshold. */
-export function largeInlineFileParts(value: unknown): InlineFilePart[] {
-  const found: InlineFilePart[] = [];
-  const visit = (node: unknown, pointer: string, depth: number): void => {
+/** A media type as a `data:` URL declares one: `type/subtype`, no parameters. */
+const declaredMediaType = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9!#$&^_.+-]+$/;
+
+/** The media type a whole string that is a `data:` URL declares, when it declares one: such a
+ * string is a file wherever it sits. A web URL, or any other text, is not. */
+function dataUrlType(text: string): string | undefined {
+  if (!text.startsWith("data:")) return undefined;
+  const header = dataUrl.exec(text);
+  if (!header) return undefined;
+  const type = header[1]!.split(";")[0]!.trim();
+  return declaredMediaType.test(type) && isMediaContentType(type) ? type : undefined;
+}
+
+/** The modality a media type implies, as Hue's reader names it. */
+export function modalityOf(mediaType: string): "image" | "audio" | "video" | "document" | "file" {
+  const type = mediaType.split(";")[0]!.trim().toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("audio/")) return "audio";
+  if (type.startsWith("video/")) return "video";
+  if (
+    type.startsWith("text/") ||
+    type === "application/pdf" ||
+    type === "application/rtf" ||
+    type === "application/msword" ||
+    type === "application/vnd.ms-excel" ||
+    type === "application/vnd.ms-powerpoint" ||
+    type.startsWith("application/vnd.openxmlformats-officedocument.")
+  )
+    return "document";
+  return "file";
+}
+
+/** The media types OpenAI's audio `format` names; any other valid name is `audio/<name>`. */
+const audioFormats: Record<string, string> = {
+  mp3: "audio/mpeg",
+  mpeg: "audio/mpeg",
+  mpga: "audio/mpeg",
+  wav: "audio/wav",
+  wave: "audio/wav",
+  ogg: "audio/ogg",
+  oga: "audio/ogg",
+  opus: "audio/opus",
+  flac: "audio/flac",
+  aac: "audio/aac",
+  m4a: "audio/mp4",
+  mp4: "audio/mp4",
+  webm: "audio/webm",
+  pcm16: "audio/pcm",
+  pcm: "audio/pcm",
+};
+
+function audioFormatMediaType(format: string): string | undefined {
+  const name = format.trim().toLowerCase();
+  if (!/^[a-z0-9.+-]{1,32}$/.test(name)) return undefined;
+  return Object.hasOwn(audioFormats, name) ? audioFormats[name] : `audio/${name}`;
+}
+
+/** The media type the first bytes of base64 audio name by their container's signature (WAV,
+ * MP3, AAC, FLAC, Ogg): OpenAI's assistant audio keeps only the bytes, in the format the request
+ * asked for. Raw PCM has no signature and no type. */
+function audioSignatureMediaType(base64: string): string | undefined {
+  const head = Buffer.from(base64.slice(0, 16), "base64");
+  const text = (start: number, end: number) => head.subarray(start, end).toString("latin1");
+  if (text(0, 4) === "RIFF" && text(8, 12) === "WAVE") return "audio/wav";
+  if (text(0, 3) === "ID3") return "audio/mpeg";
+  if (text(0, 4) === "fLaC") return "audio/flac";
+  if (text(0, 4) === "OggS") return "audio/ogg";
+  // An MPEG frame's sync word: layer bits 00 are an AAC ADTS frame, any other an MP3 frame.
+  if (head.length >= 2 && head[0] === 0xff && (head[1]! & 0xf0) === 0xf0)
+    return (head[1]! & 0x06) === 0 ? "audio/aac" : "audio/mpeg";
+  if (head.length >= 2 && head[0] === 0xff && (head[1]! & 0xe0) === 0xe0) return "audio/mpeg";
+  return undefined;
+}
+
+/** A label as Hue's reader takes one: nonempty once trimmed, at most 256 code units. */
+function readerLabel(value: unknown): boolean {
+  if (typeof value !== "string" || value.length === 0) return false;
+  const text = value.trim();
+  return text.length > 0 && text.length <= 256;
+}
+
+/**
+ * The keys of a value Hue's reader reads as a file by its shape, where the SDK found no inline
+ * bytes to upload in it (a remote URL, a provider file id, an empty or malformed field): nothing
+ * inside them is read as another file, so nothing inside them is replaced either. Undefined for a
+ * value that is no file. Mirrors the reader's shapes (`mediaPartOf`).
+ */
+function readerConsumed(part: Record<string, unknown>): readonly string[] | undefined {
+  const type =
+    typeof part.type === "string" ? part.type.toLowerCase().replaceAll("-", "_") : undefined;
+  const size = part.size ?? part.byte_size;
+  const digest =
+    (typeof part.sha256 === "string" && /^[0-9a-f]{64}$/.test(part.sha256)) ||
+    (typeof size === "number" && Number.isSafeInteger(size) && size >= 0);
+  const identifies = (content: unknown, fileId?: unknown) =>
+    (typeof content === "string" && content.length > 0) || readerLabel(fileId) || digest;
+  const anthropic = () => {
+    const source = object(part.source);
+    return source && source.type !== "content"
+      ? ["type", "source", "title", "name", "filename", "cache_control"]
+      : undefined;
+  };
+  switch (type) {
+    case "blob":
+      return ["type", "content", "mime_type", "modality", "name", "filename", "transcript"];
+    case "uri":
+      return ["type", "uri", "mime_type", "modality", "name", "filename", "transcript"];
+    case "file": {
+      const file = object(part.file);
+      if (file) return identifies(file.file_data, file.file_id) ? ["type", "file"] : undefined;
+      if (typeof part.file_id === "string" || typeof part.modality === "string")
+        return identifies(undefined, part.file_id)
+          ? ["type", "file_id", "mime_type", "modality", "name", "filename"]
+          : undefined;
+      return identifies(part.data)
+        ? ["type", "data", "mediaType", "mimeType", "filename", "name", "providerOptions"]
+        : undefined;
+    }
+    case "image":
+      if (object(part.source)) return anthropic();
+      return typeof part.image === "string" || digest
+        ? ["type", "image", "mediaType", "mimeType", "filename", "name", "providerOptions"]
+        : undefined;
+    case "document":
+      return anthropic();
+    case "image_url":
+      return ["type", "image_url"];
+    case "input_image":
+      return ["type", "image_url", "file_id", "detail"];
+    case "input_audio":
+      return ["type", "input_audio", "data", "format", "transcript"];
+    case "input_file":
+      return ["type", "file_data", "file_url", "file_id", "filename", "name"];
+    case "computer_screenshot":
+      return ["type", "image_url", "file_id"];
+    case "media":
+      return ["type", "data", "mime_type", "file_uri", "fileUri", "name", "filename"];
+    case undefined: {
+      for (const key of ["inlineData", "inline_data", "fileData", "file_data"])
+        if (object(part[key])) return [key];
+      for (const key of ["image", "document"]) if (object(object(part[key])?.source)) return [key];
+      const audio = object(part.audio);
+      if (
+        audio &&
+        typeof audio.id === "string" &&
+        (typeof audio.data === "string" ||
+          typeof audio.transcript === "string" ||
+          typeof audio.expires_at === "number")
+      )
+        return ["audio"];
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** The keys of a part whose string value is JSON by its convention, read as the value it encodes:
+ * a tool call's `arguments`, a tool result, and a `tool` or `function` message's `content`. A
+ * message's own text is never read as JSON. */
+function encodedJsonKeys(item: Record<string, unknown>): readonly string[] {
+  if (item.role === "tool" || item.role === "function") return ["content"];
+  const type =
+    typeof item.type === "string" ? item.type.toLowerCase().replaceAll("-", "_") : undefined;
+  if (type === "tool_call" || type === "function_call") return ["arguments"];
+  if (type === "tool_result" || type === "function_call_output" || type === "tool_call_response")
+    return ["output", "result", "content", "response"];
+  if (typeof item.name === "string" && Object.hasOwn(item, "arguments")) return ["arguments"];
+  return [];
+}
+
+/** The object or array a JSON-encoded string holds; undefined for any other string. */
+function encodedJsonValue(text: string): unknown {
+  if (!/^\s*[[{]/.test(text)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The files a recorded value holds, the box holding the value (so a whole-string file at its
+ * root can be replaced), and the JSON-encoded strings the walk read, innermost first, to encode
+ * again once a file inside one is placed. */
+export interface MediaValue {
+  box: { value: unknown };
+  files: InlineFilePart[];
+  encoded: EncodedValue[];
+}
+
+/**
+ * Every file a recorded value carries for upload, in reading order, as Hue's reader finds them
+ * (`forEachMediaPart`): a provider part with inline bytes, an OpenAI assistant message's audio,
+ * a whole string that is a typed `data:` URL, and the files inside a tool call's or tool result's
+ * JSON-encoded string. A part whose bytes are not inline (a remote URL, a file id) is left whole.
+ * The caller applies the decoded text threshold.
+ */
+export function mediaIn(value: unknown): MediaValue {
+  const box = { value };
+  const files: InlineFilePart[] = [];
+  const encoded: EncodedValue[] = [];
+  const visit = (
+    node: unknown,
+    pointer: string,
+    depth: number,
+    owner: Record<string, unknown> | unknown[],
+    key: string | number,
+    within: EncodedValue[],
+  ): void => {
     if (depth > 256) throw new Error("Message exceeds the supported nesting limit");
+    const add = (file: InlineFilePart) =>
+      files.push(within.length ? { ...file, encoded: within } : file);
+    if (typeof node === "string") {
+      const type = dataUrlType(node);
+      if (type !== undefined)
+        add({
+          part: {},
+          owner,
+          key,
+          content: node,
+          pointer,
+          partPointer: pointer,
+          contentType: type,
+          whole: true,
+        });
+      return;
+    }
     if (Array.isArray(node)) {
-      node.forEach((item, index) => visit(item, `${pointer}/${index}`, depth + 1));
+      for (let index = 0; index < node.length; index++)
+        visit(node[index], `${pointer}/${index}`, depth + 1, node, index, within);
       return;
     }
     const part = object(node);
     if (!part) return;
     const file = contentPath(part, pointer);
     if (file) {
-      found.push(file);
+      add(file);
       return;
     }
-    for (const [name, item] of Object.entries(part))
-      visit(item, `${pointer}/${pointerSegment(name)}`, depth + 1);
+    const consumed = readerConsumed(part);
+    // An OpenAI Chat assistant message's spoken reply: the message is the part.
+    const audio =
+      consumed?.length === 1 && consumed[0] === "audio" ? object(part.audio)! : undefined;
+    if (
+      audio &&
+      typeof audio.data === "string" &&
+      audio.data.length % 4 === 0 &&
+      base64.test(audio.data)
+    ) {
+      const format = typeof audio.format === "string" && audio.format ? audio.format : undefined;
+      const contentType = format
+        ? audioFormatMediaType(format)
+        : audioSignatureMediaType(audio.data);
+      add({
+        part,
+        owner: audio,
+        key: "data",
+        content: audio.data,
+        pointer: `${pointer}/audio/data`,
+        partPointer: pointer,
+        ...(contentType ? { contentType } : {}),
+        base64: true,
+      });
+    }
+    const encodedKeys = encodedJsonKeys(part);
+    for (const [name, item] of Object.entries(part)) {
+      if (consumed?.includes(name)) continue;
+      const at = `${pointer}/${pointerSegment(name)}`;
+      const inner =
+        typeof item === "string" && encodedKeys.includes(name) ? encodedJsonValue(item) : undefined;
+      if (inner !== undefined) {
+        const holder: EncodedValue = { owner: part, key: name, value: inner, dirty: false };
+        const before = files.length;
+        visit(inner, at, depth + 1, holder as unknown as Record<string, unknown>, "value", [
+          ...within,
+          holder,
+        ]);
+        if (files.length > before) encoded.push(holder);
+        continue;
+      }
+      visit(item, at, depth + 1, part, name, within);
+    }
   };
-  visit(value, "", 0);
-  return found;
+  visit(value, "", 0, box, "value", []);
+  return { box, files, encoded };
 }
+
+/**
+ * An attribute's recorded text read for files as Hue's reader reads that attribute: JSON by its
+ * convention; metadata as JSON when it reads as an object or array, otherwise as the text itself;
+ * an OpenLLMetry content as the parts list it encodes (any other content stays text); an
+ * OpenInference image URL as the text itself. Undefined for text that reading finds nothing in.
+ * Throws for JSON that does not parse or nests too deep.
+ */
+export function readMediaText(key: string, text: string): MediaValue | undefined {
+  switch (readingOf(key)) {
+    case "json":
+      return mediaIn(JSON.parse(text));
+    case "metadata":
+      return mediaIn(/^\s*[[{]/.test(text) ? JSON.parse(text) : text);
+    case "parts": {
+      if (!/^\s*\[/.test(text)) return undefined;
+      const parsed: unknown = JSON.parse(text);
+      return Array.isArray(parsed) &&
+        parsed.length > 0 &&
+        parsed.every((part) => typeof object(part)?.type === "string")
+        ? mediaIn(parsed)
+        : undefined;
+    }
+    case "url":
+      return mediaIn(text);
+    default:
+      return undefined;
+  }
+}
+
+/** The recorded value's text once its files are placed, re-encoding each JSON-encoded string a
+ * placed file sits in, innermost first. */
+export function placedMediaText(media: MediaValue): string {
+  reencodeMedia(media);
+  return JSON.stringify(media.box.value);
+}
+
+/** Each JSON-encoded string a placed file sits in, encoded again, innermost first. */
+export function reencodeMedia(media: MediaValue): void {
+  for (const holder of media.encoded)
+    if (holder.dirty) holder.owner[holder.key] = JSON.stringify(holder.value);
+}
+
+/** Whether a found file has bytes to place: nonempty, and a whole string's `data:` URL decodes. */
+export function placeable(file: InlineFilePart, decoded: InlineFileBytes): boolean {
+  return decoded.bytes.byteLength > 0 && (!file.whole || decoded.decoded);
+}
+
+/** Whether an uploaded file keeps a 16 KiB prefix of its content in place (text media in a
+ * provider part, whose entry names the content) rather than its digest. A whole string and a
+ * file inside a JSON-encoded string always take the digest form. */
+export function keepsPrefix(file: InlineFilePart, textual: boolean): boolean {
+  return textual && !file.whole && !file.encoded?.length;
+}
+
 export function mediaBytes(file: InlineFilePart): InlineFileBytes {
   if (file.base64) return { bytes: Buffer.from(file.content, "base64"), decoded: true };
   if (
@@ -366,25 +768,121 @@ export class MediaDigestMemo {
   }
 }
 
-/** Digest placement removes only the leaf and adds identity to the provider part. */
-export function digestPart(file: InlineFilePart, digest: FileDigest): void {
-  delete file.owner[file.key];
-  file.part.sha256 = digest.sha256;
-  file.part.size = digest.size;
+/** The GenAI `blob` part in digest form a whole-string file is replaced by. */
+function blobPart(contentType: string, digest: FileDigest): Record<string, unknown> {
+  return {
+    type: "blob",
+    mime_type: contentType,
+    modality: modalityOf(contentType),
+    sha256: digest.sha256,
+    size: digest.size,
+  };
 }
+
+/** Digest placement removes only the leaf and adds identity to the provider part (the message,
+ * for OpenAI assistant audio); a whole string becomes a GenAI `blob` part in digest form. */
+export function digestPart(file: InlineFilePart, digest: FileDigest): void {
+  const owner = file.owner as Record<string | number, unknown>;
+  if (file.whole) owner[file.key] = blobPart(file.contentType!, digest);
+  else {
+    delete owner[file.key];
+    file.part.sha256 = digest.sha256;
+    file.part.size = digest.size;
+  }
+  for (const holder of file.encoded ?? []) holder.dirty = true;
+}
+
+/** Prefix placement keeps the first 16 KiB of a text file's content in place. */
+export function prefixPart(file: InlineFilePart, prefix: string): void {
+  (file.owner as Record<string | number, unknown>)[file.key] = prefix;
+  for (const holder of file.encoded ?? []) holder.dirty = true;
+}
+
+/**
+ * A span's own attribute with its inline media replaced by their digest, as export places media
+ * it does not upload. Only the recorded message attributes (`isMessageKey`) shrink without an
+ * upload; every other inspected attribute keeps its bytes inline unless they upload, so `anyKey`
+ * asks for the digest form of any inspected attribute (what the queue is charged for a value it
+ * holds whole for upload).
+ */
 export function hashInlineFiles(
   key: string,
   value: unknown,
   count?: { files: number },
   memo?: MediaDigestMemo,
   traceId = "",
+  anyKey = false,
 ): unknown {
-  return hashFiles(key, value, false, count, memo, traceId);
+  return anyKey || isMessageKey(key) ? hashFiles(key, value, false, count, memo, traceId) : value;
 }
 
 /** Nested message attributes retain small media and digest larger media without upload state. */
-export function hashNestedInlineFiles(key: string, value: unknown): unknown {
-  return hashFiles(key, value, true);
+export function hashNestedInlineFiles(
+  key: string,
+  value: unknown,
+  count?: { files: number },
+): unknown {
+  return isMessageKey(key) ? hashFiles(key, value, true, count) : value;
+}
+
+/**
+ * Each file a recorded value holds replaced by its digest, as export places a file it does not
+ * upload: binary media of any size (`nested`: over the inline limit) and text media over the
+ * inline limit. Whether any was replaced; `count` counts them.
+ */
+export function digestMedia(
+  media: MediaValue,
+  nested: boolean,
+  count?: { files: number },
+  memo?: MediaDigestMemo,
+  traceId = "",
+): boolean {
+  let changed = false;
+  for (const file of media.files) {
+    const decoded = mediaBytes(file);
+    if (!placeable(file, decoded)) continue;
+    if (
+      (nested || isTextMediaType(mediaContentType(file, decoded))) &&
+      decoded.bytes.byteLength <= INLINE_FILE_LIMIT
+    )
+      continue;
+    const digest = memo
+      ? memo.digest(file, decoded, traceId)
+      : {
+          sha256: createHash("sha256").update(decoded.bytes).digest("hex"),
+          size: decoded.bytes.byteLength,
+        };
+    digestPart(file, digest);
+    changed = true;
+    if (count) count.files++;
+  }
+  if (changed) reencodeMedia(media);
+  return changed;
+}
+
+/**
+ * The UTF-8 size of a structured value's JSON once each file the SDK may upload from it, within
+ * the inspection limits, is placed in its digest form: whether a log body over the value cap fits
+ * it once its media upload. Mutates `value`, a copy the caller owns.
+ */
+export function digestFormBytes(value: unknown): number {
+  const media = mediaIn(value);
+  let inspected = 0;
+  for (const file of media.files) {
+    const units = file.content.length;
+    if (units > MAX_INLINE_FILE_TEXT || inspected + units > INLINE_FILE_TEXT_PER_RECORD) continue;
+    inspected += units;
+    const decoded = mediaBytes(file);
+    if (!placeable(file, decoded)) continue;
+    if (
+      isTextMediaType(mediaContentType(file, decoded)) &&
+      decoded.bytes.byteLength <= INLINE_FILE_LIMIT
+    )
+      continue;
+    digestPart(file, { sha256: "0".repeat(64), size: decoded.bytes.byteLength });
+  }
+  reencodeMedia(media);
+  return Buffer.byteLength(JSON.stringify(media.box.value));
 }
 
 function hashFiles(
@@ -402,28 +900,9 @@ function hashFiles(
   )
     return value;
   try {
-    const parsed: unknown = JSON.parse(value);
-    const files = largeInlineFileParts(parsed);
-    let changed = false;
-    for (const file of files) {
-      const decoded = mediaBytes(file);
-      if (!decoded.bytes.byteLength) continue;
-      if (
-        (nested || isTextMediaType(mediaContentType(file, decoded))) &&
-        decoded.bytes.byteLength <= INLINE_FILE_LIMIT
-      )
-        continue;
-      const digest = memo
-        ? memo.digest(file, decoded, traceId)
-        : {
-            sha256: createHash("sha256").update(decoded.bytes).digest("hex"),
-            size: decoded.bytes.byteLength,
-          };
-      digestPart(file, digest);
-      changed = true;
-      if (count) count.files++;
-    }
-    return changed ? JSON.stringify(parsed) : value;
+    const media = readMediaText(key, value);
+    if (!media || !digestMedia(media, nested, count, memo, traceId)) return value;
+    return JSON.stringify(media.box.value);
   } catch {
     return value;
   }

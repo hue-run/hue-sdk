@@ -41,6 +41,7 @@ from ._blobs import (
     Uploads,
     _blob_entry,
     held_of,
+    place_logs,
     place_spans,
     upload_budget_seconds,
 )
@@ -1150,6 +1151,36 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         self._delegate.shutdown()
 
 
+def _restored_body(body: Any, held: Mapping[str, str]) -> Any:
+    """A log record's queued body as JSON values (lists for its sequences), with each string its
+    copy held whole put back at its JSON pointer."""
+
+    def copied(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: copied(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [copied(item) for item in value]
+        return value
+
+    result = copied(body)
+    for pointer, text in held.items():
+        segments = [
+            segment.replace("~1", "/").replace("~0", "~") for segment in pointer.split("/")[1:]
+        ]
+        if not segments:
+            result = text
+            continue
+        owner = result
+        for segment in segments[:-1]:
+            owner = owner[int(segment)] if isinstance(owner, list) else owner[segment]
+        last = segments[-1]
+        if isinstance(owner, list):
+            owner[int(last)] = text
+        else:
+            owner[last] = text
+    return result
+
+
 class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
     signal = "logs"
 
@@ -1166,7 +1197,9 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         report_uploads: Callable[[Tally, str], None] | None = None,
     ) -> None:
         self._setup(ledger, limits, dropped_records)
-        # Uploads of the attachments log bodies hold, counted with the span exporter's.
+        # Uploads of correlated GenAI log records' media and of the attachments their bodies
+        # hold; None when the client uploads none. Their outcomes are counted with the span
+        # exporter's.
         self._uploads = uploads
         self._report = report_uploads
         self._session = SafeSession("logs", limits=self._limits)
@@ -1183,6 +1216,8 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         return self._delegate.export(batch) is LogRecordExportResult.SUCCESS
 
     def _wait_for_rate(self, seconds: float) -> bool:
+        """Waits out a rate-limited reservation within the export's hold; False when the hold
+        may not take ``seconds`` more."""
         with self._lock:
             if self._held + seconds > MAX_RATE_LIMIT_HOLD_SECONDS:
                 return False
@@ -1190,115 +1225,80 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         Event().wait(seconds)
         return True
 
-    def _place_attachments(self, records: list[Any]) -> list[Any]:
-        """The records with the attachments their bodies hold uploaded under the record's own
-        trace and listed under its ``hue.blobs`` (keys ``body#<pointer>``): each part found where
-        it was placed, fitted with its entry before any bytes are sent, and kept as its digest
-        part when it is not uploaded. Every fallback is counted and reported."""
+    def _place_held(self, records: list[Any]) -> list[Any]:
+        """The log records with the media their copies held, and the attachments their bodies
+        hold, placed in one step: each file uploaded under the record's trace and listed in its
+        own ``hue.blobs`` (keys ``<attribute>#<pointer>`` and ``body#<pointer>``), or kept inline
+        (an attachment as its digest part); what is left over the cap cut as before. Every
+        fallback is counted and reported as a warning naming its traces."""
         uploads = self._uploads
-        holding = [
-            (index, record, held_of(getattr(record, "log_record", None)))
+        entries = [
+            (index, record, held)
             for index, record in enumerate(records)
+            if (held := held_of(record)) is not None
         ]
-        entries = [(index, record, held) for index, record, held in holding if held is not None]
         if uploads is None or not entries:
             return records
         result = list(records)
-        tally = Tally()
         try:
-            deadline = monotonic() + upload_budget_seconds(uploads.timeout)
-            for index, record, held in entries:
-                placed = Tally()
-                try:
-                    result[index] = self._place_record(record, held, uploads, deadline, placed)
-                except Exception:
-                    # The record is sent as it is, its attachments as their digest parts.
-                    placed = Tally()
-                    for _ in held.files:
-                        placed.fallback("failed", _record_trace_id(record) or "")
-                tally.uploaded += placed.uploaded
-                for reason, (count, traces) in placed.fallbacks.items():
-                    previous, named = tally.fallbacks.get(reason, (0, set()))
-                    tally.fallbacks[reason] = (previous + count, named | traces)
+            logs = []
+            for _, record, held in entries:
+                log = record.log_record
+                body = _restored_body(log.body, held.body_values) if held.body else None
+                # An attachment uploads while its own part is still where it was placed.
+                held.files[:] = self._surviving_files(
+                    held.files, log.body if body is None else body
+                )
+                logs.append((log.attributes or {}, held, _record_trace_id(record) or "", body))
+            placed, bodies, tally = place_logs(
+                logs,
+                uploader=uploads.uploader,
+                memo=uploads.memo,
+                value_bytes=self._limits.current.value_bytes,
+                deadline=monotonic() + upload_budget_seconds(uploads.timeout),
+                wait=self._wait_for_rate,
+            )
+            for (index, record, held), attributes, body in zip(
+                entries, placed, bodies, strict=True
+            ):
+                result[index] = (
+                    replace_log(record, attributes=attributes, body=body)
+                    if held.body
+                    else replace_log(record, attributes=attributes)
+                )
         finally:
             for _, _, held in entries:
+                held.values.clear()
+                held.body_values.clear()
                 held.files.clear()
                 held.release()
-            self._report_uploads(tally)
+        self._report_uploads(tally)
         return result
 
-    def _place_record(
-        self, record: Any, held: Held, uploads: Uploads, deadline: float, tally: Tally
-    ) -> Any:
-        trace_id = _record_trace_id(record) or ""
-        for _ in held.cut:
-            tally.fallback("unsupported" if uploads.uploader.unsupported() else "budget", trace_id)
-        body = record.log_record.body
-        files = []
-        for file in held.files:
-            part = placed_part(file, {"body": body}, {}, {})
+    @staticmethod
+    def _surviving_files(files: list[ExplicitFile], body: Any) -> list[ExplicitFile]:
+        """The attachments whose own part is at its pointer in the body, each with the name the
+        part carries; a part removed takes its upload with it."""
+        surviving = []
+        parsed: dict[str, Any] = {}
+        for file in files:
+            part = placed_part(file, {"body": body}, {}, parsed)
             if part is not None:
                 name = part.get("name")
-                files.append(replace(file, name=name if is_media_name(name) else None))
-        attributes = dict(record.log_record.attributes or {})
-        listed = attributes.get(BLOBS_KEY)
-        existing = (
-            [item for item in listed if isinstance(item, str)]
-            if isinstance(listed, (list, tuple))
-            else []
-        )
-        admitted = files[: max(0, MAX_BLOB_ENTRIES - len(existing))]
-        for _ in files[len(admitted) :]:
-            tally.fallback("budget", trace_id)
-        if not admitted:
-            return record
-        # The parts and their entries are fitted together before any bytes are sent.
-        provisional = replace_log(
-            record,
-            attributes={
-                **attributes,
-                BLOBS_KEY: [*existing, *(self._entry(file) for file in admitted)],
-            },
-        )
-        fitted = self._fit(provisional)
-        if fitted is None or fitted[0].log_record.body is not body:
-            for _ in admitted:
-                tally.fallback("budget", trace_id)
-            return record
-        placed: list[str] = []
-        for file in admitted:
-            outcome = uploads.uploader.store(
-                trace_id,
-                file.key,
-                file.data,
-                file.content_type,
-                file.digest,
-                deadline,
-                self._wait_for_rate,
-            )
-            if outcome.ok:
-                placed.append(self._entry(file, outcome.content_type))
-                tally.uploaded += 1
-            else:
-                tally.fallback(outcome.reason, trace_id)
-        if not placed:
-            return record
-        return replace_log(record, attributes={**attributes, BLOBS_KEY: [*existing, *placed]})
+                surviving.append(replace(file, name=name if is_media_name(name) else None))
+        return surviving
 
     def _report_uploads(self, tally: Tally, signal: str = "logs") -> None:
         if self._report is not None:
             self._report(tally, signal)
 
-    @staticmethod
-    def _entry(file: ExplicitFile, content_type: str | None = None) -> str:
-        return _blob_entry(file.key, *file.digest, content_type or file.content_type, file.name)
-
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         failed = False
         self._held = 0.0
         try:
-            # The attachments log bodies hold are uploaded before any record is measured.
-            batch = self._place_attachments(list(batch))
+            # A correlated GenAI record's media, and the attachments its body holds, are uploaded
+            # before any record is measured.
+            batch = self._place_held(list(batch))
             entries: list[tuple[Any, int]] = []
             for record in batch:
                 entry = self._fit(record)
