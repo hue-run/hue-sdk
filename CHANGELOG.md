@@ -10,6 +10,15 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### 0.18.0 (unreleased)
+
+#### Added
+
+- **Wire** `EvaluationClient.media.fetch({ traceId, sha256, spanId? })` reads one recorded file back by digest through `GET /api/v1/traces/{traceId}/blobs/{sha256}` (`{ snapshotId, sha256 }` reads a trace snapshot's pinned copy), downloads the short-lived link without the project key and refuses bytes whose SHA-256 is not the digest. It returns `{ bytes, sha256, size, contentType, fileName }` and throws `MediaFetchError` with a `reason` (`not_found`, `missing`, `unavailable`, `forbidden`, `too_large`, `digest_mismatch`, `failed`); an unavailable answer is asked once more after its `Retry-After` of up to 10 seconds. It needs a Read or Read and write key. This is the counterpart of Braintrust's `ReadonlyAttachment` and Langfuse's media fetch.
+- `EvaluationClient.media.resolve(value, { traceId, spanId?, as? })` writes the bytes of every digest part in a recorded value back into the part's own field, as a `data:` URL or the bare base64 its convention requires (`as: "dataUrl"`, the default) or as a `Uint8Array` (`as: "bytes"`), downloading each distinct digest once with bounded concurrency. It returns a new value with the parts it could not read listed in `failures`, like Langfuse's `resolveMediaReferences`.
+- `rehydrateMedia(inputs, files)` writes a case's local files back into the digest parts of its inputs by SHA-256, so a target can send a recorded model call again with the real image, document or audio.
+- **Wire** `CaseWrite.files` pins up to 32 input files on `addCase` and `addEvalSetCase`: `{ artifactId, role }` references, or files given as `bytes` or a `path` that the client checks against the artifact policy (content type, name, 1 byte to 25 MiB) and uploads as verified artifacts under keys that make a repeated write reuse them.
+
 ### [0.17.0] - 2026-10-10
 
 #### Breaking
@@ -1446,6 +1455,16 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### 0.11.0 (unreleased)
+
+#### Added
+
+- **Wire** `EvaluationClient.media.fetch(trace_id=..., sha256=..., span_id=None)` reads one recorded file back by digest through `GET /api/v1/traces/{traceId}/blobs/{sha256}` (`snapshot_id=` reads a trace snapshot's pinned copy), downloads the short-lived link without the project key and refuses bytes whose SHA-256 is not the digest. It returns a `MediaFile` (`data`, `sha256`, `size`, `content_type`, `file_name`) and raises `MediaFetchError` with a `reason` (`not_found`, `missing`, `unavailable`, `forbidden`, `too_large`, `digest_mismatch`, `failed`); an unavailable answer is asked once more after its `Retry-After` of up to 10 seconds. It needs a Read or Read and write key. This is the counterpart of Braintrust's `ReadonlyAttachment` and Langfuse's media fetch.
+- `EvaluationClient.media.resolve(value, trace_id=..., span_id=None, as_="data_url")` writes the bytes of every digest part in a recorded value back into the part's own field, as a `data:` URL or the bare base64 its convention requires, or as `bytes` (`as_="bytes"`), downloading each distinct digest once with bounded concurrency. It returns a `ResolvedMedia` whose new `value` leaves the parts it could not read unchanged and lists them in `failures`, like Langfuse's `resolve_media_references`.
+- `rehydrate_media(inputs, files)` writes a case's local files back into the digest parts of its inputs by SHA-256, so a target can send a recorded model call again with the real image, document or audio.
+- **Wire** `add_case(files=...)` and `add_eval_set_case(files=...)` pin up to 32 input files: `CaseFileWrite(role=..., artifact_id=...)` references, or files given as `data` or a `path` that the client checks against the artifact policy (content type, name, 1 byte to 25 MiB) and uploads as verified artifacts under keys that make a repeated write reuse them. The client gains the artifact methods it uses: `reserve_artifact`, `request_artifact_upload`, `upload_artifact_bytes`, `complete_artifact`, `get_artifact` and `download_artifact` (`ArtifactSizeError`).
+- `run_experiment` downloads a case's pinned input files under `files_directory` (default `<checkpoint_directory>/files`) and checks them against the manifest before the execution starts, as the TypeScript runner does: targets receive the agent-visible ones as `TargetContext.files` (`LocalFile`), and local code scorers receive every one as `ScoreContext["files"]`. A mismatch raises `CaseFileError` without spending the execution. `rescore` passes a subject's frozen files to local code scorers the same way.
 
 ### [0.10.0] - 2026-10-10
 

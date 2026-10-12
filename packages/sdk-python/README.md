@@ -249,6 +249,57 @@ are rejected. The deadline covers connection, polling and response-body reads. A
 read may finish in the background after the caller times out. This helper requires a Hue deployment
 that implements `/api/v1/traces/{traceId}/receipt`.
 
+## Read recorded media back
+
+A file in recorded messages that is too large to keep inline is exported as a digest part: the
+part keeps its shape and media type, its content field is replaced by the file's `sha256` and
+`size`, and the bytes are stored with the trace. `EvaluationClient.media` reads them back with a
+key that may read recorded content (**Read** or **Read and write**):
+
+```python
+import json
+import os
+from hue_sdk.evals import EvaluationClient
+
+client = EvaluationClient(api_key=os.environ["HUE_API_KEY"])
+
+# One file by digest; pass the span that recorded it when you know it.
+file = client.media.fetch(trace_id=trace_id, span_id=span_id, sha256=sha256)
+print(file.content_type, file.file_name, file.size, len(file.data))
+
+# Every digest part of a recorded value, written back in its own field.
+recorded = json.loads(attributes["gen_ai.input.messages"])
+resolved = client.media.resolve(recorded, trace_id=trace_id, span_id=span_id)
+messages, failures = resolved.value, resolved.failures
+```
+
+`fetch` asks Hue for a five-minute download link (`GET /api/v1/traces/{traceId}/blobs/{sha256}`),
+downloads it without the project key and refuses bytes whose SHA-256 is not the digest. It raises
+`MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for the trace),
+`missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still
+unavailable after one retry that waits out a `Retry-After` of up to 10 seconds), `forbidden` (the
+key cannot read recorded content), `too_large` (over `max_bytes`, 64 MiB by default, checked
+before downloading), `digest_mismatch` or `failed` (a connection failure, a timeout or an
+unexpected answer, retried once). `snapshot_id=` instead of `trace_id=` reads a trace snapshot's
+pinned copy.
+
+`resolve` downloads each distinct digest once, four at a time (`concurrency`, up to 16), and
+returns a `ResolvedMedia` with a new `value`; the input is not changed. With `as_="data_url"` (the
+default) each part receives a `data:` URL where its field takes one (OpenAI `image_url` and
+`file_data`, Responses `input_image`, `input_file` and `computer_screenshot`, AI SDK `image` and
+`file`) and bare base64 where its convention requires it (GenAI `blob`, OpenAI `input_audio` and
+assistant `audio`, Anthropic `source.data`, Gemini `inlineData`, Vertex `media`, Bedrock
+`source.bytes`), so the messages can be sent to the provider again; `as_="bytes"` writes `bytes`.
+A resolved part no longer carries `sha256` and `size`. A part whose file cannot be read stays as
+it is and is listed in `failures` with its JSON pointer and reason. Parts inside JSON-encoded
+strings, such as tool-call arguments, and Langfuse media tokens, which name files Langfuse holds,
+are left as they are.
+
+| Langfuse or Braintrust | Hue |
+| --- | --- |
+| Langfuse `resolve_media_references(obj=..., resolve_with="base64_data_uri")` | `client.media.resolve(obj, trace_id=...)` |
+| Langfuse `GET /api/public/media/{mediaId}`, Braintrust `ReadonlyAttachment.data` | `client.media.fetch(trace_id=..., sha256=...)` |
+
 ## Supported runtimes and verification
 
 Python 3.10+ is supported. CI tests Python 3.10 and 3.14, source imports and an independently installed wheel. Tests use synthetic loopback HTTP receivers and decode official OTLP protobuf messages to verify trace/log correlation, metadata-only capture, redaction, propagation, existing-provider ownership, authentication failures, redirects, partial rejection, retries, encoded request limits and live-span placeholders, including their downgrade against a receiver without the `Hue-Pending-Spans` header. Compatibility tests also exercise local evaluations and the optional OpenInference adapter. No live model provider is required for these checks.

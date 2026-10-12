@@ -233,6 +233,53 @@ Tabs, newlines, DEL and lone surrogates make a name invalid. An invalid name is 
 counted as an instrumentation failure; the otherwise valid event remains. Invalid records and
 records without an active span count as instrumentation failures.
 
+## Read recorded media back
+
+A file in recorded messages that is too large to keep inline is exported as a digest part: the
+part keeps its shape and media type, its content field is replaced by the file's `sha256` and
+`size`, and the bytes are stored with the trace. The evaluation client's `media` reads them back
+with a key that may read recorded content (**Read** or **Read and write**):
+
+```ts
+import { createEvaluationClient } from "@hue-run/sdk/evals";
+
+const client = createEvaluationClient({ apiKey: process.env.HUE_API_KEY! });
+
+// One file by digest; pass the span that recorded it when you know it.
+const file = await client.media.fetch({ traceId, spanId, sha256 });
+console.log(file.contentType, file.fileName, file.size, file.bytes);
+
+// Every digest part of a recorded value, written back in its own field.
+const recorded = JSON.parse(attributes["gen_ai.input.messages"]);
+const { value: messages, failures } = await client.media.resolve(recorded, { traceId, spanId });
+```
+
+`fetch` asks Hue for a five-minute download link (`GET /api/v1/traces/{traceId}/blobs/{sha256}`),
+downloads it without the project key and refuses bytes whose SHA-256 is not the digest. It throws
+`MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for the trace),
+`missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still
+unavailable after one retry that waits out a `Retry-After` of up to 10 seconds), `forbidden` (the
+key cannot read recorded content), `too_large` (over `maxBytes`, 64 MiB by default, checked before
+downloading), `digest_mismatch` or `failed` (a connection failure, a timeout or an unexpected
+answer, retried once). `{ snapshotId, sha256 }` reads a trace snapshot's pinned copy instead.
+
+`resolve` downloads each distinct digest once, four at a time (`concurrency`, up to 16), and returns
+a new value; the input is not changed. With `as: "dataUrl"` (the default) each part receives a
+`data:` URL where its field takes one (OpenAI `image_url` and `file_data`, Responses
+`input_image`, `input_file` and `computer_screenshot`, AI SDK `image` and `file`) and bare base64
+where its convention requires it (GenAI `blob`, OpenAI `input_audio` and assistant `audio`,
+Anthropic `source.data`, Gemini `inlineData`, Vertex `media`, Bedrock `source.bytes`), so the
+messages can be sent to the provider again; `as: "bytes"` writes a `Uint8Array`. A resolved part
+no longer carries `sha256` and `size`. A part whose file cannot be read stays as it is and is
+listed in `failures` with its JSON pointer and reason. Parts inside JSON-encoded strings, such as
+tool-call arguments, and Langfuse media tokens, which name files Langfuse holds, are left as they
+are.
+
+| Langfuse or Braintrust | Hue |
+| --- | --- |
+| Langfuse `resolveMediaReferences({ obj, resolveWith: "base64DataUri" })` | `client.media.resolve(obj, { traceId })` |
+| Langfuse `GET /api/public/media/{mediaId}`, Braintrust `ReadonlyAttachment.data()` | `client.media.fetch({ traceId, sha256 })` |
+
 ## Vercel AI SDK 6
 
 AI SDK 6 accepts a per-call tracer through `experimental_telemetry`. Pass

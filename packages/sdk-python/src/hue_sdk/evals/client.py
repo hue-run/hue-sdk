@@ -5,13 +5,17 @@ import math
 import random
 import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 import requests
 
 from ..transport import DEFAULT_BASE_URL, normalize_base_url, reject_positional_api_key
 from ._json import MISSING, encode, json_value, uuid
+from ._media import MediaClient, _no_auth
+
+if TYPE_CHECKING:
+    from .types import CaseFileWrite
 
 
 def _tag_names(tags: list[str]) -> list[str]:
@@ -22,6 +26,16 @@ def _tag_names(tags: list[str]) -> list[str]:
 
 def _tagged(tags: list[str] | None) -> dict[str, Any]:
     return {} if tags is None else {"tags": _tag_names(tags)}
+
+
+class ArtifactSizeError(ValueError):
+    """An artifact download that ran past the size its caller expected; the rest is not read."""
+
+    max_bytes: int
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        super().__init__(f"Artifact download exceeded the expected {max_bytes} bytes.")
 
 
 class HueApiError(RuntimeError):
@@ -245,6 +259,9 @@ class EvaluationClient:
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._timeout = timeout_seconds
         self._max_attempts = max_attempts
+        # Recorded media read back by digest: one file (``fetch``) or every digest part of a
+        # recorded value (``resolve``). Needs a key that may read recorded content.
+        self.media = MediaClient(self.base_url, self._headers, timeout_seconds)
 
     def __repr__(self) -> str:
         return "EvaluationClient()"
@@ -399,16 +416,35 @@ class EvaluationClient:
         inputs: Any,
         expected: Any = MISSING,
         metadata: dict[str, Any] | None = None,
+        files: list[CaseFileWrite | dict[str, str]] | None = None,
     ) -> dict[str, Any]:
+        """Add a case to a draft version at its expected revision.
+
+        ``files`` pins up to 32 input files: an artifact this project holds
+        (``CaseFileWrite(role=..., artifact_id=...)`` or ``{"artifactId": ..., "role": ...}``), or
+        a file the client uploads first as a verified artifact, from ``data`` or read once from
+        ``path``. An uploaded file must have one of the artifact content types, a name of 1–255
+        characters without path separators or control characters, and 1 byte to 25 MiB; every
+        file is checked before the first upload, which raises ``ValueError`` without a request.
+        The reservation key names the version, ``external_key``, the role and the bytes, so the
+        same case sent again reuses its artifacts.
+        """
+        version_id = uuid(version_id)
+        references = None
+        if files is not None:
+            from ._files import case_file_references
+
+            references = case_file_references(self, version_id, external_key, files)
         return self._request(
             "POST",
-            f"/dataset-versions/{uuid(version_id)}/cases",
+            f"/dataset-versions/{version_id}/cases",
             {
                 "expectedRevision": expected_revision,
                 "externalKey": external_key,
                 "inputs": inputs,
                 **({"expected": expected} if expected is not MISSING else {}),
                 **({"metadata": metadata} if metadata is not None else {}),
+                **({"files": references} if references is not None else {}),
             },
         )
 
@@ -523,7 +559,9 @@ class EvaluationClient:
         inputs: Any,
         expected: Any = MISSING,
         metadata: dict[str, Any] | None = None,
+        files: list[CaseFileWrite | dict[str, str]] | None = None,
     ) -> dict[str, Any]:
+        """Add a case to a draft eval set version; ``files`` as in ``add_case``."""
         return _product_registry_fields(
             self.add_case(
                 version_id,
@@ -532,6 +570,7 @@ class EvaluationClient:
                 inputs=inputs,
                 expected=expected,
                 metadata=metadata,
+                files=files,
             )
         )
 
@@ -876,6 +915,103 @@ class EvaluationClient:
 
     def get_judge_budget(self) -> dict[str, Any]:
         return self._request("GET", "/judge-budget")
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any]:
+        """One artifact reservation and its verification state."""
+        return self._request("GET", f"/artifacts/{uuid(artifact_id)}")
+
+    def reserve_artifact(
+        self,
+        *,
+        idempotency_key: str,
+        filename: str,
+        content_type: str,
+        byte_size: int,
+        sha256: str,
+    ) -> dict[str, Any]:
+        """Reserve an artifact by declared identity; replaying the key returns the same one."""
+        return self._request(
+            "POST",
+            "/artifacts",
+            {
+                "idempotencyKey": idempotency_key,
+                "filename": filename,
+                "contentType": content_type,
+                "byteSize": byte_size,
+                "sha256": sha256,
+            },
+        )
+
+    def request_artifact_upload(self, artifact_id: str) -> dict[str, Any]:
+        """A short-lived storage capability for staging the reserved artifact's bytes."""
+        return self._request("POST", f"/artifacts/{uuid(artifact_id)}/upload", {})
+
+    def complete_artifact(self, artifact_id: str) -> dict[str, Any]:
+        """Ask Hue to verify the staged bytes against the declared identity."""
+        return self._request("POST", f"/artifacts/{uuid(artifact_id)}/complete", {})
+
+    def upload_artifact_bytes(self, upload: dict[str, Any], data: bytes, content_type: str) -> None:
+        """Stage bytes at the storage capability Hue issued; the Hue key is never sent there."""
+        from ..managed import _upload_headers, _upload_url
+
+        try:
+            if not isinstance(upload, dict) or upload.get("method") != "PUT":
+                raise ValueError
+            url = _upload_url(upload.get("uploadUrl"))
+            headers = _upload_headers(upload.get("headers"), content_type)
+        except ValueError:
+            raise HueApiError(reason="malformed_response") from None
+        try:
+            with requests.put(
+                url,
+                data=data,
+                headers=headers,
+                auth=_no_auth,
+                timeout=max(self._timeout, 120),
+                allow_redirects=False,
+                stream=True,
+            ) as response:
+                if not 200 <= response.status_code < 300:
+                    raise HueApiError(response.status_code, _retry_after_seconds(response))
+        except requests.RequestException:
+            raise HueApiError() from None
+
+    def download_artifact(self, artifact_id: str, *, max_bytes: int | None = None) -> bytes:
+        """Verified bytes of one ready artifact of this project, bounded to 25 MiB.
+
+        With ``max_bytes`` the download stops one byte past it and raises ``ArtifactSizeError``.
+        """
+        if max_bytes is not None and (
+            isinstance(max_bytes, bool) or type(max_bytes) is not int or max_bytes < 0
+        ):
+            raise ValueError("max_bytes must be a non-negative integer.")
+        limit = 25 * 1024 * 1024
+        try:
+            attempt = 0
+            while True:
+                with requests.get(
+                    f"{self.base_url}/api/v1/artifacts/{uuid(artifact_id)}/download",
+                    headers=self._headers,
+                    timeout=max(self._timeout, 120),
+                    allow_redirects=False,
+                    stream=True,
+                ) as response:
+                    delay = _refusal_retry_after(response) if attempt < _REFUSAL_RETRIES else None
+                    if delay is None:
+                        if not 200 <= response.status_code < 300:
+                            raise HueApiError(response.status_code, _retry_after_seconds(response))
+                        data = bytearray()
+                        for chunk in response.iter_content(chunk_size=65536):
+                            data += chunk
+                            if max_bytes is not None and len(data) > max_bytes:
+                                raise ArtifactSizeError(max_bytes)
+                            if len(data) > limit:
+                                raise HueApiError(reason="malformed_response")
+                        return bytes(data)
+                time.sleep(delay * (1 + random.random() / 2))
+                attempt += 1
+        except requests.RequestException:
+            raise HueApiError() from None
 
 
 def _invalid_constant(_value: str) -> None:

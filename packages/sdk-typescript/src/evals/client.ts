@@ -1,6 +1,7 @@
 import { isLoopbackHost, validateOptions } from "../config.js";
 import type { ProjectConnection } from "../types.js";
 import { json, uuid, valueBounds } from "./json.js";
+import { MediaClient } from "./media.js";
 import {
   attemptBindingRead,
   parsePrepareAttemptResultV2,
@@ -16,6 +17,7 @@ import type {
   ArtifactUpload,
   CaseConversion,
   CaseConversionSummary,
+  CaseFileReference,
   CaseWrite,
   CompleteExecution,
   Completion,
@@ -261,6 +263,9 @@ function refusalRetryAfter(response: Response): number | undefined {
 export class EvaluationClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;
+  /** Recorded media read back by digest: one file (`fetch`) or every digest part of a recorded
+   * value (`resolve`). Needs a key that may read recorded content (Read, or Read and write). */
+  readonly media: MediaClient;
   readonly #apiKey: string;
   private readonly timeoutMillis: number;
   private readonly maxAttempts: number;
@@ -277,6 +282,11 @@ export class EvaluationClient {
     if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10)
       throw new RangeError("maxAttempts must be 1–10");
     this.maxAttempts = attempts;
+    this.media = new MediaClient({
+      baseUrl: this.baseUrl,
+      apiKey: validated.apiKey,
+      timeoutMillis: this.timeoutMillis,
+    });
   }
   /** Sends one request to Hue, again after the wait while Hue refuses it with a short
    * `Retry-After`. `init` runs for every attempt, so each has its own timeout; `signal` also ends
@@ -538,14 +548,28 @@ export class EvaluationClient {
       `/dataset-versions/${uuid(id)}/cases${this.page(page)}`,
     );
   }
-  /** Adds a case to a draft version using optimistic concurrency on `expectedRevision`. */
-  addCase(id: string, input: CaseWrite) {
+  /**
+   * Adds a case to a draft version using optimistic concurrency on `expectedRevision`. Each of
+   * `files` given as bytes or a path is checked against the artifact policy and uploaded as a
+   * verified artifact first, under a key derived from the version, the case's `externalKey`, the
+   * role and the bytes, so sending the same case again reuses the artifact.
+   *
+   * @throws TypeError or RangeError for `files` outside the artifact policy, before any request.
+   */
+  async addCase(id: string, input: CaseWrite) {
+    const versionId = uuid(id);
+    let body: CaseWrite | (Omit<CaseWrite, "files"> & { files: CaseFileReference[] }) = input;
+    if (input?.files !== undefined) {
+      // Loaded on use: the artifact helpers import this client.
+      const { caseFileReferences } = await import("./files.js");
+      body = { ...input, files: await caseFileReferences(this, versionId, input) };
+    }
     return this.request<{
       /** The stored case. */
       item: DatasetCase;
       /** The version with its new revision. */
       version: DatasetVersion;
-    }>("POST", `/dataset-versions/${uuid(id)}/cases`, input);
+    }>("POST", `/dataset-versions/${versionId}/cases`, body);
   }
   /** Freezes a draft version at the given revision; frozen versions are immutable. */
   freezeDatasetVersion(id: string, expectedRevision: number) {

@@ -69,7 +69,7 @@ billing = client.list_eval_sets(tags=["billing"])
 
 `builtin_scorers.exact_match()`, `builtin_scorers.includes(case_sensitive=True)` and `builtin_scorers.json_schema(schema)` return publishable declarations. Exact match preserves JSON types (`False` differs from `0`), object key order is irrelevant, and equivalent JSON numbers compare equally. Missing output/reference produces a skipped score, never zero. `None` is present JSON null; the exported `MISSING` sentinel represents intentional absence.
 
-`define_local_scorer(source=..., entrypoint=..., metrics=..., score=...)` hashes explicitly supplied source text or bytes. The binding must match the pinned language, source digest, entry point and complete metric definition. Each metric may include an optional `description` (1–500 characters) shown with its check in Hue's run view. This is a caller declaration, not independent attestation of closures or installed dependencies. Callbacks receive a private `ScoreContext` copy with `inputs`, optional `output`/`expected`, `has_output`/`has_expected`, `metadata`, and `execution_state`. They return `state` (`scored`, `error`, `skipped`), typed `metrics` and meaningful explanation/evidence. A false quality verdict remains a scored result; invalid callback results and exceptions become typed scorer errors.
+`define_local_scorer(source=..., entrypoint=..., metrics=..., score=...)` hashes explicitly supplied source text or bytes. The binding must match the pinned language, source digest, entry point and complete metric definition. Each metric may include an optional `description` (1–500 characters) shown with its check in Hue's run view. This is a caller declaration, not independent attestation of closures or installed dependencies. Callbacks receive a private `ScoreContext` copy with `inputs`, optional `output`/`expected`, `has_output`/`has_expected`, `metadata`, `execution_state` and, when the case pins files, `files`. They return `state` (`scored`, `error`, `skipped`), typed `metrics` and meaningful explanation/evidence. A false quality verdict remains a scored result; invalid callback results and exceptions become typed scorer errors.
 
 Manual and `llm_judge` pins are deferred to their owning service and returned in `report.deferred_scorer_version_ids`. The local runner writes no synthetic skipped result into those slots. Use the explicit judge-job client methods to request hosted execution; submitting jobs can consume the project's configured allowance.
 
@@ -90,6 +90,64 @@ The runner saves a starting marker before requesting an execution and a running 
 Prepared completion/results and their stable request keys are saved before upload. A dropped acknowledgement can replay the same request without repeating the target or acknowledged scoring. A crash before the prepared checkpoint exists is uncertain; custom scorers may recompute after a crash before their results are saved. The runner stops starting new cases after a failure and lets already-running callbacks finish safely.
 
 `run_experiment` and `rescore` are synchronous entry points with bounded worker concurrency (1–100). Sync and async callbacks are supported inside their workers. From an async application, call the runner through `asyncio.to_thread`.
+
+## Case files
+
+`add_case` and `add_eval_set_case` pin up to 32 input files with `files`. Name an artifact the
+project already holds, or give the file, as `data` or a `path`, and the client uploads it as a
+verified artifact first:
+
+```python
+from hue_sdk.evals import CaseFileWrite
+
+client.add_eval_set_case(
+    version_id,
+    expected_revision=revision,
+    external_key="chart-question",
+    inputs={"messages": messages},
+    files=[
+        CaseFileWrite(role="source", filename="chart.png", content_type="image/png", data=chart),
+        CaseFileWrite(role="evaluator_reference", artifact_id=answer_key_artifact_id),
+    ],
+)
+```
+
+An uploaded file needs one of the artifact content types (the 22 types managed outputs accept), a
+name of 1–255 characters without path separators or control characters, and 1 byte to 25 MiB.
+Every file is checked before the first upload; one outside that policy raises `ValueError` without
+a request. The reservation key names the version, the case's `external_key`, the role and the
+bytes, so sending the same case again reuses its artifacts. The client also exposes the artifact
+API it uses: `reserve_artifact`, `request_artifact_upload`, `upload_artifact_bytes`,
+`complete_artifact`, `get_artifact` and `download_artifact`.
+
+Before a case's execution starts, `run_experiment` downloads its pinned files under
+`files_directory` (default `<checkpoint_directory>/files`, mode 0700) and checks each one's size
+and SHA-256; bytes that differ from the manifest raise `CaseFileError` (`case_file_mismatch`)
+without spending the case's execution, and a copy already saved with the pinned identity is
+reused. The target receives the `source`, `attached_template`, `attached_reference` and
+`original` files as `context.files`, a tuple of `LocalFile` (`artifact_id`, `role`, `filename`,
+`content_type`, `byte_size`, `sha256`, `path`). `org_template` and `evaluator_reference` files are
+downloaded, apart from the target's, only when a local code scorer grades the case, and reach
+scorers with the others as `context["files"]`. `rescore` passes a subject's frozen input and
+output files to local code scorers the same way.
+
+Recorded messages copied into a case's inputs keep their large files as digest parts. With each
+file pinned to the case, the target can send the recorded model call again with the real image,
+document or audio:
+
+```python
+from hue_sdk.evals import rehydrate_media
+
+def target(inputs, context):
+    messages = rehydrate_media(inputs["messages"], context.files).value
+    return call_model(messages)
+```
+
+`rehydrate_media(value, files, as_="data_url")` matches digest parts to files by SHA-256, checks
+each file's bytes against the digest and writes them as `EvaluationClient.media.resolve` does (see
+the [README](README.md#read-recorded-media-back)); `files` may also hold a managed target's
+`ManagedInputFile` or any object with `sha256`, `data` and `content_type`. A part without a
+matching file stays as it is and is listed in `failures`.
 
 ## Historical rescoring
 
