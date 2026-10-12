@@ -250,3 +250,115 @@ def test_setup_credentials_record_the_digest_part_and_upload_nothing(hue_store):
         assert hue.force_flush(timeout_millis=30_000)
         assert hue.export_status.upload_fallbacks == 0
     assert hue_store.reservations == []
+
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+)
+PDF = b"%PDF-1.4\n%synthetic attachment\n%%EOF\n"
+IMAGE_PART = {"type": "blob", "modality": "image", "mime_type": "image/png"}
+PDF_PART = {
+    "type": "blob",
+    "mime_type": "application/pdf",
+    "modality": "document",
+    "sha256": sha256(PDF),
+    "size": len(PDF),
+    "name": "terms.pdf",
+}
+
+
+def log_attachment_and_inline_media(hue_store, *, success: bool) -> None:
+    with client(hue_store) as hue:
+        with hue.model("synthetic-model", provider="openai") as span:
+            span.log_inference(
+                input=[
+                    {
+                        "role": "user",
+                        "parts": [
+                            {**IMAGE_PART, "content": base64.b64encode(PNG).decode()},
+                            Attachment(PDF, content_type="application/pdf", name="terms.pdf"),
+                        ],
+                    }
+                ]
+            )
+            trace_id = format(span.otel_span.get_span_context().trace_id, "032x")
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+    (log,) = hue_store.logs
+    parts = any_value(log.body)["gen_ai.input.messages"][0]["parts"]
+    # The attachment is its digest part either way; the small image is placed only once it
+    # uploads, and otherwise stays inline as before.
+    assert parts[1] == PDF_PART
+    assert parts[0] == (
+        {**IMAGE_PART, "sha256": sha256(PNG), "size": len(PNG)}
+        if success
+        else {**IMAGE_PART, "content": base64.b64encode(PNG).decode()}
+    )
+    # Each file is reserved at most once, by the one step that places a log record's files (a
+    # refused reservation pauses uploads, so a second file may not be asked for).
+    keys = [item["key"] for item in hue_store.reservations]
+    expected = ["body#/gen_ai.input.messages/0/parts/0", "body#/gen_ai.input.messages/0/parts/1"]
+    assert sorted(keys) == expected if success else len(set(keys)) == len(keys) <= 2
+    assert set(keys) <= set(expected)
+    assert all(item["traceId"] == trace_id for item in hue_store.reservations)
+    if success:
+        assert [json.loads(entry) for entry in entries(log)] == [
+            {
+                "key": "body#/gen_ai.input.messages/0/parts/0",
+                "sha256": sha256(PNG),
+                "size": len(PNG),
+                "content_type": "image/png",
+            },
+            {
+                "key": "body#/gen_ai.input.messages/0/parts/1",
+                "sha256": sha256(PDF),
+                "size": len(PDF),
+                "content_type": "application/pdf",
+                "name": "terms.pdf",
+            },
+        ]
+        assert len(hue_store.puts) == 2
+        assert (status.uploaded_values, status.upload_fallbacks) == (2, 0)
+    else:
+        assert entries(log) == []
+        assert (status.uploaded_values, status.upload_fallbacks) == (0, 2)
+
+
+def test_a_log_records_attachment_and_inline_media_upload_together_once_each(hue_store):
+    log_attachment_and_inline_media(hue_store, success=True)
+
+
+def test_a_log_records_attachment_and_inline_media_fall_back_together(hue_store):
+    hue_store.reserve = lambda _: (403, {}, True)
+    log_attachment_and_inline_media(hue_store, success=False)
+
+
+def test_a_log_records_message_file_not_uploaded_keeps_the_nested_rule(hue_store):
+    hue_store.reserve = lambda _: (403, {}, True)
+    large = bytes(index * 7 % 256 for index in range(100 * 1024))
+    messages = json.dumps(
+        [
+            {
+                "role": "user",
+                "parts": [
+                    {**IMAGE_PART, "content": base64.b64encode(PNG).decode()},
+                    {**IMAGE_PART, "content": base64.b64encode(large).decode()},
+                ],
+            }
+        ]
+    )
+    with client(hue_store) as hue:
+        with hue.span("log fallback"):
+            hue._logger.emit(body="log fallback", attributes={"gen_ai.input.messages": messages})
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+    (log,) = hue_store.logs
+    # Both uploads were refused: the small image stays inline and the large one is its digest,
+    # as a log record's messages were before log records uploaded.
+    assert json.loads(attrs(log)["gen_ai.input.messages"].string_value)[0]["parts"] == [
+        {**IMAGE_PART, "content": base64.b64encode(PNG).decode()},
+        {**IMAGE_PART, "sha256": sha256(large), "size": len(large)},
+    ]
+    assert entries(log) == []
+    assert 1 <= len(hue_store.reservations) <= 2
+    assert status.upload_fallbacks == 2
