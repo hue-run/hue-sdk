@@ -31,6 +31,10 @@ import {
 } from "@opentelemetry/sdk-logs";
 import { isInsecureOrigin, REDACTION_CONTEXT_UNITS, validateOptions } from "./config.js";
 import {
+  BLOBS_KEY,
+  MAX_BLOB_ENTRIES,
+  blobEntry,
+  countFallback,
   BlobUploader,
   FALLBACK_MESSAGES,
   fallbackAttributes,
@@ -109,7 +113,7 @@ interface ExportSink {
   receiverLimits(): ReceiverLimits;
   adoptLimits(headers: IncomingHttpHeaders): void;
   offloadsValues(): boolean;
-  mediaAttachments(record: RecordValue, redacted: ReadableSpan): MediaAttachment[];
+  mediaAttachments(record: RecordValue): MediaAttachment[];
   offloadSpan(
     span: ReadableSpan,
     collector: OffloadCollector,
@@ -117,6 +121,53 @@ interface ExportSink {
     tally: OffloadTally,
   ): Promise<ReadableSpan>;
   reportOffload(tally: OffloadTally): void;
+}
+
+/** Each surviving event authorizes one staged request, including repeated digests. */
+function survivingMedia(
+  files: readonly MediaAttachment[],
+  span: ReadableSpan,
+  tally: OffloadTally,
+): MediaAttachment[] {
+  const consumed = new Set<number>();
+  const traceId = span.spanContext().traceId;
+  return files.flatMap((file) => {
+    const index = span.events.findIndex(
+      (event, index) =>
+        !consumed.has(index) &&
+        event.name === "hue.file" &&
+        (!file.eventTime ||
+          (event.time[0] === file.eventTime[0] && event.time[1] === file.eventTime[1])) &&
+        event.attributes?.["hue.file.sha256"] === file.digest.sha256 &&
+        event.attributes?.["hue.file.size"] === file.digest.size &&
+        event.attributes?.["hue.file.media_type"] === file.contentType,
+    );
+    if (index < 0) {
+      countFallback(tally, "budget", traceId);
+      return [];
+    }
+    consumed.add(index);
+    const name = span.events[index]!.attributes?.["hue.file.name"];
+    return [
+      {
+        bytes: file.bytes,
+        digest: file.digest,
+        contentType: file.contentType,
+        ...(file.eventTime ? { eventTime: file.eventTime } : {}),
+        ...(isMediaName(name) ? { name } : {}),
+      },
+    ];
+  });
+}
+
+function mediaEntry(file: MediaAttachment): string {
+  return blobEntry(
+    `event:hue.file:${file.digest.sha256}`,
+    file.digest.sha256,
+    file.digest.size,
+    file.contentType,
+    file.name,
+  );
 }
 
 /**
@@ -330,6 +381,10 @@ export class HueTransport {
           }
           const queued = this.enqueue("traces", span);
           if (!queued) {
+            const tally = newTally();
+            for (const file of this.mediaAttachments(span))
+              if (file.bytes.byteLength) countFallback(tally, "budget", span.spanContext().traceId);
+            this.reportOffload(tally);
             this.releaseMedia(span);
             return;
           }
@@ -581,8 +636,14 @@ export class HueTransport {
   }
 
   /** @internal Retain a defensive copy within the existing held-value budget. */
-  stageMedia(span: ApiSpan, file: MediaAttachment): boolean {
-    if (this.closed || !this.offloadsValues()) return true;
+  stageMedia(span: ApiSpan, file?: MediaAttachment): boolean {
+    if (this.closed || !this.offloadsValues() || file?.bytes.byteLength === 0) return true;
+    if (!file) {
+      const tally = newTally();
+      countFallback(tally, "budget", span.spanContext().traceId);
+      this.reportOffload(tally);
+      return false;
+    }
     if (!this.holdsValues()) {
       this.uploadFallbacks++;
       this.issue(
@@ -685,28 +746,10 @@ export class HueTransport {
     }
   }
 
-  /** @internal Only events that survive redaction authorize their staged upload. */
-  mediaAttachments(record: RecordValue, redacted: ReadableSpan): MediaAttachment[] {
+  /** @internal Staged requests are matched against surviving events before upload. */
+  mediaAttachments(record: RecordValue): MediaAttachment[] {
     const identity = this.mediaIdentity(record);
-    return (identity ? (this.media.get(identity) ?? []) : []).flatMap((file) => {
-      const event = redacted.events.find(
-        (event) =>
-          event.name === "hue.file" &&
-          event.attributes?.["hue.file.sha256"] === file.digest.sha256 &&
-          event.attributes?.["hue.file.size"] === file.digest.size &&
-          event.attributes?.["hue.file.media_type"] === file.contentType,
-      );
-      if (!event) return [];
-      const name = event.attributes?.["hue.file.name"];
-      return [
-        {
-          bytes: file.bytes,
-          digest: file.digest,
-          contentType: file.contentType,
-          ...(isMediaName(name) ? { name } : {}),
-        },
-      ];
-    });
+    return identity ? (this.media.get(identity) ?? []) : [];
   }
 
   /** @internal Whether spans' content and media may be uploaded: content is captured and
@@ -1286,7 +1329,13 @@ class ReportingExporter<T extends RecordValue> {
       },
     };
     const tally = newTally();
-    const placed: { record: T; markers?: Attributes; redacted: T | Promise<T> }[] = [];
+    const helpers = new Map<T, { files: MediaAttachment[]; baseline: string[] }>();
+    const placed: {
+      record: T;
+      markers?: Attributes;
+      files: MediaAttachment[];
+      redacted: T | Promise<T>;
+    }[] = [];
     for (const { record, markers } of this.ordered(records)) {
       try {
         const ready = record.resource.waitForAsyncAttributes?.();
@@ -1311,14 +1360,15 @@ class ReportingExporter<T extends RecordValue> {
             ? { candidates: [], cut: [] }
             : undefined;
         const redacted = this.redact(record, cache, offload);
-        if (offload)
-          offload.attachments = this.transport.mediaAttachments(record, redacted as ReadableSpan);
+        const files = offload
+          ? survivingMedia(this.transport.mediaAttachments(record), redacted as ReadableSpan, tally)
+          : [];
         placed.push({
           record,
+          files,
           ...(markers ? { markers } : {}),
           redacted:
-            offload &&
-            (offload.candidates.length || offload.cut.length || offload.attachments?.length)
+            offload && (offload.candidates.length || offload.cut.length)
               ? (this.transport.offloadSpan(
                   redacted as ReadableSpan,
                   offload,
@@ -1328,6 +1378,11 @@ class ReportingExporter<T extends RecordValue> {
               : redacted,
         });
       } catch {
+        if (!markers && this.signal === "traces" && this.transport.offloadsValues()) {
+          const files = this.transport.mediaAttachments(record);
+          for (let index = 0; index < files.length; index++)
+            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
+        }
         invalid(
           markers !== undefined,
           "Telemetry record could not be redacted or exceeds supported content limits",
@@ -1335,7 +1390,8 @@ class ReportingExporter<T extends RecordValue> {
         );
       }
     }
-    for (const { record, markers, redacted: placing } of placed) {
+    for (const { record, markers, files, redacted: placing } of placed) {
+      let retained = files;
       try {
         let redacted = await placing;
         // Added after redaction, so a redactor cannot alter the markers or the parent identity.
@@ -1349,6 +1405,27 @@ class ReportingExporter<T extends RecordValue> {
           const kept = withoutPlaceholderMarkers(attributes);
           if (kept !== attributes) redacted = { ...redacted, attributes: kept };
         }
+        if (files.length) {
+          const span = redacted as ReadableSpan;
+          const listed = span.attributes[BLOBS_KEY];
+          const baseline = Array.isArray(listed)
+            ? listed.filter((entry): entry is string => typeof entry === "string")
+            : [];
+          retained = files.slice(0, Math.max(0, MAX_BLOB_ENTRIES - baseline.length));
+          for (let index = retained.length; index < files.length; index++)
+            countFallback(tally, "budget", span.spanContext().traceId);
+          if (retained.length) {
+            // Fit the event and its reference together before sending customer bytes.
+            redacted = {
+              ...redacted,
+              attributes: {
+                ...span.attributes,
+                [BLOBS_KEY]: [...baseline, ...retained.map(mediaEntry)],
+              },
+            };
+            helpers.set(redacted, { files: retained, baseline });
+          }
+        }
         const bytes =
           512 +
           estimateRecordBytes(
@@ -1360,6 +1437,8 @@ class ReportingExporter<T extends RecordValue> {
         redactedBytes += bytes;
         (markers ? pending : real).push(redacted);
       } catch {
+        for (let index = 0; index < retained.length; index++)
+          countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
         invalid(
           markers !== undefined,
           "Telemetry record could not be redacted or exceeds supported content limits",
@@ -1440,7 +1519,6 @@ class ReportingExporter<T extends RecordValue> {
       // export may have adopted lower ones meanwhile, and each attempt checks them again.
       return fitsLimits(body, this.transport.receiverLimits()) ? body : undefined;
     };
-    this.transport.reportOffload(tally);
     /** Sends one kind of record (completed records, or placeholders alone: `advisory`) in one
      * request, or in halves when it is over the receiver's limits. A trace's root among completed
      * records carries the trace's dropped-record count as it stands when its request is made, so
@@ -1512,18 +1590,63 @@ class ReportingExporter<T extends RecordValue> {
       const prepared: { record: T; bytes: number }[] = [];
       for (const record of accepted) {
         let fitted: { record: T; bytes: number } | undefined;
+        const helper = helpers.get(record);
+        let remaining = helper?.files ?? [];
         try {
           fitted = await fit(record);
+          if (fitted && helper) {
+            const span = fitted.record as ReadableSpan;
+            const matched = survivingMedia(remaining, span, tally);
+            remaining = matched;
+            const listed = span.attributes[BLOBS_KEY];
+            const entries = Array.isArray(listed) ? [...listed] : [];
+            const files = matched.filter((file) => {
+              const index = entries.indexOf(mediaEntry(file), helper.baseline.length);
+              if (index < 0) {
+                countFallback(tally, "budget", span.spanContext().traceId);
+                return false;
+              }
+              entries.splice(index, 1);
+              return true;
+            });
+            remaining = files;
+            // Drop provisional entries, retaining only the original references after fitting.
+            const attributes = { ...span.attributes };
+            if (Array.isArray(listed)) {
+              const baseline = listed.slice(0, helper.baseline.length);
+              if (baseline.length) attributes[BLOBS_KEY] = baseline;
+              else delete attributes[BLOBS_KEY];
+            }
+            const uploaded = await this.transport.offloadSpan(
+              { ...span, attributes },
+              { candidates: [], cut: [], attachments: files },
+              upload,
+              tally,
+            );
+            remaining = [];
+            measured.delete(fitted.record);
+            // Actual references can differ when an existing object supplies its media type.
+            const final = await probe(uploaded as T);
+            fitted = final;
+            if (final?.request) measured.set(final.record, final.request);
+          }
         } catch {
+          for (let index = 0; index < remaining.length; index++)
+            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
           invalid(advisory, "Telemetry record could not be serialized", record);
           continue;
         }
         if (!fitted) {
+          for (let index = 0; index < remaining.length; index++)
+            countFallback(tally, "budget", (record as ReadableSpan).spanContext().traceId);
           invalid(advisory, OVER_REQUEST_LIMIT, record);
           continue;
         }
         prepared.push(fitted);
       }
+      // Preparation includes explicit file uploads. Report their outcome once, before delivery
+      // failures can consume the diagnostic callback's rate-limit slot. Placeholders never upload.
+      if (!advisory) this.transport.reportOffload(tally);
       let batch: T[] = [];
       let batchBytes = 0;
       for (const { record, bytes: recordBytes } of prepared) {

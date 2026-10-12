@@ -26,3 +26,12 @@ Preconditions:
 
 - The stub does not implement evaluation routes; a script that calls `EvaluationClient` against it fails. Use the test receivers.
 - A live run against a real Hue project needs a maintainer's project key and is not part of PR verification.
+
+## Generated media files
+
+TypeScript's generated-file allowlist adds GIF (`image/gif`) and audio (`audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/webm`, `audio/mp4`, `audio/flac`) alongside the existing document, text and image types. Python managed outputs continue to accept arbitrary valid MIME types, including GIF and those audio types. Verify byte identity, content types, generated-file reservation and completion with a synthetic receiver.
+
+The file lifecycle checks are:
+
+- **TypeScript.** From `packages/sdk-typescript`, run `bun test tests/files.test.ts -t "downloads pinned inputs, uploads generated files and grades them locally"`.
+- **Python.** From `packages/sdk-python`, run `uv run --frozen --all-groups pytest tests/test_managed.py -q -k claim_upload_checkpoint_flush_and_duplicate`.

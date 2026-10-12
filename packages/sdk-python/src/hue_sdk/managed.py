@@ -21,6 +21,7 @@ from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from ._inline_files import is_media_content_type
 from .evals._json import MISSING, encode, json_value, uuid
 from .transport import DEFAULT_BASE_URL, normalize_base_url
 
@@ -535,7 +536,8 @@ def _invocation(value: Any) -> dict[str, Any]:
             raise ValueError()
         ids.add(identifier)
         _filename(item["filename"])
-        _string(item["contentType"])
+        if not is_media_content_type(item["contentType"]):
+            raise ValueError()
         _string(item["role"], 64)
         total += _integer(item["byteSize"], 0, _MAX_FILE)
         if not isinstance(item["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]):
@@ -567,7 +569,8 @@ def _result(value: ManagedTargetResult) -> None:
     total = primary = 0
     for file in value.files:
         _filename(file.filename)
-        _string(file.content_type)
+        if not is_media_content_type(file.content_type):
+            raise ValueError()
         if not isinstance(file.data, bytes) or type(file.primary) is not bool:
             raise ValueError()
         total += _integer(len(file.data), 0, _MAX_FILE)

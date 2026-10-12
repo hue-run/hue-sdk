@@ -28,6 +28,7 @@ from opentelemetry.context import attach, detach
 
 from ._inline_files import (
     INLINE_FILE_LIMIT,
+    INLINE_FILE_TEXT_PER_RECORD,
     MAX_INLINE_FILE_TEXT,
     MediaDigestMemo,
     digest_part,
@@ -276,6 +277,7 @@ class Held:
     budget: HeldValues | None = None
     files: list[ExplicitFile] = field(default_factory=list)
     digests: dict[str, dict[str, tuple[str, int]]] = field(default_factory=dict)
+    inspected: set[str] | None = None
     _released: bool = False
 
     def release(self) -> None:
@@ -302,6 +304,8 @@ class ExplicitFile:
     digest: tuple[str, int]
     content_type: str
     name: str | None
+    role: str = "input"
+    timestamp: int | None = None
 
 
 @dataclass
@@ -521,6 +525,8 @@ class BlobUploader:
         """Stores ``value`` under ``key`` of the trace: reserved, uploaded unless Hue already
         holds it, and completed. Holds an upload slot meanwhile."""
         sha256, size = digest
+        if size <= 0:
+            return _Outcome(False, "failed")
         if size > MAX_BLOB_BYTES:
             return _Outcome(False, "too_large")
         if (
@@ -563,8 +569,11 @@ class BlobUploader:
                     self._slots.release()
             return outcome
         finally:
-            outcomes.append(outcome)
-            event.set()
+            with self._lock:
+                outcomes.append(outcome)
+                if not outcome.ok and self._outcomes.get(identity) is known:
+                    del self._outcomes[identity]
+                event.set()
 
     def _store(
         self,
@@ -619,7 +628,7 @@ class BlobUploader:
         if reservation.get("grant"):
             # For Hue's accounting only: a value is read whether or not it was completed, so a
             # failed completion is not retried.
-            self._request(
+            completion = self._request(
                 "POST",
                 f"{self._base_url}/api/v1/otlp/blobs/complete",
                 self._headers,
@@ -627,6 +636,8 @@ class BlobUploader:
                 min(deadline, monotonic() + self._timeout),
                 _MAX_JSON_RESPONSE_BYTES,
             )
+            if completion is None or completion.status >= 500 or completion.status == 429:
+                self._pause()
         return _Outcome(True, content_type=reservation["content_type"])
 
     def _reserve(
@@ -655,7 +666,7 @@ class BlobUploader:
                 self._pause()
                 return {"fallback": "failed"}
             status = reply.status
-            answer = _json(reply.body) if status in (200, 404) else None
+            answer = _json(reply.body) if status in (200, 404, 409) else None
             # A receiver without the route answers its framework's not-found (Hue's own 404, an
             # archived project, is JSON with an ``error``), refuses the method, or answers
             # something that is no reservation at all: it is not asked again for a while.
@@ -675,7 +686,9 @@ class BlobUploader:
                 with self._lock:
                     self._unsupported_until = monotonic() + UNSUPPORTED_PAUSE_SECONDS
                 return {"fallback": "unsupported"}
-            if status == 200:
+            if status == 200 or (
+                status == 409 and isinstance(answer, dict) and answer.get("status") == "exists"
+            ):
                 reservation = self._reservation(answer, size)
                 # A reservation that cannot be used would fail every value alike.
                 if "fallback" in reservation:
@@ -687,6 +700,7 @@ class BlobUploader:
                 delay = _retry_after_seconds(reply)
                 if monotonic() + delay < deadline and wait(delay):
                     continue
+                self._pause()
                 return {"fallback": "failed"}
             if status >= 500:
                 delay = _retry_after_seconds(reply)
@@ -699,12 +713,10 @@ class BlobUploader:
                     continue
                 self._pause()
                 return {"fallback": "failed"}
-            # A conflict over this value alone (409) fails only it. Any other refusal (a refused
-            # key, an archived project, a request Hue could not read, a redirect) would meet every
-            # value alike, so uploads pause; the export's own requests report a key problem.
-            if status != 409:
+            if status not in (400, 409, 413):
                 self._pause()
             return {"fallback": "failed"}
+        self._pause()
         return {"fallback": "failed"}
 
     def _reservation(self, answer: Any, size: int) -> dict[str, Any]:
@@ -779,7 +791,7 @@ class BlobUploader:
             return "stored"
         if reply.status == 403:
             return "expired" if b"Request has expired" in reply.body else "failed"
-        if reply.status >= 500 or reply.status == 408:
+        if reply.status >= 500 or reply.status in (408, 429):
             return "transient"
         return "failed"
 
@@ -854,6 +866,21 @@ class _Span:
             value = held.values.get(key)
             if isinstance(value, (str, bytes)):
                 self.candidates.append((key, value))
+        self.inspected: set[str] = set(held.inspected or ())
+        inspected_bytes = 0
+        for key, candidate in self.candidates:
+            if (
+                held.inspected is None
+                and isinstance(candidate, str)
+                and may_inline_files(key, candidate)
+            ):
+                size = utf8_size(candidate, MAX_INLINE_FILE_TEXT)
+                if (
+                    size <= MAX_INLINE_FILE_TEXT
+                    and inspected_bytes + size <= INLINE_FILE_TEXT_PER_RECORD
+                ):
+                    self.inspected.add(key)
+                    inspected_bytes += size
         self.candidates.extend((f"event:hue.file:{file.digest[0]}", file) for file in held.files)
 
     def slot(self) -> bool:
@@ -882,7 +909,8 @@ def _upload_parts(
 ) -> str:
     """Upload recognized media, keeping digests for binary and prefixes for large text."""
     if (
-        not may_inline_files(key, text)
+        key not in span.inspected
+        or not may_inline_files(key, text)
         or utf8_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
     ):
         return text
@@ -900,7 +928,7 @@ def _upload_parts(
                 "application/octet-stream" if decoded.decoded else "text/plain; charset=utf-8"
             )
         textual = is_text_media_type(content_type)
-        if textual and len(decoded.data) <= INLINE_FILE_LIMIT:
+        if not decoded.data or (textual and len(decoded.data) <= INLINE_FILE_LIMIT):
             continue
         changed = True
         part_key = f"{key}#{file.pointer if textual else file.part_pointer}"
@@ -1007,7 +1035,9 @@ def _place(
     return result
 
 
-def _fallback(key: str, value: str | bytes | ExplicitFile, cap: int) -> _Result:
+def _fallback(
+    key: str, value: str | bytes | ExplicitFile, cap: int, inspect: bool = True
+) -> _Result:
     """Place a candidate whose upload failed or did not finish in time.
 
     Scrub credentials, replace binary and large textual inline files with digests, and cut
@@ -1017,7 +1047,8 @@ def _fallback(key: str, value: str | bytes | ExplicitFile, cap: int) -> _Result:
     if isinstance(value, ExplicitFile):
         return _Result(None, fallbacks=["failed"])
     try:
-        placed, files = hash_inline_files_counted(key, scrub_tool_credentials(key, value))
+        scrubbed = scrub_tool_credentials(key, value)
+        placed, files = hash_inline_files_counted(key, scrubbed) if inspect else (scrubbed, 0)
         # Report each binary or large textual inline file as not uploaded.
         fallbacks = ["failed"] * files
         if isinstance(placed, str) and over_utf8(placed, cap):
@@ -1076,7 +1107,9 @@ def place_spans(
                     if result is not None:
                         results[(number, index)] = result
                     else:
-                        results[(number, index)] = _fallback(key, value, value_bytes)
+                        results[(number, index)] = _fallback(
+                            key, value, value_bytes, key in placements[number].inspected
+                        )
                     if len(results) == total:
                         done.set()
         finally:
@@ -1098,7 +1131,9 @@ def place_spans(
         listed: list[str] = []
         entries: list[tuple[tuple[int, int], str]] = []
         for index, (key, value) in enumerate(span.candidates):
-            result = placed.get((number, index)) or _fallback(key, value, value_bytes)
+            result = placed.get((number, index)) or _fallback(
+                key, value, value_bytes, key in span.inspected
+            )
             if not isinstance(value, ExplicitFile):
                 result_attributes[key] = result.value
             if result.listed:

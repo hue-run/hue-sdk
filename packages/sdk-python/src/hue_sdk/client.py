@@ -26,7 +26,7 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 
-from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Uploads
+from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Tally, Uploads
 from ._inline_files import is_media_name
 from ._limits import AdvertisedLimits, cut_utf8
 from ._otel_compat import encode_logs
@@ -486,20 +486,29 @@ class HueSpan:
                 attributes["hue.file.name"] = name
             else:
                 self._client._record_issue()
+        timestamp = time_ns()
+        refused = False
         if upload and uploads is not None:
             if content is None:
-                self._client._record_issue()
-            elif not uploads.stage(
+                refused = True
+            elif content and not uploads.stage(
                 self.otel_span,
                 ExplicitFile(
                     content,
                     (digest, len(content)),
                     media_type,
                     name if is_media_name(name) else None,
+                    role=role,
+                    timestamp=timestamp,
                 ),
             ):
-                self._client._record_issue()
-        self.otel_span.add_event("hue.file", attributes)
+                refused = True
+        if refused:
+            self._client._record_issue()
+            tally = Tally()
+            tally.fallback("budget", self.trace_id)
+            self._client._span_exporter._report_uploads(tally)
+        self.otel_span.add_event("hue.file", attributes, timestamp=timestamp)
 
     def log_inference(
         self,

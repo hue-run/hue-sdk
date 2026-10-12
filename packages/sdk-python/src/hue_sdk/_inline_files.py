@@ -149,15 +149,21 @@ def may_inline_files(key: str, value: Any) -> bool:
     )
 
 
+_ECMASCRIPT_WHITESPACE = (
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
 def is_media_name(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and 1 <= len(value) <= 256
-        and not any(
-            ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F or 0xD800 <= ord(char) <= 0xDFFF
-            for char in value
-        )
-    )
+    if not isinstance(value, str) or not value.strip(_ECMASCRIPT_WHITESPACE):
+        return False
+    try:
+        units = len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        return False
+    return 1 <= units <= 256 and not any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
 
 
 def is_media_content_type(value: Any) -> bool:
@@ -232,26 +238,28 @@ def _string(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _coalesce(part: dict[str, Any], *keys: str) -> Any:
+    return next((part[key] for key in keys if part.get(key) is not None), None)
+
+
 def content_path(part: dict[str, Any], pointer: str = "") -> InlineFilePart | None:
     """Describe a supported provider part, its content leaf, and wire metadata."""
     owner = part
     key: str | None
     path = ""
-    mime = _string(
-        part.get("mime_type", part.get("mimeType", part.get("mediaType", part.get("media_type"))))
-    )
-    name = _string(part.get("name", part.get("filename")))
+    mime = _string(_coalesce(part, "mime_type", "mimeType", "mediaType", "media_type"))
+    name = _string(_coalesce(part, "name", "filename"))
     encoded = url_only = False
     source = _object(part.get("source"))
-    inline = _object(part.get("inlineData", part.get("inline_data")))
+    inline = _object(_coalesce(part, "inlineData", "inline_data"))
     audio = _object(part.get("input_audio"))
     chat_file = _object(part.get("file"))
-    bedrock = _object(part.get("image", part.get("document")))
+    bedrock = _object(_coalesce(part, "image", "document"))
     kind = part.get("type")
     if inline is not None:
         owner, key = inline, "data"
-        path = "/inlineData" if "inlineData" in part else "/inline_data"
-        mime = _string(inline.get("mimeType", inline.get("mime_type")))
+        path = "/inlineData" if part.get("inlineData") is not None else "/inline_data"
+        mime = _string(_coalesce(inline, "mimeType", "mime_type"))
         encoded, name = True, None
     elif audio is not None and kind == "input_audio":
         owner, key, path = audio, "data", "/input_audio"
@@ -420,7 +428,7 @@ def hash_inline_files_counted(
         count = 0
         for file in files:
             decoded = media_bytes(file)
-            if (
+            if not decoded.data or (
                 is_text_media_type(media_content_type(file, decoded))
                 and len(decoded.data) <= INLINE_FILE_LIMIT
             ):
@@ -440,4 +448,7 @@ def hash_inline_files_counted(
 
 
 def dumps_message(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    # JSON can preserve lone surrogate code units, but UTF-8 cannot encode them. Escape only
+    # those units so provider metadata round-trips without changing ordinary Unicode text.
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return _SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", encoded)

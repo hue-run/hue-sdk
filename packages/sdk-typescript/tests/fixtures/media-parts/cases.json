@@ -3558,6 +3558,1342 @@
         ],
         "entries": []
       }
+    },
+    {
+      "id": "empty-raw",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "blob",
+              "mime_type": "application/octet-stream",
+              "content": ""
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": "application/octet-stream",
+                "content": ""
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": "application/octet-stream",
+                "content": ""
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-file",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": ""
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "data": ""
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "data": ""
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-image",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "image",
+              "mediaType": "image/png",
+              "image": ""
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "image",
+                "mediaType": "image/png",
+                "image": ""
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "image",
+                "mediaType": "image/png",
+                "image": ""
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-input-audio",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_audio",
+              "input_audio": {
+                "data": "",
+                "format": "wav"
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_audio",
+                "input_audio": {
+                  "data": "",
+                  "format": "wav"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_audio",
+                "input_audio": {
+                  "data": "",
+                  "format": "wav"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-anthropic-image",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": ""
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-anthropic-document",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "document",
+              "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": ""
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "base64",
+                  "media_type": "application/pdf",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "document",
+                "source": {
+                  "type": "base64",
+                  "media_type": "application/pdf",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-gemini-inlineData",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "inlineData": {
+                "mimeType": "image/png",
+                "data": ""
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "image/png",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "image/png",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-gemini-inline_data",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "inline_data": {
+                "mime_type": "image/png",
+                "data": ""
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "inline_data": {
+                  "mime_type": "image/png",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "inline_data": {
+                  "mime_type": "image/png",
+                  "data": ""
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-data-url-base64",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "blob",
+              "mime_type": "image/png",
+              "content": "data:image/png;base64,"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": "image/png",
+                "content": "data:image/png;base64,"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": "image/png",
+                "content": "data:image/png;base64,"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-data-url-percent",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "blob",
+              "mime_type": "image/png",
+              "content": "data:image/png,"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": "image/png",
+                "content": "data:image/png,"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": "image/png",
+                "content": "data:image/png,"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-chat-image-url",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,"
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-chat-file",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "file",
+              "file": {
+                "file_data": "data:application/pdf;base64,",
+                "filename": "empty.pdf"
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "file",
+                "file": {
+                  "file_data": "data:application/pdf;base64,",
+                  "filename": "empty.pdf"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "file",
+                "file": {
+                  "file_data": "data:application/pdf;base64,",
+                  "filename": "empty.pdf"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-responses-input-file",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_file",
+              "file_data": "",
+              "filename": "empty.pdf"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_file",
+                "file_data": "",
+                "filename": "empty.pdf"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_file",
+                "file_data": "",
+                "filename": "empty.pdf"
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-bedrock-image",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "image": {
+                "format": "png",
+                "source": {
+                  "bytes": ""
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "image": {
+                  "format": "png",
+                  "source": {
+                    "bytes": ""
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "image": {
+                  "format": "png",
+                  "source": {
+                    "bytes": ""
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "empty-bedrock-document",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "document": {
+                "format": "pdf",
+                "source": {
+                  "bytes": ""
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "document": {
+                  "format": "pdf",
+                  "source": {
+                    "bytes": ""
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "document": {
+                  "format": "pdf",
+                  "source": {
+                    "bytes": ""
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "null-mime-type-alternate",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "blob",
+              "mime_type": null,
+              "mediaType": "application/pdf",
+              "content": "JVBERi0xLjQKJeLjz9MKJSVFT0YK"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": null,
+                "mediaType": "application/pdf",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "blob",
+                "mime_type": null,
+                "mediaType": "application/pdf",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "null-name-alternate",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "name": null,
+              "filename": "資料.pdf"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "name": null,
+                "filename": "資料.pdf",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\",\"name\":\"資料.pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "name": null,
+                "filename": "資料.pdf",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "null-inlineData-alternate",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "inlineData": null,
+              "inline_data": {
+                "mime_type": "image/png",
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "inlineData": null,
+                "inline_data": {
+                  "mime_type": "image/png"
+                },
+                "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                "size": 68
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "inlineData": null,
+                "inline_data": {
+                  "mime_type": "image/png"
+                },
+                "sha256": "6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29",
+                "size": 68
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-astral-boundary-128",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\",\"name\":\"🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-astral-over-129",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-astral-over-256",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧🎧",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-blank",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "   "
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "   ",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "   ",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-tab",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "bad\tname"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\tname",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\tname",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-c0-unit-separator",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "bad\u001fname"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\u001fname",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\u001fname",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-lone-high-surrogate",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "bad\ud800name"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\ud800name",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\ud800name",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "name-lone-low-surrogate",
+      "attribute": "gen_ai.input.messages",
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "file",
+              "mediaType": "application/pdf",
+              "data": "JVBERi0xLjQKJeLjz9MKJSVFT0YK",
+              "filename": "bad\udc00name"
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\udc00name",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.input.messages#/0/parts/0\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "file",
+                "mediaType": "application/pdf",
+                "filename": "bad\udc00name",
+                "sha256": "c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530",
+                "size": 21
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
     }
   ]
 }

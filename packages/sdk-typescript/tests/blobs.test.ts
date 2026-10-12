@@ -30,6 +30,8 @@ type WireRecord = {
   attributes?: Attribute[];
   body?: Value;
   events?: { name: string; attributes?: Attribute[] }[];
+  links?: { attributes?: Attribute[] }[];
+  resourceAttributes?: Attribute[];
 };
 
 type StagingTransport = HueTransport & {
@@ -61,6 +63,7 @@ interface Behavior {
   /** The store's status for a PUT; 200 stores the bytes. */
   put?: (index: number) => number | "hang" | "expired";
   beforePut?: () => Promise<void>;
+  complete?: (index: number) => number;
 }
 
 /**
@@ -75,6 +78,7 @@ function hue(behavior: Behavior = {}) {
   const reservations: Record<string, unknown>[] = [];
   const puts: { headers: Record<string, string>; bytes: number; status: number }[] = [];
   const completions: Record<string, unknown>[] = [];
+  const decodedRequests: { signal: "traces" | "logs"; bytes: number }[] = [];
   /** Objects by `<trace>/<sha256>`: their bytes and content type. */
   const store = new Map<string, { bytes: Buffer; contentType: string }>();
   let reserveCount = 0;
@@ -175,6 +179,8 @@ function hue(behavior: Behavior = {}) {
       if (url.pathname === "/api/v1/otlp/blobs/complete") {
         const body = (await request.json()) as Record<string, unknown>;
         completions.push(body);
+        const status = behavior.complete?.(completions.length) ?? 200;
+        if (status !== 200) return new Response(null, { status });
         if (!store.has(`${String(body.traceId)}/${String(body.sha256)}`))
           return Response.json({ error: "Not uploaded.", status: "missing" }, { status: 409 });
         return Response.json({ status: "complete" });
@@ -183,15 +189,34 @@ function hue(behavior: Behavior = {}) {
       const namespace = `opentelemetry.proto.collector.${signal === "traces" ? "trace" : "logs"}.v1.Export${signal === "traces" ? "Trace" : "Logs"}Service`;
       let bytes = Buffer.from(await request.arrayBuffer());
       if (request.headers.get("content-encoding") === "gzip") bytes = gunzipSync(bytes);
+      decodedRequests.push({ signal, bytes: bytes.byteLength });
       const type = root.lookupType(`${namespace}Request`);
       const data = type.toObject(type.decode(bytes), { longs: String, bytes: String });
       const decoded: WireRecord[] =
         signal === "traces"
-          ? data.resourceSpans.flatMap((group: { scopeSpans: { spans: WireRecord[] }[] }) =>
-              group.scopeSpans.flatMap((scope) => scope.spans),
+          ? data.resourceSpans.flatMap(
+              (group: {
+                resource?: { attributes?: Attribute[] };
+                scopeSpans: { spans: WireRecord[] }[];
+              }) =>
+                group.scopeSpans.flatMap((scope) =>
+                  scope.spans.map((span) => ({
+                    ...span,
+                    resourceAttributes: group.resource?.attributes,
+                  })),
+                ),
             )
-          : data.resourceLogs.flatMap((group: { scopeLogs: { logRecords: WireRecord[] }[] }) =>
-              group.scopeLogs.flatMap((scope) => scope.logRecords),
+          : data.resourceLogs.flatMap(
+              (group: {
+                resource?: { attributes?: Attribute[] };
+                scopeLogs: { logRecords: WireRecord[] }[];
+              }) =>
+                group.scopeLogs.flatMap((scope) =>
+                  scope.logRecords.map((record) => ({
+                    ...record,
+                    resourceAttributes: group.resource?.attributes,
+                  })),
+                ),
             );
       for (const record of decoded) records.push({ signal, record });
       const responseType = root.lookupType(`${namespace}Response`);
@@ -213,6 +238,7 @@ function hue(behavior: Behavior = {}) {
     reservations,
     puts,
     completions,
+    decodedRequests,
     span: (name: string) =>
       records.find(({ signal, record }) => signal === "traces" && record.name === name)?.record,
     logs: () => records.filter(({ signal }) => signal === "logs").map(({ record }) => record),
@@ -896,7 +922,7 @@ test("recordFile uploads are opt-in, copied, and share inline reservations on th
   const hueClient = client(endpoint);
   const bytes = Buffer.from([0, 1, 2, 3]);
   const digest = sha256(bytes);
-  const name = "🎧".repeat(256);
+  const name = "🎧".repeat(128);
   try {
     await hueClient.withSpan("default file", () => {
       hueClient.recordFile({ role: "attachment", mediaType: "image/png", data: bytes, name });
@@ -930,6 +956,12 @@ test("recordFile uploads are opt-in, copied, and share inline reservations on th
     expect(endpoint.puts).toHaveLength(1);
     expect([...endpoint.store.values()][0]!.bytes).toEqual(Buffer.from([0, 1, 2, 3]));
     const record = endpoint.span("explicit file")!;
+    expect(
+      attr(
+        record.events!.find((event) => event.name === "hue.file")! as WireRecord,
+        "hue.file.name",
+      )?.stringValue,
+    ).toBe(name);
     expect(blobs(record)).toEqual([
       {
         key: "gen_ai.input.messages#/0/parts/1",
@@ -954,7 +986,7 @@ test("recordFile uploads are opt-in, copied, and share inline reservations on th
   }
 });
 
-test("failed media reservations are reused across inline and explicit occurrences in one trace", async () => {
+test("failed media reservations pause inline and explicit occurrences without caching failures", async () => {
   const endpoint = hue({ reserve: () => ({ status: 403 }) });
   const hueClient = client(endpoint);
   const bytes = Buffer.from([1, 2, 3]);
@@ -973,6 +1005,7 @@ test("failed media reservations are reused across inline and explicit occurrence
     expect(endpoint.reservations).toHaveLength(1);
     expect(endpoint.puts).toHaveLength(0);
     expect(blobs(endpoint.span("failed parent")!)).toEqual([]);
+    expect(mediaState(hueClient).uploader.outcomes.size).toBe(0);
   } finally {
     await hueClient.shutdown();
     endpoint.server.stop(true);
@@ -1010,6 +1043,20 @@ test("media in logs, events, links, resources, and fetched URLs never authorizes
     expect(endpoint.reservations).toHaveLength(0);
     expect(endpoint.puts).toHaveLength(0);
     expect(endpoint.logs()).toHaveLength(1);
+    const span = endpoint.span("privacy surfaces")!;
+    expect(attr(span.events![0]! as WireRecord, "gen_ai.input.messages")?.stringValue).toBe(
+      messages,
+    );
+    expect(attr(span.links![0]! as WireRecord, "gen_ai.input.messages")?.stringValue).toBe(
+      messages,
+    );
+    expect(
+      attr({ traceId: "", attributes: span.resourceAttributes }, "gen_ai.input.messages")
+        ?.stringValue,
+    ).toBe(messages);
+    expect(attr(endpoint.logs()[0]!, "gen_ai.input.messages")?.stringValue).toBe(messages);
+    expect(endpoint.logs()[0]!.body?.stringValue).toBe(messages);
+    expect(mediaState(hueClient).mediaMemo.entries.size).toBe(0);
   } finally {
     await hueClient.shutdown();
     endpoint.server.stop(true);
@@ -1038,7 +1085,8 @@ test("metadata-only, setup credentials, and redacted file events never upload ex
         if (index !== 2)
           span.setAttribute("gen_ai.input.messages", messageWithImage(Buffer.from([1, 2, 3])));
       });
-      await hueClient.flush();
+      const report = await hueClient.flush();
+      expect(report.uploadFallbacks).toBe(index === 2 ? 1 : 0);
     }
     expect(endpoint.reservations).toHaveLength(0);
   } finally {
@@ -1049,13 +1097,26 @@ test("metadata-only, setup credentials, and redacted file events never upload ex
 
 function mediaState(hueClient: ReturnType<typeof client>) {
   return (hueClient as unknown as { transport: HueTransport }).transport as unknown as {
-    mediaMemo: { entries: Map<string, unknown>; units: number };
+    mediaMemo: {
+      entries: Map<string, unknown>;
+      units: number;
+      bytes(bytes: Uint8Array, traceId: string): { sha256: string; size: number };
+    };
     media: Map<string, { bytes: Uint8Array }[]>;
     mediaOwners: Map<string, { source: WeakRef<Span> }>;
     mediaTimer?: ReturnType<typeof setInterval>;
     heldBytes: number;
     uploader: {
       unsupportedUntil: number;
+      pausedUntil: number;
+      store(
+        traceId: string,
+        key: string,
+        value: string | Uint8Array,
+        contentType: string,
+        digest: { sha256: string; size: number },
+        upload: { deadline: number; wait(ms: number): Promise<boolean> },
+      ): Promise<{ ok: true; contentType: string } | { ok: false; reason: string }>;
       closed: boolean;
       outcomes: Map<string, { settled: boolean }>;
       requests: Set<unknown>;
@@ -1063,7 +1124,12 @@ function mediaState(hueClient: ReturnType<typeof client>) {
   };
 }
 
-function attachedMediaClient(endpoint: { url: string }, liveSpans: boolean, tracked = true) {
+function attachedMediaClient(
+  endpoint: { url: string },
+  liveSpans: boolean,
+  tracked = true,
+  eventCountLimit = 128,
+) {
   const transport = createHueTransport({
     apiKey,
     serviceName: "media-lifecycle-tests",
@@ -1072,6 +1138,7 @@ function attachedMediaClient(endpoint: { url: string }, liveSpans: boolean, trac
     liveSpans,
   });
   const tracerProvider = new TracerProvider({
+    spanLimits: { eventCountLimit },
     spanProcessors: tracked
       ? [
           {
@@ -1269,7 +1336,7 @@ for (const reserveStatus of [200, 403]) {
         });
       });
       await hueClient.flush();
-      expect(state.uploader.outcomes.size).toBe(1);
+      expect(state.uploader.outcomes.size).toBe(reserveStatus === 200 ? 1 : 0);
       expect([...state.uploader.outcomes.values()].every((outcome) => outcome.settled)).toBe(true);
       await hueClient.shutdown();
       expect(state.uploader.closed).toBe(true);
@@ -1344,7 +1411,7 @@ test("explicit upload missing bytes and staging refusals retain file metadata an
     });
     await hueClient.flushSafe();
     expect(endpoint.span("staging cap")!.events).toHaveLength(66);
-    expect(hueClient.transport.getReport().uploadFallbacks).toBe(1);
+    expect(hueClient.transport.getReport().uploadFallbacks).toBe(2);
     expect(hueClient.transport.getReport().instrumentationFailures).toBe(2);
     expect(endpoint.reservations).toHaveLength(1);
     await hueClient.withSpan("held budget", () => {
@@ -1359,11 +1426,11 @@ test("explicit upload missing bytes and staging refusals retain file metadata an
       hueClient.recordFile({ role: "input", mediaType: "image/png", data: bytes, upload: true });
     });
     await hueClient.flushSafe();
-    expect(hueClient.transport.getReport().uploadFallbacks).toBe(3);
+    expect(hueClient.transport.getReport().uploadFallbacks).toBe(4);
     expect(hueClient.transport.getReport().instrumentationFailures).toBe(4);
     expect(
       hueClient.transport.getIssues().filter((issue) => issue.kind === "warning"),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
   } finally {
     await hueClient.shutdown();
     endpoint.server.stop(true);
@@ -1398,6 +1465,484 @@ test("abandoned explicit media is bounded by span identities without retaining s
     await hueClient.shutdown();
     expect(state.media.size).toBe(0);
     expect(state.heldBytes).toBe(0);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+function storeMedia(
+  hueClient: ReturnType<typeof client>,
+  bytes: Uint8Array,
+  traceId = "1".repeat(32),
+) {
+  return mediaState(hueClient).uploader.store(
+    traceId,
+    `event:hue.file:${sha256(bytes)}`,
+    bytes,
+    "image/png",
+    { sha256: sha256(bytes), size: bytes.byteLength },
+    { deadline: Date.now() + 500, wait: async () => false },
+  );
+}
+
+function setDecodedLimit(hueClient: ReturnType<typeof client>, decodedBytes: number) {
+  const transport = hueClient.transport as unknown as {
+    limits: { decodedBytes: number; requestBytes: number; valueBytes: number };
+  };
+  transport.limits = { ...transport.limits, decodedBytes };
+}
+
+test("409 exists successes are memoized while pending uploads deduplicate per trace", async () => {
+  const bytes = Buffer.from("memoized existing media");
+  const endpoint = hue({
+    reserve: () => ({
+      status: 409,
+      body: JSON.stringify({
+        status: "exists",
+        ref: {
+          key: "existing",
+          sha256: sha256(bytes),
+          size: bytes.length,
+          content_type: "image/png",
+        },
+      }),
+    }),
+  });
+  const hueClient = client(endpoint);
+  try {
+    const results = await Promise.all([storeMedia(hueClient, bytes), storeMedia(hueClient, bytes)]);
+    expect(results).toEqual([
+      { ok: true, contentType: "image/png" },
+      { ok: true, contentType: "image/png" },
+    ]);
+    expect(await storeMedia(hueClient, bytes)).toEqual(results[0]);
+    expect(endpoint.reservations).toHaveLength(1);
+    expect(endpoint.puts).toHaveLength(0);
+    expect(mediaState(hueClient).uploader.outcomes.size).toBe(1);
+    expect((await storeMedia(hueClient, bytes, "2".repeat(32))).ok).toBe(true);
+    expect(endpoint.reservations).toHaveLength(2);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const uploading = hue({ beforePut: () => held });
+  const uploadingClient = client(uploading);
+  try {
+    const first = storeMedia(uploadingClient, bytes);
+    await waitForMedia(() => uploading.reservations.length === 1);
+    const second = storeMedia(uploadingClient, bytes);
+    expect(mediaState(uploadingClient).uploader.outcomes.size).toBe(1);
+    release();
+    expect((await first).ok).toBe(true);
+    expect((await second).ok).toBe(true);
+    expect(uploading.reservations).toHaveLength(1);
+    expect(uploading.puts).toHaveLength(1);
+    expect(uploading.completions).toHaveLength(1);
+  } finally {
+    release();
+    await uploadingClient.shutdown();
+    uploading.server.stop(true);
+  }
+});
+
+test("failed uploads and pause refusals retry after the transient pause", async () => {
+  const endpoint = hue({ reserve: (index) => ({ status: index === 1 ? 503 : 200 }) });
+  const hueClient = client(endpoint);
+  const bytes = Buffer.from("retry this media");
+  try {
+    expect((await storeMedia(hueClient, bytes)).ok).toBe(false);
+    const state = mediaState(hueClient);
+    expect(state.uploader.pausedUntil).toBeGreaterThan(Date.now());
+    expect(state.uploader.outcomes.size).toBe(0);
+    expect((await storeMedia(hueClient, bytes)).ok).toBe(false);
+    expect((await storeMedia(hueClient, Buffer.from("other media during pause"))).ok).toBe(false);
+    expect(endpoint.reservations).toHaveLength(1);
+    expect(state.uploader.outcomes.size).toBe(0);
+    state.uploader.pausedUntil = 0;
+    expect((await storeMedia(hueClient, bytes)).ok).toBe(true);
+    expect((await storeMedia(hueClient, bytes)).ok).toBe(true);
+    expect(endpoint.reservations).toHaveLength(2);
+    expect(state.uploader.outcomes.size).toBe(1);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("empty values never reserve and HTTP 400 isolates only the refused payload", async () => {
+  for (const path of ["reserve", "put", "complete"] as const) {
+    const behavior: Behavior =
+      path === "reserve"
+        ? { reserve: (index) => ({ status: index === 1 ? 400 : 200 }) }
+        : path === "put"
+          ? { put: (index) => (index === 1 ? 400 : 200) }
+          : { complete: (index) => (index === 1 ? 400 : 200) };
+    const endpoint = hue(behavior);
+    const hueClient = client(endpoint);
+    try {
+      const state = mediaState(hueClient);
+      expect((await storeMedia(hueClient, Buffer.alloc(0))).ok).toBe(false);
+      expect(endpoint.reservations).toHaveLength(0);
+      expect(state.uploader.outcomes.size).toBe(0);
+      expect((await storeMedia(hueClient, Buffer.from("first payload"))).ok).toBe(
+        path === "complete",
+      );
+      expect(state.uploader.pausedUntil).toBe(0);
+      expect((await storeMedia(hueClient, Buffer.from("next valid payload"))).ok).toBe(true);
+      expect(endpoint.reservations).toHaveLength(2);
+      expect(endpoint.completions.at(-1)?.sha256).toBe(sha256("next valid payload"));
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  }
+});
+
+test("transient PUT and completion statuses pause further uploads", async () => {
+  for (const path of ["put", "complete"] as const) {
+    for (const status of [429, 503]) {
+      const endpoint = hue(path === "put" ? { put: () => status } : { complete: () => status });
+      const hueClient = client(endpoint);
+      try {
+        await storeMedia(hueClient, Buffer.from("transient first payload"));
+        expect(mediaState(hueClient).uploader.pausedUntil).toBeGreaterThan(Date.now());
+        expect((await storeMedia(hueClient, Buffer.from("paused next payload"))).ok).toBe(false);
+        expect(endpoint.reservations).toHaveLength(1);
+      } finally {
+        await hueClient.shutdown();
+        endpoint.server.stop(true);
+      }
+    }
+  }
+});
+
+test("file helper names enforce UTF-16 units and omit invalid names without dropping the event or upload", async () => {
+  const names = [
+    "🎧".repeat(128),
+    "🎧".repeat(129),
+    "🎧".repeat(256),
+    " \t ",
+    "a\u0000b",
+    "a\u007fb",
+    "a\ud800b",
+    "a\udc00b",
+  ];
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const bytes = Buffer.from("named media");
+  try {
+    for (const [index, name] of names.entries()) {
+      await hueClient.withSpan(`name boundary ${index}`, () => {
+        hueClient.recordFile({
+          role: "output",
+          mediaType: "audio/mpeg",
+          name,
+          data: bytes,
+          upload: true,
+        });
+      });
+    }
+    await expect(hueClient.flush()).rejects.toThrow("Hue could not accept all telemetry");
+    const report = hueClient.transport.getReport();
+    expect(report.instrumentationFailures).toBe(names.length - 1);
+    expect(report.uploadedValues).toBe(names.length);
+    for (const [index, name] of names.entries()) {
+      const span = endpoint.span(`name boundary ${index}`)!;
+      expect(span.events).toHaveLength(1);
+      expect(span.events![0]!.name).toBe("hue.file");
+      expect(attr(span.events![0]! as WireRecord, "hue.file.name")?.stringValue).toBe(
+        index === 0 ? name : undefined,
+      );
+      expect(blobs(span)).toHaveLength(1);
+      expect(blobs(span)[0]!.name).toBe(index === 0 ? name : undefined);
+    }
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("dropped helper events cannot authorize uploads through a same-digest metadata-only event", async () => {
+  const endpoint = hue();
+  const attached = attachedMediaClient(endpoint, false, true, 1);
+  const bytes = Buffer.from("same digest different events");
+  try {
+    await attached.hueClient.withSpan("evicted upload event", () => {
+      attached.hueClient.recordFile({
+        role: "input",
+        mediaType: "image/png",
+        name: "upload.png",
+        data: bytes,
+        upload: true,
+      });
+      attached.hueClient.recordFile({
+        role: "input",
+        mediaType: "image/png",
+        name: "metadata.png",
+        data: bytes,
+      });
+    });
+    const report = await attached.hueClient.flush();
+    const span = endpoint.span("evicted upload event")!;
+    expect(span.events).toHaveLength(1);
+    expect(attr(span.events![0]! as WireRecord, "hue.file.name")?.stringValue).toBe("metadata.png");
+    expect(endpoint.reservations).toHaveLength(0);
+    expect(blobs(span)).toHaveLength(0);
+    expect(report.uploadFallbacks).toBe(1);
+    expect(
+      attached.hueClient.transport.getIssues().filter((issue) => issue.kind === "warning"),
+    ).toHaveLength(1);
+    expect(mediaState(attached.hueClient).heldBytes).toBe(0);
+  } finally {
+    await attached.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("partial helper event survival uploads one named reference without duplicates", async () => {
+  const endpoint = hue();
+  const attached = attachedMediaClient(endpoint, false, true, 1);
+  const bytes = Buffer.from("duplicate bytes named separately");
+  try {
+    await attached.hueClient.withSpan("one surviving file", () => {
+      attached.hueClient.recordFile({
+        role: "input",
+        mediaType: "image/png",
+        name: "dropped.png",
+        data: bytes,
+        upload: true,
+      });
+      attached.hueClient.recordFile({
+        role: "input",
+        mediaType: "image/png",
+        name: "surviving.png",
+        data: bytes,
+        upload: true,
+      });
+    });
+    const report = await attached.hueClient.flush();
+    const span = endpoint.span("one surviving file")!;
+    expect(blobs(span)).toEqual([
+      {
+        key: `event:hue.file:${sha256(bytes)}`,
+        sha256: sha256(bytes),
+        size: bytes.length,
+        content_type: "image/png",
+        name: "surviving.png",
+      },
+    ]);
+    expect(endpoint.reservations).toHaveLength(1);
+    expect(endpoint.puts).toHaveLength(1);
+    expect(report.uploadedValues).toBe(1);
+    expect(report.uploadFallbacks).toBe(1);
+  } finally {
+    await attached.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("helper fitting preserves an identical baseline reference while shedding content", async () => {
+  const endpoint = hue();
+  const attached = attachedMediaClient(endpoint, false);
+  const bytes = Buffer.from("baseline collision media");
+  const entry = {
+    key: `event:hue.file:${sha256(bytes)}`,
+    sha256: sha256(bytes),
+    size: bytes.length,
+    content_type: "image/png",
+    name: "collision.png",
+  };
+  setDecodedLimit(attached.hueClient, 2048);
+  try {
+    await attached.hueClient.withSpan("baseline collision", ({ span }) => {
+      span.setAttribute("hue.blobs", [JSON.stringify(entry)]);
+      span.setAttribute("gen_ai.prompt", "X".repeat(8 * KiB));
+      attached.hueClient.recordFile({
+        role: "output",
+        mediaType: "image/png",
+        name: entry.name,
+        data: bytes,
+        upload: true,
+      });
+    });
+    const report = await attached.hueClient.flush();
+    const span = endpoint.span("baseline collision")!;
+    expect(blobs(span)).toEqual([entry, entry]);
+    expect(strings(attr(span, "hue.truncated"))).toContain("gen_ai.prompt");
+    expect(endpoint.reservations).toHaveLength(1);
+    expect(endpoint.puts).toHaveLength(1);
+    expect(endpoint.completions).toHaveLength(1);
+    expect(report.uploadedValues).toBe(1);
+    expect(report.uploadFallbacks).toBe(0);
+    expect(endpoint.decodedRequests.every((request) => request.bytes <= 2048)).toBe(true);
+  } finally {
+    await attached.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("identical surviving helper events keep two references with one upload", async () => {
+  const endpoint = hue();
+  const attached = attachedMediaClient(endpoint, false);
+  const bytes = Buffer.from("identical helper media");
+  try {
+    await attached.hueClient.withSpan("identical surviving files", () => {
+      for (let index = 0; index < 2; index++) {
+        attached.hueClient.recordFile({
+          role: "output",
+          mediaType: "image/png",
+          name: "same.png",
+          data: bytes,
+          upload: true,
+        });
+      }
+    });
+    const report = await attached.hueClient.flush();
+    const span = endpoint.span("identical surviving files")!;
+    expect(span.events).toHaveLength(2);
+    const entries = blobs(span);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toEqual(entries[1]);
+    expect(entries[0]?.name).toBe("same.png");
+    expect(endpoint.reservations).toHaveLength(1);
+    expect(endpoint.puts).toHaveLength(1);
+    expect(endpoint.completions).toHaveLength(1);
+    expect(report.uploadedValues).toBe(2);
+    expect(report.uploadFallbacks).toBe(0);
+  } finally {
+    await attached.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("a helper span rejected by the request budget falls back once without uploading", async () => {
+  const endpoint = hue();
+  const attached = attachedMediaClient(endpoint, false);
+  setDecodedLimit(attached.hueClient, 2048);
+  try {
+    await attached.hueClient.withSpan("unfittable file span", ({ span }) => {
+      span.setAttribute("custom.metadata", "X".repeat(4 * KiB));
+      attached.hueClient.recordFile({
+        role: "output",
+        mediaType: "image/png",
+        data: Buffer.from("unfittable media"),
+        upload: true,
+      });
+    });
+    await expect(attached.hueClient.flush()).rejects.toThrow("Hue could not accept all telemetry");
+    const report = attached.hueClient.transport.getReport();
+    expect(report.failedSpans).toBe(1);
+    expect(report.uploadedValues).toBe(0);
+    expect(report.uploadFallbacks).toBe(1);
+    expect(endpoint.span("unfittable file span")).toBeUndefined();
+    expect(endpoint.reservations).toHaveLength(0);
+    expect(endpoint.puts).toHaveLength(0);
+    expect(
+      attached.hueClient.transport.getIssues().filter((issue) => issue.kind === "warning"),
+    ).toHaveLength(1);
+    expect(mediaState(attached.hueClient).heldBytes).toBe(0);
+  } finally {
+    await attached.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("a longer existing-object MIME is checked again before final helper delivery", async () => {
+  const bytes = Buffer.from("existing object media");
+  const calibration = hue();
+  const calibrated = attachedMediaClient(calibration, false);
+  let decodedBytes: number;
+  try {
+    await calibrated.hueClient.withSpan("final helper MIME fitting", () => {
+      calibrated.hueClient.recordFile({
+        role: "output",
+        mediaType: "image/png",
+        name: "fitting.png",
+        data: bytes,
+        upload: true,
+      });
+    });
+    await calibrated.hueClient.flush();
+    expect(calibration.span("final helper MIME fitting")).toBeDefined();
+    decodedBytes = calibration.decodedRequests.find(
+      (request) => request.signal === "traces",
+    )!.bytes;
+  } finally {
+    await calibrated.shutdown();
+    calibration.server.stop(true);
+  }
+  const contentType = `application/${"x".repeat(243)}`;
+  const endpoint = hue({
+    reserve: () => ({
+      status: 200,
+      body: JSON.stringify({
+        status: "exists",
+        ref: {
+          key: `event:hue.file:${sha256(bytes)}`,
+          sha256: sha256(bytes),
+          size: bytes.length,
+          content_type: contentType,
+        },
+      }),
+    }),
+  });
+  const attached = attachedMediaClient(endpoint, false);
+  setDecodedLimit(attached.hueClient, decodedBytes + 64);
+  try {
+    await attached.hueClient.withSpan("final helper MIME fitting", () => {
+      attached.hueClient.recordFile({
+        role: "output",
+        mediaType: "image/png",
+        name: "fitting.png",
+        data: bytes,
+        upload: true,
+      });
+    });
+    await expect(attached.hueClient.flush()).rejects.toThrow("Hue could not accept all telemetry");
+    const report = attached.hueClient.transport.getReport();
+    expect(endpoint.reservations).toHaveLength(1);
+    expect(endpoint.puts).toHaveLength(0);
+    expect(endpoint.span("final helper MIME fitting")).toBeUndefined();
+    expect(report.uploadedValues).toBe(1);
+    expect(report.uploadFallbacks).toBe(0);
+    expect(report.failedSpans).toBe(1);
+  } finally {
+    await attached.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("media digest memo retains only trace and SHA keys with bounded digest metadata", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  try {
+    const state = mediaState(hueClient);
+    const bytes = Buffer.from("customer-payload-canary\u0000\u00ff");
+    const traceId = "1".repeat(32);
+    const first = state.mediaMemo.bytes(bytes, traceId);
+    expect(state.mediaMemo.bytes(bytes, traceId)).toBe(first);
+    expect([...state.mediaMemo.entries.keys()]).toEqual([`${traceId}:${sha256(bytes)}`]);
+    expect([...state.mediaMemo.entries.values()]).toEqual([
+      { sha256: sha256(bytes), size: bytes.length },
+    ]);
+    state.mediaMemo.bytes(bytes, "2".repeat(32));
+    expect(state.mediaMemo.entries.size).toBe(2);
+    for (let index = 0; index < 4200; index++)
+      state.mediaMemo.bytes(Buffer.from(String(index)), traceId);
+    expect(state.mediaMemo.entries.size).toBeLessThanOrEqual(4096);
+    expect(state.mediaMemo.units).toBeLessThanOrEqual(32 * MiB);
+    expect(
+      [...state.mediaMemo.entries.keys()].every((key) => /^[0-9a-f]{32}:[0-9a-f]{64}$/.test(key)),
+    ).toBe(true);
+    await hueClient.shutdown();
+    expect(state.mediaMemo.entries.size).toBe(0);
+    expect(state.mediaMemo.units).toBe(0);
   } finally {
     await hueClient.shutdown();
     endpoint.server.stop(true);

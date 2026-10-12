@@ -476,7 +476,7 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
             span.record_file(
                 role="output", media_type="application/pdf", sha256=pdf, byte_size=2048
             )
-            # A str is hashed as UTF-8; a one-code-point space is a valid name.
+            # A str is hashed as UTF-8; a blank optional name is omitted and counted.
             span.record_file(role="attachment", media_type="text/plain", data=body, name=" ")
             # Each of these is omitted and counted; the block keeps running.
             span.record_file(role="draft", media_type="text/plain", data=body)
@@ -485,7 +485,7 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
             span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=-1)
             span.record_file(role="input", media_type="text/plain", sha256=digest, byte_size=2**63)
             span.record_file(role="input", media_type="", sha256=digest)
-        assert hue.export_status.instrumentation_failures == 6
+        assert hue.export_status.instrumentation_failures == (7 if capture_content else 6)
         hue.force_flush()
     (request,) = receiver.spans()
     files = [
@@ -512,7 +512,6 @@ def test_record_file_links_a_file_by_content_hash_without_exporting_it(receiver,
             "hue.file.role": "attachment",
             "hue.file.media_type": "text/plain",
             "hue.file.size": len(body),
-            **({"hue.file.name": " "} if capture_content else {}),
         },
     ]
     telemetry = b"".join(data for path, _, data in receiver.requests if path.endswith("/traces"))

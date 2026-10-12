@@ -15,11 +15,22 @@ for (const item of corpus.fixtures)
     ).toEqual(item.failure.messages);
   });
 
-test("media names use code point limits and reject controls", () => {
+test("media names use UTF-16 limits and reject invalid labels", () => {
   expect(INLINE_FILE_LIMIT).toBe(65536);
-  expect(isMediaName("🎧".repeat(256))).toBe(true);
-  expect(isMediaName("🎧".repeat(257))).toBe(false);
-  for (const name of ["", "a\u0000b", "a\u001fb", "a\u007fb", "a\u009fb", "\ud800"])
+  expect(isMediaName("🎧".repeat(128))).toBe(true);
+  expect(isMediaName("🎧".repeat(129))).toBe(false);
+  expect(isMediaName("a\u009fb")).toBe(true);
+  for (const name of [
+    "",
+    "  ",
+    "a\u0000b",
+    "a\u001fb",
+    "a\u007fb",
+    "a\tb",
+    "a\nb",
+    "\ud800",
+    "\udc00",
+  ])
     expect(isMediaName(name)).toBe(false);
 });
 

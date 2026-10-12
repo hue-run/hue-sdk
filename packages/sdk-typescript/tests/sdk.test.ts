@@ -813,9 +813,8 @@ describe("Hue SDK contract", () => {
       endpoint.server.stop(true);
     }
   });
-  test("a 5 MiB inline file exports as its digest within the default queue budget", async () => {
-    // Base64 makes the file about 6.7 M characters, charged at two bytes each: without hashing
-    // at admission the span would exceed the default 8 MiB queue and be dropped.
+  test("a 5 MiB span-own inline file exports as its digest while event messages truncate ordinarily", async () => {
+    // The span's own message is held for export. The event uses the ordinary value cap.
     const endpoint = receiver();
     const hue = createHue({
       apiKey,
@@ -863,7 +862,10 @@ describe("Hue SDK contract", () => {
       const eventMessages = event.attributes!.find(
         (attribute) => attribute.key === "gen_ai.input.messages",
       )!;
-      expect(JSON.parse(eventMessages.value.stringValue!)[0].parts).toEqual(expected);
+      expect(eventMessages.value.stringValue).toBe(messages.slice(0, 1024 * 1024));
+      expect(strings(attr(record, "hue.truncated"))).toContain(
+        "event:messages:gen_ai.input.messages",
+      );
       expect(hue.transport.getReport()).toMatchObject({ droppedSpans: 0, failedSpans: 0 });
     } finally {
       await hue.shutdown();
@@ -871,7 +873,7 @@ describe("Hue SDK contract", () => {
     }
   });
 
-  test("admission hashes a shared message once and bounds the message text it inspects", async () => {
+  test("admission inspects shared span-own messages once and copies event messages ordinarily", async () => {
     const endpoint = receiver();
     const hue = createHue({
       apiKey,
@@ -879,7 +881,7 @@ describe("Hue SDK contract", () => {
       captureContent: true,
       baseUrl: endpoint.url,
     });
-    const message = (seed: number) =>
+    const message = (seed: number, size = 1024 * 1024) =>
       JSON.stringify([
         {
           role: "user",
@@ -888,22 +890,29 @@ describe("Hue SDK contract", () => {
               type: "blob",
               modality: "document",
               mime_type: "application/pdf",
-              content: Buffer.alloc(1024 * 1024, seed).toString("base64"),
+              content: Buffer.alloc(size, seed).toString("base64"),
             },
           ],
         },
       ]);
-    const shared = message(1);
+    // Stay below the queued value length so admission inspects the own attributes.
+    const shared = message(1, 512 * 1024);
     const distinct = Array.from({ length: 24 }, (_, index) => message(index + 2));
+    const messages = new Set([shared, ...distinct]);
     const parsed: number[] = [];
     const parse = JSON.parse;
     const spy = spyOn(JSON, "parse").mockImplementation(((text: string, reviver?: never) => {
-      if (typeof text === "string" && text.length > 1024 * 1024) parsed.push(text.length);
+      if (messages.has(text)) parsed.push(text.length);
       return parse(text, reviver);
     }) as typeof JSON.parse);
     try {
-      // One message shared by 128 events under all three message keys is parsed once.
+      // Sharing the same text under the three own message keys requires one inspection.
       const repeated = hue.tracer.startSpan("shared-message");
+      repeated.setAttributes({
+        "gen_ai.input.messages": shared,
+        "gen_ai.output.messages": shared,
+        "ai.prompt.messages": shared,
+      });
       for (let index = 0; index < 128; index++)
         repeated.addEvent(`event-${index}`, {
           "gen_ai.input.messages": shared,
@@ -912,25 +921,94 @@ describe("Hue SDK contract", () => {
         });
       repeated.end();
       expect(parsed).toHaveLength(1);
-      // Distinct messages are inspected only up to the per-record limit of 16 MiB of text.
+      // Events never authorize media inspection, including distinct messages.
       parsed.length = 0;
       const many = hue.tracer.startSpan("distinct-messages");
       distinct.forEach((text, index) =>
         many.addEvent(`event-${index}`, { "gen_ai.input.messages": text }),
       );
       many.end();
-      expect(parsed.length).toBeLessThanOrEqual(Math.floor((16 * 1024 * 1024) / shared.length));
-      // The messages past the limit are charged as recorded, so not every event fits the budget:
-      // the span keeps its newest events and counts the rest as dropped.
+      expect(parsed).toHaveLength(0);
+      // Ordinary event copies consume the queue budget. Keep the newest and count the rest.
       await hue.flush();
       expect(hue.transport.getReport().droppedSpans).toBe(0);
+      const sharedRecord = endpoint.accepted().find((span) => span.name === "shared-message")!;
+      const sharedEvent = sharedRecord.events!.at(-1)!;
+      expect(sharedEvent.name).toBe("event-127");
+      for (const key of ["gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"])
+        expect(
+          sharedEvent.attributes!.find((attribute) => attribute.key === key)!.value.stringValue,
+        ).toBe(shared);
       const record = endpoint.accepted().find((span) => span.name === "distinct-messages")!;
       const kept = record.events!.length;
+      expect(kept).toBeGreaterThan(0);
       expect(kept).toBeLessThan(distinct.length);
       expect(record.events!.at(-1)!.name).toBe(`event-${distinct.length - 1}`);
       expect(record.droppedEventsCount).toBe(distinct.length - kept);
     } finally {
       spy.mockRestore();
+      await hue.shutdownSafe();
+      await endpoint.server.stop(true);
+    }
+  });
+
+  test("admission bounds inspection of distinct span-own messages per record", async () => {
+    const MiB = 1024 * 1024;
+    const endpoint = receiver("success", undefined, undefined, () => ({
+      headers: { "Hue-Max-Value-Bytes": String(8 * MiB) },
+    }));
+    const hue = createHue({
+      apiKey,
+      serviceName: "inline-files-inspection-bound",
+      captureContent: true,
+      baseUrl: endpoint.url,
+      maxQueueBytes: 32 * MiB,
+    });
+    const messages = [1, 2, 3].map((seed) =>
+      JSON.stringify([
+        {
+          role: "user",
+          parts: [
+            {
+              type: "blob",
+              modality: "document",
+              mime_type: "application/pdf",
+              content: Buffer.alloc(4 * MiB, seed).toString("base64"),
+            },
+          ],
+        },
+      ]),
+    );
+    const parsed: string[] = [];
+    const parse = JSON.parse;
+    let spy: ReturnType<typeof spyOn> | undefined;
+    try {
+      hue.tracer.startSpan("negotiate-value-cap").end();
+      await hue.flush();
+      // Each message fits the negotiated value cap. Together they exceed 16 MiB of text.
+      expect(messages.every((text) => text.length < 8 * MiB)).toBe(true);
+      expect(messages.reduce((sum, text) => sum + text.length, 0)).toBeGreaterThan(16 * MiB);
+      spy = spyOn(JSON, "parse").mockImplementation(((text: string, reviver?: never) => {
+        if (messages.includes(text)) parsed.push(text);
+        return parse(text, reviver);
+      }) as typeof JSON.parse);
+      const span = hue.tracer.startSpan("bounded-own-inspection");
+      span.setAttributes({
+        "gen_ai.input.messages": messages[0]!,
+        "gen_ai.output.messages": messages[1]!,
+        "ai.prompt.messages": messages[2]!,
+      });
+      span.end();
+      expect(parsed).toEqual(messages.slice(0, 2));
+      spy.mockRestore();
+      spy = undefined;
+      await hue.flush();
+      expect(endpoint.accepted().some((record) => record.name === "bounded-own-inspection")).toBe(
+        true,
+      );
+      expect(hue.transport.getReport()).toMatchObject({ droppedSpans: 0, failedSpans: 0 });
+    } finally {
+      spy?.mockRestore();
       await hue.shutdownSafe();
       await endpoint.server.stop(true);
     }
@@ -4403,9 +4481,12 @@ describe("Queued telemetry snapshots", () => {
     });
     const resourceValues = ["resource-before"];
     const scopeValues = ["scope-before"];
-    const attributes = { nested: ["attribute-before"] };
+    const messages = JSON.stringify([
+      { role: "user", parts: [{ type: "blob", mime_type: "application/pdf", content: "AQID" }] },
+    ]);
+    const attributes = { nested: ["attribute-before"], "gen_ai.input.messages": messages };
     const bytes = new Uint8Array([1, 2, 3]);
-    const body = { value: "body-before", bytes };
+    const body = { value: "body-before", bytes, nested: { "gen_ai.input.messages": messages } };
     const provider = new LoggerProvider({
       resource: resourceFromAttributes({ example: resourceValues }),
       processors: [transport.logRecordProcessor],
@@ -4420,11 +4501,17 @@ describe("Queued telemetry snapshots", () => {
       body.value = "mutated-secret".repeat(100000);
       bytes.fill(255);
       attributes.nested[0] = "attribute-mutated";
+      attributes["gen_ai.input.messages"] = "attribute-mutated";
+      body.nested["gen_ai.input.messages"] = "body-mutated";
       resourceValues[0] = "resource-mutated";
       scopeValues[0] = "scope-mutated";
       expect(transport.getReport().pendingBytes).toBe(queued.pendingBytes);
       await provider.forceFlush();
       expect((await transport.flush()).acceptedLogs).toBe(1);
+      const record = endpoint.requests.flatMap((request) => request.records)[0]!;
+      expect(attr(record, "gen_ai.input.messages")?.stringValue).toBe(messages);
+      const nested = record.body!.kvlistValue!.values.find((item) => item.key === "nested")!;
+      expect(nested.value.kvlistValue!.values[0]!.value.stringValue).toBe(messages);
       const raw = endpoint.requests.map((request) => request.raw).join(" ");
       for (const original of [
         "body-before",

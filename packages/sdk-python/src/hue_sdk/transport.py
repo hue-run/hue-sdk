@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from math import isfinite
@@ -31,13 +31,19 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import get_current_span
 
 from ._blobs import (
+    BLOBS_KEY,
     FALLBACK_MESSAGES,
+    MAX_BLOB_ENTRIES,
+    ExplicitFile,
+    Held,
     Tally,
     Uploads,
+    _blob_entry,
     held_of,
     place_spans,
     upload_budget_seconds,
 )
+from ._inline_files import is_media_name
 from ._limits import BATCH_TARGET_BYTES as BATCH_TARGET_BYTES
 from ._limits import DROPPED_RECORDS_KEY as DROPPED_RECORDS_KEY
 from ._limits import MAX_CONTENT_BYTES as MAX_CONTENT_BYTES
@@ -127,11 +133,13 @@ class ExportStatus:
     trace acknowledgement lacked the ``Hue-Pending-Spans`` header, so the receiver predates
     live-span placeholders and this client stopped sending them.
 
-    ``uploaded_values`` counts span values over Hue's inline limit uploaded apart from their
-    spans (or already stored by Hue), each listed under the span's ``hue.blobs`` with its first
-    16 KiB kept inline; ``upload_fallbacks`` counts the ones that could not be uploaded and were
-    exported cut to the limit (an inline file as its digest), each reported in a warning issue.
-    Neither affects ``ok``.
+    ``uploaded_values`` counts whole span attributes, inline media parts, and opted-in file
+    helpers uploaded apart from their spans (or already stored by Hue). Whole attributes keep
+    a 16 KiB prefix; binary media keeps digest metadata; file helpers keep their event metadata.
+    Each accepted upload adds a ``hue.blobs`` reference. ``upload_fallbacks`` counts requested
+    uploads that fail or cannot be admitted, including dropped file helper events or references.
+    Fallbacks keep the available inline content or metadata and produce warning issues.
+    Neither counter affects ``ok``.
     """
 
     failed_trace_batches: int
@@ -825,7 +833,8 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
 
     @property
     def uploads(self) -> tuple[int, int]:
-        """Values uploaded, and values that fell back to the inline cut, so far."""
+        """Uploaded whole attributes, media parts and opted-in file helpers, and requested
+        uploads that failed or could not be admitted, so far."""
         with self._lock:
             return self._uploaded, self._upload_fallbacks
 
@@ -848,28 +857,128 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         entries = [(index, span, held) for index, span, held in holding if held is not None]
         if uploads is None or not entries:
             return spans
+        deadline = monotonic() + upload_budget_seconds(uploads.timeout)
         placed, tally = place_spans(
             [
-                (span.attributes or {}, held, _record_trace_id(span) or "")
+                (
+                    span.attributes or {},
+                    Held(
+                        values=held.values,
+                        cut=held.cut,
+                        digests=held.digests,
+                        inspected=held.inspected,
+                    ),
+                    _record_trace_id(span) or "",
+                )
                 for _, span, held in entries
             ],
             uploader=uploads.uploader,
             memo=uploads.memo,
             value_bytes=self._limits.current.value_bytes,
-            deadline=monotonic() + upload_budget_seconds(uploads.timeout),
+            deadline=deadline,
             wait=self._wait_for_rate,
         )
         result = list(spans)
         for (index, span, held), attributes in zip(entries, placed, strict=True):
-            result[index] = replace_span(span, attributes=attributes)
-            # The placed copy is what this export sends, its retries included: the queued copy
-            # lets go of its whole values with their budget, so no more is held than it admits.
-            held.values.clear()
-            held.files.clear()
-            held.digests.clear()
-            held.release()
+            trace_id = _record_trace_id(span) or ""
+            record = replace_span(span, attributes=attributes)
+            try:
+                files = self._surviving_files(held.files, record, tally)
+                if files:
+                    listed = attributes.get(BLOBS_KEY)
+                    baseline = (
+                        [item for item in listed if isinstance(item, str)]
+                        if isinstance(listed, (list, tuple))
+                        else []
+                    )
+                    slots = max(0, MAX_BLOB_ENTRIES - len(baseline))
+                    for _ in files[slots:]:
+                        tally.fallback("budget", trace_id)
+                    files = files[:slots]
+                    provisional = [self._file_entry(file) for file in files]
+                    fitted = self._fit(
+                        replace_span(
+                            record, attributes={**attributes, BLOBS_KEY: [*baseline, *provisional]}
+                        )
+                    )
+                    if fitted is None:
+                        for _ in files:
+                            tally.fallback("budget", trace_id)
+                    else:
+                        record = fitted[0]
+                        files = self._surviving_files(files, record, tally)
+                        fitted_attributes = dict(record.attributes or {})
+                        listed = fitted_attributes.get(BLOBS_KEY)
+                        references = list(listed) if isinstance(listed, (list, tuple)) else []
+                        admitted = []
+                        for file in files:
+                            entry = self._file_entry(file)
+                            try:
+                                position = references.index(entry, len(baseline))
+                            except ValueError:
+                                tally.fallback("budget", trace_id)
+                            else:
+                                references.pop(position)
+                                admitted.append(file)
+                        # Only baseline references survive until actual uploads succeed.
+                        existing = references[: len(baseline)]
+                        if existing:
+                            fitted_attributes[BLOBS_KEY] = existing
+                        else:
+                            fitted_attributes.pop(BLOBS_KEY, None)
+                        uploaded, helper_tally = place_spans(
+                            [(fitted_attributes, Held(files=admitted, inspected=set()), trace_id)],
+                            uploader=uploads.uploader,
+                            memo=uploads.memo,
+                            value_bytes=self._limits.current.value_bytes,
+                            deadline=deadline,
+                            wait=self._wait_for_rate,
+                        )
+                        record = replace_span(record, attributes=uploaded[0])
+                        tally.uploaded += helper_tally.uploaded
+                        for reason, (count, traces) in helper_tally.fallbacks.items():
+                            previous, named = tally.fallbacks.get(reason, (0, set()))
+                            tally.fallbacks[reason] = (previous + count, named | traces)
+                result[index] = record
+            finally:
+                # Release the queued copy once, including helper requests rejected by admission.
+                held.values.clear()
+                held.files.clear()
+                held.digests.clear()
+                held.release()
         self._report_uploads(tally)
         return result
+
+    @staticmethod
+    def _file_entry(file: ExplicitFile) -> str:
+        return _blob_entry(
+            f"event:hue.file:{file.digest[0]}", *file.digest, file.content_type, file.name
+        )
+
+    @staticmethod
+    def _surviving_files(files: list[ExplicitFile], span: Any, tally: Tally) -> list[ExplicitFile]:
+        """Each matching surviving event admits one staged file, including repeated digests."""
+        consumed: set[int] = set()
+        surviving = []
+        for file in files:
+            for index, event in enumerate(span.events or ()):
+                fields = event.attributes or {}
+                if (
+                    index not in consumed
+                    and event.name == "hue.file"
+                    and event.timestamp == file.timestamp
+                    and fields.get("hue.file.sha256") == file.digest[0]
+                    and fields.get("hue.file.size") == file.digest[1]
+                    and fields.get("hue.file.media_type") == file.content_type
+                    and fields.get("hue.file.role") == file.role
+                ):
+                    consumed.add(index)
+                    name = fields.get("hue.file.name")
+                    surviving.append(replace(file, name=name if is_media_name(name) else None))
+                    break
+            else:
+                tally.fallback("budget", _record_trace_id(span) or "")
+        return surviving
 
     def _report_uploads(self, tally: Tally) -> None:
         fallbacks = sum(count for count, _ in tally.fallbacks.values())

@@ -335,7 +335,7 @@ function attributes<T extends Record<string, unknown>>(
         [
           key,
           redactValue(
-            scrubToolCredentials(key, hashInlineFiles(key, value)),
+            scrubToolCredentials(key, own ? hashInlineFiles(key, value) : value),
             `${path}.${key}`,
             options,
             budget,

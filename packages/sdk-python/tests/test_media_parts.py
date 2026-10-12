@@ -10,6 +10,7 @@ import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -20,13 +21,23 @@ from opentelemetry.sdk._logs import ReadWriteLogRecord
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event as SpanEvent
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import Link, SpanContext, TraceFlags
 from test_blobs import KEY, attrs, blobs, client, listed, message_with_image, sha256
 from test_blobs import hue_store as hue_store
 
 from hue_sdk import Hue
-from hue_sdk._blobs import BlobUploader, HeldValues, Uploads, held_of, held_size
+from hue_sdk._blobs import (
+    BlobUploader,
+    ExplicitFile,
+    Held,
+    HeldValues,
+    Uploads,
+    attach_held,
+    held_of,
+    held_size,
+)
 from hue_sdk._inline_files import (
     INLINE_FILE_TEXT_PER_RECORD,
     MAX_INLINE_FILE_TEXT,
@@ -36,6 +47,7 @@ from hue_sdk._inline_files import (
     may_inline_files,
 )
 from hue_sdk._limits import cut_utf8
+from hue_sdk._records import replace_span
 from hue_sdk.snapshots import Hold, _ValueBudget, snapshot_log, snapshot_span
 
 ATTRIBUTE = "gen_ai.input.messages"
@@ -190,7 +202,7 @@ def test_media_and_explicit_files_share_trace_digest_and_reservation(hue_store, 
     assert blobs(hue_store.span("media again"))[0]["sha256"] == digest
 
 
-def test_failed_media_and_explicit_upload_share_cached_outcome(hue_store):
+def test_failed_media_outcome_is_evicted_for_explicit_retry(hue_store):
     data = b"synthetic refused media"
     hue_store.reserve = lambda _: (409, {}, True)
     with client(hue_store) as hue:
@@ -203,7 +215,7 @@ def test_failed_media_and_explicit_upload_share_cached_outcome(hue_store):
             assert hue.force_flush()
         assert hue.force_flush()
         assert hue.export_status.upload_fallbacks == 2
-    assert len(hue_store.reservations) == 1
+    assert len(hue_store.reservations) == 2
     assert hue_store.puts == []
     assert entries(hue_store.span("media")) == entries(hue_store.span("file")) == []
     assert len(hue_store.span("file").events) == 1
@@ -311,11 +323,11 @@ def test_only_own_message_attributes_upload(hue_store):
             assert hue.force_flush()
         record = hue_store.span("ownership")
         assert attrs(record)["custom.message"].string_value == message
-        assert_image_digest(attrs(record.events[0])[ATTRIBUTE].string_value, data)
-        assert_image_digest(attrs(record.links[0])[ATTRIBUTE].string_value, data)
+        assert attrs(record.events[0])[ATTRIBUTE].string_value == message
+        assert attrs(record.links[0])[ATTRIBUTE].string_value == message
         assert len(hue_store.logs) == 2
         (log,) = [log for log in hue_store.logs if log.body.string_value == message]
-        assert_image_digest(attrs(log)[ATTRIBUTE].string_value, data)
+        assert attrs(log)[ATTRIBUTE].string_value == message
         assert entries(record) == [] and all(entries(log) == [] for log in hue_store.logs)
         assert hue_store.reservations == hue_store.puts == hue_store.completions == []
     finally:
@@ -374,8 +386,11 @@ def test_declared_text_stays_utf8_and_decoded_threshold_controls_upload(hue_stor
 
 
 def test_unicode_names_and_conservative_media_prefilter():
-    assert is_media_name("🎧" * 256) and is_media_name(" ")
-    for name in ("", "🎧" * 257, "bad\x00", "bad\x7f", "bad\x85", "bad\ud800"):
+    assert is_media_name("🎧" * 128) and is_media_name("é" * 256)
+    assert is_media_name("bad\x85")
+    assert is_media_name("\x85")
+    assert not is_media_name("\ufeff")
+    for name in ("", " ", "🎧" * 129, "é" * 257, "bad\x00", "bad\x7f", "bad\ud800"):
         assert not is_media_name(name)
     for marker in (
         "blob",
@@ -537,7 +552,7 @@ def test_oversized_media_refusal_acknowledges_one_fallback(hue_store, oversized_
 
 
 @pytest.mark.parametrize("location", ["resource", "event", "link", "log"])
-def test_nested_media_digests_before_value_and_record_admission(
+def test_nested_media_uses_ordinary_value_and_record_admission(
     hue_store, uploads, monkeypatch, location
 ):
     import hue_sdk.snapshots as snapshots
@@ -566,7 +581,7 @@ def test_nested_media_digests_before_value_and_record_admission(
             **options,
         )
         value = copied.log_record.attributes[ATTRIBUTE]
-        assert "hue.truncated" not in copied.log_record.attributes
+        assert copied.log_record.attributes["hue.truncated"] == (ATTRIBUTE,)
         assert copied.dropped_attributes == 0
     else:
         context = SpanContext(1, 3, False, TraceFlags(TraceFlags.SAMPLED))
@@ -577,15 +592,18 @@ def test_nested_media_digests_before_value_and_record_admission(
         }
         copied = snapshot_span(external_span(**fields[location]), **options)
         assert copied.dropped_events == copied.dropped_links == 0
-        assert "hue.truncated" not in copied.attributes
+        assert copied.attributes["hue.truncated"] == (
+            {"resource": "resource.", "event": "event:provider.event:", "link": "link:"}[location]
+            + ATTRIBUTE,
+        )
         if location == "resource":
             value = copied.resource.attributes[ATTRIBUTE]
         else:
             items = copied.events if location == "event" else copied.links
             assert len(items) == 1
             value = items[0].attributes[ATTRIBUTE]
-    assert_image_digest(value, data)
-    assert inspected == [(None, None)]
+    assert value == cut_utf8(message, 512)
+    assert inspected == []
     assert held_of(copied) is None and uploads.held.held == 0
     assert uploads.memo._entries == {} and uploads.memo._size == 0
     assert "hue.blobs" not in (
@@ -690,10 +708,12 @@ def test_nested_media_same_pointer_preserves_own_upload(hue_store, monkeypatch):
         receipts, before, resource_value = observations[0]
         assert receipts[ATTRIBUTE] == {"/0/parts/1/content": (sha256(data), len(data))}
         assert snapshots[0] == (receipts[ATTRIBUTE], *before)
-        assert_image_digest(resource_value, b"different resource bytes")
+        assert resource_value == message_with_image(b"different resource bytes")
         record = hue_store.span("collision")
-        assert_image_digest(attrs(record.events[0])[ATTRIBUTE].string_value, b"different event")
-        assert_image_digest(attrs(record.links[0])[ATTRIBUTE].string_value, b"link")
+        assert attrs(record.events[0])[ATTRIBUTE].string_value == message_with_image(
+            b"different event"
+        )
+        assert attrs(record.links[0])[ATTRIBUTE].string_value == message_with_image(b"link")
         assert blobs(record) == [
             {
                 "key": f"{ATTRIBUTE}#/0/parts/1",
@@ -765,3 +785,558 @@ def test_scope_media_and_log_body_keep_ordinary_copying(record):
         assert copied.log_record.attributes["hue.truncated"] == ("body",)
     assert copied.instrumentation_scope.attributes[ATTRIBUTE] is message
     assert copied.instrumentation_scope is not scope
+
+
+def test_shared_media_corpus_admission_without_hold():
+    cases = json.loads((Path(__file__).parent / "fixtures/media-parts/cases.json").read_text())[
+        "fixtures"
+    ]
+    for case in cases:
+        copied = snapshot_span(
+            external_span(
+                attributes={
+                    case["attribute"]: json.dumps(case["messages"], ensure_ascii=False),
+                }
+            )
+        )
+        assert json.loads(copied.attributes[case["attribute"]]) == case["failure"]["messages"], (
+            case["id"]
+        )
+        assert "hue.blobs" not in copied.attributes, case["id"]
+
+
+@pytest.mark.parametrize("boundary", ["network", "server", "auth", "rate", "put"])
+def test_transient_upload_pause_evicts_failure_and_recovers(
+    uploads, hue_store, monkeypatch, boundary
+):
+    import hue_sdk._blobs as blob_module
+
+    clock = [time.monotonic()]
+    monkeypatch.setattr(blob_module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(blob_module, "_RETRY_DELAY_SECONDS", 0)
+    uploader = uploads.uploader
+    original = uploader._request
+    calls = []
+
+    def request(method, url, *args):
+        if boundary == "network" and url.endswith("/blobs"):
+            calls.append(url)
+            return None
+        return original(method, url, *args)
+
+    monkeypatch.setattr(uploader, "_request", request)
+    status = {"server": 503, "auth": 403, "rate": 429}.get(boundary)
+    if status:
+        hue_store.reserve = lambda _: (status, {"Retry-After": "0"}, True)
+    if boundary == "put":
+        hue_store.put = lambda _: 503
+    data = b"retry identical bytes"
+
+    def store():
+        return uploader.store(
+            "1" * 32,
+            ATTRIBUTE,
+            data,
+            "image/png",
+            (sha256(data), len(data)),
+            clock[0] + 5,
+            lambda _: False,
+        )
+
+    assert not store().ok
+    assert uploader._outcomes == {} and uploader.available()
+    assert uploader._paused_until > clock[0]
+    requests = len(hue_store.reservations), len(hue_store.puts), len(calls)
+    assert not store().ok
+    assert requests == (len(hue_store.reservations), len(hue_store.puts), len(calls))
+    clock[0] = uploader._paused_until + 1
+    monkeypatch.setattr(uploader, "_request", original)
+    hue_store.reserve = lambda _: None
+    hue_store.put = lambda _: 200
+    assert store().ok
+    assert hue_store.objects[f"{'1' * 32}/{sha256(data)}"] == (data, "image/png")
+    reservations = len(hue_store.reservations)
+    assert store().ok and len(hue_store.reservations) == reservations
+
+
+@pytest.mark.parametrize("status", [400, 409, 413])
+def test_content_local_upload_refusal_does_not_pause_next_value(uploads, hue_store, status):
+    hue_store.reserve = lambda n: (status, {}, True) if n == 1 else None
+    for index, data in enumerate((b"refused", b"accepted")):
+        outcome = uploads.uploader.store(
+            "1" * 32,
+            ATTRIBUTE,
+            data,
+            "image/png",
+            (sha256(data), len(data)),
+            time.monotonic() + 5,
+            lambda _: False,
+        )
+        assert outcome.ok == bool(index)
+        assert uploads.uploader._paused_until == 0
+    assert len(hue_store.reservations) == 2 and len(hue_store.puts) == 1
+
+
+def test_zero_byte_upload_and_helper_keep_metadata_without_requests(uploads, hue_store):
+    outcome = uploads.uploader.store(
+        "1" * 32,
+        ATTRIBUTE,
+        b"",
+        "image/png",
+        (sha256(b""), 0),
+        time.monotonic() + 5,
+        lambda _: False,
+    )
+    assert not outcome.ok and uploads.uploader._outcomes == {}
+    with client(hue_store) as hue:
+        with hue.span("empty helper") as span:
+            span.record_file(role="input", media_type="image/png", data=b"", upload=True)
+        assert hue.force_flush()
+        assert hue.export_status.uploaded_values == hue.export_status.upload_fallbacks == 0
+        assert hue.export_status.instrumentation_failures == 0
+        assert hue._uploads.held.held == 0
+    (event,) = hue_store.span("empty helper").events
+    assert attrs(event)["hue.file.sha256"].string_value == sha256(b"")
+    assert attrs(event)["hue.file.size"].int_value == 0
+    assert entries(hue_store.span("empty helper")) == []
+    assert hue_store.reservations == hue_store.puts == hue_store.completions == []
+
+
+def test_existing_409_upload_ref_is_accepted_without_put(uploads, hue_store):
+    hue_store.reserve = lambda _: (
+        409,
+        {},
+        json.dumps(
+            {
+                "status": "exists",
+                "ref": {"content_type": "image/gif"},
+            }
+        ).encode(),
+    )
+    outcome = uploads.uploader.store(
+        "1" * 32,
+        ATTRIBUTE,
+        b"gif",
+        "image/gif",
+        (sha256(b"gif"), 3),
+        time.monotonic() + 5,
+        lambda _: False,
+    )
+    assert outcome.ok and outcome.content_type == "image/gif"
+    assert len(hue_store.reservations) == 1
+    assert hue_store.puts == hue_store.completions == []
+
+
+@pytest.mark.parametrize("boundary", ["network", "server", "rate"])
+def test_completion_failure_preserves_receipt_and_pauses_other_uploads(
+    uploads, hue_store, monkeypatch, boundary
+):
+    import hue_sdk._blobs as blob_module
+
+    clock = [time.monotonic()]
+    monkeypatch.setattr(blob_module, "monotonic", lambda: clock[0])
+    original = uploads.uploader._request
+
+    def request(method, url, *args):
+        if url.endswith("/complete"):
+            if boundary == "network":
+                return None
+            reply = original(method, url, *args)
+            reply.status = 503 if boundary == "server" else 429
+            return reply
+        return original(method, url, *args)
+
+    monkeypatch.setattr(uploads.uploader, "_request", request)
+
+    def store(data):
+        return uploads.uploader.store(
+            "1" * 32,
+            ATTRIBUTE,
+            data,
+            "image/png",
+            (sha256(data), len(data)),
+            clock[0] + 5,
+            lambda _: False,
+        )
+
+    assert store(b"first").ok
+    assert uploads.uploader._paused_until > clock[0]
+    assert store(b"first").ok
+    assert not store(b"second").ok and len(hue_store.reservations) == 1
+    clock[0] = uploads.uploader._paused_until + 1
+    monkeypatch.setattr(uploads.uploader, "_request", original)
+    assert store(b"second").ok and len(hue_store.reservations) == 2
+
+
+@pytest.mark.parametrize(
+    "name,valid",
+    [
+        ("🎧" * 128, True),
+        ("é" * 256, True),
+        ("ok\x85", True),
+        ("🎧" * 129, False),
+        ("é" * 257, False),
+        (" ", False),
+        ("bad\x00", False),
+        ("bad\x7f", False),
+        ("bad\ud800", False),
+    ],
+)
+def test_helper_name_validation_uses_utf16_and_preserves_upload(hue_store, name, valid):
+    with client(hue_store) as hue:
+        with hue.span("named helper") as span:
+            span.record_file(
+                role="input", media_type="image/png", data=b"name", name=name, upload=True
+            )
+        assert hue.force_flush() == valid
+        assert hue.export_status.uploaded_values == 1
+        assert hue.export_status.instrumentation_failures == int(not valid)
+        assert hue._uploads.held.held == 0
+    (entry,) = blobs(hue_store.span("named helper"))
+    event = attrs(hue_store.span("named helper").events[0])
+    assert entry.get("name") == (name if valid else None)
+    assert ("hue.file.name" in event) == valid
+    assert len(hue_store.reservations) == 1
+
+
+@pytest.mark.parametrize(
+    "part,pointer,mime,name,digested",
+    [
+        (
+            {
+                "inlineData": None,
+                "inline_data": {"mimeType": None, "mime_type": "image/png", "data": "eA=="},
+            },
+            "/inline_data/data",
+            "image/png",
+            None,
+            {"inlineData": None, "inline_data": {"mimeType": None, "mime_type": "image/png"}},
+        ),
+        (
+            {
+                "image": None,
+                "document": {"format": "pdf", "name": "source.pdf", "source": {"bytes": "eA=="}},
+            },
+            "/document/source/bytes",
+            "application/pdf",
+            "source.pdf",
+            {"image": None, "document": {"format": "pdf", "name": "source.pdf", "source": {}}},
+        ),
+        (
+            {
+                "type": "blob",
+                "mime_type": None,
+                "mimeType": "image/png",
+                "name": None,
+                "filename": "source.png",
+                "content": "eA==",
+            },
+            "/content",
+            "image/png",
+            "source.png",
+            {
+                "type": "blob",
+                "mime_type": None,
+                "mimeType": "image/png",
+                "name": None,
+                "filename": "source.png",
+            },
+        ),
+        (
+            {"image": {"format": "gif", "source": {"bytes": "eA=="}}},
+            "/image/source/bytes",
+            "image/gif",
+            None,
+            {"image": {"format": "gif", "source": {}}},
+        ),
+    ],
+)
+def test_provider_none_alternates_survive_admission_and_upload(
+    hue_store, part, pointer, mime, name, digested
+):
+    file = content_path(part)
+    assert file is not None and (file.pointer, file.content_type, file.name) == (
+        pointer,
+        mime,
+        name,
+    )
+    message = json.dumps([{"parts": [part]}])
+    copied = snapshot_span(external_span(attributes={ATTRIBUTE: message}))
+    assert json.loads(copied.attributes[ATTRIBUTE])[0]["parts"][0] == {
+        **digested,
+        "sha256": sha256(b"x"),
+        "size": 1,
+    }
+    with client(hue_store) as hue:
+        with hue.span("alternate") as span:
+            span.set_attribute(ATTRIBUTE, message)
+        assert hue.force_flush()
+    (entry,) = blobs(hue_store.span("alternate"))
+    assert entry["key"] == ATTRIBUTE + "#/0/parts/0"
+    assert entry["content_type"] == mime and entry.get("name") == name
+
+
+def staged_helpers(hue, files, *, events=None, attributes=None):
+    if events is None:
+        events = [
+            SpanEvent(
+                "hue.file",
+                {
+                    "hue.file.sha256": file.digest[0],
+                    "hue.file.size": file.digest[1],
+                    "hue.file.media_type": file.content_type,
+                    "hue.file.role": file.role,
+                    **({"hue.file.name": file.name} if file.name is not None else {}),
+                },
+                file.timestamp,
+            )
+            for file in files
+        ]
+    size = sum(held_size(file.data) + 1024 for file in files)
+    assert hue._uploads.held.reserve(size)
+    held = Held(files=list(files), size=size, budget=hue._uploads.held, inspected=set())
+    span = external_span(events=events, attributes=attributes or {})
+    attach_held(span, held)
+    return span, held
+
+
+def helper(data=b"helper", *, name="original.png", timestamp=1):
+    return ExplicitFile(data, (sha256(data), len(data)), "image/png", name, timestamp=timestamp)
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["missing", "event_name", "timestamp", "sha256", "size", "media_type", "role"]
+)
+def test_helper_upload_requires_surviving_matching_event(hue_store, mismatch):
+    file = helper()
+    fields = {
+        "hue.file.sha256": file.digest[0],
+        "hue.file.size": file.digest[1],
+        "hue.file.media_type": file.content_type,
+        "hue.file.role": file.role,
+    }
+    if mismatch in ("sha256", "size", "media_type", "role"):
+        fields["hue.file." + mismatch] = 99 if mismatch == "size" else "different"
+    event = SpanEvent(
+        "other" if mismatch == "event_name" else "hue.file",
+        fields,
+        2 if mismatch == "timestamp" else 1,
+    )
+    with client(hue_store) as hue:
+        span, held = staged_helpers(hue, [file], events=[] if mismatch == "missing" else [event])
+        (record,) = hue._span_exporter._place_held([span])
+        assert "hue.blobs" not in record.attributes
+        assert hue.export_status.upload_fallbacks == 1 and hue.export_status.uploaded_values == 0
+        assert held.files == [] and hue._uploads.held.held == 0
+        held.release()
+        assert hue._uploads.held.held == 0
+    assert hue_store.reservations == []
+
+
+@pytest.mark.parametrize("name", ["surviving.png", "🎧" * 129, "bad\x00"])
+def test_duplicate_helpers_consume_one_event_and_use_surviving_name(hue_store, name):
+    file = helper()
+    with client(hue_store) as hue:
+        event = SpanEvent(
+            "hue.file",
+            {
+                "hue.file.sha256": file.digest[0],
+                "hue.file.size": file.digest[1],
+                "hue.file.media_type": file.content_type,
+                "hue.file.role": file.role,
+                "hue.file.name": name,
+            },
+            1,
+        )
+        span, held = staged_helpers(hue, [file, file], events=[event])
+        (record,) = hue._span_exporter._place_held([span])
+        (entry,) = [json.loads(item) for item in record.attributes["hue.blobs"]]
+        assert entry.get("name") == (name if is_media_name(name) else None)
+        assert hue.export_status.uploaded_values == hue.export_status.upload_fallbacks == 1
+        assert held.files == [] and hue._uploads.held.held == 0
+    assert len(hue_store.reservations) == len(hue_store.puts) == 1
+
+
+@pytest.mark.parametrize("boundary", ["record", "event", "reference", "baseline", "slots"])
+def test_provisional_helper_admission_rejects_before_upload(hue_store, monkeypatch, boundary):
+    file = helper()
+    with client(hue_store) as hue:
+        exporter = hue._span_exporter
+        baseline = [exporter._file_entry(file)] if boundary == "baseline" else []
+        if boundary == "slots":
+            baseline = [
+                json.dumps(
+                    {
+                        "key": f"existing:{n}",
+                        "sha256": sha256(str(n)),
+                        "size": 1,
+                        "content_type": "image/png",
+                    }
+                )
+                for n in range(64)
+            ]
+        span, held = staged_helpers(
+            hue, [file], attributes={"hue.blobs": baseline} if baseline else {}
+        )
+
+        def fit(record):
+            if boundary == "record":
+                return None
+            if boundary == "event":
+                return replace_span(record, events=[]), 0
+            return replace_span(record, attributes={"hue.blobs": baseline}), 0
+
+        monkeypatch.setattr(exporter, "_fit", fit)
+        (record,) = exporter._place_held([span])
+        assert list(record.attributes.get("hue.blobs", [])) == baseline
+        assert hue.export_status.upload_fallbacks == 1 and hue.export_status.uploaded_values == 0
+        assert held.files == [] and hue._uploads.held.held == 0
+    assert hue_store.reservations == hue_store.puts == []
+
+
+def test_real_helper_request_budget_rejects_before_upload(hue_store):
+    with client(hue_store) as hue:
+        exporter = hue._span_exporter
+        exporter._limits._current = replace(exporter._limits.current, decoded_bytes=2048)
+        span, held = staged_helpers(
+            hue, [helper(b"unfittable media")], attributes={"custom.metadata": "X" * 4096}
+        )
+        assert exporter.export([span]) is SpanExportResult.FAILURE
+        status = hue.export_status
+        assert status.failed_trace_batches == 1
+        dropped = [issue for issue in hue.export_issues() if issue.kind == "dropped"]
+        assert len(dropped) == 1 and dropped[0].count == 1
+        assert status.uploaded_values == 0 and status.upload_fallbacks == 1
+        warnings = [issue for issue in hue.export_issues() if issue.kind == "warning"]
+        assert len(warnings) == 1 and warnings[0].count == 1
+        assert held.files == [] and hue._uploads.held.held == 0
+    assert hue_store.spans == []
+    assert hue_store.reservations == hue_store.puts == hue_store.completions == []
+
+
+def test_real_fit_identical_surviving_helpers_keep_two_references_with_one_upload(hue_store):
+    file = helper(b"identical helper media", name="same.png")
+    with client(hue_store) as hue:
+        exporter = hue._span_exporter
+        span, held = staged_helpers(hue, [file, file])
+        assert exporter.export([span]) is SpanExportResult.SUCCESS
+        received = hue_store.span("external")
+        assert len(received.events) == 2 and received.events[0] == received.events[1]
+        assert entries(received) == [exporter._file_entry(file)] * 2
+        assert hue.export_status.uploaded_values == 2
+        assert hue.export_status.upload_fallbacks == 0
+        assert held.files == [] and hue._uploads.held.held == 0
+    assert len(hue_store.reservations) == len(hue_store.puts) == len(hue_store.completions) == 1
+
+
+def test_real_helper_fit_preserves_identical_baseline_reference_while_shedding(hue_store):
+    file = helper(b"baseline collision media", name="collision.png")
+    with client(hue_store) as hue:
+        exporter = hue._span_exporter
+        exporter._limits._current = replace(exporter._limits.current, decoded_bytes=2048)
+        baseline = exporter._file_entry(file)
+        span, held = staged_helpers(
+            hue,
+            [file],
+            attributes={"hue.blobs": [baseline], "gen_ai.prompt": "X" * 8192},
+        )
+        assert exporter.export([span]) is SpanExportResult.SUCCESS
+        received = hue_store.span("external")
+        assert entries(received) == [baseline, baseline]
+        assert "gen_ai.prompt" in listed(received)
+        assert hue.export_status.uploaded_values == 1
+        assert hue.export_status.upload_fallbacks == 0
+        assert held.files == [] and hue._uploads.held.held == 0
+    assert len(hue_store.reservations) == len(hue_store.puts) == len(hue_store.completions) == 1
+
+
+def test_real_helper_fit_rechecks_longer_receiver_mime_before_final_delivery(hue_store):
+    file = helper(b"existing object media", name="fitting.png")
+    content_type = "application/" + "x" * 243
+    hue_store.reserve = lambda _: (
+        200,
+        {},
+        json.dumps({"status": "exists", "ref": {"content_type": content_type}}).encode(),
+    )
+    with client(hue_store) as hue:
+        exporter = hue._span_exporter
+        span, held = staged_helpers(hue, [file])
+        provisional = replace_span(span, attributes={"hue.blobs": [exporter._file_entry(file)]})
+        decoded_bytes = exporter._encode([provisional]).ByteSize()
+        exporter._limits._current = replace(
+            exporter._limits.current, decoded_bytes=decoded_bytes + 64
+        )
+        fitted = exporter._fit(provisional)
+        assert fitted is not None and fitted[1] == decoded_bytes
+        assert exporter.export([span]) is SpanExportResult.FAILURE
+        status = hue.export_status
+        # Acknowledged uploads and span delivery are separate; delivery is not atomic.
+        assert status.uploaded_values == 1 and status.upload_fallbacks == 0
+        assert status.failed_trace_batches == 1
+        dropped = [issue for issue in hue.export_issues() if issue.kind == "dropped"]
+        assert len(dropped) == 1 and dropped[0].count == 1
+        assert held.files == [] and hue._uploads.held.held == 0
+    assert hue_store.spans == []
+    assert len(hue_store.reservations) == 1
+    assert hue_store.puts == hue_store.completions == []
+
+
+def test_helper_provisional_fit_preserves_baseline_and_counts_mixed_results(hue_store):
+    first, second = helper(b"first"), helper(b"second", timestamp=2)
+    hue_store.reserve = lambda n: (400, {}, True) if n == 2 else None
+    baseline = json.dumps(
+        {"key": "existing", "sha256": sha256(b"old"), "size": 3, "content_type": "image/png"}
+    )
+    with client(hue_store) as hue:
+        span, held = staged_helpers(hue, [first, second], attributes={"hue.blobs": [baseline]})
+        (record,) = hue._span_exporter._place_held([span])
+        references = list(record.attributes["hue.blobs"])
+        assert references[0] == baseline and len(references) == 2
+        # Concurrent helpers can reach the receiver in either order. It acknowledges
+        # the first reservation and refuses the second.
+        assert json.loads(references[1])["sha256"] == hue_store.reservations[0]["sha256"]
+        assert len(record.events) == 2
+        assert hue.export_status.uploaded_values == hue.export_status.upload_fallbacks == 1
+        assert held.files == [] and hue._uploads.held.held == 0
+    assert len(hue_store.reservations) == 2 and len(hue_store.puts) == 1
+
+
+def test_inspection_allowance_from_unheld_value_limits_export_eligibility(hue_store, monkeypatch):
+    import hue_sdk.snapshots as snapshots
+
+    small = json.dumps(
+        [{"parts": [{"type": "blob", "mime_type": "text/plain", "content": "é" * 100}]}],
+        ensure_ascii=False,
+    )
+    first, skipped = message_with_image(b"first"), message_with_image(b"skipped" * 160_000)
+    allowance = len(small.encode()) + len(first.encode())
+    monkeypatch.setattr(snapshots, "INLINE_FILE_TEXT_PER_RECORD", allowance)
+    with client(hue_store) as hue:
+        copied = snapshot_span(
+            external_span(
+                attributes={
+                    ATTRIBUTE: small,
+                    "gen_ai.output.messages": first,
+                    "ai.prompt.messages": skipped,
+                }
+            ),
+            value_bytes=512,
+            hold=Hold(hue._uploads.held, 512, uploads=hue._uploads),
+        )
+        held = held_of(copied)
+        assert held is not None
+        assert held.inspected == {ATTRIBUTE, "gen_ai.output.messages"}
+        assert ATTRIBUTE not in held.values and copied.attributes[ATTRIBUTE] == small
+        assert "ai.prompt.messages" not in held.digests
+        (record,) = hue._span_exporter._place_held([copied])
+        refs = [json.loads(item) for item in record.attributes["hue.blobs"]]
+        assert any(item["key"] == "gen_ai.output.messages#/0/parts/1" for item in refs)
+        assert any(
+            item["key"] == "ai.prompt.messages" and item["sha256"] == sha256(skipped)
+            for item in refs
+        )
+        assert hue._uploads.held.held == 0
+    assert hue_store.objects[f"{'0' * 31}1/{sha256(skipped)}"] == (
+        skipped.encode(),
+        "application/json",
+    )

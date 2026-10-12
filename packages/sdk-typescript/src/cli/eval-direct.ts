@@ -48,6 +48,15 @@ export const outputExtensions: Readonly<Record<string, string>> = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".mp3": "audio/mpeg",
+  ".mpeg": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".webm": "audio/webm",
+  ".mp4": "audio/mp4",
+  ".m4a": "audio/mp4",
+  ".flac": "audio/flac",
 };
 for (const type of Object.values(outputExtensions))
   if (!outputContentTypes.includes(type))

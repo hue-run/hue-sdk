@@ -363,3 +363,35 @@ def test_raw_target_exception_is_not_recorded_or_returned(managed):
     span = managed.exporter.get_finished_spans()[0]
     assert span.status.description is None
     assert not span.events
+
+
+@pytest.mark.parametrize("mime", ["image/gif", "audio/wav", "audio/mpeg", "audio/pcm"])
+def test_managed_gif_and_audio_output_uploads(managed, mime):
+    def target(_context):
+        return ManagedTargetResult(output="media", files=(ManagedOutputFile("media", mime, DATA),))
+
+    response = managed.handler(target=target).handle(invocation(), HEADERS)
+    assert response.status_code == 200
+    assert managed.outcomes[0]["state"] == "succeeded"
+    assert managed.outcomes[0]["artifactIds"] == [FILE]
+    reservation = next(
+        json.loads(body) for path, _, body in managed.requests if path.endswith("/files")
+    )
+    assert reservation["contentType"] == mime and reservation["byteSize"] == len(DATA)
+    assert managed.uploaded == DATA
+
+
+@pytest.mark.parametrize("mime", ["invalid", " ", "image/png\n", "image/é", "image/" + "x" * 250])
+def test_managed_invalid_mime_fails_before_file_reservation(managed, mime):
+    def target(_context):
+        return ManagedTargetResult(output="media", files=(ManagedOutputFile("media", mime, DATA),))
+
+    response = managed.handler(target=target).handle(invocation(), HEADERS)
+    assert response.status_code == 200
+    assert managed.outcomes[0]["state"] == "error"
+    assert managed.outcomes[0]["error"] == {
+        "type": "target_error",
+        "message": "The target or input validation failed.",
+    }
+    assert not any(path.endswith("/files") or path == "/upload" for path, _, _ in managed.requests)
+    assert managed.uploaded is None

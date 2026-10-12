@@ -227,8 +227,11 @@ same span, keyed `event:hue.file:<sha256>`, while preserving the event.
 
 The event carries `hue.file.sha256`, `hue.file.role` (`input`, `attachment` or `output`),
 `hue.file.media_type` and `hue.file.size` in both capture modes. `hue.file.name` requires
-`captureContent: true`. Names must be nonempty, at most 256 characters and contain no control
-characters. Invalid records and records without an active span count as instrumentation failures.
+`captureContent: true`. Names must be nonblank after trimming, contain at most 256 UTF-16 code
+units, be well-formed Unicode and contain no C0 characters (U+0000–U+001F) or DEL (U+007F).
+Tabs, newlines, DEL and lone surrogates make a name invalid. An invalid name is omitted and
+counted as an instrumentation failure; the otherwise valid event remains. Invalid records and
+records without an active span count as instrumentation failures.
 
 ## Vercel AI SDK 6
 
@@ -380,16 +383,19 @@ and OpenAI `content` arrays. Supported byte shapes include GenAI `blob`, AI SDK 
 `inlineData` and `inline_data`, Vertex `media`, and Bedrock image and document sources.
 Remote URLs, provider file IDs and S3 references stay unchanged. Hue never fetches them.
 
-Binary media uploads from a span's own message attributes at every size. The byte field is
+Nonempty binary media in a span's own message attributes is eligible for upload at every size
+within the inspection limits. Empty byte fields stay recorded and do not upload. The byte field is
 removed and the part carries `sha256` and `size`; the span's `hue.blobs` entry points to the part,
 for example `gen_ai.input.messages#/0/parts/1`. Text media over 64 KiB of decoded bytes uploads
 with a UTF-8-safe 16 KiB prefix in its content field. Its entry points to that field, for example
 `gen_ai.input.messages#/0/parts/1/content`. Smaller text stays inline. Hue reads both these forms
 and earlier binary prefixes. If upload fails, the part keeps its digest with no blob entry.
-Log records and span events use the digest without uploading eligible media.
+Media digest replacement applies only to a span's own message attributes. Resources, events,
+links and log records preserve media content under their ordinary hold, cut or drop rules.
 
 Entries use the recorded media type and, when valid, the filename, name or title. A valid name
-is nonempty, at most 256 characters and contains no control characters. Invalid names are omitted
+is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
+characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted
 from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
 base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
 declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
@@ -563,10 +569,13 @@ work, and a `shutdownSafe()` whose budget runs out ends the uploads in flight.
 
 A value that cannot be uploaded (Hue or the store refused it or failed, the network or a deadline
 did, the receiver has no upload route, or the value is over 1 GB) is exported as before uploads
-existed: cut to the limit and listed under `hue.truncated`, an inline file as its digest. Each
+existed: whole attributes keep a prefix up to the limit and are listed under `hue.truncated`;
+media parts keep their digest without a blob entry; failed opt-in `recordFile` uploads preserve
+the file event. The explicit helper limit is 25 MiB; whole attributes retain their 1 GB limit. Each
 export reports such values in a `warning` issue per cause, whose `count` is the values and
-`traceIds` their traces, and counts them in `report.uploadFallbacks`; uploaded values are counted
-in `report.uploadedValues`. A warning never makes `flush()` throw. After a transient failure, or
+`traceIds` their traces, and counts them in `report.uploadFallbacks`; successful uploads are counted
+in `report.uploadedValues`. Both counters include whole attributes, eligible media and opt-in
+`recordFile` uploads. A warning never makes `flush()` throw. After a transient failure, or
 a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without
 the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not
 asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm.
@@ -788,7 +797,9 @@ the [managed-run guide](https://docs.hue.run/evaluations/managed-runs).
 
 `runAgentForEvaluation` adapts your application result to `{ output, files? }`.
 Files contain `filename`, `contentType`, actual `Uint8Array` data and an optional
-`primary` flag. The helper verifies input bytes, claims the invocation, saves the
+`primary` flag. The generated-file allowlist includes `image/gif`, `audio/mpeg`,
+`audio/wav`, `audio/ogg`, `audio/webm`, `audio/mp4` and `audio/flac` alongside the
+existing document, text and image types. The helper verifies input bytes, claims the invocation, saves the
 outcome and correlates its span with Hue. It never retries the agent automatically.
 Use a 120-second host request limit for the default 90-second execution and
 30-second finalization budget; your target must honor `signal`.
@@ -801,6 +812,6 @@ existing-provider flush callbacks and recovery. Local/CI runners remain availabl
 
 Use `createHueSafe(options)` for best-effort startup. Invalid initialization returns a disabled client that keeps your `onExportIssue` hook and records the reason as an instrumentation failure. Pass `enabled: false` to disable Hue without a key or a `captureContent` choice; disabled helpers still execute the application callback, and `inject()` keeps propagating the application's own trace context. `flushSafe({ timeoutMillis: 1000 })` and `shutdownSafe({ timeoutMillis: 1000 })` return `{ ok, timedOut, report }` without rejecting. Strict initialization, connection checks and `flush()` remain available for diagnostics; do not gate application readiness or responses on them.
 
-Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters; `uploadedValues` and `uploadFallbacks` count the values over the inline limit uploaded apart from their spans and exported cut instead. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production setup](https://docs.hue.run/sdks/typescript#production-setup).
+Capture/serialization/redaction/provider failures omit unsafe telemetry, record failures, and preserve the original business result/error. Async diagnostic rejections are contained; diagnostics are rate-limited. The default `maxQueueBytes` is 8 MiB across traces/logs including in-flight work, alongside the existing record cap. `pendingBytes` is a current queue gauge; `droppedSpans`, `droppedLogs` and `instrumentationFailures` are cumulative failure counters; `uploadedValues` and `uploadFallbacks` count successful uploads and upload fallbacks for whole attributes, eligible binary or large text media, and opt-in `recordFile` uploads. Whole-attribute fallbacks keep a prefix; media fallbacks keep a digest; helper upload fallbacks keep the file event. This is a telemetry budget, not a total process memory ceiling. A timeout bounds the caller and does not cancel a borrowed provider. Never retry the business operation to recover telemetry. See [production setup](https://docs.hue.run/sdks/typescript#production-setup).
 
 Queued records snapshot supported telemetry values when a span ends or a log is emitted; later caller mutations cannot change queued data. Resource attributes still awaiting detection are omitted with a sanitized warning. Later records include them after detection finishes; await resource detection before instrumentation when those attributes are required.

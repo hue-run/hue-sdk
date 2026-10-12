@@ -10,13 +10,14 @@ import {
   trace,
   type Attributes,
   type Context,
+  type HrTime,
   type Span,
   type SpanOptions as OtelSpanOptions,
   type Tracer,
 } from "@opentelemetry/api";
 import { defaultTextMapGetter, defaultTextMapSetter } from "@opentelemetry/api";
 import { SeverityNumber, type Logger } from "@opentelemetry/api-logs";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { hrTime, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources";
@@ -855,7 +856,7 @@ export class HueClient {
               : undefined;
         if (!bytes) throw new TypeError("File data must be bytes or a string");
         const digest =
-          file.upload === true && this.transport.holdsValues()
+          bytes.byteLength > 0 && file.upload === true && this.transport.holdsValues()
             ? this.transport.digestMedia(bytes, span.spanContext().traceId).sha256
             : createHash("sha256").update(bytes).digest("hex");
         // A caller-supplied digest or size must describe the same bytes.
@@ -881,16 +882,36 @@ export class HueClient {
         if (isMediaName(name)) attributes["hue.file.name"] = name;
         else this.instrumentationFailed();
       }
-      span.addEvent("hue.file", attributes);
+      const eventTime = hrTime();
+      const previous = this.fileEventTime;
+      if (
+        previous &&
+        (eventTime[0] < previous[0] ||
+          (eventTime[0] === previous[0] && eventTime[1] <= previous[1]))
+      ) {
+        eventTime[0] = previous[0];
+        eventTime[1] = previous[1] + 1;
+        if (eventTime[1] === 1_000_000_000) {
+          eventTime[0]++;
+          eventTime[1] = 0;
+        }
+      }
+      this.fileEventTime = eventTime;
+      span.addEvent("hue.file", attributes, eventTime);
       if (file.upload === true && this.transport.offloadsValues()) {
         if (
-          !bytes ||
-          !this.transport.stageMedia(span, {
-            bytes,
-            digest: { sha256, size: bytes.byteLength },
-            contentType: mediaType,
-            ...(isMediaName(name) ? { name } : {}),
-          })
+          !this.transport.stageMedia(
+            span,
+            bytes
+              ? {
+                  bytes,
+                  digest: { sha256, size: bytes.byteLength },
+                  contentType: mediaType,
+                  eventTime,
+                  ...(isMediaName(name) ? { name } : {}),
+                }
+              : undefined,
+          )
         )
           this.instrumentationFailed();
       }
@@ -901,6 +922,9 @@ export class HueClient {
 
   /** The keys of each span's content values that were cut to Hue's value cap, for `hue.truncated`. */
   private truncatedKeys = new WeakMap<Span, string[]>();
+
+  /** Distinguishes requests whose helper events otherwise have identical metadata. */
+  private fileEventTime?: HrTime;
 
   /** A content value's bounds: Hue's value cap as the receiver last advertised it. */
   private contentLimits() {

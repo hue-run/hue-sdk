@@ -358,7 +358,7 @@ class Snapshot {
         const source: unknown = descriptor.value;
         const copied = this.copy(
           shape === "attributes"
-            ? this.scrubbedBeforeCut(key, this.inlineFiles(key, source))
+            ? this.scrubbedBeforeCut(key, this.own ? this.inlineFiles(key, source) : source)
             : source,
           depth + 1,
           shape === "event" && key === "attributes" ? "attributes" : "value",

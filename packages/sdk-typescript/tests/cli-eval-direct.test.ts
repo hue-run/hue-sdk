@@ -24,6 +24,46 @@ const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const SPAWN_TIMEOUT = 90_000;
 
+test("collectDirectOutputs infers GIF and audio MIME types and rejects unsupported extensions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hue-direct-media-"));
+  const outputs = [
+    ["animation.gif", "image/gif"],
+    ["reply.mp3", "audio/mpeg"],
+    ["reply.mpeg", "audio/mpeg"],
+    ["reply.wav", "audio/wav"],
+    ["reply.ogg", "audio/ogg"],
+    ["reply.webm", "audio/webm"],
+    ["reply.mp4", "audio/mp4"],
+    ["reply.m4a", "audio/mp4"],
+    ["reply.flac", "audio/flac"],
+  ] as const;
+  const bytes = Buffer.from([0, 1, 128, 255]);
+  try {
+    const layout = await stageDirectCase(join(root, "scratch"), {
+      inputs: {},
+      config: {},
+      item: { id: "case-id", externalKey: "case-key" },
+      executionId: "exec-1",
+      files: [],
+    });
+    for (const [filename] of outputs)
+      await writeFile(join(layout.outputDirectory, filename), bytes);
+    const result = await collectDirectOutputs(layout.outputDirectory);
+    expect(result.files).toHaveLength(outputs.length);
+    for (const [filename, contentType] of outputs) {
+      const file = result.files.find((item) => item.filename === filename)!;
+      expect(file.contentType).toBe(contentType);
+      expect(Buffer.from(file.bytes!)).toEqual(bytes);
+    }
+    await writeFile(join(layout.outputDirectory, "program.exe"), bytes);
+    await expect(collectDirectOutputs(layout.outputDirectory)).rejects.toThrow(
+      "The agent wrote files Hue does not accept as generated documents",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 type Stored = {
   id: string;
   filename: string;

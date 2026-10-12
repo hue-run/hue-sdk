@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
-import { context } from "@opentelemetry/api";
+import { context, type HrTime } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
 import { isLoopbackHost } from "./config.js";
 import {
@@ -98,6 +98,7 @@ export interface MediaAttachment {
   digest: FileDigest;
   contentType: string;
   name?: string;
+  eventTime?: HrTime;
 }
 
 /** The outcome of one export's uploads, reported once the export's records are placed. */
@@ -110,7 +111,7 @@ export function newTally(): OffloadTally {
   return { uploaded: 0, fallbacks: new Map() };
 }
 
-function countFallback(tally: OffloadTally, reason: FallbackReason, traceId: string): void {
+export function countFallback(tally: OffloadTally, reason: FallbackReason, traceId: string): void {
   const entry = tally.fallbacks.get(reason) ?? { count: 0, traceIds: new Set<string>() };
   entry.count++;
   entry.traceIds.add(traceId);
@@ -198,7 +199,7 @@ export async function digestOf(
 }
 
 /** The `hue.blobs` element for one uploaded value. */
-function blobEntry(
+export function blobEntry(
   key: string,
   sha256: string,
   size: number,
@@ -360,7 +361,7 @@ export class BlobUploader {
       /^0+$/.test(traceId) ||
       !/^[0-9a-f]{64}$/.test(digest.sha256) ||
       !Number.isSafeInteger(digest.size) ||
-      digest.size < 0 ||
+      digest.size <= 0 ||
       digest.size !== sizeOf(value)
     )
       return { ok: false, reason: "failed" };
@@ -380,8 +381,10 @@ export class BlobUploader {
     this.outcomes.set(identity, item);
     item.promise = this.storeFresh(traceId, key, value, contentType, digest, upload)
       .catch((): Outcome => ({ ok: false, reason: "failed" }))
-      .finally(() => {
+      .then((outcome) => {
         item.settled = true;
+        if (!outcome.ok && this.outcomes.get(identity) === item) this.outcomes.delete(identity);
+        return outcome;
       });
     return item.promise;
   }
@@ -436,10 +439,10 @@ export class BlobUploader {
       reservation = await this.reserve(body, digest.size, upload);
     }
     if ("fallback" in reservation) return { ok: false, reason: reservation.fallback };
-    if (!reservation.exists)
+    if (!reservation.exists) {
       // For Hue's accounting only: a value is read whether or not it was completed, so a failed
       // completion is not retried.
-      await this.request(
+      const completion = await this.request(
         "POST",
         new URL("/api/v1/otlp/blobs/complete", this.options.baseUrl),
         this.jsonHeaders(),
@@ -447,6 +450,8 @@ export class BlobUploader {
         Math.min(upload.deadline, Date.now() + this.options.timeoutMillis),
         MAX_JSON_RESPONSE_BYTES,
       );
+      if (!completion || completion.status >= 500 || completion.status === 429) this.pause();
+    }
     return { ok: true, contentType: reservation.contentType };
   }
 
@@ -478,7 +483,8 @@ export class BlobUploader {
         return { fallback: "failed" };
       }
       const { status } = reply;
-      const answer = status === 200 || status === 404 ? parseJson(reply.body) : undefined;
+      const answer =
+        status === 200 || status === 404 || status === 409 ? parseJson(reply.body) : undefined;
       // A receiver without the route answers its framework's not-found (Hue's own 404, an
       // archived project, is JSON with an `error`), refuses the method, or answers something
       // that is no reservation at all: it is not asked again for a while.
@@ -498,10 +504,13 @@ export class BlobUploader {
         if ("fallback" in reservation) this.pause();
         return reservation;
       }
+      if (status === 409 && isObject(answer) && answer.status === "exists")
+        return this.reservation(answer, size);
       if (status === 413) return { fallback: "tooLarge" };
       if (status === 429) {
         const wait = retryAfterMillis(reply.headers) ?? RETRY_DELAY_MILLIS;
         if (Date.now() + wait < upload.deadline && (await upload.wait(wait))) continue;
+        this.pause();
         return { fallback: "failed" };
       }
       if (status >= 500) {
@@ -511,12 +520,11 @@ export class BlobUploader {
         this.pause();
         return { fallback: "failed" };
       }
-      // A conflict over this value alone (409) fails only it. Any other refusal (a refused key,
-      // an archived project, a request Hue could not read, a redirect) would meet every value
-      // alike, so uploads pause; the export's own requests report a key problem.
-      if (status !== 409) this.pause();
+      // Bad values and conflicts refuse only this value. Transient service failures pause uploads.
+      if (status !== 400 && status !== 409) this.pause();
       return { fallback: "failed" };
     }
+    this.pause();
     return { fallback: "failed" };
   }
 
@@ -596,7 +604,7 @@ export class BlobUploader {
     if ((reply.status >= 200 && reply.status < 300) || reply.status === 412) return "stored";
     if (reply.status === 403)
       return reply.body.toString("utf8").includes("Request has expired") ? "expired" : "failed";
-    if (reply.status >= 500 || reply.status === 408) return "transient";
+    if (reply.status >= 500 || reply.status === 408 || reply.status === 429) return "transient";
     return "failed";
   }
 
@@ -767,6 +775,7 @@ export async function offloadAttributes(
     await Promise.all(
       found.map((file, position) => {
         const decoded = mediaBytes(file);
+        if (!decoded.bytes.byteLength) return Promise.resolve();
         const contentType = mediaContentType(file, decoded);
         const textual = isTextMediaType(contentType);
         if (textual && decoded.bytes.byteLength <= INLINE_FILE_LIMIT) return Promise.resolve();
@@ -838,6 +847,7 @@ export async function offloadAttributes(
   await Promise.all(collector.candidates.map((candidate, index) => place(index, candidate)));
   await Promise.all(
     (collector.attachments ?? []).map((file, position) => {
+      if (!file.bytes.byteLength) return Promise.resolve();
       const slot = slots > 0 ? (slots--, true) : false;
       return uploader.limit(async () => {
         const key = `event:hue.file:${file.digest.sha256}`;

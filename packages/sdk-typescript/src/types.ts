@@ -142,11 +142,11 @@ export interface ExportReport {
   pendingBytes: number;
   /** Helper capture or instrumentation failures that omitted telemetry while preserving application results. */
   instrumentationFailures: number;
-  /** Span values over Hue's inline limit uploaded apart from their spans (or already stored by
-   * Hue), each listed under the span's `hue.blobs` with its first 16 KiB kept inline. */
+  /** Whole span attributes, inline media, and opted-in file helper uploads stored apart from
+   * their spans (or already held by Hue), each listed under the span's `hue.blobs`. */
   uploadedValues: number;
-  /** Span values over Hue's inline limit that could not be uploaded and were exported cut to the
-   * limit (an inline file as its digest), each reported in a warning issue. */
+  /** Whole-attribute, inline-media, and opted-in file helper uploads that could not be attached.
+   * Content falls back to truncation, media digests, or file metadata, with a warning issue. */
   uploadFallbacks: number;
 }
 

@@ -214,7 +214,7 @@ class _ValueBudget:
         self._cut = False
         self.hold = hold
         # The span's own values held whole for upload, charged to the held-value budget.
-        self.held = Held(budget=hold.budget if hold else None)
+        self.held = Held(budget=hold.budget if hold else None, inspected=set())
 
     def consume(self, size: int) -> None:
         self.remaining -= size
@@ -339,6 +339,9 @@ class _ValueBudget:
         if size > MAX_INLINE_FILE_TEXT or size > self.media_remaining:
             return value, 0
         self.media_remaining -= size
+        if collect_upload_state:
+            assert self.held.inspected is not None
+            self.held.inspected.add(key)
         receipts: dict[str, tuple[str, int]] | None = {} if collect_upload_state else None
         memo = (
             self.hold.uploads.memo
@@ -395,7 +398,7 @@ class _ValueBudget:
         """Attribute values copied, each cut to the value cap and listed as ``prefix`` + key. A
         span's ``own`` values over the cap are held whole for upload when they may be."""
         holding = own and self.hold is not None
-        source = self.permitted(values, files=not holding)
+        source = self.permitted(values, files=own and not holding)
         if not isinstance(source, Mapping):
             return self.value(source)
         copied: dict[str, Any] = {}

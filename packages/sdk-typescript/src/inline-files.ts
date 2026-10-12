@@ -129,14 +129,14 @@ function string(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 export function isMediaName(value: unknown): value is string {
-  if (typeof value !== "string" || !value.isWellFormed()) return false;
-  const characters = [...value];
   return (
-    characters.length >= 1 &&
-    characters.length <= 256 &&
-    characters.every((character) => {
-      const point = character.codePointAt(0)!;
-      return point > 0x1f && (point < 0x7f || point > 0x9f);
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= 256 &&
+    value.isWellFormed() &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
     })
   );
 }
@@ -345,13 +345,13 @@ export class MediaDigestMemo {
     return this.bytes((decoded ?? mediaBytes(file)).bytes, traceId);
   }
   bytes(bytes: Uint8Array, traceId: string): FileDigest {
-    const key = `${traceId}:${Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1")}`;
-    const known = this.entries.get(key);
-    if (known) return known;
     const digest = {
       sha256: createHash("sha256").update(bytes).digest("hex"),
       size: bytes.byteLength,
     };
+    const key = `${traceId}:${digest.sha256}`;
+    const known = this.entries.get(key);
+    if (known) return known;
     const limit = 32 * 1024 * 1024;
     if (key.length <= limit) {
       while (this.entries.size >= 4096 || this.units + key.length > limit) {
@@ -391,6 +391,7 @@ export function hashInlineFiles(
     let changed = false;
     for (const file of files) {
       const decoded = mediaBytes(file);
+      if (!decoded.bytes.byteLength) continue;
       if (
         isTextMediaType(mediaContentType(file, decoded)) &&
         decoded.bytes.byteLength <= INLINE_FILE_LIMIT

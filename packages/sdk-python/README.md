@@ -68,16 +68,19 @@ and OpenAI `content` arrays. Supported byte shapes include GenAI `blob`, AI SDK 
 `inlineData` and `inline_data`, Vertex `media`, and Bedrock image and document sources.
 Remote URLs, provider file IDs and S3 references stay unchanged. Hue never fetches them.
 
-Binary media uploads from a span's own message attributes at every size. The byte field is
+Nonempty binary media in a span's own message attributes is eligible for upload at every size
+within the inspection limits. Empty byte fields stay recorded and do not upload. The byte field is
 removed and the part carries `sha256` and `size`; the span's `hue.blobs` entry points to the part,
 for example `gen_ai.input.messages#/0/parts/1`. Text media over 64 KiB of decoded bytes uploads
 with a UTF-8-safe 16 KiB prefix in its content field. Its entry points to that field, for example
 `gen_ai.input.messages#/0/parts/1/content`. Smaller text stays inline. Hue reads both these forms
 and earlier binary prefixes. If upload fails, the part keeps its digest with no blob entry.
-Log records and span events use the digest without uploading eligible media.
+Media digest replacement applies only to a span's own message attributes. Resources, events,
+links and log records preserve media content under their ordinary hold, cut or drop rules.
 
 Entries use the recorded media type and, when valid, the filename, name or title. A valid name
-is nonempty, at most 256 characters and contains no control characters. Invalid names are omitted
+is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
+characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted
 from the entry without rewriting the original field. Data URLs and fields explicitly encoded as
 base64 by the provider contract are decoded before hashing. Other non-data strings with a valid
 declared textual media type remain raw UTF-8: `YWJj` hashes as those four characters. The digest
@@ -124,8 +127,11 @@ with hue.span("review contract") as span:
     )
 ```
 
-`upload` defaults to `False`. Supplied `data` must be at most 25 MiB. Names must be nonempty, at most 256 characters and contain no
-control characters. Larger data and invalid records are omitted and counted as instrumentation
+`upload` defaults to `False`. Supplied `data` must be at most 25 MiB. Names must be nonblank
+after trimming, contain at most 256 UTF-16 code units, be well-formed Unicode and contain no C0
+characters (U+0000–U+001F) or DEL (U+007F). Tabs, newlines, DEL and lone surrogates make a name
+invalid. An invalid name is omitted and counted as an instrumentation failure; the otherwise
+valid event remains. Larger data and invalid records are omitted and counted as instrumentation
 failures. Pass `sha256` and `byte_size` when you already have the file's identity.
 
 Tool/model metadata accepts plain strings; invalid values use stable fallback labels and increment instrumentation failures without invoking custom conversion hooks. Disabled tracing skips metadata validation.
@@ -166,7 +172,7 @@ Hue keeps a value inline up to its value limit (1 MiB unless the receiver advert
 
 Hue stores the value under the trace, so the trace's retention, deletion and erasure cover it. Uploads run on the export worker, never on the application's thread: at most four at a time on daemon threads, each request within `export_timeout_seconds`, and all of one export's uploads within six of them; a transient failure is retried once, and a rate-limited reservation (429) waits out its `Retry-After` within the export's 60-second hold. A value not uploaded in time falls back; its upload, if still running, stops sending at the same deadline and its answer goes unused.
 
-A value that cannot be uploaded (Hue or the store refused it or failed, the network or a deadline did, the receiver has no upload route, or the value is over 1 GB) is exported as before uploads existed: cut to the cap and listed under `hue.truncated`, an inline file as its digest. Each export records such values in a `warning` export issue per cause, whose `count` is the values and `trace_ids` their traces, and counts them in `export_status.upload_fallbacks`; uploaded values are counted in `export_status.uploaded_values`. A warning is not a failure: it does not affect `export_status.ok`, `force_flush()` or `export_failure_sequence()`. After a transient failure, or a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm. An upload still sending when its export's upload budget ends stops there.
+A value that cannot be uploaded (Hue or the store refused it or failed, the network or a deadline did, the receiver has no upload route, or the value is over 1 GB) falls back according to its form: whole attributes keep a prefix up to the cap and are listed under `hue.truncated`; media parts keep their digest without a blob entry; failed opt-in `record_file` uploads preserve the file event. The explicit helper limit is 25 MiB; whole attributes retain their 1 GB limit. Each export records such values in a `warning` export issue per cause, whose `count` is the values and `trace_ids` their traces, and counts them in `export_status.upload_fallbacks`; successful uploads are counted in `export_status.uploaded_values`. Both counters include whole attributes, eligible binary or large text media, and opt-in `record_file` uploads. A warning is not a failure: it does not affect `export_status.ok`, `force_flush()` or `export_failure_sequence()`. After a transient failure, or a refusal that is not about the value alone, uploads pause for 30 seconds, and a receiver without the upload route (a 404 that is not Hue's, a 405 or 501, or a 200 that is no reservation) is not asked again for 10 minutes, so an unavailable store or another OTLP receiver meets no retry storm. An upload still sending when its export's upload budget ends stops there.
 
 To upload a value whole, the queued copy of its span holds it until export apart from `max_queue_bytes`, within a 128 MiB budget of held values (each charged as the interpreter holds it); a recorded message holding eligible media is held the same way, while the queue is charged its copy with the files as their digest. A value the budget cannot hold, or one queued while the receiver is known to lack the upload route, is cut (its files digested) when it is queued, as before, and reported as not uploaded, once per file; a single value larger than the whole budget is held while nothing else is. The queued copy lets go of its held values once export has placed them.
 
@@ -333,7 +339,9 @@ its JSON body, status code and headers. Limit request bodies to 1 MiB; use
 and 30-second finalization budget.
 
 For generated files, return `ManagedOutputFile` entries containing actual bytes,
-filename, content type and an optional primary flag. The helper claims the
+filename, content type and an optional primary flag. Managed outputs accept any
+valid MIME type, including `image/gif`, `audio/mpeg`, `audio/wav`, `audio/ogg`,
+`audio/webm`, `audio/mp4` and `audio/flac`. The helper claims the
 invocation, verifies files and saves the outcome without automatically rerunning
 the agent. See the [managed-run guide](https://docs.hue.run/evaluations/managed-runs)
 and [full adapter contract](https://github.com/hue-run/hue-sdk/blob/main/packages/sdk-python/MANAGED_TARGETS.md) for registration, existing-provider
