@@ -430,7 +430,7 @@ class _ValueBudget:
             self.held.digests[key] = receipts
         return result
 
-    def _held_value(self, key: str, item: Any) -> tuple[bool, Any]:
+    def _held_value(self, key: str, item: Any, *, literal: bool = False) -> tuple[bool, Any]:
         """One of the span's own attribute values held whole for export to upload, when it may
         be, within the held-value budget: text or bytes over the cap, replaced in the copy by the
         receiver's marker until export places it, or a recorded message within the cap holding a
@@ -442,11 +442,16 @@ class _ValueBudget:
         hold = self.hold
         assert hold is not None
         if self.log:
-            return self._held_log_value(key, item)
+            # A log record uploads no value whole, and literal text holds no file.
+            return (False, item) if literal else self._held_log_value(key, item)
         # Only a recorded message shrinks its files when it is not held; any other inspected
-        # attribute is queued as it is.
+        # attribute is queued as it is. Literal text is never inspected for media.
         message = is_message_key(key)
-        digested, files = self._media(key, item, collect_upload_state=True, any_key=True)
+        digested, files = (
+            (item, 0)
+            if literal
+            else self._media(key, item, collect_upload_state=True, any_key=True)
+        )
         queued = digested if message else item
         if isinstance(item, str):
             try:
@@ -570,15 +575,16 @@ class _ValueBudget:
         if not isinstance(source, Mapping):
             return self.value(source)
         copied: dict[str, Any] = {}
-        # Literal text (``input.value`` declared ``text/plain``) is no JSON Hue reads files from.
+        # Literal text (``input.value`` declared ``text/plain``) is no JSON Hue reads files from:
+        # it is never inspected for media, but a span's value over the cap is still held whole.
         literal = literal_keys(source) if holding else frozenset()
         for key, item in source.items():
             if not isinstance(key, str):
                 raise ValueError("Telemetry mapping keys must be strings.")
             listed = f"{prefix}{key}"
-            if holding and key not in literal:
+            if holding:
                 # Unheld binary and large textual inline files shrink to digests.
-                kept, item = self._held_value(key, item)
+                kept, item = self._held_value(key, item, literal=key in literal)
                 if kept:
                     copied[self.value(key, 1)] = item
                     continue

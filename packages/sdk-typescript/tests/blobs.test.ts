@@ -3054,3 +3054,40 @@ test("a log body's inline media take hue.blobs places before its attachments, in
     endpoint.server.stop(true);
   }
 });
+
+test("a text/plain input.value over the cap still uploads whole, never read for media", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const value = JSON.stringify({
+    image: `data:image/png;base64,${png.toString("base64")}`,
+    text: "x".repeat(2 * MiB),
+  });
+  try {
+    let traceId = "";
+    await hueClient.withSpan("literal whole", ({ span }) => {
+      traceId = span.spanContext().traceId;
+      span.setAttribute("input.mime_type", "text/plain");
+      span.setAttribute("input.value", value);
+    });
+    await hueClient.flush();
+    const record = endpoint.span("literal whole")!;
+    // Uploaded whole as any value over the cap is, its image left in the text.
+    expect(blobs(record)).toEqual([
+      {
+        key: "input.value",
+        sha256: sha256(value),
+        size: Buffer.byteLength(value),
+        content_type: "application/json",
+      },
+    ]);
+    expect(endpoint.store.get(`${traceId}/${sha256(value)}`)!.bytes.toString("utf8")).toBe(value);
+    expect(strings(attr(record, "hue.truncated"))).toEqual(["input.value"]);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});

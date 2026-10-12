@@ -168,11 +168,13 @@ class Snapshot {
    * cut and its inline media shrink to their digest, as before uploads existed.
    */
   private heldValue(key: string, value: unknown): { value: unknown } | undefined {
-    // Literal text (`input.value` declared `text/plain`) is no JSON Hue reads files from.
-    if (!this.hold || !this.own || this.literal.has(key)) return undefined;
+    if (!this.hold || !this.own) return undefined;
     if (typeof value === "string") {
+      // Literal text (`input.value` declared `text/plain`) is no JSON Hue reads files from: it is
+      // never inspected for media, but a span's value over the cap is still held whole to upload.
+      const literal = this.literal.has(key);
       // A log record's value is never uploaded whole: only the media in its inspected attributes.
-      if (this.log && !isMediaKey(key)) return undefined;
+      if (this.log && (literal || !isMediaKey(key))) return undefined;
       if (value.length > this.valueUnits) {
         if (this.log && (value.length > MAX_INLINE_FILE_TEXT || !mayInlineFiles(key, value)))
           return undefined;
@@ -184,6 +186,7 @@ class Snapshot {
         // log record's export inspects within its own allowance.
         if (
           !this.log &&
+          !literal &&
           value.length <= MAX_INLINE_FILE_TEXT &&
           mayInlineFiles(key, value) &&
           this.inspected + value.length <= INLINE_FILE_TEXT_PER_RECORD
@@ -197,7 +200,7 @@ class Snapshot {
       // export to upload the files, within the held-value budget, and the queue is charged its
       // copy with the files as their digest. Past the budget, a recorded message's files shrink to
       // their digest when queued, as before uploads existed; any other value is queued as it is.
-      if (!isMediaKey(key)) return undefined;
+      if (!isMediaKey(key) || literal) return undefined;
       const digested = this.inlineFiles(key, value, true);
       if (digested === value || !this.holds(value.length * 2)) return undefined;
       this.copy(digested, 1, "value", true);

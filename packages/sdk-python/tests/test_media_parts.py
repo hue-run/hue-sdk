@@ -1842,3 +1842,33 @@ def test_a_blob_key_over_256_utf16_units_is_not_reserved(hue_store):
     assert attrs(record)["input.value"].string_value == value
     assert hue_store.reservations == []
     assert status.upload_fallbacks == 1
+
+
+def test_a_text_plain_input_value_over_the_cap_still_uploads_whole(hue_store):
+    data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII="
+    )
+    value = json.dumps(
+        {
+            "image": "data:image/png;base64," + base64.b64encode(data).decode(),
+            "text": "x" * (2 * 1024 * 1024),
+        }
+    )
+    with client(hue_store) as hue:
+        with hue.span("literal whole") as span:
+            span.set_attribute("input.mime_type", "text/plain")
+            span.set_attribute("input.value", value)
+            trace_id = format(span.otel_span.get_span_context().trace_id, "032x")
+        assert hue.force_flush(timeout_millis=30_000)
+    record = hue_store.span("literal whole")
+    # Uploaded whole as any value over the cap is, its image left in the text.
+    assert blobs(record) == [
+        {
+            "key": "input.value",
+            "sha256": sha256(value.encode()),
+            "size": len(value.encode()),
+            "content_type": "application/json",
+        }
+    ]
+    assert hue_store.objects[f"{trace_id}/{sha256(value.encode())}"][0] == value.encode()
+    assert listed(record) == ["input.value"]
