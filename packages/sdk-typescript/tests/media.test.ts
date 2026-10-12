@@ -9,6 +9,7 @@ import {
   rehydrateMedia,
   type JsonValue,
   type LocalFile,
+  type MediaResolveFailure,
 } from "../src/evals.js";
 import { mediaDownload } from "../src/evals/media.js";
 import { inlineFileBytes } from "../src/inline-files.js";
@@ -23,7 +24,6 @@ const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
 const wav = new TextEncoder().encode("RIFF....WAVEfmt synthetic");
 const pdf = new TextEncoder().encode("%PDF-1.7 synthetic");
 const lost = new TextEncoder().encode("never uploaded");
-const lost16k = new TextEncoder().encode("never uploaded text ".repeat(4000));
 
 /** What the synthetic Hue answers for one digest. */
 type Answer =
@@ -570,18 +570,52 @@ describe("client.media.resolve", () => {
     ).toStartWith("data:application/octet-stream;base64,");
   });
 
-  test("text kept as its first 16 KiB is written back whole from the entry naming its field", async () => {
-    const text = new TextEncoder().encode("A long report. ".repeat(6000));
-    const prefix = Buffer.from(text.subarray(0, 16 * 1024)).toString("utf8");
-    const other = new TextEncoder().encode("another attribute's file");
-    const { client } = hue({
-      [sha256(text)]: stored(text, "text/plain", "report.txt"),
-      [sha256(other)]: stored(other, "text/plain", "other.txt"),
+  test("an entry whose size is out of range is ignored, never thrown", async () => {
+    const snapshotId = randomUUID();
+    const { client } = hue({ [sha256(png)]: stored(png, "image/png", "chart.png") });
+    const parts = [{ type: "image_url", image_url: {}, sha256: sha256(png), size: png.byteLength }];
+    const entry = (index: number, size: unknown) => ({
+      key: `gen_ai.input.messages#/${index}`,
+      sha256: sha256(png),
+      size,
+      content_type: "image/gif",
     });
-    const recorded = [
-      { role: "user", parts: [{ type: "blob", mime_type: "text/plain", content: prefix }] },
-      { role: "user", parts: [{ type: "blob", mime_type: "text/plain", content: "short" }] },
+    // Sizes Hue's reader refuses: each entry is ignored, so the part takes the type of the valid
+    // entry after them.
+    const blobs = [
+      entry(0, Number("1e400")),
+      entry(1, 1_000_000_001),
+      entry(2, 0),
+      entry(3, true),
+      entry(4, 1.5),
+      entry(5, 10n ** 400n),
+      entry(6, "12345678901"),
+      JSON.stringify({ ...entry(7, 1), content_type: "image/png" }),
     ];
+    const { value } = await client.media.resolve(parts, { snapshotId, blobs });
+    expect(value as unknown).toEqual([
+      { type: "image_url", image_url: { url: `data:image/png;base64,${base64(png)}` } },
+    ]);
+  });
+
+  test("text kept as its first 16 KiB is reported as prefix_only and never written, whatever attribute's entry names it", async () => {
+    const input = new TextEncoder().encode("A long report. ".repeat(6000));
+    const output = new TextEncoder().encode("An output summary. ".repeat(5000));
+    const short = new TextEncoder().encode("a short file");
+    // Both files are stored: resolve still writes neither, since an entry names a pointer and not
+    // the value it was read from.
+    const { client, seen } = hue({
+      [sha256(input)]: stored(input, "text/plain", "input.txt"),
+      [sha256(output)]: stored(output, "text/plain", "output.txt"),
+      [sha256(short)]: stored(short, "text/plain", "short.txt"),
+    });
+    const prefixOf = (bytes: Uint8Array) => Buffer.from(bytes.subarray(0, 16 * 1024)).toString();
+    const message = (role: string, content: string) => ({
+      role,
+      parts: [{ type: "blob", mime_type: "text/plain", content }],
+    });
+    const inputMessages = [message("user", prefixOf(input)), message("user", "short")];
+    const outputMessages = [message("assistant", prefixOf(output))];
     const entry = (key: string, bytes: Uint8Array) =>
       JSON.stringify({
         key,
@@ -589,29 +623,30 @@ describe("client.media.resolve", () => {
         size: bytes.byteLength,
         content_type: "text/plain",
       });
-    const { value, resolved, failures } = await client.media.resolve(recorded, {
-      traceId,
-      blobs: [
-        entry("gen_ai.input.messages#/0/parts/0/content", text),
-        // Another attribute's entry at the same kind of pointer: its file does not begin with the
-        // text recorded here, so it is not written in.
-        entry("gen_ai.output.messages#/1/parts/0/content", other),
-      ],
-    });
-    expect(resolved).toBe(1);
-    expect(failures).toEqual([]);
-    expect(value).toEqual([
-      { role: "user", parts: [{ type: "blob", mime_type: "text/plain", content: base64(text) }] },
-      recorded[1]!,
-    ]);
-    // A prefix whose file cannot be read is reported with its reason.
-    const lost = await client.media.resolve(recorded.slice(0, 1), {
-      traceId,
-      blobs: [entry("gen_ai.input.messages#/0/parts/0/content", lost16k)],
-    });
-    expect(lost.failures).toEqual([
-      { pointer: "/0/parts/0", sha256: sha256(lost16k), reason: "not_found" },
-    ]);
+    const blobs = [
+      entry("gen_ai.input.messages#/0/parts/0/content", input),
+      // The output's text file at the same pointer as the input's.
+      entry("gen_ai.output.messages#/0/parts/0/content", output),
+      // A field holding text shorter than a prefix is complete and left alone.
+      entry("gen_ai.output.messages#/1/parts/0/content", short),
+    ];
+    const both: MediaResolveFailure[] = [
+      { pointer: "/0/parts/0", sha256: sha256(input), reason: "prefix_only" },
+      { pointer: "/0/parts/0", sha256: sha256(output), reason: "prefix_only" },
+    ];
+    for (const recorded of [inputMessages, outputMessages]) {
+      const { value, resolved, failures } = await client.media.resolve(recorded, {
+        traceId,
+        blobs,
+      });
+      expect(value).toEqual(recorded);
+      expect(resolved).toBe(0);
+      expect(failures).toEqual(both);
+    }
+    // The entries of the value's own attribute name its own file.
+    const own = await client.media.resolve(outputMessages, { traceId, blobs: blobs.slice(1) });
+    expect(own.failures).toEqual([both[1]!]);
+    expect(seen.filter((item) => item.path.includes("/blobs/"))).toEqual([]);
   });
 
   test("as bytes writes the bytes themselves", async () => {

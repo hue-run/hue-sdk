@@ -449,9 +449,12 @@ part carries.
 A snapshot's copies carry no media type, so a part that declares none would get a `data:` URL of
 `application/octet-stream`. Pass the record's `hue.blobs` entries in any form Hue reads (the JSON
 strings the attribute holds, objects, or one string holding the JSON array), and such a part takes
-the type of the entry with its SHA-256. The entries also restore text over 64 KiB that the record
-keeps as its first 16 KiB: the part whose content field an entry names receives the whole text when
-its file begins with the recorded text, and is listed in `failures` when its file cannot be read.
+the type of the entry with its SHA-256. Text over 64 KiB that a record keeps as its first 16 KiB
+is never written back: a part whose content field an entry names, holding only that prefix, stays
+as it is and is listed in `failures` as `prefix_only` with the entry's SHA-256, and
+`fetch({ traceId, sha256 })` returns the whole file. An entry names a pointer, not a value, so the
+entries of another attribute with a file at the same pointer are listed too; pass only the entries
+of the value's own attribute to list its own file.
 
 ```ts
 const { value } = await client.media.resolve(recorded, {

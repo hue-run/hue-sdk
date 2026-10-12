@@ -93,12 +93,14 @@ class MediaFile:
 
 @dataclass(frozen=True)
 class MediaResolveFailure:
-    """A digest part left unchanged: its RFC 6901 pointer in the value, the SHA-256 it records
-    and why (a ``MediaFetchError`` reason, or ``not_found`` when no local file has the digest)."""
+    """A part left unchanged: its RFC 6901 pointer in the value, the SHA-256 it records and why
+    (a ``MediaFetchError`` reason, or ``not_found`` when no local file has the digest).
+    ``prefix_only`` marks a part whose content field holds only the first 16 KiB of its file, as a
+    ``blobs`` entry names it; ``sha256`` is that entry's, and ``fetch`` returns the file whole."""
 
     pointer: str
     sha256: str
-    reason: MediaFetchErrorReason
+    reason: MediaFetchErrorReason | Literal["prefix_only"]
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,8 @@ _MIN_DOWNLOAD_IDLE_SECONDS: float = 120
 _MAX_RETRY_AFTER_SECONDS = 10
 # Bytes of a JSON answer read: a link answer or an error body.
 _MAX_ANSWER_BYTES = 64 * 1024
+# What the SDKs keep of text media over 64 KiB in its content field: its first 16 KiB.
+_PREFIX_BYTES = 16 * 1024
 # Nesting a value is walked to; deeper parts stay as they are.
 _MAX_DEPTH = 128
 
@@ -338,9 +342,9 @@ class MediaClient:
         form Hue reads: a list of compact JSON object strings (what the SDKs write), a list of
         dicts, or one string holding the JSON array. A part that declares no media type, read from
         a copy that carries none (a snapshot's), takes the type of the entry with its SHA-256 for
-        its ``data:`` URL, rather than ``application/octet-stream``; text kept as its first 16 KiB,
-        whose entry names its content field, is written back whole. Entries that do not parse are
-        ignored.
+        its ``data:`` URL, rather than ``application/octet-stream``. A part whose content field
+        an entry names and that holds only the first 16 KiB of its file is reported as
+        ``prefix_only``. Entries that do not parse are ignored.
 
         Raises ``ValueError`` for invalid identifiers or options; never for one file's failure.
         """
@@ -357,7 +361,7 @@ class MediaClient:
         # Identifiers are checked once, before any request.
         _route("0" * 64, trace_id, span_id, snapshot_id)
         parts = _digest_parts(value)
-        _prefix_parts(value, refs, parts)
+        prefixes = _prefix_failures(value, refs)
         digests = list(dict.fromkeys(part.sha256 for part in parts.values()))
 
         def read(digest: str) -> MediaFile | MediaFetchError:
@@ -387,7 +391,9 @@ class MediaClient:
             file = files[digest]
             return file.reason if isinstance(file, MediaFetchError) else file
 
-        return _write_back(value, parts, file_of, mode)
+        resolved = _write_back(value, parts, file_of, mode)
+        resolved.failures.extend(prefixes)
+        return resolved
 
     def _grant(self, path: str, sha256: str) -> _Grant:
         """The download link of one file, asked once more after an unavailable answer or a lost
@@ -458,6 +464,7 @@ class MediaClient:
 class _BlobRef:
     key: str
     sha256: str
+    size: int
     content_type: str | None
 
 
@@ -499,19 +506,14 @@ def _blob_refs(listed: object) -> list[_BlobRef]:
         key = entry.get("key")
         digest = entry.get("sha256")
         digest = digest.lower() if isinstance(digest, str) else ""
-        size = entry.get("size")
-        if isinstance(size, str) and re.fullmatch(r"[0-9]{1,10}", size):
-            size = int(size)
+        size = _entry_size(entry.get("size"))
         if (
             not isinstance(key, str)
             or not 1 <= _utf16_length(key) <= 256
             or any(ord(char) < 0x20 or ord(char) == 0x7F for char in key)
             or key in keys
             or not _SHA256.fullmatch(digest)
-            or isinstance(size, bool)
-            or not isinstance(size, (int, float))
-            or not float(size).is_integer()
-            or not 1 <= size <= 1_000_000_000
+            or size is None
         ):
             continue
         keys.add(key)
@@ -523,8 +525,23 @@ def _blob_refs(listed: object) -> list[_BlobRef]:
             and 3 <= len(kind) <= 255
             and _BLOB_CONTENT_TYPE.fullmatch(kind) is not None
         )
-        refs.append(_BlobRef(key, digest, kind if typed else None))
+        refs.append(_BlobRef(key, digest, size, kind if typed else None))
     return refs
+
+
+def _entry_size(size: object) -> int | None:
+    """An entry's ``size`` as Hue's reader takes it: a whole number from 1 to 10^9, given as a
+    number or a string of up to ten digits; None otherwise. Integers are compared as they are, so
+    one too large for a float is ignored rather than raising."""
+    if isinstance(size, str):
+        return int(size) if re.fullmatch(r"[0-9]{1,10}", size) and 1 <= int(size) <= 10**9 else None
+    if isinstance(size, bool):
+        return None
+    if isinstance(size, int):
+        return size if 1 <= size <= 10**9 else None
+    if isinstance(size, float) and size.is_integer() and 1 <= size <= 10**9:
+        return int(size)
+    return None
 
 
 def _listed_types(refs: list[_BlobRef]) -> dict[str, str]:
@@ -537,11 +554,15 @@ def _listed_types(refs: list[_BlobRef]) -> dict[str, str]:
     return types
 
 
-def _prefix_parts(value: Any, refs: list[_BlobRef], parts: dict[int, _DigestPart]) -> None:
-    """The parts of ``value`` whose text media was kept as its first 16 KiB, found by the
-    ``hue.blobs`` entries that name their content field (``<attribute>#<pointer to the field>``),
-    added to ``parts`` with the prefix their file must begin with. A part whose field holds no
-    text, or that is already in digest form, is left out."""
+def _prefix_failures(value: Any, refs: list[_BlobRef]) -> list[MediaResolveFailure]:
+    """The parts of ``value`` whose content field holds only the first 16 KiB of a file (text
+    media over 64 KiB, as the SDKs record it), found by the ``hue.blobs`` entries that name that
+    field (``<attribute>#<pointer to the field>``): reported as ``prefix_only`` with the entry's
+    SHA-256, never written. An entry names a pointer, not the value, so entries of other
+    attributes at the same pointer are reported too; a part in digest form, or whose field holds
+    no such prefix, is left out."""
+    failures: list[MediaResolveFailure] = []
+    seen: set[tuple[str, str]] = set()
     for ref in refs:
         _, hashed, pointer = ref.key.partition("#")
         if not hashed or not pointer.startswith("/"):
@@ -561,16 +582,16 @@ def _prefix_parts(value: Any, refs: list[_BlobRef], parts: dict[int, _DigestPart
             else:
                 break
         recorded = nodes[-1]
-        if len(nodes) != len(segments) + 1 or not isinstance(recorded, str) or not recorded:
+        if len(nodes) != len(segments) + 1 or not isinstance(recorded, str):
+            continue
+        # The SDKs keep the first 16 KiB of the content, cut back to a character.
+        kept = len(recorded.encode("utf-8", "surrogatepass"))
+        if kept > _PREFIX_BYTES or kept <= _PREFIX_BYTES - 4 or ref.size <= kept:
             continue
         # The part is a few levels above its content field, as the field's slot names it.
         for up in range(1, min(3, len(segments)) + 1):
             part = nodes[len(nodes) - 1 - up]
-            if (
-                not isinstance(part, dict)
-                or id(part) in parts
-                or isinstance(part.get("sha256"), str)
-            ):
+            if not isinstance(part, dict) or isinstance(part.get("sha256"), str):
                 continue
             slot = _slot(part)
             if slot is None or [*slot.owner, slot.key] != segments[len(segments) - up :]:
@@ -578,8 +599,11 @@ def _prefix_parts(value: Any, refs: list[_BlobRef], parts: dict[int, _DigestPart
             part_pointer = "".join(
                 f"/{_escape(segment)}" for segment in segments[: len(segments) - up]
             )
-            parts[id(part)] = _DigestPart(part_pointer, ref.sha256, slot, recorded)
+            if (part_pointer, ref.sha256) not in seen:
+                seen.add((part_pointer, ref.sha256))
+                failures.append(MediaResolveFailure(part_pointer, ref.sha256, "prefix_only"))
             break
+    return failures
 
 
 def _mode(value: object) -> Literal["data_url", "bytes"]:
@@ -653,8 +677,6 @@ class _DigestPart:
     pointer: str
     sha256: str
     slot: _Slot
-    # For text kept as its first 16 KiB: that prefix, the content its file must begin with.
-    prefix: str | None = None
 
 
 def _text(value: object) -> str | None:
@@ -865,19 +887,7 @@ def _write_back(
             failures.append(MediaResolveFailure(part.pointer, part.sha256, file))
             reported.add(id(node))
         copy = {key: visit(item, depth + 1) for key, item in node.items()}
-        # Text kept as its prefix is written back only from the file that prefix begins.
-        whole = (
-            part is None
-            or part.prefix is None
-            or (
-                isinstance(file, MediaFile)
-                and (
-                    file.data.decode("utf-8", "replace").startswith(part.prefix)
-                    or _spelled(part.slot, file).startswith(part.prefix)
-                )
-            )
-        )
-        if part is not None and whole and isinstance(file, MediaFile):
+        if part is not None and isinstance(file, MediaFile):
             # The owners along the slot are this copy's own objects: the walk copied every one.
             owner = copy
             for segment in part.slot.owner:

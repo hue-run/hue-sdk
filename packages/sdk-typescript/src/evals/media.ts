@@ -135,8 +135,9 @@ export type MediaResolveOptions = (
      * array of compact JSON object strings (what the SDKs write), an array of objects, or one
      * string holding the JSON array. A part that declares no media type, read from a copy that
      * carries none (a snapshot's), takes the type of the entry with its SHA-256 for its `data:`
-     * URL, rather than `application/octet-stream`; text kept as its first 16 KiB, whose entry
-     * names its content field, is written back whole. Entries that do not parse are ignored. */
+     * URL, rather than `application/octet-stream`. A part whose content field an entry names and
+     * that holds only the first 16 KiB of its file is reported as `prefix_only`. Entries that do
+     * not parse are ignored. */
     blobs?: readonly (string | Readonly<Record<string, unknown>>)[] | string;
     /** Files downloaded at once, 1–16. Default 4. */
     concurrency?: number;
@@ -159,15 +160,18 @@ export interface MediaWriteOptions {
   as?: "dataUrl" | "bytes";
 }
 
-/** A digest part {@link MediaClient.resolve} or {@link rehydrateMedia} left unchanged. */
+/** A part {@link MediaClient.resolve} or {@link rehydrateMedia} left unchanged. */
 export interface MediaResolveFailure {
   /** RFC 6901 JSON pointer of the part in the value. */
   pointer: string;
-  /** The SHA-256 the part records. */
+  /** The SHA-256 the part records, or for `prefix_only` the SHA-256 of the entry naming its
+   * content field. */
   sha256: string;
-  /** Why its bytes were not written: as {@link MediaFetchError.reason}, or `not_found` when no
-   * local file has the digest. */
-  reason: MediaFetchErrorReason;
+  /** Why its bytes were not written: as {@link MediaFetchError.reason}, `not_found` when no local
+   * file has the digest, or `prefix_only` for a part whose content field holds only the first
+   * 16 KiB of its file, as a `blobs` entry names it; {@link MediaClient.fetch} returns that file
+   * whole. */
+  reason: MediaFetchErrorReason | "prefix_only";
 }
 
 /** A recorded value with the bytes of its digest parts written back. */
@@ -218,6 +222,8 @@ export const mediaDownload = { minIdleMillis: 120_000 };
 const MAX_RETRY_AFTER_SECONDS = 10;
 /** Bytes of a JSON answer read: a link answer or an error body. */
 const MAX_ANSWER_BYTES = 64 * 1024;
+/** What the SDKs keep of text media over 64 KiB in its content field: its first 16 KiB. */
+const PREFIX_BYTES = 16 * 1024;
 /** Nesting a value is walked to; deeper parts stay as they are. */
 const MAX_DEPTH = 128;
 
@@ -459,7 +465,7 @@ export class MediaClient {
     // Identifiers are checked once, before any request.
     routeOf(target("0".repeat(64)));
     const parts = digestParts(value);
-    prefixParts(value, refs, parts);
+    const prefixes = prefixFailures(value, refs);
     const digests = [...new Set([...parts.values()].map((part) => part.sha256))];
     const files = new Map<string, MediaFile | MediaFetchError>();
     let next = 0;
@@ -481,7 +487,7 @@ export class MediaClient {
       }
     };
     await Promise.all(Array.from({ length: Math.min(concurrency, digests.length) }, worker));
-    return writeBack(
+    const resolution = writeBack(
       value,
       parts,
       (sha256) => {
@@ -490,6 +496,8 @@ export class MediaClient {
       },
       as,
     );
+    resolution.failures.push(...prefixes);
+    return resolution;
   }
 
   /** The download link of one file, asked once more after an unavailable answer or a lost
@@ -622,6 +630,7 @@ export class MediaClient {
 interface BlobRef {
   key: string;
   sha256: string;
+  size: number;
   contentType?: string;
 }
 
@@ -686,6 +695,7 @@ function blobRefsOf(listed: unknown): BlobRef[] {
     refs.push({
       key,
       sha256,
+      size,
       ...(typeof type === "string" &&
       type.length >= 3 &&
       type.length <= 255 &&
@@ -708,12 +718,16 @@ function listedTypes(refs: readonly BlobRef[]): Map<string, string> {
 }
 
 /**
- * The parts of `value` whose text media was kept as its first 16 KiB, found by the `hue.blobs`
- * entries that name their content field (`<attribute>#<pointer to the field>`), added to `parts`
- * with the prefix their file must begin with. A part whose field holds no text, or that is already
- * in digest form, is left out.
+ * The parts of `value` whose content field holds only the first 16 KiB of a file (text media over
+ * 64 KiB, as the SDKs record it), found by the `hue.blobs` entries that name that field
+ * (`<attribute>#<pointer to the field>`): reported as `prefix_only` with the entry's SHA-256, never
+ * written. An entry names a pointer, not the value, so entries of other attributes at the same
+ * pointer are reported too; a part in digest form, or whose field holds no such prefix, is left
+ * out.
  */
-function prefixParts(value: unknown, refs: readonly BlobRef[], parts: Map<object, DigestPart>) {
+function prefixFailures(value: unknown, refs: readonly BlobRef[]): MediaResolveFailure[] {
+  const failures: MediaResolveFailure[] = [];
+  const seen = new Set<string>();
   for (const ref of refs) {
     const at = ref.key.indexOf("#");
     const pointer = at === -1 ? "" : ref.key.slice(at + 1);
@@ -736,27 +750,32 @@ function prefixParts(value: unknown, refs: readonly BlobRef[], parts: Map<object
       nodes.push(next);
     }
     const recorded = nodes.at(-1);
-    if (nodes.length !== segments.length + 1 || typeof recorded !== "string" || !recorded) continue;
+    if (nodes.length !== segments.length + 1 || typeof recorded !== "string") continue;
+    // The SDKs keep the first 16 KiB of the content, cut back to a character.
+    const kept = Buffer.byteLength(recorded, "utf8");
+    if (kept > PREFIX_BYTES || kept <= PREFIX_BYTES - 4 || ref.size <= kept) continue;
     // The part is a few levels above its content field, as the field's slot names it.
     for (let up = 1; up <= Math.min(3, segments.length); up++) {
       const part = plain(nodes[nodes.length - 1 - up]);
       const slot = part && slotOf(part);
-      if (!part || !slot || parts.has(part) || typeof part.sha256 === "string") continue;
+      if (!part || !slot || typeof part.sha256 === "string") continue;
       const path = [...slot.owner, slot.key];
-      if (path.join("/") !== segments.slice(-up).join("/")) continue;
+      const tail = segments.slice(-up);
+      if (path.length !== tail.length || path.some((segment, index) => segment !== tail[index]))
+        continue;
       const partPointer = segments
         .slice(0, segments.length - up)
         .map((segment) => `/${segment.replaceAll("~", "~0").replaceAll("/", "~1")}`)
         .join("");
-      parts.set(part, {
-        pointer: partPointer,
-        sha256: ref.sha256,
-        slot,
-        prefix: recorded,
-      });
+      const identity = `${partPointer}\u0000${ref.sha256}`;
+      if (!seen.has(identity)) {
+        seen.add(identity);
+        failures.push({ pointer: partPointer, sha256: ref.sha256, reason: "prefix_only" });
+      }
       break;
     }
   }
+  return failures;
 }
 
 function writeModeOf(value: unknown): "dataUrl" | "bytes" {
@@ -829,8 +848,6 @@ interface DigestPart {
   pointer: string;
   sha256: string;
   slot: Slot;
-  /** For text kept as its first 16 KiB: that prefix, the content its file must begin with. */
-  prefix?: string;
 }
 
 type Plain = Record<string, unknown>;
@@ -1101,14 +1118,7 @@ function writeBack<T>(
     }
     const copy: Plain = {};
     for (const [key, item] of Object.entries(source)) setOwn(copy, key, visit(item, depth + 1));
-    // Text kept as its prefix is written back only from the file that prefix begins.
-    const whole =
-      part?.prefix === undefined ||
-      (file !== undefined &&
-        typeof file !== "string" &&
-        (Buffer.from(file.bytes).toString("utf8").startsWith(part.prefix) ||
-          spelled(part.slot, file).startsWith(part.prefix)));
-    if (part && whole && file !== undefined && typeof file !== "string") {
+    if (part && file !== undefined && typeof file !== "string") {
       // The owners along the slot are this copy's own objects: the walk copied every plain one.
       let owner = copy;
       for (const segment of part.slot.owner) owner = owner[segment] as Plain;

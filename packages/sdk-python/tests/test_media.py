@@ -1088,49 +1088,81 @@ def test_a_snapshots_parts_that_declare_no_type_take_it_from_the_records_hue_blo
     assert ignored.value[0]["image_url"]["url"].startswith("data:application/octet-stream;base64,")
 
 
-def test_text_kept_as_its_first_16_kib_is_written_back_whole_from_the_entry_naming_its_field(hue):
-    text = b"A long report. " * 6000
-    prefix = text[: 16 * 1024].decode()
-    other = b"another attribute's file"
-    lost = b"never uploaded text " * 4000
+def test_an_entry_whose_size_is_out_of_range_is_ignored_never_raised(hue):
+    snapshot_id = str(uuid4())
+    hue.answers[sha(PNG)] = stored(PNG, "image/png", "chart.png")
+    parts = [{"type": "image_url", "image_url": {}, "sha256": sha(PNG), "size": len(PNG)}]
+
+    def entry(index: int, size: object) -> dict[str, Any]:
+        return {
+            "key": f"gen_ai.input.messages#/{index}",
+            "sha256": sha(PNG),
+            "size": size,
+            "content_type": "image/gif",
+        }
+
+    # Sizes Hue's reader refuses, the first too large for a float: each entry is ignored, so the
+    # part takes the type of the valid entry after them.
+    blobs: list[str | dict[str, Any]] = [
+        entry(0, 10**400),
+        entry(1, 10**9 + 1),
+        entry(2, 0),
+        entry(3, True),
+        entry(4, 1.5),
+        entry(5, float("inf")),
+        entry(6, "12345678901"),
+        json.dumps({**entry(7, 1), "content_type": "image/png"}),
+    ]
+    resolved = hue.client().media.resolve(parts, snapshot_id=snapshot_id, blobs=blobs)
+    assert resolved.value[0]["image_url"]["url"] == f"data:image/png;base64,{b64(PNG)}"
+
+
+def test_text_kept_as_its_first_16_kib_is_reported_as_prefix_only_and_never_written(hue):
+    text_in = b"A long report. " * 6000
+    text_out = b"An output summary. " * 5000
+    short = b"a short file"
+    # Both files are stored: resolve still writes neither, since an entry names a pointer and not
+    # the value it was read from.
     hue.answers.update(
         {
-            sha(text): stored(text, "text/plain", "report.txt"),
-            sha(other): stored(other, "text/plain", "other.txt"),
+            sha(text_in): stored(text_in, "text/plain", "input.txt"),
+            sha(text_out): stored(text_out, "text/plain", "output.txt"),
+            sha(short): stored(short, "text/plain", "short.txt"),
         }
     )
 
-    def message(content: str) -> dict[str, Any]:
+    def message(role: str, content: str) -> dict[str, Any]:
         return {
-            "role": "user",
+            "role": role,
             "parts": [{"type": "blob", "mime_type": "text/plain", "content": content}],
         }
 
-    recorded = [message(prefix), message("short")]
+    input_messages = [message("user", text_in[: 16 * 1024].decode()), message("user", "short")]
+    output_messages = [message("assistant", text_out[: 16 * 1024].decode())]
 
     def entry(key: str, data: bytes) -> str:
         return json.dumps(
             {"key": key, "sha256": sha(data), "size": len(data), "content_type": "text/plain"}
         )
 
+    blobs = [
+        entry("gen_ai.input.messages#/0/parts/0/content", text_in),
+        # The output's text file at the same pointer as the input's.
+        entry("gen_ai.output.messages#/0/parts/0/content", text_out),
+        # A field holding text shorter than a prefix is complete and left alone.
+        entry("gen_ai.output.messages#/1/parts/0/content", short),
+    ]
+    both = [
+        MediaResolveFailure("/0/parts/0", sha(text_in), "prefix_only"),
+        MediaResolveFailure("/0/parts/0", sha(text_out), "prefix_only"),
+    ]
     client = hue.client()
-    resolved = client.media.resolve(
-        recorded,
-        trace_id=TRACE_ID,
-        blobs=[
-            entry("gen_ai.input.messages#/0/parts/0/content", text),
-            # Another attribute's entry at the same kind of pointer: its file does not begin with
-            # the text recorded here, so it is not written in.
-            entry("gen_ai.output.messages#/1/parts/0/content", other),
-        ],
-    )
-    assert resolved.resolved == 1
-    assert resolved.failures == []
-    assert resolved.value == [message(b64(text)), recorded[1]]
-    # A prefix whose file cannot be read is reported with its reason.
-    missing = client.media.resolve(
-        recorded[:1],
-        trace_id=TRACE_ID,
-        blobs=[entry("gen_ai.input.messages#/0/parts/0/content", lost)],
-    )
-    assert missing.failures == [MediaResolveFailure("/0/parts/0", sha(lost), "not_found")]
+    for recorded in (input_messages, output_messages):
+        resolved = client.media.resolve(recorded, trace_id=TRACE_ID, blobs=blobs)
+        assert resolved.value == recorded
+        assert resolved.resolved == 0
+        assert resolved.failures == both
+    # The entries of the value's own attribute name its own file.
+    own = client.media.resolve(output_messages, trace_id=TRACE_ID, blobs=blobs[1:])
+    assert own.failures == [both[1]]
+    assert [item for item in hue.seen if "/blobs/" in item["path"]] == []
