@@ -403,7 +403,7 @@ records without an active span count as instrumentation failures.
 ### Read recorded media back
 
 The evaluation client's `media` reads a recorded file back by its digest, with a key that may read
-recorded content (**Read** or **Read and write**):
+recorded content (**Read** or **Read and write**; a trace snapshot's copy needs **Read and write**):
 
 ```ts
 import { createEvaluationClient } from "@hue-run/sdk/evals";
@@ -424,9 +424,13 @@ downloads it without the project key and refuses bytes whose SHA-256 is not the 
 `MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for the trace),
 `missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still
 unavailable after one retry that waits out a `Retry-After` of up to 10 seconds), `forbidden` (the
-key cannot read recorded content), `too_large` (over `maxBytes`, 64 MiB by default, checked before
-downloading), `digest_mismatch` or `failed` (a connection failure, a timeout or an unexpected
-answer, retried once). `{ snapshotId, sha256 }` reads a trace snapshot's pinned copy instead.
+key cannot read recorded content, or reads a snapshot without **Read and write**), `too_large`
+(over `maxBytes`, 64 MiB by default, checked before downloading), `digest_mismatch` or `failed` (a
+connection failure, a timeout, a redirect or another unexpected answer). Hue is asked for the link
+once more after a connection failure or a timeout, never after an unexpected answer; a download
+ends once no byte has arrived for the client's timeout, at least two minutes, and is not retried.
+`{ snapshotId, sha256 }` reads a trace snapshot's pinned copy instead
+(`GET /api/v1/trace-snapshots/{snapshotId}/blobs/{sha256}`), which carries no media type or name.
 
 `resolve` downloads each distinct digest once, four at a time (`concurrency`, up to 16), and returns
 a new value; the input is not changed. With `as: "dataUrl"` (the default) each part receives a
@@ -442,6 +446,17 @@ whose file cannot be read stays as it is and is listed in `failures` with its JS
 reason. Parts inside JSON-encoded strings, such as tool-call arguments, and Langfuse media tokens,
 which name files Langfuse holds, are left as they are; `fetch` reads the former by the digest the
 part carries.
+
+A snapshot's copies carry no media type, so a part that declares none would get a `data:` URL of
+`application/octet-stream`. Pass the record's `hue.blobs` entries, the JSON strings the attribute
+holds, and such a part takes the type of the entry with its SHA-256:
+
+```ts
+const { value } = await client.media.resolve(recorded, {
+  snapshotId,
+  blobs: attributes["hue.blobs"],
+});
+```
 
 ### Files in evaluation cases
 

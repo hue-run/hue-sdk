@@ -48,11 +48,12 @@ class MediaFetchError(RuntimeError):
     an unknown trace, another project's, or a digest none of its records list), ``missing`` (the
     trace lists the file, but its bytes were never uploaded or have been erased),
     ``unavailable`` (Hue could not read its evidence store, again after one retry),
-    ``forbidden`` (the key cannot read recorded content), ``too_large`` (over ``max_bytes``;
-    nothing was downloaded), ``digest_mismatch`` (the bytes do not have the requested SHA-256 or
-    the size Hue reported) or ``failed`` (a connection failure, a timeout, an unexpected status or
-    an invalid response). ``status`` is the HTTP status of the failing answer when there was one;
-    ``retry_after_seconds`` the wait Hue asked for on ``unavailable`` when it said.
+    ``forbidden`` (the key cannot read recorded content; a snapshot's copy needs a Read and
+    write key), ``too_large`` (over ``max_bytes``; nothing was downloaded), ``digest_mismatch``
+    (the bytes do not have the requested SHA-256 or the size Hue reported) or ``failed`` (a
+    connection failure, a timeout, an unexpected status or an invalid response). ``status`` is
+    the HTTP status of the failing answer when there was one; ``retry_after_seconds`` the wait Hue
+    asked for on ``unavailable`` when it said.
     """
 
     reason: MediaFetchErrorReason
@@ -256,7 +257,7 @@ class MediaClient:
 
     The project key is sent to Hue only; the file itself comes from a short-lived link fetched
     without it. Created by ``EvaluationClient``; it needs a key that may read recorded content
-    (Read, or Read and write).
+    (Read, or Read and write), and a Read and write key for a snapshot's copies.
     """
 
     def __init__(self, base_url: str, headers: dict[str, str], timeout_seconds: float) -> None:

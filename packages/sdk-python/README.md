@@ -183,7 +183,7 @@ with hue.span("review contract") as span:
 
 ### Read recorded media back
 
-`EvaluationClient.media` reads a recorded file back by its digest, with a key that may read recorded content (**Read** or **Read and write**):
+`EvaluationClient.media` reads a recorded file back by its digest, with a key that may read recorded content (**Read** or **Read and write**; a trace snapshot's copy needs **Read and write**):
 
 ```python
 import json
@@ -202,9 +202,15 @@ resolved = client.media.resolve(recorded, trace_id=trace_id, span_id=span_id)
 messages, failures = resolved.value, resolved.failures
 ```
 
-`fetch` asks Hue for a five-minute download link (`GET /api/v1/traces/{traceId}/blobs/{sha256}`), downloads it without the project key and refuses bytes whose SHA-256 is not the digest. It raises `MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for the trace), `missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still unavailable after one retry that waits out a `Retry-After` of up to 10 seconds), `forbidden` (the key cannot read recorded content), `too_large` (over `max_bytes`, 64 MiB by default, checked before downloading), `digest_mismatch` or `failed` (a connection failure, a timeout or an unexpected answer, retried once). `snapshot_id=` instead of `trace_id=` reads a trace snapshot's pinned copy.
+`fetch` asks Hue for a five-minute download link (`GET /api/v1/traces/{traceId}/blobs/{sha256}`), downloads it without the project key and refuses bytes whose SHA-256 is not the digest. It raises `MediaFetchError`, whose `reason` is `not_found` (Hue holds no such file for the trace), `missing` (the trace lists it, but it was never uploaded or has been erased), `unavailable` (still unavailable after one retry that waits out a `Retry-After` of up to 10 seconds), `forbidden` (the key cannot read recorded content, or reads a snapshot without **Read and write**), `too_large` (over `max_bytes`, 64 MiB by default, checked before downloading), `digest_mismatch` or `failed` (a connection failure, a timeout, a redirect or another unexpected answer). Hue is asked for the link once more after a connection failure or a timeout, never after an unexpected answer; a download ends once no byte has arrived for the client's timeout, at least two minutes, and is not retried. `snapshot_id=` instead of `trace_id=` reads a trace snapshot's pinned copy (`GET /api/v1/trace-snapshots/{snapshotId}/blobs/{sha256}`), which carries no media type or name.
 
 `resolve` downloads each distinct digest once, four at a time (`concurrency`, up to 16), and returns a `ResolvedMedia` with a new `value`; the input is not changed. With `as_="data_url"` (the default) each part receives a `data:` URL where its field takes one (OpenAI `image_url` and `file_data`, Responses `input_image`, `input_file` and `computer_screenshot`, AI SDK `image` and `file`) and bare base64 where its convention requires it (GenAI `blob`, OpenAI `input_audio` and assistant `audio`, Anthropic `source.data`, Gemini `inlineData`, Vertex `media`, Bedrock `source.bytes`), so the messages can be sent to the provider again. A GenAI `blob` or Vertex `media` part that declares a textual media type (`text/*`, JSON, XML, YAML and the like) receives the file's UTF-8 text, as Hue reads that field, or a typed `data:` URL when the bytes are no UTF-8, so recording the value again keeps the same bytes; `as_="bytes"` writes `bytes`. A resolved part no longer carries `sha256` and `size`. A part whose file cannot be read stays as it is and is listed in `failures` with its JSON pointer and reason. Parts inside JSON-encoded strings, such as tool-call arguments, and Langfuse media tokens, which name files Langfuse holds, are left as they are; `fetch` reads the former by the digest the part carries.
+
+A snapshot's copies carry no media type, so a part that declares none would get a `data:` URL of `application/octet-stream`. Pass the record's `hue.blobs` entries, the JSON strings the attribute holds, and such a part takes the type of the entry with its SHA-256:
+
+```python
+resolved = client.media.resolve(recorded, snapshot_id=snapshot_id, blobs=attributes["hue.blobs"])
+```
 
 ### Files in evaluation cases
 

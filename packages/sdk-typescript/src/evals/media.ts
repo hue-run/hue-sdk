@@ -22,7 +22,8 @@ export type MediaFetchErrorReason =
   /** Hue could not read its evidence store, again after one retry; `retryAfterSeconds` says when
    * to ask again. */
   | "unavailable"
-  /** The key cannot read recorded content: use a Read or Read and write key. */
+  /** The key cannot read recorded content: use a Read or Read and write key, and a Read and write
+   * key for a snapshot's copy. */
   | "forbidden"
   /** The file is larger than `maxBytes`; nothing was downloaded. */
   | "too_large"
@@ -89,7 +90,8 @@ export type MediaFetchTarget =
       snapshotId?: undefined;
     }
   | {
-      /** Trace snapshot ID (UUID), such as the one a case converted from a trace keeps. */
+      /** Trace snapshot ID (UUID), such as the one a case converted from a trace keeps. Reading
+       * its copy needs a Read and write key. */
       snapshotId: string;
       /** Lowercase hex SHA-256 the part records. */
       sha256: string;
@@ -120,7 +122,8 @@ export type MediaResolveOptions = (
       snapshotId?: undefined;
     }
   | {
-      /** Trace snapshot ID whose pinned copies hold the files. */
+      /** Trace snapshot ID whose pinned copies hold the files; reading them needs a Read and
+       * write key. */
       snapshotId: string;
       /** Not set when resolving a snapshot's pinned copies. */
       traceId?: undefined;
