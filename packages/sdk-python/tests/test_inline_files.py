@@ -12,8 +12,10 @@ import pytest
 from hue_sdk._inline_files import (
     INLINE_FILE_LIMIT,
     _file_bytes,
+    dumps_message,
     hash_inline_files,
     is_text_media_type,
+    loads_message,
 )
 
 # The TypeScript suite reads the same file; each digest is of the bytes the case was built from.
@@ -119,3 +121,22 @@ def test_lone_surrogates_are_replaced_once_for_a_whole_part() -> None:
         return best
 
     assert seconds("a%41\ud800") < 3 * seconds("a%41\u00e9")
+
+
+def test_placed_json_numbers_are_written_as_javascript_writes_them():
+    # Pinned against Node's JSON.stringify(JSON.parse(text)).
+    text = (
+        '{"threshold":1e-5,"id":9007199254740993,"big":1e21,"tiny":1e-7,"scale":1.5e20,'
+        '"ratio":-0.25,"zero":-0,"exact":2.0,"huge":123456789012345678901234567890,'
+        '"small":1.23e-18,"max":1.7976931348623157e308,"over":1e400}'
+    )
+    assert dumps_message(loads_message(text)) == (
+        '{"threshold":0.00001,"id":9007199254740992,"big":1e+21,"tiny":1e-7,'
+        '"scale":150000000000000000000,"ratio":-0.25,"zero":0,"exact":2,'
+        '"huge":1.2345678901234568e+29,"small":1.23e-18,"max":1.7976931348623157e+308,'
+        '"over":null}'
+    )
+    # Values a caller supplies are written the same way.
+    assert dumps_message({"x": 2.0, "y": 1e17, "z": 0.5, "w": 1e-6}) == (
+        '{"x":2,"y":100000000000000000,"z":0.5,"w":0.000001}'
+    )

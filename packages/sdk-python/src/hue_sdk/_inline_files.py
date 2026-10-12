@@ -12,6 +12,7 @@ import json
 import re
 import sys
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
 from threading import Lock
@@ -989,12 +990,116 @@ def _no_constant(text: str) -> Any:
 
 def loads_message(text: str) -> Any:
     """JSON text as the TypeScript SDK parses it, so a value placed again is written the same:
-    ``NaN`` and ``Infinity`` are not JSON, and a number keeps the value JavaScript gives it."""
-    return json.loads(text, parse_float=_js_number, parse_constant=_no_constant)
+    ``NaN`` and ``Infinity`` are not JSON, and every number, integer literals included, keeps the
+    double JavaScript gives it (``9007199254740993`` reads as ``9007199254740992``)."""
+    return json.loads(
+        text, parse_float=_js_number, parse_int=_js_number, parse_constant=_no_constant
+    )
+
+
+def js_number_text(number: float) -> str:
+    """A number as JavaScript's ``JSON.stringify`` writes it (ECMAScript Number::toString): the
+    shortest digits that read back as the same double, positional from 1e-6 up to 1e21
+    (``0.00001``, ``150000000000000000000``), else exponential (``1e-7``, ``1e+21``); ``-0`` as
+    ``0`` and a value that is not finite as ``null``."""
+    if not isfinite(number):
+        return "null"
+    if number == 0:
+        return "0"
+    sign = "-" if number < 0 else ""
+    # Python's repr is the shortest decimal that reads back as the same double, as JavaScript's.
+    mantissa, _, exponent = repr(abs(number)).partition("e")
+    whole, _, fraction = mantissa.partition(".")
+    figures = whole + fraction
+    digits = figures.lstrip("0")
+    # The value is 0.<digits> times ten to the power ``point``.
+    point = len(whole) + (int(exponent) if exponent else 0) - (len(figures) - len(digits))
+    digits = digits.rstrip("0")
+    count = len(digits)
+    if count <= point <= 21:
+        return sign + digits + "0" * (point - count)
+    if 0 < point <= 21:
+        return sign + digits[:point] + "." + digits[point:]
+    if -6 < point <= 0:
+        return sign + "0." + "0" * -point + digits
+    power = point - 1
+    shown = digits if count == 1 else digits[0] + "." + digits[1:]
+    return f"{sign}{shown}e{'+' if power >= 0 else '-'}{abs(power)}"
+
+
+def _json_text(value: Any, parts: list[str]) -> None:
+    """``value`` written as JavaScript's ``JSON.stringify`` writes the same JSON data."""
+    if isinstance(value, str):
+        parts.append(json.dumps(value, ensure_ascii=False))
+    elif value is None or value is True or value is False:
+        parts.append("null" if value is None else "true" if value else "false")
+    elif isinstance(value, int):
+        parts.append(int.__repr__(value))
+    elif isinstance(value, float):
+        parts.append(js_number_text(value))
+    elif isinstance(value, Mapping):
+        parts.append("{")
+        for index, (key, item) in enumerate(value.items()):
+            if index:
+                parts.append(",")
+            if not isinstance(key, str):
+                key = (
+                    "null"
+                    if key is None
+                    else ("true" if key else "false")
+                    if isinstance(key, bool)
+                    else js_number_text(key)
+                    if isinstance(key, float)
+                    else str(key)
+                )
+            parts.append(json.dumps(key, ensure_ascii=False))
+            parts.append(":")
+            _json_text(item, parts)
+        parts.append("}")
+    elif isinstance(value, (list, tuple)):
+        parts.append("[")
+        for index, item in enumerate(value):
+            if index:
+                parts.append(",")
+            _json_text(item, parts)
+        parts.append("]")
+    else:
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _spelled_alike(value: Any) -> bool:
+    """Whether ``json.dumps`` writes ``value`` as ``JSON.stringify`` does: plain dicts, lists,
+    strings, integers and booleans, and only floats both spell the same (finite, not integral,
+    from 1e-4 up to 1e16)."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        kind = type(item)
+        if kind is str or kind is int or kind is bool or item is None:
+            continue
+        if kind is float:
+            if not (isfinite(item) and not item.is_integer() and 1e-4 <= abs(item) < 1e16):
+                return False
+        elif kind is dict:
+            if any(type(key) is not str for key in item):
+                return False
+            stack.extend(item.values())
+        elif kind is list or kind is tuple:
+            stack.extend(item)
+        else:
+            return False
+    return True
 
 
 def dumps_message(value: Any) -> str:
+    """Compact JSON text as JavaScript's ``JSON.stringify`` writes the same data, numbers
+    included, so a value the SDK places again matches the TypeScript SDK's byte for byte."""
+    if _spelled_alike(value):
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        parts: list[str] = []
+        _json_text(value, parts)
+        encoded = "".join(parts)
     # JSON can preserve lone surrogate code units, but UTF-8 cannot encode them. Escape only
     # those units so provider metadata round-trips without changing ordinary Unicode text.
-    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return _SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", encoded)

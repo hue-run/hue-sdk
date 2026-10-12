@@ -6073,6 +6073,81 @@
         },
         "entries": []
       }
+    },
+    {
+      "id": "tool-call-arguments-js-numbers",
+      "attribute": "gen_ai.output.messages",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_2",
+              "type": "function",
+              "function": {
+                "name": "save_file",
+                "arguments": "{\"file\":\"data:application/pdf;base64,JVBERi0xLjQKJeLjz9MKJSVFT0YK\",\"threshold\":1e-5,\"id\":9007199254740993,\"big\":1e21,\"tiny\":1e-7,\"scale\":1.5e20,\"ratio\":-0.25,\"zero\":-0,\"exact\":2.0}"
+              }
+            }
+          ]
+        }
+      ],
+      "success": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                  "name": "save_file",
+                  "arguments": "{\"file\":{\"type\":\"blob\",\"mime_type\":\"application/pdf\",\"modality\":\"document\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21},\"threshold\":0.00001,\"id\":9007199254740992,\"big\":1e+21,\"tiny\":1e-7,\"scale\":150000000000000000000,\"ratio\":-0.25,\"zero\":0,\"exact\":2}"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": [
+          "{\"key\":\"gen_ai.output.messages#/0/tool_calls/0/function/arguments/file\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21,\"content_type\":\"application/pdf\"}"
+        ]
+      },
+      "failure": {
+        "messages": [
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                  "name": "save_file",
+                  "arguments": "{\"file\":{\"type\":\"blob\",\"mime_type\":\"application/pdf\",\"modality\":\"document\",\"sha256\":\"c33ca5fb3d29a4432270c851469532a7d3729b33d8bd8fe8245023eccd1a5530\",\"size\":21},\"threshold\":0.00001,\"id\":9007199254740992,\"big\":1e+21,\"tiny\":1e-7,\"scale\":150000000000000000000,\"ratio\":-0.25,\"zero\":0,\"exact\":2}"
+                }
+              }
+            ]
+          }
+        ],
+        "entries": []
+      }
+    },
+    {
+      "id": "input-value-js-numbers",
+      "attribute": "input.value",
+      "value": "{\"threshold\":1e-5,\"id\":9007199254740993,\"big\":1e21,\"tiny\":1e-7,\"scale\":1.5e20,\"ratio\":-0.25,\"zero\":-0,\"exact\":2.0,\"image\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}",
+      "success": {
+        "value": "{\"threshold\":0.00001,\"id\":9007199254740992,\"big\":1e+21,\"tiny\":1e-7,\"scale\":150000000000000000000,\"ratio\":-0.25,\"zero\":0,\"exact\":2,\"image\":{\"type\":\"blob\",\"mime_type\":\"image/png\",\"modality\":\"image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68}}",
+        "entries": [
+          "{\"key\":\"input.value#/image\",\"sha256\":\"6a179239986c9373720e7f2be3c383f6f1a61bd9161b286b9f9e103bdf95bc29\",\"size\":68,\"content_type\":\"image/png\"}"
+        ]
+      },
+      "failure": {
+        "value": "{\"threshold\":1e-5,\"id\":9007199254740993,\"big\":1e21,\"tiny\":1e-7,\"scale\":1.5e20,\"ratio\":-0.25,\"zero\":-0,\"exact\":2.0,\"image\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR2kAAAAASUVORK5CYII=\"}",
+        "entries": []
+      }
     }
   ],
   "logs": [
