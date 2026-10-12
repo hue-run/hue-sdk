@@ -153,6 +153,8 @@ function fixture(options: {
   scorers: ScorerVersion[];
   failReserveOnce?: boolean;
   failPutOnce?: boolean;
+  /** Answer trace receipts as holding every span asked for (the OTLP routes keep nothing). */
+  receipts?: boolean;
 }) {
   const projectId = randomUUID();
   const datasetVersionId = randomUUID();
@@ -281,6 +283,19 @@ function fixture(options: {
           slug: "synthetic",
           organizationId: randomUUID(),
         });
+      const receipt = /^\/traces\/([0-9a-f]{32})\/receipt$/.exec(path);
+      if (receipt && options.receipts) {
+        const expected = url.searchParams.getAll("expectedSpanId");
+        return Response.json({
+          traceId: receipt[1],
+          spanCount: 1000,
+          revision: 1,
+          fields: { input: false, output: false, model: false, usage: false, session: false },
+          matchedSpanIds: expected,
+          missingSpanIds: [],
+          traceUrl: `${url.origin}/traces/${receipt[1]}`,
+        });
+      }
       if (path.startsWith("/otlp/")) {
         await request.arrayBuffer();
         return new Response(new Uint8Array(), {
@@ -1203,6 +1218,64 @@ describe("file-based cases", () => {
     expect(
       existsSync(join(checkpointDirectory, "files", `case-${f.item.id}`, "evaluator-inputs")),
     ).toBe(false);
+  });
+
+  test("a failed scorer file download after the target resumes and completes without running it again", async () => {
+    const scored: string[][] = [];
+    const grader = defineLocalScorer({
+      source: "grade with every pinned file",
+      entrypoint: "grade",
+      metrics: [{ name: "files", type: "number", min: 0 }],
+      score(context) {
+        scored.push((context.files ?? []).map((file) => file.role).sort());
+        return {
+          state: "scored",
+          metrics: [{ name: "files", value: context.files?.length ?? 0, passed: true }],
+        };
+      },
+    });
+    const f = fixture({ scorers: [version(grader.definition)], receipts: true });
+    const hue = createHue({
+      apiKey: key,
+      baseUrl: f.baseUrl,
+      serviceName: "resume-scoring",
+      captureContent: false,
+    });
+    const checkpointDirectory = await directory();
+    const evaluatorOnly = f.artifacts.get(f.inputs.evaluatorOnly.id)!;
+    let invocations = 0;
+    const options = {
+      client: createEvaluationClient({ apiKey: key, baseUrl: f.baseUrl, maxAttempts: 1 }),
+      hue,
+      experimentId: f.experiment.id,
+      checkpointDirectory,
+      persistResultContent: true,
+      environmentEvidence: "when_pinned" as const,
+      traceEvidence: { mode: "required" as const },
+      scorers: [grader],
+      target: (_inputs: JsonValue, context: { files?: readonly LocalFile[] }) => {
+        invocations++;
+        expect((context.files ?? []).map((file) => file.role)).not.toContain("org_template");
+        // The evaluator-only file becomes unreadable once the target has finished.
+        evaluatorOnly.state = "reserved";
+        return { ok: true };
+      },
+    };
+    try {
+      await expect(runExperiment(options)).rejects.toThrow();
+      expect(invocations).toBe(1);
+      expect(f.calls.completions).toHaveLength(0);
+      // Readable again: the saved outcome is scored and completed under required evidence.
+      evaluatorOnly.state = "ready";
+      const report = await runExperiment(options);
+      expect(invocations).toBe(1);
+      expect(report.subjectIds).toHaveLength(1);
+      expect(f.calls.completions[0]).toMatchObject({ state: "succeeded", output: { ok: true } });
+      expect(scored).toEqual([["attached_template", "org_template", "source"]]);
+    } finally {
+      await hue.shutdown();
+      f.server.stop(true);
+    }
   });
 
   test("a failed upload resumes from the staged files without invoking the target again", async () => {

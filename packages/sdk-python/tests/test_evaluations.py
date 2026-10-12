@@ -2016,6 +2016,66 @@ def test_evaluator_only_files_are_not_on_disk_while_any_target_runs(evaluation_r
     assert left == [chart]
 
 
+def test_a_failed_scorer_file_download_after_the_target_resumes_without_running_it_again(
+    evaluation_receiver, tmp_path
+):
+    receiver, calls = evaluation_receiver, {"target": 0, "scorer": []}
+    chart, key = b"\x89PNG synthetic chart", b"answer key 42"
+    receiver.input_files = [
+        _pinned("source", "chart.png", "image/png", chart),
+        _pinned("evaluator_reference", "key.txt", "text/plain", key),
+    ]
+    key_id = receiver.input_files[1]["artifactId"]
+    receiver.artifacts = {receiver.input_files[0]["artifactId"]: chart, key_id: key}
+    files_root = tmp_path / "checkpoints" / "files"
+
+    def custom_score(context):
+        calls["scorer"].append(
+            [(file.role, file.path.read_bytes()) for file in context.get("files", [])]
+        )
+        return {"state": "scored", "metrics": [{"name": "seen", "value": True, "passed": True}]}
+
+    local = define_local_scorer(
+        source=inspect.getsource(custom_score),
+        entrypoint="score",
+        metrics=[{"name": "seen", "type": "boolean"}],
+        score=custom_score,
+    )
+    receiver.versions = [
+        {"id": str(uuid4()), "contentDigest": "d" * 64, "definition": local.definition}
+    ]
+
+    def target(inputs, context):
+        calls["target"] += 1
+        assert [file.role for file in context.files] == ["source"]
+        assert not any(
+            path.is_file() and path.read_bytes() == key for path in files_root.rglob("*")
+        )
+        # The evaluator file becomes unreadable once the target has finished.
+        receiver.artifacts.pop(key_id)
+        return "the answer"
+
+    arguments = options(receiver, tmp_path, target)
+    arguments["scorers"] = [local]
+    try:
+        with pytest.raises(HueApiError):
+            run_experiment(**arguments)
+    finally:
+        arguments["hue"].shutdown()
+    assert calls == {"target": 1, "scorer": []}
+    # The file is readable again: the same run resumes, scores and completes the saved outcome.
+    receiver.artifacts[key_id] = key
+    arguments = options(receiver, tmp_path, target)
+    arguments["scorers"] = [local]
+    try:
+        run_experiment(**arguments)
+    finally:
+        arguments["hue"].shutdown()
+    assert calls["target"] == 1 and receiver.starts == 1
+    assert calls["scorer"] == [[("source", chart), ("evaluator_reference", key)]]
+    assert receiver.complete_body["output"] == "the answer"
+
+
 def test_a_pinned_file_that_does_not_match_its_manifest_never_starts_the_case(
     evaluation_receiver, tmp_path
 ):
