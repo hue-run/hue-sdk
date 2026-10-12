@@ -216,10 +216,11 @@ its place and lists the upload in its `hue.blobs` attribute. Files reach Hue in 
 | Files a case's agent and scorers receive in an evaluation | [`CaseWrite.files`](#files-in-evaluation-cases) | An input file pinned on the case | None: case files are artifacts |
 
 [`client.media`](#read-recorded-media-back) reads a recorded file back. Every upload needs
-`captureContent: true` and a project key (never a setup credential, `hue_setup_…`), sees
-`redact` and the credential scrub before it is hashed, shares the export's upload budget and the
-128 MiB held for values awaiting upload, and falls back without failing the export; a file used
-more than once in a trace is stored once. See [Values over the inline limit](#values-over-the-inline-limit)
+`captureContent: true` and a project key (never a setup credential, `hue_setup_…`) and follows
+`redact`: nothing the redactor removes is uploaded, a value it rewrites uploads as rewritten, and an
+attachment part it rewrites uploads nothing. Uploads share the export's upload budget and the 128
+MiB held for values awaiting upload, and fall back without failing the export; a file used more than
+once in a trace is stored once. See [Values over the inline limit](#values-over-the-inline-limit)
 for the upload protocol, budgets and fallbacks.
 
 ### Automatically captured media

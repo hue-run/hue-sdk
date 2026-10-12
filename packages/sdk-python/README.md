@@ -106,7 +106,7 @@ Hue stores the bytes of images, documents and audio apart from the spans and log
 | A file the work read, received or produced, outside any recorded value | [`span.record_file`](#record-a-file) | A `hue.file` event | `event:hue.file:<sha256>` |
 | Files a case's agent and scorers receive in an evaluation | [`add_case(files=...)`](#files-in-evaluation-cases) | An input file pinned on the case | None: case files are artifacts |
 
-[`client.media`](#read-recorded-media-back) reads a recorded file back. Every upload needs `capture_content=True` and a project key (never a setup key, `hue_setup_…`), sees the redactor and the credential scrub before it is hashed, shares the export's upload budget and the 128 MiB held for values awaiting upload, and falls back without failing the export; a file used more than once in a trace is stored once. See [Values over the inline limit](#values-over-the-inline-limit) for the upload protocol, budgets and fallbacks.
+[`client.media`](#read-recorded-media-back) reads a recorded file back. Every upload needs `capture_content=True` and a project key (never a setup key, `hue_setup_…`) and follows the redactor: nothing it removes is uploaded, a value it rewrites uploads as rewritten, and an attachment part it rewrites uploads nothing. Uploads share the export's upload budget and the 128 MiB held for values awaiting upload, and fall back without failing the export; a file used more than once in a trace is stored once. See [Values over the inline limit](#values-over-the-inline-limit) for the upload protocol, budgets and fallbacks.
 
 ### Automatically captured media
 
