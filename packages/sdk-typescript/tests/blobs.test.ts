@@ -1996,3 +1996,30 @@ test("helper uploads from several spans run concurrently within one export's upl
     endpoint.server.stop(true);
   }
 }, 20_000);
+
+test("requested helper uploads of spans dropped at the queue count as upload fallbacks", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint, { maxQueueBytes: 1024 });
+  try {
+    for (let index = 0; index < 6; index++)
+      await hueClient.withSpan(`dropped helper ${index}`, ({ span }) => {
+        // Over the whole queue budget: the span is dropped when it ends.
+        span.setAttribute("app.padding", "x".repeat(2048));
+        hueClient.recordFile({
+          role: "input",
+          mediaType: "image/png",
+          data: Buffer.from(`dropped helper ${index}`),
+          upload: true,
+        });
+      });
+    await hueClient.flushSafe();
+    const report = hueClient.transport.getReport();
+    expect(report.droppedSpans).toBe(6);
+    expect(report.uploadFallbacks).toBe(6);
+    expect(endpoint.reservations).toHaveLength(0);
+    expect(mediaState(hueClient).heldBytes).toBe(0);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});

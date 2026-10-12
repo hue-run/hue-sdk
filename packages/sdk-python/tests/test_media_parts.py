@@ -1436,3 +1436,33 @@ def test_inspection_allowance_from_unheld_value_limits_export_eligibility(hue_st
         skipped.encode(),
         "application/json",
     )
+
+
+def test_requested_uploads_of_spans_dropped_at_the_queue_are_counted(hue_store):
+    # The first span's export is held, so the one-record queue is full while six more end.
+    hue_store.release_traces.clear()
+    try:
+        with client(hue_store, max_queue_size=1) as hue:
+            with hue.span("queued"):
+                pass
+            assert hue_store.traces_received.wait(10)
+            for index in range(6):
+                with hue.span(f"dropped {index}") as span:
+                    span.record_file(
+                        role="input",
+                        media_type="image/png",
+                        data=f"dropped {index}".encode(),
+                        upload=True,
+                    )
+            status = hue.export_status
+            assert status.dropped_trace_records == 6
+            assert status.upload_fallbacks == 6
+            assert hue._uploads is not None and hue._uploads._staged == {}
+            assert hue._uploads.held.held == 0
+            hue_store.release_traces.set()
+            # Not ok: six records were dropped.
+            assert not hue.force_flush()
+    finally:
+        hue_store.release_traces.set()
+    assert [span.name for span in hue_store.spans] == ["queued"]
+    assert hue_store.reservations == []
