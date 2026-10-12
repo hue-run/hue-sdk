@@ -10,6 +10,14 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.18.1] - 2026-10-12
+
+#### Fixed
+
+- **Wire** A text file that a GenAI `blob`, Vertex `media` or AI SDK `file` or `image` part holds as bare base64 is read as Hue reads it: its decoded bytes are measured against the 64 KiB inline limit, uploaded and placed in the digest form, keyed at the part. Base64 is the encoding the GenAI conventions give `blob` content, and what `client.media.resolve` and `rehydrateMedia` write back into a `blob` or `media` part for every media type; 0.18.0 read such content as the text itself whenever its media type was textual, so recording a resolved 72,000-byte text file again uploaded its base64 text and kept that text's first 16 KiB. Content that does not read as base64 (a length divisible by four, base64 characters only) is still the file's own text and keeps the 16 KiB prefix form; a `data:` URL and a field its convention declares base64 are read as before.
+- **Wire** An `Attachment` in a value that is still over the value limit with its files as digest parts is no longer uploaded or listed under `hue.blobs`: such a value uploads whole and keeps only its first 16 KiB inline, where no reader finds the part. The value keeps the attachment's digest part, and the attachment counts in `uploadFallbacks`, as one in a value cut to the limit does. The same holds for an attachment in a `recordMessages()` body that export replaces by the receiver's marker.
+- A refused `client.media.fetch` of a snapshot's copy (`MediaFetchError` reason `forbidden`) says that a snapshot's files need a Read and write key; its message named a Read or Read and write key, which is what a trace's files need. `MediaFetchError` takes a `snapshot` option that selects this message.
+
 ### [0.18.0] - 2026-10-12
 
 #### Breaking
@@ -1474,6 +1482,14 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### [0.11.1] - 2026-10-12
+
+#### Fixed
+
+- **Wire** A text file that a GenAI `blob`, Vertex `media` or AI SDK `file` or `image` part holds as bare base64 is read as Hue reads it, as in the TypeScript SDK 0.18.1: its decoded bytes are measured against the 64 KiB inline limit, uploaded and placed in the digest form, keyed at the part. Base64 is the encoding the GenAI conventions give `blob` content, and what `client.media.resolve` and `rehydrate_media` write back into a `blob` or `media` part for every media type; 0.11.0 read such content as the text itself whenever its media type was textual, so recording a resolved 72,000-byte text file again uploaded its base64 text and kept that text's first 16 KiB. Content that does not read as base64 (a length divisible by four, base64 characters only) is still the file's own text and keeps the 16 KiB prefix form; a `data:` URL and a field its convention declares base64 are read as before.
+- **Wire** An `Attachment` in a value that is still over the value limit with its files as digest parts is no longer uploaded or listed under `hue.blobs`: such a value uploads whole and keeps only its first 16 KiB inline, where no reader finds the part. The value keeps the attachment's digest part, and the attachment counts in `export_status.upload_fallbacks`, as one in a value cut to the limit does.
+- A refused `client.media.fetch` of a snapshot's copy (`MediaFetchError` reason `forbidden`) says that a snapshot's files need a Read and write key; its message named a Read or Read and write key, which is what a trace's files need. `MediaFetchError` takes a keyword-only `snapshot` argument that selects this message.
 
 ### [0.11.0] - 2026-10-12
 
