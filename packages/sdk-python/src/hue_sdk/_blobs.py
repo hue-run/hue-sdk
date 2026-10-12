@@ -154,12 +154,13 @@ def blob_prefix(value: str | bytes) -> str | bytes:
     return cut_utf8(value, BLOB_PREFIX_BYTES)
 
 
-def _chunks(value: str | bytes) -> Iterator[bytes]:
-    """The bytes an upload of ``value`` carries, a slice at a time."""
+def _chunks(value: str | bytes) -> Iterator[bytes | memoryview]:
+    """The bytes an upload of ``value`` carries, a slice at a time: bytes as views of their own
+    buffer, never copied whole."""
     if isinstance(value, bytes):
         view = memoryview(value)
         for start in range(0, len(value), _TEXT_CHUNK_CHARS):
-            yield view[start : start + _TEXT_CHUNK_CHARS].tobytes()
+            yield view[start : start + _TEXT_CHUNK_CHARS]
         return
     for start in range(0, len(value), _TEXT_CHUNK_CHARS):
         yield value[start : start + _TEXT_CHUNK_CHARS].encode("utf-8")
@@ -189,7 +190,7 @@ class _Body(io.RawIOBase):
         super().__init__()
         self._chunks = _chunks(value)
         self._size = size
-        self._pending = b""
+        self._pending: bytes | memoryview = b""
         self._offset = 0
         self._deadline = deadline
         self._stopped = stopped
@@ -217,7 +218,7 @@ class _Body(io.RawIOBase):
         if size is None or size < 0:
             size = len(self._pending)
         # Only what is read is copied, never the rest of the slice.
-        result = self._pending[self._offset : self._offset + size]
+        result = bytes(self._pending[self._offset : self._offset + size])
         self._offset += len(result)
         self._position += len(result)
         return result

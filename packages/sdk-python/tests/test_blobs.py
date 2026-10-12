@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+import tracemalloc
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Lock, Thread
@@ -740,6 +741,49 @@ def test_a_placed_span_lets_go_of_its_whole_value_while_it_is_sent(hue_store):
             if flushing is not None:
                 flushing.join(15)
     assert len(blobs(hue_store.span("released"))) == 1
+
+
+def test_an_image_in_input_value_is_let_go_once_placed_without_a_collection(hue_store):
+    # Admission and export each parse the value, decode its image and edit its text. What they
+    # make is freed as soon as they are done with it, by reference counting alone: with the
+    # cycle collector off, spans placed one after another peak near one span's copies, rather
+    # than adding each span's to the last.
+    text = f"data:image/png;base64,{base64.b64encode(os.urandom(384 * KIB)).decode()}"
+    image = {"type": "image_url", "image_url": {"url": text}}
+    value = {"messages": [{"role": "user", "content": [image]}]}
+    spans = 8
+    with client(hue_store) as hue:
+        with hue.span("warm up") as span:
+            span.set_input(value)
+        assert hue.force_flush()
+        tracing = tracemalloc.is_tracing()
+        gc.collect()
+        gc.disable()
+        try:
+            if not tracing:
+                tracemalloc.start()
+            before = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            for index in range(spans):
+                with hue.span(f"image {index}") as span:
+                    span.set_input(value)
+                del span
+                assert hue.force_flush()
+                # The store keeps what it is sent; only the SDK's memory is measured.
+                with hue_store.lock:
+                    hue_store.objects.clear()
+            peak = tracemalloc.get_traced_memory()[1] - before
+        finally:
+            if not tracing:
+                tracemalloc.stop()
+            gc.enable()
+        assert hue.export_status.uploaded_values == spans + 1
+    # One span's admission holds its value's text, its JSON and the image decoded; its export
+    # holds them again while the image uploads. Left to the collector, each span added about
+    # three copies of the text.
+    assert peak < 8 * len(text), f"{peak / len(text):.1f} copies of the value's text"
+    (entry,) = blobs(hue_store.span(f"image {spans - 1}"))
+    assert entry["key"] == "input.value#/messages/0/content/0"
 
 
 def test_a_rate_limited_reservation_is_retried_after_its_retry_after(hue_store):

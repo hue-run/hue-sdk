@@ -174,7 +174,9 @@ def inline_file(content: str) -> InlineFile:
         decoded = _percent_decoded(payload)
     elif len(payload) % 4 == 0 and _BASE64.match(payload):
         try:
-            decoded = base64.b64decode(payload, validate=True)
+            # The text is strict base64, as just checked. Decoded as it is, without the ASCII
+            # copy ``b64decode`` makes of a string first.
+            decoded = binascii.a2b_base64(payload)
         except binascii.Error:
             decoded = None
     media_type = match.group(1).split(";")[0].strip() if match else ""
@@ -816,8 +818,14 @@ def media_in(value: Any, source: str | None = None) -> MediaValue:
                 continue
             visit(item, at, depth + 1, node, name, within)
 
-    visit(value, "", 0, box, "value", [])
-    return MediaValue(box, files, encoded, document, source)
+    try:
+        visit(value, "", 0, box, "value", [])
+        return MediaValue(box, files, encoded, document, source)
+    finally:
+        # ``visit`` refers to itself, so it outlives this call until the next collection: the
+        # lists it holds are let go now, so the files found, with the parts and content they
+        # hold, go with the result.
+        files, encoded = [], []
 
 
 _JSON_OBJECT_TEXT = re.compile(r"\s*[\[{]")
