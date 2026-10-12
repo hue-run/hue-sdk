@@ -70,7 +70,7 @@ Run from `packages/sdk-typescript`:
 
 ```sh
 bun test tests/blobs.test.ts -t "media wire"
-bun test tests/blobs.test.ts -t "log media wire|media beyond the recorded messages"
+bun test tests/blobs.test.ts -t "log media wire|media beyond the recorded messages|queue cut"
 bun test tests/blobs.test.ts -t "recordFile uploads are opt-in"
 bun test tests/blobs.test.ts -t "concurrently within one export|repeated files share|dropped at the queue|code units|admission skipped"
 bun test tests/inline-files.test.ts -t "media digest fallback"
