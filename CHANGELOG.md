@@ -10,6 +10,16 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.18.2] - 2026-10-13
+
+#### Added
+
+- `Attachment({ path })` and `recordFile({ path })` take a regular file over 25 MiB, up to Hue's 1 GB upload limit: the file is hashed a 1 MiB slice at a time when it is recorded and read again from disk when it is uploaded, so it is never held in memory and does not count against the 128 MiB budget for values awaiting upload. Each slice is hashed as it is sent and the last is sent only once the file ended at the size and SHA-256 it was recorded with; a file that changed or is gone by then is not uploaded (the request ends before its body is complete, and Hue's upload URL signs the size and SHA-256, so the store refuses other bytes) and counts in `report.uploadFallbacks`, its part or event keeping the digest it was recorded with. `recordFile` takes `path` in place of `data` (not both); a file up to 25 MiB given by path is read when it is recorded, as `data` is. Bytes given in memory (`data`) keep their 25 MiB limit, since they are held until export. Uploads follow `captureContent`, setup credentials, `redact` and fallback counting as before.
+
+#### Fixed
+
+- **Wire** Inline media in a span's own attribute past the media inspection bounds (8 Mi UTF-16 code units for one attribute, 16 Mi for a record) is uploaded as files: 0.18.1 uploaded such a value whole as JSON text, its first 16 KiB inline, so a model call's 10 MB base64 audio part reached Hue inside that text instead of as an audio file. An attribute held whole for upload past the bounds (it is over the value limit) now has its media read in place when it is exported: each string in it longer than 16 Ki code units and written without escapes as base64 or a `data:` URL is decoded, hashed and uploaded a 1 MiB slice at a time from the recorded text, never parsed or copied out of it, up to Hue's 1 GB upload limit, and the value is placed exactly as one within the bounds: the same digest form, `hue.blobs` entries and fallbacks, every other byte of the recorded text kept. The JSON around those strings, files written with escapes or inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it still uploads whole. Nothing more is read on the application's thread, and the held-value budget, fallback counting and the exporter's limits are unchanged. Log records keep the bounds. The shared corpus gains cases with files of 6.3 MB in both SDKs.
+
 ### [0.18.1] - 2026-10-12
 
 A limitation that 0.18.0 already had and that this release keeps: an `Attachment` in a value that is still over the value limit with its files as digest parts is uploaded and listed under `hue.blobs` at `<attribute>#<pointer>`. Its bytes are stored, and `client.media.fetch({ traceId, sha256 })` and Hue's span read reach them by digest. The value itself uploads whole and keeps only its first 16 KiB inline, so readers do not place the file at its position in the value.
@@ -1488,6 +1498,16 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### [0.11.2] - 2026-10-13
+
+#### Added
+
+- `Attachment(path=...)` and `span.record_file(path=...)` take a regular file over 25 MiB, up to Hue's 1 GB upload limit, as in the TypeScript SDK 0.18.2: the file is hashed a 1 MiB slice at a time when it is recorded and read again from disk when it is uploaded, so it is never held in memory and does not count against the 128 MiB held for values awaiting upload. Each slice is hashed as it is sent and the last is sent only once the file ended at the size and SHA-256 it was recorded with; a file that changed or is gone by then is not uploaded (the request ends before its body is complete, and Hue's upload URL signs the size and SHA-256, so the store refuses other bytes) and counts in `export_status.upload_fallbacks`, its part or event keeping the digest it was recorded with. `record_file` takes `path` in place of `data` (not both); a file up to 25 MiB given by path is read when it is recorded, as `data` is. Bytes given in memory (`data`) keep their 25 MiB limit, since they are held until export. Uploads follow `capture_content`, setup keys, the redactor and fallback counting as before.
+
+#### Fixed
+
+- **Wire** Inline media in a span's own attribute past the media inspection bounds (8 Mi UTF-16 code units for one attribute, 16 Mi for a record) is uploaded as files, as in the TypeScript SDK 0.18.2: 0.11.1 uploaded such a value whole as JSON text, its first 16 KiB inline, so a model call's 10 MB base64 audio part reached Hue inside that text instead of as an audio file. An attribute held whole for upload past the bounds (it is over the value limit) now has its media read in place when it is exported: each string in it longer than 16 Ki code units and written without escapes as base64 or a `data:` URL is decoded, hashed and uploaded a 1 MiB slice at a time from the recorded text, never parsed or copied out of it, up to Hue's 1 GB upload limit, and the value is placed exactly as one within the bounds: the same digest form, `hue.blobs` entries and fallbacks, every other byte of the recorded text kept. The JSON around those strings, files written with escapes or inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it still uploads whole. Nothing more is read on the application's thread, and the held-value budget, fallback counting and the exporter's limits are unchanged. Log records keep the bounds. The shared corpus gains cases with files of 6.3 MB in both SDKs.
 
 ### [0.11.1] - 2026-10-12
 
