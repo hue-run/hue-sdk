@@ -721,6 +721,8 @@ export class BlobUploader {
     if (this.closed) return undefined;
     return new Promise<Reply | undefined>((resolve) => {
       let settled = false;
+      // Whether the whole body was handed to the request.
+      let ended = false;
       let request: ClientRequest | undefined;
       const finish = (reply?: Reply) => {
         if (settled) return;
@@ -728,7 +730,9 @@ export class BlobUploader {
         clearTimeout(timer);
         if (request) {
           this.requests.delete(request);
-          if (!reply) request.destroy();
+          // An answer before the whole body was handed over ends the request: a store that
+          // neither reads nor closes would otherwise hold it, and its source, open.
+          if (!reply || !ended) request.destroy();
         }
         resolve(reply);
       };
@@ -778,6 +782,7 @@ export class BlobUploader {
       sent.setTimeout(this.options.timeoutMillis, () => finish());
       void (async () => {
         if (length === undefined && !isByteSource(body)) {
+          ended = true;
           sent.end(body);
           return;
         }
@@ -801,8 +806,11 @@ export class BlobUploader {
             if (sent.write(chunk)) done();
             else sent.on("drain", done);
           });
+          if (settled) return;
         }
-        if (!settled) sent.end();
+        if (settled) return;
+        ended = true;
+        sent.end();
       })().catch(() => finish());
     });
   }

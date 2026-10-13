@@ -145,6 +145,14 @@ function space(text: string, at: number): number {
   }
 }
 
+/** Whether the quote at `at` is escaped: whether an odd run of backslashes ends just before it.
+ * A string's run stops at its opening quote. */
+function escapedQuote(text: string, at: number): boolean {
+  let start = at;
+  while (start > 0 && text.charCodeAt(start - 1) === 0x5c) start--;
+  return (at - start) % 2 === 1;
+}
+
 /** Marks a search that reached the end of its window before its bound. */
 const MORE = -2;
 
@@ -200,22 +208,28 @@ async function skeletonOf(text: string, longUnits: number): Promise<Skeleton | u
     let open = quote(at);
     if (open === MORE) open = await find(text, '"', at + WINDOW_UNITS, text.length);
     if (open === -1) break;
-    // The string's end: its first quote no backslash escapes. Each part of the string is read
-    // once, however its escapes fall.
+    // The string's end: its first quote after an even run of backslashes, found quote by quote,
+    // not escape by escape.
     let close = quote(open + 1);
     if (close === MORE) close = await find(text, '"', open + 1 + WINDOW_UNITS, text.length);
-    let cursor = open + 1;
     let escaped = false;
-    while (close !== -1) {
-      let slash = within(text, "\\", cursor, close);
-      if (slash === MORE) slash = await find(text, "\\", cursor + WINDOW_UNITS, close);
-      if (slash === -1) break;
-      escaped = true;
-      cursor = slash + 2;
-      if (close < cursor) {
-        close = quote(cursor);
-        if (close === MORE) close = await find(text, '"', cursor + WINDOW_UNITS, text.length);
+    if (close !== -1) {
+      let slash = within(text, "\\", open + 1, close);
+      if (slash === MORE) slash = await find(text, "\\", open + 1 + WINDOW_UNITS, close);
+      escaped = slash !== -1;
+    }
+    while (escaped && close !== -1) {
+      // A string with an escape is kept as recorded: once it passes the bound, so does the
+      // skeleton, and its run of backslashes is no longer than the bound.
+      if (close - shorter > MAX_INLINE_FILE_TEXT) return undefined;
+      if (!escapedQuote(text, close)) break;
+      if (close - turn >= WINDOW_UNITS) {
+        turn = close;
+        await nextTurn();
       }
+      const from = close + 1;
+      close = quote(from);
+      if (close === MORE) close = await find(text, '"', from + WINDOW_UNITS, text.length);
     }
     if (close === -1) break;
     at = close + 1;

@@ -154,6 +154,25 @@ def _find(text: str, character: str, start: int, end: int) -> int:
     return -1
 
 
+def _escaped_quote(text: str, at: int) -> bool:
+    """Whether the quote at ``at`` is escaped: whether an odd run of backslashes ends just before
+    it. A string's run stops at its opening quote. The run is read back in windows that double,
+    so each backslash is read at most twice."""
+    run = 0
+    end = at
+    width = 16
+    while end > 0:
+        begin = max(0, end - width)
+        piece = text[begin:end]
+        kept = len(piece.rstrip("\\"))
+        run += len(piece) - kept
+        if kept:
+            break
+        end = begin
+        width = min(2 * width, WINDOW_UNITS)
+    return run % 2 == 1
+
+
 def _longer(text: str, start: int, end: int, units: int) -> bool:
     """Whether ``text`` from ``start`` to ``end`` is longer than ``units`` UTF-16 code units, as
     the TypeScript SDK measures strings, without a copy of it."""
@@ -194,19 +213,18 @@ def _skeleton_of(text: str, long_units: int) -> _Skeleton | None:
         opening = _find(text, '"', at, size)
         if opening == -1:
             break
-        # The string's end: its first quote no backslash escapes. Each part of the string is read
-        # once, however its escapes fall.
+        # The string's end: its first quote after an even run of backslashes, found quote by
+        # quote, not escape by escape.
         close = _find(text, '"', opening + 1, size)
-        cursor = opening + 1
-        escaped = False
-        while close != -1:
-            slash = _find(text, "\\", cursor, close)
-            if slash == -1:
+        escaped = close != -1 and _find(text, "\\", opening + 1, close) != -1
+        while escaped and close != -1:
+            # A string with an escape is kept as recorded: once it passes the bound, so does the
+            # skeleton, and its run of backslashes is no longer than the bound.
+            if close - shorter > MAX_INLINE_FILE_TEXT:
+                return None
+            if not _escaped_quote(text, close):
                 break
-            escaped = True
-            cursor = slash + 2
-            if close < cursor:
-                close = _find(text, '"', cursor, size)
+            close = _find(text, '"', close + 1, size)
         if close == -1:
             break
         at = close + 1

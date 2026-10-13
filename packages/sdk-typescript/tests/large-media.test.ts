@@ -187,6 +187,16 @@ cases.push(
     "input.value",
     `{"type":"blob","mime_type":"image/png","content":"${long.slice(0, 400)}\\/${long.slice(400)}"}`,
   ],
+  [
+    "escaped quotes and runs of backslashes",
+    "input.value",
+    JSON.stringify({
+      quoted: `say "${"\\".repeat(5)}" ${'"'.repeat(400)}`,
+      path: `C:${"\\".repeat(4)}dir\\`,
+      image: { type: "blob", mime_type: "image/png", content: long },
+      after: "\\",
+    }),
+  ],
   ["unterminated JSON", "input.value", `{"type":"blob","mime_type":"image/png","content":"${long}`],
   [
     "a control character in a data: URL",
@@ -283,9 +293,27 @@ describe("media read in place is placed as media parsed out of the value", () =>
     // The scan stops at the bound: 64 Mi code units of escaped text before a file are not read
     // to their end.
     const escapedFirst = `[{"parts":[{"type":"text","content":"${"a\\n".repeat(32 * MiB)}"},{"type":"blob","content":"${long}"}]}]`;
+    // Nor does any step of the scan hold the event loop for long. The value is made one flat
+    // string first, as a recorded value is, so the measure is the scan's.
+    expect(escapedFirst.indexOf("\u0000")).toBe(-1);
+    let longest = 0;
+    let last = performance.now();
+    let ticking = true;
+    const tick = () => {
+      const now = performance.now();
+      longest = Math.max(longest, now - last);
+      last = now;
+      if (ticking) setImmediate(tick);
+    };
+    setImmediate(tick);
     const started = performance.now();
-    expect(await readLargeMediaText("gen_ai.input.messages", escapedFirst, 300)).toBeUndefined();
-    expect(performance.now() - started).toBeLessThan(2000);
+    const refused = await readLargeMediaText("gen_ai.input.messages", escapedFirst, 300);
+    const elapsed = performance.now() - started;
+    longest = Math.max(longest, performance.now() - last);
+    ticking = false;
+    expect(refused).toBeUndefined();
+    expect(elapsed).toBeLessThan(2000);
+    expect(longest).toBeLessThan(100);
   });
 
   test("thousands of long strings are put back in one scan, between turns of the event loop", async () => {

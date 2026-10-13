@@ -636,6 +636,8 @@ def test_a_source_starts_fresh_on_each_read(tmp_path):
     assert read() == sha256(data) and not source.changed
 
 
+# Open files are listed from /proc, which Linux has and macOS does not.
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="lists open files from /proc")
 def test_a_cut_off_upload_closes_its_file_without_a_collection(hue_store, tmp_path):
     import gc
 

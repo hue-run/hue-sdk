@@ -159,6 +159,18 @@ CASES += [
         f'{{"type":"blob","mime_type":"image/png","content":"{_LONG[:400]}\\/{_LONG[400:]}"}}',
     ),
     (
+        "escaped quotes and runs of backslashes",
+        "input.value",
+        json.dumps(
+            {
+                "quoted": 'say "' + "\\" * 5 + '" ' + '"' * 400,
+                "path": "C:" + "\\" * 4 + "dir\\",
+                "image": {"type": "blob", "mime_type": "image/png", "content": _LONG},
+                "after": "\\",
+            }
+        ),
+    ),
+    (
         "unterminated JSON",
         "input.value",
         f'{{"type":"blob","mime_type":"image/png","content":"{_LONG}',
@@ -299,11 +311,15 @@ def test_a_value_over_the_bound_is_refused_without_a_copy_of_it():
     )
     tracemalloc.start()
     try:
+        started = monotonic()
         assert read_large_media_text("gen_ai.input.messages", value, 300) is None
+        elapsed = monotonic() - started
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
     assert peak < 4 * _MIB, peak
+    # Its escapes are not walked one by one either.
+    assert elapsed < 5, elapsed
 
 
 @pytest.mark.parametrize("ok", [True, False], ids=["uploaded", "refused"])
