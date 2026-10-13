@@ -205,6 +205,18 @@ CASES += [
             ensure_ascii=False,
         ),
     ),
+    # A value that is no JSON is the file whatever it ends in, and a JSON string whose trim is no
+    # label is read in place.
+    (
+        "a raw data: URL ending in a line break",
+        "metadata",
+        "data:application/octet-stream," + "hello%20world " * 40 + "\n",
+    ),
+    (
+        "a data: URL ending in spaces",
+        "input.value",
+        json.dumps({"image": "data:application/octet-stream," + "x" * 400 + " " * 400}),
+    ),
     # Percent-escaped data read a 1 Mi slice at a time: never split inside a surrogate pair or an
     # escape, and a run of lone high surrogates still moves on.
     ("a surrogate pair across slices", "metadata", "data:text/plain," + "a" * (_MIB - 1) + "😀b"),

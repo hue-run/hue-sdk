@@ -219,6 +219,20 @@ cases.push(
       },
     }),
   ],
+  // A value that is no JSON is the file whatever it ends in, and a JSON string whose trim is no
+  // label is read in place.
+  [
+    "a raw data: URL ending in a line break",
+    "metadata",
+    `data:application/octet-stream,${"hello%20world ".repeat(40)}\n`,
+  ],
+  [
+    "a data: URL ending in spaces",
+    "input.value",
+    JSON.stringify({
+      image: `data:application/octet-stream,${"x".repeat(400)}${" ".repeat(400)}`,
+    }),
+  ],
   // Percent-escaped data read a 1 Mi slice at a time: never split inside a surrogate pair or an
   // escape, and a run of lone high surrogates still moves on.
   ["a surrogate pair across slices", "metadata", `data:text/plain,${"a".repeat(MiB - 1)}😀b`],

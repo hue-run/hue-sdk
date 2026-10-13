@@ -42,6 +42,9 @@ _BAD_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 # The longest data: URL header read in place, in characters: a string with a longer one is parsed
 # with the rest of the value.
 _MAX_HEADER_UNITS = 4096
+# Text JavaScript's trim removes whole, and the longest label Hue's reader matches once trimmed.
+_BLANK = re.compile(f"[{re.escape(_ECMASCRIPT_WHITESPACE)}]*")
+_MAX_LABEL_UNITS = 256
 _SURROGATE = re.compile("[\ud800-\udfff]")
 _SPACE = re.compile(r"[ \t\n\r]*")
 _ASTRAL = re.compile("[\U00010000-\U0010ffff]")
@@ -105,12 +108,17 @@ def _classify(text: str, start: int, end: int, raw: bool = False) -> LongText | 
             if (end - comma - 1) % 4 or not _BASE64.fullmatch(text, comma + 1, end):
                 return None
             return LongText(text, start, end, comma + 1, "dataBase64", header)
-        # Data that ends in whitespace could trim to a label Hue's reader matches, which its
-        # stand-in could not.
+        # A string inside JSON whose trim is short enough to be a label Hue's reader matches (a
+        # file id): its stand-in could not be one. A value that is no JSON is the file whatever it
+        # ends in. Counted in characters, which are never more than code units: a label is
+        # always kept.
         if (
             (not raw and _CONTROL.search(text, comma + 1, end))
             or _BAD_ESCAPE.search(text, comma + 1, end)
-            or (end > comma + 1 and text[end - 1] in _ECMASCRIPT_WHITESPACE)
+            or (
+                not raw
+                and _BLANK.fullmatch(text, min(end, start + _MAX_LABEL_UNITS), end) is not None
+            )
         ):
             return None
         return LongText(text, start, end, comma + 1, "dataPercent", header)

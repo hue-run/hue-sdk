@@ -64,8 +64,10 @@ const base64 = /^[A-Za-z0-9+/]*={0,2}$/;
 // eslint-disable-next-line no-control-regex -- a JSON string literal holds no raw control character
 const controlCharacter = /[\u0000-\u001f]/;
 const badEscape = /%(?![0-9A-Fa-f]{2})/;
-/** What `String.prototype.trim` removes: a character Hue's reader trims from a label. */
-const trimmed = /\s/;
+/** Text `String.prototype.trim` removes whole: what Hue's reader trims from a label. */
+const blank = /^\s*$/;
+/** The longest label Hue's reader matches, in code units once trimmed. */
+const MAX_LABEL_UNITS = 256;
 /** The longest `data:` URL header read in place, in code units: a string with a longer one is
  * parsed with the rest of the value. */
 const MAX_HEADER_UNITS = 4096;
@@ -100,12 +102,12 @@ function classify(text: string, start: number, end: number, raw = false): LongTe
       if ((end - comma - 1) % 4 !== 0 || !base64.test(data)) return undefined;
       return { text, start, end, data: comma + 1, kind: "dataBase64", header };
     }
-    // Data that ends in whitespace could trim to a label Hue's reader matches, which its
-    // stand-in could not.
+    // A string inside JSON whose trim is short enough to be a label Hue's reader matches (a file
+    // id): its stand-in could not be one. A value that is no JSON is the file whatever it ends in.
     if (
       (!raw && controlCharacter.test(data)) ||
       badEscape.test(data) ||
-      trimmed.test(text[end - 1] ?? "")
+      (!raw && blank.test(text.slice(start + MAX_LABEL_UNITS, end)))
     )
       return undefined;
     return { text, start, end, data: comma + 1, kind: "dataPercent", header };
