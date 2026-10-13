@@ -84,6 +84,11 @@ def _locate(text: str, wanted: set[str]) -> dict[str, _Located]:
         return match.end() if match else index
 
     def string_end(index: int) -> int:
+        # A string without escapes ends at the next quote, found natively: a long file's content
+        # is passed over without the pattern's step per character.
+        quote = text.find('"', index + 1)
+        if quote != -1 and text.find("\\", index + 1, quote) == -1:
+            return quote + 1
         match = _STRING_REST.match(text, index + 1)
         if match is None:
             raise ValueError("Unterminated JSON string.")

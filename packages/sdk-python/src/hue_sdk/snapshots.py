@@ -480,6 +480,16 @@ class _ValueBudget:
             return False, queued
         self.held.size += size
         self.held.values[key] = value
+        if (
+            over
+            and isinstance(value, str)
+            and not literal
+            and is_media_key(key)
+            and key not in (self.held.inspected or ())
+        ):
+            # Past the inspection bounds, export reads its media in place, without parsing the
+            # files out of it; nothing is read here, on the application's thread.
+            self.held.large.add(key)
         # The copy carries what the queue is charged: the receiver's marker for a value over the
         # cap, a value within it with its files as their digest.
         return True, self.value(truncated_marker(len(value)) if over else digested)

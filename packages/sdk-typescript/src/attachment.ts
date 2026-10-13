@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { resolve } from "node:path";
 import { types as utilTypes } from "node:util";
+import { MAX_BLOB_BYTES } from "./blobs.js";
 import { MAX_FILE_DATA_BYTES } from "./config.js";
 import { inlineFileBytes, isMediaContentType, isMediaName } from "./inline-files.js";
+import type { ByteSource } from "./large-media.js";
 
 /** How deep in a value an attachment's part may sit and still be uploaded: Hue reads media parts
  * within ten levels of the value's root. */
@@ -11,9 +15,11 @@ export const MAX_ATTACHMENT_DEPTH = 10;
 /** Options for {@link Attachment}. Give exactly one of `data` and `path`. */
 export interface AttachmentOptions {
   /** The file's bytes (a `Buffer`, typed array or `ArrayBuffer`), or a string holding them as
-   * base64 or a `data:` URL. */
+   * base64 or a `data:` URL; up to 25 MiB. */
   data?: ArrayBufferView | ArrayBuffer | string;
-  /** A file to read when the attachment is created (Node.js file system). */
+  /** A file to read (Node.js file system): up to 25 MiB it is read when the attachment is created;
+   * a larger regular file, up to Hue's 1 GB upload limit, is hashed then and read again from disk
+   * when it is uploaded. */
   path?: string;
   /** The file's media type, such as `image/png` or `application/pdf`. */
   contentType: string;
@@ -23,9 +29,14 @@ export interface AttachmentOptions {
 
 /** What an attachment holds, read by the client and transport only. */
 export interface AttachmentState {
-  /** The file's bytes; undefined for an attachment that could not be read or is invalid. */
+  /** The file's bytes; undefined for a file read from disk when it is uploaded, and for an
+   * attachment that could not be read or is invalid. */
   bytes?: Uint8Array;
+  /** A file given by path over 25 MiB, read again from disk when it is uploaded. */
+  file?: PathFile;
   sha256?: string;
+  /** The file's size; undefined for an invalid attachment. */
+  size?: number;
   contentType: string;
   /** The name, when it is a valid media name. */
   name?: string;
@@ -47,36 +58,121 @@ function stringBytes(text: string): Uint8Array | undefined {
   return Buffer.from(text, "base64");
 }
 
-/** A file's bytes, read through one descriptor and never past the limit. */
-function fileBytes(path: string): Uint8Array | undefined {
+/** A regular file given by path over the in-memory limit, as it was hashed when it was recorded:
+ * its absolute path, size and SHA-256. Its bytes are read again from disk when it is uploaded. */
+export interface PathFile {
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+/** How much of a file given by path is read at once, to hash it or to upload it. */
+const FILE_SLICE = 1024 * 1024;
+
+/**
+ * A file given by path: its bytes when it is no larger than 25 MiB (or is no regular file, read to
+ * its end within that limit), and otherwise, for a regular file up to Hue's 1 GB upload limit, its
+ * size and SHA-256 from one reading pass a slice at a time, never holding it whole. Undefined for a
+ * file over its limit; throws for one that cannot be read.
+ */
+export function readPath(path: string): { bytes: Uint8Array } | { file: PathFile } | undefined {
   const descriptor = openSync(path, "r");
   try {
-    if (fstatSync(descriptor).size > MAX_FILE_DATA_BYTES) return undefined;
-    // Read to its end, which may lie past its size as stated (a file that grew, a pipe), but
-    // never more than one byte past the limit.
-    const parts: Buffer[] = [];
-    let total = 0;
-    for (;;) {
-      const room = Math.min(1 << 20, MAX_FILE_DATA_BYTES + 1 - total);
-      if (room <= 0) return undefined;
-      const buffer = Buffer.alloc(room);
-      const read = readSync(descriptor, buffer, 0, room, null);
-      if (read === 0) break;
-      parts.push(buffer.subarray(0, read));
-      total += read;
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.size <= MAX_FILE_DATA_BYTES) {
+      const bytes = fileBytes(descriptor);
+      return bytes ? { bytes } : undefined;
     }
-    return Buffer.concat(parts, total);
+    if (info.size > MAX_BLOB_BYTES) return undefined;
+    const hash = createHash("sha256");
+    const slice = Buffer.allocUnsafe(FILE_SLICE);
+    let size = 0;
+    for (;;) {
+      const read = readSync(descriptor, slice, 0, FILE_SLICE, null);
+      if (read === 0) break;
+      size += read;
+      // A file that grew past the limit while it was read is refused, not read on.
+      if (size > MAX_BLOB_BYTES) return undefined;
+      hash.update(slice.subarray(0, read));
+    }
+    return { file: { path: resolve(path), size, sha256: hash.digest("hex") } };
   } finally {
     closeSync(descriptor);
   }
 }
 
-function attachmentBytes(options: AttachmentOptions): Uint8Array | undefined {
+/**
+ * A file given by path as an upload body, read from disk a slice at a time. Each slice is hashed as
+ * it is read and sent once the next one is read; the last is sent only once the file ended at its
+ * recorded size with its recorded SHA-256. A file that changed since it was recorded, or can no
+ * longer be read, ends the read with an error before its body is complete and sets `changed`, so
+ * the upload is abandoned and the value is counted as not uploaded. Hue's presigned PUT also signs
+ * the size and SHA-256, so the store refuses a body that differs.
+ */
+export function fileSource(file: PathFile): ByteSource {
+  const source: ByteSource = {
+    size: file.size,
+    async *chunks() {
+      const changed = () => {
+        source.changed = true;
+        return new Error("The file changed after it was recorded");
+      };
+      const handle = await open(file.path, "r").catch(() => {
+        throw changed();
+      });
+      try {
+        const hash = createHash("sha256");
+        let size = 0;
+        let pending: Buffer | undefined;
+        for (;;) {
+          const slice = Buffer.allocUnsafe(FILE_SLICE);
+          const { bytesRead } = await handle.read(slice, 0, FILE_SLICE, null).catch(() => {
+            throw changed();
+          });
+          if (bytesRead === 0) break;
+          size += bytesRead;
+          if (size > file.size) throw changed();
+          const read = slice.subarray(0, bytesRead);
+          hash.update(read);
+          if (pending) yield pending;
+          pending = read;
+        }
+        if (size !== file.size || hash.digest("hex") !== file.sha256) throw changed();
+        if (pending) yield pending;
+      } finally {
+        await handle.close().catch(() => undefined);
+      }
+    },
+  };
+  return source;
+}
+
+/** A file's bytes, read through one descriptor and never past the in-memory limit. */
+function fileBytes(descriptor: number): Uint8Array | undefined {
+  // Read to its end, which may lie past its size as stated (a file that grew, a pipe), but never
+  // more than one byte past the limit.
+  const parts: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const room = Math.min(1 << 20, MAX_FILE_DATA_BYTES + 1 - total);
+    if (room <= 0) return undefined;
+    const buffer = Buffer.alloc(room);
+    const read = readSync(descriptor, buffer, 0, room, null);
+    if (read === 0) break;
+    parts.push(buffer.subarray(0, read));
+    total += read;
+  }
+  return Buffer.concat(parts, total);
+}
+
+function attachmentBytes(
+  options: AttachmentOptions,
+): { bytes: Uint8Array } | { file: PathFile } | undefined {
   const { data, path } = options;
   if ((data === undefined) === (path === undefined)) return undefined;
+  if (path !== undefined) return typeof path === "string" && path ? readPath(path) : undefined;
   let bytes: Uint8Array | undefined;
-  if (typeof path === "string") bytes = path ? fileBytes(path) : undefined;
-  else if (typeof data === "string") {
+  if (typeof data === "string") {
     if (data.length > 4 * MAX_FILE_DATA_BYTES) return undefined;
     bytes = stringBytes(data);
   }
@@ -89,7 +185,7 @@ function attachmentBytes(options: AttachmentOptions): Uint8Array | undefined {
     if (data.byteLength > MAX_FILE_DATA_BYTES) return undefined;
     bytes = new Uint8Array(data.slice(0));
   }
-  return bytes && bytes.byteLength <= MAX_FILE_DATA_BYTES ? bytes : undefined;
+  return bytes && bytes.byteLength <= MAX_FILE_DATA_BYTES ? { bytes } : undefined;
 }
 
 /**
@@ -100,10 +196,15 @@ function attachmentBytes(options: AttachmentOptions): Uint8Array | undefined {
  * names the file by digest (`{ type: "blob", mime_type, modality, sha256, size, name }`) and
  * uploads its bytes during export, listed under the record's `hue.blobs`.
  *
- * The bytes are read and hashed when the attachment is created; `data` and `path` are limited to
- * 25 MiB. Creating one never throws: an attachment without exactly one of `data` and `path`, with
- * unreadable data, larger data or an invalid `contentType` records `null` where it is placed and
- * counts an instrumentation failure; an invalid `name` alone is omitted and counted.
+ * The bytes are read and hashed when the attachment is created; `data` is limited to 25 MiB, as
+ * the bytes are held in memory until they are uploaded. A `path` up to 25 MiB is read then too; a
+ * larger regular file, up to Hue's 1 GB upload limit, is hashed then a slice at a time and read
+ * again from disk when it is uploaded, so it must stay in place and unchanged until the client
+ * flushes: a file whose size or SHA-256 then differs is not uploaded and counts as an upload
+ * fallback, its part keeping the digest it was recorded with. Creating one never throws: an
+ * attachment without exactly one of `data` and `path`, with unreadable data, larger data or an
+ * invalid `contentType` records `null` where it is placed and counts an instrumentation failure;
+ * an invalid `name` alone is omitted and counted.
  */
 export class Attachment {
   /** The media type given. */
@@ -118,20 +219,23 @@ export class Attachment {
   constructor(options: AttachmentOptions) {
     const contentType = options?.contentType;
     const name = options?.name;
-    let bytes: Uint8Array | undefined;
+    let read: ReturnType<typeof attachmentBytes>;
     try {
-      bytes = isMediaContentType(contentType) ? attachmentBytes(options) : undefined;
+      read = isMediaContentType(contentType) ? attachmentBytes(options) : undefined;
     } catch {
       // An unreadable path, or data that is not bytes: the attachment is invalid.
-      bytes = undefined;
+      read = undefined;
     }
-    const sha256 = bytes ? createHash("sha256").update(bytes).digest("hex") : undefined;
+    const bytes = read && "bytes" in read ? read.bytes : undefined;
+    const file = read && "file" in read ? read.file : undefined;
+    const sha256 = bytes ? createHash("sha256").update(bytes).digest("hex") : file?.sha256;
     this.contentType = typeof contentType === "string" ? contentType : "";
     this.name = isMediaName(name) ? name : undefined;
     this.sha256 = sha256;
-    this.size = bytes?.byteLength;
+    this.size = bytes?.byteLength ?? file?.size;
     states.set(this, {
-      ...(bytes ? { bytes, sha256 } : {}),
+      ...(bytes ? { bytes, sha256, size: bytes.byteLength } : {}),
+      ...(file ? { file, sha256, size: file.size } : {}),
       contentType: this.contentType,
       ...(this.name === undefined ? {} : { name: this.name }),
       invalidName: name !== undefined && name !== null && this.name === undefined,
@@ -169,13 +273,13 @@ export function attachmentPart(
   state: AttachmentState,
   captureContent: boolean,
 ): Record<string, unknown> | undefined {
-  if (!state.bytes || !state.sha256) return undefined;
+  if (state.size === undefined || !state.sha256) return undefined;
   return {
     type: "blob",
     mime_type: state.contentType,
     modality: modalityOf(state.contentType),
     sha256: state.sha256,
-    size: state.bytes.byteLength,
+    size: state.size,
     ...(captureContent && state.name !== undefined ? { name: state.name } : {}),
   };
 }

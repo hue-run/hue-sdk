@@ -48,6 +48,10 @@ function locate(text: string, wanted: ReadonlySet<string>): Map<string, Located>
     }
   };
   const stringEnd = (index: number) => {
+    // A string without escapes ends at the next quote, found natively: a long file's content
+    // is passed over without a step per character.
+    const quote = text.indexOf('"', index + 1);
+    if (quote !== -1 && !text.slice(index + 1, quote).includes("\\")) return quote + 1;
     let at = index + 1;
     for (;;) {
       const code = text.charCodeAt(at);

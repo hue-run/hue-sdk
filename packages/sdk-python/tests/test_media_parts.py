@@ -241,7 +241,7 @@ def test_metadata_only_inspects_and_uploads_nothing(hue_store):
     assert hue_store.reservations == []
 
 
-def test_value_past_the_inspection_limit_is_not_walked_for_media(hue_store):
+def test_value_past_the_inspection_limit_has_its_media_read_in_place(hue_store):
     image = bytes(6 * 1024 * 1024 + 1)
     url = "data:image/png;base64," + base64.b64encode(image).decode()
     with client(hue_store) as hue:
@@ -249,11 +249,21 @@ def test_value_past_the_inspection_limit_is_not_walked_for_media(hue_store):
             span.set_attribute("input.value", json.dumps({"image": url}))
         assert hue.force_flush(timeout_millis=30_000)
     record = hue_store.span("over inspection")
-    # Over 8 MiB of text: uploaded whole as before, its image never parsed out of it.
+    # Over 8 Mi code units of text: its image is read in place and uploaded as a file, where
+    # 0.11.1 uploaded the whole value as text.
     assert [(entry["key"], entry["content_type"]) for entry in blobs(record)] == [
-        ("input.value", "application/json")
+        ("input.value#/image", "image/png")
     ]
-    assert listed(record) == ["input.value"]
+    assert json.loads(attrs(record)["input.value"].string_value) == {
+        "image": {
+            "type": "blob",
+            "mime_type": "image/png",
+            "modality": "image",
+            "sha256": sha256(image),
+            "size": len(image),
+        }
+    }
+    assert listed(record) == []
 
 
 def test_deprecated_genai_event_keys_its_message_parts_from_the_body(hue_store):
@@ -1706,17 +1716,20 @@ def test_inspection_allowance_from_unheld_value_limits_export_eligibility(hue_st
         assert held.inspected == {ATTRIBUTE, "gen_ai.output.messages"}
         assert ATTRIBUTE not in held.values and copied.attributes[ATTRIBUTE] == small
         assert "ai.prompt.messages" not in held.digests
+        # Past the record's allowance, export reads its media in place.
+        assert held.large == {"ai.prompt.messages"}
         (record,) = hue._span_exporter._place_held([copied])
         refs = [json.loads(item) for item in record.attributes["hue.blobs"]]
         assert any(item["key"] == "gen_ai.output.messages#/0/parts/1" for item in refs)
         assert any(
-            item["key"] == "ai.prompt.messages" and item["sha256"] == sha256(skipped)
+            item["key"] == "ai.prompt.messages#/0/parts/1"
+            and item["sha256"] == sha256(b"skipped" * 160_000)
             for item in refs
         )
         assert hue._uploads.held.held == 0
-    assert hue_store.objects[f"{'0' * 31}1/{sha256(skipped)}"] == (
-        skipped.encode(),
-        "application/json",
+    assert hue_store.objects[f"{'0' * 31}1/{sha256(b'skipped' * 160_000)}"] == (
+        b"skipped" * 160_000,
+        "image/png",
     )
 
 
@@ -1915,3 +1928,183 @@ def test_a_text_plain_input_value_over_the_cap_still_uploads_whole(hue_store):
     ]
     assert hue_store.objects[f"{trace_id}/{sha256(value.encode())}"][0] == value.encode()
     assert listed(record) == ["input.value"]
+
+
+LARGE = json.loads((Path(__file__).parent / "fixtures/media-parts/cases.json").read_text())["large"]
+
+
+def large_file(name: str) -> bytes:
+    spec = LARGE["files"][name]
+    seed = base64.b64decode(spec["seed"])
+    return (seed * (spec["size"] // len(seed) + 1))[: spec["size"]]
+
+
+def large_text(case: dict[str, Any]) -> str:
+    """A large case's attribute text: ``$file`` replaced by the file as the case writes it, the
+    messages written as the TypeScript suite writes them (``JSON.stringify``)."""
+    data = base64.b64encode(large_file(case["file"])).decode()
+    if case["form"] != "base64":
+        data = f"data:{LARGE['files'][case['file']]['content_type']};base64,{data}"
+
+    def fill(value: Any) -> Any:
+        if value == "$file":
+            return data
+        if isinstance(value, list):
+            return [fill(item) for item in value]
+        if isinstance(value, dict):
+            return {key: fill(item) for key, item in value.items()}
+        return value
+
+    return data if "value" in case else dumps_message(fill(case["messages"]))
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+@pytest.mark.parametrize("case", LARGE["cases"], ids=[case["id"] for case in LARGE["cases"]])
+def test_shared_large_media_wire_corpus(hue_store, case, outcome):
+    if outcome == "failure":
+        hue_store.reserve = lambda _: (409, {}, True)
+    text = large_text(case)
+    # Past the per-attribute bound: 0.11.1 uploaded such a value whole, its file unread.
+    assert utf16_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
+    with client(hue_store) as hue:
+        with hue.span(case["id"]) as span:
+            span.set_attribute(case["attribute"], text)
+        assert hue.force_flush(timeout_millis=60_000)
+        status = hue.export_status
+    record = hue_store.span(case["id"])
+    exported = attrs(record)[case["attribute"]].string_value
+    expected = case[outcome]
+    assert entries(record) == expected["entries"]
+    if expected.get("truncated"):
+        # Not a recorded message: the file keeps its bytes, and the value is cut as before.
+        assert listed(record) == [case["attribute"]]
+        assert text.startswith(exported)
+    elif "value" in expected:
+        assert exported == expected["value"]
+    else:
+        assert json.loads(exported) == expected["messages"]
+    if outcome == "success":
+        assert status.upload_fallbacks == 0
+        (entry,) = [json.loads(item) for item in expected["entries"]]
+        stored = hue_store.objects[f"{record.trace_id.hex()}/{entry['sha256']}"]
+        assert stored[0] == large_file(case["file"])
+
+
+def test_a_model_calls_10_mb_audio_part_is_read_in_place_its_memory_bounded(hue_store, monkeypatch):
+    import binascii
+
+    import hue_sdk._inline_files as inline_files
+    import hue_sdk._large_media as large_media
+
+    audio = large_file("wav")
+    audio += audio[: 4 * 1024 * 1024]
+    messages = [
+        {
+            "role": "user",
+            "parts": [
+                {"type": "text", "content": "Transcribe this call."},
+                {
+                    "type": "blob",
+                    "modality": "audio",
+                    "mime_type": "audio/wav",
+                    "content": base64.b64encode(audio).decode(),
+                },
+            ],
+        }
+    ]
+    largest = {"parse": 0, "decode": 0}
+
+    def spy(name: str, function: Any) -> Any:
+        def call(value: Any, *args: Any, **kwargs: Any) -> Any:
+            largest[name] = max(largest[name], len(value))
+            return function(value, *args, **kwargs)
+
+        return call
+
+    with client(hue_store) as hue:
+        with hue.model("gpt-audio", provider="openai") as span:
+            span.set_input(messages)
+        for module in (inline_files, large_media):
+            monkeypatch.setattr(module, "loads_message", spy("parse", module.loads_message))
+        monkeypatch.setattr(json, "loads", spy("parse", json.loads))
+        monkeypatch.setattr(binascii, "a2b_base64", spy("decode", binascii.a2b_base64))
+        monkeypatch.setattr(base64, "b64decode", spy("decode", base64.b64decode))
+        assert hue.force_flush(timeout_millis=60_000)
+        monkeypatch.undo()
+        status = hue.export_status
+    assert (status.uploaded_values, status.upload_fallbacks) == (1, 0)
+    # The message is never parsed whole, nor its file decoded whole: only the JSON around it and
+    # 1 MiB slices of its base64.
+    assert largest["parse"] < 64 * 1024, largest
+    assert 0 < largest["decode"] <= 1024 * 1024, largest
+    record = hue_store.span("chat gpt-audio")
+    assert json.loads(attrs(record)["gen_ai.input.messages"].string_value) == [
+        {
+            "role": "user",
+            "parts": [
+                {"type": "text", "content": "Transcribe this call."},
+                {
+                    "type": "blob",
+                    "modality": "audio",
+                    "mime_type": "audio/wav",
+                    "sha256": sha256(audio),
+                    "size": len(audio),
+                },
+            ],
+        }
+    ]
+    assert blobs(record) == [
+        {
+            "key": "gen_ai.input.messages#/0/parts/1",
+            "sha256": sha256(audio),
+            "size": len(audio),
+            "content_type": "audio/wav",
+        }
+    ]
+    assert listed(record) == []
+
+
+def test_a_message_past_the_records_inspection_allowance_is_read_in_place_too(hue_store):
+    # Three messages of 6 Mi code units: the third is past the record's 16 Mi allowance.
+    images = [bytes([seed]) * 4_700_000 for seed in (1, 2, 3)]
+    keys = ["gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"]
+    with client(hue_store) as hue:
+        with hue.span("allowance") as span:
+            for key, image in zip(keys, images, strict=True):
+                span.set_attribute(key, message_with_image(image))
+        assert hue.force_flush(timeout_millis=60_000)
+        assert hue.export_status.upload_fallbacks == 0
+    record = hue_store.span("allowance")
+    assert [(entry["key"], entry["sha256"]) for entry in blobs(record)] == [
+        (f"{key}#/0/parts/1", sha256(image)) for key, image in zip(keys, images, strict=True)
+    ]
+    assert listed(record) == []
+
+
+def test_a_value_whose_json_around_its_files_is_past_the_bound_uploads_whole(hue_store):
+    # A text part of 9 Mi code units with escapes (newlines) is parsed, not read in place.
+    messages = dumps_message(
+        [
+            {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "content": "line\n" * (9 * 1024 * 1024 // 5)},
+                    {
+                        "type": "blob",
+                        "modality": "image",
+                        "mime_type": "image/png",
+                        "content": "iVBORw0KGgo=",
+                    },
+                ],
+            }
+        ]
+    )
+    with client(hue_store) as hue:
+        with hue.span("over the bound") as span:
+            span.set_attribute("gen_ai.input.messages", messages)
+        assert hue.force_flush(timeout_millis=60_000)
+    record = hue_store.span("over the bound")
+    assert [(entry["key"], entry["content_type"]) for entry in blobs(record)] == [
+        ("gen_ai.input.messages", "application/json")
+    ]
+    assert listed(record) == ["gen_ai.input.messages"]

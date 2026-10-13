@@ -881,6 +881,7 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                             cut=held.cut,
                             digests=held.digests,
                             inspected=held.inspected,
+                            large=held.large,
                         ),
                         _record_trace_id(span) or "",
                     )

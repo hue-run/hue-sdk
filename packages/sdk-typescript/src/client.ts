@@ -40,12 +40,15 @@ import {
   type PlaceAttachment,
 } from "./safety.js";
 import { TRUNCATED_KEY, withTruncatedKeys } from "./privacy.js";
-import { countFallback, MAX_BLOB_BYTES, newTally, type MediaAttachment } from "./blobs.js";
+import { countFallback, MAX_BLOB_BYTES, newTally, sizeOf, type MediaAttachment } from "./blobs.js";
 import {
   attachmentPart,
   attachmentState,
+  fileSource,
   holdsAttachment,
   MAX_ATTACHMENT_DEPTH,
+  readPath,
+  type PathFile,
   type PlacedAttachment,
 } from "./attachment.js";
 import {
@@ -775,19 +778,20 @@ export class HueClient {
     const files: MediaAttachment[] = [];
     const tally = newTally();
     for (const { state, part, depth } of placed) {
-      if (!part || !state.bytes || !state.sha256) {
+      if (!part || state.size === undefined || !state.sha256) {
         this.instrumentationFailed(signal);
         continue;
       }
       if (state.invalidName && captureContent) this.instrumentationFailed(signal);
-      if (!this.transport.offloadsValues() || !state.bytes.byteLength) continue;
+      if (!this.transport.offloadsValues() || !state.size) continue;
       if (cut || depth > MAX_ATTACHMENT_DEPTH) {
         countFallback(tally, "budget", traceId);
         continue;
       }
       files.push({
-        bytes: state.bytes,
-        digest: { sha256: state.sha256, size: state.bytes.byteLength },
+        // A file given by path over 25 MiB is read again from disk when it is uploaded.
+        bytes: state.file ? fileSource(state.file) : state.bytes!,
+        digest: { sha256: state.sha256, size: state.size },
         contentType: state.contentType,
         ...(state.name === undefined ? {} : { name: state.name }),
       });
@@ -963,10 +967,14 @@ export class HueClient {
   /**
    * Adds a `hue.file` event to the active (or given) span for a file the work read, received or
    * produced: `hue.file.sha256`, `hue.file.role`, `hue.file.media_type`, `hue.file.size` when known
-   * and, when `captureContent` is true, `hue.file.name`. `data` is hashed and measured locally and
-   * uploaded only with `upload: true`. The event is metadata, so it is recorded in both capture modes. An invalid
-   * record, or one without an active span, is omitted and counted, never thrown; an invalid name
-   * alone is omitted and counted while the rest is recorded.
+   * and, when `captureContent` is true, `hue.file.name`. `data` or the file at `path` is hashed and
+   * measured locally and uploaded only with `upload: true`: `data` and a file up to 25 MiB are
+   * held in memory until then, while a larger regular file, up to Hue's 1 GB upload limit, is
+   * hashed a slice at a time and read again from disk when it is uploaded, and is uploaded only if
+   * it still has the size and SHA-256 it was recorded with. The event is metadata, so it is
+   * recorded in both capture modes. An invalid record, or one without an active span, is omitted
+   * and counted, never thrown; an invalid name alone is omitted and counted while the rest is
+   * recorded.
    */
   recordFile(file: FileRecord, explicitContext?: Context): void {
     if (!this.enabled || this.closed) return;
@@ -975,14 +983,36 @@ export class HueClient {
         explicitContext ?? this.storage.getStore()?.context ?? context.active(),
       );
       if (!span?.isRecording()) throw new Error("File records require an active span");
-      const { role, mediaType, data, name } = file;
+      const { role, mediaType, data, name, path } = file;
       if (role !== "input" && role !== "attachment" && role !== "output")
         throw new TypeError("Invalid file role");
       if (!isLabel(mediaType)) throw new TypeError("Invalid media type");
       let sha256 = typeof file.sha256 === "string" ? file.sha256.toLowerCase() : file.sha256;
       let byteSize = file.byteSize;
       let bytes: Uint8Array | undefined;
-      if (data !== undefined) {
+      // A file given by path over 25 MiB: hashed now and read again from disk when it is uploaded.
+      let onDisk: PathFile | undefined;
+      let given = data;
+      if (path !== undefined) {
+        if (data !== undefined) throw new TypeError("A file takes data or a path, not both");
+        if (typeof path !== "string" || !path) throw new TypeError("Invalid file path");
+        const read = readPath(path);
+        if (!read) throw new RangeError("File exceeds Hue's 1 GB upload limit");
+        if ("bytes" in read) given = read.bytes;
+        else {
+          onDisk = read.file;
+          // A caller-supplied digest or size must describe the same bytes.
+          if (
+            (sha256 !== undefined && sha256 !== onDisk.sha256) ||
+            (byteSize !== undefined && byteSize !== onDisk.size)
+          )
+            throw new TypeError("File digest or size does not match its data");
+          sha256 = onDisk.sha256;
+          byteSize = onDisk.size;
+        }
+      }
+      if (given !== undefined) {
+        const data = given;
         bytes =
           typeof data === "string"
             ? (() => {
@@ -1063,13 +1093,14 @@ export class HueClient {
       }
       if (eventTime) this.fileEventTimes.set(source, eventTime);
       if (file.upload === true && this.transport.offloadsValues()) {
+        const upload = bytes ?? (onDisk ? fileSource(onDisk) : undefined);
         if (
           !this.transport.stageMedia(
             span,
-            bytes && eventTime
+            upload && eventTime
               ? {
-                  bytes,
-                  digest: { sha256, size: bytes.byteLength },
+                  bytes: upload,
+                  digest: { sha256, size: sizeOf(upload) },
                   contentType: mediaType,
                   eventTime,
                   ...(isMediaName(name) ? { name } : {}),

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from test_blobs import MIB, attrs, blobs, client, listed, sha256
 from test_blobs import hue_store as hue_store
 
@@ -488,3 +489,137 @@ def test_a_log_bodys_inline_media_take_hue_blobs_places_before_its_attachments(h
         f"body#/gen_ai.input.messages/0/parts/{index}" for index in range(64)
     ]
     assert status.upload_fallbacks == 3
+
+
+def sparse_file(path: Path, size: int, head: bytes = b"RIFF\0\0\0\0WAVE") -> Path:
+    """A sparse file of ``size`` bytes starting with ``head`` (removed with ``tmp_path``)."""
+    with open(path, "wb") as file:
+        file.write(head)
+        file.truncate(size)
+    return path
+
+
+def test_an_attachment_of_a_30_mib_file_uploads_from_disk_never_held_in_memory(hue_store, tmp_path):
+    import tracemalloc
+
+    path = sparse_file(tmp_path / "recording.wav", 30 * MIB)
+    data = path.read_bytes()
+    tracemalloc.start()
+    try:
+        attachment = Attachment(path=path, content_type="audio/wav", name="call.wav")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Hashed a slice at a time: the file is never read whole into memory.
+    assert peak < 4 * MIB
+    assert (attachment.sha256, attachment.size) == (sha256(data), 30 * MIB)
+    with client(hue_store) as hue:
+        with hue.span("path attachment") as span:
+            span.set_input({"recording": attachment})
+        assert hue.force_flush(timeout_millis=60_000)
+        status = hue.export_status
+    assert (status.uploaded_values, status.upload_fallbacks) == (1, 0)
+    assert status.instrumentation_failures == 0
+    record = hue_store.span("path attachment")
+    assert json.loads(attrs(record)["input.value"].string_value) == {
+        "recording": {
+            "type": "blob",
+            "mime_type": "audio/wav",
+            "modality": "audio",
+            "sha256": sha256(data),
+            "size": 30 * MIB,
+            "name": "call.wav",
+        }
+    }
+    assert blobs(record) == [
+        {
+            "key": "input.value#/recording",
+            "sha256": sha256(data),
+            "size": 30 * MIB,
+            "content_type": "audio/wav",
+            "name": "call.wav",
+        }
+    ]
+    assert hue_store.objects[f"{record.trace_id.hex()}/{sha256(data)}"][0] == data
+
+
+def test_record_file_uploads_a_30_mib_file_given_by_path(hue_store, tmp_path):
+    path = sparse_file(tmp_path / "recording.wav", 30 * MIB)
+    data = path.read_bytes()
+    with client(hue_store) as hue:
+        with hue.span("record path") as span:
+            span.record_file(
+                role="input", media_type="audio/wav", path=path, upload=True, name="call.wav"
+            )
+        assert hue.force_flush(timeout_millis=60_000)
+        status = hue.export_status
+    assert (status.uploaded_values, status.instrumentation_failures) == (1, 0)
+    record = hue_store.span("record path")
+    (event,) = [event for event in record.events if event.name == "hue.file"]
+    assert {item.key: item.value for item in event.attributes}["hue.file.size"].int_value == (
+        30 * MIB
+    )
+    assert blobs(record) == [
+        {
+            "key": f"event:hue.file:{sha256(data)}",
+            "sha256": sha256(data),
+            "size": 30 * MIB,
+            "content_type": "audio/wav",
+            "name": "call.wav",
+        }
+    ]
+    assert hue_store.objects[f"{record.trace_id.hex()}/{sha256(data)}"][0] == data
+
+
+@pytest.mark.parametrize("change", ["changed", "removed"])
+def test_a_file_changed_after_it_was_recorded_is_not_uploaded_and_is_counted(
+    hue_store, tmp_path, change
+):
+    path = sparse_file(tmp_path / "recording.wav", 30 * MIB)
+    with client(hue_store) as hue:
+        with hue.span(change) as span:
+            span.set_input({"recording": Attachment(path=path, content_type="audio/wav")})
+            span.record_file(role="input", media_type="audio/wav", path=path, upload=True)
+            if change == "removed":
+                path.unlink()
+            else:
+                # One byte in the middle: the size is the same, the SHA-256 is not.
+                with open(path, "r+b") as file:
+                    file.seek(20 * MIB)
+                    file.write(b"X")
+        assert hue.force_flush(timeout_millis=60_000)
+        status = hue.export_status
+        issues = hue.export_issues()
+    # The attachment and the recorded file share one upload of the recorded digest.
+    assert (status.uploaded_values, status.upload_fallbacks) == (0, 2)
+    record = hue_store.span(change)
+    assert blobs(record) == []
+    # The part keeps the digest it was recorded with.
+    assert json.loads(attrs(record)["input.value"].string_value)["recording"]["size"] == 30 * MIB
+    # Nothing was stored or completed, and no complete body of other bytes reached the store.
+    assert hue_store.objects == {}
+    assert hue_store.completions == []
+    assert [
+        put for put in hue_store.puts if put["status"] == 200 and put["bytes"] == 30 * MIB
+    ] == []
+    assert any("could not be uploaded" in issue.message for issue in issues)
+
+
+def test_bytes_over_25_mib_and_a_file_over_the_1_gb_upload_limit_are_still_refused(
+    hue_store, tmp_path
+):
+    path = sparse_file(tmp_path / "huge.wav", 1_000_000_001)
+    assert Attachment(path=path, content_type="audio/wav").sha256 is None
+    assert Attachment(bytes(25 * MIB + 1), content_type="audio/wav").sha256 is None
+    with client(hue_store) as hue:
+        with hue.span("refused") as span:
+            span.record_file(role="input", media_type="audio/wav", path=path, upload=True)
+            span.record_file(
+                role="input", media_type="audio/wav", data=bytes(25 * MIB + 1), upload=True
+            )
+            span.record_file(role="input", media_type="audio/wav", data=b"x", path=path)
+        # Instrumentation issues fail the flush; the span is exported all the same.
+        assert not hue.force_flush(timeout_millis=30_000)
+        assert hue.export_status.instrumentation_failures == 3
+    assert [event.name for event in hue_store.span("refused").events] == []
+    assert hue_store.reservations == []

@@ -27,10 +27,12 @@ from urllib.parse import urlsplit
 import requests
 from opentelemetry.context import attach, detach
 
+from ._attachment import PathFile, file_source
 from ._inline_files import (
     INLINE_FILE_LIMIT,
     INLINE_FILE_TEXT_PER_RECORD,
     MAX_INLINE_FILE_TEXT,
+    InlineFile,
     InlineFilePart,
     MediaDigestMemo,
     MediaValue,
@@ -50,6 +52,14 @@ from ._inline_files import (
     read_media_text,
     reencode_media,
     utf16_size,
+)
+from ._large_media import (
+    ByteSource,
+    LongFileBytes,
+    LongText,
+    long_file_bytes,
+    long_head,
+    read_large_media_text,
 )
 from ._limits import TRUNCATED_KEY, cut_utf8, over_utf8
 from ._otel_compat import export_context
@@ -154,9 +164,12 @@ def blob_prefix(value: str | bytes) -> str | bytes:
     return cut_utf8(value, BLOB_PREFIX_BYTES)
 
 
-def _chunks(value: str | bytes) -> Iterator[bytes | memoryview]:
+def _chunks(value: str | bytes | ByteSource) -> Iterator[bytes | memoryview]:
     """The bytes an upload of ``value`` carries, a slice at a time: bytes as views of their own
-    buffer, never copied whole."""
+    buffer, never copied whole, and a source as it reads them."""
+    if isinstance(value, ByteSource):
+        yield from value.chunks()
+        return
     if isinstance(value, bytes):
         view = memoryview(value)
         for start in range(0, len(value), _TEXT_CHUNK_CHARS):
@@ -166,7 +179,7 @@ def _chunks(value: str | bytes) -> Iterator[bytes | memoryview]:
         yield value[start : start + _TEXT_CHUNK_CHARS].encode("utf-8")
 
 
-def digest_of(value: str | bytes) -> tuple[str, int]:
+def digest_of(value: str | bytes | ByteSource) -> tuple[str, int]:
     """The SHA-256 (lowercase hex) and byte size of what an upload of ``value`` carries. A lone
     surrogate raises ``UnicodeEncodeError``, as encoding the value whole would."""
     if isinstance(value, bytes):
@@ -185,7 +198,11 @@ class _Body(io.RawIOBase):
     of holding the value and an upload slot after its export has moved on."""
 
     def __init__(
-        self, value: str | bytes, size: int, deadline: float, stopped: Callable[[], bool]
+        self,
+        value: str | bytes | ByteSource,
+        size: int,
+        deadline: float,
+        stopped: Callable[[], bool],
     ) -> None:
         super().__init__()
         self._chunks = _chunks(value)
@@ -300,6 +317,9 @@ class Held:
     body_values: dict[str, str] = field(default_factory=dict)
     # The JSON pointers of the body's strings its copy cut and did not hold: never read as files.
     body_cut: set[str] = field(default_factory=set)
+    # The span's own values held whole past the inspection bounds: export reads their media in
+    # place (``read_large_media_text``).
+    large: set[str] = field(default_factory=set)
     _released: bool = False
 
     def release(self) -> None:
@@ -333,6 +353,13 @@ class ExplicitFile:
     # and the part's JSON pointer there.
     attribute: str | None = None
     pointer: str | None = None
+    # A file given by path over the in-memory limit (``data`` empty): read again from disk when it
+    # is uploaded.
+    on_disk: PathFile | None = None
+
+    def body(self) -> bytes | ByteSource:
+        """What its upload carries: its bytes, or its file read from disk as it is sent."""
+        return file_source(self.on_disk) if self.on_disk is not None else self.data
 
     @property
     def key(self) -> str:
@@ -644,7 +671,7 @@ class BlobUploader:
         self,
         trace_id: str,
         key: str,
-        value: str | bytes,
+        value: str | bytes | ByteSource,
         content_type: str,
         digest: tuple[str, int],
         deadline: float,
@@ -711,7 +738,7 @@ class BlobUploader:
         self,
         trace_id: str,
         key: str,
-        value: str | bytes,
+        value: str | bytes | ByteSource,
         content_type: str,
         sha256: str,
         size: int,
@@ -910,12 +937,18 @@ class BlobUploader:
             "grant": {"url": url, "headers": signed, "expires_at": expires_at},
         }
 
-    def _put(self, grant: Mapping[str, Any], value: str | bytes, size: int, deadline: float) -> str:
-        """The PUT of the value's bytes, with exactly the headers Hue signed."""
+    def _put(
+        self, grant: Mapping[str, Any], value: str | bytes | ByteSource, size: int, deadline: float
+    ) -> str:
+        """The PUT of the value's bytes, with exactly the headers Hue signed. A source that no
+        longer holds its bytes (a file changed since it was recorded) ends the request before its
+        body is complete, and fails the value without a retry."""
         body = _Body(value, size, deadline, lambda: self._closed)
         reply = self._request(
             "PUT", grant["url"], grant["headers"], body, deadline, _MAX_ERROR_RESPONSE_BYTES
         )
+        if isinstance(value, ByteSource) and value.changed:
+            return "failed"
         if reply is None:
             return "transient"
         # 412: the object exists already (another upload of the same value won).
@@ -1035,8 +1068,10 @@ class _Span:
             if isinstance(value, (str, bytes)):
                 self.candidates.append((key, value))
         # A span's export inspects only what admission inspected; a log record's within its own
-        # allowance, its body's files first.
+        # allowance, its body's files first. A span's values admission held whole past the
+        # inspection bounds are read in place.
         self.inspected: set[str] = set(() if log else held.inspected or ())
+        self.large: set[str] = set() if log else set(held.large)
         literal = literal_keys(attributes)
         for key, candidate in self.candidates:
             if (
@@ -1084,6 +1119,7 @@ def _place_files(
     files: list[InlineFilePart],
     context: _Context,
     result: _Result,
+    long: Mapping[str, LongText] | None = None,
 ) -> bool:
     """Upload each file of a value and place it; whether any was placed. A file is placed in its
     digest form (a text file in a provider part keeps a 16 KiB prefix). One that is not uploaded
@@ -1093,8 +1129,17 @@ def _place_files(
     message = is_message_key(key)
     changed = False
     for position, file in enumerate(files):
-        decoded = media_bytes(file)
-        if not placeable(file, decoded):
+        # A file whose content is a long string is read from its place in the recorded text, a
+        # slice at a time: never decoded or copied whole.
+        in_place = long.get(file.content) if long else None
+        decoded: InlineFile | LongFileBytes = (
+            long_file_bytes(file, in_place) if in_place is not None else media_bytes(file)
+        )
+        body: bytes | ByteSource = (
+            decoded.source if isinstance(decoded, LongFileBytes) else decoded.data
+        )
+        size = decoded.size if isinstance(decoded, LongFileBytes) else len(decoded.data)
+        if not placeable(file, decoded, size):
             continue
         content_type = media_content_type(file, decoded)
         if not is_blob_content_type(content_type):
@@ -1102,19 +1147,22 @@ def _place_files(
                 "application/octet-stream" if decoded.decoded else "text/plain; charset=utf-8"
             )
         textual = is_text_media_type(content_type)
-        if textual and len(decoded.data) <= INLINE_FILE_LIMIT:
+        if textual and size <= INLINE_FILE_LIMIT:
             continue
         prefix = keeps_prefix(file, textual, decoded)
         part_key = f"{key}#{file.pointer if prefix else file.part_pointer}"
         has_slot = _is_blob_key(part_key) and span.slot()
-        digest = span.held.digests.get(key, {}).get(file.pointer) or context.memo.digest(
-            decoded.data, span.trace_id
+        digest = (
+            digest_of(body)
+            if isinstance(body, ByteSource)
+            else span.held.digests.get(key, {}).get(file.pointer)
+            or context.memo.digest(body, span.trace_id)
         )
         outcome = (
             context.uploader.store(
                 span.trace_id,
                 part_key,
-                decoded.data,
+                body,
                 content_type,
                 digest,
                 context.deadline,
@@ -1126,7 +1174,12 @@ def _place_files(
         )
         if outcome.ok:
             if prefix:
-                prefix_part(file, blob_prefix(file.content))  # type: ignore[arg-type]
+                content = (
+                    long_head(in_place, BLOB_PREFIX_BYTES + 1)
+                    if in_place is not None
+                    else file.content
+                )
+                prefix_part(file, blob_prefix(content))  # type: ignore[arg-type]
             else:
                 digest_part(file, *digest)
             changed = True
@@ -1135,7 +1188,7 @@ def _place_files(
             )
             result.uploads += 1
         else:
-            if message and (not span.log or len(decoded.data) > INLINE_FILE_LIMIT):
+            if message and (not span.log or size > INLINE_FILE_LIMIT):
                 digest_part(file, *digest)
                 changed = True
             result.fallbacks.append(outcome.reason)
@@ -1145,22 +1198,37 @@ def _place_files(
 def _upload_parts(
     span: _Span, index: int, key: str, text: str, context: _Context, result: _Result
 ) -> str:
-    """Upload recognized media, keeping digests for binary and prefixes for large text."""
-    if (
-        key not in span.inspected
-        or not may_inline_files(key, text)
-        or utf16_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
-    ):
-        return text
-    try:
-        media = read_media_text(key, text)
-    except (ValueError, RecursionError):
-        return text
+    """Upload recognized media, keeping digests for binary and prefixes for large text. A value
+    admission held whole past the inspection bounds has its long strings read in place, the JSON
+    around them within the per-attribute bound."""
+    media: MediaValue | None
+    long: dict[str, LongText] | None = None
+    if key in span.large:
+        if not may_inline_files(key, text):
+            return text
+        try:
+            large = read_large_media_text(key, text)
+        except (ValueError, RecursionError):
+            return text
+        if large is None:
+            return text
+        media, long = large.media, large.long
+    else:
+        if (
+            key not in span.inspected
+            or not may_inline_files(key, text)
+            or utf16_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT
+        ):
+            return text
+        try:
+            media = read_media_text(key, text)
+        except (ValueError, RecursionError):
+            return text
     if media is None or not media.files:
         return text
     return (
         placed_media_text(media)
-        if _place_files(span, index, key, media.files, context, result)
+        if _place_files(span, index, key, media.files, context, result, long)
         else text
     )
 
@@ -1220,7 +1288,7 @@ def _place(
             context.uploader.store(
                 span.trace_id,
                 key,
-                value.data,
+                value.body(),
                 value.content_type,
                 value.digest,
                 context.deadline,

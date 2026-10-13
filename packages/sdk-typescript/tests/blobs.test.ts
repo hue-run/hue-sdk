@@ -5,7 +5,16 @@ import { ROOT_CONTEXT, trace, type Span } from "@opentelemetry/api";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
 import protobuf from "protobufjs/light.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +26,7 @@ import {
   type HueTransport,
 } from "../src/index.js";
 import { fallbackAttributes, newTally } from "../src/blobs.js";
+import { MAX_INLINE_FILE_TEXT } from "../src/inline-files.js";
 import { rehydrateMedia } from "../src/evals.js";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
@@ -2744,7 +2754,7 @@ describe("media beyond the recorded messages", () => {
     }
   });
 
-  test("a value past the per-attribute inspection limit is not walked for media", async () => {
+  test("a value past the per-attribute inspection limit has its media read in place", async () => {
     const endpoint = hue();
     const hueClient = client(endpoint);
     const large = Buffer.alloc(6 * MiB + 1, 7);
@@ -2754,13 +2764,21 @@ describe("media beyond the recorded messages", () => {
       });
       await hueClient.flush();
       const record = endpoint.span("over inspection")!;
-      // Over 8 MiB of text: uploaded whole as before, its image never parsed out of it.
+      // Over 8 Mi code units of text: its image is read in place and uploaded as a file, where
+      // 0.18.1 uploaded the whole value as text.
       expect(blobs(record).map(({ key, content_type }) => [key, content_type])).toEqual([
-        ["input.value", "application/json"],
+        ["input.value#/image", "image/png"],
       ]);
-      expect(
-        attr(record, "hue.truncated")!.arrayValue!.values.map((item) => item.stringValue),
-      ).toEqual(["input.value"]);
+      expect(JSON.parse(attr(record, "input.value")!.stringValue!)).toEqual({
+        image: {
+          type: "blob",
+          mime_type: "image/png",
+          modality: "image",
+          sha256: sha256(large),
+          size: large.byteLength,
+        },
+      });
+      expect(attr(record, "hue.truncated")).toBeUndefined();
     } finally {
       await hueClient.shutdown();
       endpoint.server.stop(true);
@@ -3168,4 +3186,403 @@ test("a text/plain input.value over the cap still uploads whole, never read for 
     await hueClient.shutdown();
     endpoint.server.stop(true);
   }
+});
+
+/** A shared corpus case whose file is too long for the media inspection bounds: the file's bytes
+ * are its seed repeated to its size, written as base64 or a `data:` URL where `$file` stands. */
+type LargeCase = {
+  id: string;
+  attribute: string;
+  file: string;
+  form: "base64" | "dataUrl";
+  messages?: unknown;
+  value?: string;
+  success: { messages?: unknown; value?: string; entries: string[] };
+  failure: { messages?: unknown; value?: string; truncated?: boolean; entries: string[] };
+};
+const large = (
+  corpus as unknown as {
+    large: {
+      files: Record<string, { seed: string; size: number; content_type: string }>;
+      cases: LargeCase[];
+    };
+  }
+).large;
+
+function largeFile(name: string): Buffer {
+  const { seed, size } = large.files[name]!;
+  const bytes = Buffer.from(seed, "base64");
+  return Buffer.concat(Array(Math.ceil(size / bytes.byteLength)).fill(bytes)).subarray(0, size);
+}
+
+/** A large case's attribute text: `$file` replaced by the file as the case writes it. */
+function largeText(item: LargeCase): string {
+  const data = largeFile(item.file).toString("base64");
+  const content =
+    item.form === "base64" ? data : `data:${large.files[item.file]!.content_type};base64,${data}`;
+  const fill = (value: unknown): unknown =>
+    value === "$file"
+      ? content
+      : Array.isArray(value)
+        ? value.map(fill)
+        : value !== null && typeof value === "object"
+          ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, fill(item)]))
+          : value;
+  return item.value !== undefined ? content : JSON.stringify(fill(item.messages));
+}
+
+describe("media past the inspection bounds", () => {
+  for (const item of large.cases) {
+    for (const mode of ["success", "failure"] as const) {
+      test(`large media wire ${mode}: ${item.id}`, async () => {
+        const endpoint = hue(mode === "failure" ? { reserve: () => ({ status: 403 }) } : {});
+        const hueClient = client(endpoint);
+        const text = largeText(item);
+        // Past the per-attribute bound: 0.18.1 uploaded such a value whole, its file unread.
+        expect(text.length).toBeGreaterThan(MAX_INLINE_FILE_TEXT);
+        try {
+          await hueClient.withSpan(item.id, ({ span }) => {
+            span.setAttribute(item.attribute, text);
+          });
+          const report = await hueClient.flush();
+          expect(report.acceptedSpans).toBe(1);
+          const record = endpoint.span(item.id)!;
+          const exported = attr(record, item.attribute)!.stringValue!;
+          const expected = item[mode];
+          expect(strings(attr(record, "hue.blobs")) ?? []).toEqual(expected.entries);
+          if ("truncated" in expected) {
+            // Not a recorded message: the file keeps its bytes, and the value is cut as before.
+            expect(strings(attr(record, "hue.truncated"))).toEqual([item.attribute]);
+            expect(text.startsWith(exported)).toBe(true);
+          } else if (expected.value !== undefined) expect(exported).toBe(expected.value);
+          else expect(JSON.parse(exported)).toEqual(expected.messages);
+          if (mode === "success") {
+            expect(report.uploadFallbacks).toBe(0);
+            const [entry] = expected.entries.map(
+              (value) => JSON.parse(value) as { sha256: string },
+            );
+            const traceId = Buffer.from(record.traceId!, "base64").toString("hex");
+            expect(endpoint.store.get(`${traceId}/${entry!.sha256}`)!.bytes).toEqual(
+              largeFile(item.file),
+            );
+          }
+        } finally {
+          await hueClient.shutdown();
+          endpoint.server.stop(true);
+        }
+      });
+    }
+  }
+
+  test("a model call's 10 MB audio part is read in place, its memory bounded by a slice", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const audio = largeFile("wav");
+    const big = Buffer.concat([audio, audio.subarray(0, 4 * MiB)]);
+    const input = [
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: "Transcribe this call." },
+          {
+            type: "blob",
+            modality: "audio",
+            mime_type: "audio/wav",
+            content: big.toString("base64"),
+          },
+        ],
+      },
+    ];
+    const parse = JSON.parse;
+    const from = Buffer.from;
+    const largest = { parse: 0, decode: 0 };
+    try {
+      await hueClient.model("gpt-audio", () => "ok", { provider: "openai", input });
+      JSON.parse = function (text: string, reviver?: Parameters<typeof parse>[1]) {
+        largest.parse = Math.max(largest.parse, text.length);
+        return parse(text, reviver);
+      } as typeof JSON.parse;
+      (Buffer as unknown as { from: (...args: unknown[]) => Buffer }).from = (...args) => {
+        if (typeof args[0] === "string" && args[1] === "base64")
+          largest.decode = Math.max(largest.decode, args[0].length);
+        return (from as (...args: unknown[]) => Buffer).apply(Buffer, args);
+      };
+      const report = await hueClient.flush();
+      expect(report.uploadedValues).toBe(1);
+      expect(report.uploadFallbacks).toBe(0);
+    } finally {
+      JSON.parse = parse;
+      Buffer.from = from;
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+    // The message is never parsed whole, nor its file decoded whole: only the JSON around it and
+    // 1 MiB slices of its base64.
+    expect(largest.parse).toBeLessThan(64 * KiB);
+    expect(largest.decode).toBeLessThanOrEqual(MiB);
+    const record = endpoint.span("chat gpt-audio")!;
+    expect(JSON.parse(attr(record, "gen_ai.input.messages")!.stringValue!)).toEqual([
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: "Transcribe this call." },
+          {
+            type: "blob",
+            modality: "audio",
+            mime_type: "audio/wav",
+            sha256: sha256(big),
+            size: big.byteLength,
+          },
+        ],
+      },
+    ]);
+    expect(blobs(record)).toEqual([
+      {
+        key: "gen_ai.input.messages#/0/parts/1",
+        sha256: sha256(big),
+        size: big.byteLength,
+        content_type: "audio/wav",
+      },
+    ]);
+    expect(attr(record, "hue.truncated")).toBeUndefined();
+  });
+
+  test("a message past the record's inspection allowance is read in place too", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    // Three messages of 6 Mi code units: the third is past the record's 16 Mi allowance.
+    const images = [1, 2, 3].map((seed) => Buffer.alloc(4_700_000, seed));
+    const keys = ["gen_ai.input.messages", "gen_ai.output.messages", "ai.prompt.messages"];
+    try {
+      await hueClient.withSpan("allowance", ({ span }) => {
+        keys.forEach((key, index) => span.setAttribute(key, messageWithImage(images[index]!)));
+      });
+      const report = await hueClient.flush();
+      expect(report.uploadFallbacks).toBe(0);
+      const record = endpoint.span("allowance")!;
+      expect(blobs(record).map(({ key, sha256: digest }) => [key, digest])).toEqual(
+        keys.map((key, index) => [`${key}#/0/parts/1`, sha256(images[index]!)]),
+      );
+      expect(attr(record, "hue.truncated")).toBeUndefined();
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("a value whose JSON around its files is past the per-attribute bound uploads whole", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    // A text part of 9 Mi code units with escapes (newlines) is parsed, not read in place.
+    const messages = JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: "line\n".repeat((9 * MiB) / 5) },
+          { type: "blob", modality: "image", mime_type: "image/png", content: "iVBORw0KGgo=" },
+        ],
+      },
+    ]);
+    try {
+      await hueClient.withSpan("over the bound", ({ span }) => {
+        span.setAttribute("gen_ai.input.messages", messages);
+      });
+      await hueClient.flush();
+      const record = endpoint.span("over the bound")!;
+      expect(blobs(record).map(({ key, content_type }) => [key, content_type])).toEqual([
+        ["gen_ai.input.messages", "application/json"],
+      ]);
+      expect(strings(attr(record, "hue.truncated"))).toEqual(["gen_ai.input.messages"]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+});
+
+describe("files given by path over 25 MiB", () => {
+  /** A sparse file of `size` bytes starting with `head`, removed after the test. */
+  function sparseFile(size: number, head = "RIFF\0\0\0\0WAVE") {
+    const directory = mkdtempSync(join(tmpdir(), "hue-path-file-"));
+    const path = join(directory, "recording.wav");
+    writeFileSync(path, head);
+    truncateSync(path, size);
+    return { path, remove: () => rmSync(directory, { recursive: true, force: true }) };
+  }
+
+  test("an attachment of a 30 MiB file uploads from disk, never held in memory", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const file = sparseFile(30 * MiB);
+    try {
+      const bytes = readFileSync(file.path);
+      const attachment = new Attachment({
+        path: file.path,
+        contentType: "audio/wav",
+        name: "call.wav",
+      });
+      expect(attachment.sha256).toBe(sha256(bytes));
+      expect(attachment.size).toBe(30 * MiB);
+      await hueClient.withSpan("path attachment", ({ setInput }) => {
+        setInput({ recording: attachment });
+      });
+      const report = await hueClient.flush();
+      expect(report.uploadedValues).toBe(1);
+      expect(report.uploadFallbacks).toBe(0);
+      expect(report.instrumentationFailures).toBe(0);
+      const record = endpoint.span("path attachment")!;
+      expect(JSON.parse(attr(record, "input.value")!.stringValue!)).toEqual({
+        recording: {
+          type: "blob",
+          mime_type: "audio/wav",
+          modality: "audio",
+          sha256: sha256(bytes),
+          size: 30 * MiB,
+          name: "call.wav",
+        },
+      });
+      expect(blobs(record)).toEqual([
+        {
+          key: "input.value#/recording",
+          sha256: sha256(bytes),
+          size: 30 * MiB,
+          content_type: "audio/wav",
+          name: "call.wav",
+        },
+      ]);
+      const traceId = Buffer.from(record.traceId!, "base64").toString("hex");
+      expect(endpoint.store.get(`${traceId}/${sha256(bytes)}`)!.bytes.equals(bytes)).toBe(true);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+      file.remove();
+    }
+  });
+
+  test("recordFile uploads a 30 MiB file given by path", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const file = sparseFile(30 * MiB);
+    try {
+      const bytes = readFileSync(file.path);
+      await hueClient.withSpan("record path", () => {
+        hueClient.recordFile({
+          role: "input",
+          mediaType: "audio/wav",
+          path: file.path,
+          upload: true,
+          name: "call.wav",
+        });
+      });
+      const report = await hueClient.flush();
+      expect(report.uploadedValues).toBe(1);
+      expect(report.instrumentationFailures).toBe(0);
+      const record = endpoint.span("record path")!;
+      const event = record.events!.find(({ name }) => name === "hue.file")!;
+      expect(event.attributes!.find(({ key }) => key === "hue.file.size")!.value.intValue).toBe(
+        String(30 * MiB),
+      );
+      expect(blobs(record)).toEqual([
+        {
+          key: `event:hue.file:${sha256(bytes)}`,
+          sha256: sha256(bytes),
+          size: 30 * MiB,
+          content_type: "audio/wav",
+          name: "call.wav",
+        },
+      ]);
+      const traceId = Buffer.from(record.traceId!, "base64").toString("hex");
+      expect(endpoint.store.get(`${traceId}/${sha256(bytes)}`)!.bytes.equals(bytes)).toBe(true);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+      file.remove();
+    }
+  });
+
+  for (const change of ["changed", "removed"] as const)
+    test(`a file ${change} after it was recorded is not uploaded, and is counted`, async () => {
+      const endpoint = hue();
+      const hueClient = client(endpoint);
+      const file = sparseFile(30 * MiB);
+      try {
+        await hueClient.withSpan(change, ({ setInput }) => {
+          setInput({ recording: new Attachment({ path: file.path, contentType: "audio/wav" }) });
+          hueClient.recordFile({
+            role: "input",
+            mediaType: "audio/wav",
+            path: file.path,
+            upload: true,
+          });
+          if (change === "removed") file.remove();
+          else {
+            // One byte in the middle: the size is the same, the SHA-256 is not.
+            const descriptor = openSync(file.path, "r+");
+            writeSync(descriptor, "X", 20 * MiB);
+            closeSync(descriptor);
+          }
+        });
+        const report = await hueClient.flush();
+        // The attachment and the recorded file share one upload of the recorded digest.
+        expect(report.uploadedValues).toBe(0);
+        expect(report.uploadFallbacks).toBe(2);
+        const record = endpoint.span(change)!;
+        expect(attr(record, "hue.blobs")).toBeUndefined();
+        // The part keeps the digest it was recorded with.
+        expect(JSON.parse(attr(record, "input.value")!.stringValue!).recording.size).toBe(30 * MiB);
+        // Nothing was stored or completed, and no complete body of other bytes reached the store.
+        expect(endpoint.store.size).toBe(0);
+        expect(endpoint.completions).toEqual([]);
+        expect(endpoint.puts.filter(({ status }) => status === 200)).toEqual([]);
+        expect(
+          hueClient.transport
+            .getIssues()
+            .some(({ message }) => message.includes("could not be uploaded")),
+        ).toBe(true);
+      } finally {
+        await hueClient.shutdown();
+        endpoint.server.stop(true);
+        file.remove();
+      }
+    });
+
+  test("bytes over 25 MiB, and a file over Hue's 1 GB upload limit, are still refused", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const file = sparseFile(1_000_000_001);
+    try {
+      expect(new Attachment({ path: file.path, contentType: "audio/wav" }).sha256).toBeUndefined();
+      expect(
+        new Attachment({ data: Buffer.alloc(25 * MiB + 1), contentType: "audio/wav" }).sha256,
+      ).toBeUndefined();
+      await hueClient.withSpan("refused", () => {
+        hueClient.recordFile({
+          role: "input",
+          mediaType: "audio/wav",
+          path: file.path,
+          upload: true,
+        });
+        hueClient.recordFile({
+          role: "input",
+          mediaType: "audio/wav",
+          data: Buffer.alloc(25 * MiB + 1),
+          upload: true,
+        });
+        hueClient.recordFile({
+          role: "input",
+          mediaType: "audio/wav",
+          data: Buffer.alloc(1),
+          path: file.path,
+        });
+      });
+      await expect(hueClient.flush()).rejects.toThrow("Hue could not accept all telemetry");
+      expect(hueClient.transport.getReport().instrumentationFailures).toBe(3);
+      expect(endpoint.span("refused")!.events ?? []).toEqual([]);
+      expect(endpoint.reservations).toEqual([]);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+      file.remove();
+    }
+  });
 });
