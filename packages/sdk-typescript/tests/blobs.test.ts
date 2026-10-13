@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { execFileSync } from "node:child_process";
 import { ROOT_CONTEXT, trace, type Span } from "@opentelemetry/api";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
@@ -25,7 +26,8 @@ import {
   type HueClient,
   type HueTransport,
 } from "../src/index.js";
-import { fallbackAttributes, newTally } from "../src/blobs.js";
+import { BlobUploader, fallbackAttributes, newTally } from "../src/blobs.js";
+import { fileSource } from "../src/attachment.js";
 import { MAX_INLINE_FILE_TEXT } from "../src/inline-files.js";
 import { rehydrateMedia } from "../src/evals.js";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
@@ -3500,7 +3502,7 @@ describe("files given by path over 25 MiB", () => {
     }
   });
 
-  for (const change of ["changed", "removed"] as const)
+  for (const change of ["changed", "removed", "replaced by a named pipe"] as const)
     test(`a file ${change} after it was recorded is not uploaded, and is counted`, async () => {
       const endpoint = hue();
       const hueClient = client(endpoint);
@@ -3515,7 +3517,11 @@ describe("files given by path over 25 MiB", () => {
             upload: true,
           });
           if (change === "removed") file.remove();
-          else {
+          else if (change === "replaced by a named pipe") {
+            // Opened without waiting for a writer, and refused as no regular file.
+            rmSync(file.path);
+            execFileSync("mkfifo", [file.path]);
+          } else {
             // One byte in the middle: the size is the same, the SHA-256 is not.
             const descriptor = openSync(file.path, "r+");
             writeSync(descriptor, "X", 20 * MiB);
@@ -3523,7 +3529,7 @@ describe("files given by path over 25 MiB", () => {
           }
         });
         const report = await hueClient.flush();
-        // The attachment and the recorded file share one upload of the recorded digest.
+        // The attachment and the recorded file each read the file again and find it changed.
         expect(report.uploadedValues).toBe(0);
         expect(report.uploadFallbacks).toBe(2);
         const record = endpoint.span(change)!;
@@ -3545,6 +3551,46 @@ describe("files given by path over 25 MiB", () => {
         file.remove();
       }
     });
+
+  test("a file that changed does not fail another reference to the bytes it was recorded with", async () => {
+    const endpoint = hue();
+    const file = sparseFile(30 * MiB);
+    const uploader = new BlobUploader({
+      baseUrl: endpoint.url,
+      apiKey,
+      timeoutMillis: 10_000,
+      allowInsecureHttp: false,
+      userAgent: "blob-tests",
+    });
+    const traceId = "0123456789abcdef0123456789abcdef";
+    const upload = { deadline: Date.now() + 60_000, wait: async () => false };
+    try {
+      const bytes = readFileSync(file.path);
+      const digest = { sha256: sha256(bytes), size: bytes.byteLength };
+      const source = fileSource({ path: file.path, ...digest });
+      const descriptor = openSync(file.path, "r+");
+      writeSync(descriptor, "X", 20 * MiB);
+      closeSync(descriptor);
+      // The changed file's upload starts first; the same bytes held in memory wait for it, and
+      // then upload themselves rather than take its failure.
+      const changed = uploader.store(
+        traceId,
+        "input.value#/a",
+        source,
+        "audio/wav",
+        digest,
+        upload,
+      );
+      const held = uploader.store(traceId, "input.value#/b", bytes, "audio/wav", digest, upload);
+      expect(await changed).toMatchObject({ ok: false, reason: "failed" });
+      expect(await held).toEqual({ ok: true, contentType: "audio/wav" });
+      expect(endpoint.store.get(`${traceId}/${digest.sha256}`)!.bytes.equals(bytes)).toBe(true);
+    } finally {
+      uploader.close();
+      endpoint.server.stop(true);
+      file.remove();
+    }
+  });
 
   test("bytes over 25 MiB, and a file over Hue's 1 GB upload limit, are still refused", async () => {
     const endpoint = hue();

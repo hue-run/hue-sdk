@@ -110,6 +110,7 @@ for (const item of corpus.fixtures as CorpusCase[]) {
   ]);
 }
 
+const MiB = 1024 * 1024;
 const long = Buffer.alloc(4000, 3).toString("base64");
 const text = `data:text/plain;charset=utf-8,${"caf%C3%A9 é 🎧 %20%0A".repeat(200)}`;
 cases.push(
@@ -197,6 +198,33 @@ cases.push(
       },
     ]),
   ],
+  // Data ending in whitespace trims to a label Hue's reader matches (a file id), so it is parsed.
+  [
+    "a file id that trims to a label",
+    "input.value",
+    JSON.stringify({
+      type: "file",
+      file_id: `data:,a${" ".repeat(400)}`,
+      name: "data:image/png;base64,iVBORw0KGgo=",
+    }),
+  ],
+  [
+    "a file id that trims to a label (ideographic space)",
+    "input.value",
+    JSON.stringify({
+      type: "file",
+      file: {
+        file_id: `data:,a${"\u3000".repeat(400)}`,
+        filename: "data:image/png;base64,iVBORw0KGgo=",
+      },
+    }),
+  ],
+  // Percent-escaped data read a 1 Mi slice at a time: never split inside a surrogate pair or an
+  // escape, and a run of lone high surrogates still moves on.
+  ["a surrogate pair across slices", "metadata", `data:text/plain,${"a".repeat(MiB - 1)}😀b`],
+  ["an escape across slices", "metadata", `data:text/plain,${"a".repeat(MiB - 1)}%41%42`],
+  ["an escape two units before a slice", "metadata", `data:text/plain,${"a".repeat(MiB - 2)}%41`],
+  ["lone high surrogates past a slice", "metadata", `data:text/plain,${"\uD800".repeat(MiB + 8)}`],
 );
 
 describe("media read in place is placed as media parsed out of the value", () => {
@@ -225,5 +253,11 @@ describe("media read in place is placed as media parsed out of the value", () =>
       },
     ]);
     expect(readLargeMediaText("gen_ai.input.messages", padded, 300)).toBeUndefined();
+    // The scan stops at the bound: 64 Mi code units of escaped text before a file are not read
+    // to their end.
+    const escapedFirst = `[{"parts":[{"type":"text","content":"${"a\\n".repeat(32 * MiB)}"},{"type":"blob","content":"${long}"}]}]`;
+    const started = performance.now();
+    expect(readLargeMediaText("gen_ai.input.messages", escapedFirst, 300)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

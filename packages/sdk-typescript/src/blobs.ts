@@ -290,7 +290,11 @@ type Reservation =
   | { exists: false; contentType: string; grant: Grant }
   | { fallback: FallbackReason };
 
-type Outcome = { ok: true; contentType: string } | { ok: false; reason: FallbackReason };
+/** An upload's outcome; `changed` when the value's own source no longer held its bytes (a file
+ * that changed since it was recorded), which says nothing of another reference's bytes. */
+type Outcome =
+  | { ok: true; contentType: string }
+  | { ok: false; reason: FallbackReason; changed?: boolean };
 
 interface Reply {
   status: number;
@@ -426,8 +430,11 @@ export class BlobUploader {
       return { ok: false, reason: "failed" };
     if (digest.size > MAX_BLOB_BYTES) return { ok: false, reason: "tooLarge" };
     const identity = `${traceId}:${digest.sha256}`;
-    const known = this.outcomes.get(identity);
-    if (known) return known.promise;
+    for (let known = this.outcomes.get(identity); known; known = this.outcomes.get(identity)) {
+      const shared = await known.promise;
+      // Another reference's file changed since it was recorded: this one tries its own bytes.
+      if (shared.ok || !shared.changed) return shared;
+    }
     if (this.outcomes.size >= 4096) {
       const oldest = [...this.outcomes].find(([, item]) => item.settled)?.[0];
       if (oldest === undefined) return { ok: false, reason: "budget" };
@@ -482,6 +489,7 @@ export class BlobUploader {
       const { grant } = reservation;
       const put = await this.put(grant, value, digest.size, upload.deadline);
       if (put === "stored") break;
+      if (put === "changed") return { ok: false, reason: "failed", changed: true };
       if (this.closed) return { ok: false, reason: "failed" };
       const expired = put === "expired" || Date.now() >= grant.expiresAt;
       if (
@@ -652,7 +660,7 @@ export class BlobUploader {
     value: string | Uint8Array | ByteSource,
     size: number,
     deadline: number,
-  ): Promise<"stored" | "expired" | "transient" | "failed"> {
+  ): Promise<"stored" | "expired" | "transient" | "failed" | "changed"> {
     const reply = await this.request(
       "PUT",
       grant.url,
@@ -662,7 +670,7 @@ export class BlobUploader {
       MAX_ERROR_RESPONSE_BYTES,
       size,
     );
-    if (isByteSource(value) && value.changed) return "failed";
+    if (isByteSource(value) && value.changed) return "changed";
     if (!reply) return "transient";
     // 412: the object exists already (another upload of the same value won).
     if ((reply.status >= 200 && reply.status < 300) || reply.status === 412) return "stored";

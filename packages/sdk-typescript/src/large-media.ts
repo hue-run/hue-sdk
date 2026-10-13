@@ -64,6 +64,11 @@ const base64 = /^[A-Za-z0-9+/]*={0,2}$/;
 // eslint-disable-next-line no-control-regex -- a JSON string literal holds no raw control character
 const controlCharacter = /[\u0000-\u001f]/;
 const badEscape = /%(?![0-9A-Fa-f]{2})/;
+/** What `String.prototype.trim` removes: a character Hue's reader trims from a label. */
+const trimmed = /\s/;
+/** The longest `data:` URL header read in place, in code units: a string with a longer one is
+ * parsed with the rest of the value. */
+const MAX_HEADER_UNITS = 4096;
 /** Slices of base64 decoded at once: a multiple of four characters. */
 const BASE64_SLICE = 1 << 20;
 /** Slices of other text read at once, in code units. */
@@ -82,8 +87,12 @@ function base64Header(header: string): boolean {
  * left for the parse to refuse. */
 function classify(text: string, start: number, end: number, raw = false): LongText | undefined {
   if (text.startsWith("data:", start)) {
-    const comma = text.indexOf(",", start + 5);
-    if (comma === -1 || comma >= end) return undefined;
+    // The comma is looked for within the string and the header's bound only.
+    const found = text
+      .slice(start + 5, Math.min(end, start + 5 + MAX_HEADER_UNITS + 1))
+      .indexOf(",");
+    if (found === -1) return undefined;
+    const comma = start + 5 + found;
     const header = text.slice(start + 5, comma);
     if (!raw && controlCharacter.test(header)) return undefined;
     const data = text.slice(comma + 1, end);
@@ -91,7 +100,14 @@ function classify(text: string, start: number, end: number, raw = false): LongTe
       if ((end - comma - 1) % 4 !== 0 || !base64.test(data)) return undefined;
       return { text, start, end, data: comma + 1, kind: "dataBase64", header };
     }
-    if ((!raw && controlCharacter.test(data)) || badEscape.test(data)) return undefined;
+    // Data that ends in whitespace could trim to a label Hue's reader matches, which its
+    // stand-in could not.
+    if (
+      (!raw && controlCharacter.test(data)) ||
+      badEscape.test(data) ||
+      trimmed.test(text[end - 1] ?? "")
+    )
+      return undefined;
     return { text, start, end, data: comma + 1, kind: "dataPercent", header };
   }
   if ((end - start) % 4 !== 0 || !base64.test(text.slice(start, end))) return undefined;
@@ -125,16 +141,18 @@ interface Skeleton {
 
 /**
  * The skeleton of JSON `text`: each value string longer than `longUnits` and recorded without
- * escapes as base64 or a `data:` URL replaced by its stand-in. Undefined when the skeleton is still
- * longer than {@link MAX_INLINE_FILE_TEXT}. A string the scan finds unterminated (text that is no
- * JSON) ends the scan; the skeleton then holds the rest as recorded and fails to parse.
+ * escapes as base64 or a `data:` URL replaced by its stand-in. Undefined once the skeleton is
+ * longer than {@link MAX_INLINE_FILE_TEXT}: the scan stops there, so the text it reads and the
+ * skeleton it makes stay within that bound however long the value is. A string the scan finds
+ * unterminated (text that is no JSON) ends the scan; the skeleton then holds the rest as recorded
+ * and fails to parse.
  */
 function skeletonOf(text: string, longUnits: number): Skeleton | undefined {
   const nonce = randomBytes(16).toString("hex");
   const long = new Map<string, LongText>();
-  const pieces: string[] = [];
-  let copied = 0;
-  let length = text.length;
+  const replaced: { start: number; end: number; stub: string }[] = [];
+  // The skeleton's length less the text's, up to where the scan stands.
+  let shorter = 0;
   let at = 0;
   // The first backslash at or after where the scan stands, found once and passed: the scan is
   // linear however the escapes and the strings fall.
@@ -156,17 +174,25 @@ function skeletonOf(text: string, longUnits: number): Skeleton | undefined {
     if (close === -1) break;
     at = close + 1;
     // Only a value: a key stays as it is.
-    if (escaped || close - open - 1 <= longUnits || text.charCodeAt(space(text, at)) === 0x3a)
-      continue;
-    const found = classify(text, open + 1, close);
-    if (!found) continue;
-    const stub = standIn(found, `${nonce}${long.size.toString(16).padStart(8, "0")}`);
-    long.set(stub, found);
-    pieces.push(text.slice(copied, open + 1), stub);
-    copied = close;
-    length += stub.length - (close - open - 1);
+    const found =
+      escaped || close - open - 1 <= longUnits || text.charCodeAt(space(text, at)) === 0x3a
+        ? undefined
+        : classify(text, open + 1, close);
+    if (found) {
+      const stub = standIn(found, `${nonce}${long.size.toString(16).padStart(8, "0")}`);
+      long.set(stub, found);
+      replaced.push({ start: open + 1, end: close, stub });
+      shorter += close - open - 1 - stub.length;
+    }
+    if (at - shorter > MAX_INLINE_FILE_TEXT) return undefined;
   }
-  if (length > MAX_INLINE_FILE_TEXT) return undefined;
+  if (text.length - shorter > MAX_INLINE_FILE_TEXT) return undefined;
+  const pieces: string[] = [];
+  let copied = 0;
+  for (const { start, end, stub } of replaced) {
+    pieces.push(text.slice(copied, start), stub);
+    copied = end;
+  }
   pieces.push(text.slice(copied));
   return { text: pieces.join(""), long };
 }
@@ -246,10 +272,11 @@ export interface LongFileBytes {
 /** Base64 from `start` to `end` of `text` (strict, padded to a multiple of four), decoded a
  * slice at a time. */
 function base64Source(text: string, start: number, end: number): ByteSource {
+  const length = end - start;
   const pad =
     (text.charCodeAt(end - 1) === 0x3d ? 1 : 0) + (text.charCodeAt(end - 2) === 0x3d ? 1 : 0);
   return {
-    size: ((end - start) / 4) * 3 - pad,
+    size: (length / 4) * 3 - pad,
     *chunks() {
       for (let at = start; at < end; at += BASE64_SLICE)
         yield Buffer.from(text.slice(at, Math.min(end, at + BASE64_SLICE)), "base64");
@@ -269,13 +296,15 @@ function percentSource(text: string, start: number, end: number): ByteSource {
     *chunks() {
       for (let at = 0; at < data.length; ) {
         let stop = Math.min(data.length, at + TEXT_SLICE);
-        while (
-          stop < data.length &&
-          (data.charCodeAt(stop - 1) === 0x25 ||
-            data.charCodeAt(stop - 2) === 0x25 ||
-            /[\uD800-\uDBFF]/.test(data[stop - 1]!))
-        )
-          stop--;
+        if (stop < data.length) {
+          // Never between the halves of a surrogate pair, nor inside a `%XX` escape: a step of at
+          // most three units back from a slice of 1 Mi, so every slice moves on.
+          const unit = data.charCodeAt(stop - 1);
+          const next = data.charCodeAt(stop);
+          if (unit >= 0xd800 && unit <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) stop--;
+          if (data.charCodeAt(stop - 1) === 0x25) stop -= 1;
+          else if (data.charCodeAt(stop - 2) === 0x25) stop -= 2;
+        }
         const slice = data.slice(at, stop);
         const bytes = Buffer.alloc(Buffer.byteLength(slice, "utf8"));
         let length = 0;

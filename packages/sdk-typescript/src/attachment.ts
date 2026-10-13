@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { resolve } from "node:path";
 import { types as utilTypes } from "node:util";
@@ -106,8 +106,10 @@ export function readPath(path: string): { bytes: Uint8Array } | { file: PathFile
  * it is read and sent once the next one is read; the last is sent only once the file ended at its
  * recorded size with its recorded SHA-256. A file that changed since it was recorded, or can no
  * longer be read, ends the read with an error before its body is complete and sets `changed`, so
- * the upload is abandoned and the value is counted as not uploaded. Hue's presigned PUT also signs
- * the size and SHA-256, so the store refuses a body that differs.
+ * the upload is abandoned and the value is counted as not uploaded; so does a path that is no
+ * longer a regular file, which is opened without waiting (a named pipe in its place would wait for
+ * a writer) and never read. Hue's presigned PUT also signs the size and SHA-256, so the store
+ * refuses a body that differs.
  */
 export function fileSource(file: PathFile): ByteSource {
   const source: ByteSource = {
@@ -117,10 +119,14 @@ export function fileSource(file: PathFile): ByteSource {
         source.changed = true;
         return new Error("The file changed after it was recorded");
       };
-      const handle = await open(file.path, "r").catch(() => {
-        throw changed();
-      });
+      const handle = await open(file.path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)).catch(
+        () => {
+          throw changed();
+        },
+      );
       try {
+        const info = await handle.stat().catch(() => undefined);
+        if (!info?.isFile()) throw changed();
         const hash = createHash("sha256");
         let size = 0;
         let pending: Buffer | undefined;

@@ -213,7 +213,8 @@ class Snapshot {
         if (
           !this.log &&
           !this.inspectedKeys.has(key) &&
-          Buffer.byteLength(value, "utf8") > this.hold.valueBytes
+          (value.length > this.hold.valueBytes ||
+            Buffer.byteLength(value, "utf8") > this.hold.valueBytes)
         )
           this.largeKeys.add(key);
         return undefined;

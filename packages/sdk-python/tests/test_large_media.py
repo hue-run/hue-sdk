@@ -106,6 +106,7 @@ for _case in _CORPUS["fixtures"]:
             )
         )
 
+_MIB = 1024 * 1024
 _LONG = base64.b64encode(bytes([3]) * 4000).decode()
 _TEXT = "data:text/plain;charset=utf-8," + "caf%C3%A9 é 🎧 %20%0A" * 200
 _WAV = base64.b64encode(b"RIFF\0\0\0\0WAVE" + bytes(4000)).decode()
@@ -178,6 +179,42 @@ CASES += [
             ]
         ),
     ),
+    # Data ending in whitespace trims to a label Hue's reader matches (a file id), so it is parsed.
+    (
+        "a file id that trims to a label",
+        "input.value",
+        json.dumps(
+            {
+                "type": "file",
+                "file_id": "data:,a" + " " * 400,
+                "name": "data:image/png;base64,iVBORw0KGgo=",
+            }
+        ),
+    ),
+    (
+        "a file id that trims to a label (ideographic space)",
+        "input.value",
+        json.dumps(
+            {
+                "type": "file",
+                "file": {
+                    "file_id": "data:,a" + "\u3000" * 400,
+                    "filename": "data:image/png;base64,iVBORw0KGgo=",
+                },
+            },
+            ensure_ascii=False,
+        ),
+    ),
+    # Percent-escaped data read a 1 Mi slice at a time: never split inside a surrogate pair or an
+    # escape, and a run of lone high surrogates still moves on.
+    ("a surrogate pair across slices", "metadata", "data:text/plain," + "a" * (_MIB - 1) + "😀b"),
+    ("an escape across slices", "metadata", "data:text/plain," + "a" * (_MIB - 1) + "%41%42"),
+    (
+        "an escape two units before a slice",
+        "metadata",
+        "data:text/plain," + "a" * (_MIB - 2) + "%41",
+    ),
+    ("lone high surrogates past a slice", "metadata", "data:text/plain," + "\ud800" * (_MIB + 8)),
 ]
 
 
@@ -209,3 +246,22 @@ def test_long_strings_are_read_in_place_and_the_json_around_them_is_bounded():
         ]
     )
     assert read_large_media_text("gen_ai.input.messages", padded, 300) is None
+
+
+def test_a_value_over_the_bound_is_refused_without_a_copy_of_it():
+    import tracemalloc
+
+    # 96 Mi characters of escaped text before a file: the scan stops at the bound, without copying
+    # or reading the value to its end.
+    value = (
+        '[{"parts":[{"type":"text","content":"'
+        + "a\\n" * (32 * _MIB)
+        + f'"}},{{"type":"blob","content":"{_LONG}"}}]}}]'
+    )
+    tracemalloc.start()
+    try:
+        assert read_large_media_text("gen_ai.input.messages", value, 300) is None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * _MIB, peak

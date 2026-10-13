@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import time
 from pathlib import Path
+from threading import Thread
 from typing import Any
 
 import pytest
@@ -15,6 +18,8 @@ from test_blobs import MIB, attrs, blobs, client, listed, sha256
 from test_blobs import hue_store as hue_store
 
 from hue_sdk import Attachment, Hue
+from hue_sdk._attachment import PathFile, file_source
+from hue_sdk._blobs import BlobUploader
 
 CORPUS = json.loads((Path(__file__).parent / "fixtures/media-parts/cases.json").read_text())[
     "attachments"
@@ -571,7 +576,7 @@ def test_record_file_uploads_a_30_mib_file_given_by_path(hue_store, tmp_path):
     assert hue_store.objects[f"{record.trace_id.hex()}/{sha256(data)}"][0] == data
 
 
-@pytest.mark.parametrize("change", ["changed", "removed"])
+@pytest.mark.parametrize("change", ["changed", "removed", "replaced by a named pipe"])
 def test_a_file_changed_after_it_was_recorded_is_not_uploaded_and_is_counted(
     hue_store, tmp_path, change
 ):
@@ -582,6 +587,10 @@ def test_a_file_changed_after_it_was_recorded_is_not_uploaded_and_is_counted(
             span.record_file(role="input", media_type="audio/wav", path=path, upload=True)
             if change == "removed":
                 path.unlink()
+            elif change == "replaced by a named pipe":
+                # Opened without waiting for a writer, and refused as no regular file.
+                path.unlink()
+                os.mkfifo(path)
             else:
                 # One byte in the middle: the size is the same, the SHA-256 is not.
                 with open(path, "r+b") as file:
@@ -590,7 +599,7 @@ def test_a_file_changed_after_it_was_recorded_is_not_uploaded_and_is_counted(
         assert hue.force_flush(timeout_millis=60_000)
         status = hue.export_status
         issues = hue.export_issues()
-    # The attachment and the recorded file share one upload of the recorded digest.
+    # The attachment and the recorded file each read the file again and find it changed.
     assert (status.uploaded_values, status.upload_fallbacks) == (0, 2)
     record = hue_store.span(change)
     assert blobs(record) == []
@@ -603,6 +612,41 @@ def test_a_file_changed_after_it_was_recorded_is_not_uploaded_and_is_counted(
         put for put in hue_store.puts if put["status"] == 200 and put["bytes"] == 30 * MIB
     ] == []
     assert any("could not be uploaded" in issue.message for issue in issues)
+
+
+def test_a_file_that_changed_does_not_fail_another_reference_to_its_recorded_bytes(
+    hue_store, tmp_path
+):
+    path = sparse_file(tmp_path / "recording.wav", 30 * MIB)
+    data = path.read_bytes()
+    digest = (sha256(data), len(data))
+    source = file_source(PathFile(str(path), len(data), digest[0]))
+    with open(path, "r+b") as file:
+        file.seek(20 * MIB)
+        file.write(b"X")
+    uploader = BlobUploader(hue_store.url, {"Authorization": "Bearer synthetic"}, 10)
+    trace_id = "0123456789abcdef0123456789abcdef"
+    deadline = time.monotonic() + 60
+    outcomes: dict[str, Any] = {}
+
+    def changed() -> None:
+        outcomes["changed"] = uploader.store(
+            trace_id, "input.value#/a", source, "audio/wav", digest, deadline, lambda _: False
+        )
+
+    # The changed file's upload starts first; the same bytes held in memory wait for it, and
+    # then upload themselves rather than take its failure.
+    thread = Thread(target=changed)
+    thread.start()
+    while (trace_id, digest[0]) not in uploader._outcomes and thread.is_alive():
+        time.sleep(0.001)
+    held = uploader.store(
+        trace_id, "input.value#/b", data, "audio/wav", digest, deadline, lambda _: False
+    )
+    thread.join(60)
+    assert (outcomes["changed"].ok, outcomes["changed"].reason) == (False, "failed")
+    assert (held.ok, held.content_type) == (True, "audio/wav")
+    assert hue_store.objects[f"{trace_id}/{digest[0]}"][0] == data
 
 
 def test_bytes_over_25_mib_and_a_file_over_the_1_gb_upload_limit_are_still_refused(

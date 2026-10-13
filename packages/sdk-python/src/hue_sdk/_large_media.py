@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ._inline_files import (
+    _ECMASCRIPT_WHITESPACE,
     MAX_INLINE_FILE_TEXT,
     InlineFilePart,
     MediaValue,
@@ -38,7 +39,9 @@ LONG_STRING_UNITS = 16 * 1024
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
 _CONTROL = re.compile(r"[\x00-\x1f]")
 _BAD_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
-_HIGH_SURROGATE = re.compile("[\ud800-\udbff]")
+# The longest data: URL header read in place, in characters: a string with a longer one is parsed
+# with the rest of the value.
+_MAX_HEADER_UNITS = 4096
 _SURROGATE = re.compile("[\ud800-\udfff]")
 _SPACE = re.compile(r"[ \t\n\r]*")
 _ASTRAL = re.compile("[\U00010000-\U0010ffff]")
@@ -91,7 +94,8 @@ def _classify(text: str, start: int, end: int, raw: bool = False) -> LongText | 
     is parsed with the rest of the value; a string literal holding a control character, which no
     JSON does, is left for the parse to refuse."""
     if text.startswith("data:", start):
-        comma = text.find(",", start + 5, end)
+        # The comma is looked for within the string and the header's bound only.
+        comma = text.find(",", start + 5, min(end, start + 5 + _MAX_HEADER_UNITS + 1))
         if comma == -1:
             return None
         header = text[start + 5 : comma]
@@ -101,8 +105,12 @@ def _classify(text: str, start: int, end: int, raw: bool = False) -> LongText | 
             if (end - comma - 1) % 4 or not _BASE64.fullmatch(text, comma + 1, end):
                 return None
             return LongText(text, start, end, comma + 1, "dataBase64", header)
-        if (not raw and _CONTROL.search(text, comma + 1, end)) or _BAD_ESCAPE.search(
-            text, comma + 1, end
+        # Data that ends in whitespace could trim to a label Hue's reader matches, which its
+        # stand-in could not.
+        if (
+            (not raw and _CONTROL.search(text, comma + 1, end))
+            or _BAD_ESCAPE.search(text, comma + 1, end)
+            or (end > comma + 1 and text[end - 1] in _ECMASCRIPT_WHITESPACE)
         ):
             return None
         return LongText(text, start, end, comma + 1, "dataPercent", header)
@@ -150,16 +158,17 @@ class _Skeleton:
 
 def _skeleton_of(text: str, long_units: int) -> _Skeleton | None:
     """The skeleton of JSON ``text``: each value string longer than ``long_units`` and recorded
-    without escapes as base64 or a data: URL replaced by its stand-in. None when the skeleton is
-    still longer than ``MAX_INLINE_FILE_TEXT`` code units. A string the scan finds unterminated
-    (text that is no JSON) ends the scan; the skeleton then holds the rest as recorded and fails
-    to parse."""
+    without escapes as base64 or a data: URL replaced by its stand-in. None once the skeleton is
+    longer than ``MAX_INLINE_FILE_TEXT`` code units: the scan stops there, so the text it reads
+    and the skeleton it makes stay within that bound however long the value is. A string the scan
+    finds unterminated (text that is no JSON) ends the scan; the skeleton then holds the rest as
+    recorded and fails to parse."""
     nonce = secrets.token_hex(16)
     long: dict[str, LongText] = {}
-    pieces: list[str] = []
-    copied = 0
+    ranges: list[tuple[int, int, str]] = []
     at = 0
-    replaced = 0
+    # The skeleton's length less the text's, up to where the scan stands, in characters.
+    shorter = 0
     # The first backslash at or after where the scan stands, found once and passed: the scan is
     # linear however the escapes and the strings fall.
     slash = text.find("\\")
@@ -183,22 +192,27 @@ def _skeleton_of(text: str, long_units: int) -> _Skeleton | None:
             break
         at = close + 1
         # Only a value: a key stays as it is.
-        if escaped or not _longer(text, opening + 1, close, long_units):
-            continue
-        following = _space(text, at)
-        if following < len(text) and text[following] == ":":
-            continue
-        found = _classify(text, opening + 1, close)
-        if found is None:
-            continue
-        stub = _stand_in(found, f"{nonce}{len(long):08x}")
-        long[stub] = found
-        pieces.append(text[copied : opening + 1])
-        pieces.append(stub)
-        copied = close
-        replaced += close - opening - 1 - len(stub)
-    if len(text) - replaced > MAX_INLINE_FILE_TEXT:
+        found = None
+        if not escaped and _longer(text, opening + 1, close, long_units):
+            following = _space(text, at)
+            if following >= len(text) or text[following] != ":":
+                found = _classify(text, opening + 1, close)
+        if found is not None:
+            stub = _stand_in(found, f"{nonce}{len(long):08x}")
+            long[stub] = found
+            ranges.append((opening + 1, close, stub))
+            shorter += close - opening - 1 - len(stub)
+        # Characters count no more than code units: past the bound in characters is past it.
+        if at - shorter > MAX_INLINE_FILE_TEXT:
+            return None
+    if len(text) - shorter > MAX_INLINE_FILE_TEXT:
         return None
+    pieces: list[str] = []
+    copied = 0
+    for start, end, stub in ranges:
+        pieces.append(text[copied:start])
+        pieces.append(stub)
+        copied = end
     pieces.append(text[copied:])
     skeleton = "".join(pieces)
     # Counted in UTF-16 code units, as the TypeScript SDK counts the skeleton.
@@ -312,12 +326,15 @@ def _percent_slices(text: str, start: int, end: int) -> Iterator[bytes]:
     at = start
     while at < end:
         stop = min(end, at + _TEXT_SLICE)
-        while stop < end and (
-            text[stop - 1] == "%"
-            or text[stop - 2] == "%"
-            or _HIGH_SURROGATE.match(text[stop - 1]) is not None
-        ):
-            stop -= 1
+        if stop < end:
+            # Never between the halves of a surrogate pair, nor inside a %XX escape: a step of at
+            # most three characters back from a slice of 1 Mi, so every slice moves on.
+            if "\ud800" <= text[stop - 1] <= "\udbff" and "\udc00" <= text[stop] <= "\udfff":
+                stop -= 1
+            if text[stop - 1] == "%":
+                stop -= 1
+            elif text[stop - 2] == "%":
+                stop -= 2
         piece = _well_formed(text[at:stop])
         decoded = bytearray()
         begin = 0
@@ -351,7 +368,7 @@ def long_file_bytes(file: InlineFilePart, long: LongText) -> LongFileBytes:
         if long.kind == "dataBase64"
         else _percent_source(long.text, long.data, long.end)
     )
-    media_type = (long.header or "").split(";")[0].strip()
+    media_type = (long.header or "").split(";")[0].strip(_ECMASCRIPT_WHITESPACE)
     return LongFileBytes(source, url_media_type=media_type or None)
 
 

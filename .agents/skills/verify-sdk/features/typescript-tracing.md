@@ -92,4 +92,4 @@ bun test tests/blobs.test.ts -t "attachment"
 bun test tests/blobs.test.ts -t "one upload step"
 ```
 
-Expected: `11 pass` and `3 pass`, `0 fail`. `verify-package.mjs` runs `blobs.test.ts` against the packed tarball.
+Expected: `14 pass` and `3 pass`, `0 fail`. `verify-package.mjs` runs `blobs.test.ts` against the packed tarball.

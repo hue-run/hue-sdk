@@ -545,6 +545,9 @@ class _Outcome:
     ok: bool
     reason: str = "failed"
     content_type: str = ""
+    # The value's own source no longer held its bytes (a file that changed since it was
+    # recorded), which says nothing of another reference's bytes.
+    changed: bool = False
 
 
 def _no_auth(request: Any) -> Any:
@@ -713,6 +716,12 @@ class BlobUploader:
             if not event.is_set():
                 with sharing():
                     event.wait(max(0.0, deadline - monotonic()))
+            if event.is_set() and outcomes[0].changed:
+                # Another reference's file changed since it was recorded: this one tries its own
+                # bytes.
+                return self.store(
+                    trace_id, key, value, content_type, digest, deadline, wait, sharing
+                )
             return outcomes[0] if event.is_set() else _Outcome(False, "failed")
         outcome = _Outcome(False, "failed")
         try:
@@ -763,6 +772,8 @@ class BlobUploader:
             put = self._put(grant, value, size, deadline)
             if put == "stored":
                 break
+            if put == "changed":
+                return _Outcome(False, "failed", changed=True)
             expired = put == "expired" or time() >= grant["expires_at"]
             if put == "transient":
                 attempts += 1
@@ -948,7 +959,7 @@ class BlobUploader:
             "PUT", grant["url"], grant["headers"], body, deadline, _MAX_ERROR_RESPONSE_BYTES
         )
         if isinstance(value, ByteSource) and value.changed:
-            return "failed"
+            return "changed"
         if reply is None:
             return "transient"
         # 412: the object exists already (another upload of the same value won).

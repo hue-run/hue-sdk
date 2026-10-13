@@ -1052,6 +1052,7 @@ void [transition, event, options, backend];
         )
         .replaceAll('"../src/blobs.js"', '"../node_modules/@hue-run/sdk/dist/blobs.js"')
         .replaceAll('"../src/large-media.js"', '"../node_modules/@hue-run/sdk/dist/large-media.js"')
+        .replaceAll('"../src/attachment.js"', '"../node_modules/@hue-run/sdk/dist/attachment.js"')
         .replaceAll('"../src/snapshot.js"', '"../node_modules/@hue-run/sdk/dist/snapshot.js"')
         .replaceAll(
           '"../src/evals/exit-cleanup.js"',

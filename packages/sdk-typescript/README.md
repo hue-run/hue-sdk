@@ -321,7 +321,9 @@ units and written without escapes as base64 or a `data:` URL is decoded, hashed 
 up to Hue's 1 GB upload limit. The value is placed exactly as one within the bounds: the same
 digest form, entries and fallbacks. The JSON around those strings, a file written with escapes or
 inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it uses the
-ordinary value limit (it uploads whole). Log records keep the bounds. Resources, links and span
+ordinary value limit (it uploads whole). Each such value is read within that bound on its own, apart
+from the record's 16 Mi allowance, while it stays held within the 128 MiB for values awaiting
+upload. Log records keep the bounds. Resources, links and span
 events never upload inline media: in their recorded messages, media up to 64 KiB stays verbatim
 and larger media is replaced by its digest, as in 0.16, and log records that cannot upload (not
 correlated with a span, or while uploads are unavailable) keep the same rule. With
@@ -358,7 +360,8 @@ values awaiting upload. A `path` up to 25 MiB is read the same way. A larger reg
 Hue's 1 GB upload limit, is not held: it is hashed a 1 MiB slice at a time when the attachment is
 created and read again from disk when it is uploaded, each slice hashed as it is sent and the last
 sent only once the file ended at the size and SHA-256 it was recorded with. Keep such a file in
-place and unchanged until the client flushes: one that changed or is gone is not uploaded (the
+place and unchanged until the client flushes: one that changed, is gone or is no longer a regular
+file is not uploaded (the
 request ends before its body is complete, and Hue's upload URL signs the size and SHA-256, so the
 store refuses other bytes), and it counts in `report.uploadFallbacks`, its part keeping the digest
 it was recorded with.

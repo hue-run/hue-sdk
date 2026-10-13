@@ -179,7 +179,8 @@ def inline_file(content: str) -> InlineFile:
             decoded = binascii.a2b_base64(payload)
         except binascii.Error:
             decoded = None
-    media_type = match.group(1).split(";")[0].strip() if match else ""
+    # Trimmed as JavaScript trims, so both SDKs read the same media type.
+    media_type = match.group(1).split(";")[0].strip(_ECMASCRIPT_WHITESPACE) if match else ""
     return InlineFile(
         content.encode("utf-8") if decoded is None else decoded,
         decoded is not None,

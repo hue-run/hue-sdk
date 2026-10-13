@@ -85,9 +85,10 @@ def file_source(file: PathFile) -> ByteSource:
     hashed as it is read and sent once the next one is read; the last is sent only once the file
     ended at its recorded size with its recorded SHA-256. A file that changed since it was
     recorded, or can no longer be read, ends the read with an error before its body is complete
-    and sets ``changed``, so the upload is abandoned and the value is counted as not uploaded.
-    Hue's presigned PUT also signs the size and SHA-256, so the store refuses a body that
-    differs."""
+    and sets ``changed``, so the upload is abandoned and the value is counted as not uploaded; so
+    does a path that is no longer a regular file, which is opened without waiting (a named pipe in
+    its place would wait for a writer) and never read. Hue's presigned PUT also signs the size and
+    SHA-256, so the store refuses a body that differs."""
 
     def chunks() -> Iterator[bytes]:
         def changed() -> OSError:
@@ -95,10 +96,20 @@ def file_source(file: PathFile) -> ByteSource:
             return OSError("The file changed after it was recorded.")
 
         try:
-            handle = open(file.path, "rb")
+            descriptor = os.open(
+                file.path,
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
+            )
         except OSError:
             raise changed() from None
-        with handle:
+        try:
+            regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+        except OSError:
+            regular = False
+        if not regular:
+            os.close(descriptor)
+            raise changed()
+        with os.fdopen(descriptor, "rb") as handle:
             digest = hashlib.sha256()
             size = 0
             pending: bytes | None = None
