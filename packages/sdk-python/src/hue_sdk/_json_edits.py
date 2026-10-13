@@ -134,8 +134,13 @@ def _locate(text: str, wanted: set[str]) -> dict[str, _Located]:
             if child in prefixes:
                 visit(member.value_start, child)
 
-    visit(space(0), "")
-    return found
+    try:
+        visit(space(0), "")
+        return found
+    finally:
+        # ``value_end`` and ``visit`` refer to themselves, so they outlive this call until the
+        # next collection: the text they read, and what they found, are let go now.
+        text, found = "", {}
 
 
 def apply_json_edits(text: str, edits: Sequence[JsonEdit]) -> str:
@@ -217,4 +222,9 @@ def apply_json_edits(text: str, edits: Sequence[JsonEdit]) -> str:
         out.append(text[at:end])
         return "".join(out)
 
-    return render(0, len(text))
+    try:
+        return render(0, len(text))
+    finally:
+        # An object's piece renders through ``render``, which reads ``pieces``: emptied, that
+        # cycle no longer outlives this call, with the text, until the next collection.
+        pieces.clear()

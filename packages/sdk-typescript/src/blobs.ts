@@ -828,7 +828,7 @@ export async function offloadRecord(
         const contentType = mediaContentType(file, decoded);
         const textual = isTextMediaType(contentType);
         if (textual && decoded.bytes.byteLength <= INLINE_FILE_LIMIT) return Promise.resolve();
-        const prefix = keepsPrefix(file, textual);
+        const prefix = keepsPrefix(file, textual, decoded);
         const partKey = `${key}#${prefix ? file.pointer : file.partPointer}`;
         const slot = slots > 0 && isBlobKey(partKey) ? (slots--, true) : false;
         return (async () => {

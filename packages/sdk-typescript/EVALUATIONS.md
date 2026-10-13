@@ -317,10 +317,13 @@ An uploaded file needs one of `outputContentTypes`, a well-formed name of 1–25
 (as JavaScript counts a string's `length`) without path separators or control characters, and 1
 byte to 25 MiB. Every file, and the case itself as it will be sent (its revision, key, values and
 size), is checked before the first upload; a file outside that policy, a `path` that cannot be
-read, or a case Hue would refuse throws `TypeError` or `RangeError` without a request. The
-reservation key names the version, the case's `externalKey`, the role, the bytes, the name and the
-content type, so sending the same case again reuses its artifacts and a corrected name or type
-reserves a new one; a reference to the artifact a file uploads as pins it once. `source`, `attached_template`, `attached_reference` and `original` files reach
+read, or a case Hue would refuse throws `TypeError` or `RangeError` without a request. A `path`
+is hashed a slice at a time when it is checked and read again when it is uploaded, one file at a
+time, so the write holds at most one file in memory and sends only the bytes its check hashed. A
+file that changed in between, or can no longer be read, sends nothing: the write throws `TypeError`
+and the case is not written. The reservation key names the version, the case's
+`externalKey`, the role, the bytes, the name and the content type, so sending the same case again
+reuses its artifacts and a corrected name or type reserves a new one; a reference to the artifact a file uploads as pins it once. `source`, `attached_template`, `attached_reference` and `original` files reach
 the target as `context.files`; `org_template` and `evaluator_reference` files reach only scorers.
 
 Recorded messages copied into a case's inputs keep their large files as digest parts. Pin each file

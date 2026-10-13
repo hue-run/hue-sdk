@@ -1,6 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import {
+  appendFile,
+  mkdtemp,
+  open,
+  rm,
+  truncate,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEvaluationClient, type CaseFileWrite } from "../src/evals.js";
@@ -22,11 +30,24 @@ interface Artifact {
 }
 
 const servers: { stop(force?: boolean): unknown }[] = [];
-afterEach(() => {
+/** Directories a test wrote files to, removed once it ends, whether or not it passed. */
+const directories: string[] = [];
+afterEach(async () => {
   for (const server of servers.splice(0)) void server.stop(true);
+  await Promise.all(
+    directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
+  );
 });
 
-function receiver() {
+/** A new directory for a test's files, removed after the test. */
+async function testDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "hue-case-files-"));
+  directories.push(directory);
+  return directory;
+}
+
+/** A synthetic Hue; `onReserve` runs when a file's artifact is reserved, before its upload. */
+function receiver(onReserve?: (declared: Record<string, unknown>) => Promise<void> | void) {
   const versionId = randomUUID();
   const artifacts = new Map<string, Artifact>();
   const reservations = new Map<string, string>();
@@ -34,6 +55,8 @@ function receiver() {
     requests: [] as string[],
     reserves: [] as Record<string, unknown>[],
     puts: 0,
+    /** Uploads whose client stopped before sending every declared byte. */
+    abandoned: 0,
     cases: [] as Record<string, unknown>[],
   };
   const view = (stored: Artifact) => ({
@@ -56,8 +79,21 @@ function receiver() {
       calls.requests.push(`${request.method} ${url.pathname}`);
       if (url.pathname.startsWith("/blob/")) {
         expect(request.headers.get("authorization")).toBeNull();
+        // As storage does, a body sent without its length is refused.
+        if (
+          request.headers.get("transfer-encoding") !== null ||
+          request.headers.get("content-length") === null
+        )
+          return new Response(null, { status: 411 });
         const stored = artifacts.get(url.pathname.slice("/blob/".length))!;
-        stored.bytes = new Uint8Array(await request.arrayBuffer());
+        let bytes: ArrayBuffer;
+        try {
+          bytes = await request.arrayBuffer();
+        } catch {
+          calls.abandoned++;
+          return new Response(null, { status: 400 });
+        }
+        stored.bytes = new Uint8Array(bytes);
         calls.puts++;
         return new Response(null, { status: 200 });
       }
@@ -69,6 +105,7 @@ function receiver() {
       >;
       if (path === "/artifacts") {
         calls.reserves.push(body);
+        await onReserve?.(body);
         let id = reservations.get(String(body.idempotencyKey));
         // As Hue does, a key already naming an artifact with other declarations is refused.
         const named = id ? artifacts.get(id)! : undefined;
@@ -136,7 +173,7 @@ function receiver() {
 
 test("addCase uploads files given as bytes or a path and pins every file by artifact and role", async () => {
   const { client, versionId, artifacts, calls } = receiver();
-  const directory = await mkdtemp(join(tmpdir(), "hue-case-files-"));
+  const directory = await testDirectory();
   const path = join(directory, "answers.csv");
   await writeFile(path, csv);
   const existing = randomUUID();
@@ -338,4 +375,95 @@ test("addCase reuses a file's artifact whatever the case of the version ID", asy
   expect(new Set(calls.reserves.map((reserve) => reserve.idempotencyKey)).size).toBe(1);
   expect(artifacts.size).toBe(1);
   expect(calls.cases[1]).toEqual(calls.cases[0]!);
+});
+
+test("addCase hashes a file given by path in slices and holds at most one file at a time", async () => {
+  const { client, versionId, artifacts, calls } = receiver();
+  const directory = await testDirectory();
+  // Each file spans several slices and ends partway through one.
+  const contents = [0, 1, 2].map((index) => randomBytes(3 * 1024 * 1024 + 7 + index));
+  const paths = contents.map((_, index) => join(directory, `${index}.pdf`));
+  for (const [index, path] of paths.entries()) await writeFile(path, contents[index]!);
+  const probe = await open(paths[0]!, "r");
+  const prototype = Object.getPrototypeOf(probe) as FileHandle;
+  await probe.close();
+  // Each read: how much it asked for, and how many files had been uploaded when it was made.
+  const reads: { length: number; uploaded: number }[] = [];
+  const read = prototype.read;
+  const spy = spyOn(prototype, "read").mockImplementation(function (
+    this: FileHandle,
+    ...args: unknown[]
+  ) {
+    reads.push({ length: Number(args[2]), uploaded: calls.puts });
+    return (read as (...args: unknown[]) => unknown).apply(this, args) as never;
+  });
+  try {
+    await client.addCase(versionId, {
+      expectedRevision: 1,
+      externalKey: "large-files",
+      inputs: {},
+      files: paths.map((path, index) => ({
+        role: "source" as const,
+        filename: `${index}.pdf`,
+        contentType: "application/pdf",
+        path,
+      })),
+    });
+  } finally {
+    spy.mockRestore();
+  }
+  // The check hashes every file at most 1 MiB at a time before anything is uploaded; each file
+  // is then read whole only once the one before it was sent, so no two are held at once.
+  const checked = reads.filter(({ length }) => length <= 1024 * 1024 && length > 1);
+  expect(checked.length).toBeGreaterThan(0);
+  expect(checked.every(({ uploaded }) => uploaded === 0)).toBe(true);
+  const whole = reads.filter(({ length }) => length > 1024 * 1024);
+  expect(whole).toEqual(
+    contents.map((bytes, index) => ({ length: bytes.byteLength, uploaded: index })),
+  );
+  expect(calls.puts).toBe(3);
+  expect([...artifacts.values()].map((item) => sha256(item.bytes!))).toEqual(contents.map(sha256));
+});
+
+test("addCase refuses a file given by path that changed after it was checked, without staging it", async () => {
+  const directory = await testDirectory();
+  const path = join(directory, "report.pdf");
+  // Several slices long: the check hashes it in pieces, the upload reads it again whole.
+  const original = randomBytes(2.5 * 1024 * 1024);
+  const rewritten = Buffer.from(original);
+  rewritten[rewritten.byteLength - 1]! ^= 1;
+  const changes: [() => Promise<void>, string][] = [
+    [() => writeFile(path, rewritten), "Case file 2 changed after it was checked"],
+    [() => appendFile(path, "x"), "Case file 2 changed after it was checked"],
+    [() => truncate(path, original.byteLength - 1), "Case file 2 changed after it was checked"],
+    [() => rm(path), "Case file 2 could not be read"],
+  ];
+  for (const [change, message] of changes) {
+    await writeFile(path, original);
+    // The file changes once its reservation, made from the checked size and SHA-256, arrives.
+    const { client, versionId, artifacts, calls } = receiver(async (declared) => {
+      if (declared.filename === "report.pdf") await change();
+    });
+    const error = await client
+      .addCase(versionId, {
+        expectedRevision: 1,
+        externalKey: "changed",
+        inputs: {},
+        files: [
+          { role: "source", filename: "chart.png", contentType: "image/png", bytes: png },
+          { role: "source", filename: "report.pdf", contentType: "application/pdf", path },
+        ],
+      })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as TypeError).message).toBe(message);
+    // None of the report's bytes are sent: no upload is asked for, nothing is staged or
+    // completed, and no case is written.
+    const report = [...artifacts.values()].find((item) => item.filename === "report.pdf")!;
+    expect(report.state).toBe("reserved");
+    expect(report.bytes).toBeUndefined();
+    expect(calls.abandoned).toBe(0);
+    expect(calls.requests.filter((request) => request.includes(report.id))).toEqual([]);
+    expect(calls.cases).toEqual([]);
+  }
 });

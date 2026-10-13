@@ -122,27 +122,35 @@ def publish_artifact(
     idempotency_key: str,
     filename: str,
     content_type: str,
-    data: bytes,
+    data: bytes | _CheckedFile,
     label: str,
     timing: _Settling = ARTIFACT_SETTLING,
 ) -> str:
     """Reserve, stage and verify one artifact; its ID once Hue verified it. Replaying the key
-    settles on the same artifact, including one Hue finished verifying earlier."""
+    settles on the same artifact, including one Hue finished verifying earlier. ``data`` is the
+    bytes, or a checked file read again, whole, only when it is uploaded."""
+    if isinstance(data, bytes):
+        byte_size, digest = len(data), hashlib.sha256(data).hexdigest()
+    else:
+        byte_size, digest = data.byte_size, data.sha256
     reserved = client.reserve_artifact(
         idempotency_key=idempotency_key,
         filename=filename,
         content_type=content_type,
-        byte_size=len(data),
-        sha256=hashlib.sha256(data).hexdigest(),
+        byte_size=byte_size,
+        sha256=digest,
     )
     artifact_id = uuid(reserved["id"])
     state = reserved.get("state")
     if state != "ready":
         # A verification already running holds the uploaded bytes; Hue refuses another upload.
         if reserved.get("copyState") != "acknowledged" and state != "verifying":
+            # A checked file is read again, whole, only now and only if it still has the bytes
+            # its check hashed: a file that changed sends nothing.
+            content = data if isinstance(data, bytes) else _checked_bytes(data)
             upload = client.request_artifact_upload(artifact_id)
             try:
-                client.upload_artifact_bytes(upload, data, content_type)
+                client.upload_artifact_bytes(upload, content, content_type)
             except HueApiError:
                 # A lost staging acknowledgement or an immutable object already present can only
                 # be settled by verified completion; never rewrite a final object here.
@@ -151,6 +159,38 @@ def publish_artifact(
     if state != "ready":
         raise RuntimeError(f"{label} was not verified by Hue ({state}).")
     return artifact_id
+
+
+# How much of a case file given by path its check reads at once, to hash it.
+_SLICE_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _CheckedFile:
+    """A case file given by path, as it was checked."""
+
+    path: Path
+    # Names the file in an error, as its check did.
+    label: str
+    byte_size: int
+    sha256: str
+
+
+def _checked_bytes(file: _CheckedFile) -> bytes:
+    """The bytes of a checked case file, read whole when it is uploaded: case files are uploaded
+    one at a time, so no more than one is held in memory. Only bytes with the checked size and
+    SHA-256 are returned, so the bytes sent are the bytes the check hashed; a file that changed
+    after its check, or can no longer be read, is refused with ``ValueError`` before anything is
+    sent."""
+    try:
+        with file.path.open("rb") as stream:
+            # Never more than its checked size and one byte, the byte that shows it grew.
+            content = stream.read(file.byte_size + 1)
+    except OSError as error:
+        raise ValueError(f"{file.label} could not be read.") from error
+    if len(content) != file.byte_size or hashlib.sha256(content).hexdigest() != file.sha256:
+        raise ValueError(f"{file.label} changed after it was checked.")
+    return content
 
 
 def _case_file_name(name: object) -> str:
@@ -170,7 +210,9 @@ def _case_file_name(name: object) -> str:
     return name
 
 
-def _case_file_bytes(path: object, label: str) -> bytes:
+def _checked_file(path: object, label: str) -> _CheckedFile:
+    """A case file given by path, checked: a regular file within the size limit, hashed a slice
+    at a time so it is never held whole. Its emptiness is the caller's check, as for data."""
     if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
         raise ValueError(f"{label} needs data or a path.")
     file = Path(path)
@@ -183,10 +225,19 @@ def _case_file_bytes(path: object, label: str) -> bytes:
         raise ValueError(f"{label} is not a regular file.")
     if info.st_size > _MAX_FILE_BYTES:
         raise ValueError(f"{label} exceeds 25 MiB.")
+    digest, byte_size = hashlib.sha256(), 0
     try:
-        return file.read_bytes()
+        with file.open("rb", buffering=0) as stream:
+            while chunk := stream.read(_SLICE_BYTES):
+                byte_size += len(chunk)
+                # A file that grew past the limit since its size was read is refused, not read
+                # whole.
+                if byte_size > _MAX_FILE_BYTES:
+                    raise ValueError(f"{label} exceeds 25 MiB.")
+                digest.update(chunk)
     except OSError as error:
         raise ValueError(f"{label} could not be read.") from error
+    return _CheckedFile(file, label, byte_size, digest.hexdigest())
 
 
 # A stand-in for an artifact a case file is uploaded as, the length of a real ID.
@@ -254,12 +305,15 @@ def case_file_references(
                 raise ValueError(f"{label} names data and a path; give one.")
             if file.data is not None and not isinstance(file.data, bytes):
                 raise ValueError(f"{label} data must be bytes.")
-            data = file.data if file.data is not None else _case_file_bytes(file.path, label)
-            if not data:
+            # Data is kept as given; a path is kept as its size and digest, and read again to
+            # upload.
+            data = file.data if file.data is not None else _checked_file(file.path, label)
+            byte_size = len(data) if isinstance(data, bytes) else data.byte_size
+            if not byte_size:
                 raise ValueError(f"{label} is empty.")
-            if len(data) > _MAX_FILE_BYTES:
+            if byte_size > _MAX_FILE_BYTES:
                 raise ValueError(f"{label} exceeds 25 MiB.")
-            digest = hashlib.sha256(data).hexdigest()
+            digest = hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else data.sha256
             prepared.append(
                 {
                     "role": file.role,

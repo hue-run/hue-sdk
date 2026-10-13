@@ -274,7 +274,8 @@ Each uploaded file is listed in the record's `hue.blobs`, keyed `<attribute>#<JS
   through the string, which no JSON pointer can address, so Hue matches it by its digest.
 - Text media over 64 KiB of decoded bytes in a provider part keeps a UTF-8-safe 16 KiB prefix in
   its content field instead, and its key names that field
-  (`gen_ai.input.messages#/0/parts/1/content`). Smaller text and empty fields stay inline.
+  (`gen_ai.input.messages#/0/parts/1/content`). Smaller text and empty fields stay inline. A text
+  file a GenAI `blob`, Vertex `media` or AI SDK part holds as bare base64 takes the digest form.
 
 Only the file's own value, or the members of the part that held it, change: every other byte of the
 recorded text, its key order, number spellings, escapes and spacing included, is kept, in an encoded
@@ -286,9 +287,11 @@ Entries use the recorded media type and, when valid, the filename, name or title
 is nonblank after trimming, at most 256 UTF-16 code units and well-formed Unicode, with no C0
 characters (U+0000–U+001F) or DEL (U+007F). Invalid names are omitted from the entry without
 rewriting the original field. Data URLs and fields explicitly encoded as base64 by the provider
-contract are decoded before hashing. Other non-data strings with a valid declared textual media
-type remain raw UTF-8: `YWJj` hashes as those four characters. The digest matches
-`hue.recordFile`'s digest for the same bytes.
+contract are decoded before hashing. Other content is read as Hue's reader reads it, whatever its
+media type: content that reads as base64 (a length divisible by four, base64 characters only, as
+the GenAI conventions and `client.media.resolve` write a `blob` or `media` part's content) is the
+file's base64 and is decoded, so `YWJj` hashes as `abc`; anything else is the file's own UTF-8
+text. The digest matches `hue.recordFile`'s digest for the same bytes.
 
 A file that is not uploaded (the upload failed, the receiver has no upload route, or a budget ran
 out) keeps its digest without an entry in the recorded messages (`gen_ai.input.messages`,
@@ -362,7 +365,11 @@ With `captureContent: false` or a setup credential no bytes leave the process: a
 attribute still records the part, without its name, and content values are not recorded at all. A
 part the redactor removes or rewrites is not uploaded. A part that cannot be uploaded keeps its
 digest and is counted in `report.uploadFallbacks`, as is one nested more than 10 levels deep in its
-value, where Hue does not read parts, or one in a value cut to the value limit. Creating an
+value, where Hue does not read parts, or one in a value cut to the value limit. An attachment in a
+value that is still over the value limit with its files as digest parts is uploaded and listed as
+usual, and `client.media.fetch({ traceId, sha256 })` and Hue's span read reach it by digest; the
+value itself uploads whole and keeps only its first 16 KiB inline, so readers do not place the file
+at its position in the value. Creating an
 attachment never throws: one without exactly one of `data` and `path`, with unreadable or larger
 data or an invalid content type is recorded as `null` and counted as an instrumentation failure;
 an invalid name alone is omitted and counted.
@@ -490,8 +497,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.18.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.18.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3

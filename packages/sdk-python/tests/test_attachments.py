@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from test_blobs import attrs, blobs, client, sha256
+from test_blobs import MIB, attrs, blobs, client, listed, sha256
 from test_blobs import hue_store as hue_store
 
 from hue_sdk import Attachment, Hue
@@ -250,6 +250,33 @@ def test_setup_credentials_record_the_digest_part_and_upload_nothing(hue_store):
         assert hue.force_flush(timeout_millis=30_000)
         assert hue.export_status.upload_fallbacks == 0
     assert hue_store.reservations == []
+
+
+def test_an_attachment_in_a_value_that_uploads_whole_is_still_uploaded_and_listed(hue_store):
+    # With its file as the digest part, the value is still over the 1 MiB value limit: it uploads
+    # whole and keeps its first 16 KiB inline. The attachment's bytes are stored and listed all the
+    # same, so they can be read by digest, though no reader places the part in the value's inline
+    # prefix.
+    data = base64.b64decode(CORPUS["files"]["pixel"]["data"])
+    pixel = Attachment(data, content_type="image/png", name="pixel.png")
+    with client(hue_store) as hue:
+        with hue.span("uploads whole") as span:
+            trace_id = span.trace_id
+            span.set_input({"notes": "n" * (2 * MIB), "image": pixel})
+        assert hue.force_flush(timeout_millis=30_000)
+        status = hue.export_status
+        assert (status.uploaded_values, status.upload_fallbacks) == (2, 0)
+    record = hue_store.span("uploads whole")
+    assert listed(record) == ["input.value"]
+    assert [entry["key"] for entry in blobs(record)] == ["input.value", "input.value#/image"]
+    assert blobs(record)[1] == {
+        "key": "input.value#/image",
+        "sha256": sha256(data),
+        "size": len(data),
+        "content_type": "image/png",
+        "name": "pixel.png",
+    }
+    assert hue_store.objects[f"{trace_id}/{sha256(data)}"][0] == data
 
 
 PNG = base64.b64decode(

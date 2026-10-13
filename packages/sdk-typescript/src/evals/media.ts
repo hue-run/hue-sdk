@@ -40,6 +40,8 @@ const messages: Record<MediaFetchErrorReason, string> = {
   digest_mismatch: "The downloaded bytes do not match the requested SHA-256",
   failed: "The media request failed",
 };
+/** A snapshot's copies take only a Read and write key, where a trace's files take a Read key too. */
+const snapshotForbidden = "The key cannot read a snapshot's files; use a Read and write key";
 
 /** Thrown by {@link MediaClient.fetch}. The message is fixed and never includes response text. */
 export class MediaFetchError extends Error {
@@ -50,11 +52,18 @@ export class MediaFetchError extends Error {
     readonly status?: number,
     /** Seconds Hue asked the caller to wait, on `unavailable`, when it said. */
     readonly retryAfterSeconds?: number,
-    options?: { cause?: unknown },
+    /** `cause`, the error behind a failure; `snapshot`, set when a snapshot's copy was read, so a
+     * `forbidden` message names the Read and write key it needs. */
+    options?: { cause?: unknown; snapshot?: boolean },
   ) {
+    const { snapshot, ...rest } = options ?? {};
     super(
-      reason === "failed" && status ? `${messages.failed} (HTTP ${status})` : messages[reason],
-      options,
+      reason === "failed" && status
+        ? `${messages.failed} (HTTP ${status})`
+        : reason === "forbidden" && snapshot
+          ? snapshotForbidden
+          : messages[reason],
+      rest,
     );
     this.name = "MediaFetchError";
   }
@@ -555,7 +564,9 @@ export class MediaClient {
       }
       if (status === 401 || status === 403) {
         await response.body?.cancel().catch(() => undefined);
-        throw new MediaFetchError("forbidden", status);
+        throw new MediaFetchError("forbidden", status, undefined, {
+          snapshot: path.startsWith("/trace-snapshots/"),
+        });
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);

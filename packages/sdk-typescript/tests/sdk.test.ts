@@ -1611,8 +1611,9 @@ describe("Hue SDK contract", () => {
     const imageDigest = createHash("sha256").update(image).digest("hex");
     const text = `${"line\n".repeat(20000)}end`;
     const textDigest = createHash("sha256").update(text, "utf8").digest("hex");
-    // Declared text stays raw UTF-8 even in the base64 alphabet: over 64 KiB, hashed.
-    const asciiText = "A".repeat(64 * 1024 + 4);
+    // Text in the base64 alphabet is the file's base64 whatever the declared type, as Hue reads
+    // it: its 66,000 decoded bytes are over 64 KiB and hashed.
+    const asciiText = "A".repeat(88_000);
     try {
       const span = tracerProvider.getTracer("third-party").startSpan("external");
       // AI SDK 6 file parts: the large image is hashed, its other fields kept; small data stays.
@@ -1629,7 +1630,8 @@ describe("Hue SDK contract", () => {
           },
         ]),
       );
-      // GenAI blob parts: a text file's own text is hashed as UTF-8, a data: URL is decoded.
+      // GenAI blob parts: a text file's own text is hashed as UTF-8, base64 and a data: URL are
+      // decoded.
       span.setAttribute(
         "gen_ai.output.messages",
         JSON.stringify([
@@ -1684,8 +1686,8 @@ describe("Hue SDK contract", () => {
           type: "blob",
           modality: "document",
           mime_type: "text/plain",
-          sha256: createHash("sha256").update(asciiText, "utf8").digest("hex"),
-          size: Buffer.byteLength(asciiText),
+          sha256: createHash("sha256").update(Buffer.alloc(66_000)).digest("hex"),
+          size: 66_000,
         },
         {
           type: "blob",

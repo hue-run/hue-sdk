@@ -137,6 +137,9 @@ export interface InlineFileBytes {
   bytes: Buffer;
   decoded: boolean;
   urlMediaType?: string;
+  /** The bytes were decoded from text that reads as base64 by its alphabet alone, not from a
+   * `data:` URL or a field its convention declares base64. */
+  bareBase64?: boolean;
 }
 
 /**
@@ -160,6 +163,7 @@ export function inlineFileBytes(content: string): InlineFileBytes {
     bytes: decoded ?? Buffer.from(content, "utf8"),
     decoded: decoded !== undefined,
     ...(mediaType ? { urlMediaType: mediaType } : {}),
+    ...(decoded !== undefined && !url ? { bareBase64: true } : {}),
   };
 }
 
@@ -796,20 +800,24 @@ export function placeable(file: InlineFilePart, decoded: InlineFileBytes): boole
 }
 
 /** Whether an uploaded file keeps a 16 KiB prefix of its content in place (text media in a
- * provider part, whose entry names the content) rather than its digest. A whole string and a
- * file inside a JSON-encoded string always take the digest form. */
-export function keepsPrefix(file: InlineFilePart, textual: boolean): boolean {
-  return textual && !file.whole && !file.encoded?.length;
+ * provider part, whose entry names the content) rather than its digest. A whole string, a file
+ * inside a JSON-encoded string, and a text file a part holds as bare base64 (a GenAI `blob`,
+ * Vertex `media` or AI SDK part, whose content is not the text itself) take the digest form. */
+export function keepsPrefix(
+  file: InlineFilePart,
+  textual: boolean,
+  decoded: InlineFileBytes,
+): boolean {
+  return textual && !file.whole && !file.encoded?.length && !decoded.bareBase64;
 }
 
+/** A file's bytes: a field its convention declares base64 decoded, any other content read as
+ * Hue's reader reads it, whatever the part's media type (`inlineFileBytes`): a `data:` URL by its
+ * own encoding, text that reads as base64 decoded (what the GenAI conventions, and
+ * `client.media.resolve`, write in a `blob` or `media` part for every media type), anything else
+ * as its UTF-8. */
 export function mediaBytes(file: InlineFilePart): InlineFileBytes {
   if (file.base64) return { bytes: Buffer.from(file.content, "base64"), decoded: true };
-  if (
-    isMediaContentType(file.contentType) &&
-    isTextMediaType(file.contentType) &&
-    !file.content.startsWith("data:")
-  )
-    return { bytes: Buffer.from(file.content, "utf8"), decoded: false };
   return inlineFileBytes(file.content);
 }
 export function mediaContentType(file: InlineFilePart, decoded: InlineFileBytes): string {

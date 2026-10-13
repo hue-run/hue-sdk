@@ -40,6 +40,8 @@ _MESSAGES: dict[str, str] = {
     "digest_mismatch": "The downloaded bytes do not match the requested SHA-256.",
     "failed": "The media request failed.",
 }
+# A snapshot's copies take only a Read and write key, where a trace's files take a Read key too.
+_SNAPSHOT_FORBIDDEN = "The key cannot read a snapshot's files; use a Read and write key."
 
 
 class MediaFetchError(RuntimeError):
@@ -54,7 +56,8 @@ class MediaFetchError(RuntimeError):
     (the bytes do not have the requested SHA-256 or the size Hue reported) or ``failed`` (a
     connection failure, a timeout, an unexpected status or an invalid response). ``status`` is
     the HTTP status of the failing answer when there was one; ``retry_after_seconds`` the wait Hue
-    asked for on ``unavailable`` when it said.
+    asked for on ``unavailable`` when it said; ``snapshot`` is set when a snapshot's copy was
+    read, so a ``forbidden`` message names the Read and write key it needs.
     """
 
     reason: MediaFetchErrorReason
@@ -66,6 +69,8 @@ class MediaFetchError(RuntimeError):
         reason: MediaFetchErrorReason,
         status: int | None = None,
         retry_after_seconds: int | None = None,
+        *,
+        snapshot: bool = False,
     ) -> None:
         self.reason = reason
         self.status = status
@@ -73,6 +78,8 @@ class MediaFetchError(RuntimeError):
         message = _MESSAGES[reason]
         if reason == "failed" and status:
             message = f"The media request failed (HTTP {status})."
+        elif reason == "forbidden" and snapshot:
+            message = _SNAPSHOT_FORBIDDEN
         super().__init__(message)
 
 
@@ -419,7 +426,9 @@ class MediaClient:
                         missing = isinstance(answer, dict) and answer.get("state") == "missing"
                         raise MediaFetchError("missing" if missing else "not_found", status)
                     elif status in (401, 403):
-                        raise MediaFetchError("forbidden", status)
+                        raise MediaFetchError(
+                            "forbidden", status, snapshot=path.startswith("/trace-snapshots/")
+                        )
                     elif not 200 <= status < 300:
                         raise MediaFetchError("failed", status)
                     else:

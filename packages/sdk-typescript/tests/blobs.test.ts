@@ -17,6 +17,7 @@ import {
   type HueTransport,
 } from "../src/index.js";
 import { fallbackAttributes, newTally } from "../src/blobs.js";
+import { rehydrateMedia } from "../src/evals.js";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
@@ -934,6 +935,47 @@ for (const item of fixtures) {
     });
   }
 }
+
+test("a resolved text file over 64 KiB records again as the same file, not its base64", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const notes = Buffer.from("Quarterly notes, line 1\n".repeat(3000), "utf8");
+  const digest = sha256(notes);
+  const recorded = [
+    {
+      role: "user",
+      parts: [
+        { type: "blob", mime_type: "text/plain", name: "notes.txt", sha256: digest, size: 72_000 },
+      ],
+    },
+  ];
+  try {
+    // The bytes are written back as Hue and the GenAI conventions read a `blob` part: base64.
+    const { value, failures } = await rehydrateMedia(recorded, [{ sha256: digest, bytes: notes }]);
+    expect(failures).toEqual([]);
+    expect(value[0]!.parts[0]).toMatchObject({ content: notes.toString("base64") });
+    await hueClient.withSpan("resolved again", ({ span }) => {
+      span.setAttribute("gen_ai.input.messages", JSON.stringify(value));
+    });
+    const report = await hueClient.flush();
+    expect([report.uploadedValues, report.uploadFallbacks]).toEqual([1, 0]);
+    const record = endpoint.span("resolved again")!;
+    expect(JSON.parse(attr(record, "gen_ai.input.messages")!.stringValue!)).toEqual(recorded);
+    expect(blobs(record)).toEqual([
+      {
+        key: "gen_ai.input.messages#/0/parts/0",
+        sha256: digest,
+        size: 72_000,
+        content_type: "text/plain",
+        name: "notes.txt",
+      },
+    ]);
+    expect([...endpoint.store.values()].map((object) => object.bytes)).toEqual([notes]);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
 
 test("recordFile uploads are opt-in, copied, and share inline reservations on the same trace", async () => {
   const endpoint = hue();
@@ -2535,6 +2577,42 @@ describe("attachments", () => {
       // Only the part past Hue's reading depth is reported: it kept its digest.
       expect(report.uploadFallbacks).toBe(1);
       expect(attr(endpoint.span("deep")!, "input.value")!.stringValue).toContain(sha256(bytes));
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("an attachment in a value that uploads whole is still uploaded and listed", async () => {
+    // With its file as the digest part, the value is still over the 1 MiB value limit: it
+    // uploads whole and keeps its first 16 KiB inline. The attachment's bytes are stored and
+    // listed all the same, so they can be read by digest, though no reader places the part in
+    // the value's inline prefix.
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    const bytes = Buffer.from(files.pixel.data, "base64");
+    const pixel = new Attachment({ data: bytes, contentType: "image/png", name: "pixel.png" });
+    try {
+      await hueClient.withSpan("uploads whole", (span) =>
+        span.setInput({ notes: "n".repeat(2 * MiB), image: pixel }),
+      );
+      const report = await hueClient.flush();
+      expect([report.uploadedValues, report.uploadFallbacks]).toEqual([2, 0]);
+      const record = endpoint.span("uploads whole")!;
+      expect(strings(attr(record, "hue.truncated"))).toEqual(["input.value"]);
+      expect(blobs(record).map((entry) => entry.key)).toEqual([
+        "input.value",
+        "input.value#/image",
+      ]);
+      expect(blobs(record)[1]).toEqual({
+        key: "input.value#/image",
+        sha256: sha256(bytes),
+        size: bytes.byteLength,
+        content_type: "image/png",
+        name: "pixel.png",
+      });
+      const traceId = Buffer.from(record.traceId, "base64").toString("hex");
+      expect(endpoint.store.get(`${traceId}/${sha256(bytes)}`)?.bytes).toEqual(bytes);
     } finally {
       await hueClient.shutdown();
       endpoint.server.stop(true);
