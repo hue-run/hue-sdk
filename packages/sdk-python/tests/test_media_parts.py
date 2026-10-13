@@ -2081,6 +2081,39 @@ def test_a_message_past_the_records_inspection_allowance_is_read_in_place_too(hu
     assert listed(record) == []
 
 
+def test_a_percent_escaped_data_url_past_the_bounds_is_not_read_in_place(hue_store):
+    # 3 Mi escapes of 3 characters each: 9 Mi code units, past the per-attribute bound.
+    block = "".join(f"%{byte:02x}" for byte in range(256))
+    messages = dumps_message(
+        [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "blob",
+                        "modality": "audio",
+                        "mime_type": "audio/wav",
+                        "content": "data:audio/wav," + block * (3 * 1024 * 1024 // 256),
+                    }
+                ],
+            }
+        ]
+    )
+    with client(hue_store) as hue:
+        with hue.span("percent") as span:
+            span.set_attribute("gen_ai.input.messages", messages)
+        assert hue.force_flush(timeout_millis=60_000)
+        assert hue.export_status.upload_fallbacks == 0
+    record = hue_store.span("percent")
+    # As 0.11.1 stored it: the whole value, its first 16 KiB inline.
+    assert [(entry["key"], entry["content_type"]) for entry in blobs(record)] == [
+        ("gen_ai.input.messages", "application/json")
+    ]
+    assert hue_store.objects[f"{record.trace_id.hex()}/{sha256(messages)}"][0] == (
+        messages.encode()
+    )
+
+
 def test_a_value_whose_json_around_its_files_is_past_the_bound_uploads_whole(hue_store):
     # A text part of 9 Mi code units with escapes (newlines) is parsed, not read in place.
     messages = dumps_message(

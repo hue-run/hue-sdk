@@ -190,3 +190,24 @@ test("a data: URL with millions of parameters is still decoded by its own encodi
     size: 70_000,
   });
 });
+
+test("JSON edits to many members are rendered in time linear in them", async () => {
+  const { applyJsonEdits } = await import("../src/json-edits.js");
+  const count = 20_000;
+  const text = JSON.stringify(
+    Array.from({ length: count }, (_, index) => ({ type: "blob", content: `c${index}`, keep: 1 })),
+  );
+  const edits = Array.from({ length: count }, (_, index) => ({
+    pointer: `/${index}`,
+    remove: "content",
+    set: [["size", String(index)]] as [string, string][],
+  }));
+  const started = performance.now();
+  const placed = applyJsonEdits(text, edits);
+  // 20,000 edited parts render in well under a second; visiting every piece for every member
+  // took tens of seconds.
+  expect(performance.now() - started).toBeLessThan(2000);
+  expect(JSON.parse(placed)).toEqual(
+    Array.from({ length: count }, (_, index) => ({ type: "blob", keep: 1, size: index })),
+  );
+});

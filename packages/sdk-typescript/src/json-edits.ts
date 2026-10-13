@@ -170,31 +170,41 @@ export function applyJsonEdits(text: string, edits: readonly JsonEdit[]): string
       start: span.start,
       end: span.end,
       render: () => {
-        const kept = members.filter((member) => !edit.remove.has(member.key));
         const first = members[0]?.start ?? span.end - 1;
         const close = members.length ? members.at(-1)!.end : span.end - 1;
         let out = text.slice(span.start, first);
-        kept.forEach((member, position) => {
-          const index = members.indexOf(member);
+        let kept = 0;
+        members.forEach((member, index) => {
+          if (edit.remove.has(member.key)) return;
           // The separator that preceded this member, comma included, unless it now comes first.
-          if (position > 0) out += text.slice(members[index - 1]!.end, member.start);
+          if (kept++ > 0) out += text.slice(members[index - 1]!.end, member.start);
           out += render(member.start, member.end);
         });
         let appended = "";
         for (const [key, value] of edit.set)
           if (!lastOf.has(key) || edit.remove.has(key))
-            appended += `${kept.length || appended ? "," : ""}${JSON.stringify(key)}:${value}`;
+            appended += `${kept || appended ? "," : ""}${JSON.stringify(key)}:${value}`;
         return out + appended + text.slice(close, span.end);
       },
     });
   }
   pieces.sort((a, b) => a.start - b.start || b.end - a.end);
   /** The text from `start` to `end` with the pieces within it rendered; a piece inside another
-   * is rendered by the outer one. */
+   * is rendered by the outer one. Only the pieces that start within the range are visited. */
   const render = (start: number, end: number): string => {
     let out = "";
     let at = start;
-    for (const piece of pieces) {
+    // The first piece starting at or after `start`, found by halving.
+    let low = 0;
+    let high = pieces.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (pieces[middle]!.start < start) low = middle + 1;
+      else high = middle;
+    }
+    for (let index = low; index < pieces.length; index++) {
+      const piece = pieces[index]!;
+      if (piece.start >= end) break;
       if (piece.start < at || piece.end > end) continue;
       out += text.slice(at, piece.start) + piece.render();
       at = piece.end;

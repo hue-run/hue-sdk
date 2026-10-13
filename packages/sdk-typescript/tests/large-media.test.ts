@@ -40,7 +40,13 @@ function uploader(ok: boolean, uploads: Upload[]): BlobUploader {
   } as unknown as BlobUploader;
 }
 
-async function place(key: string, text: string, large: boolean, ok: boolean) {
+async function place(
+  key: string,
+  text: string,
+  large: boolean,
+  ok: boolean,
+  valueBytes = 1_000_000_000,
+) {
   const uploads: Upload[] = [];
   const tally = newTally();
   const collector: OffloadCollector = {
@@ -52,7 +58,7 @@ async function place(key: string, text: string, large: boolean, ok: boolean) {
   const attributes = await offloadRecord({ [key]: text }, collector, {
     uploader: uploader(ok, uploads),
     traceId: "0123456789abcdef0123456789abcdef",
-    valueBytes: 1_000_000_000,
+    valueBytes,
     upload: { deadline: Date.now() + 60_000, wait: async () => false },
     tally,
     longUnits: 300,
@@ -60,6 +66,7 @@ async function place(key: string, text: string, large: boolean, ok: boolean) {
   return {
     value: attributes.attributes[key],
     entries: attributes.attributes[BLOBS_KEY],
+    truncated: attributes.attributes["hue.truncated"],
     uploads,
     uploaded: tally.uploaded,
     fallbacks: [...tally.fallbacks].map(([reason, { count }]) => [reason, count]),
@@ -250,11 +257,11 @@ describe("media read in place is placed as media parsed out of the value", () =>
         expect(inPlace).toEqual(parsed);
       });
 
-  test("long strings are read in place, and the JSON around them is bounded", () => {
+  test("long strings are read in place, and the JSON around them is bounded", async () => {
     const value = JSON.stringify([
       { parts: [{ type: "blob", mime_type: "audio/wav", content: long }] },
     ]);
-    const read = readLargeMediaText("gen_ai.input.messages", value, 300)!;
+    const read = (await readLargeMediaText("gen_ai.input.messages", value, 300))!;
     expect(read.long.size).toBe(1);
     expect(read.files[0]!.content).not.toBe(long);
     // Past 8 Mi code units of JSON around its long strings, a value is not read at all.
@@ -266,12 +273,39 @@ describe("media read in place is placed as media parsed out of the value", () =>
         ],
       },
     ]);
-    expect(readLargeMediaText("gen_ai.input.messages", padded, 300)).toBeUndefined();
+    expect(await readLargeMediaText("gen_ai.input.messages", padded, 300)).toBeUndefined();
     // The scan stops at the bound: 64 Mi code units of escaped text before a file are not read
     // to their end.
     const escapedFirst = `[{"parts":[{"type":"text","content":"${"a\\n".repeat(32 * MiB)}"},{"type":"blob","content":"${long}"}]}]`;
     const started = performance.now();
-    expect(readLargeMediaText("gen_ai.input.messages", escapedFirst, 300)).toBeUndefined();
+    expect(await readLargeMediaText("gen_ai.input.messages", escapedFirst, 300)).toBeUndefined();
     expect(performance.now() - started).toBeLessThan(2000);
   });
+});
+
+type Placement = {
+  id: string;
+  attribute: string;
+  valueBytes: number;
+  value: string;
+  success: Record<string, unknown>;
+  failure: Record<string, unknown>;
+};
+
+describe("shared placements", () => {
+  for (const item of (corpus as unknown as { placements: Placement[] }).placements)
+    for (const ok of [true, false])
+      test(`${ok ? "uploaded" : "refused"}: ${item.id}`, async () => {
+        const expected = item[ok ? "success" : "failure"];
+        for (const large of [false, true]) {
+          const placed = await place(item.attribute, item.value, large, ok, item.valueBytes);
+          expect({
+            value: placed.value,
+            entries: placed.entries ?? [],
+            truncated: placed.truncated ?? [],
+            uploaded: placed.uploaded,
+            fallbacks: Object.fromEntries(placed.fallbacks),
+          }).toEqual(expected as never);
+        }
+      });
 });

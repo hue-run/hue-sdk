@@ -61,6 +61,8 @@ def read_path(path: str | os.PathLike[str]) -> bytes | PathFile | None:
     read to its end within that limit), and otherwise, for a regular file up to Hue's 1 GB upload
     limit, its size and SHA-256 from one reading pass a slice at a time, never holding it whole.
     None for a file over its limit; raises ``OSError`` for one that cannot be read."""
+    # Resolved first: the file read now is the one read again when it is uploaded.
+    path = os.path.abspath(path)
     with open(path, "rb") as file:
         info = os.fstat(file.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size <= MAX_ATTACHMENT_BYTES:
@@ -77,7 +79,7 @@ def read_path(path: str | os.PathLike[str]) -> bytes | PathFile | None:
             if size > MAX_PATH_FILE_BYTES:
                 return None
             digest.update(chunk)
-    return PathFile(os.path.abspath(path), size, digest.hexdigest())
+    return PathFile(path, size, digest.hexdigest())
 
 
 def file_source(file: PathFile) -> ByteSource:
@@ -91,6 +93,9 @@ def file_source(file: PathFile) -> ByteSource:
     SHA-256, so the store refuses a body that differs."""
 
     def chunks() -> Iterator[bytes]:
+        # Each read starts fresh: a retried upload reads the file again.
+        source.changed = False
+
         def changed() -> OSError:
             source.changed = True
             return OSError("The file changed after it was recorded.")

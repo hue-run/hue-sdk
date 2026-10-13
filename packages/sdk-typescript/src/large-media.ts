@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import {
   MAX_INLINE_FILE_TEXT,
   mediaIn,
+  placedMediaText,
   readerParses,
   readingOf,
   type InlineFilePart,
@@ -12,25 +13,32 @@ import {
  * Inline media in a value too long for the media inspection bounds (8 Mi UTF-16 code units for one
  * attribute, 16 Mi for a record), read without parsing the files out of it. A span's own attribute
  * held whole for upload is scanned once: every value string longer than {@link LONG_STRING_UNITS}
- * that is recorded without escapes as base64 or a `data:` URL is replaced, in a skeleton of the
- * JSON text, by a short stand-in of the same kind, and the skeleton (within the 8 Mi bound) is read
- * as Hue's reader reads the value. A file whose content is such a string is then decoded, hashed
- * and uploaded a slice at a time from its place in the recorded text, never copied out of it whole,
- * and placed with the same JSON edits as any file. Mirrors the Python SDK's `_large_media.py`, so
- * both SDKs write the same bytes.
+ * that is recorded without escapes as strict base64 or a base64 `data:` URL is replaced, in a
+ * skeleton of the JSON text, by a short stand-in of the same kind, and the skeleton (within the
+ * 8 Mi bound) is read as Hue's reader reads the value. A file whose content is such a string is
+ * then decoded, hashed and uploaded a slice at a time from its place in the recorded text, never
+ * copied out of it whole; its placement edits the skeleton, and the strings no file replaced are
+ * written back from the recorded text. The scan reads at most {@link WINDOW_UNITS} of the text in
+ * one synchronous step. Mirrors the Python SDK's `_large_media.py`, so both SDKs write the same
+ * bytes.
  */
 
 /** A value string longer than this, in UTF-16 code units, is read in place when it is base64 or a
- * `data:` URL recorded without escapes. Longer than every label Hue's reader matches (256 units),
- * so a stand-in decides every test of the walk as the string itself does. */
+ * base64 `data:` URL recorded without escapes. Longer than every label Hue's reader matches (256
+ * units), so a stand-in decides every test of the walk as the string itself does. */
 export const LONG_STRING_UNITS = 16 * 1024;
 
+/** The most of a value read in one synchronous step: the scan yields to the event loop between
+ * windows, and files are decoded and hashed a window at a time. */
+export const WINDOW_UNITS = 1024 * 1024;
+
 /** A source of bytes read a slice at a time: an upload body that is never held whole. `chunks` may
- * be called again for a retried upload. */
+ * be called again for a retried upload, and starts fresh each time; a slice it yields may be
+ * reused for the next one, so a reader is done with each slice before it asks for the next. */
 export interface ByteSource {
   readonly size: number;
   chunks(): Iterable<Uint8Array> | AsyncIterable<Uint8Array>;
-  /** Set once a read found the source no longer holds the bytes it was recorded with. */
+  /** Set when the latest read found the source no longer holds the bytes it was recorded with. */
   changed?: boolean;
 }
 
@@ -45,7 +53,7 @@ export function isByteSource(value: unknown): value is ByteSource {
 }
 
 /** How the bytes of a long string are read from its text. */
-type LongKind = "base64" | "dataBase64" | "dataPercent";
+type LongKind = "base64" | "dataBase64";
 
 /** A long value string in place in the recorded text: its content is `text` from `start` to
  * `end`, without escapes, and its data (after a `data:` URL's comma) starts at `data`. */
@@ -59,22 +67,16 @@ export interface LongText {
   header?: string;
 }
 
-/** Strict base64: alphabet characters only, padded to a multiple of four. */
+/** Base64 alphabet characters only, and the same padded to a multiple of four. */
+const alphabet = /^[A-Za-z0-9+/]*$/;
 const base64 = /^[A-Za-z0-9+/]*={0,2}$/;
 // eslint-disable-next-line no-control-regex -- a JSON string literal holds no raw control character
 const controlCharacter = /[\u0000-\u001f]/;
-const badEscape = /%(?![0-9A-Fa-f]{2})/;
-/** Text `String.prototype.trim` removes whole: what Hue's reader trims from a label. */
-const blank = /^\s*$/;
-/** The longest label Hue's reader matches, in code units once trimmed. */
-const MAX_LABEL_UNITS = 256;
 /** The longest `data:` URL header read in place, in code units: a string with a longer one is
  * parsed with the rest of the value. */
 const MAX_HEADER_UNITS = 4096;
-/** Slices of base64 decoded at once: a multiple of four characters. */
-const BASE64_SLICE = 1 << 20;
-/** Slices of other text read at once, in code units. */
-const TEXT_SLICE = 1 << 20;
+
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** Whether a `data:` URL header's parameters, after its media type, include `base64`. */
 function base64Header(header: string): boolean {
@@ -82,12 +84,32 @@ function base64Header(header: string): boolean {
   return semicolon !== -1 && `${header.slice(semicolon)};`.includes(";base64;");
 }
 
-/** How the content from `start` to `end` of `text` (a string literal's, without escapes, or with
+/** Whether `text` from `start` to `end` is strict base64 (padded to a multiple of four), checked a
+ * window at a time between turns of the event loop. */
+async function strictBase64(text: string, start: number, end: number): Promise<boolean> {
+  if ((end - start) % 4 !== 0) return false;
+  for (let at = start; at < end; at += WINDOW_UNITS) {
+    const stop = Math.min(end, at + WINDOW_UNITS);
+    // Padding only closes the whole string.
+    if (!(stop === end ? base64 : alphabet).test(text.slice(at, stop))) return false;
+    if (stop < end) await nextTurn();
+  }
+  return true;
+}
+
+/**
+ * How the content from `start` to `end` of `text` (a string literal's, without escapes, or with
  * `raw` the whole text of a value that is no JSON) is read in place, if it is: strict base64, or a
- * `data:` URL whose data decodes by its own encoding. Undefined for any other text, which is parsed
- * with the rest of the value; a string literal holding a control character, which no JSON does, is
- * left for the parse to refuse. */
-function classify(text: string, start: number, end: number, raw = false): LongText | undefined {
+ * `data:` URL declaring `;base64` whose data is strict base64. Undefined for any other text, which
+ * is parsed with the rest of the value (a percent-escaped `data:` URL included); a string literal
+ * whose header holds a control character, which no JSON does, is left for the parse to refuse.
+ */
+async function classify(
+  text: string,
+  start: number,
+  end: number,
+  raw = false,
+): Promise<LongText | undefined> {
   if (text.startsWith("data:", start)) {
     // The comma is looked for within the string and the header's bound only.
     const found = text
@@ -96,33 +118,21 @@ function classify(text: string, start: number, end: number, raw = false): LongTe
     if (found === -1) return undefined;
     const comma = start + 5 + found;
     const header = text.slice(start + 5, comma);
-    if (!raw && controlCharacter.test(header)) return undefined;
-    const data = text.slice(comma + 1, end);
-    if (base64Header(header)) {
-      if ((end - comma - 1) % 4 !== 0 || !base64.test(data)) return undefined;
-      return { text, start, end, data: comma + 1, kind: "dataBase64", header };
-    }
-    // A string inside JSON whose trim is short enough to be a label Hue's reader matches (a file
-    // id): its stand-in could not be one. A value that is no JSON is the file whatever it ends in.
-    if (
-      (!raw && controlCharacter.test(data)) ||
-      badEscape.test(data) ||
-      (!raw && blank.test(text.slice(start + MAX_LABEL_UNITS, end)))
-    )
-      return undefined;
-    return { text, start, end, data: comma + 1, kind: "dataPercent", header };
+    if ((!raw && controlCharacter.test(header)) || !base64Header(header)) return undefined;
+    if (!(await strictBase64(text, comma + 1, end))) return undefined;
+    return { text, start, end, data: comma + 1, kind: "dataBase64", header };
   }
-  if ((end - start) % 4 !== 0 || !base64.test(text.slice(start, end))) return undefined;
+  if (!(await strictBase64(text, start, end))) return undefined;
   return { text, start, end, data: start, kind: "base64" };
 }
 
 /** The stand-in for a long string in the skeleton: its kind kept (base64 and its first 16
- * characters, which name an audio container; a `data:` URL's header and whether its data decode),
- * longer than any label, and unique by `tag`. */
+ * characters, which name an audio container; a `data:` URL's header), longer than any label, and
+ * unique by `tag`. */
 function standIn(long: LongText, tag: string): string {
-  const fill = (character: string) => `${tag}${character.repeat(472)}`;
-  if (long.kind === "base64") return `${long.text.slice(long.start, long.start + 16)}${fill("A")}`;
-  return `data:${long.header},${fill(long.kind === "dataBase64" ? "A" : "x")}`;
+  const fill = `${tag}${"A".repeat(472)}`;
+  if (long.kind === "base64") return `${long.text.slice(long.start, long.start + 16)}${fill}`;
+  return `data:${long.header},${fill}`;
 }
 
 /** The index past the whitespace JSON allows from `at`. */
@@ -135,6 +145,27 @@ function space(text: string, at: number): number {
   }
 }
 
+/** Marks a search that reached the end of its window before its bound. */
+const MORE = -2;
+
+/** The first `character` of `text` from `from`, before `to`, within one window: its index, -1
+ * when there is none before `to`, or {@link MORE} when the window ended first. */
+function within(text: string, character: string, from: number, to: number): number {
+  const stop = Math.min(to, from + WINDOW_UNITS);
+  const found = text.slice(from, stop).indexOf(character);
+  if (found !== -1) return from + found;
+  return stop === to ? -1 : MORE;
+}
+
+/** {@link within} on from window to window, a turn of the event loop between them. */
+async function find(text: string, character: string, from: number, to: number): Promise<number> {
+  for (let at = from; ; at += WINDOW_UNITS) {
+    const found = within(text, character, at, to);
+    if (found !== MORE) return found;
+    await nextTurn();
+  }
+}
+
 /** A value read with its long strings in place: the skeleton's JSON text and its stand-ins. */
 interface Skeleton {
   text: string;
@@ -143,35 +174,46 @@ interface Skeleton {
 
 /**
  * The skeleton of JSON `text`: each value string longer than `longUnits` and recorded without
- * escapes as base64 or a `data:` URL replaced by its stand-in. Undefined once the skeleton is
- * longer than {@link MAX_INLINE_FILE_TEXT}: the scan stops there, so the text it reads and the
+ * escapes as base64 or a base64 `data:` URL replaced by its stand-in. Undefined once the skeleton
+ * is longer than {@link MAX_INLINE_FILE_TEXT}: the scan stops there, so the text it reads and the
  * skeleton it makes stay within that bound however long the value is. A string the scan finds
  * unterminated (text that is no JSON) ends the scan; the skeleton then holds the rest as recorded
- * and fails to parse.
+ * and fails to parse. The scan reads at most a window of the text in one synchronous step.
  */
-function skeletonOf(text: string, longUnits: number): Skeleton | undefined {
+async function skeletonOf(text: string, longUnits: number): Promise<Skeleton | undefined> {
   const nonce = randomBytes(16).toString("hex");
   const long = new Map<string, LongText>();
   const replaced: { start: number; end: number; stub: string }[] = [];
   // The skeleton's length less the text's, up to where the scan stands.
   let shorter = 0;
   let at = 0;
-  // The first backslash at or after where the scan stands, found once and passed: the scan is
-  // linear however the escapes and the strings fall.
-  let slash = text.indexOf("\\");
+  let turn = 0;
+  // A search within one window, synchronous; past it, from window to window between turns.
+  const quote = (from: number) => within(text, '"', from, text.length);
   for (;;) {
-    const open = text.indexOf('"', at);
+    if (at - turn >= WINDOW_UNITS) {
+      turn = at;
+      await nextTurn();
+    }
+    let open = quote(at);
+    if (open === MORE) open = await find(text, '"', at + WINDOW_UNITS, text.length);
     if (open === -1) break;
-    let close = text.indexOf('"', open + 1);
+    // The string's end: its first quote no backslash escapes. Each part of the string is read
+    // once, however its escapes fall.
+    let close = quote(open + 1);
+    if (close === MORE) close = await find(text, '"', open + 1 + WINDOW_UNITS, text.length);
     let cursor = open + 1;
     let escaped = false;
-    for (;;) {
-      if (close === -1) break;
-      if (slash !== -1 && slash < cursor) slash = text.indexOf("\\", cursor);
-      if (slash === -1 || slash > close) break;
+    while (close !== -1) {
+      let slash = within(text, "\\", cursor, close);
+      if (slash === MORE) slash = await find(text, "\\", cursor + WINDOW_UNITS, close);
+      if (slash === -1) break;
       escaped = true;
       cursor = slash + 2;
-      if (close < cursor) close = text.indexOf('"', cursor);
+      if (close < cursor) {
+        close = quote(cursor);
+        if (close === MORE) close = await find(text, '"', cursor + WINDOW_UNITS, text.length);
+      }
     }
     if (close === -1) break;
     at = close + 1;
@@ -179,7 +221,7 @@ function skeletonOf(text: string, longUnits: number): Skeleton | undefined {
     const found =
       escaped || close - open - 1 <= longUnits || text.charCodeAt(space(text, at)) === 0x3a
         ? undefined
-        : classify(text, open + 1, close);
+        : await classify(text, open + 1, close);
     if (found) {
       const stub = standIn(found, `${nonce}${long.size.toString(16).padStart(8, "0")}`);
       long.set(stub, found);
@@ -199,40 +241,47 @@ function skeletonOf(text: string, longUnits: number): Skeleton | undefined {
   return { text: pieces.join(""), long };
 }
 
-/** A media value read in place, with the long strings its stand-ins name. */
+/** A media value read in place, with the long strings its stand-ins name. Its `source` is the
+ * skeleton: placing its files edits the skeleton, and {@link placedLargeText} writes the long
+ * strings back. */
 export interface LargeMediaValue extends MediaValue {
   long: Map<string, LongText>;
 }
 
 /**
  * An attribute's recorded text read for files as `readMediaText` reads it, its long base64 and
- * `data:` URL strings read in place (see {@link skeletonOf}); the edits of placed files apply to
- * the recorded text itself. Undefined for text whose JSON around those strings is over the 8 Mi
- * bound, or that reading finds nothing in. Throws for JSON that does not parse.
+ * base64 `data:` URL strings read in place (see {@link skeletonOf}). Undefined for text whose JSON
+ * around those strings is over the 8 Mi bound, or that reading finds nothing in. Throws for JSON
+ * that does not parse.
  */
-export function readLargeMediaText(
+export async function readLargeMediaText(
   key: string,
   text: string,
   longUnits = LONG_STRING_UNITS,
-): LargeMediaValue | undefined {
+): Promise<LargeMediaValue | undefined> {
   const reading = readingOf(key);
-  /** Text that is no JSON is the file itself when it is one long `data:` URL. */
-  const whole = (): LargeMediaValue | undefined => {
-    if (text.length <= longUnits) {
-      if (text.length > MAX_INLINE_FILE_TEXT) return undefined;
-      return { ...mediaIn(text), long: new Map() };
-    }
-    const found = text.startsWith("data:") ? classify(text, 0, text.length, true) : undefined;
-    if (!found) return undefined;
+  /** Text that is no JSON is the file itself when it is one long base64 `data:` URL; other text
+   * is read as `readMediaText` reads it, within the 8 Mi bound. */
+  const whole = async (): Promise<LargeMediaValue | undefined> => {
+    const found =
+      text.length > longUnits && text.startsWith("data:")
+        ? await classify(text, 0, text.length, true)
+        : undefined;
+    if (!found)
+      return text.length > MAX_INLINE_FILE_TEXT ? undefined : { ...mediaIn(text), long: new Map() };
     const stub = standIn(found, randomBytes(16).toString("hex") + "00000000");
     return { ...mediaIn(stub), long: new Map([[stub, found]]) };
   };
-  const json = (check?: (parsed: unknown) => boolean): LargeMediaValue | undefined => {
-    const skeleton = skeletonOf(text, longUnits);
+  const json = async (
+    check?: (parsed: unknown) => boolean,
+  ): Promise<LargeMediaValue | undefined> => {
+    const skeleton = await skeletonOf(text, longUnits);
     if (!skeleton) return undefined;
     const parsed: unknown = JSON.parse(skeleton.text);
     if (check && !check(parsed)) return undefined;
-    return readerParses(parsed) ? { ...mediaIn(parsed, text), long: skeleton.long } : undefined;
+    return readerParses(parsed)
+      ? { ...mediaIn(parsed, skeleton.text), long: skeleton.long }
+      : undefined;
   };
   switch (reading) {
     case "json":
@@ -261,6 +310,100 @@ export function readLargeMediaText(
   }
 }
 
+/**
+ * Text made of pieces of other strings, not yet joined into one: the recorded text with its files
+ * placed, whose long strings no file replaced are still pieces of the recorded text. It is read a
+ * window at a time, and made one string only when it is short enough to keep inline, so a long
+ * remainder is never held in two copies.
+ */
+export class JoinedText {
+  private readonly pieces: [string, number, number][];
+
+  constructor(pieces: [string, number, number][]) {
+    this.pieces = pieces.filter(([, start, end]) => end > start);
+  }
+
+  /** The text a window at a time, never between the halves of a surrogate pair. */
+  *windows(): Generator<string> {
+    for (const [text, start, end] of this.pieces)
+      for (let at = start; at < end; ) {
+        let stop = Math.min(end, at + WINDOW_UNITS);
+        if (stop < end && /[\uD800-\uDBFF]/.test(text[stop - 1]!)) stop--;
+        yield text.slice(at, stop);
+        at = stop;
+      }
+  }
+
+  /** The first `units` code units. */
+  head(units: number): string {
+    let out = "";
+    for (const [text, start, end] of this.pieces) {
+      if (out.length >= units) break;
+      out += text.slice(start, Math.min(end, start + units - out.length));
+    }
+    return out;
+  }
+
+  /** The last `units` code units. */
+  tail(units: number): string {
+    let out = "";
+    for (let index = this.pieces.length - 1; index >= 0 && out.length < units; index--) {
+      const [text, start, end] = this.pieces[index]!;
+      out = text.slice(Math.max(start, end - (units - out.length)), end) + out;
+    }
+    return out;
+  }
+
+  /** The text as one string. */
+  text(): string {
+    return this.pieces.map(([text, start, end]) => text.slice(start, end)).join("");
+  }
+
+  /** The text's UTF-8 size, counted a window at a time. */
+  utf8Size(): number {
+    let size = 0;
+    for (const window of this.windows()) size += Buffer.byteLength(window, "utf8");
+    return size;
+  }
+
+  /** The text's UTF-8, a window at a time, into one buffer each read reuses. */
+  source(size: number): ByteSource {
+    const windows = () => this.windows();
+    return {
+      size,
+      *chunks() {
+        const buffer = Buffer.allocUnsafe(WINDOW_UNITS * 3);
+        for (const window of windows()) yield buffer.subarray(0, buffer.write(window, "utf8"));
+      },
+    };
+  }
+}
+
+/**
+ * The recorded text once the files of a value read in place are placed: the skeleton with the
+ * placements' edits, and each stand-in no placement replaced written back as the string it stands
+ * for. Every byte the placements do not change is the recorded text's. Text that keeps a long
+ * string is returned as its pieces ({@link JoinedText}), not copied into one string.
+ */
+export function placedLargeText(media: LargeMediaValue): string | JoinedText {
+  const edited = placedMediaText(media);
+  const kept: { at: number; stub: string; long: LongText }[] = [];
+  for (const [stub, long] of media.long) {
+    const at = edited.indexOf(stub);
+    if (at !== -1) kept.push({ at, stub, long });
+  }
+  if (!kept.length) return edited;
+  kept.sort((a, b) => a.at - b.at);
+  const pieces: [string, number, number][] = [];
+  let from = 0;
+  for (const { at, stub, long } of kept) {
+    pieces.push([edited, from, at], [long.text, long.start, long.end]);
+    from = at + stub.length;
+  }
+  pieces.push([edited, from, edited.length]);
+  return new JoinedText(pieces);
+}
+
 /** A long file's bytes as `mediaBytes` reads them, measured without being made: its size, whether
  * it was decoded, the media type its `data:` URL names, and a source of its bytes. */
 export interface LongFileBytes {
@@ -271,8 +414,8 @@ export interface LongFileBytes {
   source: ByteSource;
 }
 
-/** Base64 from `start` to `end` of `text` (strict, padded to a multiple of four), decoded a
- * slice at a time. */
+/** Base64 from `start` to `end` of `text` (strict, padded to a multiple of four), decoded a window
+ * at a time into one buffer each read reuses. */
 function base64Source(text: string, start: number, end: number): ByteSource {
   const length = end - start;
   const pad =
@@ -280,67 +423,26 @@ function base64Source(text: string, start: number, end: number): ByteSource {
   return {
     size: (length / 4) * 3 - pad,
     *chunks() {
-      for (let at = start; at < end; at += BASE64_SLICE)
-        yield Buffer.from(text.slice(at, Math.min(end, at + BASE64_SLICE)), "base64");
-    },
-  };
-}
-
-/** A `data:` URL's data without `;base64` from `start` to `end` of `text`: each `%XX` escape its
- * octet, any other character its UTF-8, a slice at a time, never splitting an escape or a
- * surrogate pair. Every `%` starts an escape (checked when the string was read). */
-function percentSource(text: string, start: number, end: number): ByteSource {
-  const data = text.slice(start, end);
-  let escapes = 0;
-  for (let at = data.indexOf("%"); at !== -1; at = data.indexOf("%", at + 3)) escapes++;
-  return {
-    size: Buffer.byteLength(data, "utf8") - 2 * escapes,
-    *chunks() {
-      for (let at = 0; at < data.length; ) {
-        let stop = Math.min(data.length, at + TEXT_SLICE);
-        if (stop < data.length) {
-          // Never between the halves of a surrogate pair, nor inside a `%XX` escape: a step of at
-          // most three units back from a slice of 1 Mi, so every slice moves on.
-          const unit = data.charCodeAt(stop - 1);
-          const next = data.charCodeAt(stop);
-          if (unit >= 0xd800 && unit <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) stop--;
-          if (data.charCodeAt(stop - 1) === 0x25) stop -= 1;
-          else if (data.charCodeAt(stop - 2) === 0x25) stop -= 2;
-        }
-        const slice = data.slice(at, stop);
-        const bytes = Buffer.alloc(Buffer.byteLength(slice, "utf8"));
-        let length = 0;
-        let from = 0;
-        for (let index = slice.indexOf("%"); index !== -1; index = slice.indexOf("%", from)) {
-          length += bytes.write(slice.slice(from, index), length, "utf8");
-          bytes[length++] = Number.parseInt(slice.slice(index + 1, index + 3), 16);
-          from = index + 3;
-        }
-        length += bytes.write(slice.slice(from), length, "utf8");
-        yield bytes.subarray(0, length);
-        at = stop;
+      const buffer = Buffer.allocUnsafe((WINDOW_UNITS / 4) * 3);
+      for (let at = start; at < end; at += WINDOW_UNITS) {
+        const written = buffer.write(text.slice(at, Math.min(end, at + WINDOW_UNITS)), "base64");
+        yield buffer.subarray(0, written);
       }
     },
   };
 }
 
 /** The bytes of a file whose content is a long string, as `mediaBytes` reads them: a field its
- * convention declares base64 decoded, base64 text decoded (`bareBase64`), a `data:` URL by its own
- * encoding. */
+ * convention declares base64 decoded, base64 text decoded (`bareBase64`), a base64 `data:` URL. */
 export function longFileBytes(file: InlineFilePart, long: LongText): LongFileBytes {
-  if (long.kind === "base64") {
-    const source = base64Source(long.text, long.start, long.end);
+  const source = base64Source(long.text, long.data, long.end);
+  if (long.kind === "base64")
     return {
       size: source.size,
       decoded: true,
       ...(file.base64 ? {} : { bareBase64: true }),
       source,
     };
-  }
-  const source =
-    long.kind === "dataBase64"
-      ? base64Source(long.text, long.data, long.end)
-      : percentSource(long.text, long.data, long.end);
   const mediaType = long.header!.split(";")[0]!.trim();
   return {
     size: source.size,

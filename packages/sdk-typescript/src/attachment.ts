@@ -76,7 +76,9 @@ const FILE_SLICE = 1024 * 1024;
  * file over its limit; throws for one that cannot be read.
  */
 export function readPath(path: string): { bytes: Uint8Array } | { file: PathFile } | undefined {
-  const descriptor = openSync(path, "r");
+  // Resolved first: the file read now is the one read again when it is uploaded.
+  const absolute = resolve(path);
+  const descriptor = openSync(absolute, "r");
   try {
     const info = fstatSync(descriptor);
     if (!info.isFile() || info.size <= MAX_FILE_DATA_BYTES) {
@@ -95,7 +97,7 @@ export function readPath(path: string): { bytes: Uint8Array } | { file: PathFile
       if (size > MAX_BLOB_BYTES) return undefined;
       hash.update(slice.subarray(0, read));
     }
-    return { file: { path: resolve(path), size, sha256: hash.digest("hex") } };
+    return { file: { path: absolute, size, sha256: hash.digest("hex") } };
   } finally {
     closeSync(descriptor);
   }
@@ -115,6 +117,8 @@ export function fileSource(file: PathFile): ByteSource {
   const source: ByteSource = {
     size: file.size,
     async *chunks() {
+      // Each read starts fresh: a retried upload reads the file again.
+      source.changed = false;
       const changed = () => {
         source.changed = true;
         return new Error("The file changed after it was recorded");
@@ -130,8 +134,11 @@ export function fileSource(file: PathFile): ByteSource {
         const hash = createHash("sha256");
         let size = 0;
         let pending: Buffer | undefined;
-        for (;;) {
-          const slice = Buffer.allocUnsafe(FILE_SLICE);
+        // Two buffers in turn: the slice withheld until the next is read, and the next. A reader
+        // is done with a slice before it asks for the next, so each buffer is free when reused.
+        const buffers = [Buffer.allocUnsafe(FILE_SLICE), Buffer.allocUnsafe(FILE_SLICE)];
+        for (let turn = 0; ; turn ^= 1) {
+          const slice = buffers[turn]!;
           const { bytesRead } = await handle.read(slice, 0, FILE_SLICE, null).catch(() => {
             throw changed();
           });

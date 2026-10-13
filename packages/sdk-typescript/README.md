@@ -316,9 +316,11 @@ body's file contents included. Within those bounds, inspection parses the value 
 file while the record is queued and again when it is exported. A span's own attribute past either
 bound that is held whole for upload (it is over the value limit) has its media read in place when
 it is exported, as a voice agent's audio usually needs: each string in it longer than 16 Ki code
-units and written without escapes as base64 or a `data:` URL is decoded, hashed and uploaded a
-1 MiB slice at a time from the recorded text, never parsed or copied out of it, and a file may be
-up to Hue's 1 GB upload limit. The value is placed exactly as one within the bounds: the same
+units and written without escapes as strict base64 or a base64 `data:` URL is decoded, hashed and
+uploaded a 1 MiB window at a time from the recorded text, never parsed or copied out of it, and a
+file may be up to Hue's 1 GB upload limit. The scan that finds those strings also reads the value
+a window at a time, between turns of the event loop, so no step of it stalls the application for
+long; a percent-escaped `data:` URL is parsed with the JSON around it. The value is placed exactly as one within the bounds: the same
 digest form, entries and fallbacks. The JSON around those strings, a file written with escapes or
 inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it uses the
 ordinary value limit (it uploads whole). Each such value is read within that bound on its own, apart
@@ -845,7 +847,9 @@ apart from their record, up to Hue's upload limit of 1,000,000,000 bytes:
 
 Hue stores the value under the trace, so the trace's retention, deletion and erasure cover it.
 Uploads run in the export, never on the application's thread: at most four at a time, each request
-within the export timeout, and all of one export's uploads within six export timeouts; a
+within the export timeout, and all of one export's uploads within six export timeouts (60 seconds
+at the default `timeoutMillis` of 10000), so a 1 GB file needs about 17 MB/s at the defaults;
+raise `timeoutMillis` (up to 60000) for slower links. A
 transient failure is retried once. A rate-limited reservation (429) waits out its `Retry-After`
 within the export's 60-second hold. `flush()` and `shutdown()` wait for uploads like any export
 work, and a `shutdownSafe()` whose budget runs out ends the uploads in flight.

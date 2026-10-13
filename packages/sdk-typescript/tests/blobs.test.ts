@@ -3372,6 +3372,46 @@ describe("media past the inspection bounds", () => {
     }
   });
 
+  test("a percent-escaped data: URL past the bounds is not read in place: it uploads whole", async () => {
+    const endpoint = hue();
+    const hueClient = client(endpoint);
+    // 3 Mi escapes of 3 units each: 9 Mi code units, past the per-attribute bound.
+    const block = Array.from(
+      { length: 256 },
+      (_, byte) => `%${byte.toString(16).padStart(2, "0")}`,
+    ).join("");
+    const messages = JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          {
+            type: "blob",
+            modality: "audio",
+            mime_type: "audio/wav",
+            content: `data:audio/wav,${block.repeat((3 * MiB) / 256)}`,
+          },
+        ],
+      },
+    ]);
+    try {
+      await hueClient.withSpan("percent", ({ span }) => {
+        span.setAttribute("gen_ai.input.messages", messages);
+      });
+      const report = await hueClient.flush();
+      expect(report.uploadFallbacks).toBe(0);
+      const record = endpoint.span("percent")!;
+      // As 0.18.1 stored it: the whole value, its first 16 KiB inline.
+      expect(blobs(record).map(({ key, content_type }) => [key, content_type])).toEqual([
+        ["gen_ai.input.messages", "application/json"],
+      ]);
+      const traceId = Buffer.from(record.traceId!, "base64").toString("hex");
+      expect(endpoint.store.get(`${traceId}/${sha256(messages)}`)!.bytes.toString()).toBe(messages);
+    } finally {
+      await hueClient.shutdown();
+      endpoint.server.stop(true);
+    }
+  });
+
   test("a value whose JSON around its files is past the per-attribute bound uploads whole", async () => {
     const endpoint = hue();
     const hueClient = client(endpoint);
@@ -3551,6 +3591,92 @@ describe("files given by path over 25 MiB", () => {
         file.remove();
       }
     });
+
+  test("a source starts fresh on each read: a file put back after a changed read uploads", async () => {
+    const file = sparseFile(30 * MiB);
+    try {
+      const bytes = readFileSync(file.path);
+      const source = fileSource({ path: file.path, size: bytes.byteLength, sha256: sha256(bytes) });
+      const read = async () => {
+        const hash = createHash("sha256");
+        try {
+          for await (const chunk of source.chunks()) hash.update(chunk);
+          return hash.digest("hex");
+        } catch {
+          return undefined;
+        }
+      };
+      writeFileSync(file.path, "changed");
+      expect(await read()).toBeUndefined();
+      expect(source.changed).toBe(true);
+      writeFileSync(file.path, bytes);
+      expect(await read()).toBe(sha256(bytes));
+      expect(source.changed).toBe(false);
+    } finally {
+      file.remove();
+    }
+  });
+
+  test("a success answered before the whole body was sent stores nothing", async () => {
+    // A store that answers 200 as soon as a PUT arrives, before reading its body.
+    const { createServer } = await import("node:http");
+    const server = createServer((request, response) => {
+      if (request.url === "/api/v1/otlp/blobs") {
+        let body = "";
+        request.on("data", (chunk) => (body += chunk));
+        request.on("end", () => {
+          const reservation = JSON.parse(body) as Record<string, unknown>;
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(
+            JSON.stringify({
+              status: "upload",
+              method: "PUT",
+              url: `http://127.0.0.1:${(server.address() as { port: number }).port}/store`,
+              headers: { "Content-Length": String(reservation.byteSize) },
+              ref: { content_type: reservation.contentType },
+            }),
+          );
+        });
+        return;
+      }
+      response.writeHead(200);
+      response.end();
+      request.destroy();
+    });
+    await new Promise<void>((listening) => server.listen(0, "127.0.0.1", listening));
+    const uploader = new BlobUploader({
+      baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+      apiKey,
+      timeoutMillis: 10_000,
+      allowInsecureHttp: false,
+      userAgent: "blob-tests",
+    });
+    // A slow source: the answer arrives while the body is still being sent.
+    const size = 8 * MiB;
+    const source = {
+      size,
+      async *chunks() {
+        for (let sent = 0; sent < size; sent += MiB) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          yield Buffer.alloc(MiB, 1);
+        }
+      },
+    };
+    try {
+      const outcome = await uploader.store(
+        "0123456789abcdef0123456789abcdef",
+        "input.value#/a",
+        source,
+        "audio/wav",
+        { sha256: sha256(Buffer.alloc(size, 1)), size },
+        { deadline: Date.now() + 30_000, wait: async () => false },
+      );
+      expect(outcome).toMatchObject({ ok: false, reason: "failed" });
+    } finally {
+      uploader.close();
+      server.close();
+    }
+  });
 
   test("a file that changed does not fail another reference to the bytes it was recorded with", async () => {
     const endpoint = hue();

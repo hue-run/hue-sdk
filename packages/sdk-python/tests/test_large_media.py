@@ -39,7 +39,9 @@ class _Uploader:
         return _Outcome(True, content_type=content_type) if self.ok else _Outcome(False, "failed")
 
 
-def place(key: str, text: str, large: bool, ok: bool) -> dict[str, Any]:
+def place(
+    key: str, text: str, large: bool, ok: bool, value_bytes: int = 1_000_000_000
+) -> dict[str, Any]:
     uploader = _Uploader(ok)
     held = Held(
         values={key: text},
@@ -49,7 +51,7 @@ def place(key: str, text: str, large: bool, ok: bool) -> dict[str, Any]:
     (attributes,), tally = place_spans(
         [({key: text}, held, "0123456789abcdef0123456789abcdef")],
         uploader=uploader,  # type: ignore[arg-type]
-        value_bytes=1_000_000_000,
+        value_bytes=value_bytes,
         deadline=monotonic() + 60,
         wait=lambda _: False,
     )
@@ -277,3 +279,22 @@ def test_a_value_over_the_bound_is_refused_without_a_copy_of_it():
     finally:
         tracemalloc.stop()
     assert peak < 4 * _MIB, peak
+
+
+@pytest.mark.parametrize("ok", [True, False], ids=["uploaded", "refused"])
+@pytest.mark.parametrize(
+    "case", _CORPUS["placements"], ids=[case["id"] for case in _CORPUS["placements"]]
+)
+def test_shared_placements(low_threshold, case, ok):
+    """Placements both SDKs make alike, lone surrogates included: hashed, uploaded and cut as
+    JavaScript encodes them, each as U+FFFD."""
+    expected = case["success" if ok else "failure"]
+    for large in (False, True):
+        placed = place(case["attribute"], case["value"], large, ok, case["valueBytes"])
+        assert {
+            "value": placed["value"],
+            "entries": placed["entries"] or [],
+            "truncated": list(placed["truncated"] or []),
+            "uploaded": placed["uploaded"],
+            "fallbacks": placed["fallbacks"],
+        } == expected, (case["id"], large)
