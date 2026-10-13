@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
 import digests from "./fixtures/inline-file-digests.json" with { type: "json" };
+import { applyJsonEdits } from "../src/json-edits.js";
 import {
   hashInlineFiles,
   hashNestedInlineFiles,
@@ -191,8 +192,7 @@ test("a data: URL with millions of parameters is still decoded by its own encodi
   });
 });
 
-test("JSON edits to many members are rendered in time linear in them", async () => {
-  const { applyJsonEdits } = await import("../src/json-edits.js");
+test("JSON edits to many members are rendered in time linear in them", () => {
   const count = 20_000;
   const text = JSON.stringify(
     Array.from({ length: count }, (_, index) => ({ type: "blob", content: `c${index}`, keep: 1 })),
