@@ -937,8 +937,10 @@ const installedPackageTests = [
   "provider-tools.test.ts",
   "provider-tool-spans.test.ts",
   "inline-files.test.ts",
-  // Values over the inline limit uploaded to a loopback Hue implementing the upload routes.
+  // Values over the inline limit uploaded to a loopback Hue implementing the upload routes, and
+  // media past the inspection bounds read in place exactly as parsed media are placed.
   "blobs.test.ts",
+  "large-media.test.ts",
   // Recorded media read back by digest and files pinned on case writes, against loopback routes.
   "media.test.ts",
   "case-files.test.ts",
@@ -1049,6 +1051,9 @@ void [transition, event, options, backend];
           '"../node_modules/@hue-run/sdk/dist/inline-files.js"',
         )
         .replaceAll('"../src/blobs.js"', '"../node_modules/@hue-run/sdk/dist/blobs.js"')
+        .replaceAll('"../src/large-media.js"', '"../node_modules/@hue-run/sdk/dist/large-media.js"')
+        .replaceAll('"../src/attachment.js"', '"../node_modules/@hue-run/sdk/dist/attachment.js"')
+        .replaceAll('"../src/json-edits.js"', '"../node_modules/@hue-run/sdk/dist/json-edits.js"')
         .replaceAll('"../src/snapshot.js"', '"../node_modules/@hue-run/sdk/dist/snapshot.js"')
         .replaceAll(
           '"../src/evals/exit-cleanup.js"',

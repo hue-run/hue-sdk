@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from bisect import bisect_left
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -84,6 +85,11 @@ def _locate(text: str, wanted: set[str]) -> dict[str, _Located]:
         return match.end() if match else index
 
     def string_end(index: int) -> int:
+        # A string without escapes ends at the next quote, found natively: a long file's content
+        # is passed over without the pattern's step per character.
+        quote = text.find('"', index + 1)
+        if quote != -1 and text.find("\\", index + 1, quote) == -1:
+            return quote + 1
         match = _STRING_REST.match(text, index + 1)
         if match is None:
             raise ValueError("Unterminated JSON string.")
@@ -176,23 +182,25 @@ def apply_json_edits(text: str, edits: Sequence[JsonEdit]) -> str:
         last_of = {member.key: member for member in members}
 
         def build() -> str:
-            kept = [member for member in members if member.key not in edit.remove]
             first = members[0].start if members else span.end - 1
             close = members[-1].end if members else span.end - 1
-            out = text[span.start : first]
-            for position, member in enumerate(kept):
-                index = members.index(member)
+            out = [text[span.start : first]]
+            kept = 0
+            for index, member in enumerate(members):
+                if member.key in edit.remove:
+                    continue
                 # The separator that preceded this member, comma included, unless it now comes
                 # first.
-                if position > 0:
-                    out += text[members[index - 1].end : member.start]
-                out += render(member.start, member.end)
+                if kept:
+                    out.append(text[members[index - 1].end : member.start])
+                kept += 1
+                out.append(render(member.start, member.end))
             appended = ""
             for key, value in edit.set.items():
                 if key not in last_of or key in edit.remove:
                     comma = "," if kept or appended else ""
                     appended += f"{comma}{json.dumps(key, ensure_ascii=False)}:{value}"
-            return out + appended + text[close : span.end]
+            return "".join(out) + appended + text[close : span.end]
 
         return build
 
@@ -207,13 +215,18 @@ def apply_json_edits(text: str, edits: Sequence[JsonEdit]) -> str:
                 pieces.append(_Piece(member.value_start, member.end, constant(value)))
         pieces.append(_Piece(span.start, span.end, object_render(span, target)))
     pieces.sort(key=lambda piece: (piece.start, -piece.end))
+    starts = [piece.start for piece in pieces]
 
     def render(start: int, end: int) -> str:
         """The text from ``start`` to ``end`` with the pieces within it rendered; a piece inside
-        another is rendered by the outer one."""
+        another is rendered by the outer one. Only the pieces that start within the range are
+        visited."""
         out: list[str] = []
         at = start
-        for piece in pieces:
+        for index in range(bisect_left(starts, start), len(pieces)):
+            piece = pieces[index]
+            if piece.start >= end:
+                break
             if piece.start < at or piece.end > end:
                 continue
             out.append(text[at : piece.start])

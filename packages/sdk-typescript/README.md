@@ -312,13 +312,23 @@ listed under `hue.truncated`. While uploads are available, `recordMessages` reco
 the value limit when it fits the limit with its files as their digest.
 
 Inspection is bounded to 8 Mi UTF-16 code units of text per attribute and 16 Mi per record, a log
-body's file contents included; a longer value uses the ordinary value limit. Inspection parses the
-value and decodes each file while the record is queued and again when it is exported, holding
-several copies of the value at once; larger files belong in an `Attachment` or in
-`hue.recordFile` with `upload` set, whose bytes are not parsed out of text. Resources, links and
-span events never upload inline media: in their recorded messages, media up to 64 KiB stays
-verbatim and larger media is replaced by its digest, as in 0.16, and log records that cannot
-upload (not correlated with a span, or while uploads are unavailable) keep the same rule. With
+body's file contents included. Within those bounds, inspection parses the value and decodes each
+file while the record is queued and again when it is exported. A span's own attribute past either
+bound that is held whole for upload (it is over the value limit) has its media read in place when
+it is exported, as a voice agent's audio usually needs: each string in it longer than 16 Ki code
+units and written without escapes as strict base64 or a base64 `data:` URL is decoded, hashed and
+uploaded a 1 MiB window at a time from the recorded text, never parsed or copied out of it, and a
+file may be up to Hue's 1 GB upload limit. The scan that finds those strings also reads the value
+a window at a time, between turns of the event loop, so no step of it stalls the application for
+long; a percent-escaped `data:` URL is parsed with the JSON around it. The value is placed exactly as one within the bounds: the same
+digest form, entries and fallbacks. The JSON around those strings, a file written with escapes or
+inside a JSON-encoded string included, is parsed within the 8 Mi bound; a value past it uses the
+ordinary value limit (it uploads whole). Each such value is read within that bound on its own, apart
+from the record's 16 Mi allowance, while it stays held within the 128 MiB for values awaiting
+upload. Log records keep the bounds. Resources, links and span
+events never upload inline media: in their recorded messages, media up to 64 KiB stays verbatim
+and larger media is replaced by its digest, as in 0.16, and log records that cannot upload (not
+correlated with a span, or while uploads are unavailable) keep the same rule. With
 `captureContent: false`, nothing is inspected or uploaded.
 
 ### Attach a file anywhere
@@ -345,10 +355,19 @@ await hue.withSpan(
 ```
 
 Give exactly one of `data` (a `Buffer`, typed array, `ArrayBuffer`, or a base64 string or `data:`
-URL) and `path` (read from the file system when the attachment is created), a `contentType` and
-optionally a `name`. The bytes are read and hashed when the attachment is created and are limited
-to 25 MiB, the `recordFile` limit: they are held in memory from then until export, within the
-128 MiB budget that queued spans share for values awaiting upload.
+URL) and `path` (a file on the file system), a `contentType` and optionally a `name`. `data` is
+read and hashed when the attachment is created and is limited to 25 MiB, the `recordFile` limit:
+it is held in memory from then until export, within the 128 MiB budget that queued spans share for
+values awaiting upload. A `path` names a regular file: anything else, such as a named pipe, is
+refused without waiting on it. A `path` up to 25 MiB is read the same way. A larger regular file, up to
+Hue's 1 GB upload limit, is not held: it is hashed a 1 MiB slice at a time when the attachment is
+created and read again from disk when it is uploaded, each slice hashed as it is sent and the last
+sent only once the file ended at the size and SHA-256 it was recorded with. Keep such a file in
+place and unchanged until the client flushes: one that changed, is gone or is no longer a regular
+file is not uploaded (the
+request ends before its body is complete, and Hue's upload URL signs the size and SHA-256, so the
+store refuses other bytes), and it counts in `report.uploadFallbacks`, its part keeping the digest
+it was recorded with.
 
 At its position the attachment is recorded as a GenAI `blob` part that names the file by digest,
 `{"type":"blob","mime_type":"application/pdf","modality":"document","sha256":"<64 hex>","size":48213,"name":"contract.pdf"}`,
@@ -392,9 +411,14 @@ await hue.withSpan("review contract", async () => {
 ```
 
 `upload` defaults to `false`, which hashes and measures `data` locally without exporting bytes.
-`data` is limited to 25 MiB. Larger data is omitted and counted as an instrumentation failure;
-pass `sha256` and `byteSize` when you already have them. Upload requires supplied bytes, content
-capture and an ordinary project key. It runs during export and adds a `hue.blobs` entry to the
+`data` is limited to 25 MiB, as it is held in memory until it is uploaded. Larger data is omitted
+and counted as an instrumentation failure; pass `sha256` and `byteSize` when you already have them.
+Give `path` instead of `data` for a file on disk: up to 25 MiB it is read as `data` is, and a larger
+regular file, up to Hue's 1 GB upload limit, is hashed a slice at a time now and, with `upload`,
+read again from disk when it is uploaded, as an [`Attachment`](#attach-a-file-anywhere) given by
+path is: it uploads only if it still has the size and SHA-256 it was recorded with. A file over
+1 GB, a path that is no regular file, or `data` and `path` together, is omitted and counted. Upload requires supplied bytes or a
+path, content capture and an ordinary project key. It runs during export and adds a `hue.blobs` entry to the
 same span, keyed `event:hue.file:<sha256>`, while preserving the event. An export fits every
 span's events and entries before it uploads any of these files, then uploads the files of all its
 spans together, four at a time; a file whose event was redacted or shed is not uploaded.
@@ -497,8 +521,8 @@ the Langfuse project's own keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, a
 `HUE_API_KEY`:
 
 ```sh
-npx -y @hue-run/sdk@0.18.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.18.1 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.18.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.18.2 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 - It reads Langfuse Cloud and self-hosted v4 through the Observations API v2, and self-hosted v3
@@ -824,7 +848,9 @@ apart from their record, up to Hue's upload limit of 1,000,000,000 bytes:
 
 Hue stores the value under the trace, so the trace's retention, deletion and erasure cover it.
 Uploads run in the export, never on the application's thread: at most four at a time, each request
-within the export timeout, and all of one export's uploads within six export timeouts; a
+within the export timeout, and all of one export's uploads within six export timeouts (60 seconds
+at the default `timeoutMillis` of 10000), so a 1 GB file needs about 17 MB/s at the defaults;
+raise `timeoutMillis` (up to 60000) for slower links. A
 transient failure is retried once. A rate-limited reservation (429) waits out its `Retry-After`
 within the export's 60-second hold. `flush()` and `shutdown()` wait for uploads like any export
 work, and a `shutdownSafe()` whose budget runs out ends the uploads in flight.
@@ -833,7 +859,8 @@ A value that cannot be uploaded (Hue or the store refused it or failed, the netw
 did, the receiver has no upload route, or the value is over 1 GB) is exported as before uploads
 existed: whole attributes keep a prefix up to the limit and are listed under `hue.truncated`;
 media parts keep their digest without a blob entry; failed opt-in `recordFile` uploads preserve
-the file event. The explicit helper limit is 25 MiB; whole attributes retain their 1 GB limit. Each
+the file event. Bytes given in memory to `recordFile` or an `Attachment` are limited to 25 MiB; a
+file given by path, a file read in place from a value and a whole attribute to 1 GB. Each
 export reports such values in a `warning` issue per cause, whose `count` is the values and
 `traceIds` their traces, and counts them in `report.uploadFallbacks`; successful uploads are counted
 in `report.uploadedValues`. Both counters include whole attributes, eligible media, attachments

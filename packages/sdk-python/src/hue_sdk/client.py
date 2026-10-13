@@ -29,9 +29,11 @@ from opentelemetry.util.types import AttributeValue
 from ._attachment import (
     MAX_ATTACHMENT_DEPTH,
     Attachment,
+    PathFile,
     PlacedAttachment,
     holds_attachment,
     locate_parts,
+    read_path,
 )
 from ._blobs import MAX_BLOB_BYTES, ExplicitFile, Tally, Uploads
 from ._inline_files import (
@@ -491,21 +493,28 @@ class HueSpan:
         byte_size: int | None = None,
         name: str | None = None,
         upload: bool = False,
+        path: str | os.PathLike[str] | None = None,
     ) -> None:
         """Add a ``hue.file`` event for a file the work read, received or produced.
 
         ``role`` is ``input`` (given to the agent), ``attachment`` (from a tool or message) or
-        ``output`` (produced by the agent). ``data`` is hashed and measured locally;
-        ``upload=True`` also stores its bytes when content capture and a project key are enabled.
-        A ``str`` is hashed as UTF-8. The event carries ``hue.file.sha256``,
-        ``hue.file.role``, ``hue.file.media_type``, ``hue.file.size`` when known and, when
-        content is captured, ``hue.file.name``. An invalid record is omitted and counted; an
-        invalid name alone is omitted and counted while the rest is recorded.
+        ``output`` (produced by the agent). ``data``, or the file at ``path``, is hashed and
+        measured locally; ``upload=True`` also stores its bytes when content capture and a
+        project key are enabled. A ``str`` is hashed as UTF-8. ``data`` is limited to 25 MiB, as
+        it is held in memory until it is uploaded; a file at ``path`` up to 25 MiB is read now as
+        ``data`` is, and a larger regular file, up to Hue's 1 GB upload limit, is hashed now a
+        slice at a time and read again from disk when it is uploaded, which it is only if it still
+        has the size and SHA-256 it was recorded with; a ``path`` that is no regular file, such as
+        a named pipe, is refused without waiting on it. Give ``data`` or ``path``, not both. The
+        event carries ``hue.file.sha256``, ``hue.file.role``, ``hue.file.media_type``,
+        ``hue.file.size`` when known and, when content is captured, ``hue.file.name``. An invalid
+        record is omitted and counted; an invalid name alone is omitted and counted while the
+        rest is recorded.
         """
         if not self._client._active:
             return
         self._client._instrument(
-            lambda: self._record_file(role, media_type, sha256, data, byte_size, name, upload)
+            lambda: self._record_file(role, media_type, sha256, data, byte_size, name, upload, path)
         )
 
     def _record_file(
@@ -517,6 +526,7 @@ class HueSpan:
         byte_size: int | None,
         name: str | None,
         upload: bool,
+        path: str | os.PathLike[str] | None = None,
     ) -> None:
         # Nothing to attach to: report once, before hashing or validating anything.
         if not self.otel_span.is_recording():
@@ -529,6 +539,26 @@ class HueSpan:
         uploads = self._client._uploads
         digest = sha256.lower() if isinstance(sha256, str) else sha256
         size = byte_size
+        # A file given by path over 25 MiB: hashed now and read again from disk when uploaded.
+        on_disk: PathFile | None = None
+        if path is not None:
+            if data is not None:
+                raise ValueError("A file takes data or a path, not both.")
+            if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
+                raise ValueError("Invalid file path.")
+            read = read_path(path)
+            if read is None:
+                raise ValueError("File must be a regular file within Hue's 1 GB upload limit.")
+            if isinstance(read, PathFile):
+                on_disk = read
+                # A caller-supplied digest or size must describe the same bytes.
+                if (digest is not None and digest != read.sha256) or (
+                    size is not None and size != read.size
+                ):
+                    raise ValueError("File digest or size does not match its data.")
+                digest, size = read.sha256, read.size
+            else:
+                data = read
         if data is not None:
             if isinstance(data, str):
                 if _utf8_byte_size(data, _MAX_FILE_DATA_BYTES) > _MAX_FILE_DATA_BYTES:
@@ -574,17 +604,25 @@ class HueSpan:
         timestamp = time_ns()
         refused = False
         if upload and uploads is not None:
-            if content is None:
+            staged = (
+                len(content)
+                if content is not None
+                else on_disk.size
+                if on_disk is not None
+                else None
+            )
+            if staged is None:
                 refused = True
-            elif content and not uploads.stage(
+            elif staged and not uploads.stage(
                 self.otel_span,
                 ExplicitFile(
-                    content,
-                    (digest, len(content)),
+                    content or b"",
+                    (digest, staged),
                     media_type,
                     name if is_media_name(name) else None,
                     role=role,
                     timestamp=timestamp,
+                    on_disk=on_disk,
                 ),
             ):
                 refused = True
@@ -1011,6 +1049,8 @@ class Hue:
                 name,
                 attribute=attribute,
                 pointer=pointer,
+                # A file given by path over 25 MiB is read again from disk when it is uploaded.
+                on_disk=attachment._file,
             )
             for attachment, pointer, name in locate_parts(value, candidates)
         ]

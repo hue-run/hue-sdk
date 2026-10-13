@@ -127,3 +127,27 @@ def test_placed_json_numbers_are_written_as_javascript_writes_them():
     assert dumps_message({"x": 2.0, "y": 1e17, "z": 0.5, "w": 1e-6}) == (
         '{"x":2,"y":100000000000000000,"z":0.5,"w":0.000001}'
     )
+
+
+def test_json_edits_to_many_members_render_in_time_linear_in_them():
+    import time
+
+    from hue_sdk._json_edits import JsonEdit, apply_json_edits
+
+    count = 20_000
+    text = json.dumps(
+        [{"type": "blob", "content": f"c{index}", "keep": 1} for index in range(count)],
+        separators=(",", ":"),
+    )
+    edits = [
+        JsonEdit(f"/{index}", remove="content", set=(("size", str(index)),))
+        for index in range(count)
+    ]
+    started = time.perf_counter()
+    placed = apply_json_edits(text, edits)
+    # 20,000 edited parts render in about a second; visiting every piece for every member took
+    # tens of seconds.
+    assert time.perf_counter() - started < 5
+    assert json.loads(placed) == [
+        {"type": "blob", "keep": 1, "size": index} for index in range(count)
+    ]

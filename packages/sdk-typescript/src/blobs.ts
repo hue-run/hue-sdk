@@ -16,6 +16,7 @@ import {
   mediaContentType,
   mediaIn,
   isTextMediaType,
+  type InlineFileBytes,
   type InlineFilePart,
   type MediaDigestMemo,
   type FileDigest,
@@ -28,6 +29,17 @@ import {
   readMediaText,
   reencodeMedia,
 } from "./inline-files.js";
+import {
+  isByteSource,
+  JoinedText,
+  longFileBytes,
+  longHead,
+  placedLargeText,
+  readLargeMediaText,
+  type ByteSource,
+  type LargeMediaValue,
+  type LongText,
+} from "./large-media.js";
 import { capLogBody, TRUNCATED_KEY, truncatedMarker, withTruncatedKeys } from "./privacy.js";
 import { truncateUtf8 } from "./safety.js";
 
@@ -105,6 +117,9 @@ export interface OffloadCollector {
    * export inspects only these. Absent for a record admission did not copy, and for a log record,
    * which export inspects within its own allowance. */
   inspected?: ReadonlySet<string> | undefined;
+  /** The span's own attributes admission held whole for upload past the inspection bounds: export
+   * reads their media in place (`readLargeMediaText`). */
+  large?: ReadonlySet<string> | undefined;
   /** Set for a log record: its values over the inline limit are cut, never uploaded whole; only
    * the media in its inspected attributes and its body upload, with the attachments placed in
    * its body (`attachments`, keyed `body#<pointer>`). */
@@ -117,7 +132,8 @@ export interface OffloadCollector {
 }
 
 export interface MediaAttachment {
-  bytes: Uint8Array;
+  /** The file's bytes, or for a file given by path over the in-memory limit, its source on disk. */
+  bytes: Uint8Array | ByteSource;
   digest: FileDigest;
   contentType: string;
   name?: string;
@@ -189,44 +205,59 @@ export function blobPrefix(value: string | Uint8Array): string | Uint8Array {
 }
 
 /** A value's size in bytes as it is uploaded: a string's UTF-8 encoding, counted, not made. */
-function sizeOf(value: string | Uint8Array): number {
-  return typeof value === "string" ? Buffer.byteLength(value, "utf8") : value.byteLength;
+export function sizeOf(value: string | Uint8Array | ByteSource): number {
+  if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+  return isByteSource(value) ? value.size : value.byteLength;
+}
+
+/** The bytes a value holds in memory: none for a source read as it is uploaded. */
+export function heldBytesOf(value: Uint8Array | ByteSource): number {
+  return isByteSource(value) ? 0 : value.byteLength;
 }
 
 /** A string's UTF-8 encoding a slice at a time, never splitting a surrogate pair. */
 function* utf8Chunks(text: string): Generator<Buffer> {
+  // One buffer, reused: a reader is done with each slice before it asks for the next.
+  const buffer = Buffer.allocUnsafe(TEXT_CHUNK_UNITS * 3);
   for (let start = 0; start < text.length; ) {
     let end = Math.min(text.length, start + TEXT_CHUNK_UNITS);
     if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
-    yield Buffer.from(text.slice(start, end), "utf8");
+    yield buffer.subarray(0, buffer.write(text.slice(start, end), "utf8"));
     start = end;
   }
 }
 
 /** The bytes an upload carries, a slice at a time: no second copy of a large value is made. */
-function* uploadChunks(value: string | Uint8Array): Generator<Uint8Array> {
-  if (typeof value === "string") {
-    yield* utf8Chunks(value);
-    return;
-  }
-  for (let start = 0; start < value.byteLength; start += TEXT_CHUNK_UNITS)
-    yield value.subarray(start, Math.min(value.byteLength, start + TEXT_CHUNK_UNITS));
+function uploadChunks(
+  value: string | Uint8Array | ByteSource,
+): Iterable<Uint8Array> | AsyncIterable<Uint8Array> {
+  if (isByteSource(value)) return value.chunks();
+  return (function* () {
+    if (typeof value === "string") {
+      yield* utf8Chunks(value);
+      return;
+    }
+    for (let start = 0; start < value.byteLength; start += TEXT_CHUNK_UNITS)
+      yield value.subarray(start, Math.min(value.byteLength, start + TEXT_CHUNK_UNITS));
+  })();
 }
 
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** The SHA-256 (lowercase hex) and byte size of what an upload of `value` carries, yielding to
- * the event loop between slices so a large value does not stall the application. */
+ * the event loop between slices so a large value does not stall the application. Past
+ * `deadline`, it throws rather than read on. */
 export async function digestOf(
-  value: string | Uint8Array,
+  value: string | Uint8Array | ByteSource,
+  deadline = Infinity,
 ): Promise<{ sha256: string; size: number }> {
   const hash = createHash("sha256");
   let size = 0;
-  let slices = 0;
-  for (const chunk of uploadChunks(value)) {
+  for await (const chunk of uploadChunks(value)) {
     hash.update(chunk);
     size += chunk.byteLength;
-    if (++slices % 4 === 0) await nextTurn();
+    await nextTurn();
+    if (Date.now() >= deadline) throw new Error("The upload ran out of time");
   }
   return { sha256: hash.digest("hex"), size };
 }
@@ -266,12 +297,18 @@ type Reservation =
   | { exists: false; contentType: string; grant: Grant }
   | { fallback: FallbackReason };
 
-type Outcome = { ok: true; contentType: string } | { ok: false; reason: FallbackReason };
+/** An upload's outcome; `changed` when the value's own source no longer held its bytes (a file
+ * that changed since it was recorded), which says nothing of another reference's bytes. */
+type Outcome =
+  | { ok: true; contentType: string }
+  | { ok: false; reason: FallbackReason; changed?: boolean };
 
 interface Reply {
   status: number;
   headers: IncomingHttpHeaders;
   body: Buffer;
+  /** Whether the request's whole body was written before the answer arrived. */
+  complete: boolean;
 }
 
 /** HTTP header names (tokens) and values without line breaks or NUL. */
@@ -383,7 +420,7 @@ export class BlobUploader {
   async store(
     traceId: string,
     key: string,
-    value: string | Uint8Array,
+    value: string | Uint8Array | ByteSource,
     contentType: string,
     digest: FileDigest,
     upload: UploadContext,
@@ -402,8 +439,11 @@ export class BlobUploader {
       return { ok: false, reason: "failed" };
     if (digest.size > MAX_BLOB_BYTES) return { ok: false, reason: "tooLarge" };
     const identity = `${traceId}:${digest.sha256}`;
-    const known = this.outcomes.get(identity);
-    if (known) return known.promise;
+    for (let known = this.outcomes.get(identity); known; known = this.outcomes.get(identity)) {
+      const shared = await known.promise;
+      // Another reference's file changed since it was recorded: this one tries its own bytes.
+      if (shared.ok || !shared.changed) return shared;
+    }
     if (this.outcomes.size >= 4096) {
       const oldest = [...this.outcomes].find(([, item]) => item.settled)?.[0];
       if (oldest === undefined) return { ok: false, reason: "budget" };
@@ -429,7 +469,7 @@ export class BlobUploader {
   private async storeFresh(
     traceId: string,
     key: string,
-    value: string | Uint8Array,
+    value: string | Uint8Array | ByteSource,
     contentType: string,
     digest: FileDigest,
     upload: UploadContext,
@@ -458,6 +498,7 @@ export class BlobUploader {
       const { grant } = reservation;
       const put = await this.put(grant, value, digest.size, upload.deadline);
       if (put === "stored") break;
+      if (put === "changed") return { ok: false, reason: "failed", changed: true };
       if (this.closed) return { ok: false, reason: "failed" };
       const expired = put === "expired" || Date.now() >= grant.expiresAt;
       if (
@@ -620,13 +661,15 @@ export class BlobUploader {
     };
   }
 
-  /** The PUT of the value's bytes, with exactly the headers Hue signed. */
+  /** The PUT of the value's bytes, with exactly the headers Hue signed. A source that no longer
+   * holds its bytes (a file changed since it was recorded) ends the request before its body is
+   * complete, and fails the value without a retry. */
   private async put(
     grant: Grant,
-    value: string | Uint8Array,
+    value: string | Uint8Array | ByteSource,
     size: number,
     deadline: number,
-  ): Promise<"stored" | "expired" | "transient" | "failed"> {
+  ): Promise<"stored" | "expired" | "transient" | "failed" | "changed"> {
     const reply = await this.request(
       "PUT",
       grant.url,
@@ -636,9 +679,12 @@ export class BlobUploader {
       MAX_ERROR_RESPONSE_BYTES,
       size,
     );
+    if (isByteSource(value) && value.changed) return "changed";
     if (!reply) return "transient";
-    // 412: the object exists already (another upload of the same value won).
-    if ((reply.status >= 200 && reply.status < 300) || reply.status === 412) return "stored";
+    // 412: the object exists already (another upload of the same value won). A success answered
+    // before the whole body was written stores nothing that was sent.
+    if (reply.status === 412) return "stored";
+    if (reply.status >= 200 && reply.status < 300) return reply.complete ? "stored" : "failed";
     if (reply.status === 403)
       return reply.body.toString("utf8").includes("Request has expired") ? "expired" : "failed";
     if (reply.status >= 500 || reply.status === 408 || reply.status === 429) return "transient";
@@ -655,7 +701,7 @@ export class BlobUploader {
     method: "POST" | "PUT",
     url: URL,
     headers: Record<string, string>,
-    body: string | Uint8Array,
+    body: string | Uint8Array | ByteSource,
     deadline: number,
     maxResponseBytes: number,
     length?: number,
@@ -675,6 +721,8 @@ export class BlobUploader {
     if (this.closed) return undefined;
     return new Promise<Reply | undefined>((resolve) => {
       let settled = false;
+      // Whether the whole body was handed to the request.
+      let ended = false;
       let request: ClientRequest | undefined;
       const finish = (reply?: Reply) => {
         if (settled) return;
@@ -682,15 +730,18 @@ export class BlobUploader {
         clearTimeout(timer);
         if (request) {
           this.requests.delete(request);
-          if (!reply) request.destroy();
+          // An answer before the whole body was handed over ends the request: a store that
+          // neither reads nor closes would otherwise hold it, and its source, open.
+          if (!reply || !ended) request.destroy();
         }
         resolve(reply);
       };
       const timer = setTimeout(() => finish(), Math.max(1, deadline - Date.now()));
+      // The bytes handed to the request: its body is complete once they are its length.
+      let sentBytes = 0;
+      const written = () => length === undefined || sentBytes === length;
       const requestHeaders: Record<string, string | number> = { ...headers };
-      if (length === undefined)
-        requestHeaders["Content-Length"] =
-          typeof body === "string" ? Buffer.byteLength(body, "utf8") : body.byteLength;
+      if (length === undefined) requestHeaders["Content-Length"] = sizeOf(body);
       try {
         // Uploads are the SDK's own export traffic: an http instrumentation must not trace them.
         request = context.with(suppressTracing(context.active()), () =>
@@ -704,6 +755,7 @@ export class BlobUploader {
                 status: response.statusCode ?? 0,
                 headers: response.headers,
                 body: Buffer.concat(chunks),
+                complete: written(),
               });
               response.on("data", (chunk: Buffer) => {
                 size += chunk.byteLength;
@@ -729,24 +781,36 @@ export class BlobUploader {
       sent.on("error", () => finish());
       sent.setTimeout(this.options.timeoutMillis, () => finish());
       void (async () => {
-        if (length === undefined) {
+        if (length === undefined && !isByteSource(body)) {
+          ended = true;
           sent.end(body);
           return;
         }
-        for (const chunk of uploadChunks(body)) {
+        // A source or a text may reuse a slice's memory for the next: each slice is written out
+        // before the next is read. Bytes are views of memory that does not change.
+        const reused = !(body instanceof Uint8Array);
+        for await (const chunk of uploadChunks(body)) {
           if (settled) return;
-          if (!sent.write(chunk))
-            await new Promise<void>((drained) => {
-              const done = () => {
-                sent.off("drain", done);
-                sent.off("close", done);
-                drained();
-              };
-              sent.on("drain", done);
-              sent.on("close", done);
-            });
+          sentBytes += chunk.byteLength;
+          await new Promise<void>((proceed) => {
+            const done = () => {
+              sent.off("drain", done);
+              sent.off("close", done);
+              proceed();
+            };
+            sent.on("close", done);
+            if (reused) {
+              sent.write(chunk, () => done());
+              return;
+            }
+            if (sent.write(chunk)) done();
+            else sent.on("drain", done);
+          });
+          if (settled) return;
         }
-        if (!settled) sent.end();
+        if (settled) return;
+        ended = true;
+        sent.end();
       })().catch(() => finish());
     });
   }
@@ -761,6 +825,8 @@ export interface OffloadOptions {
   upload: UploadContext;
   tally: OffloadTally;
   memo?: MediaDigestMemo;
+  /** For tests: the length past which a long string is read in place (`LONG_STRING_UNITS`). */
+  longUnits?: number;
 }
 
 /**
@@ -818,28 +884,48 @@ export async function offloadRecord(
     index: number,
     key: string,
     files: readonly InlineFilePart[],
+    long?: ReadonlyMap<string, LongText>,
   ): Promise<boolean> => {
     const message = isMessageKey(key);
     let changed = false;
     await Promise.all(
       files.map((file, position) => {
-        const decoded = mediaBytes(file);
-        if (!placeable(file, decoded)) return Promise.resolve();
+        // A file whose content is a long string is read from its place in the recorded text, a
+        // slice at a time: never decoded or copied whole.
+        const inPlace = long?.get(file.content);
+        const decoded = inPlace ? longFileBytes(file, inPlace) : mediaBytes(file);
+        const bytes = "source" in decoded ? decoded.source : decoded.bytes;
+        const size = sizeOf(bytes);
+        if (!placeable(file, decoded, size)) return Promise.resolve();
         const contentType = mediaContentType(file, decoded);
         const textual = isTextMediaType(contentType);
-        if (textual && decoded.bytes.byteLength <= INLINE_FILE_LIMIT) return Promise.resolve();
+        if (textual && size <= INLINE_FILE_LIMIT) return Promise.resolve();
         const prefix = keepsPrefix(file, textual, decoded);
         const partKey = `${key}#${prefix ? file.pointer : file.partPointer}`;
         const slot = slots > 0 && isBlobKey(partKey) ? (slots--, true) : false;
         return (async () => {
-          const digest = options.memo
-            ? options.memo.digest(file, decoded, traceId)
-            : await digestOf(decoded.bytes);
+          // Hashing a long file takes an upload place, as hashing a large value does; one the
+          // export's upload budget cannot hash stays as recorded and is not uploaded.
+          let digest: FileDigest;
+          try {
+            digest = isByteSource(bytes)
+              ? await uploader.limit(() => digestOf(bytes, upload.deadline))
+              : options.memo
+                ? options.memo.digest(file, decoded as InlineFileBytes, traceId)
+                : await digestOf(bytes);
+          } catch {
+            fallback("failed");
+            return;
+          }
           const outcome: Outcome = slot
-            ? await uploader.store(traceId, partKey, decoded.bytes, contentType, digest, upload)
+            ? await uploader.store(traceId, partKey, bytes, contentType, digest, upload)
             : { ok: false, reason: "budget" };
           if (outcome.ok) {
-            if (prefix) prefixPart(file, blobPrefix(file.content));
+            if (prefix)
+              prefixPart(
+                file,
+                blobPrefix(inPlace ? longHead(inPlace, BLOB_PREFIX_BYTES + 1) : file.content),
+              );
             else digestPart(file, digest);
             changed = true;
             entries.push({
@@ -848,7 +934,7 @@ export async function offloadRecord(
             });
             tally.uploaded++;
           } else {
-            if (message && (!collector.log || decoded.bytes.byteLength > INLINE_FILE_LIMIT)) {
+            if (message && (!collector.log || size > INLINE_FILE_LIMIT)) {
               digestPart(file, digest);
               changed = true;
             }
@@ -861,26 +947,52 @@ export async function offloadRecord(
   };
 
   const literal = literalKeys(attributes);
-  const parts = async (index: number, key: string, text: string): Promise<string> => {
-    // Both bounds count UTF-16 code units, as admission does. Literal text holds no file.
-    if (!mayInlineFiles(key, text) || text.length > MAX_INLINE_FILE_TEXT || literal.has(key))
-      return text;
-    if (collector.inspected) {
-      // A value admission skipped stays as recorded.
-      if (!collector.inspected.has(key)) return text;
-    } else {
-      if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
-      inspected += text.length;
-    }
+  const parts = async (index: number, key: string, text: string): Promise<string | JoinedText> => {
+    // Literal text holds no file.
+    if (!mayInlineFiles(key, text) || literal.has(key)) return text;
     let media: ReturnType<typeof readMediaText>;
-    try {
-      media = readMediaText(key, text);
-    } catch {
-      return text;
+    let large: LargeMediaValue | undefined;
+    if (collector.large?.has(key)) {
+      // Held whole past the inspection bounds: its long strings were read in place, the JSON
+      // around them within the per-attribute bound.
+      media = large = largeReads.get(index);
+    } else {
+      // Both bounds count UTF-16 code units, as admission does.
+      if (text.length > MAX_INLINE_FILE_TEXT) return text;
+      if (collector.inspected) {
+        // A value admission skipped stays as recorded.
+        if (!collector.inspected.has(key)) return text;
+      } else {
+        if (inspected + text.length > INLINE_FILE_TEXT_PER_RECORD) return text;
+        inspected += text.length;
+      }
+      try {
+        media = readMediaText(key, text);
+      } catch {
+        return text;
+      }
     }
     if (!media?.files.length) return text;
-    return (await placeFiles(index, key, media.files)) ? placedMediaText(media) : text;
+    if (!(await placeFiles(index, key, media.files, large?.long))) return text;
+    return large ? await placedLargeText(large) : placedMediaText(media);
   };
+  // The values read in place are scanned first, in candidate order, between turns of the event
+  // loop: places in `hue.blobs` are then taken in candidate order, as for any value.
+  const largeReads = new Map<number, LargeMediaValue | undefined>();
+  for (const [index, { key, value }] of collector.candidates.entries()) {
+    if (
+      typeof value !== "string" ||
+      !collector.large?.has(key) ||
+      !mayInlineFiles(key, value) ||
+      literal.has(key)
+    )
+      continue;
+    try {
+      largeReads.set(index, await readLargeMediaText(key, value, options.longUnits));
+    } catch {
+      // JSON that does not parse holds no file: the value stays as recorded.
+    }
+  }
 
   /** A log record's body with its files placed. Each file's content counts toward the record's
    * inspection bounds, as an attribute's text does. */
@@ -905,15 +1017,23 @@ export async function offloadRecord(
   };
 
   const place = async (index: number, { key, value }: OffloadCandidate): Promise<void> => {
-    const placed = typeof value === "string" ? await parts(index, key, value) : value;
-    const size = sizeOf(placed);
+    const read = typeof value === "string" ? await parts(index, key, value) : value;
+    // Text joined from pieces of the recorded text is made one string only when it is kept
+    // inline; otherwise it is measured, hashed, uploaded and cut from its pieces.
+    const joined = read instanceof JoinedText ? read : undefined;
+    const size = joined ? joined.utf8Size() : sizeOf(read as string | Uint8Array);
     if (size <= valueBytes) {
-      result[key] = placed;
+      result[key] = joined ? joined.text() : read;
       return;
     }
+    const placed = joined ? joined.source(size) : (read as string | Uint8Array);
     listed.push({ order: index, key });
     const cut = () =>
-      typeof placed === "string" ? truncateUtf8(placed, valueBytes) : truncatedMarker(size);
+      joined
+        ? truncateUtf8(joined.head(valueBytes + 1), valueBytes)
+        : typeof placed === "string"
+          ? truncateUtf8(placed, valueBytes)
+          : truncatedMarker(size);
     // A log record's value is cut, as no log reader pages an uploaded text value.
     if (collector.log) {
       result[key] = cut();
@@ -928,14 +1048,26 @@ export async function offloadRecord(
     const stored = await (async () => {
       if (size > MAX_BLOB_BYTES) return { ok: false as const, reason: "tooLarge" as const };
       // Hashing a large value takes a slot as its upload does; the upload takes its own.
-      const digest = await uploader.limit(() => digestOf(placed));
-      const contentType =
-        typeof placed === "string" ? textContentType(placed) : "application/octet-stream";
+      let digest: FileDigest;
+      try {
+        digest = await uploader.limit(() => digestOf(placed, upload.deadline));
+      } catch {
+        return { ok: false as const, reason: "failed" as const };
+      }
+      const contentType = joined
+        ? textContentType(joined.head(256) + joined.tail(256))
+        : typeof placed === "string"
+          ? textContentType(placed)
+          : "application/octet-stream";
       const outcome = await uploader.store(traceId, key, placed, contentType, digest, upload);
       return outcome.ok ? { ...outcome, digest } : outcome;
     })();
     if (stored.ok) {
-      result[key] = typeof placed === "string" ? blobPrefix(placed) : blobPrefix(placed);
+      result[key] = joined
+        ? blobPrefix(joined.head(BLOB_PREFIX_BYTES + 1))
+        : typeof placed === "string"
+          ? blobPrefix(placed)
+          : blobPrefix(placed as Uint8Array);
       entries.push({
         order: [index, Infinity],
         entry: blobEntry(key, stored.digest.sha256, stored.digest.size, stored.contentType),
@@ -951,7 +1083,7 @@ export async function offloadRecord(
   await Promise.all(collector.candidates.map((candidate, index) => place(index, candidate)));
   await Promise.all(
     (collector.attachments ?? []).map((file, position) => {
-      if (!file.bytes.byteLength) return Promise.resolve();
+      if (!sizeOf(file.bytes)) return Promise.resolve();
       const slot = slots > 0 ? (slots--, true) : false;
       return (async () => {
         const key = mediaKey(file);

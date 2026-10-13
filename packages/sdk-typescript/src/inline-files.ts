@@ -794,9 +794,14 @@ export function reencodeMedia(media: MediaValue): void {
   }
 }
 
-/** Whether a found file has bytes to place: nonempty, and a whole string's `data:` URL decodes. */
-export function placeable(file: InlineFilePart, decoded: InlineFileBytes): boolean {
-  return decoded.bytes.byteLength > 0 && (!file.whole || decoded.decoded);
+/** Whether a found file has bytes to place: nonempty (`size` bytes), and a whole string's `data:`
+ * URL decodes. */
+export function placeable(
+  file: InlineFilePart,
+  decoded: Pick<InlineFileBytes, "decoded">,
+  size: number,
+): boolean {
+  return size > 0 && (!file.whole || decoded.decoded);
 }
 
 /** Whether an uploaded file keeps a 16 KiB prefix of its content in place (text media in a
@@ -806,7 +811,7 @@ export function placeable(file: InlineFilePart, decoded: InlineFileBytes): boole
 export function keepsPrefix(
   file: InlineFilePart,
   textual: boolean,
-  decoded: InlineFileBytes,
+  decoded: Pick<InlineFileBytes, "bareBase64">,
 ): boolean {
   return textual && !file.whole && !file.encoded?.length && !decoded.bareBase64;
 }
@@ -820,7 +825,10 @@ export function mediaBytes(file: InlineFilePart): InlineFileBytes {
   if (file.base64) return { bytes: Buffer.from(file.content, "base64"), decoded: true };
   return inlineFileBytes(file.content);
 }
-export function mediaContentType(file: InlineFilePart, decoded: InlineFileBytes): string {
+export function mediaContentType(
+  file: InlineFilePart,
+  decoded: Pick<InlineFileBytes, "decoded" | "urlMediaType">,
+): string {
   return (
     (isMediaContentType(file.contentType) ? file.contentType : undefined) ??
     (isMediaContentType(decoded.urlMediaType) ? decoded.urlMediaType : undefined) ??
@@ -958,7 +966,7 @@ export function digestMedia(
   let changed = false;
   for (const file of media.files) {
     const decoded = mediaBytes(file);
-    if (!placeable(file, decoded)) continue;
+    if (!placeable(file, decoded, decoded.bytes.byteLength)) continue;
     if (
       (nested || isTextMediaType(mediaContentType(file, decoded))) &&
       decoded.bytes.byteLength <= INLINE_FILE_LIMIT
@@ -991,7 +999,7 @@ export function digestFormBytes(value: unknown): number {
     if (units > MAX_INLINE_FILE_TEXT || inspected + units > INLINE_FILE_TEXT_PER_RECORD) continue;
     inspected += units;
     const decoded = mediaBytes(file);
-    if (!placeable(file, decoded)) continue;
+    if (!placeable(file, decoded, decoded.bytes.byteLength)) continue;
     if (
       isTextMediaType(mediaContentType(file, decoded)) &&
       decoded.bytes.byteLength <= INLINE_FILE_LIMIT

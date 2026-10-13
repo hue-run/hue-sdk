@@ -39,17 +39,20 @@ import {
   FALLBACK_MESSAGES,
   fallbackAttributes,
   fallbackRecord,
+  heldBytesOf,
   MAX_HELD_BLOB_BYTES,
   newTally,
   mediaKey,
   offloadAttributes,
   offloadRecord,
+  sizeOf,
   uploadBudgetMillis,
   type OffloadCollector,
   type MediaAttachment,
   type OffloadTally,
   type UploadContext,
 } from "./blobs.js";
+import { isByteSource } from "./large-media.js";
 import {
   advertisedLimits,
   BATCH_TARGET_BYTES,
@@ -356,6 +359,8 @@ export class HueTransport {
   private admissionDigests = new WeakMap<RecordValue, ReadonlyMap<string, DigestedMessage>>();
   // The span's own messages each admitted span inspected, or left to export to inspect.
   private admissionInspected = new WeakMap<RecordValue, ReadonlySet<string>>();
+  // The span's own values each admitted span held whole past the inspection bounds.
+  private admissionLarge = new WeakMap<RecordValue, ReadonlySet<string>>();
   /** Uploads values over the inline limit apart from their spans; absent when disabled. */
   private uploader?: BlobUploader;
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
@@ -390,8 +395,12 @@ export class HueTransport {
       ProtobufTraceSerializer,
       TraceExporterMetricsHelper,
       (span, cache, offload) => {
-        // Export inspects only the messages admission inspected within the record's allowance.
-        if (offload) offload.inspected = this.admissionInspected.get(span);
+        // Export inspects only the messages admission inspected within the record's allowance,
+        // and reads in place the values it held whole past the inspection bounds.
+        if (offload) {
+          offload.inspected = this.admissionInspected.get(span);
+          offload.large = this.admissionLarge.get(span);
+        }
         return redactSpan(span, this.options, cache, {
           valueBytes: this.limits.valueBytes,
           cut: this.admissionCuts.get(span),
@@ -463,7 +472,7 @@ export class HueTransport {
           if (!queued) {
             const tally = newTally();
             for (const file of this.mediaAttachments(span))
-              if (file.bytes.byteLength) countFallback(tally, "budget", span.spanContext().traceId);
+              if (sizeOf(file.bytes)) countFallback(tally, "budget", span.spanContext().traceId);
             this.reportOffload(tally);
             this.releaseMedia(span);
             return;
@@ -591,6 +600,7 @@ export class HueTransport {
       if (snapshot.cut.size) this.admissionCuts.set(snapshot.record, snapshot.cut);
       if (snapshot.digested.size) this.admissionDigests.set(snapshot.record, snapshot.digested);
       if (signal === "traces") this.admissionInspected.set(snapshot.record, snapshot.inspected);
+      if (snapshot.large.size) this.admissionLarge.set(snapshot.record, snapshot.large);
       if (snapshot.held) {
         this.heldBytes += snapshot.held;
         this.held.set(snapshot.record, snapshot.held);
@@ -734,7 +744,7 @@ export class HueTransport {
 
   /** @internal Retain a defensive copy within the existing held-value budget. */
   stageMedia(span: ApiSpan, file?: MediaAttachment): boolean {
-    if (this.closed || !this.offloadsValues() || file?.bytes.byteLength === 0) return true;
+    if (this.closed || !this.offloadsValues() || (file && sizeOf(file.bytes) === 0)) return true;
     if (!file) {
       const tally = newTally();
       countFallback(tally, "budget", span.spanContext().traceId);
@@ -759,7 +769,7 @@ export class HueTransport {
     if (
       files.length >= 64 ||
       (!this.media.has(identity) && this.media.size >= 2048) ||
-      this.heldBytes + file.bytes.byteLength > MAX_HELD_BLOB_BYTES
+      this.heldBytes + heldBytesOf(file.bytes) > MAX_HELD_BLOB_BYTES
     ) {
       this.uploadFallbacks++;
       this.issue(
@@ -772,11 +782,13 @@ export class HueTransport {
       );
       return false;
     }
-    const bytes = Uint8Array.from(file.bytes);
+    // A file read from disk as it is uploaded holds no bytes; bytes are copied, so a later change
+    // to the caller's buffer cannot alter what was recorded.
+    const bytes = isByteSource(file.bytes) ? file.bytes : Uint8Array.from(file.bytes);
     files.push({ ...file, bytes });
     this.media.set(identity, files);
     this.ownMedia(span, identity);
-    this.heldBytes += bytes.byteLength;
+    this.heldBytes += heldBytesOf(bytes);
     return true;
   }
 
@@ -793,7 +805,7 @@ export class HueTransport {
     if (previous?.some((file) => file.attribute === attribute)) {
       const kept = previous.filter((file) => {
         if (file.attribute !== attribute) return true;
-        this.heldBytes -= file.bytes.byteLength;
+        this.heldBytes -= heldBytesOf(file.bytes);
         return false;
       });
       if (kept.length) this.media.set(identity, kept);
@@ -801,7 +813,7 @@ export class HueTransport {
     }
     const tally = newTally();
     for (const file of files) {
-      if (!file.bytes.byteLength) continue;
+      if (!sizeOf(file.bytes)) continue;
       const refused = this.uploader?.refusal();
       if (!this.holdsValues() || refused) {
         countFallback(tally, refused ?? "unsupported", traceId);
@@ -812,7 +824,7 @@ export class HueTransport {
       if (
         staged.length >= MAX_BLOB_ENTRIES ||
         (!this.media.has(identity) && this.media.size >= 2048) ||
-        this.heldBytes + file.bytes.byteLength > MAX_HELD_BLOB_BYTES
+        this.heldBytes + heldBytesOf(file.bytes) > MAX_HELD_BLOB_BYTES
       ) {
         countFallback(tally, "budget", traceId);
         continue;
@@ -820,7 +832,7 @@ export class HueTransport {
       // Attachment bytes are the attachment's own copy: held as they are.
       staged.push({ ...file, attribute });
       this.media.set(identity, staged);
-      this.heldBytes += file.bytes.byteLength;
+      this.heldBytes += heldBytesOf(file.bytes);
       this.ownMedia(span, identity);
     }
     if (tally.fallbacks.size) this.reportOffload(tally);
@@ -836,7 +848,7 @@ export class HueTransport {
     const tally = newTally();
     const staged: MediaAttachment[] = [];
     for (const file of files) {
-      if (!file.bytes.byteLength) continue;
+      if (!sizeOf(file.bytes)) continue;
       const refused = this.uploader?.refusal();
       if (!this.holdsValues() || refused) countFallback(tally, refused ?? "unsupported", traceId);
       else if (staged.length >= MAX_BLOB_ENTRIES) countFallback(tally, "budget", traceId);
@@ -859,7 +871,7 @@ export class HueTransport {
       body !== null && typeof body === "object" ? this.logParts.get(body as object) : undefined;
     if (!pending) return;
     this.logParts.delete(body as object);
-    const size = pending.files.reduce((total, file) => total + file.bytes.byteLength, 0);
+    const size = pending.files.reduce((total, file) => total + heldBytesOf(file.bytes), 0);
     if (this.heldBytes + size > MAX_HELD_BLOB_BYTES) {
       const tally = newTally();
       for (const _file of pending.files) countFallback(tally, "budget", pending.traceId);
@@ -918,7 +930,7 @@ export class HueTransport {
     }
     const files = this.media.get(identity);
     if (!files) return;
-    for (const file of files) this.heldBytes -= file.bytes.byteLength;
+    for (const file of files) this.heldBytes -= heldBytesOf(file.bytes);
     this.media.delete(identity);
   }
 

@@ -86,6 +86,91 @@ console.log(redactionProbe.stdout.trim());
   }
   console.log(JSON.stringify({ nodeOnlyLimits: "passed" }));
 }
+// On Node a write the peer never reads never completes. An upload a store answers before its
+// whole body was sent, and then neither reads nor closes, must end its request and close its
+// source, not leave the request and the file it reads open.
+{
+  const { BlobUploader } = await import(
+    pathToFileURL(join(consumer, "node_modules/@hue-run/sdk/dist/blobs.js")).href
+  );
+  const net = await import("node:net");
+  const sockets = new Set();
+  const store = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    let head = "";
+    const onData = (chunk) => {
+      head += chunk.toString("latin1");
+      if (!head.includes("\r\n\r\n")) return;
+      socket.off("data", onData);
+      socket.pause();
+      socket.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    };
+    socket.on("data", onData);
+  });
+  store.listen(0, "127.0.0.1");
+  await once(store, "listening");
+  const api = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => (body += chunk));
+    request.on("end", () => {
+      const reservation = JSON.parse(body);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          status: "upload",
+          method: "PUT",
+          url: `http://127.0.0.1:${store.address().port}/store`,
+          headers: { "Content-Length": String(reservation.byteSize) },
+          ref: { content_type: reservation.contentType },
+        }),
+      );
+    });
+  });
+  api.listen(0, "127.0.0.1");
+  await once(api, "listening");
+  const uploader = new BlobUploader({
+    baseUrl: `http://127.0.0.1:${api.address().port}`,
+    apiKey: "synthetic",
+    timeoutMillis: 10_000,
+    allowInsecureHttp: false,
+    userAgent: "verify-safety",
+  });
+  // More than the connection buffers hold, so writing it waits on the store.
+  const size = 64 * 1024 * 1024;
+  let sourceClosed = false;
+  const source = {
+    size,
+    async *chunks() {
+      try {
+        for (let sent = 0; sent < size; sent += 1024 * 1024) yield Buffer.alloc(1024 * 1024, 1);
+      } finally {
+        sourceClosed = true;
+      }
+    },
+  };
+  try {
+    const outcome = await uploader.store(
+      "0123456789abcdef0123456789abcdef",
+      "input.value#/a",
+      source,
+      "audio/wav",
+      { sha256: "0".repeat(64), size },
+      { deadline: Date.now() + 30_000, wait: async () => false },
+    );
+    assert.deepEqual(outcome, { ok: false, reason: "failed" });
+    const until = Date.now() + 2_000;
+    while (!sourceClosed && Date.now() < until)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(sourceClosed, "An upload answered early left its request and source open");
+  } finally {
+    uploader.close();
+    for (const socket of sockets) socket.destroy();
+    store.close();
+    api.close();
+  }
+  console.log(JSON.stringify({ earlyAnswerClosesUpload: "passed" }));
+}
 // Exercise the installed snapshot with a genuinely concurrent growing view.
 // No hooks or mocked constructors create the race; vary the worker's delay to
 // cover growth before, during and after admission while bounding total work.

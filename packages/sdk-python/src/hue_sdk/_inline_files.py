@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from math import isfinite
 from threading import Lock
-from typing import Any
+from typing import Any, Protocol
 
 from ._json_edits import JsonEdit, apply_json_edits
 from ._limits import MAX_REQUEST_BYTES
@@ -179,13 +179,27 @@ def inline_file(content: str) -> InlineFile:
             decoded = binascii.a2b_base64(payload)
         except binascii.Error:
             decoded = None
-    media_type = match.group(1).split(";")[0].strip() if match else ""
+    # Trimmed as JavaScript trims, so both SDKs read the same media type.
+    media_type = match.group(1).split(";")[0].strip(_ECMASCRIPT_WHITESPACE) if match else ""
     return InlineFile(
         content.encode("utf-8") if decoded is None else decoded,
         decoded is not None,
         media_type or None,
         decoded is not None and match is None,
     )
+
+
+class DecodedFile(Protocol):
+    """How a file's bytes were read from its content, whether or not they were made."""
+
+    @property
+    def decoded(self) -> bool: ...
+
+    @property
+    def url_media_type(self) -> str | None: ...
+
+    @property
+    def bare_base64(self) -> bool: ...
 
 
 def _file_bytes(content: str) -> bytes:
@@ -887,13 +901,13 @@ def placed_media_text(media: MediaValue) -> str:
     return dumps_message(media.box["value"])
 
 
-def placeable(file: InlineFilePart, decoded: InlineFile) -> bool:
-    """Whether a found file has bytes to place: nonempty, and a whole string's data: URL
-    decodes."""
-    return bool(decoded.data) and (not file.whole or decoded.decoded)
+def placeable(file: InlineFilePart, decoded: DecodedFile, size: int) -> bool:
+    """Whether a found file has bytes to place: nonempty (``size`` bytes), and a whole string's
+    data: URL decodes."""
+    return size > 0 and (not file.whole or decoded.decoded)
 
 
-def keeps_prefix(file: InlineFilePart, textual: bool, decoded: InlineFile) -> bool:
+def keeps_prefix(file: InlineFilePart, textual: bool, decoded: DecodedFile) -> bool:
     """Whether an uploaded file keeps a 16 KiB prefix of its content in place (text media in a
     provider part, whose entry names the content) rather than its digest. A whole string, a file
     inside a JSON-encoded string, and a text file a part holds as bare base64 (a GenAI ``blob``,
@@ -913,7 +927,7 @@ def media_bytes(file: InlineFilePart) -> InlineFile:
     return inline_file(file.content)
 
 
-def media_content_type(file: InlineFilePart, decoded: InlineFile) -> str:
+def media_content_type(file: InlineFilePart, decoded: DecodedFile) -> str:
     for mime in (file.content_type, decoded.url_media_type):
         if is_media_content_type(mime):
             assert mime is not None
@@ -1025,7 +1039,7 @@ def digest_media(
     count = 0
     for file in media.files:
         decoded = media_bytes(file)
-        if not placeable(file, decoded) or (
+        if not placeable(file, decoded, len(decoded.data)) or (
             (preserve_small_binary or is_text_media_type(media_content_type(file, decoded)))
             and len(decoded.data) <= INLINE_FILE_LIMIT
         ):
@@ -1056,7 +1070,7 @@ def digest_form_size(value: Any) -> int:
             continue
         inspected += units
         decoded = media_bytes(file)
-        if not placeable(file, decoded) or (
+        if not placeable(file, decoded, len(decoded.data)) or (
             is_text_media_type(media_content_type(file, decoded))
             and len(decoded.data) <= INLINE_FILE_LIMIT
         ):

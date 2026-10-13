@@ -136,6 +136,9 @@ class Snapshot {
   /** The span's own message attributes inspected within the record's allowance, whether here or
    * left to export for a message held whole: export inspects only these. */
   inspectedKeys = new Set<string>();
+  /** The span's own attributes held whole for upload that the inspection bounds left out: export
+   * reads their media in place. */
+  largeKeys = new Set<string>();
 
   /**
    * In metadata-only mode the recorded messages, which export strips, are not copied at all. A
@@ -194,6 +197,9 @@ class Snapshot {
           this.inspected += value.length;
           this.inspectedKeys.add(key);
         }
+        // Past those bounds, export reads its media in place, without parsing the files out of
+        // it; nothing is read here, on the application's thread.
+        else if (!this.log && !literal && isMediaKey(key)) this.largeKeys.add(key);
         return { value };
       }
       // Within the queued length: an inspected attribute holding inline media is held whole for
@@ -202,7 +208,18 @@ class Snapshot {
       // their digest when queued, as before uploads existed; any other value is queued as it is.
       if (!isMediaKey(key) || literal) return undefined;
       const digested = this.inlineFiles(key, value, true);
-      if (digested === value || !this.holds(value.length * 2)) return undefined;
+      if (digested === value) {
+        // Over the cap but past the inspection bounds: export reads its media in place.
+        if (
+          !this.log &&
+          !this.inspectedKeys.has(key) &&
+          (value.length > this.hold.valueBytes ||
+            Buffer.byteLength(value, "utf8") > this.hold.valueBytes)
+        )
+          this.largeKeys.add(key);
+        return undefined;
+      }
+      if (!this.holds(value.length * 2)) return undefined;
       this.copy(digested, 1, "value", true);
       return { value };
     }
@@ -573,6 +590,8 @@ export interface RecordSnapshot<T> {
   digested: ReadonlyMap<string, DigestedMessage>;
   /** The span's own message attributes admission inspected or left to export to inspect. */
   inspected: ReadonlySet<string>;
+  /** The span's own attributes held whole past the inspection bounds, read in place at export. */
+  large: ReadonlySet<string>;
 }
 
 export function snapshotSpan(
@@ -640,6 +659,7 @@ export function snapshotSpan(
     held: snapshot.held,
     digested: snapshot.digested,
     inspected: snapshot.inspectedKeys,
+    large: snapshot.largeKeys,
   };
 }
 
@@ -706,5 +726,6 @@ export function snapshotLog(
     held: snapshot.held,
     digested: new Map(),
     inspected: new Set(),
+    large: new Set(),
   };
 }

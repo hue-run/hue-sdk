@@ -283,11 +283,19 @@ export interface FileRecord {
   mediaType: string;
   /** Hex SHA-256 of the file's bytes; computed from `data` when omitted. */
   sha256?: string;
-  /** Upload supplied bytes on this span when content capture is enabled. Defaults to false. */
+  /** Upload the file's bytes (`data`, or the file at `path`) on this span when content capture is
+   * enabled. Defaults to false. */
   upload?: boolean;
   /** The file's bytes, hashed and measured locally by default; a string is hashed as UTF-8.
-   * Data larger than 25 MiB is omitted and counted as an instrumentation failure. */
+   * Data larger than 25 MiB, which would be held in memory until it is uploaded, is omitted and
+   * counted as an instrumentation failure. Give `data` or `path`, not both. */
   data?: Uint8Array | string;
+  /** A file to hash and measure locally (Node.js file system) instead of `data`. Up to 25 MiB it is
+   * read now, as `data` is. A larger regular file, up to Hue's 1 GB upload limit, is hashed now a
+   * slice at a time and, with `upload: true`, read again from disk when it is uploaded: it must
+   * stay unchanged until the client flushes, and is uploaded only if it still has the size and
+   * SHA-256 it was recorded with (otherwise it counts as an upload fallback). */
+  path?: string;
   /** Size in bytes; computed from `data` when omitted. */
   byteSize?: number;
   /** File name, recorded as `hue.file.name` only when `captureContent` is true. */

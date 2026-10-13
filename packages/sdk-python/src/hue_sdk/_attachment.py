@@ -10,14 +10,22 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping
+import stat
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from ._inline_files import inline_file, is_media_content_type, is_media_name
+from ._large_media import ByteSource
 
-# Matches the 25 MiB limit of ``record_file`` data.
+# Matches the 25 MiB limit of ``record_file`` data: bytes are held in memory until they are
+# uploaded.
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+# The largest file given by path that is hashed and read again from disk when it is uploaded:
+# Hue's 1 GB upload limit.
+MAX_PATH_FILE_BYTES = 1_000_000_000
+# How much of a file given by path is read at once, to hash it or to upload it.
+_FILE_SLICE = 1024 * 1024
 # How deep in a value an attachment's part may sit and still be uploaded: Hue reads media parts
 # within ten levels of the value's root.
 MAX_ATTACHMENT_DEPTH = 10
@@ -37,24 +45,123 @@ def _string_bytes(text: str) -> bytes | None:
         return None
 
 
-def _file_bytes(path: str | os.PathLike[str]) -> bytes | None:
-    """A file's bytes, read through one descriptor and never past the limit."""
-    with open(path, "rb") as file:
-        if os.fstat(file.fileno()).st_size > MAX_ATTACHMENT_BYTES:
+@dataclass(frozen=True)
+class PathFile:
+    """A regular file given by path over the in-memory limit, as it was hashed when it was
+    recorded: its absolute path, size and SHA-256. Its bytes are read again from disk when it is
+    uploaded."""
+
+    path: str
+    size: int
+    sha256: str
+
+
+def read_path(path: str | os.PathLike[str]) -> bytes | PathFile | None:
+    """A regular file given by path: its bytes when it is no larger than 25 MiB, and otherwise, up
+    to Hue's 1 GB upload limit, its size and SHA-256 from one reading pass a slice at a time,
+    never holding it whole. None for a file over its limit and for anything that is no regular
+    file (a named pipe, a device), which is opened without waiting and never read; raises
+    ``OSError`` for one that cannot be opened."""
+    # Resolved first: the file read now is the one read again when it is uploaded.
+    path = os.path.abspath(path)
+    # Without waiting: a named pipe would block the application until something wrote to it.
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+    except OSError:
+        os.close(descriptor)
+        raise
+    if not regular:
+        os.close(descriptor)
+        return None
+    with os.fdopen(descriptor, "rb") as file:
+        info = os.fstat(file.fileno())
+        if info.st_size <= MAX_ATTACHMENT_BYTES:
+            # One byte past the limit shows a file that grew while it was read.
+            data = file.read(MAX_ATTACHMENT_BYTES + 1)
+            return data if len(data) <= MAX_ATTACHMENT_BYTES else None
+        if info.st_size > MAX_PATH_FILE_BYTES:
             return None
-        # One byte past the limit shows a file that grew while it was read.
-        data = file.read(MAX_ATTACHMENT_BYTES + 1)
-    return data if len(data) <= MAX_ATTACHMENT_BYTES else None
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := file.read(_FILE_SLICE):
+            size += len(chunk)
+            # A file that grew past the limit while it was read is refused, not read on.
+            if size > MAX_PATH_FILE_BYTES:
+                return None
+            digest.update(chunk)
+    return PathFile(path, size, digest.hexdigest())
 
 
-def _attachment_bytes(data: Any, path: Any) -> bytes | None:
+def file_source(file: PathFile) -> ByteSource:
+    """A file given by path as an upload body, read from disk a slice at a time. Each slice is
+    hashed as it is read and sent once the next one is read; the last is sent only once the file
+    ended at its recorded size with its recorded SHA-256. A file that changed since it was
+    recorded, or can no longer be read, ends the read with an error before its body is complete
+    and sets ``changed``, so the upload is abandoned and the value is counted as not uploaded; so
+    does a path that is no longer a regular file, which is opened without waiting (a named pipe in
+    its place would wait for a writer) and never read. Hue's presigned PUT also signs the size and
+    SHA-256, so the store refuses a body that differs."""
+
+    def chunks() -> Iterator[bytes]:
+        # Each read starts fresh: a retried upload reads the file again.
+        source.changed = False
+
+        def changed() -> OSError:
+            source.changed = True
+            return OSError("The file changed after it was recorded.")
+
+        try:
+            descriptor = os.open(
+                file.path,
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
+            )
+        except OSError:
+            raise changed() from None
+        try:
+            regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+        except OSError:
+            regular = False
+        if not regular:
+            os.close(descriptor)
+            raise changed()
+        with os.fdopen(descriptor, "rb") as handle:
+            digest = hashlib.sha256()
+            size = 0
+            pending: bytes | None = None
+            while True:
+                try:
+                    chunk = handle.read(_FILE_SLICE)
+                except OSError:
+                    raise changed() from None
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > file.size:
+                    raise changed()
+                digest.update(chunk)
+                if pending is not None:
+                    yield pending
+                pending = chunk
+            if size != file.size or digest.hexdigest() != file.sha256:
+                raise changed()
+            if pending is not None:
+                yield pending
+
+    source = ByteSource(file.size, chunks)
+    return source
+
+
+def _attachment_bytes(data: Any, path: Any) -> bytes | PathFile | None:
     if (data is None) == (path is None):
         return None
     if path is not None:
         if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
             return None
-        content = _file_bytes(path)
-    elif isinstance(data, str):
+        return read_path(path)
+    if isinstance(data, str):
         if len(data) > 4 * MAX_ATTACHMENT_BYTES:
             return None
         content = _string_bytes(data)
@@ -81,13 +188,19 @@ class Attachment:
     ``hue.blobs``.
 
     Give exactly one of ``data`` (bytes, or a base64 string or ``data:`` URL holding them) and
-    ``path`` (a file read now). The bytes are read and hashed when the attachment is created and
-    are limited to 25 MiB. Creating one never raises: an attachment without exactly one of them,
-    with unreadable data, larger data or an invalid ``content_type`` records ``None`` where it is
-    placed and counts an instrumentation issue; an invalid ``name`` alone is omitted and counted.
+    ``path`` (a file). The bytes are read and hashed when the attachment is created; ``data`` is
+    limited to 25 MiB, as the bytes are held in memory until they are uploaded. A ``path`` names a
+    regular file, opened without waiting: anything else, such as a named pipe, is invalid. One up
+    to 25 MiB is read then too; a larger regular file, up to Hue's 1 GB upload limit, is hashed then
+    a slice at a time and read again from disk when it is uploaded, so it must stay in place and
+    unchanged until the client flushes: a file whose size or SHA-256 then differs is not uploaded
+    and counts as an upload fallback, its part keeping the digest it was recorded with. Creating
+    one never raises: an attachment without exactly one of them, with unreadable data, larger
+    data or an invalid ``content_type`` records ``None`` where it is placed and counts an
+    instrumentation issue; an invalid ``name`` alone is omitted and counted.
     """
 
-    __slots__ = ("_content_type", "_name", "_data", "_sha256", "_invalid_name")
+    __slots__ = ("_content_type", "_name", "_data", "_file", "_sha256", "_invalid_name")
 
     def __init__(
         self,
@@ -97,7 +210,7 @@ class Attachment:
         content_type: str,
         name: str | None = None,
     ) -> None:
-        content: bytes | None = None
+        content: bytes | PathFile | None = None
         if is_media_content_type(content_type):
             try:
                 content = _attachment_bytes(data, path)
@@ -107,8 +220,16 @@ class Attachment:
         self._content_type = content_type if isinstance(content_type, str) else ""
         self._name = name if is_media_name(name) else None
         self._invalid_name = name is not None and self._name is None
-        self._data = content
-        self._sha256 = hashlib.sha256(content).hexdigest() if content is not None else None
+        # A file given by path over 25 MiB holds no bytes: it is read again when it is uploaded.
+        self._file = content if isinstance(content, PathFile) else None
+        self._data = content if isinstance(content, bytes) else None
+        self._sha256 = (
+            self._file.sha256
+            if self._file is not None
+            else hashlib.sha256(self._data).hexdigest()
+            if self._data is not None
+            else None
+        )
 
     @property
     def content_type(self) -> str:
@@ -128,6 +249,8 @@ class Attachment:
     @property
     def size(self) -> int | None:
         """Size of the bytes; ``None`` for an invalid attachment."""
+        if self._file is not None:
+            return self._file.size
         return len(self._data) if self._data is not None else None
 
     def __repr__(self) -> str:
@@ -162,15 +285,15 @@ def modality_of(content_type: str) -> str:
 def attachment_part(attachment: Attachment, capture_content: bool) -> dict[str, Any] | None:
     """An attachment's digest-form GenAI part, the name only with content capture; ``None`` for
     an invalid attachment."""
-    data = attachment._data
-    if data is None or attachment._sha256 is None:
+    size = attachment.size
+    if size is None or attachment._sha256 is None:
         return None
     part: dict[str, Any] = {
         "type": "blob",
         "mime_type": attachment._content_type,
         "modality": modality_of(attachment._content_type),
         "sha256": attachment._sha256,
-        "size": len(data),
+        "size": size,
     }
     if capture_content and attachment._name is not None:
         part["name"] = attachment._name

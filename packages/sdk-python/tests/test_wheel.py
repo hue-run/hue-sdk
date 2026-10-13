@@ -173,6 +173,7 @@ with Hue(os.environ['HUE_BASE_URL'], os.environ['HUE_API_KEY'], capture_content=
         "test_blobs.py",
         "test_media_parts.py",
         "test_attachments.py",
+        "test_large_media.py",
     ):
         shutil.copyfile(package / "tests" / name, receipt_tests / name)
     shutil.copytree(package / "tests/fixtures/media-parts", receipt_tests / "fixtures/media-parts")
