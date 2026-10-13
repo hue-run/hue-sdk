@@ -173,6 +173,7 @@ def _longer(text: str, start: int, end: int, units: int) -> bool:
 class _Skeleton:
     text: str
     long: dict[str, LongText] = field(default_factory=dict)
+    nonce: str = ""
 
 
 def _skeleton_of(text: str, long_units: int) -> _Skeleton | None:
@@ -236,7 +237,7 @@ def _skeleton_of(text: str, long_units: int) -> _Skeleton | None:
     # Counted in UTF-16 code units, as the TypeScript SDK counts the skeleton.
     if utf16_size(skeleton, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT:
         return None
-    return _Skeleton(skeleton, long)
+    return _Skeleton(skeleton, long, nonce)
 
 
 @dataclass
@@ -247,6 +248,10 @@ class LargeMediaValue:
 
     media: MediaValue
     long: dict[str, LongText]
+    # What every stand-in's tag starts with, followed by its index in ``order`` as eight hex
+    # digits: one forward scan for it finds every stand-in left in a placed text.
+    nonce: str = ""
+    order: list[str] = field(default_factory=list)
 
 
 def read_large_media_text(
@@ -272,8 +277,9 @@ def read_large_media_text(
             if utf16_size(text, MAX_INLINE_FILE_TEXT) > MAX_INLINE_FILE_TEXT:
                 return None
             return LargeMediaValue(media_in(text), {})
-        stub = _stand_in(found, f"{secrets.token_hex(16)}{0:08x}")
-        return LargeMediaValue(media_in(stub), {stub: found})
+        nonce = secrets.token_hex(16)
+        stub = _stand_in(found, f"{nonce}{0:08x}")
+        return LargeMediaValue(media_in(stub), {stub: found}, nonce, [stub])
 
     def json_text(check: Callable[[Any], bool] | None = None) -> LargeMediaValue | None:
         skeleton = _skeleton_of(text, long_units)
@@ -284,7 +290,9 @@ def read_large_media_text(
             return None
         if not reader_parses(parsed):
             return None
-        return LargeMediaValue(media_in(parsed, skeleton.text), skeleton.long)
+        return LargeMediaValue(
+            media_in(parsed, skeleton.text), skeleton.long, skeleton.nonce, list(skeleton.long)
+        )
 
     if reading == "json":
         return json_text()
@@ -372,17 +380,29 @@ def placed_large_text(media: LargeMediaValue) -> str | JoinedText:
     stands for. Every byte the placements do not change is the recorded text's. Text that keeps a
     long string is returned as its pieces (``JoinedText``), not copied into one string."""
     edited = placed_media_text(media.media)
-    kept = sorted(
-        (at, stub, long) for stub, long in media.long.items() if (at := edited.find(stub)) != -1
-    )
-    if not kept:
+    if not media.order:
         return edited
+    # One forward scan for the stand-ins' shared nonce finds each one left, in order, by the index
+    # its tag carries: linear in the text however many there are.
     pieces: list[tuple[str, int, int]] = []
     start = 0
-    for at, stub, long in kept:
-        pieces.append((edited, start, at))
-        pieces.append((long.text, long.start, long.end))
-        start = at + len(stub)
+    at = edited.find(media.nonce)
+    while at != -1:
+        try:
+            stub = media.order[int(edited[at + 32 : at + 40], 16)]
+        except (ValueError, IndexError):
+            stub = None
+        begin = at - stub.find(media.nonce) if stub is not None else -1
+        if stub is not None and begin >= start and edited.startswith(stub, begin):
+            long = media.long[stub]
+            pieces.append((edited, start, begin))
+            pieces.append((long.text, long.start, long.end))
+            start = begin + len(stub)
+            at = edited.find(media.nonce, start)
+        else:
+            at = edited.find(media.nonce, at + 1)
+    if not pieces:
+        return edited
     pieces.append((edited, start, len(edited)))
     return JoinedText(pieces)
 

@@ -966,7 +966,7 @@ export async function offloadRecord(
     }
     if (!media?.files.length) return text;
     if (!(await placeFiles(index, key, media.files, large?.long))) return text;
-    return large ? placedLargeText(large) : placedMediaText(media);
+    return large ? await placedLargeText(large) : placedMediaText(media);
   };
   // The values read in place are scanned first, in candidate order, between turns of the event
   // loop: places in `hue.blobs` are then taken in candidate order, as for any value.

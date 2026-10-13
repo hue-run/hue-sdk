@@ -170,6 +170,8 @@ async function find(text: string, character: string, from: number, to: number): 
 interface Skeleton {
   text: string;
   long: Map<string, LongText>;
+  nonce: string;
+  order: string[];
 }
 
 /**
@@ -238,7 +240,7 @@ async function skeletonOf(text: string, longUnits: number): Promise<Skeleton | u
     copied = end;
   }
   pieces.push(text.slice(copied));
-  return { text: pieces.join(""), long };
+  return { text: pieces.join(""), long, nonce, order: [...long.keys()] };
 }
 
 /** A media value read in place, with the long strings its stand-ins name. Its `source` is the
@@ -246,6 +248,10 @@ async function skeletonOf(text: string, longUnits: number): Promise<Skeleton | u
  * strings back. */
 export interface LargeMediaValue extends MediaValue {
   long: Map<string, LongText>;
+  /** What every stand-in's tag starts with, followed by its index in {@link order} as eight hex
+   * digits: one forward scan for it finds every stand-in left in a placed text. */
+  nonce: string;
+  order: string[];
 }
 
 /**
@@ -268,9 +274,12 @@ export async function readLargeMediaText(
         ? await classify(text, 0, text.length, true)
         : undefined;
     if (!found)
-      return text.length > MAX_INLINE_FILE_TEXT ? undefined : { ...mediaIn(text), long: new Map() };
-    const stub = standIn(found, randomBytes(16).toString("hex") + "00000000");
-    return { ...mediaIn(stub), long: new Map([[stub, found]]) };
+      return text.length > MAX_INLINE_FILE_TEXT
+        ? undefined
+        : { ...mediaIn(text), long: new Map(), nonce: "", order: [] };
+    const nonce = randomBytes(16).toString("hex");
+    const stub = standIn(found, `${nonce}00000000`);
+    return { ...mediaIn(stub), long: new Map([[stub, found]]), nonce, order: [stub] };
   };
   const json = async (
     check?: (parsed: unknown) => boolean,
@@ -280,7 +289,12 @@ export async function readLargeMediaText(
     const parsed: unknown = JSON.parse(skeleton.text);
     if (check && !check(parsed)) return undefined;
     return readerParses(parsed)
-      ? { ...mediaIn(parsed, skeleton.text), long: skeleton.long }
+      ? {
+          ...mediaIn(parsed, skeleton.text),
+          long: skeleton.long,
+          nonce: skeleton.nonce,
+          order: skeleton.order,
+        }
       : undefined;
   };
   switch (reading) {
@@ -385,21 +399,29 @@ export class JoinedText {
  * for. Every byte the placements do not change is the recorded text's. Text that keeps a long
  * string is returned as its pieces ({@link JoinedText}), not copied into one string.
  */
-export function placedLargeText(media: LargeMediaValue): string | JoinedText {
+export async function placedLargeText(media: LargeMediaValue): Promise<string | JoinedText> {
   const edited = placedMediaText(media);
-  const kept: { at: number; stub: string; long: LongText }[] = [];
-  for (const [stub, long] of media.long) {
-    const at = edited.indexOf(stub);
-    if (at !== -1) kept.push({ at, stub, long });
-  }
-  if (!kept.length) return edited;
-  kept.sort((a, b) => a.at - b.at);
+  if (!media.order.length) return edited;
+  // One forward scan for the stand-ins' shared nonce finds each one left, in order, by the index
+  // its tag carries: linear in the text however many there are, a window at a time.
   const pieces: [string, number, number][] = [];
   let from = 0;
-  for (const { at, stub, long } of kept) {
-    pieces.push([edited, from, at], [long.text, long.start, long.end]);
-    from = at + stub.length;
+  let turn = 0;
+  for (let at = edited.indexOf(media.nonce); at !== -1; at = edited.indexOf(media.nonce, at + 1)) {
+    if (at - turn >= WINDOW_UNITS) {
+      turn = at;
+      await nextTurn();
+    }
+    const stub = media.order[Number.parseInt(edited.slice(at + 32, at + 40), 16)];
+    if (stub === undefined) continue;
+    const start = at - stub.indexOf(media.nonce);
+    if (start < from || !edited.startsWith(stub, start)) continue;
+    const long = media.long.get(stub)!;
+    pieces.push([edited, from, start], [long.text, long.start, long.end]);
+    from = start + stub.length;
+    at = from - 1;
   }
+  if (!pieces.length) return edited;
   pieces.push([edited, from, edited.length]);
   return new JoinedText(pieces);
 }

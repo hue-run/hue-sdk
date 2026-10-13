@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { ROOT_CONTEXT, trace, type Span } from "@opentelemetry/api";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { TracerProvider } from "@opentelemetry/sdk-trace";
@@ -3757,4 +3757,39 @@ describe("files given by path over 25 MiB", () => {
       file.remove();
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "a named pipe given by path is refused without waiting for a writer",
+    async () => {
+      const endpoint = hue();
+      const hueClient = client(endpoint);
+      const directory = mkdtempSync(join(tmpdir(), "hue-pipe-"));
+      const pipe = join(directory, "recording.wav");
+      execFileSync("mkfifo", [pipe]);
+      // A writer for any open that waits, from 3 seconds on, so waiting fails this test rather than
+      // hanging it.
+      const writer = spawn("sh", ["-c", 'sleep 3; while :; do printf x > "$0"; done', pipe], {
+        stdio: "ignore",
+      });
+      try {
+        const started = performance.now();
+        await hueClient.withSpan("piped", (span) => {
+          span.setInput({ recording: new Attachment({ path: pipe, contentType: "audio/wav" }) });
+          hueClient.recordFile({ role: "input", mediaType: "audio/wav", path: pipe, upload: true });
+        });
+        expect(performance.now() - started).toBeLessThan(1000);
+        await expect(hueClient.flush()).rejects.toThrow("Hue could not accept all telemetry");
+        expect(hueClient.transport.getReport().instrumentationFailures).toBe(2);
+        const span = endpoint.span("piped")!;
+        expect(JSON.parse(attr(span, "input.value")!.stringValue!)).toEqual({ recording: null });
+        expect(span.events ?? []).toEqual([]);
+        expect(endpoint.reservations).toEqual([]);
+      } finally {
+        writer.kill("SIGKILL");
+        await hueClient.shutdown();
+        endpoint.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });

@@ -358,7 +358,8 @@ Give exactly one of `data` (a `Buffer`, typed array, `ArrayBuffer`, or a base64 
 URL) and `path` (a file on the file system), a `contentType` and optionally a `name`. `data` is
 read and hashed when the attachment is created and is limited to 25 MiB, the `recordFile` limit:
 it is held in memory from then until export, within the 128 MiB budget that queued spans share for
-values awaiting upload. A `path` up to 25 MiB is read the same way. A larger regular file, up to
+values awaiting upload. A `path` names a regular file: anything else, such as a named pipe, is
+refused without waiting on it. A `path` up to 25 MiB is read the same way. A larger regular file, up to
 Hue's 1 GB upload limit, is not held: it is hashed a 1 MiB slice at a time when the attachment is
 created and read again from disk when it is uploaded, each slice hashed as it is sent and the last
 sent only once the file ended at the size and SHA-256 it was recorded with. Keep such a file in
@@ -416,7 +417,7 @@ Give `path` instead of `data` for a file on disk: up to 25 MiB it is read as `da
 regular file, up to Hue's 1 GB upload limit, is hashed a slice at a time now and, with `upload`,
 read again from disk when it is uploaded, as an [`Attachment`](#attach-a-file-anywhere) given by
 path is: it uploads only if it still has the size and SHA-256 it was recorded with. A file over
-1 GB, or `data` and `path` together, is omitted and counted. Upload requires supplied bytes or a
+1 GB, a path that is no regular file, or `data` and `path` together, is omitted and counted. Upload requires supplied bytes or a
 path, content capture and an ordinary project key. It runs during export and adds a `hue.blobs` entry to the
 same span, keyed `event:hue.file:<sha256>`, while preserving the event. An export fits every
 span's events and entries before it uploads any of these files, then uploads the files of all its

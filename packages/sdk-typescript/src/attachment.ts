@@ -70,18 +70,21 @@ export interface PathFile {
 const FILE_SLICE = 1024 * 1024;
 
 /**
- * A file given by path: its bytes when it is no larger than 25 MiB (or is no regular file, read to
- * its end within that limit), and otherwise, for a regular file up to Hue's 1 GB upload limit, its
- * size and SHA-256 from one reading pass a slice at a time, never holding it whole. Undefined for a
- * file over its limit; throws for one that cannot be read.
+ * A regular file given by path: its bytes when it is no larger than 25 MiB, and otherwise, up to
+ * Hue's 1 GB upload limit, its size and SHA-256 from one reading pass a slice at a time, never
+ * holding it whole. Undefined for a file over its limit and for anything that is no regular file
+ * (a named pipe, a device), which is opened without waiting and never read; throws for one that
+ * cannot be opened.
  */
 export function readPath(path: string): { bytes: Uint8Array } | { file: PathFile } | undefined {
   // Resolved first: the file read now is the one read again when it is uploaded.
   const absolute = resolve(path);
-  const descriptor = openSync(absolute, "r");
+  // Without waiting: a named pipe would block the application until something wrote to it.
+  const descriptor = openSync(absolute, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
     const info = fstatSync(descriptor);
-    if (!info.isFile() || info.size <= MAX_FILE_DATA_BYTES) {
+    if (!info.isFile()) return undefined;
+    if (info.size <= MAX_FILE_DATA_BYTES) {
       const bytes = fileBytes(descriptor);
       return bytes ? { bytes } : undefined;
     }
@@ -162,8 +165,8 @@ export function fileSource(file: PathFile): ByteSource {
 
 /** A file's bytes, read through one descriptor and never past the in-memory limit. */
 function fileBytes(descriptor: number): Uint8Array | undefined {
-  // Read to its end, which may lie past its size as stated (a file that grew, a pipe), but never
-  // more than one byte past the limit.
+  // Read to its end, which may lie past its size as stated (a file that grew), but never more
+  // than one byte past the limit.
   const parts: Buffer[] = [];
   let total = 0;
   for (;;) {
@@ -210,8 +213,9 @@ function attachmentBytes(
  * uploads its bytes during export, listed under the record's `hue.blobs`.
  *
  * The bytes are read and hashed when the attachment is created; `data` is limited to 25 MiB, as
- * the bytes are held in memory until they are uploaded. A `path` up to 25 MiB is read then too; a
- * larger regular file, up to Hue's 1 GB upload limit, is hashed then a slice at a time and read
+ * the bytes are held in memory until they are uploaded. A `path` names a regular file, opened
+ * without waiting: anything else, such as a named pipe, is invalid. One up to 25 MiB is read then
+ * too; a larger regular file, up to Hue's 1 GB upload limit, is hashed then a slice at a time and read
  * again from disk when it is uploaded, so it must stay in place and unchanged until the client
  * flushes: a file whose size or SHA-256 then differs is not uploaded and counts as an upload
  * fallback, its part keeping the digest it was recorded with. Creating one never throws: an

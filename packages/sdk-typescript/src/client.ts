@@ -971,7 +971,8 @@ export class HueClient {
    * measured locally and uploaded only with `upload: true`: `data` and a file up to 25 MiB are
    * held in memory until then, while a larger regular file, up to Hue's 1 GB upload limit, is
    * hashed a slice at a time and read again from disk when it is uploaded, and is uploaded only if
-   * it still has the size and SHA-256 it was recorded with. The event is metadata, so it is
+   * it still has the size and SHA-256 it was recorded with; a `path` that is no regular file, such
+   * as a named pipe, is refused without waiting on it. The event is metadata, so it is
    * recorded in both capture modes. An invalid record, or one without an active span, is omitted
    * and counted, never thrown; an invalid name alone is omitted and counted while the rest is
    * recorded.
@@ -997,7 +998,8 @@ export class HueClient {
         if (data !== undefined) throw new TypeError("A file takes data or a path, not both");
         if (typeof path !== "string" || !path) throw new TypeError("Invalid file path");
         const read = readPath(path);
-        if (!read) throw new RangeError("File exceeds Hue's 1 GB upload limit");
+        if (!read)
+          throw new RangeError("File must be a regular file within Hue's 1 GB upload limit");
         if ("bytes" in read) given = read.bytes;
         else {
           onDisk = read.file;

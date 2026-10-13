@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from pathlib import Path
 from time import monotonic
@@ -17,7 +18,7 @@ import pytest
 
 import hue_sdk._large_media as large_media
 from hue_sdk._blobs import BLOBS_KEY, Held, _Outcome, digest_of, place_spans
-from hue_sdk._large_media import read_large_media_text
+from hue_sdk._large_media import JoinedText, placed_large_text, read_large_media_text
 from hue_sdk._limits import TRUNCATED_KEY
 
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
@@ -260,6 +261,30 @@ def test_long_strings_are_read_in_place_and_the_json_around_them_is_bounded():
         ]
     )
     assert read_large_media_text("gen_ai.input.messages", padded, 300) is None
+
+
+def test_thousands_of_long_strings_are_put_back_in_one_scan():
+    # 3,000 long base64 strings that are not files, around one file: their stand-ins are found in
+    # one forward scan, not one search of the whole text each.
+    parts: list[dict[str, str]] = [
+        {"type": "text", "content": base64.b64encode(os.urandom(300)).decode()} for _ in range(3000)
+    ]
+    parts.append(
+        {
+            "type": "blob",
+            "mime_type": "audio/wav",
+            "content": base64.b64encode(os.urandom(3000)).decode(),
+        }
+    )
+    value = json.dumps([{"role": "user", "parts": parts}], separators=(",", ":"))
+    read = read_large_media_text("gen_ai.input.messages", value, 300)
+    assert read is not None and len(read.long) == 3001
+    started = monotonic()
+    placed = placed_large_text(read)
+    elapsed = monotonic() - started
+    assert isinstance(placed, JoinedText)
+    assert "".join(placed.windows()) == value
+    assert elapsed < 1, elapsed
 
 
 def test_a_value_over_the_bound_is_refused_without_a_copy_of_it():

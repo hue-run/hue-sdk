@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from threading import Thread
@@ -780,3 +781,32 @@ def test_bytes_over_25_mib_and_a_file_over_the_1_gb_upload_limit_are_still_refus
         assert hue.export_status.instrumentation_failures == 3
     assert [event.name for event in hue_store.span("refused").events] == []
     assert hue_store.reservations == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes")
+def test_a_named_pipe_given_by_path_is_refused_without_waiting_for_a_writer(hue_store, tmp_path):
+    pipe = tmp_path / "recording.wav"
+    os.mkfifo(pipe)
+    # A writer for any open that waits, from 3 seconds on, so waiting fails this test rather than
+    # hanging it.
+    writer = subprocess.Popen(
+        ["sh", "-c", 'sleep 3; while :; do printf x > "$0"; done', str(pipe)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        with client(hue_store) as hue:
+            started = time.monotonic()
+            with hue.span("piped") as span:
+                span.set_input({"recording": Attachment(path=pipe, content_type="audio/wav")})
+                span.record_file(role="input", media_type="audio/wav", path=pipe, upload=True)
+            assert time.monotonic() - started < 1
+            assert not hue.force_flush(timeout_millis=30_000)
+            assert hue.export_status.instrumentation_failures == 2
+        span = hue_store.span("piped")
+        assert json.loads(attrs(span)["input.value"].string_value) == {"recording": None}
+        assert [event.name for event in span.events] == []
+        assert hue_store.reservations == []
+    finally:
+        writer.kill()
+        writer.wait()

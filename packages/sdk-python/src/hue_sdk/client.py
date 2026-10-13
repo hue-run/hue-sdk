@@ -504,7 +504,8 @@ class HueSpan:
         it is held in memory until it is uploaded; a file at ``path`` up to 25 MiB is read now as
         ``data`` is, and a larger regular file, up to Hue's 1 GB upload limit, is hashed now a
         slice at a time and read again from disk when it is uploaded, which it is only if it still
-        has the size and SHA-256 it was recorded with. Give ``data`` or ``path``, not both. The
+        has the size and SHA-256 it was recorded with; a ``path`` that is no regular file, such as
+        a named pipe, is refused without waiting on it. Give ``data`` or ``path``, not both. The
         event carries ``hue.file.sha256``, ``hue.file.role``, ``hue.file.media_type``,
         ``hue.file.size`` when known and, when content is captured, ``hue.file.name``. An invalid
         record is omitted and counted; an invalid name alone is omitted and counted while the
@@ -547,7 +548,7 @@ class HueSpan:
                 raise ValueError("Invalid file path.")
             read = read_path(path)
             if read is None:
-                raise ValueError("File exceeds Hue's 1 GB upload limit.")
+                raise ValueError("File must be a regular file within Hue's 1 GB upload limit.")
             if isinstance(read, PathFile):
                 on_disk = read
                 # A caller-supplied digest or size must describe the same bytes.

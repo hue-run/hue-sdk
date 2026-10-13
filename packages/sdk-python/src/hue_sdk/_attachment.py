@@ -57,15 +57,28 @@ class PathFile:
 
 
 def read_path(path: str | os.PathLike[str]) -> bytes | PathFile | None:
-    """A file given by path: its bytes when it is no larger than 25 MiB (or is no regular file,
-    read to its end within that limit), and otherwise, for a regular file up to Hue's 1 GB upload
-    limit, its size and SHA-256 from one reading pass a slice at a time, never holding it whole.
-    None for a file over its limit; raises ``OSError`` for one that cannot be read."""
+    """A regular file given by path: its bytes when it is no larger than 25 MiB, and otherwise, up
+    to Hue's 1 GB upload limit, its size and SHA-256 from one reading pass a slice at a time,
+    never holding it whole. None for a file over its limit and for anything that is no regular
+    file (a named pipe, a device), which is opened without waiting and never read; raises
+    ``OSError`` for one that cannot be opened."""
     # Resolved first: the file read now is the one read again when it is uploaded.
     path = os.path.abspath(path)
-    with open(path, "rb") as file:
+    # Without waiting: a named pipe would block the application until something wrote to it.
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+    except OSError:
+        os.close(descriptor)
+        raise
+    if not regular:
+        os.close(descriptor)
+        return None
+    with os.fdopen(descriptor, "rb") as file:
         info = os.fstat(file.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size <= MAX_ATTACHMENT_BYTES:
+        if info.st_size <= MAX_ATTACHMENT_BYTES:
             # One byte past the limit shows a file that grew while it was read.
             data = file.read(MAX_ATTACHMENT_BYTES + 1)
             return data if len(data) <= MAX_ATTACHMENT_BYTES else None
@@ -176,8 +189,9 @@ class Attachment:
 
     Give exactly one of ``data`` (bytes, or a base64 string or ``data:`` URL holding them) and
     ``path`` (a file). The bytes are read and hashed when the attachment is created; ``data`` is
-    limited to 25 MiB, as the bytes are held in memory until they are uploaded. A ``path`` up to
-    25 MiB is read then too; a larger regular file, up to Hue's 1 GB upload limit, is hashed then
+    limited to 25 MiB, as the bytes are held in memory until they are uploaded. A ``path`` names a
+    regular file, opened without waiting: anything else, such as a named pipe, is invalid. One up
+    to 25 MiB is read then too; a larger regular file, up to Hue's 1 GB upload limit, is hashed then
     a slice at a time and read again from disk when it is uploaded, so it must stay in place and
     unchanged until the client flushes: a file whose size or SHA-256 then differs is not uploaded
     and counts as an upload fallback, its part keeping the digest it was recorded with. Creating

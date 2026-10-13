@@ -8,7 +8,13 @@ import {
   type BlobUploader,
   type OffloadCollector,
 } from "../src/blobs.js";
-import { readLargeMediaText, type ByteSource } from "../src/large-media.js";
+import { randomBytes } from "node:crypto";
+import {
+  JoinedText,
+  placedLargeText,
+  readLargeMediaText,
+  type ByteSource,
+} from "../src/large-media.js";
 
 /**
  * Media read in place (`readLargeMediaText`) is placed exactly as media parsed out of the value:
@@ -280,6 +286,39 @@ describe("media read in place is placed as media parsed out of the value", () =>
     const started = performance.now();
     expect(await readLargeMediaText("gen_ai.input.messages", escapedFirst, 300)).toBeUndefined();
     expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  test("thousands of long strings are put back in one scan, between turns of the event loop", async () => {
+    // 3,000 long base64 strings that are not files, around one file: their stand-ins are found
+    // in one forward scan, not one search of the whole text each.
+    const parts: unknown[] = Array.from({ length: 3000 }, () => ({
+      type: "text",
+      content: randomBytes(300).toString("base64"),
+    }));
+    parts.push({
+      type: "blob",
+      mime_type: "audio/wav",
+      content: randomBytes(3000).toString("base64"),
+    });
+    const value = JSON.stringify([{ role: "user", parts }]);
+    const read = (await readLargeMediaText("gen_ai.input.messages", value, 300))!;
+    expect(read.long.size).toBe(3001);
+    let turns = 0;
+    let ticking = true;
+    const tick = () => {
+      if (!ticking) return;
+      turns++;
+      setImmediate(tick);
+    };
+    setImmediate(tick);
+    const started = performance.now();
+    const placed = await placedLargeText(read);
+    const elapsed = performance.now() - started;
+    ticking = false;
+    expect(placed).toBeInstanceOf(JoinedText);
+    expect([...(placed as JoinedText).windows()].join("")).toBe(value);
+    expect(elapsed).toBeLessThan(1000);
+    expect(turns).toBeGreaterThan(0);
   });
 });
 
