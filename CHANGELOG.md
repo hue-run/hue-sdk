@@ -2102,6 +2102,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.7.5 (2026-10-14): the key steps name the settings page by its current label, **Settings → API keys**, instead of **Settings → Integrations & API keys**.
 - 0.7.2 (2026-10-12): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.18.0` instead of 0.17.0. The registry availability check before installation is unchanged.
 - 0.7.1 (2026-10-11): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.17.0` instead of 0.16.0. The registry availability check before installation is unchanged.
 - 0.7.0 (2026-10-08): evals run through `hue eval` with SDK 0.16.0: `--check` first, one command is one run, never a custom harness or tool stand-ins; an interrupted run stays open and the identical command resumes it.
