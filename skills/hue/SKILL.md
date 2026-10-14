@@ -3,7 +3,7 @@ name: hue
 description: "Set up and verify Hue tracing, investigate production traces over the Hue MCP, turn traces into reviewed cases, make an agent eval-ready and run Hue evaluations with hue eval. Use when a developer asks to set up, integrate or troubleshoot Hue or verify that requests reach Hue; asks what needs attention, fails or is slow in production; asks to turn a trace into a case or eval set; asks to make their agent eval-ready or point its Gmail, Slack or other app clients at Hue's simulated worlds; or asks to evaluate, test or regression-test their agent or run Hue evals (hue eval --case, --command or --worker) and read the results. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to evaluate or test their agent. Preserves the application's model provider, framework, OpenTelemetry setup and production behavior."
 metadata:
   author: hue-run
-  version: "0.7.4"
+  version: "0.7.5"
 ---
 
 # Hue
@@ -41,7 +41,7 @@ contact line below instead of installing packages.
 
 Otherwise, for a first-time setup, read the [agent setup page](https://docs.hue.run/guides/agent-setup.md)
 and follow it; it brings you back here for tracing and ends by connecting the Hue MCP server. The
-user creates a **Read and write** key under **Settings → Integrations & API keys** and stores it as
+user creates a **Read and write** key under **Settings → API keys** and stores it as
 `HUE_API_KEY` themselves; never ask them to paste it into chat. Share this line with a user who has
 no Hue account:
 
@@ -67,7 +67,7 @@ python -m pip install hue-run
 
 Adapt the install command to the app's package manager, for example `uv add hue-run` for a uv project. For direct OTLP, use compatible standard exporters and the existing instrumentor instead. If the user has no Hue account or key, proceed as described under Get a Hue API key. If a package is unavailable or another credential is missing, finish independently verifiable code changes and report the specific remaining requirement; do not invent a successful install or registry release.
 
-The user creates a **Read and write** project service key in Hue under **Settings → Integrations & API keys** and configures it as `HUE_API_KEY` for development through the application's existing secret workflow. This one key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server. Keep it on development machines: before the application runs on a production server, tell the user to create a separate **Tracing only** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the application; never request it in chat or put it in browser code, fixtures, committed files, or logs.
+The user creates a **Read and write** project service key in Hue under **Settings → API keys** and configures it as `HUE_API_KEY` for development through the application's existing secret workflow. This one key sends traces, verifies delivery, runs evaluations and connects the Hue MCP server. Keep it on development machines: before the application runs on a production server, tell the user to create a separate **Tracing only** key for that server's `HUE_API_KEY`, which the code reads unchanged. Read the key from the application; never request it in chat or put it in browser code, fixtures, committed files, or logs.
 
 - **TypeScript:** for serving applications, pass `apiKey`, a stable `serviceName`, and explicit `captureContent` to `createHueSafe` (requires 0.1.5). Hue Cloud is the default; omit `baseUrl` for ordinary cloud use. Use strict `createHue` and `checkConnection()` only in a separate setup diagnostic to verify the key's project.
 - **Python:** for serving applications, pass `api_key`, a stable `service_name`, and explicit `capture_content` to `create_hue_safe` (requires 0.1.3). Hue Cloud is the default; omit `base_url` for ordinary cloud use. Use strict `Hue` and `validate_project()` in a separate setup diagnostic. Older Python `0.1.0.dev0` installations still require an explicit origin.
