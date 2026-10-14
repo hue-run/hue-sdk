@@ -388,6 +388,11 @@ export class LangfuseApi {
         failures++;
         continue;
       }
+      const location = status >= 300 && status < 400 ? response.headers.get("location") : null;
+      if (location !== null) {
+        await response.body?.cancel().catch(() => undefined);
+        return { status, body: Buffer.alloc(0), location };
+      }
       let body: Buffer | undefined;
       try {
         body = await readBounded(response, maxBytes);
@@ -398,9 +403,7 @@ export class LangfuseApi {
         await this.wait(RETRY_DELAYS_MS[failures++]!, "Langfuse's answer could not be read");
         continue;
       }
-      const location = status >= 300 && status < 400 ? response.headers.get("location") : null;
-      const answer: Answer = body === undefined ? { status, tooLarge: true } : { status, body };
-      return location === null ? answer : { ...answer, location };
+      return body === undefined ? { status, tooLarge: true } : { status, body };
     }
   }
 
@@ -639,7 +642,8 @@ export class LangfuseApi {
     if (url.protocol !== "https:" && url.protocol !== "http:") return "missing";
     const langfuse = new URL(this.connection.baseUrl);
     for (let redirects = 0; ; redirects++) {
-      const refused = await refusedDownload(url, langfuse);
+      const refused = await refusedDownload(url, langfuse, this.connection.signal);
+      this.stopped();
       if (refused) throw new LangfuseError(`Langfuse named a media download link that ${refused}`);
       const download = await this.get(url, false, MAX_FILE_DATA_BYTES, DOWNLOAD_TIMEOUT_MS);
       if (download.location !== undefined) {
@@ -699,9 +703,14 @@ export function isInternalAddress(address: string): boolean {
  * (plain HTTP only to this machine), at most 8192 characters, without credentials or a fragment,
  * and name a host whose every address is public, unless it names the configured Langfuse host or
  * that host is on this machine. Langfuse chooses the link, so this keeps a hostile or compromised
- * deployment from sending requests to this machine's network.
+ * deployment from sending requests to this machine's network. The name's lookup gives up after a
+ * minute or once `signal` stops the import.
  */
-export async function refusedDownload(url: URL, langfuse: URL): Promise<string | undefined> {
+export async function refusedDownload(
+  url: URL,
+  langfuse: URL,
+  signal: AbortSignal,
+): Promise<string | undefined> {
   if (url.href.length > MAX_LINK_LENGTH) return "is too long";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname)))
     return "does not use https";
@@ -716,13 +725,27 @@ export async function refusedDownload(url: URL, langfuse: URL): Promise<string |
     addresses =
       named || isIP(host)
         ? [named ? "127.0.0.1" : host]
-        : (await lookup(host, { all: true })).map((entry) => entry.address);
+        : await resolved(host, AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]));
   } catch {
     return "names a host that could not be resolved";
   }
   if (addresses.length === 0 || addresses.some(isInternalAddress))
     return "names an address on this machine or a private network";
   return undefined;
+}
+
+/** Every address `host` resolves to; rejects once `signal` aborts, since a lookup cannot be
+ * cancelled. */
+function resolved(host: string, signal: AbortSignal): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const stop = () => reject(new Error("The lookup was abandoned"));
+    if (signal.aborted) return stop();
+    signal.addEventListener("abort", stop, { once: true });
+    lookup(host, { all: true }).then(
+      (entries) => resolve(entries.map((entry) => entry.address)),
+      reject,
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------------------------

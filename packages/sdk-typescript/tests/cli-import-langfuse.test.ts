@@ -14,6 +14,7 @@ import {
   hueTraceId,
   isInternalAddress,
   parseMediaToken,
+  refusedDownload,
 } from "../src/cli/langfuse.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
@@ -1439,7 +1440,9 @@ describe("hue import langfuse media download links", () => {
   /** A Langfuse API at a public host whose media record names `link`, and the URLs fetched. */
   function api(link: string, store: (url: URL) => Response = () => new Response("bytes")) {
     const fetched: string[] = [];
-    const fetchImpl = (async (input: URL) => {
+    const fetchImpl = (async (input: URL, init: RequestInit) => {
+      // Real fetch would reach a redirect's target before media() could check it.
+      expect(init.redirect).toBe("manual");
       fetched.push(input.href);
       if (input.pathname === "/api/public/media/m1")
         return Response.json({ mediaId: "m1", contentLength: 5, url: link });
@@ -1500,6 +1503,17 @@ describe("hue import langfuse media download links", () => {
       );
       expect(new TextDecoder().decode((await lf.media("m1")) as Uint8Array)).toBe("bytes");
     }
+  });
+
+  test("a stopped import stops waiting for a name's lookup", async () => {
+    const stop = new AbortController();
+    const check = refusedDownload(
+      new URL("https://store.invalid/object"),
+      new URL("https://langfuse.example"),
+      stop.signal,
+    );
+    stop.abort();
+    expect(await check).toBe("names a host that could not be resolved");
   });
 
   test("names internal addresses", () => {
