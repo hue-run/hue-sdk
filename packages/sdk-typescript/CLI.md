@@ -459,8 +459,12 @@ memory stays bounded whatever the project's size.
 sent as recorded, and Hue shows them as files held in Langfuse. With `--media`, each reference where
 Hue reads a file (a whole string, or the content of a provider part such as an OpenAI `image_url` or
 `input_audio`, an Anthropic `source` or a GenAI `blob`, no deeper than ten levels) is looked up with
-`GET /api/public/media/{id}`. The file is downloaded from the link Langfuse answers (following its
-store's redirects, without the Langfuse keys), uploaded under the span's trace through Hue's upload route (reservation, presigned
+`GET /api/public/media/{id}`. The file is downloaded from the link Langfuse answers (following up to
+five of its store's redirects, without the Langfuse keys). The link and each redirect must use HTTPS
+without credentials or a fragment and reach a public address, or the Langfuse host itself; a link to
+this machine, a private network or a link-local address such as cloud metadata fails the file. When
+the Langfuse host is on this machine, any address is accepted, and plain HTTP to this machine. The
+file is then uploaded under the span's trace through Hue's upload route (reservation, presigned
 `PUT`, completion), and placed in the digest form the SDK writes for media it records: a whole string
 becomes `{"type":"blob","mime_type":…,"modality":…,"sha256":…,"size":…}` and a provider part loses its
 bytes and gains `sha256` and `size`, every other byte of the value's text kept, each file listed in

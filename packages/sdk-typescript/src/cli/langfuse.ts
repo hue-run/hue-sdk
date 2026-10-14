@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
 import {
   SpanKind,
   SpanStatusCode,
@@ -8,7 +10,7 @@ import {
 } from "@opentelemetry/api";
 import type { Resource } from "@opentelemetry/resources";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
-import { MAX_CONTENT_BYTES, MAX_FILE_DATA_BYTES } from "../config.js";
+import { MAX_CONTENT_BYTES, MAX_FILE_DATA_BYTES, isLoopbackHost } from "../config.js";
 import {
   BLOBS_KEY,
   MAX_BLOB_ENTRIES,
@@ -45,6 +47,10 @@ import { sdkVersion } from "../version.js";
 const REQUEST_TIMEOUT_MS = 60_000;
 /** A media file download's deadline: up to 25 MiB over a slow link. */
 const DOWNLOAD_TIMEOUT_MS = 300_000;
+/** Redirects a media download follows, each to a link checked as the first one was. */
+const MAX_DOWNLOAD_REDIRECTS = 5;
+/** The longest media download link accepted, as the Python SDK's media client accepts. */
+const MAX_LINK_LENGTH = 8192;
 /** The largest answer read from the API. Langfuse Cloud answers at most 5 MB; a larger answer is
  * asked for again in smaller pages. */
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -296,7 +302,10 @@ function nextCursor(page: { meta: unknown }, current: string | undefined): strin
 }
 
 /** An answer read whole: its status and body, or `tooLarge` for a body past the bound. */
-type Answer = { status: number; body: Buffer } | { status: number; tooLarge: true };
+type Answer = ({ status: number; body: Buffer } | { status: number; tooLarge: true }) & {
+  /** A redirect's `Location`, which no request follows itself. */
+  location?: string;
+};
 
 /** Reads one Langfuse project through its public API with Basic authentication. */
 export class LangfuseApi {
@@ -322,9 +331,10 @@ export class LangfuseApi {
   /**
    * One GET with retries: a rate limit (HTTP 429) is waited out for as long as its `Retry-After`
    * asks (up to 15 minutes, ten times in a row), and a connection failure, a timeout or a 5xx is
-   * tried again after 1, 2, 4, 8 and 16 seconds (or its `Retry-After`, up to a minute). An
-   * authenticated request never follows a redirect, so the keys go only to the configured host;
-   * `authenticated` is false for a presigned media download, which carries no Langfuse keys.
+   * tried again after 1, 2, 4, 8 and 16 seconds (or its `Retry-After`, up to a minute). No
+   * redirect is followed (its `Location` is answered), so the keys go only to the configured host
+   * and a media download reaches only links {@link LangfuseApi.media} checked; `authenticated` is
+   * false for a presigned media download, which carries no Langfuse keys.
    */
   async get(
     url: URL,
@@ -344,9 +354,7 @@ export class LangfuseApi {
             "user-agent": `hue-sdk-typescript/${sdkVersion} hue-import`,
             ...(authenticated ? { authorization: this.authorization } : {}),
           },
-          // The keys go only to the configured host; a presigned download carries none and may
-          // be redirected by its store.
-          redirect: authenticated ? "manual" : "follow",
+          redirect: "manual",
           signal: AbortSignal.any([this.connection.signal, AbortSignal.timeout(timeoutMs)]),
         });
       } catch {
@@ -379,6 +387,11 @@ export class LangfuseApi {
         );
         failures++;
         continue;
+      }
+      const location = status >= 300 && status < 400 ? response.headers.get("location") : null;
+      if (location !== null) {
+        await response.body?.cancel().catch(() => undefined);
+        return { status, body: Buffer.alloc(0), location };
       }
       let body: Buffer | undefined;
       try {
@@ -609,7 +622,8 @@ export class LangfuseApi {
   /**
    * A media file's bytes through `GET /api/public/media/{id}` and the download link it answers
    * (fetched without the Langfuse keys): `missing` when Langfuse holds no bytes for it (no record,
-   * no link, or a link whose object is gone), `tooLarge` past {@link MAX_FILE_DATA_BYTES}.
+   * no link, or a link whose object is gone), `tooLarge` past {@link MAX_FILE_DATA_BYTES}. The link
+   * and each redirect from it must pass {@link refusedDownload}; one that does not fails the file.
    */
   async media(id: string): Promise<Uint8Array | "missing" | "tooLarge"> {
     const answer = await this.json(`/api/public/media/${encodeURIComponent(id)}`, {});
@@ -626,12 +640,112 @@ export class LangfuseApi {
       return "missing";
     }
     if (url.protocol !== "https:" && url.protocol !== "http:") return "missing";
-    const download = await this.get(url, false, MAX_FILE_DATA_BYTES, DOWNLOAD_TIMEOUT_MS);
-    if ("tooLarge" in download) return download.status === 200 ? "tooLarge" : "missing";
-    if (download.status === 200) return new Uint8Array(download.body);
-    if ([403, 404, 410].includes(download.status)) return "missing";
-    throw new LangfuseError(`The media download answered HTTP ${download.status}`);
+    const langfuse = new URL(this.connection.baseUrl);
+    for (let redirects = 0; ; redirects++) {
+      const refused = await refusedDownload(url, langfuse, this.connection.signal);
+      this.stopped();
+      if (refused) throw new LangfuseError(`Langfuse named a media download link that ${refused}`);
+      const download = await this.get(url, false, MAX_FILE_DATA_BYTES, DOWNLOAD_TIMEOUT_MS);
+      if (download.location !== undefined) {
+        if (redirects === MAX_DOWNLOAD_REDIRECTS)
+          throw new LangfuseError("The media download redirected too many times");
+        try {
+          url = new URL(download.location, url);
+        } catch {
+          throw new LangfuseError("The media download redirected to something other than a URL");
+        }
+        continue;
+      }
+      if ("tooLarge" in download) return download.status === 200 ? "tooLarge" : "missing";
+      if (download.status === 200) return new Uint8Array(download.body);
+      if ([403, 404, 410].includes(download.status)) return "missing";
+      throw new LangfuseError(`The media download answered HTTP ${download.status}`);
+    }
   }
+}
+
+/** Addresses a media download may not reach: this machine, private networks, link-local
+ * (cloud metadata), shared, benchmarking, multicast and reserved ranges. IPv4-mapped IPv6
+ * addresses are checked as their IPv4 address. */
+const INTERNAL_ADDRESSES = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["224.0.0.0", 3],
+] as const)
+  INTERNAL_ADDRESSES.addSubnet(network, prefix, "ipv4");
+for (const [network, prefix] of [
+  ["::", 128],
+  ["::1", 128],
+  ["64:ff9b::", 96],
+  ["fc00::", 7],
+  ["fe80::", 10],
+  ["fec0::", 10],
+  ["ff00::", 8],
+] as const)
+  INTERNAL_ADDRESSES.addSubnet(network, prefix, "ipv6");
+
+/** Whether an IP address is one {@link INTERNAL_ADDRESSES} holds; false for anything else. */
+export function isInternalAddress(address: string): boolean {
+  const version = isIP(address);
+  return version !== 0 && INTERNAL_ADDRESSES.check(address, version === 4 ? "ipv4" : "ipv6");
+}
+
+/**
+ * Why a media download link is refused, or undefined when it may be fetched: it must be HTTPS
+ * (plain HTTP only to this machine), at most 8192 characters, without credentials or a fragment,
+ * and name a host whose every address is public, unless it names the configured Langfuse host or
+ * that host is on this machine. Langfuse chooses the link, so this keeps a hostile or compromised
+ * deployment from sending requests to this machine's network. The name's lookup gives up after a
+ * minute or once `signal` stops the import.
+ */
+export async function refusedDownload(
+  url: URL,
+  langfuse: URL,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  if (url.href.length > MAX_LINK_LENGTH) return "is too long";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname)))
+    return "does not use https";
+  if (url.username || url.password || url.hash) return "carries credentials or a fragment";
+  if (isLoopbackHost(langfuse.hostname) || url.hostname === langfuse.hostname) return undefined;
+  const host = url.hostname.replace(/^\[|\]$/gu, "");
+  const named = host === "localhost" || host.endsWith(".localhost");
+  // shortcut: the name is resolved apart from the request's own lookup, so a host that answers a
+  // second lookup differently (DNS rebinding) is not caught; pin the lookup if fetch gains a hook.
+  let addresses: string[];
+  try {
+    addresses =
+      named || isIP(host)
+        ? [named ? "127.0.0.1" : host]
+        : await resolved(host, AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]));
+  } catch {
+    return "names a host that could not be resolved";
+  }
+  if (addresses.length === 0 || addresses.some(isInternalAddress))
+    return "names an address on this machine or a private network";
+  return undefined;
+}
+
+/** Every address `host` resolves to; rejects once `signal` aborts, since a lookup cannot be
+ * cancelled. */
+function resolved(host: string, signal: AbortSignal): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const stop = () => reject(new Error("The lookup was abandoned"));
+    if (signal.aborted) return stop();
+    signal.addEventListener("abort", stop, { once: true });
+    lookup(host, { all: true }).then(
+      (entries) => resolve(entries.map((entry) => entry.address)),
+      reject,
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
