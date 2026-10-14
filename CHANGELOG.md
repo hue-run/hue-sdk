@@ -10,6 +10,10 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Fixed
+
+- `hue import langfuse --media` downloads only links that use HTTPS, carry no credentials or fragment, fit in 8192 characters and reach a public address (or the configured Langfuse host), and checks each redirect the same way, up to five. 0.18.2 fetched any `http`/`https` link the Langfuse media record named and followed redirects anywhere, so a hostile or compromised Langfuse deployment could make the import request addresses on the user's machine or network (such as `169.254.169.254`) and upload the answers to Hue. A refused link fails its file and holds the span back, with the reason reported. With the Langfuse host on this machine, any address is accepted, and plain HTTP to this machine.
+
 ### [0.18.2] - 2026-10-13
 
 #### Added

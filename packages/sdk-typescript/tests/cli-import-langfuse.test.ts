@@ -8,7 +8,13 @@ import { PassThrough, Writable } from "node:stream";
 import { gunzipSync } from "node:zlib";
 import protobuf from "protobufjs/light.js";
 import { IMPORT_USAGE, runImportCommand, type ImportCommandIo } from "../src/cli/import.js";
-import { hueSpanId, hueTraceId, parseMediaToken } from "../src/cli/langfuse.js";
+import {
+  LangfuseApi,
+  hueSpanId,
+  hueTraceId,
+  isInternalAddress,
+  parseMediaToken,
+} from "../src/cli/langfuse.js";
 import schema from "./fixtures/otlp-schema.json" with { type: "json" };
 
 // Synthetic stand-ins written from the public contracts: Langfuse's public API (Basic auth,
@@ -1426,6 +1432,95 @@ describe("hue import usage", () => {
       "@@@langfuseMedia:type=image/png|id=abc|source=bytes@@@\n@@@langfuseMedia:type=image/png|id=d|source=bytes@@@",
     ])
       expect(parseMediaToken(text)).toBeUndefined();
+  });
+});
+
+describe("hue import langfuse media download links", () => {
+  /** A Langfuse API at a public host whose media record names `link`, and the URLs fetched. */
+  function api(link: string, store: (url: URL) => Response = () => new Response("bytes")) {
+    const fetched: string[] = [];
+    const fetchImpl = (async (input: URL) => {
+      fetched.push(input.href);
+      if (input.pathname === "/api/public/media/m1")
+        return Response.json({ mediaId: "m1", contentLength: 5, url: link });
+      return store(input);
+    }) as unknown as typeof fetch;
+    const lf = new LangfuseApi({
+      baseUrl: "https://langfuse.example",
+      publicKey: PUBLIC_KEY,
+      secretKey: SECRET_KEY,
+      fetch: fetchImpl,
+      sleep: async () => undefined,
+      signal: new AbortController().signal,
+    });
+    return { lf, fetched };
+  }
+
+  test("a link to this machine, a private network or without https is refused unfetched", async () => {
+    for (const link of [
+      "http://169.254.169.254/latest/meta-data/",
+      "https://169.254.169.254/latest/meta-data/",
+      "https://[::ffff:169.254.169.254]/",
+      "https://[fd00::1]/object",
+      "https://10.0.0.5/object",
+      "https://0x7f.1/object",
+      "https://localhost/object",
+      "https://store.localhost/object",
+      "http://93.184.215.14/object",
+      "https://user:secret@93.184.215.14/object",
+      "https://93.184.215.14/object#fragment",
+      `https://93.184.215.14/${"a".repeat(8192)}`,
+    ]) {
+      const { lf, fetched } = api(link);
+      await expect(lf.media("m1")).rejects.toThrow("Langfuse named a media download link that");
+      expect(fetched.every((url) => url.startsWith("https://langfuse.example/"))).toBe(true);
+    }
+  });
+
+  test("each redirect is checked as the link was", async () => {
+    const { lf, fetched } = api("https://93.184.215.14/object", (url) =>
+      url.hostname === "93.184.215.14"
+        ? new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8080/admin" } })
+        : new Response("internal"),
+    );
+    await expect(lf.media("m1")).rejects.toThrow("names an address on this machine");
+    expect(fetched.some((url) => url.includes("127.0.0.1"))).toBe(false);
+  });
+
+  test("a public link, a redirect to one, and a link on the Langfuse host are downloaded", async () => {
+    for (const link of [
+      "https://93.184.215.14/object?X-Amz-Signature=abc",
+      "https://93.184.215.14/redirect",
+      "https://langfuse.example/media/object",
+    ]) {
+      const { lf } = api(link, (url) =>
+        url.pathname === "/redirect"
+          ? new Response(null, { status: 307, headers: { location: "/object" } })
+          : new Response("bytes"),
+      );
+      expect(new TextDecoder().decode((await lf.media("m1")) as Uint8Array)).toBe("bytes");
+    }
+  });
+
+  test("names internal addresses", () => {
+    for (const address of [
+      "127.0.0.1",
+      "10.1.2.3",
+      "172.16.0.1",
+      "192.168.1.1",
+      "169.254.169.254",
+      "100.64.0.1",
+      "0.0.0.0",
+      "::1",
+      "::",
+      "fe80::1",
+      "fd12::1",
+      "::ffff:10.0.0.1",
+      "64:ff9b::a9fe:a9fe",
+    ])
+      expect(isInternalAddress(address)).toBe(true);
+    for (const address of ["93.184.215.14", "8.8.8.8", "2606:4700::1111", "example.com"])
+      expect(isInternalAddress(address)).toBe(false);
   });
 });
 
