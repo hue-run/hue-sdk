@@ -4565,17 +4565,32 @@ describe("uploads after export", () => {
     const gate = putGate();
     const endpoint = hue({ beforePut: gate.beforePut });
     const hueClient = client(endpoint);
-    mediaState(hueClient).uploader.lifetimeMillis = 300;
+    const uploader = mediaState(hueClient).uploader;
     const files = Array.from({ length: 5 }, (_, index) => Buffer.from(`lifetime ${index}`));
     try {
-      await hueClient.withSpan("lifetime", () => {
-        for (const data of files)
+      // Four uploads hold every place at the store for a second ...
+      uploader.lifetimeMillis = 1000;
+      await hueClient.withSpan("held", () => {
+        for (const data of files.slice(0, 4))
           hueClient.recordFile({ role: "input", mediaType: "image/png", data, upload: true });
       });
       const started = Date.now();
-      const report = await hueClient.flush();
-      // Four uploads the store held past their lifetime, and a fifth that waited for a place
-      // past its own and was never reserved.
+      const flushed = hueClient.flush();
+      await waitForMedia(() => gate.entered === 4);
+      // ... while a fifth, whose lifetime ends long before any place frees, waits for one.
+      uploader.lifetimeMillis = 100;
+      await hueClient.withSpan("lifetime", () => {
+        hueClient.recordFile({
+          role: "input",
+          mediaType: "image/png",
+          data: files[4]!,
+          upload: true,
+        });
+      });
+      // Its own flush sends it at once, and its upload ends at its deadline without a request.
+      const second = hueClient.flush();
+      await flushed;
+      const report = await second;
       expect(Date.now() - started).toBeLessThan(3000);
       expect(gate.entered).toBe(4);
       expect(endpoint.reservations.map((body) => body.sha256)).toEqual(
@@ -4583,9 +4598,12 @@ describe("uploads after export", () => {
       );
       expect(report.uploadedValues).toBe(0);
       expect(report.uploadFallbacks).toBe(5);
-      expect(blobs(endpoint.span("lifetime")!).map(({ key }) => key)).toEqual(
-        files.map((data) => `event:hue.file:${sha256(data)}`),
+      expect(blobs(endpoint.span("held")!).map(({ key }) => key)).toEqual(
+        files.slice(0, 4).map((data) => `event:hue.file:${sha256(data)}`),
       );
+      expect(blobs(endpoint.span("lifetime")!).map(({ key }) => key)).toEqual([
+        `event:hue.file:${sha256(files[4]!)}`,
+      ]);
     } finally {
       gate.release();
       await hueClient.shutdown();
