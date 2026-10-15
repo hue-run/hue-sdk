@@ -617,9 +617,10 @@ export class BlobUploader {
     const held = heldBy(value);
     const fresh = held.filter((text) => !this.holding.has(text));
     const bytes = fresh.reduce((total, text) => total + text.bytes, 0);
+    // An upload whose strings are all held already adds no memory, so only the job cap applies.
     if (
       this.queued >= MAX_QUEUED_UPLOADS ||
-      (this.queuedBytes > 0 && this.queuedBytes + bytes > MAX_HELD_BLOB_BYTES)
+      (bytes > 0 && this.queuedBytes > 0 && this.queuedBytes + bytes > MAX_HELD_BLOB_BYTES)
     )
       return { ok: false, reason: "budget" };
     this.queued++;

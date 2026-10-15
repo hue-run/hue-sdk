@@ -32,6 +32,7 @@ import {
   FALLBACK_MESSAGES,
   fallbackAttributes,
   LATE_FALLBACK_MESSAGES,
+  MAX_HELD_BLOB_BYTES,
   newTally,
   offloadAttributes,
 } from "../src/blobs.js";
@@ -4503,6 +4504,56 @@ describe("uploads after export", () => {
       expect(uploader.pendingBytes()).toBe(0);
       await queued[0]!.released;
       expect(endpoint.puts).toHaveLength(2);
+    } finally {
+      for (const pass of waiting) pass();
+      uploader.close();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("a later file of a value already charged whole queues even when that value fills the budget", async () => {
+    const waiting: (() => void)[] = [];
+    const endpoint = hue({ beforePut: () => new Promise<void>((pass) => waiting.push(pass)) });
+    const uploader = new BlobUploader({
+      baseUrl: endpoint.url,
+      apiKey,
+      timeoutMillis: 10_000,
+      allowInsecureHttp: false,
+      userAgent: "blob-tests",
+    });
+    const value = JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          { type: "blob", mime_type: "audio/wav", content: randomBytes(3000).toString("base64") },
+          { type: "blob", mime_type: "audio/wav", content: randomBytes(3000).toString("base64") },
+        ],
+      },
+    ]);
+    const read = (await readLargeMediaText("gen_ai.input.messages", value, 300))!;
+    const state = uploader as unknown as { queuedBytes: number };
+    // Stands for a single value larger than the whole budget, admitted on its own.
+    const oversize = MAX_HELD_BLOB_BYTES;
+    try {
+      const queued = [];
+      for (const [index, file] of read.files.entries()) {
+        const { source } = longFileBytes(file, read.long.get(file.content)!);
+        const digest = await digestOf(source);
+        const key = `gen_ai.input.messages#/0/parts/${index + 1}`;
+        const result = uploader.enqueue("2".repeat(32), key, source, "audio/wav", digest);
+        if (!result.ok) throw new Error(`File ${index + 1} was refused: ${result.reason}`);
+        queued.push(result);
+        if (index === 0) state.queuedBytes += oversize;
+      }
+      expect(queued.map(({ bytes }) => bytes)).toEqual([value.length * 2, 0]);
+      state.queuedBytes -= oversize;
+      await waitForMedia(() => waiting.length === 2);
+      for (const pass of waiting) pass();
+      expect((await Promise.all(queued.map(({ done }) => done))).map(({ ok }) => ok)).toEqual([
+        true,
+        true,
+      ]);
+      expect(uploader.pendingBytes()).toBe(0);
     } finally {
       for (const pass of waiting) pass();
       uploader.close();
