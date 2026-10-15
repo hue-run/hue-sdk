@@ -156,11 +156,13 @@ export interface ExportReport {
   instrumentationFailures: number;
   /** Whole span attributes, inline media, attachments and opted-in file helper uploads stored
    * apart from their records (or already held by Hue), each listed under the record's
-   * `hue.blobs`. */
+   * `hue.blobs`; counted when the upload completes, which can be after the export that listed
+   * it. */
   uploadedValues: number;
   /** Whole-attribute, inline-media, attachment and opted-in file helper uploads that could not be
-   * attached. Content falls back to truncation, media digests, or file metadata, with a warning
-   * issue. */
+   * attached, each with a warning issue: values exported in their fallback form (truncation,
+   * media digests, or file metadata), and values whose upload failed after their record was
+   * exported (their `hue.blobs` entries stay). */
   uploadFallbacks: number;
 }
 

@@ -500,16 +500,17 @@ class HueSpan:
         ``role`` is ``input`` (given to the agent), ``attachment`` (from a tool or message) or
         ``output`` (produced by the agent). ``data``, or the file at ``path``, is hashed and
         measured locally; ``upload=True`` also stores its bytes when content capture and a
-        project key are enabled. A ``str`` is hashed as UTF-8. ``data`` is limited to 25 MiB, as
-        it is held in memory until it is uploaded; a file at ``path`` up to 25 MiB is read now as
-        ``data`` is, and a larger regular file, up to Hue's 1 GB upload limit, is hashed now a
-        slice at a time and read again from disk when it is uploaded, which it is only if it still
-        has the size and SHA-256 it was recorded with; a ``path`` that is no regular file, such as
-        a named pipe, is refused without waiting on it. Give ``data`` or ``path``, not both. The
-        event carries ``hue.file.sha256``, ``hue.file.role``, ``hue.file.media_type``,
-        ``hue.file.size`` when known and, when content is captured, ``hue.file.name``. An invalid
-        record is omitted and counted; an invalid name alone is omitted and counted while the
-        rest is recorded.
+        project key are enabled: the file is listed in the span's ``hue.blobs`` when the span is
+        exported and uploaded in the background. A ``str`` is hashed as UTF-8. ``data`` is limited
+        to 25 MiB, as it is held in memory until it is uploaded; a file at ``path`` up to 25 MiB
+        is read now as ``data`` is, and a larger regular file, up to Hue's 1 GB upload limit, is
+        hashed now a slice at a time and read again from disk when it is uploaded, which it is
+        only if it still has the size and SHA-256 it was recorded with; a ``path`` that is no
+        regular file, such as a named pipe, is refused without waiting on it. Give ``data`` or
+        ``path``, not both. The event carries ``hue.file.sha256``, ``hue.file.role``,
+        ``hue.file.media_type``, ``hue.file.size`` when known and, when content is captured,
+        ``hue.file.name``. An invalid record is omitted and counted; an invalid name alone is
+        omitted and counted while the rest is recorded.
         """
         if not self._client._active:
             return
@@ -926,6 +927,9 @@ class Hue:
             dropped_records=dropped_records,
             uploads=self._uploads,
         )
+        if self._uploads is not None:
+            # Settled uploads are counted with the span exporter's, for both signals.
+            self._uploads.uploader.report = self._span_exporter._report_uploads
         sdk_tracer_provider.add_span_processor(self._span_processor)
         sdk_logger_provider.add_log_record_processor(self._log_processor)
         self.tracer = self.tracer_provider.get_tracer(HUE_TRACER_SCOPE, __version__)
@@ -1474,10 +1478,12 @@ class Hue:
         """Drain pending telemetry. False means a timeout or a recorded export failure.
 
         A single background worker drains both signals while this caller waits
-        only up to its own budget. Queue drops and omitted helper data also fail
-        the result, independently of successful exports.
-        A timed-out operation continues in the background. Counters are cumulative;
-        this is not an exactly-once or durable-queue guarantee.
+        only up to its own budget; the caller then waits, within the same budget, for
+        the uploads accepted so far, which hold up no later flush's records. An upload
+        that fails is a warning, not a failure.
+        Queue drops and omitted helper data also fail the result, independently of
+        successful exports. A timed-out operation continues in the background. Counters
+        are cumulative; this is not an exactly-once or durable-queue guarantee.
         """
         self._validate_timeout(timeout_millis)
         if self._pid != os.getpid():
@@ -1508,7 +1514,13 @@ class Hue:
         except RuntimeError:
             self._flush_lock.release()
             return False
-        return completed.wait(max(0, deadline - monotonic())) and result
+        if not completed.wait(max(0, deadline - monotonic())):
+            return False
+        # The records are sent. Their uploads are waited for on this thread, after the drain has
+        # let go of the coordinator: a later flush sends its own records at once, never behind an
+        # earlier caller's wait for uploads.
+        settled = self._uploads_settled(deadline)
+        return result and settled
 
     @staticmethod
     def _validate_timeout(timeout_millis: int) -> None:
@@ -1520,9 +1532,10 @@ class Hue:
             raise ValueError("timeout_millis must be a positive integer.")
 
     def _drain(self, deadline: float) -> bool:
+        """Sends both signals' queued records; waits for no upload."""
         traces, logs = False, False
         try:
-            traces = self._span_processor.force_flush(
+            traces = self._span_processor.flush_records(
                 timeout_millis=max(0, int((deadline - monotonic()) * 1000))
             )
         except Exception:
@@ -1530,17 +1543,28 @@ class Hue:
         try:
             # Even with no wait remaining, request the other signal's export.
             # The processor's own worker continues without holding this drain.
-            logs = self._log_processor.force_flush(
+            logs = self._log_processor.flush_records(
                 timeout_millis=max(0, int((deadline - monotonic()) * 1000))
             )
         except Exception:
             pass
         return traces and logs and self.export_status.ok
 
+    def _uploads_settled(self, deadline: float) -> bool:
+        """Waits until every upload accepted so far has settled and is counted; False when
+        ``deadline`` came first."""
+        uploads = self._uploads
+        try:
+            return uploads is None or uploads.uploader.wait_idle(deadline)
+        except Exception:
+            return False
+
     def shutdown(self, timeout_millis: int = 30_000) -> bool:
         """Stop new helpers, drain and close Hue exporters within the caller's wait budget.
 
-        Work continues after a timeout. Call again to await the same shutdown;
+        Work continues after a timeout. Pending uploads get up to 30 seconds more in the
+        background once the exporters stop; the rest are then abandoned and counted in
+        ``export_status.upload_fallbacks``. Call again to await the same shutdown;
         repeated calls never launch extra workers. Borrowed providers stay usable.
         """
         self._validate_timeout(timeout_millis)
@@ -1580,9 +1604,16 @@ class Hue:
                                 self.logger_provider.shutdown()
                             else:
                                 self._log_processor.shutdown()
+                        # Pending uploads get their grace once the processors stopped, never
+                        # inside a processor's shutdown, which would hold a borrowed provider's
+                        # other processors; an upload still pending after it fails the result.
+                        settled = self._uploads_settled(
+                            monotonic() if self._uploads is None else self._uploads.grace_deadline()
+                        )
                         # An expired caller budget is not an export failure.
                         # Recheck completed cleanup without starting another wait.
-                        self._shutdown_result = self._drain(monotonic())
+                        drained = self._drain(monotonic())
+                        self._shutdown_result = settled and drained
                     except Exception:
                         self._shutdown_result = False
                     finally:

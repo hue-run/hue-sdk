@@ -38,6 +38,7 @@ from ._blobs import (
     ExplicitFile,
     Held,
     Tally,
+    UploadGroup,
     Uploads,
     _blob_entry,
     held_of,
@@ -136,13 +137,14 @@ class ExportStatus:
     live-span placeholders and this client stopped sending them.
 
     ``uploaded_values`` counts whole span attributes, inline media parts, attachments, and
-    opted-in file helpers uploaded apart from their records (or already stored by Hue). Whole
-    attributes keep a 16 KiB prefix; binary media and attachments keep digest metadata; file
-    helpers keep their event metadata.
-    Each accepted upload adds a ``hue.blobs`` reference. ``upload_fallbacks`` counts requested
-    uploads that fail or cannot be admitted, including dropped file helper events or references.
-    Fallbacks keep the available inline content or metadata and produce warning issues.
-    Neither counter affects ``ok``.
+    opted-in file helpers uploaded apart from their records (or already stored by Hue), each
+    reference once its upload was stored. Whole attributes keep a 16 KiB prefix; binary media and
+    attachments keep digest metadata; file helpers keep their event metadata.
+    An upload accepted at export adds a ``hue.blobs`` reference before it runs, in the
+    background. ``upload_fallbacks`` counts requested uploads refused before export (they keep
+    the available inline content or metadata), including dropped file helper events or
+    references, and uploads that failed after it, whose references Hue reads as missing. Both
+    produce warning issues. Neither counter affects ``ok``.
     """
 
     failed_trace_batches: int
@@ -413,12 +415,13 @@ class ExportIssue:
     """One export failure or warning, with the traces of the records it concerned.
 
     ``kind`` is ``failed`` for a batch Hue refused or did not acknowledge, ``dropped`` for a
-    record the pipeline could not hold or encode, and ``warning`` for span values over Hue's
-    inline limit that could not be uploaded and were exported cut (``count`` is the values): a
-    warning is not a failure. ``trace_ids`` names the traces whose records the issue concerned,
-    lowercase hexadecimal; ``None`` when the records named none or more than
-    ``MAX_ISSUE_TRACE_IDS``, so a case's trace receipt decides. ``sequence`` orders issues across
-    both signals; a client's ``export_failure_sequence()`` is the last failure's.
+    record the pipeline could not hold or encode, and ``warning`` for values over Hue's inline
+    limit or media that could not be uploaded (``count`` is the values): refused before export and
+    exported in their fallback form, or, after their record listed them, not uploaded, so Hue
+    reads their references as missing. A warning is not a failure. ``trace_ids`` names the traces
+    whose records the issue concerned, lowercase hexadecimal; ``None`` when the records named none
+    or more than ``MAX_ISSUE_TRACE_IDS``, so a case's trace receipt decides. ``sequence`` orders
+    issues across both signals; a client's ``export_failure_sequence()`` is the last failure's.
     """
 
     signal: str
@@ -849,25 +852,18 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         with self._lock:
             return self._uploaded, self._upload_fallbacks
 
-    def _wait_for_rate(self, seconds: float) -> bool:
-        """Waits out a rate-limited reservation within the export's hold; False when the hold
-        may not take ``seconds`` more."""
-        with self._lock:
-            if self._held + seconds > MAX_RATE_LIMIT_HOLD_SECONDS:
-                return False
-            self._held += seconds
-        Event().wait(seconds)
-        return True
-
     def _place_held(self, spans: list[Any]) -> list[Any]:
-        """The spans with the values their copies held for upload placed: uploaded and listed
-        under ``hue.blobs``, or cut as before. Every fallback is counted and reported as a
-        warning naming its traces; the spans are exported either way."""
+        """The spans with the values their copies held for upload placed: listed under
+        ``hue.blobs`` when the upload is accepted, uploaded in the background; refused before
+        export, cut or kept as before. Nothing waits for an upload. Every refusal is counted and
+        reported as a warning naming its traces; the spans are exported either way."""
         uploads = self._uploads
         holding = [(index, span, held_of(span)) for index, span in enumerate(spans)]
         entries = [(index, span, held) for index, span, held in holding if held is not None]
         if uploads is None or not entries:
             return spans
+        # Each record's charge stays held until the uploads keeping its bytes settle.
+        groups = [UploadGroup.adopt(held) for _, _, held in entries]
         deadline = monotonic() + upload_budget_seconds(uploads.timeout)
         result = list(spans)
         tally = Tally()
@@ -882,22 +878,22 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                             digests=held.digests,
                             inspected=held.inspected,
                             large=held.large,
+                            group=group,
                         ),
                         _record_trace_id(span) or "",
                     )
-                    for _, span, held in entries
+                    for (_, span, held), group in zip(entries, groups, strict=True)
                 ],
                 uploader=uploads.uploader,
                 memo=uploads.memo,
                 value_bytes=self._limits.current.value_bytes,
                 deadline=deadline,
-                wait=self._wait_for_rate,
             )
             _add_tally(tally, placed_tally)
             # Every span's helper events and references are fitted before any helper file is
-            # sent; the admitted files of all spans then share the upload workers and deadline.
-            helpers: list[tuple[int, dict[str, Any], list[ExplicitFile], str]] = []
-            for (index, span, held), attributes in zip(entries, placed, strict=True):
+            # submitted; the admitted files of all spans then share the upload workers.
+            helpers: list[tuple[int, dict[str, Any], list[ExplicitFile], str, UploadGroup]] = []
+            for (index, span, held), group, attributes in zip(entries, groups, placed, strict=True):
                 record = replace_span(span, attributes=attributes)
                 result[index] = record
                 admitted = self._admit_files(
@@ -905,29 +901,31 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
                 )
                 if admitted is not None:
                     result[index], fitted_attributes, files = admitted
-                    helpers.append((index, fitted_attributes, files, _record_trace_id(span) or ""))
+                    helpers.append(
+                        (index, fitted_attributes, files, _record_trace_id(span) or "", group)
+                    )
             if helpers:
                 uploaded, helper_tally = place_spans(
                     [
-                        (attributes, Held(files=files, inspected=set()), trace_id)
-                        for _, attributes, files, trace_id in helpers
+                        (attributes, Held(files=files, inspected=set(), group=group), trace_id)
+                        for _, attributes, files, trace_id, group in helpers
                     ],
                     uploader=uploads.uploader,
                     memo=uploads.memo,
                     value_bytes=self._limits.current.value_bytes,
                     deadline=deadline,
-                    wait=self._wait_for_rate,
                 )
-                for (index, _, _, _), attributes in zip(helpers, uploaded, strict=True):
+                for (index, _, _, _, _), attributes in zip(helpers, uploaded, strict=True):
                     result[index] = replace_span(result[index], attributes=attributes)
                 _add_tally(tally, helper_tally)
         finally:
-            # Release each queued copy once, including helper requests rejected by admission.
-            for _, _, held in entries:
+            # Each queued copy lets go of its values, including helper requests rejected by
+            # admission; its charge goes once its accepted uploads settle.
+            for (_, _, held), group in zip(entries, groups, strict=True):
                 held.values.clear()
                 held.files.clear()
                 held.digests.clear()
-                held.release()
+                group.seal()
         self._report_uploads(tally)
         return result
 
@@ -985,7 +983,8 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
             else:
                 references.pop(position)
                 admitted.append(file)
-        # Only baseline references survive until actual uploads succeed.
+        # Only baseline references survive here; the helper placement lists each file again when
+        # its upload is accepted, as the same entry (the SDK's own media type), so the fit holds.
         existing = references[: len(baseline)]
         if existing:
             fitted_attributes[BLOBS_KEY] = existing
@@ -1099,7 +1098,8 @@ class BoundedSpanExporter(_ReceiverExporter, SpanExporter):
         real = [span for span in spans if not isinstance(span, PendingSpan)]
         pending = [span for span in spans if isinstance(span, PendingSpan)]
         try:
-            # Values over the inline limit are uploaded before any record is measured.
+            # Values over the inline limit and media are placed (their uploads accepted, not run)
+            # before any record is measured.
             real = self._place_held(real)
             # Every record is measured, shed and, where it cannot be sent, counted lost before any
             # root is written, so a root carries the losses of children that ended after it.
@@ -1216,22 +1216,13 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
     def _delegate_export(self, batch: Sequence[Any]) -> bool:
         return self._delegate.export(batch) is LogRecordExportResult.SUCCESS
 
-    def _wait_for_rate(self, seconds: float) -> bool:
-        """Waits out a rate-limited reservation within the export's hold; False when the hold
-        may not take ``seconds`` more."""
-        with self._lock:
-            if self._held + seconds > MAX_RATE_LIMIT_HOLD_SECONDS:
-                return False
-            self._held += seconds
-        Event().wait(seconds)
-        return True
-
     def _place_held(self, records: list[Any]) -> list[Any]:
         """The log records with the media their copies held, and the attachments their bodies
-        hold, placed in one step: each file uploaded under the record's trace and listed in its
-        own ``hue.blobs`` (keys ``<attribute>#<pointer>`` and ``body#<pointer>``), or kept inline
-        (an attachment as its digest part); what is left over the cap cut as before. Every
-        fallback is counted and reported as a warning naming its traces."""
+        hold, placed in one step: each file whose upload is accepted listed in the record's own
+        ``hue.blobs`` (keys ``<attribute>#<pointer>`` and ``body#<pointer>``) and uploaded under
+        its trace in the background, or kept inline when refused (an attachment as its digest
+        part); what is left over the cap cut as before. Every refusal is counted and reported as
+        a warning naming its traces."""
         uploads = self._uploads
         entries = [
             (index, record, held)
@@ -1240,11 +1231,14 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         ]
         if uploads is None or not entries:
             return records
+        # Each record's charge stays held until the uploads keeping its bytes settle.
+        groups = [UploadGroup.adopt(held) for _, _, held in entries]
         result = list(records)
         try:
             logs = []
             refused = Tally()
-            for _, record, held in entries:
+            for (_, record, held), group in zip(entries, groups, strict=True):
+                held.group = group
                 log = record.log_record
                 trace_id = _record_trace_id(record) or ""
                 body = _restored_body(log.body, held.body_values) if held.body else None
@@ -1264,7 +1258,6 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
                 memo=uploads.memo,
                 value_bytes=self._limits.current.value_bytes,
                 deadline=monotonic() + upload_budget_seconds(uploads.timeout),
-                wait=self._wait_for_rate,
             )
             for (index, record, held), attributes, body in zip(
                 entries, placed, bodies, strict=True
@@ -1275,11 +1268,11 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
                     else replace_log(record, attributes=attributes)
                 )
         finally:
-            for _, _, held in entries:
+            for (_, _, held), group in zip(entries, groups, strict=True):
                 held.values.clear()
                 held.body_values.clear()
                 held.files.clear()
-                held.release()
+                group.seal()
         _add_tally(tally, refused)
         self._report_uploads(tally)
         return result
@@ -1305,8 +1298,8 @@ class BoundedLogExporter(_ReceiverExporter, LogRecordExporter):
         failed = False
         self._held = 0.0
         try:
-            # A correlated GenAI record's media, and the attachments its body holds, are uploaded
-            # before any record is measured.
+            # A correlated GenAI record's media, and the attachments its body holds, are placed
+            # (their uploads accepted, not run) before any record is measured.
             batch = self._place_held(list(batch))
             entries: list[tuple[Any, int]] = []
             for record in batch:

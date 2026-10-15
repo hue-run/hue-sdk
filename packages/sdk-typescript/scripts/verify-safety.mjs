@@ -323,20 +323,33 @@ try {
   assert.equal(sideEffects, 1);
   assert.equal((await hue.flushSafe()).ok, false);
   await new Promise((resolve) => setTimeout(resolve, 30));
-  // One warning (the receiver refused to reserve the input and result over the cap for upload) and one
-  // failure (it refused the export): each reaches the throwing callback without a crash.
-  assert.equal(diagnostics.length, 2);
+  // The receiver refused the export (a failure) and, independently and in either order, the
+  // uploads of the input and result over the cap that the exported span listed (one warning):
+  // each issue that reaches the throwing callback does so without a crash, and the failure
+  // always does.
+  assert.ok(diagnostics.length >= 1);
+  assert.ok(diagnostics.some((issue) => issue.kind === "failed" && issue.status === 401));
+  const late = hue.transport
+    .getIssues()
+    .filter(
+      (issue) =>
+        issue.kind === "warning" && issue.message.includes("after its record was exported"),
+    );
   assert.deepEqual(
-    diagnostics.map((issue) => issue.kind),
-    ["warning", "failed"],
+    late.map((issue) => issue.count),
+    [2],
   );
-  assert.equal(diagnostics[0].count, 2);
-  assert.equal(diagnostics[1].status, 401);
   assert.equal(hue.transport.getReport().uploadFallbacks, 2);
   assert.equal(hue.transport.getReport().uploadedValues, 0);
-  // The 1 MiB input and result are cut to the cap and listed under `hue.truncated`, never
-  // omitted or counted as failures; the side effect ran once all the same.
+  // The 1 MiB input and result keep 16 KiB prefixes, listed under `hue.truncated` and
+  // `hue.blobs`, never omitted or counted as failures; the side effect ran once all the same.
   assert.equal(hue.transport.getReport().instrumentationFailures, 0);
+  // An invalid budget returns at once; the refused flush it started is handled, never an
+  // unhandled rejection that this strict mode turns into a crash.
+  await hue.withSpan("invalid-budget", () => undefined);
+  const invalidBudget = await hue.flushSafe({ timeoutMillis: 0 });
+  assert.equal(invalidBudget.ok || invalidBudget.timedOut, false);
+  await assert.rejects(hue.flush(), HueExportError);
   const original = new Error("original application exception");
   await assert.rejects(
     (async () => {

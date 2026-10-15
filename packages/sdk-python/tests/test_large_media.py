@@ -25,7 +25,7 @@ _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}\Z")
 
 
 class _Uploader:
-    """Hashes what it is given and stores it, or refuses every value."""
+    """Hashes what it is given and accepts it, or refuses every value."""
 
     def __init__(self, ok: bool) -> None:
         self.ok = ok
@@ -34,7 +34,19 @@ class _Uploader:
     def unsupported(self) -> bool:
         return False
 
-    def store(self, trace_id, key, value, content_type, digest, deadline, wait, sharing=None):
+    def submit(
+        self,
+        trace_id,
+        key,
+        value,
+        content_type,
+        digest,
+        group,
+        signal="traces",
+        *,
+        from_disk=False,
+        uncharged=0,
+    ):
         assert digest_of(value) == digest
         self.uploads.append((key, *digest, content_type))
         return _Outcome(True, content_type=content_type) if self.ok else _Outcome(False, "failed")
@@ -54,14 +66,14 @@ def place(
         uploader=uploader,  # type: ignore[arg-type]
         value_bytes=value_bytes,
         deadline=monotonic() + 60,
-        wait=lambda _: False,
     )
     return {
         "value": attributes[key],
         "entries": attributes.get(BLOBS_KEY),
         "truncated": attributes.get(TRUNCATED_KEY),
         "uploads": uploader.uploads,
-        "uploaded": tally.uploaded,
+        # Accepted uploads are counted once they are stored, which this uploader stands for.
+        "uploaded": len(uploader.uploads) if ok else 0,
         "fallbacks": {reason: count for reason, (count, _) in tally.fallbacks.items()},
     }
 

@@ -326,8 +326,13 @@ export class HueClient {
   private ownedProviders?: { tracer: TracerProvider; logger: LoggerProvider };
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
-  private flushPromise?: Promise<ExportReport>;
-  private safeFlushPromise?: Promise<SafeLifecycleResult>;
+  /** The latest flush while it still sends its records (`sent`, which the next flush's send
+   * follows), and the safe result that joined it. */
+  private sending?: {
+    work: Promise<ExportReport>;
+    sent: Promise<unknown>;
+    safe?: Promise<SafeLifecycleResult>;
+  };
   private safeShutdownPromise?: Promise<SafeLifecycleResult>;
 
   constructor(options: HueOptions | ExistingHueProviders) {
@@ -1247,24 +1252,24 @@ export class HueClient {
 
   /** Production lifecycle path: never rejects; timeouts do not cancel borrowed provider work. */
   flushSafe(options: SafeLifecycleOptions = {}): Promise<SafeLifecycleResult> {
-    if (this.safeFlushPromise) return this.safeFlushPromise;
-    const work = this.flushPromise ?? this.flush();
+    // A flush still sending its records is joined, so repeated timeouts do not accumulate
+    // promises against a hung borrowed provider. Once it sent them, a new flush sends the
+    // caller's own records instead of waiting on the earlier flush's uploads.
+    if (this.sending?.safe) return this.sending.safe;
+    const work = this.sending?.work ?? this.flush();
+    // An invalid budget returns before the result awaits the flush: its failure is still handled.
+    void work.catch(() => {});
     const result = this.safeLifecycle(() => work, options);
-    this.safeFlushPromise = result;
-    const clear = () => {
-      this.safeFlushPromise = undefined;
-    };
-    // Retain the timed-out result until its underlying drain settles. Repeated
-    // timeouts must not accumulate promises against a hung borrowed provider.
-    void work.then(clear, clear);
+    if (this.sending?.work === work) this.sending.safe = result;
     return result;
   }
 
   /**
    * Safe for finally blocks; preserves the application's result or original exception. When its
    * budget runs out while the client's own transport holds records for a receiver that limited
-   * the rate, the hold ends: those records are reported lost to the rate limit, and the hold no
-   * longer keeps the process running.
+   * the rate, or still uploads values its records listed, the hold and the uploads end: those
+   * records are reported lost to the rate limit, the uploads counted as failed (their records keep
+   * their entries), and neither keeps the process running.
    */
   shutdownSafe(options: SafeLifecycleOptions = {}): Promise<SafeLifecycleResult> {
     if (this.safeShutdownPromise) return this.safeShutdownPromise;
@@ -1314,8 +1319,9 @@ export class HueClient {
   }
 
   /**
-   * Drains the trace and log providers and waits for Hue's acknowledgements. Each caller gets a
-   * fresh serialized drain that includes records emitted before its call.
+   * Drains the trace and log providers and waits for Hue's acknowledgements, then for the uploads
+   * queued so far. Each caller gets a fresh drain that includes records emitted before its call;
+   * its records are sent after an earlier drain's records, never after that drain's uploads.
    *
    * @throws HueExportError when this drain observed a new rejection, delivery failure, drop or
    * invalid record; its `issues` and `report` are sanitized counts, never server text.
@@ -1323,28 +1329,34 @@ export class HueClient {
   flush(): Promise<ExportReport> {
     // Each caller needs a drain after its own preceding span/log emissions.
     // Joining an earlier drain can acknowledge records that were not in its batch.
+    // Only the sends are serialized: each flush then waits on its own for the uploads queued so
+    // far, so a later flush's records never wait behind an earlier flush's uploads.
     const from = this.transport.getFailureSequence();
-    const drain = async () => {
-      const report = await this.flushOnce();
-      if (this.transport.getFailureSequence() !== from)
-        throw new HueExportError(
-          this.transport
-            .getIssues()
-            .filter((issue) => issue.sequence > from && issue.kind !== "warning"),
-          report,
-        );
-      return report;
-    };
-    const next = (this.flushPromise ?? Promise.resolve()).then(drain, drain);
-    this.flushPromise = next;
+    const start = () => this.transport.flushRecords(() => this.flushProviders());
+    const flushing = (this.sending?.sent ?? Promise.resolve()).then(start, start);
+    const sent = flushing.then(({ sent }) => sent);
+    const next = flushing
+      .then(({ report }) => report)
+      .then((report) => {
+        if (this.transport.getFailureSequence() !== from)
+          throw new HueExportError(
+            this.transport
+              .getIssues()
+              .filter((issue) => issue.sequence > from && issue.kind !== "warning"),
+            report,
+          );
+        return report;
+      });
+    const sending = { work: next, sent };
+    this.sending = sending;
     const clear = () => {
-      if (this.flushPromise === next) this.flushPromise = undefined;
+      if (this.sending === sending) this.sending = undefined;
     };
-    void next.then(clear, clear);
+    void sent.then(clear, clear);
     return next;
   }
 
-  private async flushOnce(): Promise<ExportReport> {
+  private async flushProviders(): Promise<void> {
     // Providers this client owns wait as long as an export may take, a rate-limit hold included,
     // instead of OpenTelemetry's 30 s; borrowed providers keep their own budget.
     const owned = this.ownedProviders;
@@ -1365,11 +1377,11 @@ export class HueClient {
           0,
           "OpenTelemetry provider flush failed",
         );
-    return this.transport.flush();
   }
 
   /**
    * Flushes, then shuts down the providers this client owns; borrowed providers are left running.
+   * Like {@link flush}, it waits for queued uploads after the records are sent.
    * Idempotent: later calls return the same promise, and later helper calls only run their callbacks.
    *
    * @throws HueExportError when the final flush observed new failures; owned providers are still released.

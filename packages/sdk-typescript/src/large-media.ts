@@ -37,9 +37,18 @@ export const WINDOW_UNITS = 1024 * 1024;
  * reused for the next one, so a reader is done with each slice before it asks for the next. */
 export interface ByteSource {
   readonly size: number;
+  /** The strings the source keeps alive while it is held, each whole; absent for one read from
+   * elsewhere. */
+  readonly held?: readonly HeldText[];
   chunks(): Iterable<Uint8Array> | AsyncIterable<Uint8Array>;
   /** Set when the latest read found the source no longer holds the bytes it was recorded with. */
   changed?: boolean;
+}
+
+/** A string sources keep alive, as its two bytes a code unit: a slice read in place keeps the
+ * whole string, so the sources that read one share its {@link HeldText}, charged once. */
+export interface HeldText {
+  readonly bytes: number;
 }
 
 /** Whether a value is a {@link ByteSource}. */
@@ -65,6 +74,8 @@ export interface LongText {
   kind: LongKind;
   /** A `data:` URL's header, between `data:` and its comma. */
   header?: string;
+  /** `text` whole, shared by every long string read from it. */
+  held: HeldText;
 }
 
 /** Base64 alphabet characters only, and the same padded to a multiple of four. */
@@ -108,6 +119,7 @@ async function classify(
   text: string,
   start: number,
   end: number,
+  held: HeldText,
   raw = false,
 ): Promise<LongText | undefined> {
   if (text.startsWith("data:", start)) {
@@ -120,10 +132,10 @@ async function classify(
     const header = text.slice(start + 5, comma);
     if ((!raw && controlCharacter.test(header)) || !base64Header(header)) return undefined;
     if (!(await strictBase64(text, comma + 1, end))) return undefined;
-    return { text, start, end, data: comma + 1, kind: "dataBase64", header };
+    return { text, start, end, data: comma + 1, kind: "dataBase64", header, held };
   }
   if (!(await strictBase64(text, start, end))) return undefined;
-  return { text, start, end, data: start, kind: "base64" };
+  return { text, start, end, data: start, kind: "base64", held };
 }
 
 /** The stand-in for a long string in the skeleton: its kind kept (base64 and its first 16
@@ -190,7 +202,11 @@ interface Skeleton {
  * unterminated (text that is no JSON) ends the scan; the skeleton then holds the rest as recorded
  * and fails to parse. The scan reads at most a window of the text in one synchronous step.
  */
-async function skeletonOf(text: string, longUnits: number): Promise<Skeleton | undefined> {
+async function skeletonOf(
+  text: string,
+  longUnits: number,
+  held: HeldText,
+): Promise<Skeleton | undefined> {
   const nonce = randomBytes(16).toString("hex");
   const long = new Map<string, LongText>();
   const replaced: { start: number; end: number; stub: string }[] = [];
@@ -237,7 +253,7 @@ async function skeletonOf(text: string, longUnits: number): Promise<Skeleton | u
     const found =
       escaped || close - open - 1 <= longUnits || text.charCodeAt(space(text, at)) === 0x3a
         ? undefined
-        : await classify(text, open + 1, close);
+        : await classify(text, open + 1, close, held);
     if (found) {
       const stub = standIn(found, `${nonce}${long.size.toString(16).padStart(8, "0")}`);
       long.set(stub, found);
@@ -280,12 +296,13 @@ export async function readLargeMediaText(
   longUnits = LONG_STRING_UNITS,
 ): Promise<LargeMediaValue | undefined> {
   const reading = readingOf(key);
+  const held: HeldText = { bytes: text.length * 2 };
   /** Text that is no JSON is the file itself when it is one long base64 `data:` URL; other text
    * is read as `readMediaText` reads it, within the 8 Mi bound. */
   const whole = async (): Promise<LargeMediaValue | undefined> => {
     const found =
       text.length > longUnits && text.startsWith("data:")
-        ? await classify(text, 0, text.length, true)
+        ? await classify(text, 0, text.length, held, true)
         : undefined;
     if (!found)
       return text.length > MAX_INLINE_FILE_TEXT
@@ -298,7 +315,7 @@ export async function readLargeMediaText(
   const json = async (
     check?: (parsed: unknown) => boolean,
   ): Promise<LargeMediaValue | undefined> => {
-    const skeleton = await skeletonOf(text, longUnits);
+    const skeleton = await skeletonOf(text, longUnits, held);
     if (!skeleton) return undefined;
     const parsed: unknown = JSON.parse(skeleton.text);
     if (check && !check(parsed)) return undefined;
@@ -347,7 +364,11 @@ export async function readLargeMediaText(
 export class JoinedText {
   private readonly pieces: [string, number, number][];
 
-  constructor(pieces: [string, number, number][]) {
+  /** `held`: the strings the pieces are cut from, which the text keeps alive whole. */
+  constructor(
+    pieces: [string, number, number][],
+    private readonly held: readonly HeldText[],
+  ) {
     this.pieces = pieces.filter(([, start, end]) => end > start);
   }
 
@@ -399,6 +420,7 @@ export class JoinedText {
     const windows = () => this.windows();
     return {
       size,
+      held: this.held,
       *chunks() {
         const buffer = Buffer.allocUnsafe(WINDOW_UNITS * 3);
         for (const window of windows()) yield buffer.subarray(0, buffer.write(window, "utf8"));
@@ -419,6 +441,7 @@ export async function placedLargeText(media: LargeMediaValue): Promise<string | 
   // One forward scan for the stand-ins' shared nonce finds each one left, in order, by the index
   // its tag carries: linear in the text however many there are, a window at a time.
   const pieces: [string, number, number][] = [];
+  const held = new Set<HeldText>([{ bytes: edited.length * 2 }]);
   let from = 0;
   let turn = 0;
   for (let at = edited.indexOf(media.nonce); at !== -1; at = edited.indexOf(media.nonce, at + 1)) {
@@ -432,12 +455,13 @@ export async function placedLargeText(media: LargeMediaValue): Promise<string | 
     if (start < from || !edited.startsWith(stub, start)) continue;
     const long = media.long.get(stub)!;
     pieces.push([edited, from, start], [long.text, long.start, long.end]);
+    held.add(long.held);
     from = start + stub.length;
     at = from - 1;
   }
   if (!pieces.length) return edited;
   pieces.push([edited, from, edited.length]);
-  return new JoinedText(pieces);
+  return new JoinedText(pieces, [...held]);
 }
 
 /** A long file's bytes as `mediaBytes` reads them, measured without being made: its size, whether
@@ -451,13 +475,14 @@ export interface LongFileBytes {
 }
 
 /** Base64 from `start` to `end` of `text` (strict, padded to a multiple of four), decoded a window
- * at a time into one buffer each read reuses. */
-function base64Source(text: string, start: number, end: number): ByteSource {
+ * at a time into one buffer each read reuses. `held` is `text` whole. */
+function base64Source(text: string, start: number, end: number, held: HeldText): ByteSource {
   const length = end - start;
   const pad =
     (text.charCodeAt(end - 1) === 0x3d ? 1 : 0) + (text.charCodeAt(end - 2) === 0x3d ? 1 : 0);
   return {
     size: (length / 4) * 3 - pad,
+    held: [held],
     *chunks() {
       const buffer = Buffer.allocUnsafe((WINDOW_UNITS / 4) * 3);
       for (let at = start; at < end; at += WINDOW_UNITS) {
@@ -471,7 +496,7 @@ function base64Source(text: string, start: number, end: number): ByteSource {
 /** The bytes of a file whose content is a long string, as `mediaBytes` reads them: a field its
  * convention declares base64 decoded, base64 text decoded (`bareBase64`), a base64 `data:` URL. */
 export function longFileBytes(file: InlineFilePart, long: LongText): LongFileBytes {
-  const source = base64Source(long.text, long.data, long.end);
+  const source = base64Source(long.text, long.data, long.end, long.held);
   if (long.kind === "base64")
     return {
       size: source.size,

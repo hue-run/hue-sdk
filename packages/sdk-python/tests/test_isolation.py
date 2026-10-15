@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
 
 import pytest
+from conftest import learn_no_upload_route
 from opentelemetry import trace
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -140,10 +141,7 @@ def _without_uploads(hue):
     """While values over the cap may be uploaded, the redactor sees content whole up to Hue's
     upload limit; once the client learns its receiver lacks the upload route (the loopback
     receiver does), its view is bounded by four value caps again."""
-    learning = hue.tracer.start_span("learns the receiver lacks uploads")
-    learning.set_attribute("custom.blob", "u" * (1024 * 1024 + 1))
-    learning.end()
-    assert hue.force_flush()
+    learn_no_upload_route(hue)
 
 
 @pytest.mark.parametrize("invalid", ["bytes", "nodes", "depth", "cycle", "custom", "nonfinite"])
@@ -252,7 +250,7 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
     output = {"nested": ["original"]}
     hue = Hue(receiver.url, KEY, capture_content=True, redactor=redact)
     try:
-        if invalid == "nested-oversize":
+        if invalid in ("nested-oversize", "final-json-limit"):
             _without_uploads(hue)
         with hue.span("invalid-output") as span:
             span.set_output(output)
@@ -263,9 +261,8 @@ def test_redactor_output_is_bounded_before_serialization(receiver, invalid):
             # any content is; it is bounded, not invalid.
             assert hue.export_status.instrumentation_failures == 0
             assert hue.force_flush()
-            attributes = {
-                attribute.key: attribute.value for attribute in receiver.spans()[0].attributes
-            }
+            (recorded,) = [span for span in receiver.spans() if span.name == "invalid-output"]
+            attributes = {attribute.key: attribute.value for attribute in recorded.attributes}
             stored = attributes["output.value"].string_value
             assert 1_048_576 - 4 < len(stored.encode("utf-8")) <= 1_048_576
             assert stored.startswith('{"nested":"xxx')
@@ -780,6 +777,58 @@ def test_inherited_client_is_noop_and_does_not_wait_on_parent_locks(receiver):
     assert receiver.requests == []
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork regression")
+def test_a_forked_child_never_waits_on_the_uploader_lock(receiver):
+    import hashlib
+    import threading
+
+    from hue_sdk._blobs import UploadGroup
+
+    hue = Hue(receiver.url, KEY, capture_content=True)
+    assert hue._uploads is not None
+    uploader = hue._uploads.uploader
+    holding, release = Event(), Event()
+
+    def hold():
+        # A parent thread owns the uploader's lock when the process forks.
+        with uploader._lock:
+            holding.set()
+            release.wait(10)
+
+    holder = Thread(target=hold, daemon=True)
+    holder.start()
+    assert holding.wait(5)
+    data = b"forked bytes"
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            pid = os.fork()
+        if pid == 0:
+            signal.alarm(3)
+            try:
+                outcome = uploader.submit(
+                    "1" * 32,
+                    "custom.blob",
+                    data,
+                    "image/png",
+                    (hashlib.sha256(data).hexdigest(), len(data)),
+                    UploadGroup(),
+                )
+                assert (outcome.ok, outcome.reason) == (False, "failed")
+                assert uploader.wait_idle(time.monotonic() + 1)
+                # No upload worker was started in the child.
+                assert not any(thread.name == "hue-upload" for thread in threading.enumerate())
+            except BaseException:
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+    finally:
+        release.set()
+        holder.join(5)
+        hue.shutdown()
+
+
 def test_shutdown_worker_failure_does_not_reactivate_closed_processors(receiver, monkeypatch):
     import hue_sdk.client as client_module
 
@@ -810,7 +859,8 @@ def test_lifecycle_releases_coordinator_at_shared_deadline(receiver, monkeypatch
 
     def intercept(processor, signal):
         original_export = processor._exporter.export
-        original_flush = processor.force_flush
+        # A client's drain sends each signal's records; the uploads are waited for after it.
+        original_flush = processor.flush_records
 
         def blocked_export(items):
             started[signal].set()
@@ -822,7 +872,7 @@ def test_lifecycle_releases_coordinator_at_shared_deadline(receiver, monkeypatch
             return original_flush(timeout_millis)
 
         monkeypatch.setattr(processor._exporter, "export", blocked_export)
-        monkeypatch.setattr(processor, "force_flush", record_budget)
+        monkeypatch.setattr(processor, "flush_records", record_budget)
 
     intercept(hue._span_processor, "traces")
     intercept(hue._log_processor, "logs")

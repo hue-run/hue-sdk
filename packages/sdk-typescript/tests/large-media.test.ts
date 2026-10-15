@@ -30,6 +30,8 @@ type Upload = { key: string; sha256: string; size: number; contentType: string }
 function uploader(ok: boolean, uploads: Upload[]): BlobUploader {
   return {
     limit: <R>(work: () => Promise<R>) => work(),
+    digest: (value: string | Uint8Array | ByteSource, deadline: number) =>
+      digestOf(value, deadline),
     unsupported: () => false,
     async store(
       _traceId: string,

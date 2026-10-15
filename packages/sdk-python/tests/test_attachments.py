@@ -12,16 +12,16 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from threading import Thread
+from threading import Event
 from typing import Any
 
 import pytest
-from test_blobs import MIB, attrs, blobs, client, listed, sha256
+from test_blobs import MIB, attrs, blobs, client, eventually, listed, settled, sha256
 from test_blobs import hue_store as hue_store
 
 from hue_sdk import Attachment, Hue
 from hue_sdk._attachment import PathFile, file_source
-from hue_sdk._blobs import BlobUploader
+from hue_sdk._blobs import BlobUploader, UploadGroup
 
 CORPUS = json.loads((Path(__file__).parent / "fixtures/media-parts/cases.json").read_text())[
     "attachments"
@@ -85,18 +85,28 @@ def entries(record: Any) -> list[str]:
 
 
 def test_shared_attachment_wire_success(hue_store):
-    run_corpus(hue_store, success=True)
+    run_corpus(hue_store, "success")
 
 
 def test_shared_attachment_wire_failure(hue_store):
+    run_corpus(hue_store, "failure")
+
+
+def test_shared_attachment_wire_after_export(hue_store):
     hue_store.reserve = lambda _: (403, {}, True)
-    run_corpus(hue_store, success=False)
+    run_corpus(hue_store, "after_export")
 
 
-def run_corpus(hue_store, *, success: bool) -> None:
+def run_corpus(hue_store, outcome: str) -> None:
+    """``failure``: uploads refused before export (a full upload queue), whose records carry no
+    entries; ``after_export``: uploads that fail after export, whose records keep their
+    entries."""
+    success = outcome == "success"
     cases = CORPUS["cases"]
     expected = sum(len(case["entries"]) for case in cases)
     with client(hue_store) as hue:
+        if outcome == "failure":
+            hue._uploads.uploader._queue_limit = 0
         for case in cases:
             record(hue, case)
         assert hue.force_flush(timeout_millis=30_000)
@@ -115,13 +125,15 @@ def run_corpus(hue_store, *, success: bool) -> None:
                 assert text == json.dumps(
                     case["recorded"], ensure_ascii=False, separators=(",", ":")
                 ), case["id"]
-            assert entries(carrier) == (case["entries"] if success else []), case["id"]
+            assert entries(carrier) == (case["entries"] if outcome != "failure" else []), case["id"]
     if success:
         # The same file twice in one trace is stored once.
         stored = {(item["traceId"], item["sha256"]) for item in hue_store.reservations}
         assert len(hue_store.puts) == len(stored)
     else:
-        assert hue_store.puts == []
+        assert hue_store.puts == [] and hue_store.objects == {}
+    if outcome == "failure":
+        assert hue_store.reservations == []
 
 
 def test_a_path_reads_the_same_bytes_as_data_and_every_string_form_decodes(tmp_path):
@@ -304,6 +316,9 @@ PDF_PART = {
 
 def log_attachment_and_inline_media(hue_store, *, success: bool) -> None:
     with client(hue_store) as hue:
+        if not success:
+            # Refused before export: the upload queue is full.
+            hue._uploads.uploader._queue_limit = 0
         with hue.model("synthetic-model", provider="openai") as span:
             span.log_inference(
                 input=[
@@ -329,12 +344,11 @@ def log_attachment_and_inline_media(hue_store, *, success: bool) -> None:
         if success
         else {**IMAGE_PART, "content": base64.b64encode(PNG).decode()}
     )
-    # Each file is reserved at most once, by the one step that places a log record's files (a
-    # refused reservation pauses uploads, so a second file may not be asked for).
+    # Each file is reserved once, by the one step that places a log record's files; none is
+    # reserved when the uploads are refused before export.
     keys = [item["key"] for item in hue_store.reservations]
     expected = ["body#/gen_ai.input.messages/0/parts/0", "body#/gen_ai.input.messages/0/parts/1"]
-    assert sorted(keys) == expected if success else len(set(keys)) == len(keys) <= 2
-    assert set(keys) <= set(expected)
+    assert sorted(keys) == (expected if success else [])
     assert all(item["traceId"] == trace_id for item in hue_store.reservations)
     if success:
         assert [json.loads(entry) for entry in entries(log)] == [
@@ -364,12 +378,10 @@ def test_a_log_records_attachment_and_inline_media_upload_together_once_each(hue
 
 
 def test_a_log_records_attachment_and_inline_media_fall_back_together(hue_store):
-    hue_store.reserve = lambda _: (403, {}, True)
     log_attachment_and_inline_media(hue_store, success=False)
 
 
 def test_a_log_records_message_file_not_uploaded_keeps_the_nested_rule(hue_store):
-    hue_store.reserve = lambda _: (403, {}, True)
     large = bytes(index * 7 % 256 for index in range(100 * 1024))
     messages = json.dumps(
         [
@@ -383,6 +395,8 @@ def test_a_log_records_message_file_not_uploaded_keeps_the_nested_rule(hue_store
         ]
     )
     with client(hue_store) as hue:
+        # Refused before export: the upload queue is full.
+        hue._uploads.uploader._queue_limit = 0
         with hue.span("log fallback"):
             hue._logger.emit(body="log fallback", attributes={"gen_ai.input.messages": messages})
         assert hue.force_flush(timeout_millis=30_000)
@@ -395,7 +409,7 @@ def test_a_log_records_message_file_not_uploaded_keeps_the_nested_rule(hue_store
         {**IMAGE_PART, "sha256": sha256(large), "size": len(large)},
     ]
     assert entries(log) == []
-    assert 1 <= len(hue_store.reservations) <= 2
+    assert hue_store.reservations == []
     assert status.upload_fallbacks == 2
 
 
@@ -583,6 +597,7 @@ def test_a_file_changed_after_it_was_recorded_is_not_uploaded_and_is_counted(
     hue_store, tmp_path, change
 ):
     path = sparse_file(tmp_path / "recording.wav", 30 * MIB)
+    recorded = sha256(path.read_bytes())
     with client(hue_store) as hue:
         with hue.span(change) as span:
             span.set_input({"recording": Attachment(path=path, content_type="audio/wav")})
@@ -601,10 +616,16 @@ def test_a_file_changed_after_it_was_recorded_is_not_uploaded_and_is_counted(
         assert hue.force_flush(timeout_millis=60_000)
         status = hue.export_status
         issues = hue.export_issues()
-    # The attachment and the recorded file each read the file again and find it changed.
+    # The attachment and the recorded file share one upload, which reads the file again and
+    # finds it changed: both references are counted as not uploaded.
     assert (status.uploaded_values, status.upload_fallbacks) == (0, 2)
     record = hue_store.span(change)
-    assert blobs(record) == []
+    # Listed when the span was exported, before the file was read again: Hue reads both
+    # references as missing.
+    assert sorted((entry["key"], entry["sha256"]) for entry in blobs(record)) == [
+        (f"event:hue.file:{recorded}", recorded),
+        ("input.value#/recording", recorded),
+    ]
     # The part keeps the digest it was recorded with.
     assert json.loads(attrs(record)["input.value"].string_value)["recording"]["size"] == 30 * MIB
     # Nothing was stored or completed, and no complete body of other bytes reached the store.
@@ -665,6 +686,10 @@ def test_a_cut_off_upload_closes_its_file_without_a_collection(hue_store, tmp_pa
         return None
 
     uploader._request = request  # type: ignore[method-assign]
+    import hue_sdk._blobs as blob_module
+
+    retry_delay = blob_module._RETRY_DELAY_SECONDS
+    blob_module._RETRY_DELAY_SECONDS = 0
     gc.disable()
     try:
         outcome = uploader.store(
@@ -673,12 +698,11 @@ def test_a_cut_off_upload_closes_its_file_without_a_collection(hue_store, tmp_pa
             file_source(PathFile(str(path), len(data), sha256(data))),
             "audio/wav",
             (sha256(data), len(data)),
-            time.monotonic() + 30,
-            lambda _: False,
         )
         assert not outcome.ok
         assert held and open_files() == 0
     finally:
+        blob_module._RETRY_DELAY_SECONDS = retry_delay
         held.clear()
         gc.enable()
 
@@ -708,11 +732,10 @@ def test_a_success_answered_before_the_whole_body_was_sent_stores_nothing(hue_st
         data,
         "audio/wav",
         (sha256(data), len(data)),
-        time.monotonic() + 30,
-        lambda _: False,
     )
     assert (outcome.ok, outcome.reason) == (False, "failed")
-    assert "PUT" in calls
+    # Final: not tried again.
+    assert calls.count("PUT") == 1
 
 
 def test_a_relative_path_is_read_from_where_it_was_recorded(hue_store, tmp_path, monkeypatch):
@@ -742,27 +765,33 @@ def test_a_file_that_changed_does_not_fail_another_reference_to_its_recorded_byt
         file.write(b"X")
     uploader = BlobUploader(hue_store.url, {"Authorization": "Bearer synthetic"}, 10)
     trace_id = "0123456789abcdef0123456789abcdef"
-    deadline = time.monotonic() + 60
-    outcomes: dict[str, Any] = {}
+    reserving = Event()
+    proceed = Event()
 
-    def changed() -> None:
-        outcomes["changed"] = uploader.store(
-            trace_id, "input.value#/a", source, "audio/wav", digest, deadline, lambda _: False
-        )
+    def reserve(_: int) -> None:
+        reserving.set()
+        assert proceed.wait(10)
+        return None
 
-    # The changed file's upload starts first; the same bytes held in memory wait for it, and
-    # then upload themselves rather than take its failure.
-    thread = Thread(target=changed)
-    thread.start()
-    while (trace_id, digest[0]) not in uploader._outcomes and thread.is_alive():
-        time.sleep(0.001)
-    held = uploader.store(
-        trace_id, "input.value#/b", data, "audio/wav", digest, deadline, lambda _: False
+    hue_store.reserve = reserve
+    group = UploadGroup()
+    # The changed file's upload starts first, its reservation held; the same bytes held in
+    # memory share it, and are uploaded once the file is found changed rather than take its
+    # failure.
+    changed = uploader.submit(
+        trace_id, "input.value#/a", source, "audio/wav", digest, group, from_disk=True
     )
-    thread.join(60)
-    assert (outcomes["changed"].ok, outcomes["changed"].reason) == (False, "failed")
-    assert (held.ok, held.content_type) == (True, "audio/wav")
+    assert reserving.wait(10)
+    held = uploader.submit(trace_id, "input.value#/b", data, "audio/wav", digest, group)
+    assert changed.ok and held.ok and held.content_type == "audio/wav"
+    reports: list[Any] = []
+    uploader.report = lambda tally, signal: reports.append(tally)
+    proceed.set()
+    assert uploader.wait_idle(time.monotonic() + 60)
     assert hue_store.objects[f"{trace_id}/{digest[0]}"][0] == data
+    assert sum(tally.uploaded for tally in reports) == 2
+    assert all(not tally.fallbacks for tally in reports)
+    uploader.close()
 
 
 def test_bytes_over_25_mib_and_a_file_over_the_1_gb_upload_limit_are_still_refused(
@@ -812,3 +841,28 @@ def test_a_named_pipe_given_by_path_is_refused_without_waiting_for_a_writer(hue_
     finally:
         writer.kill()
         writer.wait()
+
+
+def test_an_attachment_and_a_recorded_file_are_listed_before_their_upload(hue_store):
+    hue_store.put = lambda _: "gate"
+    csv = b"name,total\nsynthetic,1\n"
+    with client(hue_store) as hue:
+        with hue.span("listed first") as span:
+            trace_id = span.trace_id
+            span.set_input({"terms": Attachment(PDF, content_type="application/pdf")})
+            span.record_file(role="output", media_type="text/csv", data=csv, upload=True)
+        # The span reaches Hue with both entries and its event while both PUTs are held.
+        assert eventually(lambda: "listed first" in hue_store.received_at, 5)
+        assert eventually(lambda: len(hue_store.puts) == 2, 5)
+        assert hue_store.objects == {}
+        record = hue_store.span("listed first")
+        assert sorted(entry["key"] for entry in blobs(record)) == sorted(
+            ["input.value#/terms", f"event:hue.file:{sha256(csv)}"]
+        )
+        assert [event.name for event in record.events] == ["hue.file"]
+        hue_store.gate.set()
+        assert hue.force_flush()
+        assert settled(hue)
+        assert hue.export_status.uploaded_values == 2
+    assert hue_store.objects[f"{trace_id}/{sha256(PDF)}"][0] == PDF
+    assert hue_store.objects[f"{trace_id}/{sha256(csv)}"][0] == csv
