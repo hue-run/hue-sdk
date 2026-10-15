@@ -37,6 +37,7 @@ import {
   placedLargeText,
   readLargeMediaText,
   type ByteSource,
+  type HeldText,
   type LargeMediaValue,
   type LongText,
 } from "./large-media.js";
@@ -230,9 +231,10 @@ function countWhenSettled(done: Promise<Outcome>, tally: OffloadTally, traceId: 
 export interface LateUploads {
   tally: OffloadTally;
   settled: Promise<void>[];
-  /** Told of each upload as it is queued: when it settles, and how many of the bytes it holds
-   * meanwhile its record holds too (none for bytes decoded or rewritten apart from the record). */
-  queued?(settled: Promise<void>, shared: number): void;
+  /** Told of each upload as it is queued: when it settles, how many of the bytes it charges its
+   * record holds too (none for bytes decoded or rewritten apart from the record), and when that
+   * charge is released. */
+  queued?(settled: Promise<void>, shared: number, released: Promise<void>): void;
 }
 
 /** A media type accepted by the upload contract. */
@@ -284,10 +286,10 @@ export function heldBytesOf(value: Uint8Array | ByteSource): number {
 }
 
 /** The memory a queued upload keeps alive until it settles: a string as two bytes a code unit,
- * a source the recorded text it reads from. */
-function retainedBytes(value: string | Uint8Array | ByteSource): number {
-  if (typeof value === "string") return value.length * 2;
-  return isByteSource(value) ? (value.held ?? 0) : value.byteLength;
+ * bytes as themselves, a source the strings it reads from, each whole. */
+function heldBy(value: string | Uint8Array | ByteSource): readonly HeldText[] {
+  if (isByteSource(value)) return value.held ?? [];
+  return [{ bytes: typeof value === "string" ? value.length * 2 : value.byteLength }];
 }
 
 /** A string's UTF-8 encoding a slice at a time, never splitting a surrogate pair. */
@@ -509,6 +511,9 @@ export class BlobUploader {
   private hashes = new Slots(HASH_CONCURRENCY);
   private queued = 0;
   private queuedBytes = 0;
+  /** What queued uploads keep alive, each charged once, from the first upload holding it until
+   * the last settles: two files read in place from one recorded string charge it once, whole. */
+  private holding = new Map<HeldText, { uploads: number; release(): void }>();
   private sleeps = new Set<() => void>();
   private requests = new Set<ClientRequest>();
   private outcomes = new Map<string, { promise: Promise<Outcome>; settled: boolean }>();
@@ -593,8 +598,10 @@ export class BlobUploader {
    * Queues `value`'s upload for an exported record, deciding now what the record lists: a value
    * refused without trying (see {@link refusal}), invalid, or past the queue's
    * {@link MAX_QUEUED_UPLOADS} uploads or {@link MAX_HELD_BLOB_BYTES} keeps its fallback. A queued
-   * upload runs within {@link uploadLifetimeMillis} of now, holding `value` (`bytes`, as
-   * {@link pendingBytes} counts it) until it settles; `done` never rejects.
+   * upload runs within {@link uploadLifetimeMillis} of now, holding `value` until it settles;
+   * `done` never rejects. `bytes` is what it adds to {@link pendingBytes}: the strings it keeps
+   * alive that no other queued upload holds, charged until `released`, once the last upload
+   * holding them settles.
    */
   enqueue(
     traceId: string,
@@ -602,10 +609,14 @@ export class BlobUploader {
     value: string | Uint8Array | ByteSource,
     contentType: string,
     digest: FileDigest,
-  ): { ok: false; reason: FallbackReason } | { ok: true; done: Promise<Outcome>; bytes: number } {
+  ):
+    | { ok: false; reason: FallbackReason }
+    | { ok: true; done: Promise<Outcome>; bytes: number; released: Promise<void> } {
     const refused = this.refusal() ?? this.invalid(traceId, key, value, contentType, digest);
     if (refused) return { ok: false, reason: refused };
-    const bytes = retainedBytes(value);
+    const held = heldBy(value);
+    const fresh = held.filter((text) => !this.holding.has(text));
+    const bytes = fresh.reduce((total, text) => total + text.bytes, 0);
     if (
       this.queued >= MAX_QUEUED_UPLOADS ||
       (this.queuedBytes > 0 && this.queuedBytes + bytes > MAX_HELD_BLOB_BYTES)
@@ -613,6 +624,13 @@ export class BlobUploader {
       return { ok: false, reason: "budget" };
     this.queued++;
     this.queuedBytes += bytes;
+    const released = fresh.map(
+      (text) =>
+        new Promise<void>((release) => {
+          this.holding.set(text, { uploads: 0, release });
+        }),
+    );
+    for (const text of held) this.holding.get(text)!.uploads++;
     const upload: UploadContext = {
       deadline: Date.now() + this.lifetimeMillis,
       wait: (millis) => this.sleep(millis),
@@ -620,9 +638,15 @@ export class BlobUploader {
     // store() never rejects; the job holds `value` only until it settles.
     const done = this.store(traceId, key, value, contentType, digest, upload).finally(() => {
       this.queued--;
-      this.queuedBytes -= bytes;
+      for (const text of held) {
+        const holding = this.holding.get(text)!;
+        if (--holding.uploads > 0) continue;
+        this.holding.delete(text);
+        this.queuedBytes -= text.bytes;
+        holding.release();
+      }
     });
-    return { ok: true, done, bytes };
+    return { ok: true, done, bytes, released: Promise.all(released).then(() => {}) };
   }
 
   /** Waits `millis`; false when {@link close} ended the wait first. The timer keeps the process
@@ -1107,7 +1131,7 @@ export async function offloadRecord(
     if (!queued.ok) return queued;
     const settled = countWhenSettled(queued.done, late.tally, traceId);
     late.settled.push(settled);
-    late.queued?.(settled, shared ? queued.bytes : 0);
+    late.queued?.(settled, shared ? queued.bytes : 0, queued.released);
     return { ok: true, contentType };
   };
   // A value the queue cut when it was admitted was never held whole to upload.

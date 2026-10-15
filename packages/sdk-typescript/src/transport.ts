@@ -945,10 +945,15 @@ export class HueTransport {
 
   /** An upload `record`'s export queued, as it is queued: flushes and the processors wait for it
    * from now on, and the `shared` bytes it holds of the record's own are charged to the upload
-   * alone, so the held-value budget never counts them twice while the export goes on. An upload
-   * that settles before the record is finished hands them back to the record, which still holds
+   * alone, so the held-value budget never counts them twice while the export goes on. A charge
+   * `released` before the record is finished is handed back to the record, which still holds
    * them. */
-  private uploadQueued(record: RecordValue, settled: Promise<void>, shared: number): void {
+  private uploadQueued(
+    record: RecordValue,
+    settled: Promise<void>,
+    shared: number,
+    released: Promise<void>,
+  ): void {
     this.awaitUploads(settled);
     const identity = this.mediaIdentity(record);
     const staged = identity
@@ -970,7 +975,7 @@ export class HueTransport {
       if (still > back) this.heldByUploads.set(owner, still - back);
       else this.heldByUploads.delete(owner);
     };
-    void settled.then(handBack, handBack);
+    void released.then(handBack, handBack);
   }
 
   /** Registers a span whose staged files are released if it is never exported. */
@@ -1084,7 +1089,7 @@ export class HueTransport {
     const own: LateUploads = {
       tally: newTally(),
       settled: [],
-      queued: (settled, shared) => this.uploadQueued(queued, settled, shared),
+      queued: (settled, shared, released) => this.uploadQueued(queued, settled, shared, released),
     };
     try {
       if (!this.uploader) throw new Error("Uploads are unavailable");
@@ -1138,7 +1143,7 @@ export class HueTransport {
     const own: LateUploads = {
       tally: newTally(),
       settled: [],
-      queued: (settled, shared) => this.uploadQueued(queued, settled, shared),
+      queued: (settled, shared, released) => this.uploadQueued(queued, settled, shared, released),
     };
     try {
       if (!this.uploader) throw new Error("Uploads are unavailable");

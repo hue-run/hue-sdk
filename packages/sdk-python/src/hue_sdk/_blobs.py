@@ -719,9 +719,9 @@ class _Job:
     # other reference's, tried only if the file changed since it was recorded.
     sources: list[str | bytes | ByteSource]
     from_disk: bool
-    # The charges kept while a source is held, and one signal per reference.
+    # The charges kept while a source is held, and the references by signal.
     groups: list[UploadGroup]
-    signals: list[str]
+    signals: dict[str, int]
     # Waiting in the queue for a worker; once taken, until when its worker waits out a retry.
     queued: bool = True
     resting_until: float = 0.0
@@ -889,7 +889,7 @@ class BlobUploader:
                 return _Outcome(True, content_type=content_type)
             job = self._jobs.get(identity)
             if job is not None:
-                job.signals.append(signal)
+                job.signals[signal] = job.signals.get(signal, 0) + 1
                 if (
                     job.from_disk
                     and len(job.sources) == 1
@@ -923,7 +923,7 @@ class BlobUploader:
                 [body],
                 from_disk,
                 [group],
-                [signal],
+                {signal: 1},
             )
             group.add()
             self._jobs[identity] = job
@@ -1016,11 +1016,11 @@ class BlobUploader:
                 self._stored[identity] = None
                 while len(self._stored) > _STORED_LIMIT:
                     self._stored.popitem(last=False)
-            for signal in job.signals:
+            for signal, count in job.signals.items():
                 if outcome.ok:
-                    self._tally(signal).uploaded += 1
+                    self._tally(signal).uploaded += count
                 else:
-                    self._tally(signal).fallback("not_uploaded", job.trace_id)
+                    self._tally(signal).fallback("not_uploaded", job.trace_id, count)
         for group in groups:
             group.done()
         if outcome.complete:
@@ -1487,10 +1487,10 @@ class Tally:
     uploaded: int = 0
     fallbacks: dict[str, tuple[int, set[str]]] = field(default_factory=dict)
 
-    def fallback(self, reason: str, trace_id: str) -> None:
-        count, traces = self.fallbacks.get(reason, (0, set()))
+    def fallback(self, reason: str, trace_id: str, count: int = 1) -> None:
+        total, traces = self.fallbacks.get(reason, (0, set()))
         traces.add(trace_id)
-        self.fallbacks[reason] = (count + 1, traces)
+        self.fallbacks[reason] = (total + count, traces)
 
 
 @dataclass

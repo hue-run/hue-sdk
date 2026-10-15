@@ -1562,6 +1562,8 @@ def test_copies_of_one_pending_value_share_its_upload(hue_store):
         assert eventually(lambda: {"parent", "child"} <= hue_store.received_at.keys(), 3)
         for name in ("parent", "child"):
             assert [entry["sha256"] for entry in blobs(hue_store.span(name))] == [sha256(text)]
+        # The spans go out before their upload runs: wait for its PUT, held at the store.
+        assert eventually(lambda: len(hue_store.puts) == 1, 5)
         assert len(hue_store.reservations) == len(hue_store.puts) == 1
         hue_store.gate.set()
         assert hue.force_flush()

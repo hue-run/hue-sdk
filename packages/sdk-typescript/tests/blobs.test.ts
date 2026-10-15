@@ -28,6 +28,7 @@ import {
 } from "../src/index.js";
 import {
   BlobUploader,
+  digestOf,
   FALLBACK_MESSAGES,
   fallbackAttributes,
   LATE_FALLBACK_MESSAGES,
@@ -35,6 +36,7 @@ import {
   offloadAttributes,
 } from "../src/blobs.js";
 import { fileSource } from "../src/attachment.js";
+import { longFileBytes, readLargeMediaText } from "../src/large-media.js";
 import { MAX_INLINE_FILE_TEXT } from "../src/inline-files.js";
 import { rehydrateMedia } from "../src/evals.js";
 import corpus from "./fixtures/media-parts/cases.json" with { type: "json" };
@@ -4443,6 +4445,66 @@ describe("uploads after export", () => {
       expect(uploader.pendingBytes()).toBe(0);
       expect(endpoint.reservations).toHaveLength(1);
     } finally {
+      uploader.close();
+      endpoint.server.stop(true);
+    }
+  });
+
+  test("files read in place from one recorded value charge it once, whole, until the last settles", async () => {
+    // Each PUT waits to be let through, in the order the PUTs arrived.
+    const waiting: (() => void)[] = [];
+    const endpoint = hue({ beforePut: () => new Promise<void>((pass) => waiting.push(pass)) });
+    const uploader = new BlobUploader({
+      baseUrl: endpoint.url,
+      apiKey,
+      timeoutMillis: 10_000,
+      allowInsecureHttp: false,
+      userAgent: "blob-tests",
+    });
+    const value = JSON.stringify([
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: "words ".repeat(1000) },
+          { type: "blob", mime_type: "audio/wav", content: randomBytes(3000).toString("base64") },
+          { type: "blob", mime_type: "audio/wav", content: randomBytes(3000).toString("base64") },
+        ],
+      },
+    ]);
+    const read = (await readLargeMediaText("gen_ai.input.messages", value, 300))!;
+    expect(read.files).toHaveLength(2);
+    try {
+      const queued = [];
+      for (const [index, file] of read.files.entries()) {
+        const { source } = longFileBytes(file, read.long.get(file.content)!);
+        const key = `gen_ai.input.messages#/0/parts/${index + 1}`;
+        const digest = await digestOf(source);
+        const result = uploader.enqueue("1".repeat(32), key, source, "audio/wav", digest);
+        if (!result.ok) throw new Error("The upload was not queued");
+        queued.push(result);
+      }
+      // Each slice keeps the whole string alive: the first upload charges all of it, once.
+      expect(queued.map(({ bytes }) => bytes)).toEqual([value.length * 2, 0]);
+      await waitForMedia(() => waiting.length === 2);
+      expect(uploader.pendingBytes()).toBe(value.length * 2);
+      let released = false;
+      void queued[0]!.released.then(() => {
+        released = true;
+      });
+      // One upload settles; the other still reads the string, which stays charged whole.
+      waiting[0]!();
+      expect((await Promise.race(queued.map(({ done }) => done))).ok).toBe(true);
+      expect(uploader.pendingBytes()).toBe(value.length * 2);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(released).toBe(false);
+      waiting[1]!();
+      const outcomes = await Promise.all(queued.map(({ done }) => done));
+      expect(outcomes.map(({ ok }) => ok)).toEqual([true, true]);
+      expect(uploader.pendingBytes()).toBe(0);
+      await queued[0]!.released;
+      expect(endpoint.puts).toHaveLength(2);
+    } finally {
+      for (const pass of waiting) pass();
       uploader.close();
       endpoint.server.stop(true);
     }

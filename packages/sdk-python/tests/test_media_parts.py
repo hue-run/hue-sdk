@@ -13,7 +13,7 @@ import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Any
 
@@ -519,6 +519,43 @@ def test_a_pending_upload_is_shared_and_stored_identities_are_bounded_and_cleare
         assert len(uploader._stored) <= 2
     uploader.close()
     assert uploader._jobs == {} and not uploader._queue and not uploader._stored
+
+
+@pytest.mark.parametrize("answer", [None, (409, {}, True)], ids=["stored", "refused"])
+def test_repeated_references_to_a_pending_upload_are_counted_not_listed(hue_store, answer):
+    uploader = BlobUploader(hue_store.url, {"Authorization": f"Bearer {KEY}"}, 10)
+    reports: dict[str, tuple[int, dict[str, int]]] = {}
+    uploader.report = lambda tally, signal: reports.__setitem__(
+        signal, (tally.uploaded, {reason: count for reason, (count, _) in tally.fallbacks.items()})
+    )
+    # The reservation is held at Hue while a long trace keeps referencing the same bytes.
+    release = Event()
+    hue_store.reserve = lambda _: answer if release.wait(10) else None
+    data = b"synthetic repeated reference"
+    trace, digest, group = "1" * 32, (sha256(data), len(data)), UploadGroup()
+    references = {"traces": 5_000, "logs": 3_000}
+    try:
+        for signal, count in references.items():
+            for _ in range(count):
+                assert uploader.submit(trace, "key", data, "image/png", digest, group, signal).ok
+        assert eventually(lambda: hue_store.reservations, 5)
+        # One pending upload, its references counted per signal rather than kept one apiece.
+        with uploader._lock:
+            (job,) = uploader._jobs.values()
+            assert job.signals == references
+            assert len(job.groups) == len(job.sources) == 1
+        release.set()
+        assert uploader.wait_idle(time.monotonic() + 10)
+    finally:
+        release.set()
+        uploader.close()
+    # Settling counts each reference once, as one entry per reference did.
+    assert reports == {
+        signal: (count, {}) if answer is None else (0, {"not_uploaded": count})
+        for signal, count in references.items()
+    }
+    assert len(hue_store.reservations) == 1
+    assert len(hue_store.puts) == (1 if answer is None else 0)
 
 
 def test_digest_cache_is_trace_scoped_and_retains_only_digest_keys(monkeypatch):
