@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import learn_no_upload_route
 from opentelemetry import trace
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
     ExportLogsServiceRequest,
@@ -177,6 +178,8 @@ def test_tool_result_over_the_cap_is_cut_and_listed_not_omitted(receiver):
     # recorded prefix reaches Hue with the call, instead of the whole value being omitted.
     large = {"body": "\u00e9" * (640 * 1024), "pages": 3}
     with Hue(receiver.url, KEY, capture_content=True) as hue:
+        # A receiver without the upload route (the loopback receiver) gets the value cut.
+        learn_no_upload_route(hue)
         with hue.tool("read_document") as call:
             call.set_input({"id": "doc_1"})
             call.set_output(large)
@@ -954,6 +957,8 @@ def test_invalid_capture_choice_and_json_are_rejected(receiver):
     with pytest.raises(TypeError):
         Hue(receiver.url, KEY, capture_content="yes")
     with Hue(receiver.url, KEY, capture_content=True) as hue:
+        # A receiver without the upload route (the loopback receiver) gets the value cut.
+        learn_no_upload_route(hue)
         with hue.span("invalid") as span:
             span.set_input(float("nan"))
             span.set_output("x" * MAX_CONTENT_BYTES)
@@ -962,7 +967,8 @@ def test_invalid_capture_choice_and_json_are_rejected(receiver):
         assert not hue.force_flush()
         # The NaN input and the two usages are failures; the output over the cap is cut.
         assert hue.export_status.instrumentation_failures == 3
-    stored = attrs(receiver.spans()[0])
+    (invalid,) = [span for span in receiver.spans() if span.name == "invalid"]
+    stored = attrs(invalid)
     assert set(stored) == {"output.value", TRUNCATED_KEY}
     assert len(stored["output.value"].string_value.encode("utf-8")) == MAX_CONTENT_BYTES
 
@@ -1139,6 +1145,9 @@ def test_large_inline_files_in_messages_export_as_their_digest(receiver):
     text = "line\n" * 20000 + "end"
     provider = TracerProvider()
     with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        # A receiver without the upload route (the loopback receiver) keeps files as recorded,
+        # a message's as their digest.
+        learn_no_upload_route(hue)
         span = provider.get_tracer("third-party").start_span("external")
         span.set_attribute(
             "gen_ai.input.messages",
@@ -1186,7 +1195,7 @@ def test_large_inline_files_in_messages_export_as_their_digest(receiver):
         )
         span.end()
         assert hue.force_flush()
-    (exported,) = receiver.spans()
+    (exported,) = [span for span in receiver.spans() if span.name == "external"]
     values = attrs(exported)
     (message,) = json.loads(values["gen_ai.input.messages"].string_value)
     assert message["parts"] == [
@@ -1312,6 +1321,8 @@ def test_export_replaces_hosted_tool_credentials_in_tool_definitions(receiver):
 def test_oversized_tool_request_is_scrubbed_whole_before_it_is_cut(receiver):
     provider = TracerProvider()
     with Hue(receiver.url, KEY, capture_content=True, tracer_provider=provider) as hue:
+        # A receiver without the upload route (the loopback receiver) gets the value cut.
+        learn_no_upload_route(hue)
         tracer = provider.get_tracer("third-party")
         oversized = tracer.start_span("oversized")
         # Over the value cap: its credentials are removed from the whole request before it is
@@ -1323,7 +1334,7 @@ def test_oversized_tool_request_is_scrubbed_whole_before_it_is_cut(receiver):
         oversized.set_attribute("input.value", json.dumps(request))
         oversized.end()
         assert hue.force_flush()
-    (span,) = receiver.spans()
+    (span,) = [span for span in receiver.spans() if span.name == "oversized"]
     stored = attrs(span)
     value = stored["input.value"].string_value
     assert len(value.encode("utf-8")) == MAX_CONTENT_BYTES

@@ -45,14 +45,24 @@ class Store:
         self.objects: dict[str, tuple[bytes, str]] = {}
         # The reservation route's answer for the n-th reservation (1-based): a status, headers
         # and whether the body is Hue's JSON error (or the body itself); ``None`` answers as Hue
-        # does.
+        # does. It is called outside the store's lock, so it may block.
         self.reserve: Callable[[int], tuple[int, dict[str, str], bool | bytes] | None] = lambda _: (
             None
         )
         # The store's status for the n-th PUT: 200 stores, "hang" never answers, "expired"
-        # answers S3's expired-URL refusal, "trickle" answers 200 a byte at a time.
+        # answers S3's expired-URL refusal, "trickle" answers 200 a byte at a time, "gate" reads
+        # the body and stores it as 200 does once ``gate`` is set.
         self.put: Callable[[int], int | str] = lambda _: 200
         self.hang = Event()
+        self.gate = Event()
+        # The status of the n-th completion, with headers; ``None`` answers as Hue does.
+        self.complete: Callable[[int], int | tuple[int, dict[str, str]] | None] = lambda _: None
+        # The answer to the n-th trace request, a status and headers, instead of accepting it;
+        # ``None`` accepts it.
+        self.traces_reply: Callable[[int], tuple[int, dict[str, str]] | None] = lambda _: None
+        self.trace_requests = 0
+        # When each span arrived (``time.monotonic()``), by name.
+        self.received_at: dict[str, float] = {}
         # Trace requests are answered once ``release_traces`` is set; ``traces_received`` is set
         # when one arrives.
         self.release_traces = Event()
@@ -81,6 +91,22 @@ def blobs(span: Any) -> list[dict[str, Any]]:
 
 def sha256(value: bytes | str) -> str:
     return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
+
+
+def eventually(condition: Callable[[], Any], seconds: float = 10) -> bool:
+    """Whether ``condition`` holds within ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def settled(hue: Hue, seconds: float = 10) -> bool:
+    """Waits for every upload the client accepted so far, as a flush does after its export."""
+    assert hue._uploads is not None
+    return hue._uploads.uploader.wait_idle(time.monotonic() + seconds)
 
 
 def message_with_image(data: bytes) -> str:
@@ -141,6 +167,9 @@ def hue_store() -> Iterator[Store]:
                 if behavior == "hang":
                     store.hang.wait(30)
                     return
+                if behavior == "gate":
+                    store.gate.wait(30)
+                    behavior = put["status"] = 200
                 if behavior == "trickle":
                     self.send_response(200)
                     self.send_header("Content-Length", "1000")
@@ -196,7 +225,8 @@ def hue_store() -> Iterator[Store]:
                 request = json.loads(body)
                 with store.lock:
                     store.reservations.append(request)
-                    answer = store.reserve(len(store.reservations))
+                    reservation = len(store.reservations)
+                answer = store.reserve(reservation)
                 if answer is not None:
                     status, reply_headers, is_json = answer
                     if isinstance(is_json, bytes):
@@ -245,7 +275,11 @@ def hue_store() -> Iterator[Store]:
                 with store.lock:
                     store.completions.append(request)
                     stored = f"{request['traceId']}/{request['sha256']}" in store.objects
-                if not stored:
+                    status = store.complete(len(store.completions))
+                if status is not None:
+                    status, reply_headers = status if isinstance(status, tuple) else (status, {})
+                    self.json(status, {"error": "Synthetic refusal."}, reply_headers)
+                elif not stored:
                     self.json(409, {"error": "Not uploaded.", "status": "missing"})
                 else:
                     self.json(200, {"status": "complete"})
@@ -253,14 +287,24 @@ def hue_store() -> Iterator[Store]:
             if headers.get("content-encoding") == "gzip":
                 body = gzip.decompress(body)
             if path.endswith("/traces"):
-                traces = ExportTraceServiceRequest.FromString(body)
                 with store.lock:
-                    store.spans.extend(
+                    store.trace_requests += 1
+                    refusal = store.traces_reply(store.trace_requests)
+                if refusal is not None:
+                    self.reply(refusal[0], b"", refusal[1])
+                    return
+                traces = ExportTraceServiceRequest.FromString(body)
+                arrived = time.monotonic()
+                with store.lock:
+                    received = [
                         span
                         for resource in traces.resource_spans
                         for scope in resource.scope_spans
                         for span in scope.spans
-                    )
+                    ]
+                    store.spans.extend(received)
+                    for span in received:
+                        store.received_at.setdefault(span.name, arrived)
                 store.traces_received.set()
                 store.release_traces.wait(30)
                 self.reply(
@@ -289,6 +333,7 @@ def hue_store() -> Iterator[Store]:
         yield store
     finally:
         store.hang.set()
+        store.gate.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -424,64 +469,43 @@ def test_an_expired_upload_url_is_reserved_again_once(hue_store):
     assert [put["status"] for put in hue_store.puts] == [403, 200]
 
 
-def test_a_value_that_cannot_be_uploaded_is_cut_as_before_reported_counted_and_pauses(hue_store):
-    hue_store.put = lambda _: 503
-    text = "f" * (2 * MIB)
-    image = os.urandom(100 * KIB)
-    with client(hue_store) as hue:
-        with hue.span("fallback") as span:
-            trace_id = span.trace_id
-            span.set_attribute("custom.document", text)
-            span.set_attribute("gen_ai.input.messages", message_with_image(image))
-        # The export succeeds: the record was delivered, with the values cut.
-        assert hue.force_flush()
-        status = hue.export_status
-        assert status.ok and status.uploaded_values == 0 and status.upload_fallbacks == 2
-        failure_sequence = hue.export_failure_sequence()
-        (warning,) = [issue for issue in hue.export_issues() if issue.kind == "warning"]
-        assert warning.count == 2 and warning.trace_ids == (trace_id,)
-        assert "could not be uploaded" in warning.message
-        record = hue_store.span("fallback")
-        assert attrs(record)["custom.document"].string_value == "f" * MIB
-        assert listed(record) == ["custom.document"]
-        assert "hue.blobs" not in attrs(record)
-        # The image falls back to its digest, as the SDK exported it before uploads.
-        (message,) = json.loads(attrs(record)["gen_ai.input.messages"].string_value)
-        assert message["parts"][1] == {
-            "type": "blob",
-            "modality": "image",
-            "mime_type": "image/png",
-            "sha256": sha256(image),
-            "size": len(image),
-        }
-        # Each failed PUT was retried once, never more; the failure paused uploads, so a later
-        # value meets no request at all.
-        attempts = len(hue_store.puts)
-        assert attempts <= 4
-        with hue.span("paused") as span:
-            span.set_attribute("custom.document", text)
-        assert hue.force_flush()
-        assert len(hue_store.puts) == attempts
-        assert attrs(hue_store.span("paused"))["custom.document"].string_value == "f" * MIB
-        assert hue.export_status.upload_fallbacks == 3
-        # A warning is not a failure.
-        assert hue.export_failure_sequence() == failure_sequence == 0
+def not_uploaded(hue: Hue) -> list[int]:
+    """The counts of the warnings for uploads that failed after their record was exported."""
+    return [
+        issue.count
+        for issue in hue.export_issues()
+        if issue.message.startswith("Content listed in hue.blobs could not be uploaded")
+    ]
 
 
 def test_a_receiver_without_the_upload_route_is_remembered(hue_store):
     hue_store.reserve = lambda _: (404, {}, False)
+    text = "n" * (2 * MIB)
     with client(hue_store) as hue:
-        for name in ("first", "second"):
-            with hue.span(name) as span:
-                span.set_attribute("custom.document", "n" * (2 * MIB))
-            assert hue.force_flush()
-            assert attrs(hue_store.span(name))["custom.document"].string_value == "n" * MIB
+        # The first value is listed when its record is exported; the receiver answers its
+        # reservation without the route afterwards, so its reference is never stored.
+        with hue.span("first") as span:
+            span.set_attribute("custom.document", text)
+        assert hue.force_flush()
+        record = hue_store.span("first")
+        assert attrs(record)["custom.document"].string_value == "n" * (16 * KIB)
+        assert listed(record) == ["custom.document"]
+        assert [entry["sha256"] for entry in blobs(record)] == [sha256(text)]
+        assert not_uploaded(hue) == [1]
+        # Learned: the next value is cut when it is queued, as before uploads existed.
+        with hue.span("second") as span:
+            span.set_attribute("custom.document", text)
+        assert hue.force_flush()
+        record = hue_store.span("second")
+        assert attrs(record)["custom.document"].string_value == "n" * MIB
+        assert listed(record) == ["custom.document"]
+        assert "hue.blobs" not in attrs(record)
         warnings = [
             issue.count
             for issue in hue.export_issues()
             if issue.message.startswith("This Hue server does not accept uploaded")
         ]
-        assert warnings == [1, 1]
+        assert warnings == [1]
     assert len(hue_store.reservations) == 1
 
 
@@ -492,14 +516,14 @@ def test_hue_s_own_404_is_a_failure_not_a_receiver_without_uploads(hue_store):
             with hue.span(name) as span:
                 span.set_attribute("custom.document", "a" * (2 * MIB))
             assert hue.force_flush()
-            assert attrs(hue_store.span(name))["custom.document"].string_value == "a" * MIB
-        warnings = [issue for issue in hue.export_issues() if issue.kind == "warning"]
-        assert [
-            issue.message.startswith("Content could not be uploaded") for issue in warnings
-        ] == [True, True]
-    # The refusal paused uploads, so the next value met no request; it was not taken for a
-    # receiver without the route, whose values are cut when queued.
-    assert len(hue_store.reservations) == 1
+            record = hue_store.span(name)
+            assert attrs(record)["custom.document"].string_value == "a" * (16 * KIB)
+            assert len(blobs(record)) == 1
+        assert not_uploaded(hue) == [1, 1]
+        assert [issue for issue in hue.export_issues() if issue.kind != "warning"] == []
+    # A refusal is final for its value alone: it is not retried, nothing pauses, and it is not
+    # taken for a receiver without the route, whose values are cut when queued.
+    assert len(hue_store.reservations) == 2
 
 
 @pytest.mark.parametrize(
@@ -516,13 +540,19 @@ def test_a_receiver_that_refuses_the_method_or_answers_no_reservation_lacks_the_
             with hue.span(name) as span:
                 span.set_attribute("custom.document", "r" * (2 * MIB))
             assert hue.force_flush()
-            assert attrs(hue_store.span(name))["custom.document"].string_value == "r" * MIB
+        # The first is listed when exported and learns the route is missing; the second is cut.
+        first, second = hue_store.span("first"), hue_store.span("second")
+        assert attrs(first)["custom.document"].string_value == "r" * (16 * KIB)
+        assert len(blobs(first)) == 1
+        assert attrs(second)["custom.document"].string_value == "r" * MIB
+        assert blobs(second) == []
+        assert not_uploaded(hue) == [1]
         warnings = [
             issue.count
             for issue in hue.export_issues()
             if issue.message.startswith("This Hue server does not accept uploaded")
         ]
-        assert warnings == [1, 1]
+        assert warnings == [1]
     assert len(hue_store.reservations) == 1
     assert hue_store.puts == []
 
@@ -593,7 +623,8 @@ def test_inline_files_queued_while_the_receiver_lacks_the_route_are_reported_per
             for issue in hue.export_issues()
             if issue.message.startswith("This Hue server does not accept uploaded")
         ]
-        assert warnings == [1, 2]
+        assert warnings == [2]
+        assert not_uploaded(hue) == [1]
     assert len(hue_store.reservations) == 1
     messages = json.loads(attrs(hue_store.span("files"))["gen_ai.input.messages"].string_value)
     assert [message["parts"][0]["sha256"] for message in messages] == [
@@ -637,7 +668,8 @@ def test_a_message_cut_after_the_queue_digested_its_files_reports_the_files_and_
             for issue in hue.export_issues()
             if issue.message.startswith("This Hue server does not accept uploaded")
         ]
-        assert warnings == [1, 4]
+        assert warnings == [4]
+        assert not_uploaded(hue) == [1]
     assert listed(hue_store.span("long")) == ["gen_ai.input.messages", "gen_ai.output.messages"]
 
 
@@ -678,7 +710,8 @@ def test_messages_queued_as_the_same_cut_text_report_their_own_files(hue_store):
             for issue in hue.export_issues()
             if issue.message.startswith("This Hue server does not accept uploaded")
         ]
-        assert warnings == [1, 5]
+        assert warnings == [5]
+        assert not_uploaded(hue) == [1]
     values = attrs(hue_store.span("shared prefix"))
     assert values["gen_ai.input.messages"].string_value == (
         values["gen_ai.output.messages"].string_value
@@ -693,28 +726,29 @@ def test_the_fallback_for_an_unfinished_placement_reports_each_inline_file_it_di
     assert result.fallbacks == ["failed"] and not result.listed
 
 
-def test_a_reply_that_trickles_is_cut_off_at_its_deadline_and_frees_its_upload_slot(hue_store):
+def test_a_put_that_trickles_is_cut_off_at_its_own_deadline_once_and_frees_its_worker(hue_store):
     hue_store.put = lambda _: "trickle"
     hue = client(hue_store, export_timeout_seconds=0.5)
     try:
         with hue.span("trickled") as span:
             span.set_attribute("custom.document", "t" * (2 * MIB))
+        ended = time.monotonic()
         started = time.monotonic()
         assert hue.force_flush(timeout_millis=20_000)
-        # Six request budgets for the uploads, then the span's own request; the store's answer
-        # would have taken 100 s.
-        assert time.monotonic() - started < 6
+        # The span went out at once; its PUT ran out of its own deadline (six export timeouts,
+        # 3 s) where the store's answer would have taken 100 s, and was not tried again.
+        assert hue_store.received_at["trickled"] - ended < 1.5
+        assert time.monotonic() - started < 5
+        assert len(hue_store.puts) == 1
         assert hue.export_status.upload_fallbacks == 1
-        slots = hue._uploads.uploader._slots
-        deadline = time.monotonic() + 2
-        while slots._value < 4 and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert slots._value == 4
+        assert hue._uploads.uploader._running == 0
     finally:
         hue.shutdown(timeout_millis=5_000)
 
 
-def test_a_placed_span_lets_go_of_its_whole_value_while_it_is_sent(hue_store):
+def test_a_held_value_is_let_go_once_its_upload_settles_whatever_its_span_request_does(
+    hue_store,
+):
     hue_store.release_traces.clear()
     text = "w" * (2 * MIB)
     flushing = None
@@ -729,13 +763,14 @@ def test_a_placed_span_lets_go_of_its_whole_value_while_it_is_sent(hue_store):
             queued = sys.getrefcount(text)
             flushing = Thread(target=hue.force_flush, daemon=True)
             flushing.start()
+            # The span's request is held unanswered; its upload runs all the same.
             assert hue_store.traces_received.wait(10)
-            # Uploaded and being sent: the queued copy no longer holds the whole value, so the
-            # held-value budget it released is not held twice.
-            deadline = time.monotonic() + 2
-            while sys.getrefcount(text) >= queued and time.monotonic() < deadline:
-                time.sleep(0.01)
+            assert eventually(lambda: hue_store.puts, 10)
+            # Stored: neither the queued copy nor its upload holds the whole value any more, and
+            # the held-value budget it was charged is free.
+            assert eventually(lambda: sys.getrefcount(text) < queued, 10)
             assert sys.getrefcount(text) == queued - 1
+            assert eventually(lambda: hue._uploads.held.held == 0, 10)
         finally:
             hue_store.release_traces.set()
             if flushing is not None:
@@ -787,15 +822,114 @@ def test_an_image_in_input_value_is_let_go_once_placed_without_a_collection(hue_
 
 
 def test_a_rate_limited_reservation_is_retried_after_its_retry_after(hue_store):
-    hue_store.reserve = lambda index: (429, {"Retry-After": "1"}, True) if index == 1 else None
+    reserved: list[float] = []
+
+    def reserve(index: int) -> Any:
+        reserved.append(time.monotonic())
+        return (429, {"Retry-After": "1"}, True) if index == 1 else None
+
+    hue_store.reserve = reserve
     with client(hue_store) as hue:
         with hue.span("limited") as span:
             span.set_attribute("custom.document", "l" * (2 * MIB))
         started = time.monotonic()
         assert hue.force_flush()
         assert time.monotonic() - started >= 0.9
+        assert hue.export_status.uploaded_values == 1
     assert len(hue_store.reservations) == 2
+    assert reserved[1] - reserved[0] >= 0.9
+    # The span did not wait for the rate-limited upload.
+    assert hue_store.received_at["limited"] < reserved[1]
     assert len(blobs(hue_store.span("limited"))) == 1
+
+
+def test_a_stored_value_settles_while_its_completion_waits_out_a_retry_after(hue_store):
+    from hue_sdk._blobs import UPLOAD_CONCURRENCY
+
+    # Hue's accounting is rate limited: each completion is answered with a 59-second wait, the
+    # value's bytes already stored.
+    hue_store.complete = lambda _: (429, {"Retry-After": "59"})
+    values = [f"{index:x}" * (2 * MIB) for index in range(UPLOAD_CONCURRENCY + 1)]
+    with client(hue_store) as hue:
+        uploads = hue._uploads
+        assert uploads is not None
+        for index, value in enumerate(values[:-1]):
+            with hue.span(f"stored {index}") as span:
+                span.set_attribute("custom.document", value)
+        started = time.monotonic()
+        assert hue.force_flush(timeout_millis=10_000)
+        # Each upload settled once its bytes were stored and its completion sent once: counted,
+        # its bytes and its charge let go.
+        assert time.monotonic() - started < 5
+        assert hue.export_status.uploaded_values == UPLOAD_CONCURRENCY
+        assert uploads.held.held == 0
+        assert len(hue_store.completions) == UPLOAD_CONCURRENCY
+        # The completions wait out their Retry-After on no upload thread: a later value uploads
+        # at once.
+        with hue.span("later") as span:
+            span.set_attribute("custom.document", values[-1])
+        started = time.monotonic()
+        assert hue.force_flush(timeout_millis=10_000)
+        assert time.monotonic() - started < 5
+        assert hue.export_status.uploaded_values == UPLOAD_CONCURRENCY + 1
+        assert uploads.held.held == 0
+    assert len(hue_store.objects) == len(hue_store.completions) == UPLOAD_CONCURRENCY + 1
+
+
+def test_a_flush_stops_waiting_once_no_pending_upload_can_be_stored_before_its_deadline(
+    hue_store,
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    # Every reservation waits out a 59-second Retry-After: no upload is stored within a flush.
+    hue_store.reserve = lambda _: (429, {"Retry-After": "59"}, True)
+    provider = TracerProvider(shutdown_on_exit=False)
+    hue = client(hue_store, tracer_provider=provider)
+    budgets: list[int] = []
+
+    class Application(BatchSpanProcessor):
+        """The application's own processor, after Hue's on the provider it shares."""
+
+        def force_flush(self, timeout_millis: int = 30_000) -> bool:
+            budgets.append(timeout_millis)
+            return super().force_flush(timeout_millis)
+
+    other = InMemorySpanExporter()
+    provider.add_span_processor(Application(other, schedule_delay_millis=60_000))
+    tracer = provider.get_tracer("application")
+    try:
+        for index in range(3):
+            span = tracer.start_span(f"borrowed {index}")
+            span.set_attribute("custom.document", str(index) * (2 * MIB))
+            span.end()
+            started = time.monotonic()
+            # Hue's processor sends its record, then reports its uploads pending as soon as each
+            # waits out its Retry-After past the deadline, rather than spend the provider's
+            # budget, which the processor after it keeps.
+            assert not provider.force_flush(2_000)
+            assert time.monotonic() - started < 1.5
+            assert f"borrowed {index}" in hue_store.received_at
+            assert all(budget > 1_000 for budget in budgets)
+        # The client's own flush, as soon.
+        started = time.monotonic()
+        assert not hue.force_flush(timeout_millis=2_000)
+        assert time.monotonic() - started < 1.5
+        # An upload being sent is still waited for.
+        hue_store.reserve = lambda _: None
+        hue_store.put = lambda _: "gate"
+        span = tracer.start_span("sent")
+        span.set_attribute("custom.document", "s" * (2 * MIB))
+        span.end()
+        started = time.monotonic()
+        assert not hue._span_processor.force_flush(1_000)
+        assert time.monotonic() - started >= 0.9
+    finally:
+        hue_store.gate.set()
+        hue.shutdown(timeout_millis=5_000)
+        provider.shutdown()
+    assert len(hue_store.reservations) == 4
 
 
 def test_the_redactor_s_answer_is_uploaded_and_metadata_only_export_uploads_nothing(hue_store):
@@ -870,19 +1004,785 @@ def test_a_setup_credential_never_uploads_and_a_log_body_is_cut_inline(hue_store
     assert log.body.string_value == "y" * MIB
 
 
-def test_a_store_that_never_answers_delays_the_export_by_the_upload_budget_at_most(hue_store):
+def test_a_store_that_never_answers_never_delays_the_span(hue_store):
     hue_store.put = lambda _: "hang"
+    text = "h" * (2 * MIB)
     hue = client(hue_store, export_timeout_seconds=0.2)
     try:
         with hue.span("hung") as span:
-            span.set_attribute("custom.document", "h" * (2 * MIB))
-        started = time.monotonic()
+            span.set_attribute("custom.document", text)
+        ended = time.monotonic()
         assert hue.force_flush(timeout_millis=10_000)
-        # Six request budgets for the uploads, then the span's own request.
-        assert time.monotonic() - started < 5
+        # The span went out at once, its value listed; the PUT was tried three times, each
+        # unanswered past the request timeout, then counted as not uploaded.
+        assert hue_store.received_at["hung"] - ended < 1
+        record = hue_store.span("hung")
+        assert attrs(record)["custom.document"].string_value == "h" * (16 * KIB)
+        assert [entry["sha256"] for entry in blobs(record)] == [sha256(text)]
+        assert len(hue_store.puts) == 3
         assert hue.export_status.upload_fallbacks == 1
-        assert attrs(hue_store.span("hung"))["custom.document"].string_value == "h" * MIB
     finally:
         started = time.monotonic()
         assert hue.shutdown(timeout_millis=5_000)
         assert time.monotonic() - started < 5
+
+
+def test_a_span_is_sent_while_its_upload_is_stalled(hue_store):
+    hue_store.put = lambda _: "gate"
+    text = "d" * (2 * MIB)
+    image = os.urandom(100 * KIB)
+    with client(hue_store) as hue:
+        with hue.span("stalled") as span:
+            trace_id = span.trace_id
+            span.set_attribute("custom.document", text)
+            span.set_attribute("gen_ai.input.messages", message_with_image(image))
+        flushed: list[bool] = []
+        flushing = Thread(
+            target=lambda: flushed.append(hue.force_flush(timeout_millis=30_000)), daemon=True
+        )
+        flushing.start()
+        try:
+            # While the store holds both PUTs, the span reaches Hue in its final form.
+            assert eventually(lambda: "stalled" in hue_store.received_at, 3)
+            assert eventually(lambda: hue_store.puts, 3)
+            assert hue_store.objects == {}
+            assert flushed == []
+            record = hue_store.span("stalled")
+            values = attrs(record)
+            assert values["custom.document"].string_value == "d" * (16 * KIB)
+            assert listed(record) == ["custom.document"]
+            assert blobs(record) == [
+                {
+                    "key": "custom.document",
+                    "sha256": sha256(text),
+                    "size": len(text),
+                    "content_type": "text/plain; charset=utf-8",
+                },
+                {
+                    "key": "gen_ai.input.messages#/0/parts/1",
+                    "sha256": sha256(image),
+                    "size": len(image),
+                    "content_type": "image/png",
+                },
+            ]
+            (message,) = json.loads(values["gen_ai.input.messages"].string_value)
+            assert message["parts"][1] == {
+                "type": "blob",
+                "modality": "image",
+                "mime_type": "image/png",
+                "sha256": sha256(image),
+                "size": len(image),
+            }
+        finally:
+            hue_store.gate.set()
+        flushing.join(30)
+        # The flush waited for both uploads.
+        assert flushed == [True]
+        assert set(hue_store.objects) == {
+            f"{trace_id}/{sha256(text)}",
+            f"{trace_id}/{sha256(image)}",
+        }
+        assert hue.export_status.uploaded_values == 2
+        assert hue._uploads.held.held == 0
+
+
+def test_a_span_ended_after_a_stalled_upload_is_not_held_behind_it(hue_store):
+    hue_store.put = lambda _: "gate"
+    with client(hue_store) as hue:
+        with hue.span("A") as span:
+            span.set_attribute("custom.document", "a" * (2 * MIB))
+        # A's export ran and its PUT is held at the store.
+        assert eventually(lambda: hue_store.puts, 5)
+        time.sleep(0.2)
+        with hue.span("B"):
+            pass
+        ended = time.monotonic()
+        assert eventually(lambda: "B" in hue_store.received_at, 3)
+        assert hue_store.received_at["B"] - ended < 1.5
+        assert hue_store.objects == {}
+        hue_store.gate.set()
+        assert hue.force_flush()
+
+
+def test_spans_ending_while_an_upload_is_stalled_are_not_dropped(hue_store):
+    hue_store.put = lambda _: "gate"
+    with client(hue_store, max_queue_size=8) as hue:
+        with hue.span("large") as span:
+            span.set_attribute("custom.document", "x" * (2 * MIB))
+        assert eventually(lambda: hue_store.puts, 5)
+        # Spans keep ending while the upload is held: they are exported as usual, never queued
+        # behind it until the small queue overflows.
+        for index in range(20):
+            with hue.span(f"small {index}"):
+                pass
+            time.sleep(0.2)
+        assert eventually(lambda: len(hue_store.spans) == 21, 5)
+        assert hue.export_status.dropped_trace_records == 0
+        assert hue_store.objects == {}
+        hue_store.gate.set()
+        assert hue.force_flush()
+
+
+def test_rate_limited_reservations_never_delay_or_drop_spans(hue_store, monkeypatch):
+    import hue_sdk._blobs as blob_module
+    from hue_sdk.transport import RATE_LIMITED
+
+    monkeypatch.setattr(blob_module, "SHUTDOWN_UPLOAD_SECONDS", 0)
+    # Every reservation is rate limited for 30 s, and the span's first request for 1 s.
+    hue_store.reserve = lambda _: (429, {"Retry-After": "30"}, True)
+    hue_store.traces_reply = lambda index: (429, {"Retry-After": "1"}) if index == 1 else None
+    values = {f"custom.document.{index}": str(index) * (2 * MIB) for index in range(4)}
+    hue = client(hue_store, export_timeout_seconds=1)
+    with hue.span("limited") as span:
+        for key, value in values.items():
+            span.set_attribute(key, value)
+    ended = time.monotonic()
+    assert eventually(lambda: "limited" in hue_store.received_at, 4)
+    assert hue_store.received_at["limited"] - ended < 4
+    assert len(blobs(hue_store.span("limited"))) == 4
+    status = hue.export_status
+    assert status.failed_trace_batches == status.dropped_trace_records == 0
+    assert all(issue.message != RATE_LIMITED for issue in hue.export_issues())
+    # The uploads still wait out their Retry-After: shutdown gives them no grace and abandons
+    # them, counted.
+    started = time.monotonic()
+    hue.shutdown(timeout_millis=2_000)
+    assert time.monotonic() - started < 3
+    assert hue._shutdown_done.wait(5)
+    assert eventually(lambda: hue.export_status.upload_fallbacks == 4, 5)
+    assert len(hue_store.reservations) == 4
+    assert not_uploaded(hue) and sum(not_uploaded(hue)) == 4
+    assert hue.export_status.failed_trace_batches == 0
+
+
+def test_a_value_whose_upload_fails_keeps_its_reference_and_is_counted(hue_store, monkeypatch):
+    import hue_sdk._blobs as blob_module
+
+    monkeypatch.setattr(blob_module, "_RETRY_DELAY_SECONDS", 0)
+    hue_store.put = lambda _: 503
+    text = "f" * (2 * MIB)
+    image = os.urandom(100 * KIB)
+    with client(hue_store) as hue:
+        with hue.span("fallback") as span:
+            trace_id = span.trace_id
+            span.set_attribute("custom.document", text)
+            span.set_attribute("gen_ai.input.messages", message_with_image(image))
+        # The export succeeds; the record was sent before its uploads failed.
+        assert hue.force_flush()
+        status = hue.export_status
+        assert status.ok and status.uploaded_values == 0 and status.upload_fallbacks == 2
+        assert hue.export_failure_sequence() == 0
+        warnings = [issue for issue in hue.export_issues() if issue.kind == "warning"]
+        assert sum(not_uploaded(hue)) == 2 and len(warnings) == len(not_uploaded(hue))
+        assert all(issue.trace_ids == (trace_id,) for issue in warnings)
+        assert all("could not be uploaded" in issue.message for issue in warnings)
+        # The record keeps what it was exported with: the prefix, its listing and both entries,
+        # which Hue reads as missing.
+        record = hue_store.span("fallback")
+        assert attrs(record)["custom.document"].string_value == "f" * (16 * KIB)
+        assert listed(record) == ["custom.document"]
+        assert [(entry["key"], entry["sha256"]) for entry in blobs(record)] == [
+            ("custom.document", sha256(text)),
+            ("gen_ai.input.messages#/0/parts/1", sha256(image)),
+        ]
+        (message,) = json.loads(attrs(record)["gen_ai.input.messages"].string_value)
+        assert message["parts"][1]["sha256"] == sha256(image)
+        # Each PUT was tried three times.
+        assert len(hue_store.puts) == 6 and len(hue_store.reservations) == 2
+        assert hue_store.objects == {}
+        # Nothing pauses: a later value is reserved and stored at once.
+        hue_store.put = lambda _: 200
+        with hue.span("later") as span:
+            span.set_attribute("custom.document", "g" * (2 * MIB))
+        assert hue.force_flush()
+        assert len(hue_store.reservations) == 3
+        assert hue.export_status.uploaded_values == 1
+        assert hue.export_failure_sequence() == 0
+
+
+def test_every_entry_point_lists_its_reference_when_the_upload_fails(hue_store):
+    from hue_sdk import Attachment
+
+    hue_store.put = lambda _: 400
+    text = "v" * (2 * MIB)
+    image = os.urandom(10 * KIB)
+    pdf = b"%PDF-1.4\n%every entry point\n%%EOF\n"
+    csv = b"a,b\n1,2\n"
+    with client(hue_store) as hue:
+        with hue.span("every entry point") as span:
+            span.set_attribute("custom.document", text)
+            span.set_attribute("gen_ai.input.messages", message_with_image(image))
+            span.set_output({"report": Attachment(pdf, content_type="application/pdf")})
+            span.record_file(role="output", media_type="text/csv", data=csv, upload=True)
+        assert hue.force_flush()
+        status = hue.export_status
+        assert (status.uploaded_values, status.upload_fallbacks) == (0, 4)
+    record = hue_store.span("every entry point")
+    assert sorted((entry["key"], entry["sha256"]) for entry in blobs(record)) == sorted(
+        [
+            ("custom.document", sha256(text)),
+            ("gen_ai.input.messages#/0/parts/1", sha256(image)),
+            ("output.value#/report", sha256(pdf)),
+            (f"event:hue.file:{sha256(csv)}", sha256(csv)),
+        ]
+    )
+    # A 400 is final: one PUT each.
+    assert len(hue_store.puts) == 4 and hue_store.objects == {}
+
+
+def test_a_later_reference_resolves_an_earlier_failed_upload(hue_store):
+    hue_store.put = lambda index: 400 if index == 1 else 200
+    text = "r" * (2 * MIB)
+    with client(hue_store) as hue:
+        with hue.span("parent"):
+            with hue.span("A") as span:
+                trace_id = span.trace_id
+                span.set_attribute("tool.output", text)
+            assert hue.force_flush()
+            assert hue.export_status.upload_fallbacks == 1
+            # The failed identity is forgotten: the same bytes later in the trace upload again.
+            with hue.span("B") as span:
+                span.set_attribute("tool.output", text)
+            assert hue.force_flush()
+        assert hue.force_flush()
+        assert hue.export_status.uploaded_values >= 1
+    (entry,) = blobs(hue_store.span("A"))
+    assert hue_store.objects[f"{trace_id}/{entry['sha256']}"][0] == text.encode()
+    assert len(hue_store.reservations) == 2
+    assert [put["status"] for put in hue_store.puts] == [400, 200]
+
+
+def test_force_flush_waits_for_pending_uploads(hue_store):
+    hue_store.put = lambda _: "gate"
+    with client(hue_store) as hue:
+        with hue.span("pending") as span:
+            trace_id = span.trace_id
+            span.set_attribute("custom.document", "p" * (2 * MIB))
+        flushed: list[bool] = []
+        flushing = Thread(target=lambda: flushed.append(hue.force_flush()), daemon=True)
+        flushing.start()
+        try:
+            assert eventually(lambda: "pending" in hue_store.received_at, 3)
+            time.sleep(0.5)
+            assert flushing.is_alive() and flushed == []
+        finally:
+            hue_store.gate.set()
+        flushing.join(30)
+        assert flushed == [True]
+        assert hue.export_status.uploaded_values == 1
+    assert f"{trace_id}/{sha256('p' * (2 * MIB))}" in hue_store.objects
+
+
+def test_force_flush_reports_a_timeout_while_an_upload_is_pending(hue_store):
+    hue_store.put = lambda _: "gate"
+    with client(hue_store) as hue:
+        with hue.span("pending") as span:
+            span.set_attribute("custom.document", "t" * (2 * MIB))
+        try:
+            assert not hue.force_flush(timeout_millis=500)
+            # A timeout, not a failure.
+            assert hue.export_status.ok and hue.export_failure_sequence() == 0
+            assert "pending" in hue_store.received_at
+        finally:
+            hue_store.gate.set()
+        assert hue.force_flush()
+        assert hue.export_status.uploaded_values == 1
+
+
+def test_a_borrowed_provider_s_shutdown_never_waits_for_uploads_and_hue_s_shutdown_does(
+    hue_store,
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    hue_store.put = lambda _: "gate"
+    provider = TracerProvider(shutdown_on_exit=False)
+    hue = client(hue_store, tracer_provider=provider)
+    # The application's own processor, after Hue's, exports only when it is flushed or shut down.
+    other = InMemorySpanExporter()
+    provider.add_span_processor(BatchSpanProcessor(other, schedule_delay_millis=60_000))
+    try:
+        tracer = provider.get_tracer("third-party")
+        span = tracer.start_span("borrowed")
+        span.set_attribute("custom.document", "b" * (2 * MIB))
+        span.end()
+        assert not provider.force_flush(500)
+        hue_store.gate.set()
+        assert provider.force_flush()
+        assert len(hue_store.objects) == 1
+        hue_store.gate.clear()
+        span = tracer.start_span("at shutdown")
+        span.set_attribute("custom.document", "c" * (2 * MIB))
+        span.end()
+        started = time.monotonic()
+        provider.shutdown()
+        # The provider's shutdown sends Hue's record and never holds the processor after Hue's
+        # behind the pending upload.
+        assert time.monotonic() - started < 5
+        assert "at shutdown" in hue_store.received_at
+        assert "at shutdown" in [span.name for span in other.get_finished_spans()]
+        assert eventually(lambda: len(hue_store.puts) == 2, 5)
+        assert len(hue_store.objects) == 1
+        # Hue's own shutdown then gives the pending upload its grace.
+        results: list[bool] = []
+        stopping = Thread(target=lambda: results.append(hue.shutdown(30_000)), daemon=True)
+        stopping.start()
+        stopping.join(0.5)
+        assert stopping.is_alive()
+        hue_store.gate.set()
+        stopping.join(10)
+        assert results == [True]
+        assert len(hue_store.objects) == 2
+    finally:
+        hue_store.gate.set()
+        hue.shutdown(timeout_millis=5_000)
+
+
+def test_shutdown_gives_pending_uploads_a_bounded_grace_then_counts_them(hue_store, monkeypatch):
+    import hue_sdk._blobs as blob_module
+
+    monkeypatch.setattr(blob_module, "SHUTDOWN_UPLOAD_SECONDS", 0.5)
+    # The store never answers the PUT while the client waits.
+    hue_store.put = lambda _: "gate"
+    hue = client(hue_store, export_timeout_seconds=1)
+    with hue.span("abandoned") as span:
+        span.set_attribute("custom.document", "z" * (2 * MIB))
+    assert eventually(lambda: hue_store.puts, 5)
+    started = time.monotonic()
+    assert not hue.shutdown(timeout_millis=1_000)
+    assert time.monotonic() - started < 1.5
+    assert hue._shutdown_done.wait(5)
+    uploads = hue._uploads
+    assert uploads is not None
+    assert eventually(lambda: hue.export_status.upload_fallbacks == 1, 5)
+    assert uploads.held.held == 0
+    assert eventually(lambda: uploads.uploader._workers == 0, 5)
+    assert "abandoned" in hue_store.received_at and hue_store.objects == {}
+
+
+def test_a_full_upload_queue_keeps_the_fallback_without_waiting(hue_store):
+    from hue_sdk._blobs import FALLBACK_MESSAGES
+
+    hue_store.put = lambda _: "gate"
+    with client(hue_store) as hue:
+        hue._uploads.uploader._queue_limit = 1
+        with hue.span("full queue") as span:
+            span.set_attribute("custom.first", "1" * (2 * MIB))
+            span.set_attribute("custom.second", "2" * (2 * MIB))
+        ended = time.monotonic()
+        assert eventually(lambda: "full queue" in hue_store.received_at, 3)
+        assert hue_store.received_at["full queue"] - ended < 2
+        record = hue_store.span("full queue")
+        assert attrs(record)["custom.first"].string_value == "1" * (16 * KIB)
+        assert attrs(record)["custom.second"].string_value == "2" * MIB
+        assert listed(record) == ["custom.first", "custom.second"]
+        assert [entry["key"] for entry in blobs(record)] == ["custom.first"]
+        assert [
+            issue.count
+            for issue in hue.export_issues()
+            if issue.message == FALLBACK_MESSAGES["budget"]
+        ] == [1]
+        hue_store.gate.set()
+        assert hue.force_flush()
+        status = hue.export_status
+        assert (status.uploaded_values, status.upload_fallbacks) == (1, 1)
+
+
+def test_a_full_held_budget_cuts_new_values_at_admission_without_waiting(hue_store):
+    from hue_sdk._blobs import FALLBACK_MESSAGES
+
+    hue_store.put = lambda _: "gate"
+    with client(hue_store) as hue:
+        uploads = hue._uploads
+        assert uploads is not None
+        uploads.held._limit = 3 * MIB
+        with hue.span("held") as span:
+            span.set_attribute("custom.document", "1" * (2 * MIB))
+        # The first value stays charged while its upload is pending: the second does not fit.
+        with hue.span("cut") as span:
+            span.set_attribute("custom.document", "2" * (2 * MIB))
+        ended = time.monotonic()
+        assert eventually(lambda: {"held", "cut"} <= hue_store.received_at.keys(), 3)
+        assert max(hue_store.received_at[name] for name in ("held", "cut")) - ended < 2
+        held, cut = hue_store.span("held"), hue_store.span("cut")
+        assert attrs(held)["custom.document"].string_value == "1" * (16 * KIB)
+        assert len(blobs(held)) == 1
+        assert attrs(cut)["custom.document"].string_value == "2" * MIB
+        assert listed(cut) == ["custom.document"] and blobs(cut) == []
+        assert [
+            issue.count
+            for issue in hue.export_issues()
+            if issue.message == FALLBACK_MESSAGES["budget"]
+        ] == [1]
+        hue_store.gate.set()
+        assert hue.force_flush()
+        assert uploads.held.held == 0
+
+
+def test_stalled_uploads_give_way_to_later_values_so_no_later_span_is_dropped(
+    hue_store, monkeypatch
+):
+    import hue_sdk._blobs as blob_module
+
+    monkeypatch.setattr(blob_module, "SHUTDOWN_UPLOAD_SECONDS", 0)
+    # Every reservation is rate limited for 59 s: the four workers wait it out, the rest queue.
+    hue_store.reserve = lambda _: (429, {"Retry-After": "59"}, True)
+    hue = client(hue_store)
+    uploads = hue._uploads
+    assert uploads is not None
+    size = blob_module.held_size("e" * (2 * MIB))
+    # The held-value budget holds the earlier requests' sixteen values exactly.
+    uploads.held._limit = 16 * size
+    try:
+        for index in range(16):
+            with hue.span(f"earlier {index}") as span:
+                span.set_attribute("custom.document", f"{index:x}" * (2 * MIB))
+        assert not hue.force_flush(timeout_millis=200)
+        # Every earlier record was placed and sent, its upload queued or waiting out its 429.
+        assert eventually(lambda: len(hue_store.spans) == 16, 5)
+        assert eventually(lambda: len(hue_store.reservations) == 4, 5)
+        assert uploads.held.held == 16 * size
+        # A later request ends more spans with values over the cap than the 8 MiB record queue
+        # holds cut inline: each is held for upload in place of an earlier queued one.
+        with hue.span("later"):
+            for index in range(10):
+                with hue.span(f"tool {index}") as span:
+                    span.set_attribute("custom.document", chr(ord("g") + index) * (2 * MIB))
+        assert not hue.force_flush(timeout_millis=2_000)
+        assert hue.export_status.dropped_trace_records == 0
+        for index in range(10):
+            record = hue_store.span(f"tool {index}")
+            text = chr(ord("g") + index) * (2 * MIB)
+            assert attrs(record)["custom.document"].string_value == text[: 16 * KIB]
+            assert [entry["sha256"] for entry in blobs(record)] == [sha256(text)]
+        assert "later" in hue_store.received_at
+        # The ten earlier uploads given up are counted as not uploaded; their records were
+        # exported listing them.
+        assert eventually(lambda: sum(not_uploaded(hue)) == 10, 5)
+        assert len(blobs(hue_store.span("earlier 15"))) == 1
+    finally:
+        hue.shutdown(timeout_millis=1_000)
+
+
+@pytest.mark.parametrize("entry_point", ["record_file", "attachment", "log_inference"])
+def test_stalled_uploads_give_way_to_later_files_and_log_values(
+    hue_store, monkeypatch, entry_point
+):
+    import hue_sdk._blobs as blob_module
+    from hue_sdk import Attachment
+
+    monkeypatch.setattr(blob_module, "SHUTDOWN_UPLOAD_SECONDS", 0)
+    hue_store.reserve = lambda _: (429, {"Retry-After": "59"}, True)
+    hue = client(hue_store)
+    uploads = hue._uploads
+    assert uploads is not None
+    size = blob_module.held_size("e" * (2 * MIB))
+    uploads.held._limit = 16 * size
+    data = os.urandom(64 * KIB)
+    try:
+        for index in range(16):
+            with hue.span(f"earlier {index}") as span:
+                span.set_attribute("custom.document", f"{index:x}" * (2 * MIB))
+        assert not hue.force_flush(timeout_millis=200)
+        # Every earlier record was placed and sent, its upload queued or waiting out its 429.
+        assert eventually(lambda: len(hue_store.spans) == 16, 5)
+        assert eventually(lambda: len(hue_store.reservations) == 4, 5)
+        assert uploads.held.held == 16 * size
+        with hue.span("later") as span:
+            # A file recorded while the budget is full is held in place of an earlier queued
+            # upload, not refused (a refused record_file is an instrumentation failure).
+            if entry_point == "record_file":
+                span.record_file(role="output", media_type="image/png", data=data, upload=True)
+            elif entry_point == "attachment":
+                span.set_output({"scan": Attachment(data, content_type="image/png")})
+            else:
+                span.log_inference(input=[Attachment(data, content_type="image/png")])
+            # So is each log record's message over the cap, which would otherwise be cut into
+            # the 8 MiB log queue.
+            for index in range(10):
+                message = [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"type": "text", "content": chr(ord("A") + index) * (5 * MIB // 4)},
+                            {
+                                "type": "blob",
+                                "modality": "image",
+                                "mime_type": "image/png",
+                                "content": base64.b64encode(os.urandom(KIB)).decode(),
+                            },
+                        ],
+                    }
+                ]
+                hue._logger.emit(
+                    body=f"log {index}", attributes={"gen_ai.input.messages": json.dumps(message)}
+                )
+        assert not hue.force_flush(timeout_millis=2_000)
+        status = hue.export_status
+        assert status.dropped_trace_records == status.dropped_log_records == 0
+        assert status.instrumentation_failures == 0
+        with hue_store.lock:
+            logs = list(hue_store.logs)
+        emitted = [log for log in logs if log.body.string_value.startswith("log ")]
+        assert len(emitted) == 10 and all(len(blobs(log)) == 1 for log in emitted)
+        if entry_point == "log_inference":
+            (inference,) = [log for log in logs if log not in emitted]
+            assert [entry["sha256"] for entry in blobs(inference)] == [sha256(data)]
+        else:
+            assert [entry["sha256"] for entry in blobs(hue_store.span("later"))] == [sha256(data)]
+        assert eventually(lambda: sum(not_uploaded(hue)) > 0, 5)
+    finally:
+        hue.shutdown(timeout_millis=1_000)
+
+
+def test_settled_uploads_are_counted_while_another_stays_pending(hue_store):
+    hue_store.put = lambda index: "gate" if index == 1 else 200
+    with client(hue_store) as hue:
+        with hue.span("stalled") as span:
+            span.set_attribute("custom.stalled", "s" * (2 * MIB))
+        assert eventually(lambda: len(hue_store.puts) == 1, 5)
+        with hue.span("stored") as span:
+            for index in range(5):
+                span.set_attribute(f"custom.stored.{index}", str(index) * (2 * MIB))
+        assert eventually(lambda: len(hue_store.objects) == 5, 5)
+        # Counted within the report interval, with no flush and no later upload settling.
+        assert eventually(lambda: hue.export_status.uploaded_values == 5, 3)
+        hue_store.gate.set()
+
+
+def test_copies_of_one_pending_value_share_its_upload(hue_store):
+    hue_store.put = lambda _: "gate"
+    text = "s" * (2 * MIB)
+    with client(hue_store) as hue:
+        with hue.span("parent") as parent:
+            parent.set_attribute("tool.output", text)
+            with hue.span("child") as child:
+                child.set_attribute("tool.output", text)
+        assert eventually(lambda: {"parent", "child"} <= hue_store.received_at.keys(), 3)
+        for name in ("parent", "child"):
+            assert [entry["sha256"] for entry in blobs(hue_store.span(name))] == [sha256(text)]
+        assert len(hue_store.reservations) == len(hue_store.puts) == 1
+        hue_store.gate.set()
+        assert hue.force_flush()
+        assert hue.export_status.uploaded_values == 2
+    assert len(hue_store.reservations) == len(hue_store.puts) == 1
+
+
+def test_uploads_use_at_most_four_workers(hue_store):
+    hue_store.put = lambda _: "gate"
+    images = [os.urandom(KIB) for _ in range(12)]
+    messages = json.dumps(
+        [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "blob",
+                        "mime_type": "image/png",
+                        "content": base64.b64encode(image).decode(),
+                    }
+                    for image in images
+                ],
+            }
+        ]
+    )
+    hue = client(hue_store)
+    uploads = hue._uploads
+    assert uploads is not None
+    uploader = uploads.uploader
+    try:
+        with hue.span("twelve") as span:
+            span.set_attribute("gen_ai.input.messages", messages)
+        assert eventually(lambda: len(hue_store.puts) == 4, 5)
+        time.sleep(0.2)
+        # Four PUTs are held at the store; the other eight wait in the queue, no thread each.
+        assert uploader._workers == uploader._running == 4
+        assert len(uploader._queue) == 8 and len(hue_store.puts) == 4
+    finally:
+        hue_store.gate.set()
+        assert hue.shutdown(timeout_millis=10_000)
+    assert eventually(lambda: uploader._workers == 0, 5)
+    assert len(hue_store.objects) == 12
+
+
+def test_upload_counters_are_current_when_flush_returns(hue_store):
+    with client(hue_store) as hue:
+        for index in range(20):
+            with hue.span(f"image {index}") as span:
+                span.set_attribute("gen_ai.input.messages", message_with_image(os.urandom(64)))
+            assert hue.force_flush()
+            assert hue.export_status.uploaded_values == index + 1
+
+
+def test_a_failed_upload_never_pauses_staging_or_the_next_upload(hue_store, monkeypatch):
+    import hue_sdk._blobs as blob_module
+    from hue_sdk import Attachment
+
+    monkeypatch.setattr(blob_module, "_RETRY_DELAY_SECONDS", 0)
+    hue_store.put = lambda index: 503 if index <= 3 else 200
+    png = os.urandom(2 * KIB)
+    with client(hue_store) as hue:
+        with hue.span("failed") as span:
+            span.set_attribute("custom.document", "f" * (2 * MIB))
+        assert hue.force_flush()
+        assert hue.export_status.upload_fallbacks == 1
+        # Recorded at once after the failure: staged, listed and uploaded.
+        with hue.span("attached") as span:
+            trace_id = span.trace_id
+            span.set_input({"scan": Attachment(png, content_type="image/png")})
+        assert hue.force_flush()
+        status = hue.export_status
+        assert (status.uploaded_values, status.upload_fallbacks) == (1, 1)
+    (entry,) = blobs(hue_store.span("attached"))
+    assert entry["key"] == "input.value#/scan"
+    assert hue_store.objects[f"{trace_id}/{sha256(png)}"] == (png, "image/png")
+
+
+def test_the_route_is_learned_in_the_background(hue_store):
+    from hue_sdk._blobs import FALLBACK_MESSAGES
+
+    hue_store.reserve = lambda _: (404, {}, False)
+    text = "l" * (2 * MIB)
+    with client(hue_store) as hue:
+        uploads = hue._uploads
+        assert uploads is not None
+        with hue.span("before") as span:
+            span.set_attribute("tool.output", text)
+        assert hue.force_flush()
+        # Listed when exported; its reservation then found no route.
+        before = hue_store.span("before")
+        assert attrs(before)["tool.output"].string_value == "l" * (16 * KIB)
+        assert [entry["sha256"] for entry in blobs(before)] == [sha256(text)]
+        assert not_uploaded(hue) == [1]
+        assert not uploads.holds()
+        with hue.span("after") as span:
+            span.set_attribute("tool.output", text)
+        assert hue.force_flush()
+        after = hue_store.span("after")
+        assert attrs(after)["tool.output"].string_value == "l" * MIB and blobs(after) == []
+        assert [
+            issue.count
+            for issue in hue.export_issues()
+            if issue.message == FALLBACK_MESSAGES["unsupported"]
+        ] == [1]
+        assert hue.export_status.upload_fallbacks == 2
+    assert len(hue_store.reservations) == 1 and hue_store.puts == []
+
+
+@pytest.mark.parametrize("held", ["put", "reservation"])
+def test_a_later_flush_sends_its_own_records_while_an_earlier_one_waits_for_an_upload(
+    hue_store, monkeypatch, held
+):
+    import hue_sdk._blobs as blob_module
+
+    monkeypatch.setattr(blob_module, "SHUTDOWN_UPLOAD_SECONDS", 0)
+    if held == "put":
+        # The store never answers the PUT while the test runs.
+        hue_store.put = lambda _: "gate"
+    else:
+        # The reservation is refused for now and asked again in 20 s.
+        hue_store.reserve = lambda index: (503, {"Retry-After": "20"}, True) if index == 1 else None
+    hue = client(hue_store)
+    try:
+        with hue.span("earlier") as span:
+            span.set_attribute("custom.document", "e" * (2 * MIB))
+        earlier: list[bool] = []
+        waiting = Thread(
+            target=lambda: earlier.append(hue.force_flush(timeout_millis=30_000)), daemon=True
+        )
+        waiting.start()
+        assert eventually(lambda: "earlier" in hue_store.received_at, 3)
+        assert eventually(lambda: hue_store.puts if held == "put" else hue_store.reservations, 3)
+        time.sleep(0.3)
+        # The earlier flush is waiting for its upload.
+        assert waiting.is_alive() and earlier == []
+        # A later request's span and log record are recorded after the upload started; its own
+        # flush puts them on the wire at once, before it returns, whatever the earlier one waits
+        # for.
+        with hue.span("later") as span:
+            span.log_inference(output=None)
+        started = time.monotonic()
+        later = hue.force_flush_safe(timeout_millis=1_000)
+        returned = time.monotonic()
+        assert "later" in hue_store.received_at
+        assert hue_store.received_at["later"] - started < 0.5
+        with hue_store.lock:
+            assert len(hue_store.logs) == 1
+        # The earlier upload is still pending: the later flush reports a timeout, not a
+        # failure, at its own deadline.
+        assert not later and returned - started < 1.5
+        assert hue.export_status.ok and hue.export_failure_sequence() == 0
+        assert waiting.is_alive() and earlier == []
+        assert hue_store.objects == {}
+    finally:
+        hue_store.gate.set()
+        hue.shutdown(timeout_millis=5_000)
+        assert hue._shutdown_done.wait(5)
+
+
+def test_a_value_is_charged_once_from_its_upload_s_acceptance_to_its_end(hue_store):
+    hue_store.put = lambda _: "gate"
+    # The span's request is held unanswered: its export has not ended.
+    hue_store.release_traces.clear()
+    first, second = "1" * (2 * MIB), "2" * (2 * MIB)
+    with client(hue_store) as hue:
+        uploads = hue._uploads
+        assert uploads is not None
+        # Room for both values charged once each, not for one charged twice.
+        uploads.held._limit = sys.getsizeof(first) + sys.getsizeof(second)
+        try:
+            with hue.span("first") as span:
+                span.set_attribute("custom.document", first)
+            assert hue_store.traces_received.wait(5)
+            assert eventually(lambda: hue_store.puts, 5)
+            # Accepted, uploading and its record still being sent: charged once.
+            assert uploads.held.held == sys.getsizeof(first)
+            with hue.span("second") as span:
+                span.set_attribute("custom.document", second)
+            # Admitted whole beside it.
+            assert uploads.held.held == sys.getsizeof(first) + sys.getsizeof(second)
+            hue_store.release_traces.set()
+            assert eventually(lambda: len(hue_store.puts) == 2, 5)
+            assert uploads.held.held == sys.getsizeof(first) + sys.getsizeof(second)
+        finally:
+            hue_store.release_traces.set()
+            hue_store.gate.set()
+        assert hue.force_flush()
+        assert uploads.held.held == 0
+        assert hue.export_status.uploaded_values == 2
+    for name in ("first", "second"):
+        assert len(blobs(hue_store.span(name))) == 1
+
+
+def test_a_receiver_without_the_upload_route_is_remembered_for_the_client_s_life(
+    hue_store, monkeypatch
+):
+    import hue_sdk._blobs as blob_module
+
+    hue_store.reserve = lambda _: (404, {}, False)
+    text = "k" * (2 * MIB)
+    with client(hue_store) as hue:
+        uploads = hue._uploads
+        assert uploads is not None
+        with hue.span("learns") as span:
+            span.set_attribute("custom.document", text)
+        assert hue.force_flush()
+        # Only the record exported before its first answer lists a value it never stores.
+        assert len(blobs(hue_store.span("learns"))) == 1
+        assert not_uploaded(hue) == [1]
+        # An hour on, the receiver is still known to lack the route: it is not asked again, and
+        # no value is listed for an upload it would never store; each is cut when it is queued.
+        later = time.monotonic() + 3600
+        monkeypatch.setattr(blob_module, "monotonic", lambda: later)
+        assert not uploads.holds() and uploads.uploader.refusal() == "unsupported"
+        monkeypatch.setattr(blob_module, "monotonic", time.monotonic)
+        for name in ("an hour on", "still"):
+            with hue.span(name) as span:
+                span.set_attribute("custom.document", text)
+            assert hue.force_flush()
+            record = hue_store.span(name)
+            assert attrs(record)["custom.document"].string_value == "k" * MIB
+            assert blobs(record) == []
+        assert hue.export_status.uploaded_values == 0
+    assert len(hue_store.reservations) == 1 and hue_store.puts == []

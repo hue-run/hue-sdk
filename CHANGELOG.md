@@ -10,6 +10,14 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Changed
+
+- **Breaking** **Wire** File and large-value uploads no longer hold up export, as with Langfuse and Braintrust. Export hashes each value, writes its reference into the record (the digest part, or the 16 KiB prefix with `hue.truncated`, and its `hue.blobs` entry), sends the record, and uploads the bytes in the background. A slow, rate-limited or failing upload never delays, holds or drops a span or log record, and spans recorded after an upload started are sent as soon as their own flush or batch runs. Hue shows the file once its bytes land; until then it reads the entry as not uploaded. A value refused when its record is exported (uploads ended by shutdown, a receiver without the upload route, over 1 GB, or the upload budget full) keeps the earlier fallback form. Migration: call `flush()`, `shutdown()` or the `Safe` variants before the process exits, with a budget that covers your uploads.
+- **Breaking** Uploads no longer share an export's 60-second rate-limit hold or upload budget, and the 30-second upload pause after a failure is removed. Each reservation and PUT is tried up to three times on no answer, 408, 429 or 5xx, waiting `Retry-After` (up to 60 s) or 1 s then 2 s with jitter, and gives up its upload slot while it waits; the completion is sent once. At most four uploads run at once and 4,096 are queued; each ends within six export timeouts plus 60 s of being queued (2 minutes at the defaults). The 128 MiB budget for values awaiting upload also covers uploads not yet finished.
+- **Breaking** `flush()`, `shutdown()` and the span and log processors' `forceFlush()`/`shutdown()` (attach mode included) send their records first, then wait for the uploads queued before them, bounded by each upload's lifetime. `report.uploadedValues` counts an upload when it completes; `report.uploadFallbacks` also counts uploads that failed after export, reported in their own warning.
+- **Wire** A `hue.blobs` entry's `content_type` is the type its own reference declared. `hue import langfuse` still stores each file before it sends the span, with Hue's stored type.
+- **Wire** A receiver without the upload route (a local OpenTelemetry Collector) is remembered for the life of the client, so only records exported before its first answer list entries it never stores.
+
 #### Fixed
 
 - `hue import langfuse --media` downloads only links that use HTTPS, carry no credentials or fragment, fit in 8192 characters and reach a public address (or the configured Langfuse host), and checks each redirect the same way, up to five. 0.18.2 fetched any `http`/`https` link the Langfuse media record named and followed redirects anywhere, so a hostile or compromised Langfuse deployment could make the import request addresses on the user's machine or network (such as `169.254.169.254`) and upload the answers to Hue. A refused link fails its file and holds the span back, with the reason reported. With the Langfuse host on this machine, any address is accepted, and plain HTTP to this machine.
@@ -1504,6 +1512,13 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+#### Changed
+
+- **Breaking** **Wire** File and large-value uploads no longer hold up export, as with Langfuse and Braintrust. The export thread hashes each value, writes its reference into the record (the digest part, or the 16 KiB prefix with `hue.truncated`, and its `hue.blobs` entry) and sends the record; the bytes upload on up to four background `hue-upload` threads. A slow, rate-limited or failing upload never delays, holds or drops a span or log record, and a later `force_flush` sends its own records without waiting for earlier uploads. Hue shows the file once its bytes land; until then it reads the entry as not uploaded. A value refused when its record is exported (uploads closed, a receiver without the upload route, over 1 GB, 1,024 uploads already pending, or the held budget full) keeps the earlier fallback form.
+- **Breaking** Uploads no longer share an export's 60-second rate-limit hold or upload budget, and the 30-second upload pause after a failure is removed. Reservation, PUT and completion are each tried up to three times on no answer, 408, 429 or 5xx, waiting `Retry-After` (up to 60 s) or a jittered backoff; a failed completion never fails the upload. The 128 MiB held budget stays charged until a record's uploads settle.
+- **Breaking** `force_flush()` and `shutdown()` (and a borrowed provider's flush through Hue's processors) send records first, then wait for uploads already queued within the same deadline; shutdown gives pending uploads up to 30 s. `export_status.uploaded_values` counts an upload when it completes; an upload that fails after export counts in `export_status.upload_fallbacks` under the `not_uploaded` warning.
+- **Wire** A `hue.blobs` entry's `content_type` is the type its own reference declared, and a receiver without the upload route is remembered for the life of the client.
 
 ### [0.11.2] - 2026-10-13
 

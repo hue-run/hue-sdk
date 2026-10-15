@@ -53,6 +53,8 @@ MAX_REMEMBERED_TRACES = 10_000
 class _BoundedProcessor:
     # Copies a record for the queue: ``(record, capture_content, record_bytes, value_bytes)``.
     _copy: Callable[..., Any]
+    # The client's uploads, shared by both signals; a flush waits for them.
+    _uploads: Uploads | None = None
 
     def __init__(
         self,
@@ -303,16 +305,40 @@ class _BoundedProcessor:
             next_export = monotonic() + 1
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        """Exports every record queued so far, then waits for every upload accepted so far,
+        within one deadline, and no longer once none of those pending can be stored before it
+        (each waits out a Retry-After past it), so a provider's processors after this one keep
+        the rest of a shared deadline. False on a timeout or a recorded drop or export failure;
+        an upload that fails is a warning."""
         if self._pid != os.getpid():
             return False
         deadline = monotonic() + timeout_millis / 1000
+        ok = self._flush_records(deadline)
+        if ok is None:
+            return False
+        uploads = self._uploads
+        if uploads is not None and not uploads.uploader.wait_idle(deadline):
+            return False
+        return ok
+
+    def flush_records(self, timeout_millis: int = 30_000) -> bool:
+        """Exports every record queued so far without waiting for any upload: a client's drain,
+        which later flushes wait behind, so they never wait behind an upload. False on a timeout
+        or a recorded drop or export failure."""
+        if self._pid != os.getpid():
+            return False
+        return bool(self._flush_records(monotonic() + timeout_millis / 1000))
+
+    def _flush_records(self, deadline: float) -> bool | None:
+        """Exports every record queued so far: None when ``deadline`` came first, otherwise
+        whether no drop or export failure is recorded."""
         with self._condition:
             self._flush_requested = True
             self._condition.notify_all()
             while self._pending_records or self._admissions:
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    return False
+                    return None
                 self._condition.wait(remaining)
             self._flush_requested = False
             return not self._dropped and not self._exporter.failures
@@ -327,6 +353,9 @@ class _BoundedProcessor:
         if self._pid != os.getpid():
             return
         self.stop_accepting()
+        # The records are sent; pending uploads are not waited for here. A provider shuts its
+        # processors down one after another, so a wait here would hold every processor after
+        # this one: the client's own shutdown gives them their grace once its processors stop.
         self._worker.join(timeout=30)
 
 

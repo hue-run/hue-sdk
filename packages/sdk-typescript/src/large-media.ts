@@ -37,6 +37,9 @@ export const WINDOW_UNITS = 1024 * 1024;
  * reused for the next one, so a reader is done with each slice before it asks for the next. */
 export interface ByteSource {
   readonly size: number;
+  /** The bytes of recorded text the source keeps alive while it is held (a string's two bytes a
+   * code unit); absent for one read from elsewhere. */
+  readonly held?: number;
   chunks(): Iterable<Uint8Array> | AsyncIterable<Uint8Array>;
   /** Set when the latest read found the source no longer holds the bytes it was recorded with. */
   changed?: boolean;
@@ -399,6 +402,7 @@ export class JoinedText {
     const windows = () => this.windows();
     return {
       size,
+      held: this.pieces.reduce((total, [, start, end]) => total + (end - start) * 2, 0),
       *chunks() {
         const buffer = Buffer.allocUnsafe(WINDOW_UNITS * 3);
         for (const window of windows()) yield buffer.subarray(0, buffer.write(window, "utf8"));
@@ -458,6 +462,7 @@ function base64Source(text: string, start: number, end: number): ByteSource {
     (text.charCodeAt(end - 1) === 0x3d ? 1 : 0) + (text.charCodeAt(end - 2) === 0x3d ? 1 : 0);
   return {
     size: (length / 4) * 3 - pad,
+    held: length * 2,
     *chunks() {
       const buffer = Buffer.allocUnsafe((WINDOW_UNITS / 4) * 3);
       for (let at = start; at < end; at += WINDOW_UNITS) {

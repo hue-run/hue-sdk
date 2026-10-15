@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, ClientRequest, IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { gzip } from "node:zlib";
 import type { Attributes, Span as ApiSpan } from "@opentelemetry/api";
@@ -40,13 +41,16 @@ import {
   fallbackAttributes,
   fallbackRecord,
   heldBytesOf,
+  LATE_FALLBACK_MESSAGES,
   MAX_HELD_BLOB_BYTES,
+  mergeWhenSettled,
   newTally,
   mediaKey,
   offloadAttributes,
   offloadRecord,
   sizeOf,
   uploadBudgetMillis,
+  type LateUploads,
   type OffloadCollector,
   type MediaAttachment,
   type OffloadTally,
@@ -126,14 +130,19 @@ interface ExportSink {
     collector: OffloadCollector,
     upload: UploadContext,
     tally: OffloadTally,
+    late: LateUploads,
+    queued: RecordValue,
   ): Promise<T>;
   offloadLog(
     log: ReadableLogRecord,
     collector: OffloadCollector,
     upload: UploadContext,
     tally: OffloadTally,
+    late: LateUploads,
+    queued: RecordValue,
   ): Promise<ReadableLogRecord>;
-  reportOffload(tally: OffloadTally, signal?: Signal): void;
+  reportOffload(tally: OffloadTally, signal?: Signal, late?: boolean): void;
+  awaitUploads(report: Promise<void>): void;
 }
 
 /** A record's trace: a span's context, a log record's span identifiers; "" when unreadable. */
@@ -248,9 +257,11 @@ function mediaEntry(file: MediaAttachment): string {
  */
 export const MAX_RATE_LIMIT_HOLD_MILLIS = 60_000;
 
-/** How long one export may take with requests of `timeoutMillis` each: its uploads of values over
+/** How long one export may take with requests of `timeoutMillis` each: hashing its values over
  * the inline limit, its requests, and a hold for a rate-limited receiver on top. Processors and
- * providers wait this long for a drain. */
+ * providers wait this long for a drain. A drain also waits for the uploads its exports queued,
+ * which run beside the requests and end within six timeouts and a minute of being queued, so they
+ * fit within the same budget. */
 export function exportBudgetMillis(timeoutMillis: number): number {
   return uploadBudgetMillis(timeoutMillis) + timeoutMillis * 16 + 1000 + MAX_RATE_LIMIT_HOLD_MILLIS;
 }
@@ -335,7 +346,11 @@ export class HueTransport {
   private logExporter: ReportingExporter<ReadableLogRecord>;
   private closed = false;
   private shutdownPromise?: Promise<ExportReport>;
-  private flushPromise?: Promise<ExportReport>;
+  /** The latest flush's send of its records; the next flush's send starts after it. */
+  private sendPromise?: Promise<unknown>;
+  /** Set while a flush sends its records: the processors leave the uploads to that flush, which
+   * waits for them after its send, so no flush's send waits behind another's uploads. */
+  private sendingRecords = new AsyncLocalStorage<true>();
   // Open spans not yet announced. Each is considered once, at the next tick after it starts.
   private live = new Set<ReadableSpan>();
   private liveTimer?: ReturnType<typeof setInterval>;
@@ -366,6 +381,10 @@ export class HueTransport {
   /** Bytes of values over the inline limit queued spans hold whole for upload, and each span's. */
   private heldBytes = 0;
   private held = new WeakMap<RecordValue, number>();
+  /** Bytes of each record's charge (its own held values and its staged files) that its queued
+   * uploads took over before the record was finished: charged to the uploads alone until they
+   * settle or the record is finished. */
+  private heldByUploads = new WeakMap<RecordValue, number>();
   private mediaMemo = new MediaDigestMemo();
   // Context identity also matches safe API wrappers to the provider's ended span. Abandoned
   // spans retain no span objects, and share the 2048-span / 128 MiB holding bounds.
@@ -383,6 +402,11 @@ export class HueTransport {
   );
   private uploaded = 0;
   private uploadFallbacks = 0;
+  /** Each export's queued uploads, until they all settle and are reported. */
+  private uploadReports = new Set<Promise<void>>();
+  /** Settles once every upload report registered so far has: each drain awaits this one promise,
+   * so a drain costs the same however many uploads are pending. */
+  private uploadsSettled: Promise<void> = Promise.resolve();
 
   constructor(options: HueOptions) {
     this.options = validateOptions(options);
@@ -494,10 +518,22 @@ export class HueTransport {
           );
         }
       },
-      forceFlush: () => spans.forceFlush(),
-      shutdown: () => {
+      // The spans are sent first, then the uploads queued so far are waited for, unless a
+      // flush sends them: that flush waits for the uploads after its send.
+      forceFlush: async () => {
+        try {
+          await spans.forceFlush();
+        } finally {
+          if (!this.sendingRecords.getStore()) await this.drainUploads();
+        }
+      },
+      shutdown: async () => {
         this.stopLiveSpans();
-        return spans.shutdown();
+        try {
+          await spans.shutdown();
+        } finally {
+          await this.drainUploads();
+        }
       },
     };
     this.logRecordProcessor = {
@@ -533,8 +569,20 @@ export class HueTransport {
           );
         }
       },
-      forceFlush: () => logs.forceFlush(),
-      shutdown: () => logs.shutdown(),
+      forceFlush: async () => {
+        try {
+          await logs.forceFlush();
+        } finally {
+          if (!this.sendingRecords.getStore()) await this.drainUploads();
+        }
+      },
+      shutdown: async () => {
+        try {
+          await logs.shutdown();
+        } finally {
+          await this.drainUploads();
+        }
+      },
     };
   }
 
@@ -575,8 +623,8 @@ export class HueTransport {
         !advisory && this.holdsValues()
           ? {
               valueBytes: this.limits.valueBytes,
-              budget: Math.max(0, MAX_HELD_BLOB_BYTES - this.heldBytes),
-              first: this.heldBytes === 0,
+              budget: this.heldRoom(),
+              first: this.heldBytes === 0 && !this.uploader?.pendingBytes(),
             }
           : undefined;
       const snapshot =
@@ -734,6 +782,12 @@ export class HueTransport {
         this.heldBytes -= held;
         this.held.delete(record);
       }
+      // Released whole above: the part its uploads took over stays charged to them.
+      const taken = this.heldByUploads.get(record);
+      if (taken) {
+        this.heldBytes += taken;
+        this.heldByUploads.delete(record);
+      }
     }
   }
 
@@ -769,7 +823,7 @@ export class HueTransport {
     if (
       files.length >= 64 ||
       (!this.media.has(identity) && this.media.size >= 2048) ||
-      this.heldBytes + heldBytesOf(file.bytes) > MAX_HELD_BLOB_BYTES
+      heldBytesOf(file.bytes) > this.heldRoom()
     ) {
       this.uploadFallbacks++;
       this.issue(
@@ -824,7 +878,7 @@ export class HueTransport {
       if (
         staged.length >= MAX_BLOB_ENTRIES ||
         (!this.media.has(identity) && this.media.size >= 2048) ||
-        this.heldBytes + heldBytesOf(file.bytes) > MAX_HELD_BLOB_BYTES
+        heldBytesOf(file.bytes) > this.heldRoom()
       ) {
         countFallback(tally, "budget", traceId);
         continue;
@@ -872,7 +926,7 @@ export class HueTransport {
     if (!pending) return;
     this.logParts.delete(body as object);
     const size = pending.files.reduce((total, file) => total + heldBytesOf(file.bytes), 0);
-    if (this.heldBytes + size > MAX_HELD_BLOB_BYTES) {
+    if (size > this.heldRoom()) {
       const tally = newTally();
       for (const _file of pending.files) countFallback(tally, "budget", pending.traceId);
       this.reportOffload(tally, "logs");
@@ -881,6 +935,42 @@ export class HueTransport {
     this.logMedia.set(queued, pending.files);
     this.heldBytes += size;
     this.held.set(queued, (this.held.get(queued) ?? 0) + size);
+  }
+
+  /** What the held-value budget has room for: values queued records hold and bytes unsettled
+   * uploads hold share it. */
+  private heldRoom(): number {
+    return Math.max(0, MAX_HELD_BLOB_BYTES - this.heldBytes - (this.uploader?.pendingBytes() ?? 0));
+  }
+
+  /** An upload `record`'s export queued, as it is queued: flushes and the processors wait for it
+   * from now on, and the `shared` bytes it holds of the record's own are charged to the upload
+   * alone, so the held-value budget never counts them twice while the export goes on. An upload
+   * that settles before the record is finished hands them back to the record, which still holds
+   * them. */
+  private uploadQueued(record: RecordValue, settled: Promise<void>, shared: number): void {
+    this.awaitUploads(settled);
+    const identity = this.mediaIdentity(record);
+    const staged = identity
+      ? (this.media.get(identity) ?? []).reduce((total, file) => total + heldBytesOf(file.bytes), 0)
+      : 0;
+    const taken = this.heldByUploads.get(record) ?? 0;
+    const moved = Math.min(shared, (this.held.get(record) ?? 0) + staged - taken);
+    if (moved <= 0) return;
+    this.heldBytes -= moved;
+    this.heldByUploads.set(record, taken + moved);
+    // Held weakly: a pending upload never keeps its finished record alive.
+    const queued = new WeakRef(record);
+    const handBack = () => {
+      const owner = queued.deref();
+      const still = owner && this.heldByUploads.get(owner);
+      if (!owner || !still) return;
+      const back = Math.min(moved, still);
+      this.heldBytes += back;
+      if (still > back) this.heldByUploads.set(owner, still - back);
+      else this.heldByUploads.delete(owner);
+    };
+    void settled.then(handBack, handBack);
   }
 
   /** Registers a span whose staged files are released if it is never exported. */
@@ -976,16 +1066,26 @@ export class HueTransport {
   }
 
   /** @internal Exporter callback: a redacted span with the values its redaction left to the
-   * upload step placed: uploaded and listed under `hue.blobs`, or cut as before. Never rejects. */
+   * upload step placed: listed under `hue.blobs` with their uploads queued (each added to `late`
+   * once it settles, and charged in place of the `queued` record it came from), or cut as before.
+   * Never rejects. */
   async offloadSpan<T extends RecordValue>(
     span: T,
     collector: OffloadCollector,
     upload: UploadContext,
     tally: OffloadTally,
+    late: LateUploads,
+    queued: RecordValue,
   ): Promise<T> {
     // A record without a readable context cannot name its trace: its values are cut.
     const traceId = recordTraceId(span);
     const valueBytes = this.limits.valueBytes;
+    // A record placed as a fallback counts its values there: its queued uploads are not added.
+    const own: LateUploads = {
+      tally: newTally(),
+      settled: [],
+      queued: (settled, shared) => this.uploadQueued(queued, settled, shared),
+    };
     try {
       if (!this.uploader) throw new Error("Uploads are unavailable");
       const attributes = await offloadAttributes(span.attributes, collector, {
@@ -995,7 +1095,10 @@ export class HueTransport {
         upload,
         tally,
         memo: this.mediaMemo,
+        background: own,
       });
+      if (own.settled.length)
+        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
       return { ...span, attributes: attributes as Attributes };
     } catch {
       return {
@@ -1013,14 +1116,17 @@ export class HueTransport {
   }
 
   /** @internal Exporter callback: a redacted log record with the media its redaction left to
-   * the upload step placed: its attributes' and its body's files uploaded and listed under its own
-   * `hue.blobs` (keys `<attribute>#<pointer>`, `body#<pointer>`), under the log record's trace;
-   * a file not uploaded keeps its bytes inline, and the record is cut as before. Never rejects. */
+   * the upload step placed: its attributes' and its body's files listed under its own `hue.blobs`
+   * (keys `<attribute>#<pointer>`, `body#<pointer>`) with their uploads queued under the log
+   * record's trace (charged in place of the `queued` record); a file refused keeps its bytes
+   * inline, and the record is cut as before. Never rejects. */
   async offloadLog(
     log: ReadableLogRecord,
     collector: OffloadCollector,
     upload: UploadContext,
     tally: OffloadTally,
+    late: LateUploads,
+    queued: RecordValue,
   ): Promise<ReadableLogRecord> {
     const traceId = log.spanContext?.traceId ?? "";
     const valueBytes = this.limits.valueBytes;
@@ -1029,18 +1135,25 @@ export class HueTransport {
       attributes: result.attributes as ReadableLogRecord["attributes"],
       ...(collector.body ? { body: result.body as ReadableLogRecord["body"] } : {}),
     });
+    const own: LateUploads = {
+      tally: newTally(),
+      settled: [],
+      queued: (settled, shared) => this.uploadQueued(queued, settled, shared),
+    };
     try {
       if (!this.uploader) throw new Error("Uploads are unavailable");
-      return placed(
-        await offloadRecord(log.attributes, collector, {
-          uploader: this.uploader,
-          traceId,
-          valueBytes,
-          upload,
-          tally,
-          memo: this.mediaMemo,
-        }),
-      );
+      const result = await offloadRecord(log.attributes, collector, {
+        uploader: this.uploader,
+        traceId,
+        valueBytes,
+        upload,
+        tally,
+        memo: this.mediaMemo,
+        background: own,
+      });
+      if (own.settled.length)
+        late.settled.push(mergeWhenSettled(late.tally, own.tally, own.settled));
+      return placed(result);
     } catch {
       return placed(
         fallbackRecord(log.attributes, collector, valueBytes, tally, traceId, this.mediaMemo),
@@ -1049,8 +1162,9 @@ export class HueTransport {
   }
 
   /** @internal Exporter callback: counts an export's uploads and reports each kind of fallback
-   * once, as a warning naming its traces: the values were exported, cut as before. */
-  reportOffload(tally: OffloadTally, signal: Signal = "traces"): void {
+   * once, as a warning naming its traces: the values were exported cut as before, or, `late`,
+   * their uploads failed after their records listed them. */
+  reportOffload(tally: OffloadTally, signal: Signal = "traces", late = false): void {
     this.uploaded += tally.uploaded;
     for (const [reason, { count, traceIds }] of tally.fallbacks) {
       this.uploadFallbacks += count;
@@ -1058,7 +1172,7 @@ export class HueTransport {
         signal,
         "warning",
         count,
-        FALLBACK_MESSAGES[reason],
+        (late ? LATE_FALLBACK_MESSAGES : FALLBACK_MESSAGES)[reason],
         undefined,
         traceIds.size && traceIds.size <= MAX_ISSUE_TRACE_IDS ? [...traceIds] : undefined,
       );
@@ -1130,8 +1244,9 @@ export class HueTransport {
 
   /** @internal Ends every rate-limit hold now and refuses new ones, once a shutdown's caller has
    * stopped waiting: the held records are reported lost to the rate limit, and no timer of theirs
-   * keeps the process running for the receiver's `Retry-After`. Uploads in flight end too, and no
-   * other starts: their values are exported cut, as before uploads existed. */
+   * keeps the process running for the receiver's `Retry-After`. Queued and in-flight uploads end
+   * too, and no other starts: their records' entries stay and the uploads count as failed, and
+   * values not yet exported are exported cut, as before uploads existed. */
   releaseRateLimitHolds(): void {
     this.holdsReleased = true;
     for (const release of [...this.holds]) release();
@@ -1273,30 +1388,75 @@ export class HueTransport {
   }
 
   /**
-   * Waits for the processors' and exporters' in-flight work; drain the providers first.
+   * Waits for the processors' and exporters' in-flight work, then for the uploads their exports
+   * queued; drain the providers first. Only the sends are serialized: a flush sends its records
+   * once an earlier flush sent its own, never after that flush's uploads.
    *
    * @throws HueExportError when a new non-warning issue was recorded since the previous observation.
    */
   flush(): Promise<ExportReport> {
-    const from = this.observedSequence;
-    const next = (this.flushPromise ?? Promise.resolve()).then(
-      () => this.flushOnce(from),
-      () => this.flushOnce(from),
-    );
-    this.flushPromise = next;
-    const clear = () => {
-      if (this.flushPromise === next) this.flushPromise = undefined;
-    };
-    void next.then(clear, clear);
-    return next;
+    return this.flushRecords().report;
   }
 
-  private async flushOnce(from: number): Promise<ExportReport> {
-    const processors = await Promise.allSettled([
-      this.spanProcessor.forceFlush(),
-      this.logRecordProcessor.forceFlush(),
-    ]);
-    await Promise.all([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+  /**
+   * @internal A flush in two steps: its send settles `sent`, then it waits on its own for the
+   * uploads queued so far and settles `report` as {@link flush} does. `providers` (the client's
+   * provider flush) runs first, before the flush joins the transport's sends, so a hung borrowed
+   * provider never holds up the transport's own flushes. `sent` waits for it, though, and the
+   * client starts each flush once the previous one's `sent` settles: it holds up the client's
+   * later flushes.
+   */
+  flushRecords(providers?: () => Promise<void>): {
+    sent: Promise<unknown>;
+    report: Promise<ExportReport>;
+  } {
+    const from = this.observedSequence;
+    const join = () => this.sendRecords();
+    const sent = providers ? this.sendingRecords.run(true, providers).then(join, join) : join();
+    const report = sent.then(async (processors) => {
+      // Exports the processors did not start (a timer's, still in flight) queued uploads too.
+      await this.drainUploads();
+      return this.flushReport(from, processors);
+    });
+    return { sent, report };
+  }
+
+  /** Sends what the processors and exporters hold, once the previous flush's send ended. */
+  private sendRecords(): Promise<PromiseSettledResult<void>[]> {
+    const send = () =>
+      this.sendingRecords.run(true, async () => {
+        const processors = await Promise.allSettled([
+          this.spanProcessor.forceFlush(),
+          this.logRecordProcessor.forceFlush(),
+        ]);
+        await Promise.all([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+        return processors;
+      });
+    const sent = (this.sendPromise ?? Promise.resolve()).then(send, send);
+    this.sendPromise = sent;
+    const clear = () => {
+      if (this.sendPromise === sent) this.sendPromise = undefined;
+    };
+    void sent.then(clear, clear);
+    return sent;
+  }
+
+  /** @internal Exporter callback: an export's queued uploads, reported once they all settle. */
+  awaitUploads(report: Promise<void>): void {
+    // Never an unhandled rejection, whatever the report does.
+    const tracked = report.catch(() => {});
+    this.uploadReports.add(tracked);
+    void tracked.then(() => this.uploadReports.delete(tracked));
+    const earlier = this.uploadsSettled;
+    this.uploadsSettled = tracked.then(() => earlier);
+  }
+
+  /** Waits for the uploads queued so far; each ends within its lifetime, so this is bounded. */
+  private drainUploads(): Promise<void> {
+    return this.uploadsSettled;
+  }
+
+  private flushReport(from: number, processors: PromiseSettledResult<void>[]): ExportReport {
     for (const [index, result] of processors.entries())
       if (result.status === "rejected") {
         const signal = index === 0 ? "traces" : "logs";
@@ -1311,8 +1471,9 @@ export class HueTransport {
   }
 
   /**
-   * Flushes and stops the processors; records emitted afterwards are dropped and counted. In attach
-   * mode call it after shutting down the application's providers.
+   * Flushes and stops the processors, waits for queued uploads, then ends the uploader; records
+   * emitted afterwards are dropped and counted. In attach mode call it after shutting down the
+   * application's providers.
    *
    * @throws HueExportError when the final flush observed new failures.
    */
@@ -1327,7 +1488,10 @@ export class HueTransport {
           this.logRecordProcessor.shutdown(),
         ]);
         await Promise.allSettled([this.traceExporter.forceFlush(), this.logExporter.forceFlush()]);
+        await this.drainUploads();
         this.uploader?.close();
+        // The reports of uploads the close ended land before shutdown resolves.
+        await this.drainUploads();
         for (const identity of this.media.keys()) this.releaseMediaIdentity(identity);
         this.logParts.clear();
         this.mediaMemo.clear();
@@ -1533,7 +1697,28 @@ class ReportingExporter<T extends RecordValue> {
     return real;
   }
 
+  /** Places and sends the records; the uploads their placement queued are reported once they
+   * settle, after the records were sent, never awaited here. */
   private async exportRecords(records: T[]): Promise<void> {
+    const late: LateUploads = { tally: newTally(), settled: [] };
+    try {
+      await this.placeAndSend(records, late);
+    } finally {
+      if (late.settled.length) this.reportWhenSettled(late);
+    }
+  }
+
+  /** Reports an export's uploads once they all settle. Built apart from the export, so a pending
+   * upload never keeps the export's records alive. */
+  private reportWhenSettled(late: LateUploads): void {
+    this.transport.awaitUploads(
+      Promise.all(late.settled).then(() =>
+        this.transport.reportOffload(late.tally, this.signal, true),
+      ),
+    );
+  }
+
+  private async placeAndSend(records: T[], late: LateUploads): Promise<void> {
     // Completed records and placeholders travel in separate requests, completed records first,
     // so a rejection count is always one kind of record's. Placeholders are advisory: losing one
     // is a warning, never an export failure.
@@ -1567,21 +1752,18 @@ class ReportingExporter<T extends RecordValue> {
       }
     };
     const resourceDeadline = Date.now() + this.transport.options.timeoutMillis;
-    // How long this export has held its records for a rate-limited receiver, its value uploads'
-    // waits included.
+    // How long this export has held its records for a rate-limited receiver.
     const hold = { millis: 0 };
-    // A span's values over the inline limit are uploaded before it is measured, within the
-    // export's upload budget; a placeholder's never are.
+    // A span's values over the inline limit are hashed and placed before it is measured, within
+    // the export's hashing deadline; their uploads are queued, never awaited, and a placeholder's
+    // values never upload.
     const upload: UploadContext = {
       deadline: Date.now() + uploadBudgetMillis(this.transport.options.timeoutMillis),
-      wait: async (millis) => {
-        if (hold.millis + millis > MAX_RATE_LIMIT_HOLD_MILLIS) return false;
-        hold.millis += millis;
-        return this.transport.holdForRateLimit(millis);
-      },
+      wait: async () => false,
     };
     const tally = newTally();
-    const helpers = new Map<T, { files: MediaAttachment[]; baseline: string[] }>();
+    // Each record's attachments to upload once it is fitted, with the queued record holding them.
+    const helpers = new Map<T, { files: MediaAttachment[]; baseline: string[]; source: T }>();
     const placed: {
       record: T;
       markers?: Attributes;
@@ -1642,12 +1824,16 @@ class ReportingExporter<T extends RecordValue> {
                   offload,
                   upload,
                   tally,
+                  late,
+                  record,
                 ) as Promise<T>)
               : (this.transport.offloadLog(
                   redacted as ReadableLogRecord,
                   offload,
                   upload,
                   tally,
+                  late,
+                  record,
                 ) as Promise<T>)
             : undefined;
         placed.push({
@@ -1701,7 +1887,7 @@ class ReportingExporter<T extends RecordValue> {
                 [BLOBS_KEY]: [...baseline, ...retained.map(mediaEntry)],
               },
             };
-            helpers.set(redacted, { files: retained, baseline });
+            helpers.set(redacted, { files: retained, baseline, source: record });
           }
         }
         const bytes =
@@ -1867,11 +2053,11 @@ class ReportingExporter<T extends RecordValue> {
       // is written, so a root carries the losses of children that ended after it.
       const admitted: {
         fitted: { record: T; bytes: number };
-        attachments?: { record: T; files: MediaAttachment[] };
+        attachments?: { record: T; files: MediaAttachment[]; source: T };
       }[] = [];
       for (const record of accepted) {
         let fitted: { record: T; bytes: number } | undefined;
-        let attachments: { record: T; files: MediaAttachment[] } | undefined;
+        let attachments: { record: T; files: MediaAttachment[]; source: T } | undefined;
         const helper = helpers.get(record);
         let remaining = helper?.files ?? [];
         try {
@@ -1900,7 +2086,11 @@ class ReportingExporter<T extends RecordValue> {
               if (baseline.length) attributes[BLOBS_KEY] = baseline;
               else delete attributes[BLOBS_KEY];
             }
-            attachments = { record: { ...fittedRecord, attributes } as T, files };
+            attachments = {
+              record: { ...fittedRecord, attributes } as T,
+              files,
+              source: helper.source,
+            };
             remaining = [];
           }
         } catch {
@@ -1917,8 +2107,9 @@ class ReportingExporter<T extends RecordValue> {
         }
         admitted.push({ fitted, attachments });
       }
-      // Decide every event/reference admission before starting helper uploads. The shared
-      // uploader's four workers place files across spans under the same upload deadline.
+      // Decide every event/reference admission before queueing helper uploads: a file fitting
+      // removed is never uploaded. Their entries are written again as the fitted record listed
+      // them, and the files upload after the records are sent.
       const placed = await Promise.all(
         admitted.map(async ({ fitted, attachments }) => {
           if (!attachments) return fitted;
@@ -1928,9 +2119,12 @@ class ReportingExporter<T extends RecordValue> {
               { candidates: [], cut: [], attachments: attachments.files },
               upload,
               tally,
+              late,
+              attachments.source,
             );
             measured.delete(fitted.record);
-            // Actual references can differ when an existing object supplies its media type.
+            // The entries name each file's own type, as the fitted record's did; a file refused
+            // when queued leaves its entry out, so the record is measured again, cheaply.
             const final = await probe(uploaded as T);
             if (final?.request) measured.set(final.record, final.request);
             if (!final) invalid(advisory, OVER_REQUEST_LIMIT, fitted.record);
@@ -1941,8 +2135,9 @@ class ReportingExporter<T extends RecordValue> {
           }
         }),
       );
-      // Preparation includes explicit file uploads. Report their outcome once, before delivery
-      // failures can consume the diagnostic callback's rate-limit slot. Placeholders never upload.
+      // Values refused when their records were placed are reported once, before delivery failures
+      // can consume the diagnostic callback's rate-limit slot; queued uploads are reported once
+      // they settle. Placeholders never upload.
       if (!advisory) this.transport.reportOffload(tally, this.signal);
       let batch: T[] = [];
       let batchBytes = 0;

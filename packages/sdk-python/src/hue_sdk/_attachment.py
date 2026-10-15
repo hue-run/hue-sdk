@@ -184,8 +184,8 @@ class Attachment:
     arguments or result, in ``log_inference()`` messages, or in a span attribute passed to
     ``span(attributes=...)`` or ``set_attribute``. Hue records it at that position as a GenAI
     ``blob`` part that names the file by digest (``{"type": "blob", "mime_type", "modality",
-    "sha256", "size", "name"}``) and uploads its bytes during export, listed under the record's
-    ``hue.blobs``.
+    "sha256", "size", "name"}``), listed under the record's ``hue.blobs`` when the record is
+    exported, and uploads its bytes in the background.
 
     Give exactly one of ``data`` (bytes, or a base64 string or ``data:`` URL holding them) and
     ``path`` (a file). The bytes are read and hashed when the attachment is created; ``data`` is

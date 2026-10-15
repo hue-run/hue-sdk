@@ -100,6 +100,8 @@ if (!values.archive && !values["registry-version"]) {
     "holdsValues",
     "offloadSpan",
     "reportOffload",
+    "awaitUploads",
+    "flushRecords",
   ]) {
     if (new RegExp(`^\\s+${member}\\(`, "m").test(transportTypes))
       throw new Error(`dist/transport.d.ts exposes internal member ${member}()`);

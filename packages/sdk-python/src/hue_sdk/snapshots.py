@@ -464,17 +464,17 @@ class _ValueBudget:
                 return False, queued
             value: str | bytes = str.__str__(item)
             # What is not uploaded if the value is not held: each file, and the value itself
-            # when it is still over the cap with its files as their digest.
-            lost = (files if message else 0) + (
-                1 if over and over_utf8(digested if message else item, hold.value_bytes) else 0
-            )
+            # when it is still over the cap with its files as their digest, cut into the queue.
+            cut = over and over_utf8(digested if message else item, hold.value_bytes)
+            lost = (files if message else 0) + (1 if cut else 0)
         elif isinstance(item, bytes) and len(item) > hold.value_bytes:
             value = item if type(item) is bytes else memoryview(item).tobytes()
-            over, lost = True, 1
+            over = cut = True
+            lost = 1
         else:
             return False, digested
         size = held_size(value)
-        if not hold.active or not hold.budget.reserve(size, self.held.size):
+        if not hold.active or not hold.budget.reserve(size, self.held.size, make_room=cut):
             # Cut, or a message's files digested, when queued, as before uploads existed.
             self.held.cut.extend([key] * lost)
             return False, queued
@@ -515,7 +515,8 @@ class _ValueBudget:
             return False, item
         value = str.__str__(item)
         size = held_size(value)
-        if not hold.active or not hold.budget.reserve(size, self.held.size):
+        # A value over the cap not held is cut into the queue: queued uploads give way to it.
+        if not hold.active or not hold.budget.reserve(size, self.held.size, make_room=over):
             return False, self._media(key, item, nested=True)[0]
         self.held.size += size
         self.held.values[key] = value
@@ -540,7 +541,7 @@ class _ValueBudget:
                     over
                     and _may_be_file_content(item)
                     and utf16_size(item, MAX_INLINE_FILE_TEXT) <= MAX_INLINE_FILE_TEXT
-                    and hold.budget.reserve(held_size(item), self.held.size)
+                    and hold.budget.reserve(held_size(item), self.held.size, make_room=True)
                 ):
                     self.held.size += held_size(item)
                     self.held.body_values[pointer] = str.__str__(item)
