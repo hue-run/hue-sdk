@@ -10,6 +10,8 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+### [0.19.0] - 2026-10-16
+
 #### Changed
 
 - **Breaking** **Wire** File and large-value uploads no longer hold up export, as with Langfuse and Braintrust. Export hashes each value, writes its reference into the record (the digest part, or the 16 KiB prefix with `hue.truncated`, and its `hue.blobs` entry), sends the record, and uploads the bytes in the background. A slow, rate-limited or failing upload never delays, holds or drops a span or log record, and spans recorded after an upload started are sent as soon as their own flush or batch runs. Hue shows the file once its bytes land; until then it reads the entry as not uploaded. A value refused when its record is exported (uploads ended by shutdown, a receiver without the upload route, over 1 GB, or the upload budget full) keeps the earlier fallback form. Migration: call `flush()`, `shutdown()` or the `Safe` variants before the process exits, with a budget that covers your uploads.
@@ -1512,6 +1514,8 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+### [0.12.0] - 2026-10-16
 
 #### Changed
 
