@@ -441,7 +441,7 @@ provides-extras = ["evals"]
 [package.metadata.requires-dev]
 compatibility = [
     { name = "openai", specifier = "==3.22.1" },
-    { name = "openinference-instrumentation-openai", specifier = "==0.1.63" },
+    { name = "openinference-instrumentation-openai", specifier = "==0.1.64" },
 ]
 dev = [
     { name = "build", specifier = ">=1.2,<2" },
@@ -987,7 +987,7 @@ wheels = [
 
 [[package]]
 name = "openinference-instrumentation-openai"
-version = "0.1.63"
+version = "0.1.64"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -999,9 +999,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/45/262427ba598ef3c8be9f0517fd75503331e0237aa4b45096bf0bf4629fb3/openinference_instrumentation_openai-0.1.63.tar.gz", hash = "sha256:86ff59eb945efdb7dfe093cb5590f0047737585f304f26ace132a4359a83baa7", size = 27830, upload-time = "2026-10-01T22:23:52.345Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/53/b8/42e3322b1b6ec1eaf873f1286a921a5558694511a7ba95262ca5f3b39136/openinference_instrumentation_openai-0.1.64.tar.gz", hash = "sha256:c4aafd090fa483ca8cd0eaee75002ebcefe4060b0ef9b00a75d4a0f2e7084bfe", size = 29855, upload-time = "2026-10-07T20:26:48.916Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/12/1a2bae35a8abfc3c2530ab7f061d5eff161e5af8c34f0e798422837a0837/openinference_instrumentation_openai-0.1.63-py3-none-any.whl", hash = "sha256:f9cb999c16054951e54f472edd6b7a8ceb256ab438959f9cde0b4b1f1145d3bc", size = 35726, upload-time = "2026-10-01T22:23:50.81Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/3d/ed20969a2ef309bf730a23332ebe8b921b6c6ff78f0b904da46aa48f6773/openinference_instrumentation_openai-0.1.64-py3-none-any.whl", hash = "sha256:fd3a39e6a93901bfff82fa8a081db961cdafb0141efe0a633097c65eb3e6abb9", size = 37949, upload-time = "2026-10-07T20:26:47.388Z" },
 ]
 
 [[package]]
