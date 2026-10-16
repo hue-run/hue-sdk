@@ -14,7 +14,10 @@ from hue_sdk._inline_files import (
     _file_bytes,
     dumps_message,
     hash_inline_files,
+    inline_file,
     loads_message,
+    pcm_media_type,
+    read_media_text,
 )
 
 # The TypeScript suite reads the same file; each digest is of the bytes the case was built from.
@@ -151,3 +154,66 @@ def test_json_edits_to_many_members_render_in_time_linear_in_them():
     assert json.loads(placed) == [
         {"type": "blob", "keep": 1, "size": index} for index in range(count)
     ]
+
+
+@pytest.mark.parametrize(
+    ("declared", "canonical"),
+    [
+        ("audio/pcm;rate=24000", "audio/pcm;rate=24000;channels=1"),
+        ("audio/L16;rate=16000", "audio/L16;rate=16000;channels=1"),
+        ("audio/x-pcm;rate=8000;channels=2", "audio/pcm;rate=8000;channels=2"),
+        ('Audio/PCM ; Rate="192000" ;channels=1;', "audio/pcm;rate=192000;channels=1"),
+        ("audio/l16;channels=2;rate=44100", "audio/L16;rate=44100;channels=2"),
+        ("audio/pcm", None),
+        ("audio/pcm;channels=1", None),
+        ("audio/pcm;rate=24000;bits=16", None),
+        ("audio/pcm;rate=24000;rate=24000", None),
+        ("audio/pcm;rate=7999", None),
+        ("audio/pcm;rate=192001", None),
+        ("audio/pcm;rate=24000;channels=3", None),
+        ("audio/pcm;rate=24000.0", None),
+        ("audio/pcm;rate=24000 x", None),
+        ("audio/wav;rate=24000", None),
+        # Empty parameters are allowed, within 255 characters.
+        ("audio/pcm;rate=24000" + ";" * 235, "audio/pcm;rate=24000;channels=1"),
+        ("audio/pcm;rate=24000" + ";" * 236, None),
+    ],
+)
+def test_raw_pcm_types_name_the_format_hue_plays_in_canonical_form(declared, canonical) -> None:
+    # Hue's reader plays raw PCM only in a format its type declares (rate 8000 to 192000,
+    # channels 1 or 2, no other parameter), and names it canonically.
+    assert pcm_media_type(declared) == canonical
+
+
+@pytest.mark.parametrize(
+    ("header", "listed"),
+    [
+        ("audio/pcm;rate=24000;base64", "audio/pcm;rate=24000;channels=1"),
+        ("audio/L16;rate=16000;base64", "audio/L16;rate=16000;channels=1"),
+        ("audio/x-pcm;rate=8000;channels=2;base64", "audio/pcm;rate=8000;channels=2"),
+        ("audio/pcm;rate=24000;bits=16;base64", "audio/pcm"),
+        ("audio/pcm;base64", "audio/pcm"),
+        ("audio/wav;rate=24000;base64", "audio/wav"),
+    ],
+)
+def test_a_data_urls_raw_pcm_keeps_its_declared_format(header, listed) -> None:
+    assert inline_file(f"data:{header},AAECAw==").url_media_type == listed
+
+
+@pytest.mark.parametrize(
+    "key", ["langfuse.observation.output", "langfuse.trace.input", "input.value", "tool_response"]
+)
+def test_text_read_by_json_convention_that_is_no_json_is_read_as_the_text_itself(key) -> None:
+    # A Langfuse SDK records a string input or output as it is; Hue's reader keeps text that is
+    # no JSON as the text itself, so a whole data: URL is a file and other text holds none.
+    media = read_media_text(key, "data:audio/pcm;rate=24000;base64,AAECAw==")
+    assert media is not None
+    (file,) = media.files
+    assert (file.whole, file.pointer, file.content_type) == (
+        True,
+        "",
+        "audio/pcm;rate=24000;channels=1",
+    )
+    for text in ("plain words about data:", '{"unterminated": "data:image/png;base64,AAAA'):
+        media = read_media_text(key, text)
+        assert media is not None and media.files == []

@@ -22,10 +22,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ._inline_files import (
-    _ECMASCRIPT_WHITESPACE,
     MAX_INLINE_FILE_TEXT,
     InlineFilePart,
     MediaValue,
+    data_url_media_type,
     loads_message,
     media_in,
     placed_media_text,
@@ -278,7 +278,9 @@ def read_large_media_text(
     """An attribute's recorded text read for files as ``read_media_text`` reads it, its long
     base64 and base64 data: URL strings (longer than ``long_units``, ``LONG_STRING_UNITS`` by
     default) read in place. None for text whose JSON around those strings is over the 8 Mi bound,
-    or that reading finds nothing in. Raises ValueError for JSON that does not parse."""
+    or that reading finds nothing in. Raises ValueError for JSON that does not parse, except text
+    read by JSON convention that is a data: URL, which is no JSON: it is read as the text itself,
+    as ``read_media_text`` reads it."""
     if long_units is None:
         long_units = LONG_STRING_UNITS
     reading = reading_of(key)
@@ -313,7 +315,8 @@ def read_large_media_text(
         )
 
     if reading == "json":
-        return json_text()
+        # Text that is no JSON is the text itself: a whole data: URL is the file.
+        return whole() if text.startswith("data:") else json_text()
     if reading == "metadata":
         return json_text() if _JSON_OBJECT_TEXT.match(text) else whole()
     if reading == "parts":
@@ -459,8 +462,7 @@ def long_file_bytes(file: InlineFilePart, long: LongText) -> LongFileBytes:
     source = _base64_source(long.text, long.data, long.end)
     if long.kind == "base64":
         return LongFileBytes(source, bare_base64=not file.base64)
-    media_type = (long.header or "").split(";")[0].strip(_ECMASCRIPT_WHITESPACE)
-    return LongFileBytes(source, url_media_type=media_type or None)
+    return LongFileBytes(source, url_media_type=data_url_media_type(long.header or "") or None)
 
 
 def long_head(long: LongText, units: int) -> str:

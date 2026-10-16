@@ -10,6 +10,15 @@ refuses to publish a version without a matching entry below.
 
 ### [Unreleased]
 
+#### Changed
+
+- **Wire** An attribute Hue reads as JSON whose whole text is a `data:` URL instead is read as that file, as Hue's reader reads it: it uploads in the background and becomes a digest-form `blob` part keyed `<attribute>#`. This is what a Langfuse SDK records for a string input or output, such as `observation.update({ output: "data:audio/wav;base64,…" })` on a provider that also carries Hue's span processor; before, the base64 was exported inline. Other text that is not JSON stays as recorded. `hue import langfuse` places such an observation's file the same way before it sends the span.
+- **Wire** Raw 16-bit PCM keeps the format its media type declares. A file typed `audio/pcm`, `audio/x-pcm` or `audio/L16` with a `rate` from 8000 to 192000 and 1 or 2 `channels` (a `data:` URL's header or a part's declared type) is reserved and listed as `audio/pcm;rate=<rate>;channels=<n>` (`audio/L16;…` for big-endian samples), and OpenAI `pcm16` audio as `audio/pcm;rate=24000;channels=1`, so Hue plays the stored file; the part's own fields stay as recorded. Before, the parameters were dropped and the file could only be downloaded.
+
+#### Fixed
+
+- A file upload's PUT answered with no reply, 408, 429 or a 5xx now waits its `Retry-After` (up to 60 s) before the next attempt, as 0.19.0 described; before, it waited the 1 s then 2 s backoff.
+
 ### [0.19.0] - 2026-10-16
 
 #### Changed
@@ -1514,6 +1523,11 @@ No registry release is claimed until publication and registry acceptance complet
 ## hue-run (Python)
 
 ### [Unreleased]
+
+#### Changed
+
+- **Wire** An attribute Hue reads as JSON whose whole text is a `data:` URL instead is read as that file, as Hue's reader reads it: it uploads in the background and becomes a digest-form `blob` part keyed `<attribute>#`, as in the TypeScript SDK. Before, the base64 was exported inline. Other text that is not JSON stays as recorded.
+- **Wire** Raw 16-bit PCM keeps the format its media type declares. A file typed `audio/pcm`, `audio/x-pcm` or `audio/L16` with a `rate` from 8000 to 192000 and 1 or 2 `channels` (a `data:` URL's header or a part's declared type) is reserved and listed as `audio/pcm;rate=<rate>;channels=<n>` (`audio/L16;…` for big-endian samples), and OpenAI `pcm16` audio as `audio/pcm;rate=24000;channels=1`, so Hue plays the stored file; the part's own fields stay as recorded. Before, the parameters were dropped and the file could only be downloaded.
 
 ### [0.12.0] - 2026-10-16
 

@@ -275,6 +275,24 @@ describe("media read in place is placed as media parsed out of the value", () =>
         expect(inPlace).toEqual(parsed);
       });
 
+  test("a JSON attribute recorded as a raw data: URL is its file, read in place", async () => {
+    for (const key of ["langfuse.observation.output", "input.value"]) {
+      const value = `data:audio/pcm;rate=24000;base64,${long}`;
+      const parsed = await place(key, value, false, true);
+      expect(await place(key, value, true, true)).toEqual(parsed);
+      expect(parsed.uploads.map((upload) => [upload.key, upload.contentType])).toEqual([
+        [`${key}#`, "audio/pcm;rate=24000;channels=1"],
+      ]);
+      expect(JSON.parse(parsed.value as string)).toMatchObject({
+        type: "blob",
+        mime_type: "audio/pcm;rate=24000;channels=1",
+        size: 4000,
+      });
+      // Read in place: the stand-in stood for the URL, and nothing parsed it as JSON.
+      expect((await readLargeMediaText(key, value, 300))!.long.size).toBe(1);
+    }
+  });
+
   test("long strings are read in place, and the JSON around them is bounded", async () => {
     const value = JSON.stringify([
       { parts: [{ type: "blob", mime_type: "audio/wav", content: long }] },

@@ -180,7 +180,7 @@ def inline_file(content: str) -> InlineFile:
         except binascii.Error:
             decoded = None
     # Trimmed as JavaScript trims, so both SDKs read the same media type.
-    media_type = match.group(1).split(";")[0].strip(_ECMASCRIPT_WHITESPACE) if match else ""
+    media_type = data_url_media_type(match.group(1)) if match else ""
     return InlineFile(
         content.encode("utf-8") if decoded is None else decoded,
         decoded is not None,
@@ -289,7 +289,8 @@ _AUDIO_TYPES = {
     "aac": "audio/aac",
     "m4a": "audio/mp4",
     "webm": "audio/webm",
-    "pcm16": "audio/pcm",
+    # OpenAI's raw PCM: 16-bit little-endian, 24 kHz, mono, as Hue's reader types it.
+    "pcm16": "audio/pcm;rate=24000;channels=1",
 }
 _DOCUMENT_TYPES = {
     "pdf": "application/pdf",
@@ -454,17 +455,88 @@ _DECLARED_MEDIA_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9!
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_SAFE_INTEGER = 2**53 - 1
 
+# Raw 16-bit linear PCM by its media type, and its samples' byte order, as Hue's reader declares a
+# format: RFC 2586's ``audio/L16`` big-endian, ``audio/pcm`` and ``audio/x-pcm`` little-endian.
+_PCM_ENDIAN = {"audio/l16": "big", "audio/pcm": "little", "audio/x-pcm": "little"}
+# One media type parameter (``name=value``, the value a token or a quoted string) or an empty one,
+# then the ``;`` that ends it or the end of the type (RFC 9110 section 8.3.1).
+_PCM_PARAMETER = re.compile(
+    r"[ \t]*(?:([!#$%&'*+.^_`|~0-9A-Za-z-]+)[ \t]*=[ \t]*"
+    r"([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"(?:[^\"\\]|\\[^\n\r\u2028\u2029])*\")[ \t]*)?(;|\Z)"
+)
+_PCM_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+_PCM_WHOLE = re.compile(r"[0-9]{1,7}")
+
+
+def _pcm_whole(value: str | None, low: int, high: int) -> int | None:
+    """A whole number written in decimal digits alone, within ``[low, high]``."""
+    if value is None or not _PCM_WHOLE.fullmatch(value):
+        return None
+    number = int(value)
+    return number if low <= number <= high else None
+
+
+def pcm_media_type(media_type: str | None) -> str | None:
+    """The canonical media type of raw 16-bit PCM whose type declares a format Hue's reader plays
+    (its ``pcmFormatOf``): ``audio/pcm;rate=<Hz>;channels=<n>`` for little-endian samples
+    (``audio/pcm``, ``audio/x-pcm``), ``audio/L16;rate=<Hz>;channels=<n>`` for big-endian ones,
+    ``rate`` a whole number from 8000 to 192000 and ``channels`` 1 or 2 (1 by default). None for
+    any other type: another type, raw PCM without a rate, or with any other parameter or one named
+    twice."""
+    if media_type is None or utf16_size(media_type, 255) > 255:
+        return None
+    endian = _PCM_ENDIAN.get(media_type.split(";")[0].strip(_ECMASCRIPT_WHITESPACE).lower())
+    if endian is None:
+        return None
+    parameters: dict[str, str] = {}
+    at = media_type.find(";")
+    while at != -1:
+        match = _PCM_PARAMETER.match(media_type, at + 1)
+        if match is None:
+            return None
+        name, value, end = match.groups()
+        if name is not None:
+            name = name.lower()
+            if name in parameters:
+                return None
+            parameters[name] = (
+                _PCM_ESCAPE.sub(r"\1", value[1:-1]) if value.startswith('"') else value
+            )
+        at = match.end() - 1 if end else -1
+    if not parameters.keys() <= {"rate", "channels"}:
+        return None
+    rate = _pcm_whole(parameters.get("rate"), 8_000, 192_000)
+    channels = _pcm_whole(parameters["channels"], 1, 2) if "channels" in parameters else 1
+    if rate is None or channels is None:
+        return None
+    return f"{'audio/L16' if endian == 'big' else 'audio/pcm'};rate={rate};channels={channels}"
+
+
+def data_url_media_type(header: str) -> str:
+    """The media type a data: URL's header (between ``data:`` and its comma) names, as the SDK
+    records a file's type: raw PCM that declares a format Hue's reader plays in its canonical form
+    (``pcm_media_type``, read from the header without a closing ``;base64``), any other type
+    without its parameters; empty when the header names none."""
+    mime = header.split(";", 1)[0].strip(_ECMASCRIPT_WHITESPACE)
+    if not mime:
+        return mime
+    declared = header[: -len(";base64")] if header.endswith(";base64") else header
+    return pcm_media_type(declared) or mime
+
 
 def _data_url_type(text: str) -> str | None:
     """The media type a whole string that is a data: URL declares, when it declares one: such a
-    string is a file wherever it sits. A web URL, or any other text, is not."""
+    string is a file wherever it sits. A web URL, or any other text, is not. Raw PCM keeps the
+    format it declares (``data_url_media_type``)."""
     if not text.startswith("data:"):
         return None
     header = _DATA_URL.match(text)
     if header is None:
         return None
     mime = header.group(1).split(";")[0].strip(_ECMASCRIPT_WHITESPACE)
-    return mime if _DECLARED_MEDIA_TYPE.match(mime) and is_media_content_type(mime) else None
+    if not (_DECLARED_MEDIA_TYPE.match(mime) and is_media_content_type(mime)):
+        return None
+    return data_url_media_type(header.group(1))
 
 
 def modality_of(media_type: str) -> str:
@@ -507,7 +579,8 @@ _AUDIO_FORMATS = {
     "m4a": "audio/mp4",
     "mp4": "audio/mp4",
     "webm": "audio/webm",
-    "pcm16": "audio/pcm",
+    # OpenAI's raw PCM: 16-bit little-endian, 24 kHz, mono. A bare ``pcm`` names no rate.
+    "pcm16": "audio/pcm;rate=24000;channels=1",
     "pcm": "audio/pcm",
 }
 _AUDIO_FORMAT = re.compile(r"[a-z0-9.+-]{1,32}\Z")
@@ -848,10 +921,12 @@ _JSON_ARRAY_TEXT = re.compile(r"\s*\[")
 
 def read_media_text(key: str, text: str) -> MediaValue | None:
     """An attribute's recorded text read for files as Hue's reader reads that attribute: JSON by
-    its convention; metadata as JSON when it reads as an object or array, otherwise as the text
-    itself; an OpenLLMetry content as the parts list it encodes (any other content stays text); an
-    OpenInference image URL as the text itself. None for text that reading finds nothing in.
-    Raises ValueError for JSON that does not parse or nests too deep."""
+    its convention, or the text itself when it is no JSON (a Langfuse SDK records a string input
+    or output as it is, so a whole data: URL is the file); metadata as JSON when it reads as an
+    object or array, otherwise as the text itself; an OpenLLMetry content as the parts list it
+    encodes (any other content stays text); an OpenInference image URL as the text itself. None
+    for text that reading finds nothing in. Raises ValueError for metadata or parts JSON that does
+    not parse, and RecursionError for JSON that nests too deep."""
     reading = reading_of(key)
 
     def json_text(parsed: Any) -> MediaValue | None:
@@ -859,7 +934,11 @@ def read_media_text(key: str, text: str) -> MediaValue | None:
         return media_in(parsed, text) if reader_parses(parsed) else None
 
     if reading == "json":
-        return json_text(loads_message(text))
+        try:
+            parsed = loads_message(text)
+        except ValueError:
+            return media_in(text)
+        return json_text(parsed)
     if reading == "metadata":
         return json_text(loads_message(text)) if _JSON_OBJECT_TEXT.match(text) else media_in(text)
     if reading == "parts":
@@ -928,10 +1007,12 @@ def media_bytes(file: InlineFilePart) -> InlineFile:
 
 
 def media_content_type(file: InlineFilePart, decoded: DecodedFile) -> str:
+    """The type a file is uploaded and listed under: the part's declared type, else its data:
+    URL's; raw PCM that declares a format Hue's reader plays in its canonical form."""
     for mime in (file.content_type, decoded.url_media_type):
         if is_media_content_type(mime):
             assert mime is not None
-            return mime
+            return pcm_media_type(mime) or mime
     return "application/octet-stream" if decoded.decoded else "text/plain; charset=utf-8"
 
 

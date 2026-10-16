@@ -254,6 +254,22 @@ CASES += [
         "data:text/plain," + "a" * (_MIB - 2) + "%41",
     ),
     ("lone high surrogates past a slice", "metadata", "data:text/plain," + "\ud800" * (_MIB + 8)),
+    # Text read by JSON convention that is no JSON is the text itself: a whole data: URL is the
+    # file, raw PCM keeping the format it declares, and other text holds none.
+    (
+        "a raw data: URL by JSON convention",
+        "langfuse.observation.output",
+        f"data:audio/wav;base64,{_WAV}",
+    ),
+    ("raw PCM by JSON convention", "input.value", f"data:audio/pcm;rate=24000;base64,{_LONG}"),
+    (
+        "raw PCM in a part",
+        "gen_ai.input.messages",
+        json.dumps(
+            [{"parts": [{"type": "file", "data": f"data:audio/L16;rate=16000;base64,{_LONG}"}]}]
+        ),
+    ),
+    ("text that is no JSON", "langfuse.observation.output", "notes on data: " + _LONG),
 ]
 
 
@@ -266,6 +282,25 @@ def low_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(("name", "key", "text"), CASES, ids=[case[0] for case in CASES])
 def test_media_read_in_place_is_placed_as_media_parsed_out(low_threshold, name, key, text, ok):
     assert place(key, text, True, ok) == place(key, text, False, ok), name
+
+
+@pytest.mark.parametrize("key", ["langfuse.observation.output", "input.value"])
+def test_a_raw_data_url_by_json_convention_is_read_in_place_as_the_file(low_threshold, key):
+    text = f"data:audio/pcm;rate=24000;base64,{_LONG}"
+    read = read_large_media_text(key, text)
+    assert read is not None and len(read.long) == 1
+    placed = place(key, text, True, True)
+    assert placed == place(key, text, False, True)
+    pcm = "audio/pcm;rate=24000;channels=1"
+    ((upload_key, digest, size, content_type),) = placed["uploads"]
+    assert (upload_key, size, content_type) == (f"{key}#", 4000, pcm)
+    assert json.loads(placed["value"]) == {
+        "type": "blob",
+        "mime_type": pcm,
+        "modality": "audio",
+        "sha256": digest,
+        "size": 4000,
+    }
 
 
 def test_long_strings_are_read_in_place_and_the_json_around_them_is_bounded():

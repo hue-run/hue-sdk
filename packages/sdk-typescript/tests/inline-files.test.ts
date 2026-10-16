@@ -10,6 +10,7 @@ import {
   MAX_INLINE_FILE_TEXT,
   isMediaName,
   MediaDigestMemo,
+  pcmMediaType,
 } from "../src/inline-files.js";
 
 test("nested legacy media preserves empty and boundary-size binary verbatim", () => {
@@ -210,4 +211,31 @@ test("JSON edits to many members are rendered in time linear in them", () => {
   expect(JSON.parse(placed)).toEqual(
     Array.from({ length: count }, (_, index) => ({ type: "blob", keep: 1, size: index })),
   );
+});
+
+test("raw PCM types that declare a format Hue plays are named as Hue's reader names them", () => {
+  for (const [declared, canonical] of [
+    ["audio/pcm;rate=24000", "audio/pcm;rate=24000;channels=1"],
+    ["audio/L16;rate=16000", "audio/L16;rate=16000;channels=1"],
+    ["audio/x-pcm;rate=8000;channels=2", "audio/pcm;rate=8000;channels=2"],
+    ['Audio/l16 ; Rate="44100" ;CHANNELS=2;', "audio/L16;rate=44100;channels=2"],
+    ["audio/pcm;rate=192000;channels=1", "audio/pcm;rate=192000;channels=1"],
+  ] as const)
+    expect(pcmMediaType(declared)).toBe(canonical);
+  // No rate, any other parameter, a value out of range, a parameter named twice, a malformed one
+  // or another type: no format Hue plays, so the type is not rewritten.
+  for (const declared of [
+    "audio/pcm",
+    "audio/pcm;channels=2",
+    "audio/pcm;rate=24000;bits=16",
+    "audio/pcm;rate=7999",
+    "audio/pcm;rate=192001",
+    "audio/pcm;rate=24000.0",
+    "audio/pcm;rate=24000;channels=3",
+    "audio/pcm;rate=24000;rate=24000",
+    "audio/pcm;rate",
+    "audio/wav;rate=24000",
+    `audio/pcm;rate=24000;${" ".repeat(240)}`,
+  ])
+    expect(pcmMediaType(declared)).toBeUndefined();
 });

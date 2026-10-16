@@ -88,8 +88,10 @@ interface Behavior {
     json?: boolean;
     body?: string;
   };
-  /** The store's status for a PUT; 200 stores the bytes. */
-  put?: (index: number) => number | "hang" | "expired";
+  /** The store's status for a PUT, or its status and headers; 200 stores the bytes. */
+  put?: (
+    index: number,
+  ) => number | "hang" | "expired" | { status: number; headers: Record<string, string> };
   beforePut?: () => Promise<void>;
   complete?: (index: number) => number;
   /** The status and headers of the `index`th OTLP request's reply (1-based); a status other than
@@ -130,7 +132,8 @@ function hue(behavior: Behavior = {}) {
       });
       if (url.pathname.startsWith("/store/")) {
         await behavior.beforePut?.();
-        const status = behavior.put?.(++putCount) ?? 200;
+        const answer = behavior.put?.(++putCount) ?? 200;
+        const status = typeof answer === "object" ? answer.status : answer;
         if (status === "hang") {
           await new Promise(() => {});
           return new Response(null);
@@ -148,7 +151,10 @@ function hue(behavior: Behavior = {}) {
         const put = { headers, bytes: bytes.byteLength, status };
         puts.push(put);
         if (status !== 200)
-          return new Response("<Error><Code>InternalError</Code></Error>", { status });
+          return new Response("<Error><Code>InternalError</Code></Error>", {
+            status,
+            ...(typeof answer === "object" ? { headers: answer.headers } : {}),
+          });
         // S3 refuses a presigned PUT sent chunked: its length is signed.
         if (headers["transfer-encoding"] !== undefined) {
           put.status = 501;
@@ -3302,6 +3308,176 @@ test("input.value declared text/plain stays literal text; a JSON one is read for
   }
 });
 
+test("a JSON attribute recorded as a raw data: URL is its file; other text that is no JSON stays", async () => {
+  // A Langfuse SDK records a string input or output as it is, not as JSON. Hue reads text that
+  // does not parse as the text itself, and a whole data: URL as a file.
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const wav = Buffer.concat([Buffer.from("RIFF\0\0\0\0WAVEfmt "), randomBytes(4 * KiB)]);
+  const png = randomBytes(2 * KiB);
+  const untouched = {
+    "langfuse.observation.input": "Transcribe the attached call, then summarise it.",
+    "langfuse.trace.input": `{not JSON "data:image/png;base64,${png.toString("base64")}"}`,
+    "langfuse.trace.output": `Image: data:image/png;base64,${png.toString("base64")}`,
+    "output.value": "data:,a data: URL without a media type",
+  };
+  try {
+    await hueClient.withSpan("raw data url", ({ span }) => {
+      span.setAttribute(
+        "langfuse.observation.output",
+        `data:audio/wav;base64,${wav.toString("base64")}`,
+      );
+      span.setAttribute("input.value", `data:image/png;base64,${png.toString("base64")}`);
+      for (const [key, value] of Object.entries(untouched)) span.setAttribute(key, value);
+    });
+    const report = await hueClient.flush();
+    expect([report.uploadedValues, report.uploadFallbacks]).toEqual([2, 0]);
+    const record = endpoint.span("raw data url")!;
+    // Each is placed as the digest-form part of a whole-value file, listed under `<attribute>#`.
+    expect(JSON.parse(attr(record, "langfuse.observation.output")!.stringValue!)).toEqual({
+      type: "blob",
+      mime_type: "audio/wav",
+      modality: "audio",
+      sha256: sha256(wav),
+      size: wav.byteLength,
+    });
+    expect(JSON.parse(attr(record, "input.value")!.stringValue!)).toEqual({
+      type: "blob",
+      mime_type: "image/png",
+      modality: "image",
+      sha256: sha256(png),
+      size: png.byteLength,
+    });
+    expect(
+      blobs(record)
+        .map(({ key, sha256: digest, content_type }) => [key, digest, content_type])
+        .sort(),
+    ).toEqual([
+      ["input.value#", sha256(png), "image/png"],
+      ["langfuse.observation.output#", sha256(wav), "audio/wav"],
+    ]);
+    expect([...endpoint.store.values()].map(({ bytes }) => sha256(bytes)).sort()).toEqual(
+      [sha256(png), sha256(wav)].sort(),
+    );
+    for (const [key, value] of Object.entries(untouched))
+      expect(attr(record, key)!.stringValue).toBe(value);
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
+test("raw PCM whose type declares its format is reserved, listed and placed as Hue names it", async () => {
+  const endpoint = hue();
+  const hueClient = client(endpoint);
+  const [realtime, l16, stereo, extra, bare, declared, unsupported, chat, reply] = Array.from(
+    { length: 9 },
+    () => randomBytes(4 * KiB),
+  );
+  const url = (type: string, bytes: Buffer) => `data:${type};base64,${bytes.toString("base64")}`;
+  const blob = (type: string, bytes: Buffer) => ({ type: "blob", content: url(type, bytes) });
+  try {
+    await hueClient.withSpan("pcm", ({ span }) => {
+      span.setAttribute("langfuse.observation.output", url("audio/pcm;rate=24000", realtime));
+      span.setAttribute(
+        "gen_ai.input.messages",
+        JSON.stringify([
+          {
+            role: "user",
+            parts: [
+              blob("audio/L16;rate=16000", l16),
+              blob("audio/x-pcm;rate=8000;channels=2", stereo),
+              blob("audio/pcm;rate=24000;bits=16", extra),
+              blob("audio/pcm", bare),
+              {
+                type: "blob",
+                mime_type: "audio/pcm;rate=16000",
+                content: declared.toString("base64"),
+              },
+              {
+                type: "blob",
+                mime_type: "audio/pcm;channels=1",
+                content: unsupported.toString("base64"),
+              },
+            ],
+          },
+        ]),
+      );
+      // OpenAI's pcm16 audio: 16-bit little-endian PCM at 24 kHz, mono.
+      span.setAttribute(
+        "input.value",
+        JSON.stringify({
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_audio",
+                  input_audio: { data: chat.toString("base64"), format: "pcm16" },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      span.setAttribute(
+        "gen_ai.output.messages",
+        JSON.stringify([
+          {
+            role: "assistant",
+            content: null,
+            audio: { id: "audio_1", data: reply.toString("base64"), format: "pcm16" },
+          },
+        ]),
+      );
+    });
+    await hueClient.flush();
+    const record = endpoint.span("pcm")!;
+    const types = {
+      "langfuse.observation.output#": "audio/pcm;rate=24000;channels=1",
+      "gen_ai.input.messages#/0/parts/0": "audio/L16;rate=16000;channels=1",
+      "gen_ai.input.messages#/0/parts/1": "audio/pcm;rate=8000;channels=2",
+      // A parameter Hue cannot honor, or no rate: the type it had before.
+      "gen_ai.input.messages#/0/parts/2": "audio/pcm",
+      "gen_ai.input.messages#/0/parts/3": "audio/pcm",
+      "gen_ai.input.messages#/0/parts/4": "audio/pcm;rate=16000;channels=1",
+      "gen_ai.input.messages#/0/parts/5": "audio/pcm;channels=1",
+      "input.value#/messages/0/content/0": "audio/pcm;rate=24000;channels=1",
+      "gen_ai.output.messages#/0": "audio/pcm;rate=24000;channels=1",
+    };
+    expect(
+      Object.fromEntries(endpoint.reservations.map(({ key, contentType }) => [key, contentType])),
+    ).toEqual(types);
+    expect(
+      Object.fromEntries(blobs(record).map((entry) => [entry.key, entry.content_type])),
+    ).toEqual(types);
+    // The whole value's part names the type; a provider part keeps its own fields.
+    expect(JSON.parse(attr(record, "langfuse.observation.output")!.stringValue!)).toEqual({
+      type: "blob",
+      mime_type: "audio/pcm;rate=24000;channels=1",
+      modality: "audio",
+      sha256: sha256(realtime),
+      size: realtime.byteLength,
+    });
+    expect(JSON.parse(attr(record, "input.value")!.stringValue!).messages[0].content[0]).toEqual({
+      type: "input_audio",
+      input_audio: { format: "pcm16" },
+      sha256: sha256(chat),
+      size: chat.byteLength,
+    });
+    expect(JSON.parse(attr(record, "gen_ai.output.messages")!.stringValue!)[0]).toEqual({
+      role: "assistant",
+      content: null,
+      audio: { id: "audio_1", format: "pcm16" },
+      sha256: sha256(reply),
+      size: reply.byteLength,
+    });
+  } finally {
+    await hueClient.shutdown();
+    endpoint.server.stop(true);
+  }
+});
+
 test("a log body's inline media take hue.blobs places before its attachments, in order", async () => {
   const endpoint = hue();
   const hueClient = client(endpoint);
@@ -4407,6 +4583,17 @@ describe("uploads after export", () => {
     const failing = await attempt({ put: () => 503 });
     expect(failing.outcome).toMatchObject({ ok: false, reason: "failed" });
     expect([failing.reservations, failing.puts, failing.waits.length]).toEqual([1, 3, 2]);
+    // A PUT's Retry-After is honoured as a reservation's is, up to a minute.
+    for (const [header, wait] of [
+      ["7", 7000],
+      ["120", 60_000],
+    ] as const) {
+      const limited = await attempt({
+        put: (index) => (index === 1 ? { status: 503, headers: { "Retry-After": header } } : 200),
+      });
+      expect(limited.outcome.ok).toBe(true);
+      expect([limited.reservations, limited.puts, limited.waits]).toEqual([1, 2, [wait]]);
+    }
     const rejected = await attempt({ put: () => 400 });
     expect(rejected.outcome).toMatchObject({ ok: false, reason: "failed" });
     expect([rejected.puts, rejected.waits.length]).toEqual([1, 0]);
