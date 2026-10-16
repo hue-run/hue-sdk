@@ -113,6 +113,73 @@ function base64Header(header: string): boolean {
 }
 const hexPair = /^[0-9A-Fa-f]{2}$/;
 
+/** Raw 16-bit PCM media types and the byte order of their samples, as Hue's reader names them. */
+const pcmEndian = new Map<string, "little" | "big">([
+  ["audio/l16", "big"],
+  ["audio/pcm", "little"],
+  ["audio/x-pcm", "little"],
+]);
+/** One media type parameter (`name=value`, the value a token or a quoted string) or an empty one,
+ * then the `;` that ends it or the end of the type (RFC 9110 section 8.3.1). */
+const pcmParameter =
+  /[ \t]*(?:([!#$%&'*+.^_`|~0-9A-Za-z-]+)[ \t]*=[ \t]*([!#$%&'*+.^_`|~0-9A-Za-z-]+|"(?:[^"\\]|\\.)*")[ \t]*)?(;|$)/y;
+
+/** A whole number written in decimal digits alone, within `[min, max]`. */
+function wholeIn(value: string | undefined, min: number, max: number): number | undefined {
+  if (value === undefined || !/^\d{1,7}$/.test(value)) return undefined;
+  const number = Number(value);
+  return number >= min && number <= max ? number : undefined;
+}
+
+/**
+ * The canonical media type of raw 16-bit PCM whose type declares its format, as Hue's reader reads
+ * one and names it: `audio/pcm;rate=<Hz>;channels=<n>` for little-endian `audio/pcm` and
+ * `audio/x-pcm`, `audio/L16;rate=<Hz>;channels=<n>` for big-endian `audio/L16`, `rate` a whole
+ * 8000 to 192000 and `channels` 1 or 2 (1 when absent). Undefined for any other type, raw PCM
+ * without a rate or with any other parameter included: Hue plays raw PCM only in a format its
+ * type declares.
+ */
+export function pcmMediaType(mediaType: string): string | undefined {
+  if (mediaType.length > 255) return undefined;
+  const endian = pcmEndian.get(mediaType.split(";", 1)[0]!.trim().toLowerCase());
+  if (!endian) return undefined;
+  const parameters = new Map<string, string>();
+  const start = mediaType.indexOf(";");
+  if (start !== -1) {
+    pcmParameter.lastIndex = start + 1;
+    for (;;) {
+      const match = pcmParameter.exec(mediaType);
+      if (!match) return undefined;
+      if (match[1] !== undefined) {
+        const name = match[1].toLowerCase();
+        if (parameters.has(name)) return undefined;
+        const value = match[2]!;
+        parameters.set(
+          name,
+          value.startsWith('"') ? value.slice(1, -1).replace(/\\(.)/g, "$1") : value,
+        );
+      }
+      if (match[3] === "") break;
+    }
+  }
+  for (const name of parameters.keys())
+    if (name !== "rate" && name !== "channels") return undefined;
+  const rate = wholeIn(parameters.get("rate"), 8_000, 192_000);
+  const channels = parameters.has("channels") ? wholeIn(parameters.get("channels"), 1, 2) : 1;
+  if (rate === undefined || channels === undefined) return undefined;
+  return `${endian === "big" ? "audio/L16" : "audio/pcm"};rate=${rate};channels=${channels}`;
+}
+
+/** The media type a `data:` URL's header (between `data:` and its comma) gives its file: raw PCM
+ * whose parameters declare its format as its canonical type (`pcmMediaType`), any other type
+ * without its parameters. Empty when the header names no type. */
+export function headerMediaType(header: string): string {
+  const type = header.split(";", 1)[0]!.trim();
+  if (!type) return type;
+  const declared = header.endsWith(";base64") ? header.slice(0, -";base64".length) : header;
+  return pcmMediaType(declared) ?? type;
+}
+
 /** RFC 2397 data without `;base64`: percent-escaped octets, other characters as UTF-8. Undefined
  * when a `%` does not start an escape. */
 function percentDecoded(payload: string): Buffer | undefined {
@@ -158,7 +225,7 @@ export function inlineFileBytes(content: string): InlineFileBytes {
         ? Buffer.from(payload, "base64")
         : undefined;
   const header = url?.[1];
-  const mediaType = header === undefined ? undefined : header.split(";")[0]!.trim();
+  const mediaType = header === undefined ? undefined : headerMediaType(header);
   return {
     bytes: decoded ?? Buffer.from(content, "utf8"),
     decoded: decoded !== undefined,
@@ -210,6 +277,8 @@ export interface InlineFilePart {
   document?: MediaDocument;
 }
 
+/** OpenAI's `pcm16` audio: raw 16-bit little-endian PCM, 24 kHz mono, as Hue's reader types it. */
+const PCM16 = "audio/pcm;rate=24000;channels=1";
 const audioTypes: Record<string, string> = {
   wav: "audio/wav",
   mp3: "audio/mpeg",
@@ -219,7 +288,7 @@ const audioTypes: Record<string, string> = {
   aac: "audio/aac",
   m4a: "audio/mp4",
   webm: "audio/webm",
-  pcm16: "audio/pcm",
+  pcm16: PCM16,
 };
 const documentTypes: Record<string, string> = {
   pdf: "application/pdf",
@@ -410,14 +479,16 @@ export function contentPath(
 /** A media type as a `data:` URL declares one: `type/subtype`, no parameters. */
 const declaredMediaType = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9!#$&^_.+-]+$/;
 
-/** The media type a whole string that is a `data:` URL declares, when it declares one: such a
- * string is a file wherever it sits. A web URL, or any other text, is not. */
+/** The media type of a whole string that is a `data:` URL declaring one (`headerMediaType`): such
+ * a string is a file wherever it sits. A web URL, or any other text, is not. */
 function dataUrlType(text: string): string | undefined {
   if (!text.startsWith("data:")) return undefined;
   const header = dataUrl.exec(text);
   if (!header) return undefined;
-  const type = header[1]!.split(";")[0]!.trim();
-  return declaredMediaType.test(type) && isMediaContentType(type) ? type : undefined;
+  const type = header[1]!.split(";", 1)[0]!.trim();
+  return declaredMediaType.test(type) && isMediaContentType(type)
+    ? headerMediaType(header[1]!)
+    : undefined;
 }
 
 /** The modality a media type implies, as Hue's reader names it. */
@@ -454,7 +525,7 @@ const audioFormats: Record<string, string> = {
   m4a: "audio/mp4",
   mp4: "audio/mp4",
   webm: "audio/webm",
-  pcm16: "audio/pcm",
+  pcm16: PCM16,
   pcm: "audio/pcm",
 };
 
@@ -740,17 +811,26 @@ export function mediaIn(value: unknown, source?: string): MediaValue {
 
 /**
  * An attribute's recorded text read for files as Hue's reader reads that attribute: JSON by its
- * convention; metadata as JSON when it reads as an object or array, otherwise as the text itself;
- * an OpenLLMetry content as the parts list it encodes (any other content stays text); an
- * OpenInference image URL as the text itself. Undefined for text that reading finds nothing in.
- * Throws for JSON that does not parse or nests too deep.
+ * convention, text that does not parse as the text itself (a Langfuse SDK records a string input
+ * or output as it is, so a whole `data:` URL is a file); metadata as JSON when it reads as an
+ * object or array, otherwise as the text itself; an OpenLLMetry content as the parts list it
+ * encodes (any other content stays text); an OpenInference image URL as the text itself.
+ * Undefined for text that reading finds nothing in. Throws for metadata or parts JSON that does
+ * not parse.
  */
 export function readMediaText(key: string, text: string): MediaValue | undefined {
   /** JSON text read as Hue's reader reads it: text it keeps as text holds no file. */
   const json = (parsed: unknown) => (readerParses(parsed) ? mediaIn(parsed, text) : undefined);
   switch (readingOf(key)) {
-    case "json":
-      return json(JSON.parse(text));
+    case "json": {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return mediaIn(text);
+      }
+      return json(parsed);
+    }
     case "metadata":
       return /^\s*[[{]/.test(text) ? json(JSON.parse(text)) : mediaIn(text);
     case "parts": {
@@ -825,12 +905,16 @@ export function mediaBytes(file: InlineFilePart): InlineFileBytes {
   if (file.base64) return { bytes: Buffer.from(file.content, "base64"), decoded: true };
   return inlineFileBytes(file.content);
 }
+/** The type a file is reserved and listed under: the type its part declares, else its `data:`
+ * URL's, raw PCM whose type declares its format in its canonical form (`pcmMediaType`). */
 export function mediaContentType(
   file: InlineFilePart,
   decoded: Pick<InlineFileBytes, "decoded" | "urlMediaType">,
 ): string {
   return (
-    (isMediaContentType(file.contentType) ? file.contentType : undefined) ??
+    (isMediaContentType(file.contentType)
+      ? (pcmMediaType(file.contentType) ?? file.contentType)
+      : undefined) ??
     (isMediaContentType(decoded.urlMediaType) ? decoded.urlMediaType : undefined) ??
     (decoded.decoded ? "application/octet-stream" : "text/plain; charset=utf-8")
   );

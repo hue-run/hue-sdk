@@ -1951,6 +1951,141 @@ def test_input_value_declared_text_plain_stays_literal_text(hue_store):
     assert [entry["key"] for entry in blobs(record)] == ["output.value#/image"]
 
 
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+@pytest.mark.parametrize(
+    "attribute", ["langfuse.observation.output", "langfuse.observation.input", "input.value"]
+)
+def test_a_raw_data_url_recorded_whole_uploads_and_is_placed_as_its_digest_part(
+    hue_store, attribute
+):
+    # A Langfuse SDK records a string input or output as it is, not as JSON. Hue's reader reads
+    # text by JSON convention that is no JSON as the text itself, so a whole data: URL is a file.
+    audio = b"RIFF" + os.urandom(4012)
+    with client(hue_store) as hue:
+        with hue.span("raw") as span:
+            trace_id = span.trace_id
+            span.set_attribute(attribute, f"data:audio/wav;base64,{b64(audio)}")
+        assert hue.force_flush(timeout_millis=30_000)
+        assert (hue.export_status.uploaded_values, hue.export_status.upload_fallbacks) == (1, 0)
+    record = hue_store.span("raw")
+    digest = {"sha256": sha256(audio), "size": len(audio)}
+    assert json.loads(attrs(record)[attribute].string_value) == {
+        "type": "blob",
+        "mime_type": "audio/wav",
+        "modality": "audio",
+        **digest,
+    }
+    assert blobs(record) == [{"key": f"{attribute}#", **digest, "content_type": "audio/wav"}]
+    assert hue_store.objects[f"{trace_id}/{sha256(audio)}"] == (audio, "audio/wav")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Transcribe the call.",
+        '{"unterminated": "data:audio/wav;base64,UklGRg==',
+        "data:audio/wav;base64",
+        " data:audio/wav;base64,UklGRg==",
+        "data:;base64,UklGRg==",
+        "data:text/plain,a small text file",
+        "https://example.com/call.wav",
+    ],
+    ids=["text", "unterminated JSON", "no comma", "leading space", "no type", "small text", "url"],
+)
+def test_text_recorded_whole_that_is_no_file_to_upload_stays_as_recorded(hue_store, text):
+    with client(hue_store) as hue:
+        with hue.span("text") as span:
+            span.set_attribute("langfuse.observation.output", text)
+            span.set_attribute("input.value", text)
+        assert hue.force_flush(timeout_millis=30_000)
+    record = hue_store.span("text")
+    assert attrs(record)["langfuse.observation.output"].string_value == text
+    assert attrs(record)["input.value"].string_value == text
+    assert blobs(record) == [] and hue_store.reservations == []
+
+
+@pytest.mark.parametrize(
+    ("declared", "listed"),
+    [
+        ("audio/pcm;rate=24000", "audio/pcm;rate=24000;channels=1"),
+        ("audio/L16;rate=16000", "audio/L16;rate=16000;channels=1"),
+        ("audio/x-pcm;rate=8000;channels=2", "audio/pcm;rate=8000;channels=2"),
+        ("audio/pcm;rate=24000;bits=16", "audio/pcm"),
+        ("audio/pcm", "audio/pcm"),
+    ],
+)
+def test_raw_pcm_in_a_data_url_is_listed_with_the_format_it_declares(hue_store, declared, listed):
+    # Hue plays raw PCM only in a format its listed type declares: a declared rate and channels
+    # are kept in their canonical form, in the reservation, the entry and the placed part.
+    whole, in_part = os.urandom(4800), os.urandom(4802)
+    file = {"type": "file", "data": f"data:{declared};base64,{b64(in_part)}"}
+    message = [{"role": "user", "content": [file]}]
+    with client(hue_store) as hue:
+        with hue.span("pcm") as span:
+            trace_id = span.trace_id
+            span.set_attribute(
+                "langfuse.observation.output", f"data:{declared};base64,{b64(whole)}"
+            )
+            span.set_attribute("ai.prompt.messages", json.dumps(message))
+        assert hue.force_flush(timeout_millis=30_000)
+    record = hue_store.span("pcm")
+    part = json.loads(attrs(record)["langfuse.observation.output"].string_value)
+    assert (part["mime_type"], part["sha256"]) == (listed, sha256(whole))
+    assert sorted((entry["key"], entry["content_type"]) for entry in blobs(record)) == [
+        ("ai.prompt.messages#/0/content/0", listed),
+        ("langfuse.observation.output#", listed),
+    ]
+    assert [request["contentType"] for request in hue_store.reservations] == [listed, listed]
+    for data in (whole, in_part):
+        assert hue_store.objects[f"{trace_id}/{sha256(data)}"] == (data, listed)
+
+
+def test_raw_pcm_a_part_declares_is_listed_in_canonical_form_and_the_part_kept(hue_store):
+    # Gemini's Live API declares its audio ``audio/pcm;rate=16000``: the entry lists the format in
+    # full, and the part keeps its own declaration.
+    audio = os.urandom(3200)
+    blob = {"type": "blob", "modality": "audio", "mime_type": "audio/pcm;rate=16000"}
+    message = [{"role": "user", "parts": [{**blob, "content": b64(audio)}]}]
+    with client(hue_store) as hue:
+        with hue.span("declared") as span:
+            span.set_attribute("gen_ai.input.messages", json.dumps(message))
+        assert hue.force_flush(timeout_millis=30_000)
+    record = hue_store.span("declared")
+    (placed,) = json.loads(attrs(record)["gen_ai.input.messages"].string_value)
+    assert placed["parts"] == [{**blob, "sha256": sha256(audio), "size": len(audio)}]
+    assert [entry["content_type"] for entry in blobs(record)] == ["audio/pcm;rate=16000;channels=1"]
+    assert hue_store.reservations[0]["contentType"] == "audio/pcm;rate=16000;channels=1"
+
+
+def test_openai_pcm16_audio_is_listed_as_24_khz_mono_pcm(hue_store):
+    # OpenAI's pcm16 is raw 16-bit little-endian PCM at 24 kHz, mono, as Hue's reader types it;
+    # each part keeps its own ``format``.
+    spoken, reply = os.urandom(4800), os.urandom(4802)
+    question = {"type": "input_audio", "input_audio": {"data": b64(spoken), "format": "pcm16"}}
+    asked = [{"role": "user", "content": [question]}]
+    audio = {"id": "audio_1", "data": b64(reply), "format": "pcm16"}
+    answered = [{"role": "assistant", "audio": audio}]
+    pcm16 = "audio/pcm;rate=24000;channels=1"
+    with client(hue_store) as hue:
+        with hue.span("pcm16") as span:
+            span.set_attribute("gen_ai.input.messages", json.dumps(asked))
+            span.set_attribute("gen_ai.output.messages", json.dumps(answered))
+        assert hue.force_flush(timeout_millis=30_000)
+    record = hue_store.span("pcm16")
+    assert sorted((entry["key"], entry["content_type"]) for entry in blobs(record)) == [
+        ("gen_ai.input.messages#/0/content/0", pcm16),
+        ("gen_ai.output.messages#/0", pcm16),
+    ]
+    assert [request["contentType"] for request in hue_store.reservations] == [pcm16, pcm16]
+    (placed,) = json.loads(attrs(record)["gen_ai.input.messages"].string_value)
+    assert placed["content"][0]["input_audio"] == {"format": "pcm16"}
+    (placed,) = json.loads(attrs(record)["gen_ai.output.messages"].string_value)
+    assert placed["audio"] == {"id": "audio_1", "format": "pcm16"}
+
+
 def test_a_blob_key_over_256_utf16_units_is_not_reserved(hue_store):
     # 130 emoji are 130 code points but 260 UTF-16 units, past the key limit Hue counts in units.
     data = base64.b64decode(
@@ -2283,6 +2418,31 @@ def test_a_reservations_retry_after_is_waited_for_at_most_60_seconds(uploads, hu
     hue_store.reserve = reserve
     assert uploader.store("1" * 32, ATTRIBUTE, data, "image/png", digest).ok
     assert len(reserved) == 2 and reserved[1] - reserved[0] >= 0.9
+
+
+def test_a_puts_retry_after_is_waited_for_at_most_60_seconds(uploads, hue_store):
+    uploader = uploads.uploader
+    data = b"stored later"
+    digest = (sha256(data), len(data))
+    waits: list[float] = []
+    real_wait = uploader._wait
+    uploader._wait = lambda seconds: waits.append(seconds) or True  # type: ignore[method-assign]
+    hue_store.put = lambda _: (503, {"Retry-After": "120"})
+    assert not uploader.store("1" * 32, ATTRIBUTE, data, "image/png", digest).ok
+    assert waits == [60.0, 60.0] and len(hue_store.puts) == 3
+    # A Retry-After within the cap is waited out, longer than any backoff (at most 1 s before the
+    # second attempt), then the PUT is tried again.
+    uploader._wait = real_wait  # type: ignore[method-assign]
+    put: list[float] = []
+
+    def answer(index: int) -> Any:
+        put.append(time.monotonic())
+        return (503, {"Retry-After": "2"}) if index == 4 else 200
+
+    hue_store.put = answer
+    assert uploader.store("1" * 32, ATTRIBUTE, data, "image/png", digest).ok
+    assert [attempt["status"] for attempt in hue_store.puts[3:]] == [503, 200]
+    assert len(put) == 2 and put[1] - put[0] >= 1.9
 
 
 def test_put_deadline_scales_with_size():

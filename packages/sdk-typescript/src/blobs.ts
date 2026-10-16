@@ -767,8 +767,11 @@ export class BlobUploader {
       if (put === "stored") break;
       if (put === "changed") return { ok: false, reason: "failed", changed: true };
       if (this.closed) return { ok: false, reason: "failed" };
-      if (put === "transient") {
-        if (++attempt >= UPLOAD_ATTEMPTS || !(await this.retryWait(attempt - 1, undefined, upload)))
+      if (typeof put === "object") {
+        if (
+          ++attempt >= UPLOAD_ATTEMPTS ||
+          !(await this.retryWait(attempt - 1, put.retryAfter, upload))
+        )
           return { ok: false, reason: "failed" };
         if (Date.now() < grant.expiresAt) continue;
       } else if (put !== "expired" && Date.now() < grant.expiresAt)
@@ -897,7 +900,8 @@ export class BlobUploader {
     };
   }
 
-  /** The PUT of the value's bytes, with exactly the headers Hue signed. A source that no longer
+  /** The PUT of the value's bytes, with exactly the headers Hue signed. No answer, a 408, a 429 or
+   * a 5xx is transient, with the answer's `Retry-After` when it gave one. A source that no longer
    * holds its bytes (a file changed since it was recorded) ends the request before its body is
    * complete, and fails the value without a retry. */
   private async put(
@@ -905,7 +909,7 @@ export class BlobUploader {
     value: string | Uint8Array | ByteSource,
     size: number,
     deadline: number,
-  ): Promise<"stored" | "expired" | "transient" | "failed" | "changed"> {
+  ): Promise<"stored" | "expired" | "failed" | "changed" | { retryAfter: number | undefined }> {
     const reply = await this.request(
       "PUT",
       grant.url,
@@ -916,14 +920,15 @@ export class BlobUploader {
       size,
     );
     if (isByteSource(value) && value.changed) return "changed";
-    if (!reply) return "transient";
+    if (!reply) return { retryAfter: undefined };
     // 412: the object exists already (another upload of the same value won). A success answered
     // before the whole body was written stores nothing that was sent.
     if (reply.status === 412) return "stored";
     if (reply.status >= 200 && reply.status < 300) return reply.complete ? "stored" : "failed";
     if (reply.status === 403)
       return reply.body.toString("utf8").includes("Request has expired") ? "expired" : "failed";
-    if (reply.status >= 500 || reply.status === 408 || reply.status === 429) return "transient";
+    if (reply.status >= 500 || reply.status === 408 || reply.status === 429)
+      return { retryAfter: retryAfterMillis(reply.headers) };
     return "failed";
   }
 

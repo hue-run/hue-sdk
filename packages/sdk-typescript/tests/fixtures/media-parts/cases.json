@@ -991,7 +991,7 @@
           }
         ],
         "entries": [
-          "{\"key\":\"gen_ai.input.messages#/0/content/0\",\"sha256\":\"7bb6463b30f9e301fed333cdf8960ca9497b602ccd8eeb46ae42693fdea15a4d\",\"size\":7,\"content_type\":\"audio/pcm\"}"
+          "{\"key\":\"gen_ai.input.messages#/0/content/0\",\"sha256\":\"7bb6463b30f9e301fed333cdf8960ca9497b602ccd8eeb46ae42693fdea15a4d\",\"size\":7,\"content_type\":\"audio/pcm;rate=24000;channels=1\"}"
         ]
       },
       "failure": {

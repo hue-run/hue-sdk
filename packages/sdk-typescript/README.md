@@ -266,10 +266,17 @@ Each uploaded file is listed in the record's `hue.blobs`, keyed `<attribute>#<JS
 - An OpenAI assistant message's `audio` loses `audio.data` and the message carries `sha256` and
   `size` (`gen_ai.output.messages#/0`). Its media type comes from `audio.format`, else from the
   bytes' WAV, MP3, AAC, FLAC or Ogg signature, else `application/octet-stream`.
+- Raw 16-bit PCM keeps the format its type declares: `audio/pcm`, `audio/x-pcm` or `audio/L16`
+  with a `rate` from 8000 to 192000 and 1 or 2 `channels` is listed as
+  `audio/pcm;rate=24000;channels=1` (`audio/L16;…` for big-endian samples), and OpenAI `pcm16`
+  audio as `audio/pcm;rate=24000;channels=1`, so Hue plays the stored file. Other types are listed
+  without their parameters.
 - A whole `data:` URL string becomes a GenAI `blob` part,
   `{"type":"blob","mime_type":"image/png","modality":"image","sha256":"…","size":68}`, keyed at
-  the string (`input.value#/image`). A value that is entirely one, such as a metadata attribute,
-  becomes that part's JSON text, keyed `<attribute>#`.
+  the string (`input.value#/image`). A value that is entirely one, such as a metadata attribute
+  or the string input or output a Langfuse SDK records as it is, becomes that part's JSON text,
+  keyed `<attribute>#`: an attribute read as JSON whose text is not JSON is read as that text, as
+  Hue reads it.
 - A file inside a JSON-encoded tool string takes the digest form inside the string. Its key goes on
   through the string, which no JSON pointer can address, so Hue matches it by its digest.
 - Text media over 64 KiB of decoded bytes in a provider part keeps a UTF-8-safe 16 KiB prefix in
@@ -516,6 +523,7 @@ the recorded model call again with the real image, document or audio. See
 | --- | --- | --- |
 | Base64 data URIs in an observation's input, output or metadata | | [Automatic capture](#automatically-captured-media), for the attributes and shapes listed there |
 | `LangfuseMedia` | `Attachment` | [`Attachment`](#attach-a-file-anywhere), at the same position |
+| `LangfuseMedia` and data URIs, keeping Langfuse's SDK | | Unchanged: with Hue's processor [beside Langfuse's](#existing-opentelemetry-providers), each file uploads to Hue in the background |
 | `resolveMediaReferences({ obj, resolveWith: "base64DataUri" })` | | `client.media.resolve(obj, { traceId })` |
 | `GET /api/public/media/{mediaId}` | `ReadonlyAttachment.data()` | `client.media.fetch({ traceId, sha256 })` |
 | Media tokens (`@@@langfuseMedia:…@@@`) | `ExternalAttachment` | Left as recorded: Hue never fetches a remote URL or a file another service holds. [`hue import langfuse --media`](#import-from-langfuse) copies Langfuse's files with your keys |

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  headerMediaType,
   MAX_INLINE_FILE_TEXT,
   mediaIn,
   placedMediaText,
@@ -288,7 +289,8 @@ export interface LargeMediaValue extends MediaValue {
  * An attribute's recorded text read for files as `readMediaText` reads it, its long base64 and
  * base64 `data:` URL strings read in place (see {@link skeletonOf}). Undefined for text whose JSON
  * around those strings is over the 8 Mi bound, or that reading finds nothing in. Throws for JSON
- * that does not parse.
+ * that does not parse, except text read by JSON convention that is a `data:` URL, which is read
+ * as the text itself, as `readMediaText` reads it.
  */
 export async function readLargeMediaText(
   key: string,
@@ -330,7 +332,9 @@ export async function readLargeMediaText(
   };
   switch (reading) {
     case "json":
-      return json();
+      // No JSON text starts with `data:`: such text is the text itself, as `readMediaText` reads
+      // text that does not parse, and a whole `data:` URL is the file.
+      return text.startsWith("data:") ? whole() : json();
     case "metadata":
       return /^\s*[[{]/.test(text) ? json() : whole();
     case "parts":
@@ -504,7 +508,7 @@ export function longFileBytes(file: InlineFilePart, long: LongText): LongFileByt
       ...(file.base64 ? {} : { bareBase64: true }),
       source,
     };
-  const mediaType = long.header!.split(";")[0]!.trim();
+  const mediaType = headerMediaType(long.header!);
   return {
     size: source.size,
     decoded: true,

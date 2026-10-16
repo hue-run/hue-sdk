@@ -51,8 +51,9 @@ class Store:
         )
         # The store's status for the n-th PUT: 200 stores, "hang" never answers, "expired"
         # answers S3's expired-URL refusal, "trickle" answers 200 a byte at a time, "gate" reads
-        # the body and stores it as 200 does once ``gate`` is set.
-        self.put: Callable[[int], int | str] = lambda _: 200
+        # the body and stores it as 200 does once ``gate`` is set; a status with headers refuses
+        # it with them.
+        self.put: Callable[[int], int | str | tuple[int, dict[str, str]]] = lambda _: 200
         self.hang = Event()
         self.gate = Event()
         # The status of the n-th completion, with headers; ``None`` answers as Hue does.
@@ -162,6 +163,9 @@ def hue_store() -> Iterator[Store]:
                 object_key = path[len("/store/") :]
                 with store.lock:
                     behavior = store.put(len(store.puts) + 1)
+                    reply_headers: dict[str, str] = {}
+                    if isinstance(behavior, tuple):
+                        behavior, reply_headers = behavior
                     put = {"headers": headers, "bytes": len(body), "status": behavior}
                     store.puts.append(put)
                 if behavior == "hang":
@@ -193,7 +197,9 @@ def hue_store() -> Iterator[Store]:
                     )
                     return
                 if behavior != 200:
-                    self.reply(int(behavior), b"<Error><Code>InternalError</Code></Error>")
+                    self.reply(
+                        int(behavior), b"<Error><Code>InternalError</Code></Error>", reply_headers
+                    )
                     return
                 # S3 refuses a presigned PUT sent chunked: its length is signed.
                 if "transfer-encoding" in headers:
