@@ -51,6 +51,61 @@ and prevents its starting Worlds from being reproduced.
 `listModels` and `listAccounts` accept `after` and `limit` for pagination. Use each account's
 `providerInstanceKey` to distinguish connections, including several accounts for one app.
 
+## Capture user and account identity
+
+Automatic World capture is unreleased and requires project enablement in the compatible service.
+Your existing tracing remains valid without these attributes; unresolved identity does not become
+World state.
+
+Record the complete user ID on the request's root span with `userId`. For another entity kind,
+set both `hue.world.entity.namespace` and `hue.world.entity.id` on that root. Tool observations
+need an explicit connection binding on the actual tool span:
+
+| Attribute | Value |
+| --- | --- |
+| `hue.connection.provider_id` | Registered app ID, such as `google.gmail`. |
+| `hue.connection.account_id` | Your stable account or connection ID, scoped to this user and project. |
+| `hue.connection.generation` | Positive integer identifying that connection generation. Increment when the connection is replaced. |
+| `hue.connection.scope` | Optional app partition, such as a workspace. Keep it stable. |
+| `hue.connection.principal` | The app's acting identity when its simulation requires one. |
+
+For example, attach the binding inside an existing tool callback. `searchThreads` below is your
+application's tool implementation:
+
+```ts
+import { trace } from "@opentelemetry/api";
+import { createHue } from "@hue-run/sdk";
+
+const hue = createHue({
+  serviceName: "assistant",
+  apiKey: process.env.HUE_API_KEY!,
+  resourceAttributes: { "deployment.environment.name": "production" },
+});
+
+await hue.withSpan("assistant request", () =>
+  hue.tool("search_threads", { query: "project update" }, async () => {
+    trace.getSpan(hue.getContext())?.setAttributes({
+      "hue.connection.provider_id": "google.gmail",
+      "hue.connection.account_id": "connection-work",
+      "hue.connection.generation": 1,
+      "hue.connection.principal": "owner@example.test",
+    });
+    return searchThreads({ query: "project update" });
+  }, { mcp: { name: "gmail", provider: "google.gmail", surface: "mcp" } }),
+  { userId: "user-123" },
+);
+await hue.shutdownSafe();
+```
+
+An attached client uses your application's existing OpenTelemetry resource; configure production
+provenance there. Mark faithful production traffic accurately. Eval, simulation and excluded
+traffic cannot populate a live user's World. Historical imports require separate trusted admission.
+
+Use the same fields with your framework's tool-span hook. A parent-only account label cannot
+resolve several accounts used by different tool calls. Account IDs and resource IDs stay separate;
+a tool argument or matching email address alone does not establish a binding. Do not record
+OAuth tokens or provider credentials in these fields.
+
 ## Publish an authored World
 
 `createWorldClient` also publishes authored definitions and starts instances from their
