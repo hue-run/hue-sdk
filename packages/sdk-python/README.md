@@ -370,6 +370,11 @@ observations that establish earlier facts. Reuse the idempotency key only to ret
 start. `reproduce_instance(instance_id, idempotency_key=...)` creates a fresh isolated instance
 from an earlier instance's original starting World. Retained starting data is required.
 
+Materialization, instance creation and reproduction wait up to two minutes when Hue explicitly
+reports that the World is preparing. Retries preserve the same request bytes and identity.
+Other failures keep `max_attempts`. These methods accept an optional `cancel_event` containing
+a `threading.Event`; setting it ends the wait and closes active HTTP reads.
+
 For automatic capture, the compatible service must enable the project. Set the complete user ID
 on the root request through `hue.context(user_id=...)`, then attach explicit account metadata to
 each tool span. Configure faithful production provenance on the application's OpenTelemetry

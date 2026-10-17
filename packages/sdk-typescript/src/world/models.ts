@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { uuid } from "../evals/json.js";
 import { WorldClient, type WorldClientOptions } from "./client.js";
 import type {
@@ -53,29 +54,43 @@ export class WorldModelClient extends WorldClient {
   }
 
   /** Reconstructs the chosen time with the latest committed evidence, without starting an instance. */
-  materialize(modelId: string, input: { at: string }) {
+  materialize(modelId: string, input: { at: string }, options: { signal?: AbortSignal } = {}) {
     return this.request<StartingWorldResult>(
       "POST",
       `/world-models/${uuid(modelId)}/materializations`,
-      input,
+      { ...input, idempotencyKey: randomUUID() },
+      options,
+      true,
     );
   }
 
   /** Starts one isolated instance, replaying the same request identity after transport failures. */
-  startInstance(modelId: string, input: StartWorldInstanceInput) {
+  startInstance(
+    modelId: string,
+    input: StartWorldInstanceInput,
+    options: { signal?: AbortSignal } = {},
+  ) {
     return this.request<WorldInstanceResult>(
       "POST",
       `/world-models/${uuid(modelId)}/instances`,
       input,
+      options,
+      true,
     );
   }
 
   /** Starts a fresh instance from the original immutable starting World of an earlier instance. */
-  reproduceInstance(instanceId: string, input: ReproduceWorldInstanceInput) {
+  reproduceInstance(
+    instanceId: string,
+    input: ReproduceWorldInstanceInput,
+    options: { signal?: AbortSignal } = {},
+  ) {
     return this.request<WorldInstanceResult>(
       "POST",
       `/instances/${uuid(instanceId)}/reproduce`,
       input,
+      options,
+      true,
     );
   }
 

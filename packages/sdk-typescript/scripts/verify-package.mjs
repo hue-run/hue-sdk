@@ -918,6 +918,7 @@ const installedPackageTests = [
   "attempt.test.ts",
   "environment.test.ts",
   "world-client.test.ts",
+  "world-preparation.test.ts",
   "simulation.test.ts",
   "local-worker.test.ts",
   "coverage-gap.test.ts",
