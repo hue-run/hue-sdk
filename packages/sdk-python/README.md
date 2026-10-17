@@ -370,6 +370,35 @@ observations that establish earlier facts. Reuse the idempotency key only to ret
 start. `reproduce_instance(instance_id, idempotency_key=...)` creates a fresh isolated instance
 from an earlier instance's original starting World. Retained starting data is required.
 
+For automatic capture, the compatible service must enable the project. Set the complete user ID
+on the root request through `hue.context(user_id=...)`, then attach explicit account metadata to
+each tool span. Configure faithful production provenance on the application's OpenTelemetry
+resource (`deployment.environment.name=production`); eval and simulation traffic stay excluded.
+
+```python
+with hue.context(user_id="user-123"):
+    with hue.span("assistant request"):
+        with hue.tool(
+            "search_threads",
+            mcp={"name": "gmail", "provider": "google.gmail", "surface": "mcp"},
+        ) as span:
+            span.otel_span.set_attributes({
+                "hue.connection.provider_id": "google.gmail",
+                "hue.connection.account_id": "connection-work",
+                "hue.connection.generation": 1,
+                "hue.connection.principal": "owner@example.test",
+            })
+            span.set_input({"query": "project update"})
+            span.set_output(search_threads(query="project update"))
+```
+
+`search_threads` is your existing tool implementation. Use a stable account/connection ID and a
+positive connection generation; increment the generation when replacing that connection.
+`hue.connection.scope` optionally identifies an app partition, and the app determines whether
+its acting `principal` is required. The [capture contract](../sdk-typescript/WORLDS.md#capture-user-and-account-identity)
+also covers explicit entity namespaces and framework tool-span hooks. Missing bindings remain
+unresolved; Hue does not infer them from tool arguments or attach provider credentials.
+
 `hue_sdk.environment.EnvironmentClient` drives Hue's World API: create a world after the case's
 execution starts, hand the agent the provider mirror URLs and the world token (never the project
 key), finish and `wait_for_seal` before the execution completes, and read the sealed world's

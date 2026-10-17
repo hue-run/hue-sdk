@@ -26,3 +26,9 @@ The maintained source for proving changes to the public SDK surface. Read this i
 - [Python tracing](./python-tracing.md): `Hue`, spans, models, tools, capture, `force_flush`.
 - [Evaluations](./evaluations.md): `@hue-run/sdk/evals` and `hue_sdk.evals` clients and runners.
 - [hue CLI](./hue-cli.md): `hue eval`, `login`, `mcp`, `listen`, `import`, `setup`.
+
+World capture identity uses the existing tracing hooks: full root user/entity IDs and explicit
+provider/account/generation metadata on each tool span. See the unreleased
+[World capture contract](../../../../packages/sdk-typescript/WORLDS.md#capture-user-and-account-identity).
+Verify both languages' emitted attributes against a loopback receiver; a child trace ID alone
+does not prove that a hosted tool call can be assigned to an account.
