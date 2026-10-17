@@ -79,6 +79,45 @@ def test_preparation_deadline_does_not_reset(receiver, monkeypatch):
     assert len(receiver.requests) <= 3
 
 
+def test_preparation_deadline_ends_trickling_response_without_cancellation(receiver, monkeypatch):
+    monkeypatch.setattr(world_client, "_WORLD_PREPARATION_WAIT_SECONDS", 0.3)
+    tracked = []
+    original_deadline = world_client._ReadDeadline
+    original_send = world_client.WorldClient._send
+    calls = 0
+
+    class Deadline(original_deadline):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            tracked.append(self)
+
+    def send(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            # Every byte arrives before the socket's per-read timeout. Only the
+            # preparation window can interrupt this otherwise successful response.
+            receiver.trickle_seconds = 0.02
+        return original_send(self, *args, **kwargs)
+
+    monkeypatch.setattr(world_client, "_ReadDeadline", Deadline)
+    monkeypatch.setattr(world_client.WorldClient, "_send", send)
+    receiver.reply(503, **{"X-Hue-Diagnostic": "world_preparing", "Retry-After": "0"})
+    receiver.reply(200, b'{"ready":true}')
+    models = WorldModelClient(api_key=KEY, base_url=receiver.url, max_attempts=1)
+    started = time.monotonic()
+    with pytest.raises(HueWorldError):
+        models.materialize(str(uuid4()), at=AT)
+    assert time.monotonic() - started < 0.8
+    assert len(receiver.requests) == 2
+    assert tracked[-1].passed
+    for deadline in tracked:
+        deadline._timer.join(timeout=0.2)
+        assert not deadline._timer.is_alive()
+        assert deadline._cancel_watch is None
+        assert deadline._sockets == []
+
+
 @pytest.mark.parametrize("phase", ["sleep", "request"])
 def test_cancel_event_ends_wait_and_socket_read_without_monitor_leaks(receiver, monkeypatch, phase):
     tracked = []

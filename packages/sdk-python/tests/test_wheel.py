@@ -55,7 +55,7 @@ def test_installed_wheel_preparation_retries_and_cancellation(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert "11 passed" in result.stdout
+    assert "12 passed" in result.stdout
 
 
 def test_installed_wheel_runs_standalone_stream_tool_error(receiver, tmp_path):

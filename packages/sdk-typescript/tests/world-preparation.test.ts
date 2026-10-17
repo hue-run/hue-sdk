@@ -104,6 +104,57 @@ test("preparation has a fixed monotonic deadline across later responses", async 
   }
 });
 
+test("preparation deadline aborts an active response without caller cancellation", async () => {
+  const schedule = globalThis.setTimeout;
+  let deadlineTimers = 0;
+  const accelerated = new Proxy(schedule, {
+    apply(target, receiver, args) {
+      if (args[1] === 120_000) {
+        deadlineTimers++;
+        return Reflect.apply(target, receiver, [args[0], 220, ...args.slice(2)]);
+      }
+      return Reflect.apply(target, receiver, args);
+    },
+  });
+  const timer = spyOn(globalThis, "setTimeout").mockImplementation(accelerated);
+  let calls = 0;
+  let interval: ReturnType<typeof setInterval> | undefined;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      if (++calls === 1) return preparing();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"ready":'));
+            interval = setInterval(() => controller.enqueue(new TextEncoder().encode(" ")), 15);
+          },
+          cancel() {
+            clearInterval(interval);
+          },
+        }),
+      );
+    },
+  });
+  const started = performance.now();
+  try {
+    const client = new WorldModelClient({
+      apiKey: key,
+      baseUrl: server.url.origin,
+      maxAttempts: 1,
+    });
+    await expect(client.materialize(randomUUID(), { at })).rejects.toBeInstanceOf(HueWorldError);
+    expect(calls).toBe(2);
+    expect(deadlineTimers).toBe(1);
+    expect(performance.now() - started).toBeLessThan(1000);
+  } finally {
+    clearInterval(interval);
+    server.stop(true);
+    timer.mockRestore();
+  }
+}, 2000);
+
 for (const phase of ["sleep", "request"] as const)
   test(`cancellation ends preparation during ${phase}`, async () => {
     const controller = new AbortController();
