@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import { HueEnvironmentError, type EnvironmentClient } from "../environment/client.js";
-import type { EnvironmentTool } from "../environment/tools.js";
+import { HueEnvironmentError, type EnvironmentClient } from "../world/client.js";
+import type { EnvironmentTool } from "../world/tools.js";
 import type {
   EnvironmentIdentity,
   PublishableEnvironmentDefinition,
   WorldHandoff,
-} from "../environment/types.js";
+} from "../world/types.js";
 import { HueApiError, type EvaluationClient } from "./client.js";
 import { CheckpointStore, checkpointPath, checkpointSegment } from "./checkpoint.js";
 import { MAX_ENVIRONMENT_STEPS } from "./environment-evidence.js";

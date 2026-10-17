@@ -832,7 +832,7 @@ export class EvaluationClient {
     const query = new URLSearchParams();
     if (page.after !== undefined) query.set("after", String(page.after));
     if (page.limit !== undefined) query.set("limit", String(page.limit));
-    return this.request<import("../environment/types.js").StepPage>(
+    return this.request<import("../world/types.js").StepPage>(
       "GET",
       `/experiment-executions/${uuid(executionId)}/environment/steps${query.size ? `?${query}` : ""}`,
     );

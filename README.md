@@ -30,7 +30,7 @@ Don't have a Hue account yet? The Hue team sets up accounts: email [founders@hue
 
 | Language | Package / imports | Runtime | Guide |
 | --- | --- | --- | --- |
-| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed`, `@hue-run/sdk/setup` | Node.js 22 or 24 (26 in CI); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated environments](./packages/sdk-typescript/ENVIRONMENTS.md) |
+| TypeScript / JavaScript | `@hue-run/sdk`, `@hue-run/sdk/ai-sdk`, `@hue-run/sdk/evals`, `@hue-run/sdk/environment`, `@hue-run/sdk/managed`, `@hue-run/sdk/setup` | Node.js 22 or 24 (26 in CI); Bun 1.4.2 | [Tracing](./packages/sdk-typescript/README.md) · [Evaluations](./packages/sdk-typescript/EVALUATIONS.md) · [Simulated worlds](./packages/sdk-typescript/ENVIRONMENTS.md) |
 | Python | `hue-run`; `hue_sdk`, `hue_sdk.evals`, `hue_sdk.managed` | Python 3.10+; tested on 3.10 and 3.14 | [Tracing](./packages/sdk-python/README.md) · [Evaluations](./packages/sdk-python/EVALUATIONS.md) |
 | Any other language | The official OpenTelemetry SDK with an OTLP/HTTP exporter | Go, Java, .NET, Rust, Ruby and others | [Existing OpenTelemetry](https://docs.hue.run/integrations/opentelemetry) |
 

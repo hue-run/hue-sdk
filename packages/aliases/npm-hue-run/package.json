@@ -23,6 +23,7 @@
     "ai-sdk.js",
     "evals.js",
     "managed.js",
+    "world.js",
     "environment.js",
     "setup.js",
     "setup-events.schema.json",
@@ -39,7 +40,8 @@
     "./managed": "./managed.js",
     "./environment": "./environment.js",
     "./setup": "./setup.js",
-    "./setup-events.schema.json": "./setup-events.schema.json"
+    "./setup-events.schema.json": "./setup-events.schema.json",
+    "./world": "./world.js"
   },
   "dependencies": {
     "@hue-run/sdk": "0.19.1"

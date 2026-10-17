@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { HueClient } from "../client.js";
-import { isTransientEnvironmentError, type EnvironmentClient } from "../environment/client.js";
-import type { EnvironmentTool } from "../environment/tools.js";
-import type { WorldHandoff } from "../environment/types.js";
+import { isTransientEnvironmentError, type EnvironmentClient } from "../world/client.js";
+import type { EnvironmentTool } from "../world/tools.js";
+import type { WorldHandoff } from "../world/types.js";
 import type {
   ActualAgentManifestInputV2,
   AttemptConnectionBundleV2,

@@ -201,6 +201,7 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
         ".": "index.ts",
         "./ai-sdk": "ai-sdk.ts",
         "./environment": "environment.ts",
+        "./world": "world.ts",
         "./evals": "evals.ts",
         "./managed": "managed.ts",
         "./setup": "setup.ts",
@@ -224,6 +225,8 @@ def build_contract(root: Path = ROOT) -> dict[str, Any]:
     py_modules = {
         "hue_sdk": py_source / "__init__.py",
         "hue_sdk.evals": py_source / "evals/__init__.py",
+        "hue_sdk.environment": py_source / "environment/__init__.py",
+        "hue_sdk.world": py_source / "world/__init__.py",
         "hue_sdk.managed": py_source / "managed.py",
     }
     skill = skill_frontmatter(skill_path)

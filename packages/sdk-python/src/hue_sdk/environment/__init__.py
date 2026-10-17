@@ -1,18 +1,15 @@
-"""Hue's simulated worlds: the World API client and the agent handoff helpers.
+"""Compatibility imports for ``hue_sdk.world``."""
 
-A world is created after the case's execution starts, hands the agent provider mirror URLs and
-a world token (never the project key), is finished and ``wait_for_seal`` completes before the
-execution completes, and is read back as evaluator-only evidence once sealed. No agent framework
-or tool binding is required.
-"""
+import sys
 
-from .client import (
+from ..world import client, types, world
+from ..world.client import (
     EnvironmentClient,
     EnvironmentSealTimeoutError,
     HueEnvironmentError,
     WorldCreationError,
 )
-from .types import (
+from ..world.types import (
     ActionDefinition,
     ActionParameter,
     ActionResult,
@@ -42,7 +39,7 @@ from .types import (
     WorldMcpServer,
     WorldSurface,
 )
-from .world import (
+from ..world.world import (
     HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES,
     HUE_CONTROL_PLANE_VARIABLES,
     agent_environment,
@@ -54,6 +51,10 @@ from .world import (
     world_handoff,
     world_now,
 )
+
+sys.modules[__name__ + ".client"] = client
+sys.modules[__name__ + ".types"] = types
+sys.modules[__name__ + ".world"] = world
 
 __all__ = [
     "ActionDefinition",

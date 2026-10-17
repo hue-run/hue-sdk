@@ -3,11 +3,11 @@ export {
   EnvironmentClient,
   HueEnvironmentError,
   isTransientEnvironmentError,
-} from "./environment/client.js";
-export type { EnvironmentClientOptions } from "./environment/client.js";
-export { bindEnvironmentTools } from "./environment/tools.js";
-export type { BindEnvironmentToolsOptions, EnvironmentTool } from "./environment/tools.js";
-export type * from "./environment/types.js";
+} from "./world/client.js";
+export type { EnvironmentClientOptions } from "./world/client.js";
+export { bindEnvironmentTools } from "./world/tools.js";
+export type { BindEnvironmentToolsOptions, EnvironmentTool } from "./world/tools.js";
+export type * from "./world/types.js";
 export {
   agentEnvironment,
   HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES,
@@ -18,5 +18,5 @@ export {
   worldHandoff,
   worldNow,
   writeMcpConfig,
-} from "./environment/world.js";
-export type { AgentEnvironmentOptions, McpConfigFile } from "./environment/world.js";
+} from "./world/world.js";
+export type { AgentEnvironmentOptions, McpConfigFile } from "./world/world.js";
