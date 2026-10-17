@@ -79,6 +79,7 @@ export function isTransientEnvironmentError(error: unknown): boolean {
 }
 /** A `Retry-After` longer than this waits this long: Hue asks for a second, never minutes. */
 const MAX_RETRY_AFTER_MS = 10_000;
+const WORLD_PREPARATION_WAIT_MS = 120_000;
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 /** Version 00 with real identifiers: an all-zero trace or span ID is invalid, and Hue refuses it. */
 function validTraceparent(value: string) {
@@ -190,6 +191,7 @@ export class WorldClient {
     path: string,
     body?: unknown,
     options: { signal?: AbortSignal } = {},
+    waitForWorld = false,
   ): Promise<T> {
     // Serialize once: a body this client cannot encode is a caller error that no retry fixes.
     const payload =
@@ -203,30 +205,72 @@ export class WorldClient {
               REQUEST_BOUNDS,
             ),
           );
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await this.send<T>(method, path, payload, options);
-      } catch (error) {
-        if (!(error instanceof HueEnvironmentError)) throw error;
-        if (options.signal?.aborted) throw error;
-        if (!isTransientEnvironmentError(error) || attempt >= this.maxAttempts) throw error;
-        // Hue's admission refusals say how long to wait; anything else backs off.
-        const backoff = Math.min(100 * 2 ** (attempt - 1), 2000);
-        const wait = error.retryAfterMs ?? backoff + Math.random() * backoff;
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            options.signal?.removeEventListener("abort", abort);
-            resolve();
-          }, wait);
-          const abort = () => {
-            clearTimeout(timer);
-            options.signal?.removeEventListener("abort", abort);
-            reject(new HueEnvironmentError());
-          };
-          if (options.signal?.aborted) abort();
-          else options.signal?.addEventListener("abort", abort, { once: true });
-        });
+    let ordinaryFailures = 0;
+    let preparingUntil: number | undefined;
+    let preparation: AbortController | undefined;
+    let preparationTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      for (;;) {
+        const signal = preparation
+          ? options.signal
+            ? AbortSignal.any([options.signal, preparation.signal])
+            : preparation.signal
+          : options.signal;
+        if (
+          signal?.aborted ||
+          (preparingUntil !== undefined && performance.now() >= preparingUntil)
+        )
+          throw new HueEnvironmentError();
+        try {
+          return await this.send<T>(method, path, payload, { signal });
+        } catch (error) {
+          if (!(error instanceof HueEnvironmentError)) throw error;
+          if (signal?.aborted) throw error;
+          const preparing =
+            waitForWorld && error.status === 503 && error.diagnostic === "world_preparing";
+          let wait: number;
+          if (preparing) {
+            if (preparingUntil === undefined) {
+              preparingUntil = performance.now() + WORLD_PREPARATION_WAIT_MS;
+              preparation = new AbortController();
+              preparationTimer = setTimeout(() => preparation!.abort(), WORLD_PREPARATION_WAIT_MS);
+            }
+            // A zero Retry-After must not turn preparation into an unbounded busy loop.
+            wait = Math.max(100, error.retryAfterMs ?? 1000);
+          } else {
+            ordinaryFailures++;
+            if (!isTransientEnvironmentError(error) || ordinaryFailures >= this.maxAttempts)
+              throw error;
+            const backoff = Math.min(100 * 2 ** (ordinaryFailures - 1), 2000);
+            wait = error.retryAfterMs ?? backoff + Math.random() * backoff;
+          }
+          if (preparingUntil !== undefined) {
+            const remaining = preparingUntil - performance.now();
+            if (remaining <= 0) throw error;
+            wait = Math.min(wait, remaining);
+          }
+          const waiting = preparation
+            ? options.signal
+              ? AbortSignal.any([options.signal, preparation.signal])
+              : preparation.signal
+            : options.signal;
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              waiting?.removeEventListener("abort", abort);
+              resolve();
+            }, wait);
+            const abort = () => {
+              clearTimeout(timer);
+              waiting?.removeEventListener("abort", abort);
+              reject(new HueEnvironmentError());
+            };
+            if (waiting?.aborted) abort();
+            else waiting?.addEventListener("abort", abort, { once: true });
+          });
+        }
       }
+    } finally {
+      if (preparationTimer !== undefined) clearTimeout(preparationTimer);
     }
   }
 
@@ -263,9 +307,9 @@ export class WorldClient {
   }
 
   /** Creates an isolated instance from an immutable World version. */
-  createInstance(input: CreateInstanceInput) {
-    const { worldVersionId, ...options } = input;
-    return this.createRun({ ...options, environmentVersionId: worldVersionId });
+  createInstance(input: CreateInstanceInput, options: { signal?: AbortSignal } = {}) {
+    const { worldVersionId, ...runInput } = input;
+    return this.createRun({ ...runInput, environmentVersionId: worldVersionId }, options);
   }
   /** Reads current or sealed instance state. */
   getInstance(instanceId: string, options: { signal?: AbortSignal } = {}) {
@@ -302,7 +346,7 @@ export class WorldClient {
     return this.request<WorldVersion>("GET", `/environment-versions/${uuid(id)}`);
   }
   /** Creates or recovers one fresh isolated world using a stable idempotency key. */
-  createRun(input: CreateRunInput) {
+  createRun(input: CreateRunInput, options: { signal?: AbortSignal } = {}) {
     if (
       input.maxSteps !== undefined &&
       (!Number.isInteger(input.maxSteps) || input.maxSteps < 1 || input.maxSteps > 500)
@@ -324,11 +368,17 @@ export class WorldClient {
         input.agentRevision.length > 256)
     )
       throw new RangeError("agentRevision must be 1–256 characters");
-    return this.request<EnvironmentRun>("POST", "/environment-runs", {
-      ...input,
-      environmentVersionId: uuid(input.environmentVersionId),
-      ...(input.executionId === undefined ? {} : { executionId: uuid(input.executionId) }),
-    });
+    return this.request<EnvironmentRun>(
+      "POST",
+      "/environment-runs",
+      {
+        ...input,
+        environmentVersionId: uuid(input.environmentVersionId),
+        ...(input.executionId === undefined ? {} : { executionId: uuid(input.executionId) }),
+      },
+      options,
+      true,
+    );
   }
   /** Reads authoritative current or sealed world state. */
   async getRun(runId: string, options: { signal?: AbortSignal } = {}) {
