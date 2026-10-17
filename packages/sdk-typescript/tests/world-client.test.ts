@@ -197,6 +197,20 @@ test("canonical authored Worlds accept arbitrary apps and independent accounts f
       },
     ],
   };
+  definition.providerInstances.push(
+    ...Array.from({ length: 20 }, (_, index) => ({
+      providerId: "example.documents",
+      providerInstanceKey: `extra-${index}`,
+      syntheticPrincipalId: randomUUID(),
+      configuration: { kind: "documents/v1", collection: "documents" },
+    })),
+  );
+  definition.credentialFailures = definition.providerInstances.map((binding) => ({
+    provider: binding.providerId,
+    surface: "example.documents/rest",
+    operation: "read",
+    instance: binding.providerInstanceKey,
+  }));
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,

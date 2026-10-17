@@ -686,6 +686,7 @@
             "WorldClient",
             "WorldClientOptions",
             "WorldCoverage",
+            "WorldCredentialFailure",
             "WorldDefinition",
             "WorldDefinitionV1",
             "WorldDefinitionV2",
