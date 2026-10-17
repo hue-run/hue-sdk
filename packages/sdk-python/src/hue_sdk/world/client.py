@@ -192,7 +192,7 @@ class _DeadlineAdapter(HTTPAdapter):
         return cast(ConnectionPool, pool)
 
 
-class EnvironmentClient:
+class WorldClient:
     """Synchronous project-key client for Hue's authoritative simulated worlds.
 
     ``EnvironmentClient(api_key=...)`` uses Hue Cloud; ``base_url`` overrides the origin, and a
@@ -229,7 +229,56 @@ class EnvironmentClient:
         self._max_attempts = max_attempts
 
     def __repr__(self) -> str:
-        return "EnvironmentClient()"
+        return f"{type(self).__name__}()"
+
+    def create_instance(
+        self,
+        *,
+        idempotency_key: str,
+        world_version_id: str,
+        execution_id: str | None = None,
+        max_steps: int | None = None,
+        ttl_seconds: int | None = None,
+        seed: str | None = None,
+        traceparent: str | None = None,
+        agent_revision: str | None = None,
+    ) -> EnvironmentRun:
+        """Start an isolated instance from an immutable World version."""
+        return self.create_run(
+            idempotency_key=idempotency_key,
+            environment_version_id=world_version_id,
+            execution_id=execution_id,
+            max_steps=max_steps,
+            ttl_seconds=ttl_seconds,
+            seed=seed,
+            traceparent=traceparent,
+            agent_revision=agent_revision,
+        )
+
+    def get_instance(self, instance_id: str) -> RunState:
+        """Read current or sealed instance state."""
+        return self.get_run(instance_id)
+
+    def finish_instance(
+        self, instance_id: str, *, idempotency_key: str, status: FinishStatus
+    ) -> SealedRun:
+        """Complete or abandon an instance and freeze its evidence."""
+        return self.finish_run(instance_id, idempotency_key=idempotency_key, status=status)
+
+    def _resource_path(self, path: str) -> str:
+        """Use canonical instance resources without changing request bodies."""
+        for previous, current in (
+            ("/environment-runs", "/instances"),
+            ("/environment-versions", "/world-versions"),
+            ("/environments", "/worlds"),
+        ):
+            if (
+                path == previous
+                or path.startswith(previous + "/")
+                or path.startswith(previous + "?")
+            ):
+                return current + path[len(previous) :]
+        return path
 
     def _send(
         self, method: str, path: str, payload: bytes | None, *, timeout_seconds: float | None = None
@@ -245,7 +294,7 @@ class EnvironmentClient:
                     session.mount("https://", adapter)
                 with session.request(
                     method,
-                    f"{self.base_url}/api/v1{path}",
+                    f"{self.base_url}/api/v1{self._resource_path(path)}",
                     data=payload,
                     headers={
                         **self._headers,
@@ -503,3 +552,15 @@ class EnvironmentClient:
             raise TypeError("bodies must be a boolean.")
         query = urlencode({"section": section, "bodies": "true" if bodies else "false"})
         return self._request("GET", f"/environment-runs/{uuid(run_id)}/evidence?{query}")
+
+
+class EnvironmentClient(WorldClient):
+    """Compatibility client using the original REST resource names."""
+
+    def _resource_path(self, path: str) -> str:
+        return path
+
+
+# Error aliases share identity so existing exception handlers continue to catch them.
+HueWorldError = HueEnvironmentError
+WorldSealTimeoutError = EnvironmentSealTimeoutError

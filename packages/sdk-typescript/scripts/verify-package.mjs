@@ -917,6 +917,7 @@ const installedPackageTests = [
   "scorer-publication.test.ts",
   "attempt.test.ts",
   "environment.test.ts",
+  "world-client.test.ts",
   "simulation.test.ts",
   "local-worker.test.ts",
   "coverage-gap.test.ts",
@@ -1023,6 +1024,7 @@ void [transition, event, options, backend];
         .replaceAll('"../src/ai-sdk.js"', '"@hue-run/sdk/ai-sdk"')
         .replaceAll('"../src/evals.js"', '"@hue-run/sdk/evals"')
         .replaceAll('"../src/environment.js"', '"@hue-run/sdk/environment"')
+        .replaceAll('"../src/world.js"', '"@hue-run/sdk/world"')
         .replaceAll('"../src/client.js"', '"@hue-run/sdk"')
         .replaceAll('"../src/managed.js"', '"@hue-run/sdk/managed"')
         .replaceAll(

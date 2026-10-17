@@ -7,15 +7,15 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
 import { createHue, type HueClient } from "../client.js";
-import { createEnvironmentClient } from "../environment/client.js";
-import type { EnvironmentTool } from "../environment/tools.js";
+import { createEnvironmentClient } from "../world/client.js";
+import type { EnvironmentTool } from "../world/tools.js";
 import {
   agentEnvironment,
   isHueControlPlaneCredential,
   stripHueControlPlaneCredentials,
   withoutWorldVariables,
   writeMcpConfig,
-} from "../environment/world.js";
+} from "../world/world.js";
 import { EvaluationClient, HueApiError } from "../evals/client.js";
 import type {
   ExperimentCase,

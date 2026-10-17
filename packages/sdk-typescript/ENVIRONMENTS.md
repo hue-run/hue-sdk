@@ -1,6 +1,6 @@
-# Simulated environments
+# Simulated worlds: compatible client
 
-The provider-aware environment APIs shipped in TypeScript `0.3.0` and are publicly available:
+The provider-aware APIs shipped in TypeScript `0.3.0` and are publicly available:
 
 ```bash
 npm install @hue-run/sdk zod
@@ -9,6 +9,9 @@ npm install @hue-run/sdk zod
 Your agent runs in your process while a disposable simulated world runs in Hue. The world is
 authoritative and records an ordered journal; Hue does not execute your agent code or provider
 credentials.
+
+The `environment` module and its exported names remain supported for existing integrations.
+The canonical client names for the next release are documented in [Worlds](WORLDS.md).
 
 ## Run a definition like a test
 

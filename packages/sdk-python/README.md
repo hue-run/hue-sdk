@@ -345,6 +345,31 @@ See the [documentation](https://docs.hue.run/sdks/python) for integration guidan
 
 ## Simulated worlds
 
+The next release adds `hue_sdk.world.WorldClient` with `create_instance`, `get_instance` and
+`finish_instance`. It requires a Hue deployment serving the canonical instance routes.
+The published client below remains supported. The handoff's legacy `worldId` field continues
+to identify the runtime instance.
+
+The unreleased `WorldModelClient` reconstructs a user's starting World from retained evidence:
+
+```python
+from hue_sdk.world import WorldModelClient
+
+models = WorldModelClient(api_key=os.environ["HUE_API_KEY"])
+model = models.create_model(entity={"namespace": "user", "id": "user-123"})["worldModel"]
+started = models.start_instance(
+    model["id"],
+    idempotency_key="review-user-123-at-t2",
+    at="2026-10-17T12:00:00Z",
+    ttl_seconds=600,
+)
+```
+
+A new start uses the latest completed reconstruction of the requested time, including later
+observations that establish earlier facts. Reuse the idempotency key only to retry that same
+start. `reproduce_instance(instance_id, idempotency_key=...)` creates a fresh isolated instance
+from an earlier instance's original starting World. Retained starting data is required.
+
 `hue_sdk.environment.EnvironmentClient` drives Hue's World API: create a world after the case's
 execution starts, hand the agent the provider mirror URLs and the world token (never the project
 key), finish and `wait_for_seal` before the execution completes, and read the sealed world's

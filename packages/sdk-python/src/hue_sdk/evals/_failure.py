@@ -88,13 +88,13 @@ def _names(error: BaseException) -> set[str]:
 
 def _hue_error(error: BaseException) -> bool:
     # Imported here: the environment client imports this package while it initializes.
-    from ..environment.client import HueEnvironmentError
+    from ..world.client import HueEnvironmentError
 
     return isinstance(error, (HueApiError, HueEnvironmentError))
 
 
 def _world_not_created(error: BaseException) -> bool:
-    from ..environment.client import WorldCreationError
+    from ..world.client import WorldCreationError
 
     return isinstance(error, WorldCreationError)
 

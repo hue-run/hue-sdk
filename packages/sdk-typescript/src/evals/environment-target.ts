@@ -4,10 +4,10 @@ import {
   HueEnvironmentError,
   isTransientEnvironmentError,
   type EnvironmentClient,
-} from "../environment/client.js";
-import { bindEnvironmentTools, type EnvironmentTool } from "../environment/tools.js";
-import type { EnvironmentRun, WorldHandoff } from "../environment/types.js";
-import { legacyMcpCapability, worldHandoff } from "../environment/world.js";
+} from "../world/client.js";
+import { bindEnvironmentTools, type EnvironmentTool } from "../world/tools.js";
+import type { EnvironmentRun, WorldHandoff } from "../world/types.js";
+import { legacyMcpCapability, worldHandoff } from "../world/world.js";
 import type { HueSpan } from "../types.js";
 import {
   actualAgentManifestV2,

@@ -1,5 +1,5 @@
 import type { JsonValue } from "../types.js";
-import type { EnvironmentCoverage } from "../environment/types.js";
+import type { EnvironmentCoverage } from "../world/types.js";
 
 export type { JsonValue } from "../types.js";
 /** One page of a paginated list. */
@@ -992,7 +992,7 @@ export interface EnvironmentEvidenceSnapshot extends EnvironmentCoverage {
 /** Sealed environment evidence with its full ordered journal. */
 export interface EnvironmentEvidence extends EnvironmentEvidenceSnapshot {
   /** Complete steps ordered by ordinal. */
-  steps: import("../environment/types.js").Step[];
+  steps: import("../world/types.js").Step[];
 }
 /** A local scorer: its pinned definition and the callback bound to it. */
 export interface LocalScorer {
