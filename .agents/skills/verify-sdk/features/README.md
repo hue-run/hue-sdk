@@ -32,3 +32,10 @@ provider/account/generation metadata on each tool span. See the unreleased
 [World capture contract](../../../../packages/sdk-typescript/WORLDS.md#capture-user-and-account-identity).
 Verify both languages' emitted attributes against a loopback receiver; a child trace ID alone
 does not prove that a hosted tool call can be assigned to an account.
+
+World preparation uses an explicit server diagnostic and a two-minute deadline. Verify
+`packages/sdk-typescript/tests/world-preparation.test.ts` and
+`packages/sdk-python/tests/test_world_preparation.py` for stable bytes and idempotency keys,
+ordinary error limits, cancellation during sleep and active HTTP reads, and fresh materialization
+identities. The installed-package verifier and Python wheel test run these same loopback checks
+against the packed code. These checks do not establish hosted reconstruction or release status.

@@ -33,6 +33,7 @@ _RETRYABLE = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # A Retry-After longer than this waits this long: the gateway asks for 1 s, never minutes.
 _MAX_RETRY_AFTER_SECONDS = 10.0
+_WORLD_PREPARATION_WAIT_SECONDS = 120.0
 MAX_GRACE_WAIT_SECONDS = 10.0
 SEAL_WAIT_SECONDS = 30.0
 SEAL_POLL_SECONDS = 0.25
@@ -109,13 +110,26 @@ class _ReadDeadline:
     host is not bounded, and each address is tried with the socket timeout rather than the window.
     """
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, cancel_event: threading.Event | None = None) -> None:
         self._lock = threading.Lock()
         self._sockets: list[socket.socket] = []
         self.passed = False
         self._timer = threading.Timer(seconds, self._pass)
         self._timer.daemon = True
         self._timer.start()
+        self._closed = threading.Event()
+        self._cancel_watch: threading.Thread | None = None
+        if cancel_event is not None:
+
+            def watch() -> None:
+                while not self._closed.is_set():
+                    if cancel_event.is_set():
+                        self._pass()
+                        return
+                    self._closed.wait(0.05)
+
+            self._cancel_watch = threading.Thread(target=watch, daemon=True)
+            self._cancel_watch.start()
 
     def track(self, sock: socket.socket) -> None:
         # Keep a plain duplicate: TLS detaches the original before its handshake, and shutting
@@ -133,11 +147,14 @@ class _ReadDeadline:
                 _shut_down(sock)
 
     def close(self) -> None:
+        self._closed.set()
         self._timer.cancel()
         with self._lock:
             for sock in self._sockets:
                 sock.close()
             self._sockets.clear()
+        if self._cancel_watch is not None:
+            self._cancel_watch.join(timeout=0.2)
 
 
 def _shut_down(sock: socket.socket) -> None:
@@ -242,6 +259,7 @@ class WorldClient:
         seed: str | None = None,
         traceparent: str | None = None,
         agent_revision: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> EnvironmentRun:
         """Start an isolated instance from an immutable World version."""
         return self.create_run(
@@ -253,6 +271,7 @@ class WorldClient:
             seed=seed,
             traceparent=traceparent,
             agent_revision=agent_revision,
+            cancel_event=cancel_event,
         )
 
     def get_instance(self, instance_id: str) -> RunState:
@@ -281,10 +300,18 @@ class WorldClient:
         return path
 
     def _send(
-        self, method: str, path: str, payload: bytes | None, *, timeout_seconds: float | None = None
+        self,
+        method: str,
+        path: str,
+        payload: bytes | None,
+        *,
+        timeout_seconds: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Any:
         # A bounded read's window starts before the request and covers the whole exchange.
-        deadline = _ReadDeadline(timeout_seconds) if timeout_seconds is not None else None
+        deadline = (
+            _ReadDeadline(timeout_seconds, cancel_event) if timeout_seconds is not None else None
+        )
         _read_deadline.current = deadline
         try:
             with requests.Session() as session:
@@ -331,26 +358,71 @@ class WorldClient:
             if deadline is not None:
                 deadline.close()
 
-    def _request(self, method: str, path: str, body: Any = MISSING) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Any = MISSING,
+        *,
+        wait_for_world: bool = False,
+        cancel_event: threading.Event | None = None,
+    ) -> Any:
+        if cancel_event is not None and not isinstance(cancel_event, threading.Event):
+            raise TypeError("cancel_event must be a threading.Event.")
         # Validate/serialize before retrying. Neither caller mutation nor another
         # attempt can change these bytes, the invocation ID, or the idempotency key.
         payload = None if body is MISSING else encode(json_value(body, 1024 * 1024))
-        for attempt in range(self._max_attempts):
+        ordinary_failures = 0
+        preparing_until: float | None = None
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise HueEnvironmentError()
+            remaining = None if preparing_until is None else preparing_until - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise HueEnvironmentError()
             try:
-                return self._send(method, path, payload)
-            except HueEnvironmentError as error:
-                if (
-                    error.status is not None and error.status not in _RETRYABLE
-                ) or attempt + 1 == self._max_attempts:
-                    raise
-                # The gateway's admission refusals say how long to wait; anything else backs off.
-                backoff = min(0.1 * 2**attempt, 2)
-                time.sleep(
-                    error.retry_after
-                    if error.retry_after is not None
-                    else backoff + random.random() * backoff
+                return self._send(
+                    method,
+                    path,
+                    payload,
+                    timeout_seconds=(
+                        self._timeout if remaining is None else min(self._timeout, remaining)
+                    )
+                    if wait_for_world
+                    else None,
+                    cancel_event=cancel_event,
                 )
-        raise AssertionError("Unreachable")
+            except HueEnvironmentError as error:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise
+                preparing = (
+                    wait_for_world and error.status == 503 and error.diagnostic == "world_preparing"
+                )
+                if preparing:
+                    if preparing_until is None:
+                        preparing_until = time.monotonic() + _WORLD_PREPARATION_WAIT_SECONDS
+                    wait = max(0.1, error.retry_after if error.retry_after is not None else 1.0)
+                else:
+                    ordinary_failures += 1
+                    if (
+                        error.status is not None and error.status not in _RETRYABLE
+                    ) or ordinary_failures >= self._max_attempts:
+                        raise
+                    backoff = min(0.1 * 2 ** (ordinary_failures - 1), 2)
+                    wait = (
+                        error.retry_after
+                        if error.retry_after is not None
+                        else backoff + random.random() * backoff
+                    )
+                if preparing_until is not None:
+                    remaining = preparing_until - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    wait = min(wait, remaining)
+                if cancel_event is None:
+                    time.sleep(wait)
+                elif cancel_event.wait(wait):
+                    raise HueEnvironmentError() from None
 
     def _request_once(self, method: str, path: str, *, timeout_seconds: float) -> Any:
         """Make one bounded request without retries, for a deadline-bound seal read."""
@@ -367,6 +439,7 @@ class WorldClient:
         ttl_seconds: int | None = None,
         traceparent: str | None = None,
         agent_revision: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> EnvironmentRun:
         """Create or replay a world. `traceparent` is the case span's W3C context; its trace ID
         must equal the trace the execution declared. `agent_revision` (1–256 characters) joins
@@ -393,6 +466,8 @@ class WorldClient:
                     **({"traceparent": traceparent} if traceparent is not None else {}),
                     **({"agentRevision": agent_revision} if agent_revision is not None else {}),
                 },
+                wait_for_world=True,
+                cancel_event=cancel_event,
             )
         except HueEnvironmentError as error:
             raise WorldCreationError(error.status, error.retry_after, error.diagnostic) from None

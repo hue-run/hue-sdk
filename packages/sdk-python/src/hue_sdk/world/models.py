@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Literal, TypedDict
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from ..evals._json import uuid
 from .client import WorldClient
@@ -118,9 +120,17 @@ class WorldModelClient(WorldClient):
         """List account bindings, including multiple accounts for the same app."""
         return self._request("GET", f"/world-models/{uuid(model_id)}/accounts{_page(after, limit)}")
 
-    def materialize(self, model_id: str, *, at: str) -> StartingWorldResult:
+    def materialize(
+        self, model_id: str, *, at: str, cancel_event: threading.Event | None = None
+    ) -> StartingWorldResult:
         """Reconstruct a chosen time without starting an instance."""
-        return self._request("POST", f"/world-models/{uuid(model_id)}/materializations", {"at": at})
+        return self._request(
+            "POST",
+            f"/world-models/{uuid(model_id)}/materializations",
+            {"at": at, "idempotencyKey": str(uuid4())},
+            wait_for_world=True,
+            cancel_event=cancel_event,
+        )
 
     def start_instance(
         self,
@@ -129,6 +139,7 @@ class WorldModelClient(WorldClient):
         idempotency_key: str,
         at: str,
         ttl_seconds: int | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> WorldInstanceResult:
         """Start an isolated instance using the latest committed reconstruction."""
         return self._request(
@@ -139,10 +150,17 @@ class WorldModelClient(WorldClient):
                 "at": at,
                 **({"ttlSeconds": ttl_seconds} if ttl_seconds is not None else {}),
             },
+            wait_for_world=True,
+            cancel_event=cancel_event,
         )
 
     def reproduce_instance(
-        self, instance_id: str, *, idempotency_key: str, ttl_seconds: int | None = None
+        self,
+        instance_id: str,
+        *,
+        idempotency_key: str,
+        ttl_seconds: int | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> WorldInstanceResult:
         """Start a fresh instance from an earlier instance's original immutable World."""
         return self._request(
@@ -152,6 +170,8 @@ class WorldModelClient(WorldClient):
                 "idempotencyKey": idempotency_key,
                 **({"ttlSeconds": ttl_seconds} if ttl_seconds is not None else {}),
             },
+            wait_for_world=True,
+            cancel_event=cancel_event,
         )
 
     def erase_model(self, model_id: str) -> ErasedWorldModel:
