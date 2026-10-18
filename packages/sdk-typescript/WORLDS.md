@@ -1,8 +1,7 @@
 # Simulated worlds
 
-The World client names in this checkout are unreleased. They require a Hue deployment that
-serves the canonical World and instance routes. Existing published packages use the
-[compatible environment client](ENVIRONMENTS.md).
+The World clients require a Hue deployment that serves the canonical World and instance routes.
+The [compatible environment client](ENVIRONMENTS.md) remains supported.
 
 Your agent runs locally against an isolated hosted instance of a simulated world:
 
@@ -21,7 +20,7 @@ legacy `worldId` field identifies the runtime instance, not a durable World mode
 
 ## Reconstruct a user's World
 
-The World model client is unreleased and requires the corresponding service routes. An entity's
+The World model client requires the corresponding service routes. An entity's
 namespace and full ID bind its history to the project identified by the service key.
 
 ```ts
@@ -67,7 +66,7 @@ review or publish action.
 
 ## Capture user and account identity
 
-Automatic World capture is unreleased and requires project enablement in the compatible service.
+Automatic World capture requires a compatible service.
 Your existing tracing remains valid without these attributes; unresolved identity does not become
 World state.
 

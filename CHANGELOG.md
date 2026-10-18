@@ -8,7 +8,14 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
-### [Unreleased]
+### [0.20.0] - 2026-10-18
+
+#### Changed
+
+- **Breaking** World materialization, instance creation and reproduction now wait up to 120 seconds
+  when Hue explicitly reports `world_preparing`, separately from the ordinary `maxAttempts` limit.
+  Retries preserve the request body and idempotency identity. Migration: pass `{ signal }` to cancel
+  a preparation wait or active request. Other failures retain the configured attempt limit.
 
 #### Added
 
@@ -20,8 +27,8 @@ refuses to publish a version without a matching entry below.
   claim handoffs and keep accepting runs after a post-dispatch verdict-read failure.
 - `runSimulation` and `runLocalAgent` accept an optional `onUploaded` callback before their
   completion marker or queue acknowledgement, for resumable application handoffs.
-- The World client names, `WorldModelClient` and instance methods are available in this checkout
-  and remain unreleased. Canonical clients use the World and instance routes. The environment module
+- The World client names, `WorldModelClient` and instance methods use the canonical World,
+  World model and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
 - World model results and errors expose optional preparation progress. Error responses retain only
   validated progress fields from a bounded body. Unchanged insufficient-evidence and processing-limit
@@ -1542,12 +1549,20 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
-### [Unreleased]
+### [0.13.0] - 2026-10-18
+
+#### Changed
+
+- **Breaking** World materialization, instance creation and reproduction now wait up to 120 seconds
+  when Hue explicitly reports `world_preparing`, separately from the ordinary `max_attempts` limit.
+  Retries preserve the request body and idempotency identity. Migration: pass a `threading.Event`
+  through `cancel_event` to cancel a preparation wait or active HTTP read. Other failures retain
+  the configured attempt limit.
 
 #### Added
 
-- The World client names, `WorldModelClient` and instance methods are available in this checkout
-  and remain unreleased. Canonical clients use the World and instance routes. The environment module
+- The World client names, `WorldModelClient` and instance methods use the canonical World,
+  World model and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
 - World model results and errors expose optional preparation progress. Error responses retain only
   validated progress fields from a bounded body. Unchanged insufficient-evidence and processing-limit
@@ -2171,6 +2186,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.7.8 (2026-10-18): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.20.0`. The registry availability check before installation is unchanged.
 - 0.7.7 (2026-10-16): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.19.1` instead of 0.19.0. The registry availability check before installation is unchanged.
 - 0.7.6 (2026-10-16): the evaluation procedure and its three `hue eval` commands use `@hue-run/sdk@0.19.0` instead of 0.18.2. The registry availability check before installation is unchanged.
 - 0.7.5 (2026-10-14): the key steps name the settings page by its current label, **Settings → API keys**, instead of **Settings → Integrations & API keys**.
