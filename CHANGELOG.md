@@ -8,6 +8,21 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.20.2] - 2026-10-18
+
+#### Added
+
+- `hue traces import prepare <path> --out <directory> --json` converts files, directories or ZIP
+  archives of OTLP/JSON trace exports, complete Langfuse observation exports and text ATIF v1.7 and
+  v1.8 exports into gzip OTLP/JSON batches beside an immutable `manifest.json`, and prints the
+  manifest digest and totals that Hue MCP's `prepare_trace_import` takes. `hue traces import upload
+  <directory> --authorization-file <file> --json` delivers the bundle to Hue's import routes with the
+  short-lived `hue_it_` authorization that tool returns, two requests at a time and in order within a
+  trace, confirms every span's receipt, and resumes from `progress.json` after an interruption. No
+  project key is involved.
+- `agentEnvironment` strips `hue_it_` import authorizations from an agent child's environment like
+  the other Hue control-plane credentials (`HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES`).
+
 ### [0.20.1] - 2026-10-18
 
 #### Added
@@ -1560,6 +1575,13 @@ No registry release is claimed until publication and registry acceptance complet
 
 ## hue-run (Python)
 
+### [0.13.2] - 2026-10-18
+
+#### Added
+
+- `agent_environment` strips `hue_it_` import authorizations from an agent child's environment like
+  the other Hue control-plane credentials (`HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES`).
+
 ### [0.13.1] - 2026-10-18
 
 #### Added
@@ -2206,6 +2228,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.3 (2026-10-18): the installation commands pin `@hue-run/sdk@0.20.2` and `hue-run==0.13.2`.
 - 0.8.2 (2026-10-18): the rule for other workflows names the evaluation-only values production configuration must not hold (mirror URLs, world tokens, `HUE_MCP_*` values and the development **Read and write** key) instead of all Hue URLs and keys, which contradicted the **Tracing only** key a production server uses.
 - 0.8.1 (2026-10-18): pin current install commands to TypeScript `@hue-run/sdk@0.20.1` and Python `hue-run==0.13.1`; retain the tracing guidance and documentation routing from 0.8.0.
 - 0.8.0 (2026-10-18): the skill centers on SDK work: choosing the integration, preserving the application's provider, framework, prompts, behavior, exporters and redaction, instrumenting request, model and tool spans with real content and streaming lifetimes, content and media capture, and verifying stored spans and content with a separate check for uploaded media. Production investigation, MCP setup, classifiers, cases from traces, Worlds and evaluations become routing links to their docs.hue.run pages, which own those procedures; the duplicated case, eval-ready and evaluation procedures, case tiers and the mirrors' release-state note are removed. The key section tells an agent arriving from the agent setup page to return there after **Verify delivery** instead of starting it again and tells a user without an account that one is required, with no contact address or booking link, the install commands pin `@hue-run/sdk@0.20.0` (saved exactly) and `hue-run==0.13.0`, and setup test runs added AI SDK 6 `consumeStream()` and Python `GeneratorExit` streaming guidance, redaction notes for wrapping processors, user and session IDs and file bytes, and where verification's span IDs come from.
