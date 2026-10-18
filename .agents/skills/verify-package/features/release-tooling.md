@@ -8,10 +8,11 @@ The scripts under `scripts/` back the owner-run `Release SDK` workflow and docs 
 - `doc-versions` keeps version mentions in docs current.
 - `docs-contract` keeps `docs-contract.json` in step with the public API.
 - `changelog` validates changelog entries.
+- `npm-alias-release` (`release.yml`): `publish-npm-alias` publishes the `hue-run` npm alias through trusted publishing after `accept-npm`, when it is at the released version pinning that SDK, and `accept-npm-alias` checks it on npm; `publish-npm` skips a version npm already holds. `test_npm_release_tags` runs those steps' shell against a fake `curl` (200, 404, 503) and the committed alias.
 
 ## How to get to it (user POV)
 
-- Maintainers run the `Release SDK` workflow with `publish=false`, then `publish`. Users see the result as the published version, changelog and docs.
+- Maintainers run the `Release SDK` workflow with `publish=false`, then `publish`. Users see the result as the published version (and `npm install hue-run` resolving to it), changelog and docs.
 
 ## Driving it with python3
 

@@ -64,6 +64,18 @@ class WaitTests(unittest.TestCase):
         poll["index"] = 2
         self.assertEqual(registry.npm_missing("0.10.0", "latest", fetch), [])
 
+    def test_npm_alias_is_read_from_its_own_documents(self):
+        alias = {
+            "https://registry.npmjs.org/hue-run/0.10.0": PUBLISHED[FULL],
+            "https://registry.npmjs.org/hue-run": PUBLISHED[ABBREVIATED],
+        }
+        # The SDK's documents say nothing about the alias, and the alias's nothing about the SDK.
+        fetch, _ = scripted([PUBLISHED])
+        self.assertEqual(len(registry.npm_missing("0.10.0", "latest", fetch, "hue-run")), 2)
+        fetch, _ = scripted([alias])
+        self.assertEqual(registry.npm_missing("0.10.0", "latest", fetch, "hue-run"), [])
+        self.assertEqual(len(registry.npm_missing("0.10.0", "latest", fetch)), 2)
+
     def test_pypi_waits_for_both_files_in_the_index_and_the_version_document(self):
         def listed(*names):
             return {SIMPLE: {"files": [{"filename": name} for name in names]}}
