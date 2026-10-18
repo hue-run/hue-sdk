@@ -28,21 +28,49 @@ jobs:
           if os.environ["AUTHOR_TYPE"] == "Bot":
               print("Bot pull request; no verification evidence required.")
               sys.exit(0)
-          body = re.sub(r"<!--.*?-->", "", os.environ.get("BODY", ""), flags=re.DOTALL)
+          body = os.environ.get("BODY", "").replace("\r\n", "\n").replace("\r", "\n")
+          body = re.sub(r"<!--\s*codesmith:footer\s*-->.*?<!--\s*/codesmith:footer\s*-->", "", body, flags=re.DOTALL | re.IGNORECASE)
+          body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
           skills = sorted(p.parent.name for p in pathlib.Path(".agents/skills").glob("verify-*/SKILL.md"))
           named = [s for s in skills if re.search(rf"(?<![\w-]){re.escape(s)}(?![\w-])", body)]
-          fences = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n(.*?)^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$", re.MULTILINE | re.DOTALL)
-          has_code_output = any(
-              opening[0] == closing[0] and len(closing) >= len(opening) and content.strip()
-              for opening, content, closing in fences.findall(body)
-          )
+          fence_start = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
+          lines = body.splitlines()
+          has_code_output = False
+          index = 0
+          while index < len(lines):
+              opening = fence_start.match(lines[index])
+              if not opening:
+                  index += 1
+                  continue
+              fence = opening.group(1)
+              closing = re.compile(rf"^[ \t]{{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$")
+              start = index + 1
+              index = start
+              while index < len(lines) and not closing.fullmatch(lines[index]):
+                  index += 1
+              if index == len(lines):
+                  break
+              if "\n".join(lines[start:index]).strip():
+                  has_code_output = True
+                  break
+              index += 1
           has_markdown_image = any(target.strip() for target in re.findall(r"!\[[^\]\n]*\]\(([^)\n]*)\)", body))
+          image_references = {
+              re.sub(r"\s+", " ", match.group(1).strip()).casefold()
+              for match in re.finditer(r"(?m)^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))", body)
+              if (match.group(2) or match.group(3) or "").strip()
+          }
+          has_reference_image = any(
+              re.sub(r"\s+", " ", (match.group(2) or match.group(1)).strip()).casefold() in image_references
+              for match in re.finditer(r"!\[([^\]\n]*)\](?:\[([^\]\n]*)\])?", body)
+              if not body[match.end():].startswith("(")
+          )
           has_html_image = re.search(
               r"""<img\b[^>]*\ssrc\s*=\s*(?:"[^"]*\S[^"]*"|'[^']*\S[^']*'|[^\s"'<>]+)[^>]*>""",
               body,
               re.IGNORECASE | re.DOTALL,
           )
-          if named and (has_code_output or has_markdown_image or has_html_image):
+          if named and (has_code_output or has_markdown_image or has_reference_image or has_html_image):
               print("Verified with " + ", ".join(named))
               sys.exit(0)
           print(f"::error::Name the verify skill you ran ({', '.join(skills)}) in the PR description and paste its output in a code block, or one screenshot for a visible UI change. See AGENTS.md, Before opening a PR.")
