@@ -12,6 +12,7 @@ import type {
   WorldModelAccountPage,
   WorldModelPage,
   WorldModelPageOptions,
+  WorldPreparationProgress,
 } from "./model-types.js";
 import type { WorldHandoff } from "./types.js";
 
@@ -21,6 +22,8 @@ export interface WorldInstanceResult {
   world: StartingWorld;
   /** Fresh, instance-scoped connection and credentials. */
   instance: WorldHandoff;
+  /** Progress of this requested starting World, when reported by Hue. */
+  preparation?: WorldPreparationProgress;
 }
 
 /** Project-key client for entity histories, reconstructed Worlds and isolated instances. */

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from ..evals._json import uuid
 from .client import WorldClient
+from .readiness import WorldModelProcessing, WorldPreparationProgress
 from .types import WorldHandoff
 
 
@@ -17,7 +18,11 @@ class WorldEntity(TypedDict):
     id: str
 
 
-class WorldModel(TypedDict):
+class _WorldModelOptional(TypedDict, total=False):
+    processing: WorldModelProcessing
+
+
+class WorldModel(_WorldModelOptional):
     id: str
     projectId: str
     entity: WorldEntity
@@ -66,7 +71,11 @@ class WorldModelResult(TypedDict):
     worldModel: WorldModel
 
 
-class StartingWorldResult(TypedDict):
+class _PreparationOptional(TypedDict, total=False):
+    preparation: WorldPreparationProgress
+
+
+class StartingWorldResult(_PreparationOptional):
     world: StartingWorld
 
 
@@ -95,7 +104,7 @@ class WorldModelClient(WorldClient):
     """Read entity histories and start isolated instances from reconstructed Worlds.
 
     Instance creation and reproduction carry caller-owned idempotency keys. Retrying them
-    replays the same starting World instead of selecting a later evidence cutoff.
+    keeps its first usable starting World. An unfinished start may recover after new evidence.
     """
 
     def create_model(self, *, entity: WorldEntity, name: str | None = None) -> WorldModelResult:
