@@ -46,7 +46,7 @@
       "App-launched local agents",
       "Scorer forward compatibility"
     ],
-    "sha256": "sha256:f847bb6f2016519ad1cc643e8057becfb9dcb8454acd0103605d38f32027783c",
+    "sha256": "sha256:f15b54a5816ffe30916a35a27cc5555d220f996702d536726b16597d37a6edbf",
     "source": "COMPATIBILITY.md"
   },
   "packages": {
@@ -741,7 +741,7 @@
           "source": "packages/sdk-typescript/setup-events.schema.json"
         }
       },
-      "version": "0.20.2"
+      "version": "0.20.3"
     }
   },
   "repository": "https://github.com/hue-run/hue-sdk",
@@ -750,10 +750,10 @@
     "description": "Add and verify Hue tracing with the Hue TypeScript or Python SDK or an existing OpenTelemetry setup: choose the integration, instrument requests, model calls and tools, set content and media capture, and confirm what Hue stored. Use when a developer asks to set up, integrate or troubleshoot Hue, or to check that requests, content or files reach Hue. Also use when the repository already uses Hue (@hue-run/sdk, hue-run, HUE_API_KEY or .env.hue) and the developer asks to investigate production traces, turn a trace into a case, connect an agent to Hue's simulated apps or run hue eval: this skill routes those to their Hue documentation. Preserves the application's model provider, framework, prompts, behavior, exporters and redaction.",
     "metadata": {
       "author": "hue-run",
-      "version": "0.8.3"
+      "version": "0.8.4"
     },
     "name": "hue",
-    "sha256": "sha256:7972482bcf597b4af15ec7014d904bbf5763c4f4814999c6a67d27f22d1d8812",
+    "sha256": "sha256:4f907f76e42e08bc6b81fd193c650c5c358752b7e019b88b796bd6dd391ae0af",
     "source": "skills/hue/SKILL.md"
   }
 }
