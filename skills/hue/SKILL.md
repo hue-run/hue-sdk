@@ -52,7 +52,7 @@ inactive; do not run it.
 
 ## Install and configure
 
-Use the [Install the SDK](https://docs.hue.run/quickstart#2-install-the-sdk) section and the exact version it pins, and confirm that version is published before installing:
+Install the exact version below, which [Install the SDK](https://docs.hue.run/quickstart#2-install-the-sdk) explains, and confirm it is published before installing:
 
 ```sh
 # TypeScript: run in the application directory.
