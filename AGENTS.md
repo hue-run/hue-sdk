@@ -27,7 +27,11 @@ CI runs the same checks on Node 22, 24 and 26 (the installed package also under 
 ## Before opening a PR
 
 - Keep the change minimal (ponytail), never at the cost of validation, error handling, security or accessibility, and run `/ponytail-review` on the diff where the host supports it.
-- Verify the change with the matching `.agents/skills/verify-*` skill (`verify-sdk`, `verify-package`, `verify-examples`) and paste its evidence into the PR: text output by default, one screenshot only for a visible UI change, never a recording. Run the narrowest check the skill names; CI runs the full commands above.
+- Verify the change with the matching `.agents/skills/verify-*` skill (`verify-sdk`, `verify-package`, `verify-examples`) and paste its evidence into the PR: text output by default, one screenshot only for a visible UI change, never a recording. Run the narrowest check the skill names; CI runs the full commands above. The `Verification evidence` check fails a ready PR whose description names no `verify-*` skill or has no pasted output.
 - If the change adds or alters a feature, update that skill's `features/` map (`maintain-verification-skill` for bigger changes) and any affected user-facing docs (`technical-writing`).
 
 `create-verification-skill` and `maintain-verification-skill` say `.cursor/skills/`; in this repository they write to `.agents/skills/verify-<area>/` (`.claude/skills` links there).
+
+## Landing
+
+Once every required check passes on the PR head and every review thread is addressed and resolved, squash-merge the PR yourself (`gh pr merge <number> --squash --match-head-commit <head-sha>`); no maintainer approval is needed. Never merge with `--admin` or past a failing check. Releases and publishing stay with the maintainer (RELEASING.md).
