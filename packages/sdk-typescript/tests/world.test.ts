@@ -257,6 +257,7 @@ describe("world handoff helpers", () => {
       SETUP_CREDENTIAL: `hue_setup_test_setup-${"a".repeat(24)}_${"s".repeat(43)}`,
       ACCESS_TOKEN: `hue_at_${"a".repeat(43)}`,
       REFRESH_TOKEN: `hue_rt_${"a".repeat(43)}`,
+      IMPORT_AUTHORIZATION: `hue_it_${"a".repeat(43)}`,
       INSTALL_TOKEN: `hue_install_${"a".repeat(43)}`,
       INVOCATION_TOKEN: `hue_inv_${"a".repeat(43)}`,
       OAUTH_SECRET: `hue_oauth_secret_${"a".repeat(43)}`,
@@ -283,6 +284,7 @@ describe("world handoff helpers", () => {
     expect(child).not.toHaveProperty("SETUP_CREDENTIAL");
     expect(child).not.toHaveProperty("ACCESS_TOKEN");
     expect(child).not.toHaveProperty("REFRESH_TOKEN");
+    expect(child).not.toHaveProperty("IMPORT_AUTHORIZATION");
     expect(child).not.toHaveProperty("INSTALL_TOKEN");
     expect(child).not.toHaveProperty("INVOCATION_TOKEN");
     expect(child).not.toHaveProperty("OAUTH_SECRET");
@@ -354,6 +356,7 @@ describe("world handoff helpers", () => {
       "hue_install_",
       "hue_at_",
       "hue_rt_",
+      "hue_it_",
       "hue_oauth_",
     ]);
     expect(stripHueControlPlaneCredentials(parent)).toEqual({

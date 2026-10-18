@@ -60,8 +60,9 @@ export const HUE_CONTROL_PLANE_VARIABLES: readonly string[] = [
   "HUE_SERVICE_KEY",
 ];
 /** Prefixes of the Hue control-plane credentials the server issues: project and setup keys,
- * attempt grants, the project MCP key, invocation and installation tokens, and OAuth tokens and
- * secrets. World tokens (`hue_world_`) and MCP capabilities (`hue_sim_`) are what the agent holds. */
+ * attempt grants, the project MCP key, invocation and installation tokens, OAuth tokens, trace
+ * import authorizations and secrets. World tokens (`hue_world_`) and MCP capabilities
+ * (`hue_sim_`) are what the agent holds. */
 export const HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: readonly string[] = [
   "hue_sk_",
   "hue_attempt_",
@@ -71,6 +72,7 @@ export const HUE_CONTROL_PLANE_CREDENTIAL_PREFIXES: readonly string[] = [
   "hue_install_",
   "hue_at_",
   "hue_rt_",
+  "hue_it_",
   "hue_oauth_",
 ];
 /** A Hue credential anywhere in a value, including JSON Unicode escapes, not inside a longer word. */
