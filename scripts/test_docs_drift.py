@@ -31,6 +31,40 @@ title: "skill.md"
 """
         self.assertEqual(drift.skill_metadata(source), drift.skill_metadata(hosted))
 
+    def test_skill_metadata_reads_a_quoted_description_with_an_apostrophe(self):
+        source = """---
+name: hue
+description: "Connect an agent to Hue's simulated apps."
+metadata:
+  author: hue-run
+  version: "0.8.5"
+---
+"""
+        hosted = source.replace("name: hue", 'name: "hue"\ntitle: "skill.md"')
+        self.assertEqual(
+            drift.skill_metadata(hosted),
+            {
+                "name": "hue",
+                "description": "Connect an agent to Hue's simulated apps.",
+                "author": "hue-run",
+                "version": "0.8.5",
+            },
+        )
+        self.assertEqual(drift.skill_metadata(source), drift.skill_metadata(hosted))
+
+    def test_site_footer_is_not_drift(self):
+        source = "# Compatibility\n\nThis matrix describes the current releases.\n"
+        hosted = source + (
+            "\n\nThis documentation is built and hosted on [Mintlify](https://mintlify.com), "
+            "a developer documentation platform."
+        )
+        self.assertEqual(drift.normalize(hosted), drift.normalize(source))
+
+    def test_hosted_url_uses_a_cache_key_no_page_links(self):
+        url = drift.hosted_url("https://docs.hue.run/skill.md")
+        self.assertTrue(url.startswith("https://docs.hue.run/skill.md?drift-check="))
+        self.assertNotEqual(url, drift.hosted_url("https://docs.hue.run/skill.md"))
+
     def test_skill_metadata_exposes_cache_identity_drift(self):
         current = """---
 name: hue
