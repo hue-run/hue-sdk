@@ -16,7 +16,8 @@ refuses to publish a version without a matching entry below.
   upload, in direct, simulation and worker modes. It is off by default, uses the project's judge
   budget, and supports `--wait 0`. Interrupted dispatch resumes saved outputs with stable
   idempotency keys instead of running the agent again, even if the project's judge budget is
-  later disabled. The upload handoff is durable before run completion.
+  later disabled. The upload handoff is durable before run completion. Workers discard terminal
+  claim handoffs and keep accepting runs after a post-dispatch verdict-read failure.
 - `runSimulation` and `runLocalAgent` accept an optional `onUploaded` callback before their
   completion marker or queue acknowledgement, for resumable application handoffs.
 - The World client names, `WorldModelClient` and instance methods are available in this checkout

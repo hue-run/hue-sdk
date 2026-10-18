@@ -1370,15 +1370,22 @@ async function completeJudgeHandoff(
   client: EvaluationClient,
   judging: JudgeCheckpoint,
   pending: PendingJudgeDispatch,
-): Promise<void> {
+): Promise<boolean> {
   const store = await CheckpointStore.acquire(judging.source.directory, judging.source.identity);
   try {
     if (pending.completion.kind === "worker") {
-      await client.completeLocalAgentRun({
-        runId: pending.completion.runId,
-        workerId: pending.completion.workerId,
-        state: "completed",
-      });
+      try {
+        await client.completeLocalAgentRun({
+          runId: pending.completion.runId,
+          workerId: pending.completion.workerId,
+          state: "completed",
+        });
+      } catch (error) {
+        // Released or cancelled work cannot be completed by this worker. Temporary failures
+        // still throw, leaving the durable handoff available for the unchanged command.
+        if (error instanceof HueApiError && error.status === 409) return false;
+        throw error;
+      }
     } else {
       const attempt = await store.read<{ experimentId?: string; stage: string }>("active-attempt");
       if (!attempt || attempt.experimentId !== pending.run.experimentId)
@@ -1386,12 +1393,32 @@ async function completeJudgeHandoff(
       if (attempt.stage !== "completed")
         await store.write("active-attempt", { ...attempt, stage: "completed" });
     }
+    return true;
   } finally {
     await store.release();
   }
 }
 
-/** Waits for Hue's verdicts, prints them (table or JSON, with the optional baseline) and returns the exit code. */
+/** Discards only the matching terminal worker claim; a retry retains its handoff. */
+async function discardWorkerJudgeHandoff(judging: JudgeCheckpoint, runId: string): Promise<void> {
+  const pending = await judging.store.read<PendingJudgeDispatch>("pending");
+  if (pending?.completion.kind === "worker" && pending.completion.runId === runId)
+    await judging.store.write("pending", null);
+}
+
+async function requestRunJudges(
+  client: EvaluationClient,
+  run: UploadedRun,
+  output: Output,
+  signal: AbortSignal,
+  judging: JudgeCheckpoint,
+): Promise<void> {
+  const count = await dispatchPinnedJudges(client, run.experimentId, run.subjectIds, signal);
+  await judging.store.write("pending", null);
+  if (count) output.log(`Requested ${count} hosted judge check${count === 1 ? "" : "s"}.`);
+}
+
+/** Dispatch failures retain the handoff; reading verdicts does not dispatch again. */
 async function reportVerdicts(
   client: EvaluationClient,
   values: ReturnType<typeof parse>["values"],
@@ -1401,13 +1428,23 @@ async function reportVerdicts(
   signal: AbortSignal,
   judging?: JudgeCheckpoint,
 ): Promise<number> {
-  const wait = integer("wait", values.wait, 300, 0, 86_400);
   if (values.judges) {
     if (!judging) throw new Error("Hosted judge recovery checkpoint is unavailable");
-    const count = await dispatchPinnedJudges(client, run.experimentId, run.subjectIds, signal);
-    await judging.store.write("pending", null);
-    if (count) output.log(`Requested ${count} hosted judge check${count === 1 ? "" : "s"}.`);
+    await requestRunJudges(client, run, output, signal, judging);
   }
+  return readAndReportVerdicts(client, values, run, baselineId, output, signal);
+}
+
+/** Waits for Hue's verdicts, prints them and returns the exit code. */
+async function readAndReportVerdicts(
+  client: EvaluationClient,
+  values: ReturnType<typeof parse>["values"],
+  run: UploadedRun,
+  baselineId: string | undefined,
+  output: Output,
+  signal: AbortSignal,
+): Promise<number> {
+  const wait = integer("wait", values.wait, 300, 0, 86_400);
   output.log("Waiting for Hue checks...");
   const verdicts = withTelemetryFailures(
     await collectExperimentVerdicts(client, {
@@ -1916,6 +1953,15 @@ async function runWorker(
         },
       }
     : undefined;
+  const reportJudgedRun = async (run: UploadedRun) => {
+    if (!judging) throw new Error("Hosted judge recovery checkpoint is unavailable");
+    await requestRunJudges(client, run, output, signal, judging);
+    try {
+      await readAndReportVerdicts(client, values, run, undefined, output, signal);
+    } catch (error) {
+      output.error(`Unable to read verdicts: ${explain(error)}`);
+    }
+  };
   try {
     const pending = await judging?.store.read<PendingJudgeDispatch>("pending");
     if (pending) {
@@ -1924,8 +1970,12 @@ async function runWorker(
           "Recover the pending judge dispatch with the unchanged command or use another --checkpoint-dir",
         );
       output.log(`Resuming hosted checks: ${pending.run.runUrl}`);
-      await completeJudgeHandoff(client, judging!, pending);
-      await reportVerdicts(client, values, pending.run, undefined, output, signal, judging);
+      if (await completeJudgeHandoff(client, judging!, pending)) {
+        await reportJudgedRun(pending.run);
+      } else if (pending.completion.kind === "worker") {
+        await discardWorkerJudgeHandoff(judging!, pending.completion.runId);
+        output.error(`Run ${pending.completion.runId} was released or cancelled in Hue`);
+      }
       if (signal.aborted) return 130;
       if (maxRuns !== undefined && --maxRuns === 0) return 0;
     }
@@ -1966,7 +2016,9 @@ async function runWorker(
       onPollError(error) {
         output.error(`Hue did not answer the poll (${explain(error)}); polling again`);
       },
-      onRunFailed(failure) {
+      async onRunFailed(failure) {
+        if (judging && failure.outcome !== "retry")
+          await discardWorkerJudgeHandoff(judging, failure.runId);
         const run = `Run ${failure.runId}`;
         if (failure.outcome === "retry") {
           const waitMillis = failure.waitMillis ?? 0;
@@ -2036,20 +2088,12 @@ async function runWorker(
         telemetry.rest(report.telemetryNotAccepted);
         if (!current) return;
         if (values.judges) {
-          await reportVerdicts(
-            client,
-            values,
-            {
-              experimentId: current.experimentId,
-              subjectIds: report.subjectIds,
-              runUrl: new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(),
-              telemetryNotAccepted: report.telemetryNotAccepted,
-            },
-            undefined,
-            output,
-            signal,
-            judging,
-          );
+          await reportJudgedRun({
+            experimentId: current.experimentId,
+            subjectIds: report.subjectIds,
+            runUrl: new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(),
+            telemetryNotAccepted: report.telemetryNotAccepted,
+          });
           return;
         }
         try {

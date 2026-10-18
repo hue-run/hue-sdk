@@ -162,6 +162,10 @@ function documentStandIn(
     gradedAfterPolls?: number;
     /** Queued CLI worker cases; ordinary document tests use their original single file case. */
     workerKinds?: ("direct" | "world")[];
+    /** Number of sequential synthetic queue entries available to a worker. */
+    workerRuns?: number;
+    /** Transient result-read failures, after hosted jobs have already been accepted. */
+    failedVerdictReads?: number;
     /** Complete replies fail transiently this often before the worker resumes uploads. */
     failWorkerCompletions?: number;
     verdict?: "pass" | "fail";
@@ -293,6 +297,8 @@ function documentStandIn(
   const worldToken = "hue_world_synthetic_worker_canary";
   let queued: { runId: string; experimentId: string; state: string; workerId?: string } | undefined;
   let failWorkerCompletions = options.failWorkerCompletions ?? 0;
+  let queuedRuns = 0;
+  let failedVerdictReads = options.failedVerdictReads ?? 0;
   const scorer = {
     id: randomUUID(),
     name: "GIA D1 citation grader",
@@ -668,7 +674,9 @@ function documentStandIn(
         });
       }
       if (path === "/local-agent-worker/claim") {
-        if (!queued) {
+        const settled = queued && ["completed", "attention", "cancelled"].includes(queued.state);
+        if (!queued || (settled && queuedRuns < (options.workerRuns ?? 1))) {
+          queuedRuns++;
           const response = await fetch(`${url.origin}/api/v1/experiments`, {
             method: "POST",
             headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
@@ -685,6 +693,7 @@ function documentStandIn(
         if (
           queued.state === "completed" ||
           queued.state === "attention" ||
+          queued.state === "cancelled" ||
           (queued.workerId && queued.workerId !== body.workerId)
         )
           return Response.json(null);
@@ -696,7 +705,10 @@ function documentStandIn(
         return Response.json({ runId: body.runId, active: true });
       if (path === "/local-agent-worker/runs/complete") {
         const interrupted = options.beforeQueueCompletion?.();
-        if (interrupted) return interrupted;
+        if (interrupted) {
+          if (interrupted.status === 409) queued!.state = "cancelled";
+          return interrupted;
+        }
         calls.localRuns.push(body);
         if (failWorkerCompletions > 0) {
           failWorkerCompletions--;
@@ -940,6 +952,10 @@ function documentStandIn(
       if (runMatch) {
         if (runMatch[2] === "items")
           return Response.json({ items: runItems.get(runMatch[1]!) ?? [], nextCursor: null });
+        if (failedVerdictReads > 0) {
+          failedVerdictReads--;
+          return new Response(null, { status: 503 });
+        }
         const seen = (polls.get(runMatch[1]!) ?? 0) + 1;
         polls.set(runMatch[1]!, seen);
         if (seen <= (options.gradedAfterPolls ?? 0))
@@ -1300,6 +1316,177 @@ describe("hue eval hosted judge opt-in", () => {
       },
       SPAWN_TIMEOUT,
     );
+
+  test(
+    "hosted judge worker drops a refused queue handoff and accepts the next run",
+    async () => {
+      let refuseCompletion = true;
+      const standIn = documentStandIn({
+        hostedJudge: {},
+        workerKinds: ["direct"],
+        workerRuns: 2,
+        beforeQueueCompletion() {
+          if (!refuseCompletion) return;
+          refuseCompletion = false;
+          return new Response(null, { status: 409 });
+        },
+      });
+      const cwd = await workerWorkspace();
+      try {
+        const args = [...workerArgs(cwd), "--max-runs", "2", "--judges", "--wait", "0"];
+        const result = await hue(args, {
+          cwd,
+          env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
+        });
+        if (result.status !== 0) throw new Error(result.stderr);
+        expect(result.status).toBe(0);
+        expect(result.stderr).toContain("was released or cancelled");
+        expect(standIn.calls.starts).toBe(2);
+        expect(standIn.calls.experiments).toHaveLength(2);
+        expect(standIn.acceptedJudgeJobs()).toBe(1);
+        const pending = JSON.parse(
+          await readFile(
+            join(
+              cwd,
+              "checkpoints",
+              standIn.projectId,
+              "worker",
+              "dual-cases-v1",
+              "judge-dispatch",
+              "pending.json",
+            ),
+            "utf8",
+          ),
+        );
+        expect(pending.value).toBeNull();
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  for (const terminal of [true, false])
+    test(
+      `hosted judge worker recovery ${terminal ? "discards a cancelled claim" : "retains a transient completion failure"}`,
+      async () => {
+        const cwd = await workerWorkspace();
+        let child: ChildProcess | undefined;
+        let interrupt = true;
+        let refuse: number | undefined;
+        const standIn = documentStandIn({
+          hostedJudge: {},
+          workerKinds: ["direct"],
+          workerRuns: terminal ? 2 : 1,
+          beforeQueueCompletion() {
+            if (interrupt) {
+              child!.kill("SIGKILL");
+              return new Response(null, { status: 503 });
+            }
+            if (refuse) {
+              const status = refuse;
+              if (status === 409) refuse = undefined;
+              return new Response(null, { status });
+            }
+          },
+        });
+        try {
+          const args = [
+            ...workerArgs(cwd),
+            "--max-runs",
+            terminal ? "2" : "1",
+            "--judges",
+            "--wait",
+            "0",
+          ];
+          const options = {
+            cwd,
+            onSpawn: (value: ChildProcess) => {
+              child = value;
+            },
+            env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
+          };
+          const pendingPath = join(
+            cwd,
+            "checkpoints",
+            standIn.projectId,
+            "worker",
+            "dual-cases-v1",
+            "judge-dispatch",
+            "pending.json",
+          );
+          const first = await hue(args, options);
+          expect(first.status).not.toBe(0);
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.judgeJobs).toEqual([]);
+          interrupt = false;
+          refuse = terminal ? 409 : 503;
+          const resumed = await hue(args, options);
+          if (terminal) {
+            if (resumed.status !== 0) throw new Error(resumed.stderr);
+            expect(resumed.status).toBe(0);
+            expect(resumed.stderr).toContain("was released or cancelled");
+            expect(standIn.calls.starts).toBe(2);
+            expect(standIn.calls.experiments).toHaveLength(2);
+            expect(standIn.acceptedJudgeJobs()).toBe(1);
+          } else {
+            expect(resumed.status).toBe(1);
+            expect(standIn.calls.starts).toBe(1);
+            expect(standIn.acceptedJudgeJobs()).toBe(0);
+            const pending = JSON.parse(await readFile(pendingPath, "utf8"));
+            expect(pending.value.completion.kind).toBe("worker");
+            refuse = undefined;
+            const recovered = await hue(args, options);
+            if (recovered.status !== 0) throw new Error(recovered.stderr);
+            expect(recovered.status).toBe(0);
+            expect(standIn.calls.starts).toBe(1);
+            expect(standIn.calls.experiments).toHaveLength(1);
+            expect(standIn.acceptedJudgeJobs()).toBe(1);
+          }
+          const pending = JSON.parse(await readFile(pendingPath, "utf8"));
+          expect(pending.value).toBeNull();
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  test(
+    "hosted judge worker continues after verdict-read failure without replaying jobs",
+    async () => {
+      const standIn = documentStandIn({
+        hostedJudge: {},
+        workerKinds: ["direct"],
+        workerRuns: 2,
+        failedVerdictReads: 4,
+      });
+      const cwd = await workerWorkspace();
+      try {
+        const result = await hue(
+          [...workerArgs(cwd), "--max-runs", "2", "--judges", "--wait", "0"],
+          {
+            cwd,
+            env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
+          },
+        );
+        if (result.status !== 0) throw new Error(result.stderr);
+        expect(result.status).toBe(0);
+        expect(result.stderr.match(/Unable to read verdicts:/g)).toHaveLength(1);
+        expect(standIn.calls.starts).toBe(2);
+        expect(standIn.calls.experiments).toHaveLength(2);
+        expect(standIn.calls.judgeJobs).toHaveLength(2);
+        expect(new Set(standIn.calls.judgeJobs.map((job) => job.runId)).size).toBe(2);
+        expect(standIn.acceptedJudgeJobs()).toBe(2);
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
 
   for (const mode of ["direct", "simulation", "worker"] as const)
     test(

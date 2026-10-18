@@ -745,6 +745,9 @@ rerun the unchanged command with the same checkpoint directory. The CLI resumes 
 outputs without invoking the agent, using the same idempotency keys. After dispatch succeeds,
 the next ordinary invocation starts a new run as usual.
 
+`--worker --judges` discards cancelled or released handoffs. Once judge requests succeed, a
+verdict-read failure is logged and the worker keeps accepting runs.
+
 `--command "<shell command>"` spawns the command once per case with the world's environment
 (`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it and returns
 `null` without it, so fall back explicitly with `worldNow() ?? new Date()`), one `HUE_SIM_<SURFACE ID>_URL` per provider
