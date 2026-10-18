@@ -905,6 +905,44 @@ describe("hue traces import prepare", () => {
     expect(validateManifest(manifest(traces(25_001)))).toContain("more than 25000 traces");
   });
 
+  test("refuses an upload whose valid manifest Hue could not register, before any request", async () => {
+    // Valid in every rule, and over the 32 MiB decoded bound: 2,100 traces whose history owner
+    // is a 16 KiB identifier (the longest the manifest allows).
+    const traces = Array.from({ length: 2_100 }, (_, index) => ({
+      trace_id: sha256(`big-${index}`).slice(0, 32),
+      span_count: 1,
+      batches: [{ sha256: sha256(`big-batch-${index}`), bytes: 10, span_count: 1 }],
+      blobs: [],
+      identity: { user: "u".repeat(16_384) },
+      origin: "unknown",
+    }));
+    const manifest = { version: 1, source: { formats: ["otlp_json"], helper: "hue-sdk" }, traces };
+    expect(validateManifest(manifest)).toBeUndefined();
+    const bytes = Buffer.from(JSON.stringify(manifest));
+    expect(bytes.byteLength).toBeGreaterThan(32 * 1024 * 1024);
+    const directory = await scratch();
+    await writeFile(join(directory, "manifest.json"), bytes);
+    const file = await authorizationFile(directory, [
+      TOKEN,
+      `http://127.0.0.1:9/api/v1/trace-imports/${IMPORT_ID}`,
+    ]);
+    let requests = 0;
+    const result = await run(
+      ["import", "upload", directory, "--authorization-file", file, "--json"],
+      {
+        fetch: async () => {
+          requests++;
+          throw new Error("no request was expected");
+        },
+      },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("over the 32 MiB");
+    expect(result.stderr).toContain("prepare the input in smaller parts");
+    expect(requests).toBe(0);
+    expect(await readdir(directory)).not.toContain("progress.json");
+  });
+
   test("refuses a manifest Hue could not register before anything is sent", () => {
     expect(manifestTooLarge(Buffer.from(JSON.stringify({ version: 1 })))).toBeUndefined();
     // Over the decoded bound, however well it compresses.
