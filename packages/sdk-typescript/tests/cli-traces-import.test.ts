@@ -28,6 +28,7 @@ import {
   type TraceImportManifest,
 } from "../src/cli/traces-import-convert.js";
 import { ZipArchive, unsafeZipPath } from "../src/cli/traces-import-zip.js";
+import { Progress } from "../src/cli/traces-import-upload.js";
 import { textContentType } from "../src/blobs.js";
 
 // Synthetic exports (OTLP/JSON, Langfuse observations, ATIF) and a loopback stand-in for Hue's
@@ -1296,6 +1297,36 @@ describe("hue traces import prepare", () => {
     );
   });
 
+  test("removes its own temporary files from an interrupted preparation and refuses other files", async () => {
+    const { directory, manifest } = await preparedBundle({ "a.json": Buffer.from(otlpFile) });
+    const input = directory.replace(/\.hue-import$/, "");
+    const trace = manifest.traces[0]!;
+    const leftovers = [
+      "manifest.json.tmp",
+      `${trace.trace_id}.${trace.batches[0]!.sha256}.json.gz.tmp`,
+      `${"c".repeat(64)}.blob.tmp`,
+      "progress.json.tmp",
+    ];
+    for (const name of leftovers) await writeFile(join(directory, name), "partial");
+    const again = await run(["import", "prepare", input, "--out", directory, "--json"]);
+    expect(again.code).toBe(0);
+    const names = await readdir(directory);
+    expect(names.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    const report = JSON.parse(again.stdout) as Record<string, any>;
+    expect(report.manifest_digest).toBe(sha256(await readFile(join(directory, "manifest.json"))));
+    // A file of another origin, even one ending in .tmp, still refuses the directory.
+    await writeFile(join(directory, "notes.tmp"), "foreign");
+    const refused = await run(["import", "prepare", input, "--out", directory]);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("is not empty (notes.tmp)");
+    await rm(join(directory, "notes.tmp"));
+    // A directory wearing a temporary name is not this helper's file either.
+    await mkdir(join(directory, "manifest.json.tmp"));
+    const blocked = await run(["import", "prepare", input, "--out", directory]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.stderr).toContain("is not empty (manifest.json.tmp)");
+  });
+
   test("prints usage for bad arguments", async () => {
     expect((await run(["import"])).code).toBe(2);
     expect((await run(["export", "prepare", "x"])).stderr).toContain("Unknown command");
@@ -1910,6 +1941,89 @@ describe("hue traces import upload", () => {
     expect(result.sleeps).toEqual([1000]);
     expect(server.posts(batch!.sha256)).toBe(2);
     expect(server.completed()).toBe(true);
+  });
+
+  test("stops and reports when progress.json cannot be written, letting no rejection escape", async () => {
+    const { directory } = await preparedBundle();
+    const server = hue();
+    const file = await authorizationFile(directory, [TOKEN, server.url]);
+    // The checkpoint's temporary path is taken by a directory: every write fails with EISDIR,
+    // whatever this process may read or write (permissions are not relied on).
+    await mkdir(join(directory, "progress.json.tmp"));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const result = await run([
+        "import",
+        "upload",
+        directory,
+        "--authorization-file",
+        file,
+        "--json",
+      ]);
+      expect(result.code).toBe(1);
+      const report = JSON.parse(result.stdout) as Record<string, any>;
+      expect(report.state).toBe("failed");
+      expect(report.error.code).toBe("progress_write_failed");
+      expect(report.error.message).toContain("EISDIR");
+      expect(report.error.message).toContain(directory);
+      expect(report.next_action).toContain("Fix the reported problem");
+      expect(server.completed()).toBe(false);
+      // Nothing was scheduled after the failure: most of the six traces were never sent.
+      expect(server.requests.filter((item) => item.path.endsWith("/batches")).length).toBeLessThan(
+        6,
+      );
+      expect(server.requests.some((item) => item.path.endsWith("/complete"))).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  test("remembers a delayed progress write that fails instead of rejecting from its timer", async () => {
+    const root = await scratch();
+    const path = join(root, "progress.json");
+    const progress = new Progress(
+      path,
+      {
+        version: 1,
+        manifest_digest: "f".repeat(64),
+        import_url: `https://hue.example/api/v1/trace-imports/${IMPORT_ID}`,
+        traces: {},
+      },
+      100,
+    );
+    let failures = 0;
+    progress.onFailure = () => failures++;
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      progress.trace("a".repeat(32)).state = "verified";
+      await progress.changed();
+      expect(JSON.parse(await readFile(path, "utf8")).traces).toHaveProperty("a".repeat(32));
+      await mkdir(`${path}.tmp`);
+      // Within the interval: scheduled on the timer, not awaited by the caller.
+      progress.trace("b".repeat(32));
+      await progress.changed();
+      expect(progress.failure).toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(progress.failure?.code).toBe("EISDIR");
+      expect(failures).toBe(1);
+      // Nothing more is written or reported twice; the earlier file stands.
+      progress.trace("c".repeat(32));
+      await progress.changed();
+      await progress.flush();
+      expect(failures).toBe(1);
+      expect(Object.keys(JSON.parse(await readFile(path, "utf8")).traces)).toEqual([
+        "a".repeat(32),
+      ]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   test("records a conflict, completes what it can and reports what Hue still lists", async () => {

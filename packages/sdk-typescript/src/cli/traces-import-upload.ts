@@ -233,11 +233,16 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 /** Writes `progress.json` (mode 0600, through a temporary file and an atomic rename) after each
  * verified step, coalescing writes that fall within the interval. */
-class Progress {
+export class Progress {
   private dirty = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private writing: Promise<void> = Promise.resolve();
   private lastWrite = 0;
+  /** The first write that failed (the disk full, the directory gone or no longer writable);
+   * nothing is written after it, and the upload reports it instead of crashing. */
+  failure: NodeJS.ErrnoException | undefined;
+  /** Called once, when a write first fails. */
+  onFailure: (() => void) | undefined;
 
   constructor(
     private readonly path: string,
@@ -254,7 +259,8 @@ class Progress {
     return trace;
   }
 
-  /** Records a step; the file is written now, or at the end of the interval. */
+  /** Records a step; the file is written now, or at the end of the interval. Never rejects: a
+   * write that fails is kept in {@link failure}, whether it was awaited or ran from the timer. */
   changed(): Promise<void> {
     this.dirty = true;
     const due = this.lastWrite + this.intervalMs - Date.now();
@@ -266,18 +272,25 @@ class Progress {
     return Promise.resolve();
   }
 
+  /** Writes what changed, now. Never rejects; see {@link failure}. */
   flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
-    if (!this.dirty) return this.writing;
+    if (!this.dirty || this.failure) return this.writing;
     this.dirty = false;
     this.lastWrite = Date.now();
     const bytes = JSON.stringify(this.file);
     this.writing = this.writing.then(async () => {
-      await writeFile(`${this.path}.tmp`, bytes, { mode: 0o600 });
-      await rename(`${this.path}.tmp`, this.path);
+      if (this.failure) return;
+      try {
+        await writeFile(`${this.path}.tmp`, bytes, { mode: 0o600 });
+        await rename(`${this.path}.tmp`, this.path);
+      } catch (error) {
+        this.failure = error as NodeJS.ErrnoException;
+        this.onFailure?.();
+      }
     });
     return this.writing;
   }
@@ -364,6 +377,14 @@ export async function uploadTraceBundle(
 
   const stopping = new AbortController();
   const forced = new AbortController();
+  // A progress write that fails ends the run as a stop request does: nothing more is scheduled,
+  // the requests in flight finish, and the report names the failure and the directory to fix.
+  checkpoint.onFailure = () => stopping.abort();
+  const progressWriteFailure = (error: NodeJS.ErrnoException) =>
+    new UploadStop(
+      `${PROGRESS_FILE} could not be written in ${options.directory}${error.code ? ` (${error.code})` : ""}; the steps since its last write are not recorded for the next run. Fix the directory and run the same command again.`,
+      "progress_write_failed",
+    );
   const removeInterrupt = (io.onInterrupt ?? defaultOnInterrupt)(() => {
     if (!stopping.signal.aborted) stopping.abort();
     else forced.abort();
@@ -838,6 +859,7 @@ export async function uploadTraceBundle(
         if (outcome.reason instanceof Interrupted) continue;
         throw outcome.reason;
       }
+    if (checkpoint.failure) throw progressWriteFailure(checkpoint.failure);
     if (stopping.signal.aborted) throw new Interrupted();
 
     const reconciled = await request("POST", `${base}/reconcile`);
@@ -868,7 +890,15 @@ export async function uploadTraceBundle(
     else throw error;
   } finally {
     removeInterrupt();
-    await checkpoint.flush().catch(() => {});
+    await checkpoint.flush();
+  }
+  // A write that failed at the end, or beside another stop, is still reported: a completed import
+  // needs no progress file, so it is a note there; anywhere else it is the failure to fix first.
+  if (checkpoint.failure) {
+    const stop = progressWriteFailure(checkpoint.failure);
+    if (completed) note = stop.message;
+    else if (failure && failure.code !== stop.code) note = stop.message;
+    else failure = stop;
   }
   countSaved();
   for (const trace of Object.values(checkpoint.file.traces)) {

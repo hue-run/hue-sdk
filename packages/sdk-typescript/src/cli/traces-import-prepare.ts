@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { sdkVersion } from "../version.js";
 import {
@@ -223,11 +223,25 @@ async function prepareOutputDirectory(directory: string): Promise<void> {
     throw new PrepareError(
       `${directory} holds an upload in progress (${PROGRESS_FILE}); choose another --out`,
     );
-  const foreign = existing.filter(
-    (name) => name !== MANIFEST_FILE && !BATCH_FILE.test(name) && !BLOB_FILE.test(name),
-  );
+  const own = (name: string) =>
+    name === MANIFEST_FILE || BATCH_FILE.test(name) || BLOB_FILE.test(name);
+  /** A temporary file this helper writes before its rename (`<file>.tmp`), left behind when a
+   * preparation or an upload was interrupted between the two. */
+  const ownTemporary = (name: string) =>
+    name.endsWith(".tmp") && (own(name.slice(0, -4)) || name.slice(0, -4) === PROGRESS_FILE);
+  const foreign = existing.filter((name) => !own(name) && !ownTemporary(name));
   if (foreign.length)
     throw new PrepareError(`${directory} is not empty (${foreign[0]}); choose another --out`);
+  for (const name of existing.filter(ownTemporary)) {
+    const path = join(directory, name);
+    const regular = await stat(path)
+      .then((info) => info.isFile())
+      .catch(() => false);
+    if (!regular)
+      throw new PrepareError(`${directory} is not empty (${name}); choose another --out`);
+    // The file it stood for is written again from scratch.
+    await rm(path, { force: true });
+  }
 }
 
 async function writePrivate(path: string, bytes: Uint8Array | string): Promise<void> {
