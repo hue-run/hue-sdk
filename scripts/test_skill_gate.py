@@ -251,7 +251,7 @@ class SkillKeyGateTests(unittest.TestCase):
     def test_gate_check_requires_the_section_before_install(self):
         text = SKILL.read_text()
         key = f"## {KEY_SECTION}\n{section(text, KEY_SECTION)}"
-        capture = "## Capture and instrument full traces\n"
+        capture = "## Capture content and media\n"
         moved = text.replace(key, "").replace(capture, key + capture)
         self.assertEqual(
             gate_problems(moved), ["key section must come before install instructions"]
