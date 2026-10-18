@@ -24,7 +24,7 @@ export interface WorldModel {
   lastUsedAt: string | null;
   /** Committed evidence sequence used for reconstruction. */
   evidenceCutoff: number;
-  /** Publication or erasure state. */
+  /** Legacy retention or erasure state. Read `processing` for current indexing progress. */
   status: "ready" | "preparing" | "erased";
   /** Retained and indexed progress, when reported by Hue. */
   processing?: WorldModelProcessing;
@@ -58,7 +58,7 @@ export interface StartingWorld {
   evidenceCutoff: number;
   /** Immutable starting-state digest, or null while preparation is incomplete. */
   digest: string | null;
-  /** Publication or erasure state. */
+  /** Starting-state preparation status. */
   status: "ready" | "preparing";
 }
 /** Bounded pagination over World models or their accounts. */

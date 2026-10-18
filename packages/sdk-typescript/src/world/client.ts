@@ -111,7 +111,7 @@ const REQUEST_BOUNDS: JsonBounds = { ...valueBounds, bytes: 1024 * 1024 };
  */
 const ENVIRONMENT_PUBLICATION_BOUNDS = aggregateBounds(240_000 + 32);
 
-/** Typed client for authored environments, isolated runs and immutable journals. */
+/** Typed client for authored Worlds, isolated World instances and immutable journals. */
 export class WorldClient {
   /** Validated Hue origin. */
   readonly baseUrl: string;

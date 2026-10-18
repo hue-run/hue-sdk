@@ -57,3 +57,11 @@ validation and transport behavior with the compatibility methods. Run
 routes, identical request bodies, runtime IDs, account tokens and opaque model cursors. The
 installed-package verifier runs the same file against the packed exports. World APIs in this
 checkout remain subject to the release boundary in `WORLDS.md`.
+
+Run `bun test tests/world-readiness.test.ts tests/world-models.test.ts` from
+`packages/sdk-typescript` and `uv run --frozen --all-groups pytest
+tests/test_world_readiness.py tests/test_world_preparation.py -q` from `packages/sdk-python`
+for optional processing and preparation metadata, the unchanged two-minute preparation wait,
+same-key retry identity, cancellation, terminal refusals without repeated requests, oversized
+metadata rejection, and sanitized error content. Build and install an npm tarball or Python
+wheel when changing these exported types or transport paths.
