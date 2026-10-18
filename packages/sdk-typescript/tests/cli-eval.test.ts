@@ -13,7 +13,14 @@ import { derivedAgentKey, explain, renderTable, spawnAgentCommand } from "../src
 import { CheckpointIdentityError } from "../src/evals/checkpoint.js";
 import type { CaseVerdict, ExperimentVerdicts } from "../src/evals/verdicts.js";
 import { TargetCancelledError } from "../src/evals.js";
-import type { Completion, Execution, Experiment, StoredResult, Subject } from "../src/evals.js";
+import type {
+  Completion,
+  Execution,
+  Experiment,
+  ScorerVersion,
+  StoredResult,
+  Subject,
+} from "../src/evals.js";
 
 const cli = join(import.meta.dir, "../src/setup/cli.ts");
 const key = "synthetic-eval-key-canary";
@@ -144,6 +151,7 @@ function hueStandIn(
     register: [] as Record<string, unknown>[],
     claims: 0,
     localRuns: [] as Record<string, unknown>[],
+    judgeJobs: [] as { runId: string; body: Record<string, unknown> }[],
   };
   const queue: { runId: string; experimentId: string; state: string; workerId?: string }[] = [];
   const agentId = randomUUID();
@@ -228,6 +236,13 @@ function hueStandIn(
       }
       const body =
         request.method === "GET" ? {} : ((await request.json()) as Record<string, unknown>);
+      if (path === "/judge-budget")
+        return Response.json({ configured: true, enabled: true, blocked: false });
+      const judgeJobs = /^\/evaluation-runs\/([^/]+)\/judge-jobs$/.exec(path);
+      if (judgeJobs && request.method === "POST") {
+        calls.judgeJobs.push({ runId: judgeJobs[1]!, body });
+        return Response.json({ ids: (body.jobs as unknown[]).map(() => randomUUID()) });
+      }
       if (path === "/case-conversions") {
         const summaries = [scenario, draftScenario].map(({ publication: _pins, ...item }) => item);
         return Response.json({ items: summaries, nextCursor: null });
@@ -870,6 +885,60 @@ test("an agent command's key skips its interpreter, a Windows executable name in
 });
 
 describe("hue eval", () => {
+  test(
+    "simulation mode requests pinned model judges only with --judges",
+    async () => {
+      const f = hueStandIn();
+      const cwd = await workspace();
+      const version = f.scorerVersion as unknown as ScorerVersion;
+      version.definition = {
+        kind: "llm_judge",
+        config: {
+          model: "synthetic/judge",
+          provider: "synthetic",
+          rubric: "Check the reply",
+          bindings: [],
+          maxOutputTokens: 64,
+          timeoutMs: 1000,
+        },
+        metrics: [
+          { name: "refund_recorded", type: "boolean" },
+          { name: "tone", type: "text" },
+        ],
+      };
+      try {
+        const result = await hue(
+          [
+            "--case",
+            f.scenario.id,
+            "--command",
+            `${process.execPath} agent-command.mjs`,
+            "--origin",
+            f.baseUrl,
+            "--judges",
+            "--wait",
+            "0",
+            "--json",
+            "--checkpoint-dir",
+            join(cwd, "checkpoints"),
+          ],
+          { cwd },
+        );
+        expect(result.status).toBe(0);
+        const document = JSON.parse(result.stdout) as { runId: string };
+        expect(f.calls.judgeJobs).toHaveLength(1);
+        expect(f.calls.judgeJobs[0]).toMatchObject({
+          runId: document.runId,
+          body: { jobs: [{ scorerVersionId: version.id }] },
+        });
+      } finally {
+        f.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
   test("a key already in the shell ignores ./.env.hue, so the file cannot send it to another origin", async () => {
     const f = hueStandIn();
     const cwd = await workspace();

@@ -171,6 +171,8 @@ Output and limits:
                                   arrive, which Hue attaches once its export is complete
   --timeout <seconds>             Per-case --command timeout (default: 600)
   --wait <seconds>                Verdict wait after the run finishes (default: 300)
+  --judges                        Request pinned hosted model judges after outputs upload
+                                  (off by default; uses the project's judge budget)
   -h, --help                      Show this help
 
 HUE_API_KEY must be a "Read and write" project key; it is never printed.
@@ -231,6 +233,7 @@ function parse(argv: string[]) {
         content: { type: "boolean" },
         "no-content": { type: "boolean", default: false },
         "no-output": { type: "boolean", default: false },
+        judges: { type: "boolean", default: false },
         "trace-not-accepted": { type: "string" },
         "save-version": { type: "boolean", default: false },
         check: { type: "boolean", default: false },
@@ -1254,22 +1257,108 @@ function withTelemetryFailures(
   return { ...verdicts, summary: { cases, totals } };
 }
 
+/** Requests only the run's pinned model judges. Stable batches let an interrupted CLI resume
+ * dispatch without creating a second paid job for the same scoring item and evaluator. */
+export async function dispatchPinnedJudges(
+  client: Pick<
+    EvaluationClient,
+    "getExperiment" | "listEvaluationItems" | "getJudgeBudget" | "createJudgeJobs"
+  >,
+  experimentId: string,
+  subjectIds: string[],
+  signal?: AbortSignal,
+): Promise<number> {
+  signal?.throwIfAborted();
+  const experiment = await client.getExperiment(experimentId);
+  const run = experiment.evaluation;
+  const scorerVersionIds = [
+    ...new Set(
+      run.scorerVersions
+        .filter((version) => version.definition.kind === "llm_judge")
+        .map((version) => version.id),
+    ),
+  ].sort();
+  if (!scorerVersionIds.length) return 0;
+  const subjects = new Set(subjectIds);
+  const items = new Set<string>();
+  let after: string | undefined;
+  do {
+    signal?.throwIfAborted();
+    const page = await client.listEvaluationItems(run.id, { after });
+    for (const item of page.items)
+      if (item.hasOutput && subjects.has(item.subjectId)) items.add(item.id);
+    after = page.nextCursor ?? undefined;
+  } while (after);
+  if (!items.size) return 0;
+  const budget = await client.getJudgeBudget();
+  if (!budget.configured || !budget.enabled || budget.blocked)
+    throw new Error(
+      "Hosted judges are unavailable for this project; check its judge budget in Hue",
+    );
+  let count = 0;
+  let jobs: { evaluationItemId: string; scorerVersionId: string }[] = [];
+  const dispatch = async () => {
+    signal?.throwIfAborted();
+    await client.createJudgeJobs(run.id, {
+      idempotencyKey: `cli-judges-${digest({ runId: run.id, jobs })}`,
+      jobs,
+    });
+    count += jobs.length;
+    jobs = [];
+  };
+  for (const evaluationItemId of [...items].sort()) {
+    for (const scorerVersionId of scorerVersionIds) {
+      jobs.push({ evaluationItemId, scorerVersionId });
+      if (jobs.length === 100) await dispatch();
+    }
+  }
+  if (jobs.length) await dispatch();
+  return count;
+}
+
+interface UploadedRun {
+  experimentId: string;
+  subjectIds: string[];
+  runUrl: string;
+  extra?: Record<string, JsonValue>;
+  telemetryNotAccepted?: TelemetryNotAccepted[];
+}
+interface PendingJudgeDispatch {
+  selectionDigest: string;
+  run: UploadedRun;
+}
+interface JudgeCheckpoint {
+  store: CheckpointStore;
+  selectionDigest: string;
+}
+
 /** Waits for Hue's verdicts, prints them (table or JSON, with the optional baseline) and returns the exit code. */
 async function reportVerdicts(
   client: EvaluationClient,
   values: ReturnType<typeof parse>["values"],
-  run: {
-    experimentId: string;
-    subjectIds: string[];
-    runUrl: string;
-    extra?: Record<string, JsonValue>;
-    telemetryNotAccepted?: TelemetryNotAccepted[];
-  },
+  run: UploadedRun,
   baselineId: string | undefined,
   output: Output,
   signal: AbortSignal,
+  judging?: JudgeCheckpoint,
 ): Promise<number> {
   const wait = integer("wait", values.wait, 300, 0, 86_400);
+  if (values.judges) {
+    if (!judging) throw new Error("Hosted judge recovery checkpoint is unavailable");
+    await judging.store.write("pending", {
+      selectionDigest: judging.selectionDigest,
+      run: {
+        experimentId: run.experimentId,
+        subjectIds: run.subjectIds,
+        runUrl: run.runUrl,
+        ...(run.extra ? { extra: run.extra } : {}),
+        ...(run.telemetryNotAccepted ? { telemetryNotAccepted: run.telemetryNotAccepted } : {}),
+      },
+    });
+    const count = await dispatchPinnedJudges(client, run.experimentId, run.subjectIds, signal);
+    await judging.store.write("pending", null);
+    if (count) output.log(`Requested ${count} hosted judge check${count === 1 ? "" : "s"}.`);
+  }
   output.log("Waiting for Hue checks...");
   const verdicts = withTelemetryFailures(
     await collectExperimentVerdicts(client, {
@@ -1359,98 +1448,134 @@ async function runOnce(
   }
   const runName = values.name ?? defaultRunName(agent);
   const project = await client.checkConnection();
-  if (selection.direct)
-    return runDirect(
-      {
-        client,
-        values,
-        pins,
-        runName,
-        projectId: project.id,
-        agent,
-        agents,
-        hue,
-        output,
-        signal,
-        concurrency,
-        baselineId,
-      },
-      connection,
-    );
-  const environmentClient = createEnvironmentClient(connection);
-  const checkpointDirectory = await prepareCheckpointDirectory(
-    values["checkpoint-dir"],
-    agent.key,
-    project.id,
-    "simulation",
-  );
-  const caseKeys = new Map<string, string>();
-  let runUrl = "";
-  const telemetry = telemetryReporter(output);
-  const report = await runSimulation({
-    client,
-    environmentClient,
-    hue,
-    checkpointDirectory,
-    definition: {
-      kind: "pins",
-      datasetVersionId: pins.datasetVersionId,
-      scorerVersionIds: pins.scorerVersionIds,
-    },
-    runName,
-    // Outputs, error messages and explanations are stored unless opted out; --content governs
-    // only the telemetry.
-    persistResultContent: !values["no-output"],
-    traceEvidence: { mode: "required" },
-    // A case whose telemetry Hue did not accept fails instead of staying started.
-    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
-    onTelemetryNotAccepted: telemetry.report,
-    concurrency,
-    agentRevision: agent.revision,
-    // The CLI adapts to whatever the deployment serves; the library warning is for code that
-    // still reads the legacy capability itself.
-    deprecationWarnings: false,
-    signal,
-    target: agents.simulation,
-    async onProgress(event: SimulationProgress) {
-      if (event.type === "run_created") {
-        runUrl = event.runUrl;
-        output.log(`Run: ${event.runUrl}`);
-        output.log(`Experiment: ${event.experimentId}`);
-        try {
-          let after: string | undefined;
-          do {
-            const page = await client.listExperimentItems(event.experimentId, { after });
-            for (const item of page.items) caseKeys.set(item.id, item.externalKey);
-            after = page.nextCursor ?? undefined;
-          } while (after);
-        } catch {
-          // Progress labels fall back to case IDs; the run itself is unaffected.
-        }
-        return;
+  const judging = values.judges
+    ? {
+        store: await CheckpointStore.acquire(
+          checkpointPath(
+            await prepareCheckpointDirectory(
+              values["checkpoint-dir"],
+              agent.key,
+              project.id,
+              selection.direct ? "direct" : "simulation",
+            ),
+            ["judge-dispatch", "judge checkpoint"],
+          ),
+          { kind: "cli-judge-dispatch", projectId: project.id, baseUrl: connection.baseUrl },
+        ),
+        selectionDigest: digest({
+          datasetVersionId: pins.datasetVersionId,
+          scorerVersionIds: [...pins.scorerVersionIds].sort(),
+          agent,
+        }),
       }
-      const label = caseKeys.get(event.caseId) ?? event.caseId;
-      if (event.type === "world_created") output.log(`[${label}] world created`);
-      else if (event.type === "target_started") output.log(`[${label}] agent started`);
-      else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
-      else if (event.type === "attempt_prepared")
-        output.log(`[${label}] attempt prepared: ${event.status}`);
-    },
-  });
-  telemetry.rest(report.telemetryNotAccepted);
-  return reportVerdicts(
-    client,
-    values,
-    {
-      experimentId: report.experimentId,
-      subjectIds: report.subjectIds,
-      runUrl: runUrl || report.runUrl,
-      telemetryNotAccepted: report.telemetryNotAccepted,
-    },
-    baselineId,
-    output,
-    signal,
-  );
+    : undefined;
+  try {
+    const pending = await judging?.store.read<PendingJudgeDispatch>("pending");
+    if (pending) {
+      if (pending.selectionDigest !== judging!.selectionDigest)
+        throw new Error(
+          "Recover the pending judge dispatch with the unchanged command or use another --checkpoint-dir",
+        );
+      output.log(`Resuming hosted checks: ${pending.run.runUrl}`);
+      return await reportVerdicts(client, values, pending.run, baselineId, output, signal, judging);
+    }
+    if (selection.direct)
+      return await runDirect(
+        {
+          client,
+          values,
+          pins,
+          runName,
+          projectId: project.id,
+          agent,
+          agents,
+          hue,
+          output,
+          signal,
+          concurrency,
+          baselineId,
+          judging,
+        },
+        connection,
+      );
+    const environmentClient = createEnvironmentClient(connection);
+    const checkpointDirectory = await prepareCheckpointDirectory(
+      values["checkpoint-dir"],
+      agent.key,
+      project.id,
+      "simulation",
+    );
+    const caseKeys = new Map<string, string>();
+    let runUrl = "";
+    const telemetry = telemetryReporter(output);
+    const report = await runSimulation({
+      client,
+      environmentClient,
+      hue,
+      checkpointDirectory,
+      definition: {
+        kind: "pins",
+        datasetVersionId: pins.datasetVersionId,
+        scorerVersionIds: pins.scorerVersionIds,
+      },
+      runName,
+      // Outputs, error messages and explanations are stored unless opted out; --content governs
+      // only the telemetry.
+      persistResultContent: !values["no-output"],
+      traceEvidence: { mode: "required" },
+      // A case whose telemetry Hue did not accept fails instead of staying started.
+      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
+      onTelemetryNotAccepted: telemetry.report,
+      concurrency,
+      agentRevision: agent.revision,
+      // The CLI adapts to whatever the deployment serves; the library warning is for code that
+      // still reads the legacy capability itself.
+      deprecationWarnings: false,
+      signal,
+      target: agents.simulation,
+      async onProgress(event: SimulationProgress) {
+        if (event.type === "run_created") {
+          runUrl = event.runUrl;
+          output.log(`Run: ${event.runUrl}`);
+          output.log(`Experiment: ${event.experimentId}`);
+          try {
+            let after: string | undefined;
+            do {
+              const page = await client.listExperimentItems(event.experimentId, { after });
+              for (const item of page.items) caseKeys.set(item.id, item.externalKey);
+              after = page.nextCursor ?? undefined;
+            } while (after);
+          } catch {
+            // Progress labels fall back to case IDs; the run itself is unaffected.
+          }
+          return;
+        }
+        const label = caseKeys.get(event.caseId) ?? event.caseId;
+        if (event.type === "world_created") output.log(`[${label}] world created`);
+        else if (event.type === "target_started") output.log(`[${label}] agent started`);
+        else if (event.type === "world_sealed") output.log(`[${label}] world sealed`);
+        else if (event.type === "attempt_prepared")
+          output.log(`[${label}] attempt prepared: ${event.status}`);
+      },
+    });
+    telemetry.rest(report.telemetryNotAccepted);
+    return await reportVerdicts(
+      client,
+      values,
+      {
+        experimentId: report.experimentId,
+        subjectIds: report.subjectIds,
+        runUrl: runUrl || report.runUrl,
+        telemetryNotAccepted: report.telemetryNotAccepted,
+      },
+      baselineId,
+      output,
+      signal,
+      judging,
+    );
+  } finally {
+    await judging?.store.release();
+  }
 }
 
 /**
@@ -1558,6 +1683,7 @@ async function runDirect(
     signal: AbortSignal;
     concurrency: number;
     baselineId: string | undefined;
+    judging?: JudgeCheckpoint;
   },
   connection: Connection,
 ): Promise<number> {
@@ -1671,6 +1797,7 @@ async function runDirect(
     run.baselineId,
     output,
     signal,
+    run.judging,
   );
 }
 
@@ -1687,7 +1814,7 @@ async function runWorker(
   const environmentClient = createEnvironmentClient(connection);
   const wait = integer("wait", values.wait, 300, 0, 86_400);
   const concurrency = integer("concurrency", values.concurrency, 1, 1, 100);
-  const maxRuns =
+  let maxRuns =
     values["max-runs"] === undefined
       ? undefined
       : integer("max-runs", values["max-runs"], 1, 1, 1_000_000);
@@ -1699,124 +1826,169 @@ async function runWorker(
     "worker",
     slug(agent.revision) || "dev",
   );
-  let current: LocalAgentClaim | undefined;
-  client.onRegistered = (registered) => {
-    output.log(
-      `Registered agent ${registered.key} (revision ${registered.revision}) with ${connection.baseUrl}; waiting for runs launched from Hue${maxRuns ? ` (stops after ${maxRuns})` : " (Ctrl+C to stop)"}`,
-    );
-  };
-  client.onClaimed = (claim) => {
-    current = claim;
-    output.log(
-      `Claimed run ${claim.runId}: ${new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString()}`,
-    );
-  };
-  const telemetry = telemetryReporter(output);
-  // A command can use the same stdin contract for both case kinds. Existing adapter files
-  // may require a world, so their direct context remains an explicit capability opt-in.
-  const direct = values.command !== undefined || values.capability?.includes("direct:v1");
-  await runLocalAgent({
-    client,
-    environmentClient,
-    hue,
-    checkpointDirectory,
-    agent: {
-      key: agent.key,
-      name: agent.name,
-      revision: agent.revision,
-      capabilities: ["environment:v1", ...(values.capability ?? [])],
-    },
-    scorers: [],
-    concurrency,
-    traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
-    onTelemetryNotAccepted: telemetry.report,
-    deprecationWarnings: false,
-    signal,
-    ...(maxRuns === undefined ? {} : { maxRuns }),
-    onPollError(error) {
-      output.error(`Hue did not answer the poll (${explain(error)}); polling again`);
-    },
-    onRunFailed(failure) {
-      const run = `Run ${failure.runId}`;
-      if (failure.outcome === "retry") {
-        const waitMillis = failure.waitMillis ?? 0;
-        output.error(
-          `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round(waitMillis / 1000)} s`,
-        );
-      } else if (failure.outcome === "attention")
-        output.error(
-          `${run} needs attention (${explain(failure.error)}); requeue or cancel it from its run page`,
-        );
-      else
-        output.error(`${run} was released or cancelled in Hue; its outcome here is not recorded`);
-    },
-    target(inputs, tools: Record<string, EnvironmentTool>, context) {
-      output.log(`[${context.item.externalKey}] agent started`);
-      return agents.simulation(inputs, {
-        config: context.config,
-        item: context.item,
-        executionId: context.executionId,
-        environmentRunId: context.environmentRunId,
-        tools,
-        ...(context.world ? { world: context.world } : {}),
-        ...(context.mcp ? { mcp: context.mcp } : {}),
-        ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
-        files: context.files,
-        outputDirectory: context.outputDirectory,
-        // The case's own signal: the worker stopping, or the world's deadline passing, both
-        // end a command that would otherwise keep running past its timed-out case.
-        signal: context.signal ?? signal,
-      });
-    },
-    ...(direct
-      ? {
-          directTarget(inputs: JsonValue, context: LocalAgentDirectContext) {
-            output.log(`[${context.item.externalKey}] agent started`);
-            return agents.direct(inputs, {
-              mode: "direct",
-              config: context.config,
-              item: context.item,
-              executionId: context.executionId,
-              files: context.files,
-              outputDirectory: context.outputDirectory,
-              signal: context.signal ?? signal,
-            });
+  const judging = values.judges
+    ? {
+        store: await CheckpointStore.acquire(
+          checkpointPath(checkpointDirectory, ["judge-dispatch", "judge checkpoint"]),
+          {
+            kind: "cli-judge-dispatch",
+            projectId: project.id,
+            baseUrl: connection.baseUrl,
           },
-        }
-      : {}),
-    async onCompleted(report) {
-      output.log(
-        `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
-      );
-      telemetry.rest(report.telemetryNotAccepted);
-      if (!current) return;
-      output.log("Waiting for Hue checks...");
-      try {
-        const verdicts = withTelemetryFailures(
-          await collectExperimentVerdicts(client, {
-            experimentId: current.experimentId,
-            subjectIds: report.subjectIds,
-            timeoutMillis: wait * 1000,
-            signal,
-          }),
-          report.telemetryNotAccepted,
-        );
-        if (signal.aborted) return;
-        if (values.json)
-          process.stdout.write(
-            `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
-          );
-        else renderTable(verdicts, output);
-      } catch (error) {
-        output.error(`Unable to read verdicts: ${explain(error)}`);
+        ),
+        selectionDigest: digest(agent),
       }
-    },
-  });
-  if (signal.aborted) {
-    process.stderr.write("Interrupted.\n");
-    return 130;
+    : undefined;
+  try {
+    const pending = await judging?.store.read<PendingJudgeDispatch>("pending");
+    if (pending) {
+      if (pending.selectionDigest !== judging!.selectionDigest)
+        throw new Error(
+          "Recover the pending judge dispatch with the unchanged command or use another --checkpoint-dir",
+        );
+      output.log(`Resuming hosted checks: ${pending.run.runUrl}`);
+      await reportVerdicts(client, values, pending.run, undefined, output, signal, judging);
+      if (signal.aborted) return 130;
+      if (maxRuns !== undefined && --maxRuns === 0) return 0;
+    }
+    let current: LocalAgentClaim | undefined;
+    client.onRegistered = (registered) => {
+      output.log(
+        `Registered agent ${registered.key} (revision ${registered.revision}) with ${connection.baseUrl}; waiting for runs launched from Hue${maxRuns ? ` (stops after ${maxRuns})` : " (Ctrl+C to stop)"}`,
+      );
+    };
+    client.onClaimed = (claim) => {
+      current = claim;
+      output.log(
+        `Claimed run ${claim.runId}: ${new URL(`/runs/${claim.experimentId}`, connection.baseUrl).toString()}`,
+      );
+    };
+    const telemetry = telemetryReporter(output);
+    // A command can use the same stdin contract for both case kinds. Existing adapter files
+    // may require a world, so their direct context remains an explicit capability opt-in.
+    const direct = values.command !== undefined || values.capability?.includes("direct:v1");
+    await runLocalAgent({
+      client,
+      environmentClient,
+      hue,
+      checkpointDirectory,
+      agent: {
+        key: agent.key,
+        name: agent.name,
+        revision: agent.revision,
+        capabilities: ["environment:v1", ...(values.capability ?? [])],
+      },
+      scorers: [],
+      concurrency,
+      traceNotAccepted: traceNotAcceptedPolicy(values["trace-not-accepted"]),
+      onTelemetryNotAccepted: telemetry.report,
+      deprecationWarnings: false,
+      signal,
+      ...(maxRuns === undefined ? {} : { maxRuns }),
+      onPollError(error) {
+        output.error(`Hue did not answer the poll (${explain(error)}); polling again`);
+      },
+      onRunFailed(failure) {
+        const run = `Run ${failure.runId}`;
+        if (failure.outcome === "retry") {
+          const waitMillis = failure.waitMillis ?? 0;
+          output.error(
+            `${run} attempt ${failure.attempt} failed (${explain(failure.error)}); resuming in ${Math.round(waitMillis / 1000)} s`,
+          );
+        } else if (failure.outcome === "attention")
+          output.error(
+            `${run} needs attention (${explain(failure.error)}); requeue or cancel it from its run page`,
+          );
+        else
+          output.error(`${run} was released or cancelled in Hue; its outcome here is not recorded`);
+      },
+      target(inputs, tools: Record<string, EnvironmentTool>, context) {
+        output.log(`[${context.item.externalKey}] agent started`);
+        return agents.simulation(inputs, {
+          config: context.config,
+          item: context.item,
+          executionId: context.executionId,
+          environmentRunId: context.environmentRunId,
+          tools,
+          ...(context.world ? { world: context.world } : {}),
+          ...(context.mcp ? { mcp: context.mcp } : {}),
+          ...(context.connectionBundle ? { connectionBundle: context.connectionBundle } : {}),
+          files: context.files,
+          outputDirectory: context.outputDirectory,
+          // The case's own signal: the worker stopping, or the world's deadline passing, both
+          // end a command that would otherwise keep running past its timed-out case.
+          signal: context.signal ?? signal,
+        });
+      },
+      ...(direct
+        ? {
+            directTarget(inputs: JsonValue, context: LocalAgentDirectContext) {
+              output.log(`[${context.item.externalKey}] agent started`);
+              return agents.direct(inputs, {
+                mode: "direct",
+                config: context.config,
+                item: context.item,
+                executionId: context.executionId,
+                files: context.files,
+                outputDirectory: context.outputDirectory,
+                signal: context.signal ?? signal,
+              });
+            },
+          }
+        : {}),
+      async onCompleted(report) {
+        output.log(
+          `Run ${report.runId} completed: ${report.subjectIds.length} case${report.subjectIds.length === 1 ? "" : "s"}`,
+        );
+        telemetry.rest(report.telemetryNotAccepted);
+        if (!current) return;
+        if (values.judges) {
+          await reportVerdicts(
+            client,
+            values,
+            {
+              experimentId: current.experimentId,
+              subjectIds: report.subjectIds,
+              runUrl: new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(),
+              telemetryNotAccepted: report.telemetryNotAccepted,
+            },
+            undefined,
+            output,
+            signal,
+            judging,
+          );
+          return;
+        }
+        try {
+          output.log("Waiting for Hue checks...");
+          const verdicts = withTelemetryFailures(
+            await collectExperimentVerdicts(client, {
+              experimentId: current.experimentId,
+              subjectIds: report.subjectIds,
+              timeoutMillis: wait * 1000,
+              signal,
+            }),
+            report.telemetryNotAccepted,
+          );
+          if (signal.aborted) return;
+          if (values.json)
+            process.stdout.write(
+              `${JSON.stringify(toJson(verdicts, new URL(`/runs/${current.experimentId}`, connection.baseUrl).toString(), undefined, {}, report.telemetryNotAccepted))}\n`,
+            );
+          else renderTable(verdicts, output);
+        } catch (error) {
+          output.error(`Unable to read verdicts: ${explain(error)}`);
+        }
+      },
+    });
+    if (signal.aborted) {
+      process.stderr.write("Interrupted.\n");
+      return 130;
+    }
+    return 0;
+  } finally {
+    await judging?.store.release();
   }
-  return 0;
 }
 
 /**
@@ -1858,6 +2030,8 @@ export async function runEvalCommand(argv: string[]): Promise<number> {
     worker = values.worker;
     if (values.content && values["no-content"])
       throw new UsageError("Choose either --content or --no-content");
+    if (values.judges && values["no-output"])
+      throw new UsageError("--judges requires stored case outputs; remove --no-output");
     // A usage error before anything is prepared or created: no run is left to recover from it.
     traceNotAcceptedPolicy(values["trace-not-accepted"]);
     json = values.json;

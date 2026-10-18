@@ -170,6 +170,10 @@ function documentStandIn(
     refuseTraces?: boolean;
     /** Grade as a scorer that never reads the execution state. */
     ignoreExecutionState?: boolean;
+    /** A separately dispatched model judge, with no real provider. */
+    hostedJudge?: { pending?: boolean; blocked?: boolean };
+    /** Accept a judge dispatch, then drop this many response bodies. */
+    lostJudgeAcknowledgements?: number;
     /** Scorer versions (by index) Hue records as not applicable to the case; `forged` answers the
      * same skipped result and evidence without Hue's `notApplicable` flag. */
     notApplicable?: { versions: number[]; forged?: boolean };
@@ -335,6 +339,19 @@ function documentStandIn(
       },
     };
   const judgeKind = options.judge?.kind ?? "world_judge";
+  if (options.hostedJudge)
+    scorerVersions[0]!.definition = {
+      kind: "llm_judge",
+      config: {
+        model: "synthetic/judge",
+        provider: "synthetic",
+        rubric: "Check the answer",
+        bindings: [],
+        maxOutputTokens: 64,
+        timeoutMs: 1000,
+      },
+      metrics: [{ name: "passed", type: "boolean" }],
+    };
   for (const index of options.judge?.versions ?? [])
     if (judgeKind !== "local_code")
       scorerVersions[index]!.definition = (judgeKind === "world_judge"
@@ -362,6 +379,8 @@ function documentStandIn(
   const polls = new Map<string, number>();
   const reservations = new Map<string, string>();
   let failCompletions = options.failCompletions ?? 0;
+  let lostJudgeAcknowledgements = options.lostJudgeAcknowledgements ?? 0;
+  const acceptedJudgeRequests = new Map<string, string[]>();
   const calls = {
     requests: [] as string[],
     experiments: [] as Record<string, unknown>[],
@@ -372,6 +391,11 @@ function documentStandIn(
     starts: 0,
     completionAttempts: 0,
     localRuns: [] as Record<string, unknown>[],
+    judgeJobs: [] as {
+      runId: string;
+      idempotencyKey: string;
+      jobs: { evaluationItemId: string; scorerVersionId: string }[];
+    }[],
   };
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -406,6 +430,40 @@ function documentStandIn(
       }
       const body =
         request.method === "GET" ? {} : ((await request.json()) as Record<string, unknown>);
+      if (path === "/judge-budget")
+        return Response.json({
+          configured: true,
+          enabled: true,
+          blocked: options.hostedJudge?.blocked ?? false,
+        });
+      const judgeJobs = /^\/evaluation-runs\/([^/]+)\/judge-jobs$/.exec(path);
+      if (judgeJobs && request.method === "POST") {
+        const jobs = body.jobs as { evaluationItemId: string; scorerVersionId: string }[];
+        const runId = judgeJobs[1]!;
+        calls.judgeJobs.push({ runId, idempotencyKey: String(body.idempotencyKey), jobs });
+        const requestKey = String(body.idempotencyKey);
+        const prior = acceptedJudgeRequests.get(requestKey);
+        const ids = prior ?? jobs.map(() => randomUUID());
+        acceptedJudgeRequests.set(requestKey, ids);
+        if (!prior && !options.hostedJudge?.pending)
+          jobs.forEach((job, index) =>
+            results.get(runId)!.push({
+              id: ids[index]!,
+              runId,
+              itemId: job.evaluationItemId,
+              scorerVersionId: job.scorerVersionId,
+              state: "scored",
+              metrics: [{ name: "passed", value: true, passed: true }],
+              explanation: "Synthetic hosted result",
+              evidence: null,
+              error: null,
+              sourceDigest: null,
+            }),
+          );
+        if (lostJudgeAcknowledgements-- > 0)
+          return new Response("{", { headers: { "content-type": "application/json" } });
+        return Response.json({ ids });
+      }
       if (path === "/datasets") {
         const { versions: _versions, ...summary } = dataset;
         return Response.json({ items: [summary], nextCursor: null });
@@ -828,6 +886,7 @@ function documentStandIn(
             });
             continue;
           }
+          if (version.definition.kind === "llm_judge") continue;
           results.get(experiment.evaluation.id)!.push({
             id: randomUUID(),
             runId: experiment.evaluation.id,
@@ -902,8 +961,9 @@ function hue(args: string[], options: { cwd: string; env?: Record<string, string
   const { HUE_API_KEY: _key, HUE_BASE_URL: _origin, ...inherited } = process.env;
   return new Promise<{ status: number | null; stdout: string; stderr: string }>(
     (resolve, reject) => {
-      // Installed worker checks exercise the published Node executable.
-      const installed = cli.endsWith(".js") && args.includes("--worker");
+      // Worker and judge-dispatch checks exercise the installed Node executable.
+      const installed =
+        cli.endsWith(".js") && (args.includes("--worker") || args.includes("--judges"));
       const child = spawn(
         installed ? cli : process.execPath,
         [...(installed ? [] : [cli]), "eval", ...args],
@@ -1015,6 +1075,156 @@ const inheritedWorld = {
   HUE_ENVIRONMENT_RUN_ID: "another-environment-run",
   HUE_MCP_KEY: key,
 };
+
+describe("hue eval hosted judge opt-in", () => {
+  test("--judges refuses --no-output before creating a run", async () => {
+    const standIn = documentStandIn();
+    const cwd = await mkdtemp(join(tmpdir(), "hue-eval-judges-"));
+    try {
+      const result = await hue(
+        ["--set", standIn.dataset.id, "--command", "node agent.mjs", "--judges", "--no-output"],
+        { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+      );
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("--judges requires stored case outputs");
+      expect(standIn.calls.requests).toEqual([]);
+    } finally {
+      standIn.stop();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  for (const [enabled, pending, status] of [
+    [false, false, 1],
+    [true, false, 0],
+    [true, true, 1],
+  ] as const)
+    test(
+      `direct mode judges=${enabled}, pending=${pending} with --wait 0`,
+      async () => {
+        const standIn = documentStandIn({ hostedJudge: { pending } });
+        const cwd = await mkdtemp(join(tmpdir(), "hue-eval-judges-"));
+        await writeFile(join(cwd, "agent.mjs"), agentSource);
+        try {
+          const result = await hue(
+            [
+              "--set",
+              standIn.dataset.id,
+              ...standIn.scorerVersions.flatMap((version) => ["--scorer-version", version.id]),
+              "--command",
+              `node ${join(cwd, "agent.mjs")}`,
+              "--wait",
+              "0",
+              "--json",
+              ...(enabled ? ["--judges"] : []),
+            ],
+            { cwd, env: { HUE_BASE_URL: standIn.baseUrl } },
+          );
+          if (result.status !== status) throw new Error(result.stderr);
+          expect(result.status).toBe(status);
+          expect(standIn.calls.judgeJobs).toHaveLength(enabled ? 1 : 0);
+          expect(standIn.calls.requests.includes("GET /judge-budget")).toBe(enabled);
+          if (enabled) {
+            const document = JSON.parse(result.stdout) as { runId: string };
+            expect(standIn.calls.judgeJobs[0]).toMatchObject({
+              runId: document.runId,
+              jobs: [{ scorerVersionId: standIn.scorerVersions[0]!.id }],
+            });
+            const posted = standIn.calls.requests.findIndex((path) => path.endsWith("/judge-jobs"));
+            const polled = standIn.calls.requests.findIndex((path) => path.endsWith("/results"));
+            expect(posted).toBeGreaterThan(-1);
+            expect(polled).toBeGreaterThan(posted);
+          }
+          expect(standIn.calls.requests.some((path) => path.endsWith("/cancel"))).toBe(false);
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+
+  test(
+    "a command worker dispatches only its pinned model judge after both case kinds upload",
+    async () => {
+      const standIn = documentStandIn({ workerKinds: ["direct", "world"], hostedJudge: {} });
+      const cwd = await workerWorkspace();
+      try {
+        const result = await hue([...workerArgs(cwd), "--judges", "--wait", "0"], {
+          cwd,
+          env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
+        });
+        expect(result.status).toBe(0);
+        expect(standIn.calls.completions).toHaveLength(2);
+        expect(standIn.calls.judgeJobs).toHaveLength(1);
+        expect(standIn.calls.judgeJobs[0]!.jobs).toHaveLength(2);
+        expect(
+          standIn.calls.judgeJobs[0]!.jobs.every(
+            (job) => job.scorerVersionId === standIn.scorerVersions[0]!.id,
+          ),
+        ).toBe(true);
+        expect(result.stdout).toContain("Requested 2 hosted judge checks.");
+      } finally {
+        standIn.stop();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT,
+  );
+
+  for (const worker of [false, true])
+    test(
+      `lost judge acknowledgement resumes uploaded ${worker ? "worker" : "direct"} outputs without another agent call`,
+      async () => {
+        const standIn = documentStandIn({
+          hostedJudge: {},
+          lostJudgeAcknowledgements: 4,
+          ...(worker ? { workerKinds: ["direct"] } : {}),
+        });
+        const cwd = await workerWorkspace();
+        await writeFile(join(cwd, "agent.mjs"), agentSource);
+        try {
+          const args = worker
+            ? [...workerArgs(cwd), "--judges", "--wait", "0"]
+            : [
+                "--set",
+                standIn.dataset.id,
+                "--scorer-version",
+                standIn.scorerVersions[0]!.id,
+                "--command",
+                `node ${join(cwd, "agent.mjs")}`,
+                "--judges",
+                "--wait",
+                "0",
+                "--checkpoint-dir",
+                join(cwd, "checkpoints"),
+              ];
+          const options = {
+            cwd,
+            env: { HUE_BASE_URL: standIn.baseUrl, WORKER_INVOCATIONS: join(cwd, "calls.txt") },
+          };
+          const first = await hue(args, options);
+          expect(first.status).toBe(1);
+          expect(standIn.calls.judgeJobs).toHaveLength(4);
+          const repeated = await hue(args, options);
+          expect(repeated.status).toBe(0);
+          expect(repeated.stdout).toContain("Resuming hosted checks:");
+          expect(standIn.calls.starts).toBe(1);
+          expect(standIn.calls.experiments).toHaveLength(1);
+          expect(standIn.calls.judgeJobs).toHaveLength(5);
+          expect(
+            standIn.calls.judgeJobs.every(
+              (job) => JSON.stringify(job) === JSON.stringify(standIn.calls.judgeJobs[0]),
+            ),
+          ).toBe(true);
+        } finally {
+          standIn.stop();
+          await rm(cwd, { recursive: true, force: true });
+        }
+      },
+      SPAWN_TIMEOUT,
+    );
+});
 
 describe("hue eval command workers", () => {
   for (const kinds of [["direct"], ["world"], ["direct", "world"]] as const)

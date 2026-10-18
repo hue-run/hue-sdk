@@ -12,6 +12,10 @@ refuses to publish a version without a matching entry below.
 
 #### Added
 
+- **Wire** `hue eval --judges` explicitly requests the run's pinned hosted model judges after outputs
+  upload, in direct, simulation and worker modes. It is off by default, uses the project's judge
+  budget, and supports `--wait 0`. Interrupted dispatch resumes saved outputs with stable
+  idempotency keys instead of running the agent again.
 - The World client names, `WorldModelClient` and instance methods are available in this checkout
   and remain unreleased. Canonical clients use the World and instance routes. The environment module
   and its HTTP paths remain supported. The handoff's legacy `worldId` still identifies an instance.
