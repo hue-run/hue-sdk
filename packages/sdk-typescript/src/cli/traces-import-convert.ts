@@ -1107,10 +1107,22 @@ function convertLangfuseTrace(draft: LangfuseTraceDraft, traceId: string): Conve
 /** The ATIF reader's bounds: a text export of at most 4 MiB and 2,000 spans. */
 export const MAX_ATIF_FILE_BYTES = 4 * 1024 * 1024;
 export const MAX_ATIF_SPANS = 2000;
-const ATIF_IMPORT_VERSION = "2";
-/** The format and scope names Hue reads ATIF-imported spans by (their recorded step order). */
-const ATIF_FORMAT = "auctor.atif";
-const ATIF_SCOPE = "hue.auctor.atif-import";
+/** The conversion's generation, part of every derived trace and span id: raised when the ids'
+ * seed or the spans' shape changes, so a bundle prepared by an earlier generation is prepared
+ * again rather than mixed with this one. 3 names the format generically; 2 carried one
+ * producer's name in the label, the scope and the seed. */
+const ATIF_IMPORT_VERSION = "3";
+/** The format label (`hue.import.format`) and instrumentation scope of a trace converted from
+ * ATIF, the Agent Trajectory Interchange Format: the format's own name, whoever exported it. */
+const ATIF_FORMAT = "atif";
+const ATIF_SCOPE = "hue.import.atif";
+
+/** The agent span's name, from the export's own agent: `invoke_agent <agent.name>`, or
+ * `invoke_agent` alone when the export names none. */
+function agentSpanName(t: { agent: { name?: unknown } }): string {
+  const name = typeof t.agent.name === "string" ? t.agent.name.trim() : "";
+  return name ? `invoke_agent ${name}` : "invoke_agent";
+}
 
 const optionalText = z.string().nullable().optional();
 const identity = z.string().min(1).max(512);
@@ -1526,8 +1538,10 @@ export function convertAtifExport(
           sub.steps.map(() => ordinal++),
         );
   }
+  // The trace's identity is run scoped: the scope name, the conversion's generation, the
+  // export's session and trajectory ids. Never a path, a file digest or a producer's name.
   const identityParts = [
-    ATIF_FORMAT === "auctor.atif" ? "hue.auctor.atif" : ATIF_FORMAT,
+    ATIF_SCOPE,
     ATIF_IMPORT_VERSION,
     document.session_id,
     document.trajectory_id ?? null,
@@ -1606,7 +1620,7 @@ export function convertAtifExport(
   addUsage(rootAttributes, finalUsage(document));
   addSpan({
     spanId: rootId,
-    name: "invoke_agent auctor",
+    name: agentSpanName(document),
     startTimeUnixNano: main.start,
     endTimeUnixNano: lastInstant,
     attributes: rootAttributes.finish(),
@@ -1760,7 +1774,7 @@ export function convertAtifExport(
     addSpan({
       spanId: agentId,
       parentSpanId,
-      name: `invoke_agent ${sub.agent.name}`,
+      name: agentSpanName(sub),
       startTimeUnixNano: found.checked.start,
       endTimeUnixNano: found.checked.times.at(-1)!,
       attributes: attributes.finish(),
