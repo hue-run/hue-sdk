@@ -28,9 +28,9 @@ CI runs the same checks on Node 22, 24 and 26 (the installed package also under 
 
 The pstack skills in `.agents/skills/` are not loaded automatically (`disable-model-invocation`), so read each `SKILL.md` yourself at the step below.
 
-- **Start:** plan the change with ponytail (`.cursor/rules/ponytail.mdc`). If no `verify-*` skill covers the area you are changing, run `create-verification-skill` first.
-- **Throughout:** apply `unslop` to everything you write, and `technical-writing` to docs, commit messages and PR descriptions.
-- **Before you call it done:** apply `principle-prove-it-works`, then run the matching `verify-*` skill (see Before opening a PR).
+- **Start:** plan the change with ponytail (`.cursor/rules/ponytail.mdc`). If no `verify-*` skill covers the area you are changing, run `create-verification-skill` first. For a bug, apply `principle-fix-root-causes` before you write the fix.
+- **Throughout:** apply `unslop` to everything you write, and `technical-writing` to docs, commit messages and PR descriptions. When you edit a `.ts` or `.tsx` file, apply `typescript-best-practices`.
+- **Before you call it done:** apply `principle-prove-it-works`. Run `blast-radius` when the change reaches past its diff (shared code, a changed signature, schema or wire format). Then run the matching `verify-*` skill (see Before opening a PR).
 - **When a `verify-*` skill falls behind** (a feature change outgrows its `features/` map, or a periodic audit): run `maintain-verification-skill`.
 
 ## Before opening a PR
