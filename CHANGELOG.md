@@ -8,6 +8,17 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.20.4] - 2026-10-18
+
+#### Added
+
+- `JudgeBudget`, which `getJudgeBudget()` returns, types the optional `organizationBudget` that
+  current servers report: the organization's monthly AI budget (`monthlyAllowanceUsd`,
+  `actualSpendUsd`, `reservedUsd`, `unresolvedUsd`, `unresolvedCalls`, `remainingUsd`,
+  `periodStart`, `resetsAt` and `paused`; amounts as decimal USD strings), or `null` when there is
+  none to report, and the optional `organizationAvailableMicroUsd`. Older servers omit both; the
+  existing fields are unchanged.
+
 ### [0.20.3] - 2026-10-18
 
 #### Added
@@ -19,12 +30,6 @@ refuses to publish a version without a matching entry below.
   run left running runs again in a fresh World; a direct case it left running stays uncertain, as
   before. `--mode simulation` over such a set is still refused before a run exists, and `--check`
   reports `mode: "mixed"` with `worldCases` and `directCases`. Before, the set was refused.
-- `JudgeBudget`, which `getJudgeBudget()` returns, types the optional `organizationBudget` that
-  current servers report: the organization's monthly AI budget (`monthlyAllowanceUsd`,
-  `actualSpendUsd`, `reservedUsd`, `unresolvedUsd`, `unresolvedCalls`, `remainingUsd`,
-  `periodStart`, `resetsAt` and `paused`; amounts as decimal USD strings), or `null` when there is
-  none to report, and the optional `organizationAvailableMicroUsd`. Older servers omit both; the
-  existing fields are unchanged.
 
 ### [0.20.2] - 2026-10-18
 
@@ -2246,7 +2251,8 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
-- 0.8.4 (2026-10-18): the rule for other workflows no longer asks before every write to a Hue project, matching the Hue MCP server, which dropped its blanket write confirmation; its other rules are unchanged. The TypeScript installation command pins `@hue-run/sdk@0.20.3`.
+- 0.8.5 (2026-10-18): the rule for other workflows no longer asks before every write to a Hue project, matching the Hue MCP server, which dropped its blanket write confirmation; its other rules are unchanged. The TypeScript installation command pins `@hue-run/sdk@0.20.4`.
+- 0.8.4 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.3`.
 - 0.8.3 (2026-10-18): the installation commands pin `@hue-run/sdk@0.20.2` and `hue-run==0.13.2`.
 - 0.8.2 (2026-10-18): the rule for other workflows names the evaluation-only values production configuration must not hold (mirror URLs, world tokens, `HUE_MCP_*` values and the development **Read and write** key) instead of all Hue URLs and keys, which contradicted the **Tracing only** key a production server uses.
 - 0.8.1 (2026-10-18): pin current install commands to TypeScript `@hue-run/sdk@0.20.1` and Python `hue-run==0.13.1`; retain the tracing guidance and documentation routing from 0.8.0.
