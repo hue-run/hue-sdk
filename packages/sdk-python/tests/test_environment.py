@@ -177,6 +177,7 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
         "hue_install_",
         "hue_at_",
         "hue_rt_",
+        "hue_it_",
         "hue_oauth_",
     )
     parent = {
@@ -189,6 +190,7 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
         "SETUP_CREDENTIAL": "hue_setup_test_setup-" + "a" * 24 + "_" + "s" * 43,
         "ACCESS_TOKEN": "hue_at_" + "a" * 43,
         "REFRESH_TOKEN": "hue_rt_" + "a" * 43,
+        "IMPORT_AUTHORIZATION": "hue_it_" + "a" * 43,
         "INSTALL_TOKEN": "hue_install_" + "a" * 43,
         "INVOCATION_TOKEN": "hue_inv_" + "a" * 43,
         "OAUTH_SECRET": "hue_oauth_secret_" + "a" * 43,
@@ -222,6 +224,7 @@ def test_agent_environment_drops_hue_control_plane_credentials_unless_opted_in()
         "SETUP_CREDENTIAL",
         "ACCESS_TOKEN",
         "REFRESH_TOKEN",
+        "IMPORT_AUTHORIZATION",
         "INSTALL_TOKEN",
         "INVOCATION_TOKEN",
         "OAUTH_SECRET",

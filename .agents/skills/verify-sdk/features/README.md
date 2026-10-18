@@ -25,7 +25,7 @@ The maintained source for proving changes to the public SDK surface. Read this i
 - [TypeScript tracing](./typescript-tracing.md): `createHue`, spans, tools, capture, redaction, flush results.
 - [Python tracing](./python-tracing.md): `Hue`, spans, models, tools, capture, `force_flush`.
 - [Evaluations](./evaluations.md): `@hue-run/sdk/evals` and `hue_sdk.evals` clients and runners.
-- [hue CLI](./hue-cli.md): `hue eval`, `login`, `mcp`, `listen`, `import`, `setup`.
+- [hue CLI](./hue-cli.md): `hue eval`, `login`, `mcp`, `listen`, `import`, `traces import`, `setup`.
 
 World capture identity uses the existing tracing hooks: full root user/entity IDs and explicit
 provider/account/generation metadata on each tool span. See the unreleased
