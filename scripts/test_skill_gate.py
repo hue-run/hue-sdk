@@ -1,9 +1,9 @@
 """The public skill must get a Hue API key first and never send agents into anonymous setup.
 
 `npx skills add hue-run/hue-sdk --skill hue` installs skills/hue/SKILL.md from main, so its
-guidance is live as soon as it merges. The Hue team sets up accounts; the agent setup page on
-docs.hue.run has the user create and store a key, and the skill names the contact for a user
-without an account. A key configured as `HUE_MCP_KEY` or a Hue MCP connection that answers
+guidance is live as soon as it merges. The agent setup page on docs.hue.run has the user create
+and store a key, and the skill tells a user without an account that one is required, without a
+contact address or booking link. A key configured as `HUE_MCP_KEY` or a Hue MCP connection that answers
 `get_project_context` shows an account too. The key section must keep its rules, not just their
 keywords: check the key for presence only, also when the agent arrives from the setup page, never
 ask for it in chat, and change nothing until a key exists. A mention of pasting in the key section
@@ -20,8 +20,9 @@ from pathlib import Path
 SKILL = Path(__file__).resolve().parents[1] / "skills/hue/SKILL.md"
 KEY_SECTION = "Get a Hue API key"
 SETUP_URL = "https://docs.hue.run/guides/agent-setup.md"
-CONTACT_EMAIL = "founders@hue.run"
-BOOKING_URL = "https://calendar.notion.so/meet/akethini/hue"
+ACCOUNT_LINE = "A Hue account is required."
+# Public setup copy states the requirement; it no longer hands out a contact address or booking link.
+CONTACT_DETAILS = ("founders@hue.run", "calendar.notion.so", "book a time")
 # Commands that start or continue anonymous setup or account linkage.
 SETUP_COMMAND = re.compile(r"(@hue-run/sdk\S*|\bhue)\s+(setup|resume|claim)\b")
 # Copy from the retired invite-only gate, the production preset the setup key must not be, and
@@ -83,8 +84,7 @@ def gate_problems(text: str) -> list[str]:
             "`HUE_MCP_KEY`",
             "`list_projects` or `get_project_context` succeeds",
             "key of any preset",
-            CONTACT_EMAIL,
-            BOOKING_URL,
+            ACCOUNT_LINE,
             "never reading its value",
             "confirm the same way that `HUE_API_KEY` is now present",
             "never ask them to paste it into chat",
@@ -96,6 +96,9 @@ def gate_problems(text: str) -> list[str]:
         for phrase in FORBIDDEN:
             if phrase.casefold() in key.casefold():
                 problems.append(f"key section still says {phrase!r}")
+        for detail in CONTACT_DETAILS:
+            if detail in key:
+                problems.append(f"key section still gives contact details {detail!r}")
         if unnegated_paste(key):
             problems.append("key section asks the user to paste the key")
         if text.index(f"## {KEY_SECTION}") > text.index("## Install and configure"):
@@ -147,12 +150,20 @@ class SkillKeyGateTests(unittest.TestCase):
                 regressed = replace_in_key_section(text, route, "an unrelated credential")
                 self.assertIn(f"key section is missing {route!r}", gate_problems(regressed))
 
-    def test_gate_check_requires_the_setup_page_and_contact_line(self):
+    def test_gate_check_requires_the_setup_page_and_account_line(self):
         text = SKILL.read_text()
-        for phrase in (SETUP_URL, CONTACT_EMAIL, BOOKING_URL):
+        for phrase in (SETUP_URL, ACCOUNT_LINE):
             with self.subTest(phrase=phrase):
                 regressed = replace_in_key_section(text, phrase, "")
                 self.assertIn(f"key section is missing {phrase!r}", gate_problems(regressed))
+
+    def test_gate_check_rejects_contact_details(self):
+        regressed = replace_in_key_section(
+            SKILL.read_text(), ACCOUNT_LINE, f"{ACCOUNT_LINE} Email founders@hue.run to get one."
+        )
+        self.assertIn(
+            "key section still gives contact details 'founders@hue.run'", gate_problems(regressed)
+        )
 
     def test_gate_check_requires_the_no_paste_rule(self):
         text = SKILL.read_text()

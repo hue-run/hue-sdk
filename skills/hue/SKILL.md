@@ -36,7 +36,7 @@ create a **Read and write** key if they have none or theirs is another preset.
 If you came here from the agent setup page, it has already had the user store a key: confirm the
 same way that `HUE_API_KEY` is now present, then continue with Install and configure and return to
 that page after Verify delivery. Do not start the setup page again from here. If the key is still
-missing, repeat that page's key message and the contact line below instead of installing packages.
+missing, repeat that page's key message and the account line below instead of installing packages.
 
 Otherwise, for a first-time setup, read the [agent setup page](https://docs.hue.run/guides/agent-setup.md)
 and follow it from the start; it covers the key, sends you back here to add tracing, and ends by
@@ -44,7 +44,7 @@ connecting the Hue MCP server. The user creates a **Read and write** key under *
 and stores it as `HUE_API_KEY` themselves; never ask them to paste it into chat. Share this line with
 a user who has no Hue account:
 
-> Don't have a Hue account yet? The Hue team sets up accounts: email founders@hue.run or book a time at https://calendar.notion.so/meet/akethini/hue. When your account is ready, send the setup prompt again.
+> A Hue account is required. When you have one, send the setup prompt again.
 
 Without a key, do not install packages or change files unless the user asks you to prepare tracing
 against a local OpenTelemetry collector. Anonymous setup (`setup --agent`, `resume`, `hue claim`) is
