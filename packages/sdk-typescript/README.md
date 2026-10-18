@@ -581,8 +581,7 @@ npx -y @hue-run/sdk@latest traces import upload ./exports.hue-import --authoriza
   requests at a time, checks every span's receipt, reconciles and completes the import. Interrupted,
   run it again: it resumes from `progress.json` in the bundle. An expired authorization is renewed
   by calling `prepare_trace_import` again with the same digest and totals.
-- The authorization (`hue_it_…`) is read only from the file and never printed. The import routes it
-  is presented to arrive with a forthcoming Hue release.
+- The authorization (`hue_it_…`) is read only from the file and never printed.
 
 See [Import a bundle of existing traces](CLI.md#import-a-bundle-of-existing-traces) for the
 formats, the report, what Hue refuses and the exit codes.

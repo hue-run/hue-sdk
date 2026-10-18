@@ -501,8 +501,7 @@ Langfuse observation exports (the `data` or native `observations` envelope) and 
 v1.8 exports, embedded subagents included. It needs no project key. `prepare` runs on the machine
 that holds the exports and sends nothing; a Hue MCP connection then authorizes the delivery
 (`prepare_trace_import`); `upload` delivers the bundle with that authorization, and
-`get_trace_import` reports what arrived. The import routes the helper talks to arrive with a
-forthcoming Hue release.
+`get_trace_import` reports what arrived.
 
 ```sh
 npx -y @hue-run/sdk@latest traces import prepare ./exports --out ./exports.hue-import --json
