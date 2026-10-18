@@ -8,6 +8,19 @@ refuses to publish a version without a matching entry below.
 
 ## @hue-run/sdk (TypeScript)
 
+### [0.20.6] - 2026-10-18
+
+#### Added
+
+- **Wire** `hue import langfuse` also sends the environment Langfuse recorded for an observation,
+  or a v1 trace, as recorded in `hue.import.source_environment` on its span, beside
+  `langfuse.environment`. Hue's World capture reads it as import provenance: an imported trace adds
+  to its user's World only when the trace itself declares production, and never when any of its
+  spans names another environment, such as Langfuse's `default`. An observation without an
+  environment carries neither attribute, and the resource still declares no deployment
+  environment. Hue refuses a different payload for a span it already holds, so finish an import
+  started with an earlier version with that version.
+
 ### [0.20.5] - 2026-10-18
 
 #### Fixed
@@ -2264,6 +2277,7 @@ No registry release is claimed until publication and registry acceptance complet
 
 The skill is installed from the default branch (`npx skills add hue-run/hue-sdk --skill hue`), so an entry takes effect when it merges into `main`.
 
+- 0.8.7 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.6`.
 - 0.8.6 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.5`.
 - 0.8.5 (2026-10-18): the rule for other workflows no longer asks before every write to a Hue project, matching the Hue MCP server, which dropped its blanket write confirmation; its other rules are unchanged. The TypeScript installation command pins `@hue-run/sdk@0.20.4`.
 - 0.8.4 (2026-10-18): the TypeScript installation command pins `@hue-run/sdk@0.20.3`.

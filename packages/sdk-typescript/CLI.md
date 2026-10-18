@@ -42,7 +42,7 @@ project manifest are refused because managers can update ancestor locks; Python 
 The generated `hue.setup.mjs` or `hue_setup.py` always selects `captureContent: false` /
 `capture_content=False`. For a supported application, setup installs the dependency and adds the
 managed import and middleware registration to the existing entrypoint; an unreferenced helper is
-not a completed integration. TypeScript uses `@hue-run/sdk@0.20.5`, `@opentelemetry/api@1.9.1` and
+not a completed integration. TypeScript uses `@hue-run/sdk@0.20.6`, `@opentelemetry/api@1.9.1` and
 `@opentelemetry/context-async-hooks@2.11.0`; Python setup uses its separately tested package pin.
 Content capture requires an ordinary account-managed key and a later explicit application decision.
 
@@ -381,8 +381,8 @@ and Hue never receives or stores them. The command is part of the `hue` executab
 #   LANGFUSE_PUBLIC_KEY=pk-lf-...
 #   LANGFUSE_SECRET_KEY=sk-lf-...
 #   LANGFUSE_BASE_URL=https://cloud.langfuse.com
-npx -y @hue-run/sdk@0.20.5 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
-npx -y @hue-run/sdk@0.20.5 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
+npx -y @hue-run/sdk@0.20.6 import langfuse --env-path .env.langfuse --from 2026-01-01 --dry-run
+npx -y @hue-run/sdk@0.20.6 import langfuse --env-path .env.langfuse --from 2026-01-01 --media
 ```
 
 `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` come from the environment or `--env-path`
@@ -430,17 +430,25 @@ without a parent are its children, and it lasts from the earliest of its timesta
 to their last end. Spans carry `service.name` `langfuse` (`--service-name` sets another) and the
 instrumentation scope `@hue-run/sdk/import/langfuse`.
 
+**Environment and Worlds.** A span whose observation, or v1 trace, records an environment also
+carries it as recorded in `hue.import.source_environment`, which marks the trace as imported; one
+that records none carries neither attribute, and the resource never declares
+`deployment.environment.name`, since one import can mix environments. A trace adds to its user's
+World only when Langfuse recorded it in its `production` environment: Hue reads the root's
+`langfuse.environment` as the trace's deployment environment, and never takes an imported trace in
+which any span names another environment, such as Langfuse's `default`, as production history.
+
 **Ids and resuming.** A Langfuse id that already is an OpenTelemetry id (32 lowercase hex digits for
 a trace, 16 for an observation, as Langfuse's OpenTelemetry SDKs write them) is kept; any other id,
 such as an older SDK's UUID, becomes one derived from it with SHA-256. The original ids are kept as
 `langfuse.trace.id` and `langfuse.observation.id`. Running the same command again sends the same
 spans, and Hue keeps one copy of an exact replay of a completed span, so an interrupted or partly
 failed import is resumed by running it again. Hue refuses a different payload for a span it already
-holds: keep `--media`, `--no-content` and `--service-name` the same when resuming, and expect a span
-whose Langfuse data changed after it was imported to be refused. For the same reason the import
-sends nothing that depends on the run: a trace's root never carries `hue.sdk.dropped_records`, and
-files and large values are stored before their span is sent. Leave out of the window any traces that
-already reached Hue through OpenTelemetry.
+holds: keep `--media`, `--no-content`, `--service-name` and the SDK version the same when
+resuming, and expect a span whose Langfuse data changed after it was imported to be refused. For
+the same reason the import sends nothing that depends on the run: a trace's root never carries
+`hue.sdk.dropped_records`, and files and large values are stored before their span is sent. Leave
+out of the window any traces that already reached Hue through OpenTelemetry.
 
 **Export and content.** Spans go through the SDK's own exporter, as `createHue` sends them: batched,
 compressed, retried and within the limits Hue advertises. Before a span is sent, its content is
@@ -689,7 +697,7 @@ node packages/sdk-typescript/scripts/verify-package.mjs --artifacts-dir .artifac
 # Set project to an existing supported fixture; use the same directory on resume.
 project=/absolute/path/to/supported-fixture
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.20.5.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.20.6.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command setup \
   --evidence .context/setup-staging-before-claim.json
@@ -700,7 +708,7 @@ the private local handoff and finish the real browser claim, then reconcile the 
 
 ```sh
 node packages/sdk-typescript/scripts/verify-setup-live.mjs \
-  --archive .artifacts/typescript/hue-run-sdk-0.20.5.tgz \
+  --archive .artifacts/typescript/hue-run-sdk-0.20.6.tgz \
   --origin https://STAGING_ORIGIN \
   --project "$project" --command claim \
   --evidence .context/setup-staging-after-claim.json
@@ -742,10 +750,10 @@ otherwise. Never hand the agent Hue-native tools (`context.tools`, `context.mcp`
 production agent lacks. Pin the SDK, so the agent's repository gains no dependency:
 
 ```sh
-npx -y @hue-run/sdk@0.20.5 eval --case "Refund an eligible charge" --command "node agent.js"
-npx -y @hue-run/sdk@0.20.5 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
-npx -y @hue-run/sdk@0.20.5 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
-npx -y @hue-run/sdk@0.20.5 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
+npx -y @hue-run/sdk@0.20.6 eval --case "Refund an eligible charge" --command "node agent.js"
+npx -y @hue-run/sdk@0.20.6 eval --case https://app.hue.run/projects/demo/scenarios/<id> --command "python agent.py" --timeout 120 --baseline <run id>
+npx -y @hue-run/sdk@0.20.6 eval --set "Billing regressions" --scorer-version <id> --command "node agent.js" --save-version
+npx -y @hue-run/sdk@0.20.6 eval --worker --command "node agent.js" --agent-key support-agent --revision <new-agent-revision>
 ```
 
 One invocation creates one run holding every selected case; it prints the run URL
@@ -783,7 +791,7 @@ export default function runMyAgent(inputs: JsonValue, context: SimulationTargetC
 ```
 
 ```sh
-npx -y @hue-run/sdk@0.20.5 eval --case "Refund an eligible charge" ./hue-agent.ts --content
+npx -y @hue-run/sdk@0.20.6 eval --case "Refund an eligible charge" ./hue-agent.ts --content
 ```
 
 `--scenario` remains an alias for `--case` for existing scripts. Pass one selection flag.

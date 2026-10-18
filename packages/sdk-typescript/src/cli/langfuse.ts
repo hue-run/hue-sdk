@@ -895,6 +895,18 @@ function setText(into: Record<string, AttributeValue>, key: string, value: strin
   if (value !== undefined && value !== "") into[key] = value;
 }
 
+/** Hue's import provenance: the source's own environment, as Langfuse recorded it. Hue's World
+ * capture treats a trace carrying `hue.import.*` attributes as imported, and never takes one in
+ * which a span names an environment other than exactly `production` as production history. */
+const IMPORT_SOURCE_ENVIRONMENT = "hue.import.source_environment";
+
+/** Langfuse's environment, verbatim, as `langfuse.environment` and as Hue's import provenance;
+ * an absent environment stays absent, never defaulted. */
+function setEnvironment(into: Record<string, AttributeValue>, environment: string | undefined) {
+  setText(into, "langfuse.environment", environment);
+  setText(into, IMPORT_SOURCE_ENVIRONMENT, environment);
+}
+
 /**
  * A Langfuse observation as the span the Langfuse OpenTelemetry SDKs would have recorded:
  * `langfuse.observation.*` (type in lower case, input, output, one `metadata.<key>` attribute per
@@ -903,7 +915,8 @@ function setText(into: Record<string, AttributeValue>, key: string, value: strin
  * `langfuse.session.id`, `langfuse.release`, `langfuse.version` and `langfuse.environment`, with
  * `gen_ai.request.model` and the input and output token counts as GenAI attributes. The
  * observation's and trace's own ids are kept as `langfuse.observation.id` and
- * `langfuse.trace.id`. Throws for a start time that is no ISO 8601 instant.
+ * `langfuse.trace.id`, and its environment also as `hue.import.source_environment`. Throws for a
+ * start time that is no ISO 8601 instant.
  */
 export function observationSpan(
   observation: LangfuseObservation,
@@ -959,7 +972,7 @@ export function observationSpan(
   setText(attributes, "langfuse.session.id", observation.sessionId ?? context.sessionId);
   setText(attributes, "langfuse.release", observation.release ?? context.release);
   setText(attributes, "langfuse.version", observation.version);
-  setText(attributes, "langfuse.environment", observation.environment);
+  setEnvironment(attributes, observation.environment);
   attributes["langfuse.trace.id"] = context.langfuseTraceId;
   attributes["langfuse.observation.id"] = observation.id;
   const parent = observation.parentObservationId
@@ -993,9 +1006,9 @@ export function traceContext(trace: LangfuseTrace): TraceContext {
 /**
  * The span that stands for a v1 trace, the parent of its observations without one, as the trace
  * Langfuse shows above them: `langfuse.trace.*` (name, input, output, one `metadata.<key>`
- * attribute per key, tags, public), the user, session, release, version and environment. It
- * covers the trace's timestamp and its observations, `observed`. Throws for a timestamp that is
- * no ISO 8601 instant.
+ * attribute per key, tags, public), the user, session, release, version and environment (also as
+ * `hue.import.source_environment`). It covers the trace's timestamp and its observations,
+ * `observed`. Throws for a timestamp that is no ISO 8601 instant.
  */
 export function traceSpan(trace: LangfuseTrace, observed: TimeBounds | undefined): ImportSpan {
   const timestamp = hrTimeOf(trace.timestamp);
@@ -1013,7 +1026,7 @@ export function traceSpan(trace: LangfuseTrace, observed: TimeBounds | undefined
   setText(attributes, "langfuse.session.id", trace.sessionId);
   setText(attributes, "langfuse.release", trace.release);
   setText(attributes, "langfuse.version", trace.version);
-  setText(attributes, "langfuse.environment", trace.environment);
+  setEnvironment(attributes, trace.environment);
   attributes["langfuse.trace.id"] = trace.id;
   return {
     traceId: hueTraceId(trace.id),

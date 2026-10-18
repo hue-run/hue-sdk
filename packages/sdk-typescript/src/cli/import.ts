@@ -98,7 +98,9 @@ export const IMPORT_USAGE = `Usage: hue import langfuse [options]
 Copy traces from a Langfuse project into Hue. The import runs on this machine with your own
 Langfuse keys, which are sent only to Langfuse. Each observation becomes a span with the
 langfuse.* attributes Hue reads; ids are kept, so running the same command again resumes an
-import without duplicating what was already sent.
+import without duplicating what was already sent. Langfuse's environment is also sent, as
+recorded, as hue.import.source_environment; only traces Langfuse recorded in production add to
+a user's World.
 
 Langfuse (keys from the environment or --env-path; the secret key never from the command line):
   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY  The Langfuse project's API keys
