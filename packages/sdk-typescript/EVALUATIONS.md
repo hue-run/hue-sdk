@@ -104,6 +104,11 @@ resolution, a fresh linked world per case, local and hosted MCP tools, finalizat
 evidence and scoring while retaining this runner's checkpoint guarantees. See
 [Simulated environments](ENVIRONMENTS.md#run-a-definition-like-a-test).
 
+The unreleased `onUploaded` callback in `runSimulation` and `runLocalAgent` supports durable
+application handoffs after outputs upload and before the attempt or worker queue is marked
+completed. A callback failure stops completion and preserves the uploaded work for recovery.
+The callback may run again after an interruption, so make its writes idempotent.
+
 Cases whose inputs are a task plus pinned documents, and rescoring over documents a run already
 saved, use the same runner without a world. See [Direct cases and files](#direct-cases-and-files).
 
@@ -179,7 +184,7 @@ Scorer deferral shipped in TypeScript `0.3.1`: the local runner executes only th
 
 `world_outcome` pins (`hue.conversion_outcome.v1` and `.v2`, and the `hue.outcome_assertions.v2` and `.v3` case-outcome evaluators, `.v3` with its pinned judge in `config.judge`) run inside Hue and need no local callback or executable source digest. A supporting server owns their execution from saved world evidence. Legacy `local_code` pins still require the exact registered callback; changing the worker cannot convert those immutable pins into hosted ones.
 
-Manual results require a human session. Hosted model-judge dispatch is an explicit separate API operation: inspect `getJudgeBudget()`, then call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
+Manual results require a human session. Hosted model-judge dispatch is explicit: call `createJudgeJobs(runId,{idempotencyKey,jobs:[{evaluationItemId,scorerVersionId}]})`. Hue checks the project's budget when admitting new requests. `getJudgeBudget()` reports its current state, but replay an interrupted request with the same key and body even if that state changed. The unreleased [`hue eval --judges`](./CLI.md#evaluate-an-agent-against-a-case) option performs this dispatch after outputs upload; it is off by default. `listJudgeJobs`, `getJudgeJob` and `cancelJudgeJob` expose job progress and cancellation requests. These methods never claim that local execution has hosted provenance. Hosted job endpoints are covered by HTTP contract tests here; live hosted model execution is a separate platform acceptance phase. `listResults` and `getResult` read recorded local or hosted results.
 
 When present, the budget's `authentication` reports credential resolution only. An
 `available` status or `configured: true` does not prove that a provider accepted the

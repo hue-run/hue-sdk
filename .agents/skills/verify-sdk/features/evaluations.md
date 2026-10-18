@@ -6,6 +6,7 @@ Code runs eval sets against a local target with `@hue-run/sdk/evals` (TypeScript
 
 - `eval-client` creates and reads eval sets, evaluators and runs through `/api/v1` paths.
 - `eval-runner` runs targets, scores locally, checkpoints and resumes.
+- `eval-upload-handoff` calls optional replayable `onUploaded` hooks before simulation attempt completion or worker queue acknowledgment. A failed handoff preserves uploaded outputs for recovery.
 - `eval-direct` runs direct cases and files (TypeScript).
 - `eval-media` reads recorded media back (`client.media.fetch`, `client.media.resolve`), rehydrates case inputs from case files (`rehydrateMedia`, `rehydrate_media`) and pins files on case writes (`CaseWrite.files`, `add_case(files=...)`).
 - `eval-files-py` hands pinned input files to Python targets and local scorers (`TargetContext.files`, `ScoreContext["files"]`).
@@ -22,6 +23,7 @@ Preconditions:
 - Dependencies installed (Launch). The tests start their own loopback evaluation receivers; the stub is not used.
 
 - **TypeScript.** `cd packages/sdk-typescript && bun test tests/evals.test.ts -t "<behavior>"`. The whole file is 42 tests in about 17 s. Related files: `attempt`, `checkpoint-lock`, `files`, `verdicts`, `scorer-publication`, `local-worker`.
+- **Upload handoff.** `cd packages/sdk-typescript && bun test tests/cli-eval-direct.test.ts -t "hosted judge.*handoff"`. Expected: a failed initial checkpoint write, a failed attempt marker and an interrupted worker acknowledgment resume the original uploaded outputs without invoking the agent again. Uses synthetic loopback receivers.
 - **Python.** `cd packages/sdk-python && uv run --frozen --all-groups pytest tests/test_evaluations.py -q -k product_registry`. Expected: selected tests pass in about 1 s.
 
 ## Gotchas

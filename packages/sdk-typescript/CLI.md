@@ -731,6 +731,23 @@ former; a case failed for its telemetry has `state: "error"`,
 Hue-owned `world_outcome` checks are graded after the world seals. An experiment always covers
 every case of the saved version; there is no case subset.
 
+`--judges` is available in this checkout and remains unreleased. It requests the run's pinned
+`llm_judge` evaluators after outputs upload, before verdict polling. It is off by default and
+works in direct, simulation and worker modes. Requests use the project's hosted judge budget;
+Hue applies its admission controls to new jobs. An accepted request remains replayable if the
+budget is later disabled. Cases without stored output are excluded, and combining
+`--judges` with `--no-output` is refused. `--check` creates no judge jobs.
+
+With `--judges --wait 0`, the CLI requests the jobs and returns their current verdict state;
+pending jobs continue in Hue. Uploaded outputs are checkpointed before the attempt or worker
+queue is marked completed. If this handoff or dispatch fails, or its acknowledgement is lost,
+rerun the unchanged command with the same checkpoint directory. The CLI resumes judging the uploaded
+outputs without invoking the agent, using the same idempotency keys. After dispatch succeeds,
+the next ordinary invocation starts a new run as usual.
+
+`--worker --judges` discards cancelled or released handoffs. Once judge requests succeed, a
+verdict-read failure is logged and the worker keeps accepting runs.
+
 `--command "<shell command>"` spawns the command once per case with the world's environment
 (`HUE_WORLD_ID`, `HUE_WORLD_TOKEN`, `HUE_WORLD_NOW` (the world's clock at creation, RFC 3339; `worldNow()` reads it and returns
 `null` without it, so fall back explicitly with `worldNow() ?? new Date()`), one `HUE_SIM_<SURFACE ID>_URL` per provider
