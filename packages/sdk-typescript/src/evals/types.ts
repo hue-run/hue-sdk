@@ -542,6 +542,31 @@ export interface JudgeBudget {
   maxInFlight: number;
   /** Dispatch is currently blocked. */
   blocked: boolean;
+  /** Micro-USD the organization's monthly AI budget can still admit; absent on older servers. */
+  organizationAvailableMicroUsd?: number;
+  /** The organization's monthly AI budget (one UTC calendar month), which hosted judging draws on.
+   * Amounts are decimal USD strings. Absent on older servers; `null` when there is no organization
+   * budget to report. */
+  organizationBudget?: {
+    /** The month's allowance. */
+    monthlyAllowanceUsd: string;
+    /** Settled spend this month. */
+    actualSpendUsd: string;
+    /** Reserved by calls in flight. */
+    reservedUsd: string;
+    /** Held by calls whose cost is not known yet. */
+    unresolvedUsd: string;
+    /** Calls whose cost is not known yet. */
+    unresolvedCalls: number;
+    /** What the month can still admit. */
+    remainingUsd: string;
+    /** First day of the month, `YYYY-MM-DD`. */
+    periodStart: string;
+    /** When the next month starts, as an ISO 8601 timestamp. */
+    resetsAt: string;
+    /** No more AI work is admitted this month. */
+    paused: boolean;
+  } | null;
 }
 /** A scorer and its published versions. */
 export interface Scorer extends Identity {
